@@ -1,0 +1,35 @@
+[package]
+name = "nostos-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nostos throughput benchmark harness — Week-1 deliverable."
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "nostos-bench"
+path = "src/main.rs"
+
+[dependencies]
+nostos-domain = { workspace = true }
+nostos-application = { workspace = true }
+nostos-infra = { workspace = true }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+axum = { workspace = true }
+futures-util = { workspace = true }
+fastrand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+nix = { version = "0.29", features = ["resource"] }
+
+[lints]
+workspace = true

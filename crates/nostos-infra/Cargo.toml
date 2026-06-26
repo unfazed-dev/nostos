@@ -1,0 +1,55 @@
+[package]
+name = "nostos-infra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nostos infrastructure adapters — pg logical replication, tokio router, ws transport."
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = []
+# The real Postgres logical-replication adapter. OFF by default in Week 1 —
+# the benchmark uses FakeReplicator and pulls none of the pg crates. Turn on
+# with `--features nostos-infra/pg` (Week 2+).
+pg = ["dep:tokio-postgres", "dep:postgres-protocol", "dep:pgoutput"]
+
+[dependencies]
+nostos-domain = { workspace = true }
+nostos-application = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+dashmap = { workspace = true }
+
+# pg-only (optional — enabled by the `pg` feature)
+tokio-postgres = { workspace = true, optional = true }
+postgres-protocol = { workspace = true, optional = true }
+pgoutput = { workspace = true, optional = true }
+
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+fastrand = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

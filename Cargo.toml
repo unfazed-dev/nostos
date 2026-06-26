@@ -1,0 +1,150 @@
+# =============================================================================
+# Nostos — workspace root
+# =============================================================================
+# An open, Rust-fast, local-first sync engine. Postgres logical replication →
+# every device, even offline. No static buckets. No write-back endpoints.
+#
+# Repository layout follows Ports & Adapters (hexagonal) + DDD:
+#
+#   dependency direction:   bootstrap ─► application ─► domain  ◄─ infrastructure
+#                                                     ◄───────── (adapters implement ports)
+#
+#   nostos-domain          enterprise/business layer — PURE: zero I/O, zero async,
+#                         zero framework deps. Types + invariants only.
+#   nostos-application     use-cases + port traits (interfaces). Depends ONLY on
+#                         domain. Defines what the system DOES, not HOW.
+#   nostos-infra           adapter implementations (pg logical replication, in-memory
+#                         session store, tokio fan-out router, websocket transport,
+#                         wire codec). Implements application ports. The ONLY place
+#                         tokio/axum/postgres live.
+#   nostos-server          the composition root / main binary. Wires adapters to
+#                         ports and runs an axum HTTP/WS server.
+#   nostos-bench           the benchmark harness — Week-1 deliverable: proves ≥5×
+#                         PowerSync's 2-4k ops/sec throughput ceiling.
+#
+# Rule enforced by structure + clippy: domain must never depend on application,
+# application must never depend on infrastructure. The dependency-inversion arrow
+# always points inward.
+# =============================================================================
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/nostos-domain",
+    "crates/nostos-application",
+    "crates/nostos-infra",
+    "crates/nostos-server",
+    "crates/nostos-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+authors = ["Cairn Sync, Inc. <founders@nostos.run>"]
+repository = "https://github.com/nostos-sync/nostos"
+homepage = "https://nostos.run"
+documentation = "https://docs.nostos.run"
+readme = "README.md"
+keywords = ["sync", "local-first", "postgres", "offline", "replication"]
+categories = ["database", "database-implementations"]
+
+# -----------------------------------------------------------------------------
+# Shared dependency versions — single source of truth (referenced as
+# `serde.workspace = true` from member crates).
+# -----------------------------------------------------------------------------
+[workspace.dependencies]
+# --- domain (kept minimal: only serde + uuid for cross-boundary value types) ---
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+bytes = { version = "1.7", features = ["serde"] }
+thiserror = "1.0"
+
+# --- application (ports + use-cases) ---
+async-trait = "0.1"
+tracing = "0.1"
+dashmap = "6.1"
+
+# --- infrastructure / async runtime ---
+tokio = { version = "1.39", features = ["full"] }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+futures-util = "0.3"
+tokio-tungstenite = "0.23"
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+hyper = "1.4"
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# --- postgres logical replication (the core capability) ---
+# Used by the real PgReplicator (Week 2). Week-1 benchmark uses a FakeReplicator
+# and needs none of these — they're marked optional in nostos-infra.
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1"] }
+postgres-protocol = "0.6"
+# pgoutput logical-decoding parser (consumes the pgoutput replication stream).
+# NOTE: still pre-1.0 (0.0.7); the real PgReplicator may swap to `pgwire-replication`
+# (0.3.2, full wire-protocol client with TLS) once we benchmark both in Week 2.
+pgoutput = "0.0.7"
+pgwire-replication = "0.3"
+
+# --- observability ---
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# --- config / error / cli ---
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+config = "0.14"
+
+# --- dev / test / bench ---
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+proptest = "1.5"
+pretty_assertions = "1.4"
+dotenvy = "0.15"
+fastrand = "2.1"
+
+# internal crates (so members can reference each other via the workspace)
+nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
+nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
+nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
+
+# -----------------------------------------------------------------------------
+# Workspace-wide lints. Fail CI on the things that matter; warn on the rest.
+# -----------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# pragmatism overrides — pedantic is too noisy for these in a hot path:
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+# doc-style preference; we backtick code identifiers but not prose product
+# names like PowerSync / Postgres / WebSocket throughout the docs.
+doc_markdown = "allow"
+
+[profile.release]
+# Production + benchmark profile: optimize hard, keep debug symbols for profilers.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
+
+# Faster incremental dev builds.
+[profile.dev]
+opt-level = 0
+debug = 1

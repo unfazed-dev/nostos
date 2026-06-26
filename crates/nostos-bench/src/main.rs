@@ -1,0 +1,344 @@
+//! # nostos-bench — Week-1 throughput benchmark harness.
+//!
+//! Measures the headline moat: how fast can Nostos's server fan replication
+//! events out to thousands of concurrent WebSocket clients, compared to
+//! PowerSync's published 2–4k ops/sec Node.js ceiling?
+//!
+//! ## Design
+//!
+//! One process runs:
+//! 1. An in-process `nostos-server` axum app on `127.0.0.1:<ephemeral>`, sharing
+//!    its `SessionStore` with the bench driver.
+//! 2. N WebSocket client tasks (tokio-tungstenite), each subscribing to `tasks`.
+//! 3. A `FakeReplicator` driving the **real** `FanOutService` against the shared
+//!    store — so events traverse the production pipeline (predicate index →
+//!    bounded sink → WebSocket frame write) end to end.
+//! 4. Measurement: wall-clock for M total events to be received, ops/sec,
+//!    drop rate, p99 client latency.
+//!
+//! See `docs/BENCHMARK-METHODOLOGY.md` for the full contract.
+
+// Benchmark/reporting code: the `cast_*` and `format_*` pedantic lints fire on
+// routine throughput math and report-string building where the flagged patterns
+// are acceptable (values within f64 precision; `push_str(&format!(...))` reads
+// fine in presentation code). Allow them here.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    clippy::format_push_string,
+    clippy::uninlined_format_args,
+    clippy::manual_is_multiple_of
+)]
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use axum::routing::get;
+use nostos_application::{FanOutService, SessionManager};
+use nostos_domain::ColumnValue;
+use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
+use nostos_infra::store::InMemorySessionStore;
+use nostos_infra::transport::{sync_handler, SyncRouterState};
+use clap::Parser;
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use tokio::time::timeout;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::info;
+
+mod report;
+mod stats;
+
+use report::write_reports;
+use stats::Histogram;
+
+/// CLI configuration.
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "nostos-bench",
+    version,
+    about = "Nostos throughput benchmark — the Week-1 moat"
+)]
+pub struct BenchConfig {
+    /// Comma-separated client counts to test (e.g. 1000,5000,10000).
+    #[arg(
+        long,
+        env = "BENCH_CLIENTS",
+        default_value = "1000,5000,10000",
+        value_delimiter = ','
+    )]
+    pub clients: Vec<usize>,
+
+    /// Total events to generate per run.
+    #[arg(long, env = "BENCH_EVENTS", default_value_t = 100_000)]
+    pub events: u64,
+
+    /// Payload profile: "small" (~100B) or "large" (~4KB).
+    #[arg(long, env = "BENCH_PROFILE", default_value = "small")]
+    pub profile: String,
+
+    /// Per-session buffer depth.
+    #[arg(long, env = "BENCH_BUFFER", default_value_t = 1024)]
+    pub buffer: usize,
+
+    /// Output directory for results.
+    #[arg(long, env = "BENCH_OUT", default_value = "benches/results")]
+    pub out_dir: String,
+
+    /// Per-run wall-clock timeout (seconds).
+    #[arg(long, env = "BENCH_TIMEOUT", default_value_t = 120)]
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunResult {
+    pub clients: usize,
+    pub events_total: u64,
+    pub events_delivered: u64,
+    pub ops_per_sec: f64,
+    pub drop_rate: f64,
+    pub p50_us: f64,
+    pub p99_us: f64,
+    pub elapsed_secs: f64,
+    pub profile: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    init_tracing();
+    let cfg = BenchConfig::parse();
+    info!(?cfg, "starting nostos-bench");
+
+    // Raise file-descriptor limit — 10k clients need ~20k+ FDs (sockets + pipes).
+    raise_fd_limit();
+
+    let mut results = Vec::with_capacity(cfg.clients.len());
+    for &clients in &cfg.clients {
+        let r = run_one(&cfg, clients)
+            .await
+            .context(format!("run with {clients} clients failed"))?;
+        results.push(r);
+    }
+
+    let env = report::Environment::collect(&cfg);
+    write_reports(&cfg, &results, &env).context("failed to write reports")?;
+
+    println!("\n=== Nostos Week-1 Benchmark ===\n");
+    println!(
+        "{:>8} {:>14} {:>10} {:>9} {:>10} {:>10}",
+        "clients", "ops/sec", "drop%", "p50(ms)", "p99(ms)", "delivered"
+    );
+    for r in &results {
+        println!(
+            "{:>8} {:>14.0} {:>9.2}% {:>9.2} {:>9.2} {:>10}",
+            r.clients,
+            r.ops_per_sec,
+            r.drop_rate * 100.0,
+            r.p50_us / 1000.0,
+            r.p99_us / 1000.0,
+            r.events_delivered
+        );
+    }
+    println!("\nResults written to {}/", cfg.out_dir);
+    Ok(())
+}
+
+async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
+    info!(clients, events = cfg.events, "run starting");
+
+    // ---- shared store + use-cases (the same instances the server uses) ----
+    let store: Arc<dyn nostos_application::ports::SessionStore> =
+        Arc::new(InMemorySessionStore::new());
+    let manager = Arc::new(SessionManager::new(Arc::clone(&store)));
+    let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
+
+    // ---- in-process axum server on an ephemeral port ----
+    let state = SyncRouterState::new(Arc::clone(&manager)).with_buffer(cfg.buffer);
+    let app = axum::Router::new()
+        .route("/sync", get(sync_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("server");
+    });
+
+    let url = format!("ws://{addr}/sync");
+
+    // ---- spawn N client tasks ----
+    // Each client owns its OWN atomic counter (sharded) so 10k concurrent
+    // incrementers don't serialize on a single cache line. We sum them at the
+    // end. A shared counter at 10k clients is a fatal contention point.
+    let per_client_received: Vec<Arc<AtomicU64>> =
+        (0..clients).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let mut client_handles = Vec::with_capacity(clients);
+    let mut histograms: Vec<Arc<std::sync::Mutex<Histogram>>> = Vec::with_capacity(clients);
+
+    for received_arc in &per_client_received {
+        let hist = Arc::new(std::sync::Mutex::new(Histogram::new()));
+        histograms.push(Arc::clone(&hist));
+        let received_c = Arc::clone(received_arc);
+        let url_c = url.clone();
+        let h = tokio::spawn(client_task(url_c, received_c, hist));
+        client_handles.push(h);
+    }
+
+    // give clients a moment to connect + subscribe
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sum_received = || {
+        per_client_received
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .sum::<u64>()
+    };
+
+    // ---- drive the FakeReplicator through the real FanOutService ----
+    let repl_cfg = match cfg.profile.as_str() {
+        "large" => FakeReplicatorConfig::large(cfg.events),
+        _ => FakeReplicatorConfig::small(cfg.events),
+    };
+    let mut replicator = FakeReplicator::new(repl_cfg);
+
+    // Week-1 extractor: synthetic payload is opaque bytes; match on table only
+    // (ColumnValue::Any matches every value). Real column extraction arrives
+    // with the PgReplicator, which parses the tuple image.
+    let extract = |_e: &nostos_domain::ReplicationEvent, _col: &str| -> Option<ColumnValue> {
+        Some(ColumnValue::Any)
+    };
+
+    let start = Instant::now();
+    // Drive fan-out concurrently with the clients receiving.
+    let fanout_task = {
+        let fanout = Arc::clone(&fanout);
+        tokio::spawn(async move { fanout.run(&mut replicator, extract).await })
+    };
+
+    // Wait until all events are received, or timeout.
+    let target = cfg.events.saturating_mul(clients as u64);
+    let deadline = Duration::from_secs(cfg.timeout_secs);
+    let wait = async {
+        loop {
+            if sum_received() >= target {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let _ = timeout(deadline, wait).await;
+    let elapsed = start.elapsed();
+
+    let outcome = fanout_task.await?;
+    // Keep the in-process server alive for the remainder of this run. Binding
+    // (rather than `_`) would trip `let_underscore_future`; we intentionally
+    // drop it after the clients finish below.
+    drop(server_handle);
+    // signal clients to stop
+    for h in &client_handles {
+        h.abort();
+    }
+
+    let delivered = sum_received();
+    // Aggregate the per-client latency histograms.
+    let mut combined = Histogram::new();
+    for h in &histograms {
+        let g = h.lock().unwrap();
+        combined.merge(&g);
+    }
+
+    let ops_per_sec = (delivered as f64) / elapsed.as_secs_f64().max(1e-9);
+    let attempted = cfg.events.saturating_mul(clients as u64).max(1);
+    let drop_rate = 1.0 - (delivered as f64 / attempted as f64);
+    let (p50, p99) = (combined.percentile(0.5), combined.percentile(0.99));
+
+    info!(
+        clients,
+        delivered,
+        matched = outcome.matched,
+        ops_per_sec,
+        drop_rate,
+        "run complete"
+    );
+
+    Ok(RunResult {
+        clients,
+        events_total: cfg.events,
+        events_delivered: delivered,
+        ops_per_sec,
+        drop_rate: drop_rate.clamp(0.0, 1.0),
+        p50_us: p50,
+        p99_us: p99,
+        elapsed_secs: elapsed.as_secs_f64(),
+        profile: cfg.profile.clone(),
+    })
+}
+
+/// One benchmark client: connect, subscribe, count received frames, record latency.
+async fn client_task(
+    url: String,
+    received: Arc<AtomicU64>,
+    hist: Arc<std::sync::Mutex<Histogram>>,
+) {
+    // `received` is THIS client's own sharded counter — no cross-client contention.
+    // Retry connect briefly — the server is starting concurrently.
+    let mut ws = None;
+    for _ in 0..50 {
+        match connect_async(&url).await {
+            Ok((stream, _)) => {
+                ws = Some(stream);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    let Some(ws) = ws else { return };
+    let (mut write, mut read) = ws.split();
+
+    // Send subscribe frame.
+    let sub = serde_json::json!({ "table": "tasks" }).to_string();
+    if write.send(Message::Text(sub)).await.is_err() {
+        return;
+    }
+
+    // Read loop — count frames, record per-frame inter-arrival time as a
+    // latency proxy. The absolute p99 reflects the recv rate; for true
+    // send→recv latency we'd embed server timestamps in the frame (Phase 2).
+    while let Some(Ok(msg)) = read.next().await {
+        let t = Instant::now();
+        if matches!(msg, Message::Binary(_) | Message::Text(_)) {
+            received.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut g) = hist.lock() {
+                g.record(t.elapsed().as_micros() as u64 + 1);
+            }
+        }
+    }
+    let _ = write.close().await;
+}
+
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("warn,nostos_bench=info")),
+        )
+        .try_init();
+}
+
+// Raise the soft file-descriptor limit so 10k client sockets fit. macOS default
+// is often 256, which would cap us well below 10k connections.
+fn raise_fd_limit() {
+    #[cfg(unix)]
+    {
+        // `setrlimit` returns `()`. Best-effort — ignore errors (e.g. if the
+        // hard limit is already lower than our requested soft limit).
+        let _ = nix::sys::resource::setrlimit(
+            nix::sys::resource::Resource::RLIMIT_NOFILE,
+            65_536,
+            65_536,
+        );
+    }
+}
