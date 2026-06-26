@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nostos Cloud — Admin</title>
+<style>
+  :root { --accent: #c8772a; --accent-dark: #9e5d1f; --bg: #faf8f4; --panel: #fff; --text: #2b2b2b; --muted: #6b6b6b; --border: #e3ded4; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  .topbar { background: var(--panel); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }
+  .brand { font-weight: 800; font-size: 1.2rem; } .brand .mark { color: var(--accent); }
+  .layout { display: flex; min-height: calc(100vh - 56px); }
+  .sidebar { width: 220px; background: var(--panel); border-right: 1px solid var(--border); padding: 20px 0; }
+  .sidebar a { display: block; padding: 12px 24px; text-decoration: none; color: var(--text); font-weight: 500; cursor: pointer; }
+  .sidebar a:hover, .sidebar a.active { background: var(--bg); color: var(--accent); border-left: 3px solid var(--accent); }
+  .main { flex: 1; padding: 32px; max-width: 1000px; }
+  h1 { font-size: 1.6rem; margin-bottom: 8px; } h2 { font-size: 1.2rem; margin: 24px 0 12px; }
+  p.sub { color: var(--muted); margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.92rem; }
+  th { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .btn { display: inline-block; padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; font-size: 0.9rem; text-decoration: none; }
+  .btn-p { background: var(--accent); color: #fff; } .btn-p:hover { background: var(--accent-dark); }
+  .btn-g { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  input, select { padding: 9px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.95rem; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  code { background: #f0ece4; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; word-break: break-all; }
+  .stat { font-size: 2rem; font-weight: 800; color: var(--accent); }
+  .hidden { display: none; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .pill.active { background: #e3f6e3; color: #2a7a2a; } .pill.free { background: #f0ece4; color: var(--muted); }
+  .note { font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand"><span class="mark">▲</span> Nostos Cloud</div>
+  <div id="auth-area"></div>
+</div>
+<div class="layout">
+  <div class="sidebar">
+    <a data-view="overview" class="active">Overview</a>
+    <a data-view="projects">Projects</a>
+    <a data-view="account">Account</a>
+    <a data-view="docs">Docs & Keys</a>
+  </div>
+  <div class="main" id="view"></div>
+</div>
+
+<script>
+const api = (p, o={}) => fetch(p, {credentials:'same-origin', headers:{'Content-Type':'application/json'}, ...o}).then(async r => {
+  const j = r.headers.get('content-type')?.includes('json') ? await r.json() : null;
+  if (!r.ok) throw new Error(j?.error || r.statusText);
+  return j;
+});
+const el = (h) => { const d = document.createElement('div'); d.innerHTML = h.trim(); return d.firstChild; };
+const view = document.getElementById('view');
+let ME = null;
+
+async function refreshMe() { try { ME = await api('/v1/me'); } catch { ME = null; } return ME; }
+function renderAuth() {
+  const a = document.getElementById('auth-area');
+  if (ME) a.innerHTML = `<span style="color:var(--muted)">${ME.email}</span> <a class="btn btn-g" href="#" onclick="logout();return false">Sign out</a>`;
+  else a.innerHTML = `<a class="btn btn-g" href="/">← Back to site</a>`;
+}
+async function logout() { await api('/v1/auth/logout',{method:'POST'}); ME = null; location.reload(); }
+
+document.querySelectorAll('.sidebar a').forEach(a => a.addEventListener('click', () => {
+  document.querySelectorAll('.sidebar a').forEach(x => x.classList.remove('active'));
+  a.classList.add('active');
+  routes[a.dataset.view]();
+}));
+
+const routes = {
+  async overview() {
+    const [projs, wl] = await Promise.all([api('/v1/projects').catch(()=>[]), api('/v1/waitlist').catch(()=>({count:0}))]);
+    view.innerHTML = `
+      <h1>Welcome${ME ? ', ' + ME.email : ''}</h1>
+      <p class="sub">Your Nostos Cloud control plane. ${ME?.role === 'founder' ? 'Founder view — full access.' : ''}</p>
+      <div class="card"><div class="stat">${projs.length}</div><div class="note">projects</div></div>
+      <div class="card"><div class="stat">${wl.count}</div><div class="note">waitlist signups</div></div>
+      <div class="card"><h2>Quick start</h2>
+        <p class="sub">1. Create a project → 2. Generate an API key → 3. Subscribe (Pro) → 4. Mint a license → 5. Point your managed sync server at Postgres.</p>
+        <button class="btn btn-p" onclick="routes.projects()">Create a project →</button>
+      </div>`;
+  },
+  async projects() {
+    let projs = await api('/v1/projects').catch(()=>[]);
+    view.innerHTML = `<h1>Projects</h1><p class="sub">Each project is one managed Nostos sync instance.</p>
+      <div class="card"><h2>New project</h2>
+        <div class="row"><input id="pname" placeholder="My App"><button class="btn btn-p" id="mkproj">Create</button></div></div>
+      <div id="plist"></div>`;
+    document.getElementById('mkproj').onclick = async () => {
+      const n = document.getElementById('pname').value.trim();
+      if (!n) return; await api('/v1/projects',{method:'POST',body:JSON.stringify({name:n})}); routes.projects();
+    };
+    const pl = document.getElementById('plist');
+    if (!projs.length) { pl.innerHTML = '<p class="note">No projects yet.</p>'; return; }
+    for (const p of projs) pl.appendChild(await projectCard(p));
+  },
+  async account() {
+    if (!ME) { await gate(); return; }
+    view.innerHTML = `<h1>Account</h1>
+      <div class="card"><h2>${ME.email}</h2><p class="sub">Role: <strong>${ME.role}</strong></p>
+      <p class="note">To change your password or invite team members, contact <a href="mailto:founders@nostos.run">founders@nostos.run</a> (full IAM lands in a later phase).</p></div>`;
+  },
+  docs() {
+    view.innerHTML = `<h1>Docs & Keys</h1>
+      <div class="card"><h2>API endpoints</h2>
+      <table><tr><th>Method</th><th>Path</th><th>Purpose</th></tr>
+      <tr><td>POST</td><td><code>/v1/auth/signup</code></td><td>Create account (first = Founder)</td></tr>
+      <tr><td>POST</td><td><code>/v1/auth/login</code></td><td>Sign in</td></tr>
+      <tr><td>GET</td><td><code>/v1/me</code></td><td>Current account</td></tr>
+      <tr><td>GET/POST</td><td><code>/v1/projects</code></td><td>List/create projects</td></tr>
+      <tr><td>POST</td><td><code>/v1/projects/:id/keys</code></td><td>Mint an API key</td></tr>
+      <tr><td>POST</td><td><code>/v1/projects/:id/checkout</code></td><td>Stripe Checkout (tier)</td></tr>
+      <tr><td>GET</td><td><code>/v1/projects/:id/license</code></td><td>Mint signed license token</td></tr>
+      <tr><td>POST</td><td><code>/v1/stripe/webhook</code></td><td>Stripe webhook (sig-verified)</td></tr>
+      </table></div>
+      <div class="card"><h2>License model</h2><p class="sub">Licenses gate <strong>Nostos Cloud</strong> + Enterprise only. The self-hosted Apache-2.0 binary is free and unlimited forever.</p>
+      <p class="note">A license is <code>payload.sig</code> (HMAC-SHA256); the managed sync server verifies it offline.</p></div>`;
+  }
+};
+
+async function projectCard(p) {
+  const [keys, sub] = await Promise.all([
+    api('/v1/projects/'+p.id+'/keys').catch(()=>[]),
+    api('/v1/projects/'+p.id+'/license').catch(()=>null),
+  ]);
+  const tier = sub?.tier || 'hobby';
+  const c = el(`<div class="card" id="proj-${p.id}">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">${p.name}</h2>
+      <span class="pill ${tier==='hobby'?'free':'active'}">${tier}</span>
+    </div>
+    <p class="note">id: <code>${p.id}</code></p>
+    <div id="pc-body"></div>
+  </div>`);
+  const body = c.querySelector('#pc-body');
+  body.appendChild(el(`<h2 style="margin-top:16px">Billing</h2>`));
+  body.appendChild(el(`<div class="row">
+    <button class="btn btn-p" data-tier="pro">Upgrade to Pro ($49/mo)</button>
+    <button class="btn btn-g" data-tier="scale">Scale ($499/mo)</button>
+  </div>`));
+  body.querySelectorAll('button[data-tier]').forEach(b => b.onclick = () => checkout(p.id, b.dataset.tier));
+  body.appendChild(el(`<h2 style="margin-top:16px">License token</h2>`));
+  if (sub?.license) {
+    body.appendChild(el(`<p class="note">Current license (offline-verifiable):</p>`));
+    body.appendChild(el(`<div><code>${sub.license}</code></div>`));
+  } else {
+    body.appendChild(el(`<p class="note">Hobby (free) — upgrade to mint a paid license.</p>`));
+  }
+  body.appendChild(el(`<h2 style="margin-top:16px">API keys</h2>`));
+  body.appendChild(el(`<div class="row"><button class="btn btn-g" id="mkkey-${p.id}">Generate new key</button></div>`));
+  body.appendChild(el(`<table><thead><tr><th>Key</th><th>Created</th></tr></thead><tbody id="klist-${p.id}"></tbody></table>`));
+  const kl = body.querySelector(`#klist-${p.id}`);
+  for (const k of keys) kl.appendChild(el(`<tr><td><code>${k.key}</code></td><td>${new Date(k.created_at*1000).toLocaleString()}</td></tr>`));
+  body.querySelector(`#mkkey-${p.id}`).onclick = async () => {
+    await api('/v1/projects/'+p.id+'/keys',{method:'POST'}); routes.projects();
+  };
+  return c;
+}
+
+async function checkout(id, tier) {
+  try {
+    const r = await api('/v1/projects/'+id+'/checkout',{method:'POST',body:JSON.stringify({tier})});
+    if (r.url) location.href = r.url;
+  } catch (e) {
+    alert('Checkout unavailable: ' + e.message + '\n\n(Configure STRIPE_SECRET_KEY + STRIPE_PRICE_' + tier.toUpperCase() + ' to enable.)');
+  }
+}
+
+async function gate() {
+  view.innerHTML = `<h1>Sign in to Nostos Cloud</h1>
+    <div class="card" style="max-width:380px">
+      <h2>Login</h2>
+      <div class="row" style="flex-direction:column;align-items:stretch">
+        <input id="lemail" placeholder="email" type="email">
+        <input id="lpass" placeholder="password" type="password">
+        <button class="btn btn-p" id="lgo">Sign in</button>
+      </div>
+      <p class="note" style="margin-top:14px">No account? <a href="#" id="tosignup">Sign up</a> — the first account becomes the Founder.</p>
+    </div>`;
+  const go = async () => {
+    try { await api('/v1/auth/login',{method:'POST',body:JSON.stringify({email:document.getElementById('lemail').value,password:document.getElementById('lpass').value})}); await refreshMe(); renderAuth(); routes.overview(); }
+    catch(e){ alert(e.message); }
+  };
+  document.getElementById('lgo').onclick = go;
+  document.getElementById('tosignup').onclick = async (e) => { e.preventDefault(); view.innerHTML = `
+    <h1>Create your Founder account</h1>
+    <div class="card" style="max-width:380px"><div class="row" style="flex-direction:column;align-items:stretch">
+      <input id="semail" placeholder="email" type="email">
+      <input id="spass" placeholder="password (min 8 chars)" type="password">
+      <button class="btn btn-p" id="sgo">Create account</button>
+    </div></div>`;
+    document.getElementById('sgo').onclick = async () => {
+      try { await api('/v1/auth/signup',{method:'POST',body:JSON.stringify({email:document.getElementById('semail').value,password:document.getElementById('spass').value})}); await refreshMe(); renderAuth(); routes.overview(); }
+      catch(e){ alert(e.message); }
+    };
+  };
+}
+
+(async () => {
+  await refreshMe(); renderAuth();
+  if (!ME) { await gate(); return; }
+  await routes.overview();
+})();
+</script>
+</body>
+</html>

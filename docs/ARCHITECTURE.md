@@ -155,3 +155,35 @@ Each deferral has an ADR in [`docs/adr/`](adr/) explaining the trade-off.
 5. Write a fake/stub for the application-layer tests.
 
 Never let an infra type leak into a port signature. If you find yourself wanting `tokio::sync::mpsc::Sender` in a port, that's a smell — define an abstract sink instead.
+
+---
+
+## 7. Platform assembly (managed Cloud + web)
+
+Beyond the sync engine, Nostos ships a managed Cloud control plane and a web
+surface. These are documented in detail in the ADRs; the summary:
+
+- **`nostos-cloud`** — the control plane (axum + rusqlite). Accounts, projects,
+  API keys, Stripe billing, HMAC-signed licenses, a dual-path auth (Supabase JWT
+  OR session cookie), and a `PaymentProvider` trait seam (Stripe live, PayPal
+  stubbed behind a feature flag). Runs on Fly.io alongside the engine.
+- **`web/`** — the SvelteKit 2 + Svelte 5 app (landing + admin), static-exported
+  to Cloudflare Pages. Visual identity is "The Nostos Field" (ADR-0008): one
+  nostos primitive at two scales, themeable (system + dark + light).
+- **`nostos-domain::Tier`** — the portable tier taxonomy (Hobby/Pro/Scale/
+  Enterprise) with concurrent-device caps. Lives in the domain ring so both the
+  engine (`nostos-server`) and the control plane (`nostos-cloud`) share it without
+  either sibling depending on the other.
+
+### Decisions
+
+- [ADR-0007: Platform assembly — Supabase + Rust + Cloudflare + Fly.io](adr/0007-platform-assembly-supabase-rust-cloudflare-fly.md)
+- [ADR-0008: Visual identity — The Nostos Field](adr/0008-visual-identity-the-nostos-field.md)
+
+### Reactive-default
+
+Nostos is **reactive-when-connected, queue-when-offline**: the data contract is
+always reactive; instant push is not the default. The push cadence lives in
+`FanOutService::push_interval` (server-side, single-source) so the FFI bridges
+stay dumb. Default `Duration::ZERO` (instant, what the benchmark measures); a
+managed deploy sets ~1-2s to coalesce bursts. See ADR-0007 §Reactive-default.

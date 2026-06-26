@@ -13,6 +13,12 @@ homepage.workspace = true
 name = "nostos-server"
 path = "src/main.rs"
 
+[features]
+default = []
+# Forward to nostos-infra's pg feature, enabling the real PgReplicator. Build with
+# `cargo build -p nostos-server --features pg` (or `--all-features`).
+pg = ["nostos-infra/pg"]
+
 [dependencies]
 nostos-domain = { workspace = true }
 nostos-application = { workspace = true }

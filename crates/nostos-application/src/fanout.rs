@@ -62,15 +62,35 @@ impl FanOutOutcome {
 ///
 /// Constructed once at server startup and driven by [`FanOutService::run`],
 /// which loops until the replicator stream is exhausted.
+///
+/// **Reactive-when-connected (default strategy):** `push_interval` sets a
+/// minimum cadence between fan-out dispatches in `run`. Default is zero
+/// (instant, what the benchmark measures). A managed deploy sets ~1-2s to
+/// coalesce bursts server-side — this keeps the four FFI bridges dumb and the
+/// policy single-sourced here, per the reactive-default ultrathink decision.
 pub struct FanOutService {
     store: Arc<dyn SessionStore>,
+    push_interval: std::time::Duration,
 }
 
 impl FanOutService {
     #[inline]
     #[must_use]
     pub fn new(store: Arc<dyn SessionStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            push_interval: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Set the minimum interval between fan-out dispatches in `run`.
+    /// `Duration::ZERO` (the default) means instant delivery — what the
+    /// benchmark measures. A reactive-when-connected managed instance sets
+    /// this to coalesce bursts server-side.
+    #[must_use]
+    pub fn with_push_interval(mut self, interval: std::time::Duration) -> Self {
+        self.push_interval = interval;
+        self
     }
 
     /// Fan a single event out to all matching sessions. This is the unit the
@@ -144,6 +164,12 @@ impl FanOutService {
         let mut total = FanOutOutcome::default();
         while let Some(event) = replicator.next_event().await {
             total = total.merged(self.fan_out(&event, &column_extractor).await);
+            // Reactive-when-connected cadence: a zero interval (the default,
+            // what the benchmark measures) is a no-op; a managed instance sets
+            // ~1-2s to coalesce bursts server-side.
+            if !self.push_interval.is_zero() {
+                tokio::time::sleep(self.push_interval).await;
+            }
         }
         total
     }

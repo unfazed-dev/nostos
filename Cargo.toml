@@ -35,6 +35,7 @@ members = [
     "crates/nostos-infra",
     "crates/nostos-server",
     "crates/nostos-bench",
+    "crates/nostos-cloud",
 ]
 
 [workspace.package]
@@ -81,14 +82,16 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
 # --- postgres logical replication (the core capability) ---
-# Used by the real PgReplicator (Week 2). Week-1 benchmark uses a FakeReplicator
+# Used by the real PgReplicator (Phase 1). Week-1 benchmark uses a FakeReplicator
 # and needs none of these — they're marked optional in nostos-infra.
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1"] }
-postgres-protocol = "0.6"
 # pgoutput logical-decoding parser (consumes the pgoutput replication stream).
-# NOTE: still pre-1.0 (0.0.7); the real PgReplicator may swap to `pgwire-replication`
-# (0.3.2, full wire-protocol client with TLS) once we benchmark both in Week 2.
+# Verified 0.0.7: trait-selected generic Event<Binary,Streaming> API; we use the
+# `BinaryValueTraitOff` (text values) + `StreamingValueTraitOff` (no streaming) monomorphization.
 pgoutput = "0.0.7"
+# Tokio-based PG wire-protocol logical-replication client (TLS + SCRAM).
+# Verified 0.3.2: ReplicationClient::connect(cfg) -> recv() -> Option<ReplicationEvent>,
+# where XLogData{ wal_end: Lsn, data: Vec<u8> } carries raw pgoutput message bytes.
 pgwire-replication = "0.3"
 
 # --- observability ---
@@ -101,6 +104,22 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 config = "0.14"
 
+# --- nostos-cloud (control plane: auth, billing, projects) ---
+# rusqlite = embedded sqlite for the cloud store (zero external deps to run).
+rusqlite = { version = "0.32", features = ["bundled"] }
+# HTTP client for Stripe REST calls (Checkout sessions, customer portal).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Webhook signature verification — HMAC-SHA256 (Stripe spec), no SDK needed.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+# Timestamps for license/subscription expiry & audit.
+time = { version = "0.3", features = ["serde", "serde-human-readable"] }
+# Cookie/session handling for the admin SPA auth.
+tower-cookies = "0.10"
+# Random token generation (API keys, session ids, license keys).
+rand = "0.8"
+
 # --- dev / test / bench ---
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 proptest = "1.5"
@@ -112,6 +131,7 @@ fastrand = "2.1"
 nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
 nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
 nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
+nostos-cloud = { path = "crates/nostos-cloud", version = "0.1.0" }
 
 # -----------------------------------------------------------------------------
 # Workspace-wide lints. Fail CI on the things that matter; warn on the rest.

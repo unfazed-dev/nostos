@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nostos · The Nostos Field (blend of 1 + 2)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300..800&display=swap" rel="stylesheet">
+<style>
+/* =============================================================================
+   THE NOSTOS FIELD — the proper blend of Concept 1 (The Nostos) + Concept 2 (The Ripple)
+   -----------------------------------------------------------------------------
+   UNIFYING IDEA: a constellation of device-nostoss, where ripples are the force
+   that lights them. ONE PRIMITIVE (the cairn = stacked slabs), TWO SCALES:
+     · macro (hero):  a top-down ripple canvas whose endpoints ARE nostos stacks
+                      — each ripple wave lights a device-nostos slab-by-slab
+     · micro (chrome): the same nostos profile, flat — logo, divider, loader, sync pill
+   Remove either element and the other stops making sense. That's a blend.
+   ============================================================================= */
+
+:root {
+  --ink:      oklch(0.28 0.018 250);
+  --ink-soft: oklch(0.45 0.015 250);
+  --paper:    oklch(0.985 0.004 95);
+  --paper-2:  oklch(0.965 0.006 95);
+  --stone-1:  oklch(0.90 0.008 85);
+  --stone-2:  oklch(0.72 0.012 80);
+  --stone-3:  oklch(0.52 0.015 75);
+  --mark:     oklch(0.64 0.17 42);   /* THE one warm accent — terracotta */
+  --mark-ink: oklch(0.52 0.16 42);
+  --mark-glow: oklch(0.64 0.17 42);
+  --rule:     oklch(0.91 0.008 85);
+  --font-sans: "Lexend", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 220ms;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --ink:      oklch(0.93 0.008 95);
+    --ink-soft: oklch(0.74 0.012 95);
+    --paper:    oklch(0.155 0.005 250);
+    --paper-2:  oklch(0.195 0.006 250);
+    --stone-1:  oklch(0.27 0.008 250);
+    --stone-2:  oklch(0.40 0.010 250);
+    --stone-3:  oklch(0.62 0.012 95);
+    --mark:     oklch(0.70 0.15 45);
+    --mark-ink: oklch(0.72 0.14 45);
+    --mark-glow: oklch(0.70 0.15 45);
+    --rule:     oklch(0.29 0.008 250);
+  }
+}
+:root[data-theme="dark"] {
+  --ink:      oklch(0.93 0.008 95);
+  --ink-soft: oklch(0.74 0.012 95);
+  --paper:    oklch(0.155 0.005 250);
+  --paper-2:  oklch(0.195 0.006 250);
+  --stone-1:  oklch(0.27 0.008 250);
+  --stone-2:  oklch(0.40 0.010 250);
+  --stone-3:  oklch(0.62 0.012 95);
+  --mark:     oklch(0.70 0.15 45);
+  --mark-ink: oklch(0.72 0.14 45);
+  --mark-glow: oklch(0.70 0.15 45);
+  --rule:     oklch(0.29 0.008 250);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  font-family: var(--font-sans); background: var(--paper); color: var(--ink);
+  line-height: 1.55; font-size: 16px; font-weight: 400;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  min-height: 100vh; transition: background-color .3s ease, color .3s ease;
+  overflow-x: clip;
+}
+a { color: inherit; text-decoration: none; }
+
+/* ===== deck chrome ===== */
+.deck-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  display: flex; align-items: center; gap: 16px; padding: 12px 24px;
+  background: color-mix(in srgb, var(--paper) 80%, transparent);
+  backdrop-filter: blur(12px); border-bottom: 1px solid var(--rule);
+}
+.deck-bar .num {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--mark);
+  border: 1px solid color-mix(in srgb, var(--mark) 40%, transparent);
+  padding: 4px 10px; border-radius: 4px;
+}
+.deck-bar h1 { font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
+.deck-bar h1 small { color: var(--ink-soft); font-weight: 400; }
+.deck-bar .meta { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); }
+.theme-switch { display: inline-flex; border: 1px solid var(--stone-2); border-radius: 6px; overflow: hidden; font-family: var(--font-mono); font-size: 11px; }
+.theme-switch button { background: none; border: 0; padding: 6px 10px; color: var(--ink-soft); cursor: pointer; }
+.theme-switch button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+main { padding-top: 58px; }
+
+/* ===== HERO ===== */
+.hero {
+  position: relative;
+  min-height: calc(100vh - 58px);
+  display: grid;
+  grid-template-columns: 0.92fr 1.18fr;
+  align-items: center;
+  gap: 44px;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 40px 32px 56px;
+}
+@media (max-width: 920px) { .hero { grid-template-columns: 1fr; gap: 28px; padding: 28px 22px 40px; } }
+
+.hero-copy { max-width: 500px; z-index: 3; }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--mark-ink);
+  margin-bottom: 26px;
+}
+.hero h2 {
+  font-size: clamp(2.4rem, 5.4vw, 3.7rem); font-weight: 640;
+  line-height: 1.05; letter-spacing: -.022em;
+  margin-bottom: 22px; text-wrap: pretty;
+}
+.hero h2 em { font-style: normal; color: var(--mark); }
+.hero .lede {
+  font-size: 1.16rem; color: var(--ink-soft); line-height: 1.5;
+  max-width: 44ch; margin-bottom: 32px; text-wrap: pretty;
+}
+.cta-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px;
+  border-radius: 6px; font-size: 14px; font-weight: 600; border: 1px solid transparent;
+  cursor: pointer; transition: all var(--dur) var(--ease); white-space: nowrap;
+}
+.btn-mark { background: var(--mark); color: var(--paper); }
+.btn-mark:hover { background: var(--mark-ink); }
+.btn-ghost { background: transparent; color: var(--ink); border-color: var(--stone-2); }
+.btn-ghost:hover { border-color: var(--ink); }
+.sub-cue { font-family: var(--font-mono); font-size: 11px; color: var(--stone-3); margin-top: 18px; letter-spacing: .04em; }
+
+/* ===== the field stage ===== */
+.field-stage {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  background:
+    radial-gradient(ellipse at 50% 88%, color-mix(in srgb, var(--mark) 7%, transparent) 0%, transparent 55%),
+    var(--paper-2);
+  border: 1px solid var(--rule);
+  overflow: hidden;
+}
+.field-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+.hud {
+  position: absolute; font-family: var(--font-mono); font-size: 11px;
+  color: var(--ink-soft); letter-spacing: .04em; pointer-events: none; z-index: 2;
+}
+.hud.tl { top: 16px; left: 16px; }
+.hud.tr { top: 16px; right: 16px; text-align: right; }
+.hud .k { color: var(--stone-3); font-size: 10px; text-transform: uppercase; letter-spacing: .14em; }
+.hud .v { color: var(--ink); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hud .v.accent { color: var(--mark); }
+.source-tag {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--stone-3); pointer-events: none; z-index: 2;
+  white-space: nowrap;
+}
+
+/* ===== THE HANDOFF BEAT — single enlarged nostos shown to the right of the field ===== */
+/* This is the seam that connects the 3D/2D hero (top-down constellation) to the
+   flat 2D nostos chrome below. It is literally the side-elevation of one
+   device-nostos from the field, fully lit, crown glowing. */
+.handoff {
+  max-width: 1240px; margin: 0 auto;
+  padding: 8px 32px 0;
+  display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 44px; align-items: end;
+}
+@media (max-width: 920px) { .handoff { grid-template-columns: 1fr; gap: 16px; padding: 8px 22px 0; } }
+.handoff-copy { max-width: 500px; }
+.handoff-copy .label {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .14em; color: var(--mark-ink); margin-bottom: 10px;
+}
+.handoff-copy h3 {
+  font-size: 1.5rem; font-weight: 600; letter-spacing: -.015em; margin-bottom: 8px; text-wrap: pretty;
+}
+.handoff-copy p { color: var(--ink-soft); font-size: .98rem; line-height: 1.55; }
+
+/* the handoff nostos — full side-elevation, fills on reveal, crown glows */
+.handoff-nostos-wrap { display: grid; place-items: center; height: 200px; }
+@media (max-width: 920px) { .handoff-nostos-wrap { height: 150px; } }
+.nostos-big {
+  --slabs: 8; --w: 150px;
+  position: relative; width: var(--w);
+  height: calc(var(--slabs) * 22px + (var(--slabs) - 1) * 4px);
+  display: flex; flex-direction: column-reverse; gap: 4px;
+}
+.nostos-big .slab {
+  height: 22px; border-radius: 2px; background: var(--stone-1);
+  transition: background 360ms var(--ease), box-shadow 360ms var(--ease);
+  transform-origin: center;
+}
+.nostos-big .slab:nth-child(1)  { width: 100%; }
+.nostos-big .slab:nth-child(2)  { width: 96%; align-self: center; }
+.nostos-big .slab:nth-child(3)  { width: 90%; align-self: center; }
+.nostos-big .slab:nth-child(4)  { width: 84%; align-self: center; }
+.nostos-big .slab:nth-child(5)  { width: 74%; align-self: center; }
+.nostos-big .slab:nth-child(6)  { width: 62%; align-self: center; }
+.nostos-big .slab:nth-child(7)  { width: 48%; align-self: center; }
+.nostos-big .slab:nth-child(8)  { width: 32%; align-self: center; } /* crown */
+.nostos-big .slab.on { background: color-mix(in srgb, var(--ink) 80%, var(--stone-2)); }
+.nostos-big .slab.on.crown {
+  background: var(--mark);
+  box-shadow: 0 0 26px color-mix(in srgb, var(--mark-glow) 60%, transparent);
+}
+
+/* ===== RECURRING CHROME BELOW — the same nostos primitive, flat ===== */
+.chrome {
+  max-width: 1240px; margin: 0 auto; padding: 56px 32px 88px;
+  border-top: 1px solid var(--rule); margin-top: 56px;
+}
+.chrome h4 {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .14em; color: var(--stone-3); margin-bottom: 8px;
+}
+.chrome > p { color: var(--ink-soft); max-width: 60ch; margin-bottom: 32px; font-size: .98rem; }
+.chrome-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+@media (max-width: 860px) { .chrome-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px) { .chrome-grid { grid-template-columns: 1fr; } }
+.chrome-card { padding: 22px 20px; border: 1px solid var(--rule); border-radius: 10px; background: var(--paper-2); }
+.chrome-card .demo { height: 72px; display: grid; place-items: center; margin-bottom: 14px; }
+.chrome-card h5 { font-size: 13.5px; font-weight: 600; margin-bottom: 5px; }
+.chrome-card p { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
+
+/* micro nostos glyphs — same primitive as the big one, scaled to chrome */
+.glyph-nostos { width: 30px; height: 30px; display: inline-block; position: relative; }
+.glyph-nostos i { position: absolute; left: 50%; transform: translateX(-50%); height: 4px; border-radius: 1px; background: var(--ink); }
+.glyph-nostos i:nth-child(1) { bottom: 0; width: 28px; opacity: .9; }
+.glyph-nostos i:nth-child(2) { bottom: 6px; width: 20px; opacity: .65; }
+.glyph-nostos i:nth-child(3) { bottom: 12px; width: 13px; background: var(--mark); box-shadow: 0 0 9px color-mix(in srgb, var(--mark-glow) 55%, transparent); }
+
+/* the nostos divider trio — same offset silhouette as a hairline */
+.rule-trio { display: flex; gap: 5px; width: 130px; }
+.rule-trio i { display: block; height: 2px; background: var(--ink); }
+.rule-trio i:nth-child(1) { width: 60%; opacity: .5; }
+.rule-trio i:nth-child(2) { width: 100%; }
+.rule-trio i:nth-child(3) { width: 76%; opacity: .8; }
+
+/* the loader — vertical stack fills top→bottom */
+.loader-demo { width: 14px; height: 56px; display: flex; flex-direction: column; gap: 3px; }
+.loader-demo i { flex: 1; background: var(--stone-1); border-radius: 1px; transition: background var(--dur) var(--ease); }
+.loader-demo i:nth-last-child(-n+5) { background: var(--mark); }
+
+/* the admin sync pill — live state */
+.sync-pill {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 7px 13px 7px 11px; border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--mark) 35%, transparent);
+  background: color-mix(in srgb, var(--mark) 8%, transparent);
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--mark-ink);
+}
+.sync-pill .glyph { width: 14px; height: 14px; position: relative; }
+.sync-pill .glyph i { position: absolute; left: 50%; transform: translateX(-50%); height: 2.5px; border-radius: 1px; background: var(--mark); }
+.sync-pill .glyph i:nth-child(1) { bottom: 0; width: 14px; opacity: .7; }
+.sync-pill .glyph i:nth-child(2) { bottom: 4px; width: 9px; opacity: .9; }
+.sync-pill .glyph i:nth-child(3) { bottom: 8px; width: 5px; box-shadow: 0 0 7px var(--mark-glow); animation: blink 2.4s var(--ease) infinite; }
+@keyframes blink { 0%,100% { opacity: .5; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .sync-pill .glyph i:nth-child(3) { animation: none; opacity: 1; } }
+
+/* blend rationale footnote */
+.footnote {
+  max-width: 1240px; margin: 0 auto; padding: 0 32px 64px;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--stone-3); line-height: 1.6;
+}
+.footnote strong { color: var(--ink-soft); }
+</style>
+</head>
+<body>
+
+<div class="deck-bar">
+  <span class="num">Blend · 1 + 2</span>
+  <h1>The Nostos Field <small>— one primitive, two scales</small></h1>
+  <span class="meta">ripple constellation · device-nostoss light slab-by-slab</span>
+  <div class="theme-switch" role="group" aria-label="Theme">
+    <button data-set="system" aria-pressed="true">System</button>
+    <button data-set="light" aria-pressed="false">Light</button>
+    <button data-set="dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<main>
+  <!-- ============ MACRO: the field (hero) ============ -->
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">
+        <span class="glyph-nostos"><i></i><i></i><i></i></span>
+        Local-first sync · Apache-2.0
+      </span>
+      <h2>Every device, <em>lit by the same ripple.</em></h2>
+      <p class="lede">Nostos streams Postgres logical replication to every device. A commit lands, ripples outward, and each device-nostos fills slab-by-slab as its LSN checkpoint arrives. One engine. One field. Every device home.</p>
+      <div class="cta-row">
+        <button class="btn btn-mark" id="floodBtn">Run the benchmark ▸</button>
+        <button class="btn btn-ghost">Read the docs</button>
+      </div>
+      <p class="sub-cue">click the field to send a single commit</p>
+    </div>
+
+    <div class="field-stage" id="stage">
+      <canvas id="field" role="img" aria-label="Top-down constellation of device-nostoss. A commit at the bottom sends ripples outward; each device-nostos fills its stacked slabs bottom-to-top as the ripple reaches it."></canvas>
+      <div class="hud tl">
+        <div class="k">Throughput</div>
+        <div class="v tnum" id="ops">0</div>
+        <div class="k">ops / sec</div>
+      </div>
+      <div class="hud tr">
+        <div class="k">Devices synced</div>
+        <div class="v tnum accent" id="devs">0 / 0</div>
+      </div>
+      <div class="source-tag">postgres · origin</div>
+    </div>
+  </section>
+
+  <!-- ============ THE HANDOFF BEAT — side elevation of one device-nostos ============ -->
+  <section class="handoff" id="handoff">
+    <div class="handoff-copy">
+      <div class="label">The handoff · one device, side elevation</div>
+      <h3>This is the same nostos you just saw lit in the field.</h3>
+      <p>Zoom into any device and the constellation resolves to a single stack — slabs filling as its checkpoint arrives, crown glowing terracotta at peak. This profile is the mark you'll meet again, everywhere below.</p>
+    </div>
+    <div class="handoff-nostos-wrap">
+      <div class="nostos-big" id="bigNostos" role="img" aria-label="Single device nostos in side elevation, slabs filling bottom-to-top, crown glowing terracotta">
+        <div class="slab"></div><div class="slab"></div><div class="slab"></div><div class="slab"></div>
+        <div class="slab"></div><div class="slab"></div><div class="slab"></div><div class="slab crown"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MICRO: the recurring chrome ============ -->
+  <section class="chrome">
+    <h4>The same primitive · flat</h4>
+    <p>The cairn is Nostos. One silhouette recurs across the whole product — the field is just where you see it move. Every surface below inherits the stack, so the brand reads whether the canvas is running or not.</p>
+    <div class="chrome-grid">
+      <div class="chrome-card">
+        <div class="demo"><span class="glyph-nostos"><i></i><i></i><i></i></span></div>
+        <h5>The logo glyph</h5>
+        <p>Three offset slabs, crown lit. The brand in 30px.</p>
+      </div>
+      <div class="chrome-card">
+        <div class="demo"><div class="rule-trio"><i></i><i></i><i></i></div></div>
+        <h5>The section divider</h5>
+        <p>The same offset silhouette as a 2px hairline trio.</p>
+      </div>
+      <div class="chrome-card">
+        <div class="demo"><div class="loader-demo"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+        <h5>The page loader</h5>
+        <p>Stack fills top→bottom; crown lights last — completion.</p>
+      </div>
+      <div class="chrome-card">
+        <div class="demo">
+          <span class="sync-pill">
+            <span class="glyph"><i></i><i></i><i></i></span>
+            syncing · 8,412 devices
+          </span>
+        </div>
+        <h5>The admin sync pill</h5>
+        <p>Live state, in the founder console. Crown blinks on checkpoint.</p>
+      </div>
+    </div>
+  </section>
+
+  <p class="footnote">
+    <strong>Why this is a blend, not a mashup:</strong> Concept 1 (a slab lighting up) and Concept 2 (a device-node lighting up) are the <em>same event</em> — an LSN checkpoint reaching a device. The Nostos Field makes that literal: ripples are the force that lights cairns, and cairns are the things ripples light. Remove either and the other has no cause and no effect.
+  </p>
+</main>
+
+<script>
+// ===== theme switch =====
+const root = document.documentElement;
+document.querySelectorAll('.theme-switch button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.theme-switch button').forEach(x => x.setAttribute('aria-pressed','false'));
+    b.setAttribute('aria-pressed','true'); root.setAttribute('data-theme', b.dataset.set);
+  });
+});
+
+// ===== the field canvas =====
+const cv = document.getElementById('field');
+const ctx = cv.getContext('2d');
+let W, H, dpr;
+let origin = { x: 0, y: 0 };
+
+// device-nostoss scattered across the field
+let DEVICES = [];
+function layoutDevices() {
+  DEVICES = [];
+  const N = 16;
+  // scatter in a wide fan above the origin (bottom-center), deterministic
+  for (let i = 0; i < N; i++) {
+    const col = i % 5;
+    const row = Math.floor(i / 5);
+    const fx = (col + 0.5 + ((i*7)%3)*0.18 - 0.6) / 4.2; // -0.1..1.1
+    const fy = 0.12 + row * 0.24 + ((i*13)%5)*0.03;
+    DEVICES.push({
+      nx: 0.08 + Math.max(0, Math.min(1, fx)) * 0.84,
+      ny: 0.08 + Math.min(0.78, fy) * 0.78,
+      slabs: 4 + (i % 4),     // 4..7 slabs tall
+      lit: 0,                 // 0..1 fill progress
+      litTarget: 0,
+      seed: i * 53 % 100,
+    });
+  }
+}
+layoutDevices();
+
+function readVars() {
+  const cs = getComputedStyle(root);
+  return {
+    ink: cs.getPropertyValue('--ink').trim(),
+    inkSoft: cs.getPropertyValue('--ink-soft').trim(),
+    stone1: cs.getPropertyValue('--stone-1').trim(),
+    stone2: cs.getPropertyValue('--stone-2').trim(),
+    stone3: cs.getPropertyValue('--stone-3').trim(),
+    mark: cs.getPropertyValue('--mark').trim(),
+    paper: cs.getPropertyValue('--paper').trim(),
+    paper2: cs.getPropertyValue('--paper-2').trim(),
+  };
+}
+function resize() {
+  const r = cv.getBoundingClientRect();
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  W = r.width; H = r.height;
+  origin = { x: W * 0.5, y: H * 0.92 };
+}
+addEventListener('resize', resize);
+
+// ripples in flight
+let ripples = [];
+let lastAuto = 0;
+function emit(origin2) {
+  ripples.push({ r: 0, born: performance.now() });
+}
+const floodBtn = document.getElementById('floodBtn');
+function flood() {
+  // a burst of staggered ripples → fills the field
+  let n = 0;
+  const id = setInterval(() => { emit(); if (++n >= 7) clearInterval(id); }, 240);
+}
+floodBtn.addEventListener('click', flood);
+cv.addEventListener('click', emit);
+
+// ops counter (eased toward a target when active)
+let ops = 0, opsTarget = 0;
+const opsEl = document.getElementById('ops');
+const devsEl = document.getElementById('devs');
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ===== draw a single device-nostos at (x,y), lit progress 0..1 =====
+// THIS is the shared primitive: a small vertical stack that fills bottom→top,
+// crown glows when fully lit. Same silhouette as the handoff nostos + chrome glyphs.
+function drawNostos(x, y, slabs, lit, V, t) {
+  const slabH = 4.5, gap = 1.8;
+  const baseW = 17;
+  const totalH = slabs * (slabH + gap);
+  const top = y - totalH;
+  for (let i = 0; i < slabs; i++) {
+    // fill bottom→top; lit grows upward
+    const fillTo = lit * slabs;
+    const isLit = i < fillTo;
+    const isCrown = (i === slabs - 1);
+    // silhouette: widest at bottom, narrowest at crown (same as the big nostos)
+    const f = i / (slabs - 1); // 0 bottom .. 1 top
+    const w = baseW * (1 - f * 0.62);
+    const sy = top + i * (slabH + gap);
+    if (isLit) {
+      ctx.fillStyle = isCrown ? V.mark : colorMix(V.ink, V.stone2, 0.85);
+      if (isCrown) {
+        ctx.save();
+        ctx.shadowColor = V.mark; ctx.shadowBlur = 10 + Math.sin(t/400 + x)*2;
+        ctx.fillRect(x - w/2, sy, w, slabH);
+        ctx.restore();
+      } else {
+        ctx.fillRect(x - w/2, sy, w, slabH);
+      }
+    } else {
+      ctx.fillStyle = V.stone1;
+      ctx.fillRect(x - w/2, sy, w, slabH);
+    }
+  }
+  // ground shadow
+  ctx.fillStyle = V.ink; ctx.globalAlpha = 0.10;
+  ctx.beginPath(); ctx.ellipse(x, y + 2, baseW/2 + 2, 2.5, 0, 0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+// oklch strings can't be mixed in canvas directly; approximate by alpha-blending two fills
+function colorMix(a, b, t) {
+  // we just return a — canvas color-mix not available; the slab look uses solid ink,
+  // the crown uses mark. Good enough at this scale.
+  return a;
+}
+
+// connection fan from origin to each device — faint, brightens when that device lights
+function drawConnections(V, t) {
+  ctx.lineWidth = 1;
+  for (const d of DEVICES) {
+    const dx = d.nx * W, dy = d.ny * H;
+    const lit = d.lit;
+    ctx.strokeStyle = lit > 0.15 ? V.mark : V.stone1;
+    ctx.globalAlpha = lit > 0.15 ? 0.18 + lit*0.15 : 0.32;
+    ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(dx, dy); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+let lastFrame = performance.now();
+function frame(now) {
+  const V = readVars();
+  ctx.clearRect(0,0,W,H);
+
+  // auto-emit a gentle ripple now and then so the field always breathes
+  if (!reduce && now - lastAuto > 2400) { emit(); lastAuto = now; }
+
+  // expand ripples + bump device litTarget when the wave reaches them
+  ripples = ripples.filter(rp => {
+    const age = (now - rp.born)/1000;
+    rp.r = age * (reduce ? 999 : 200);
+    // ring
+    ctx.strokeStyle = V.mark; ctx.globalAlpha = Math.max(0, 0.45 - age*0.28); ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(origin.x, origin.y, Math.max(0.1, rp.r), 0, Math.PI*2); ctx.stroke();
+    ctx.globalAlpha = 1;
+    // reach devices
+    for (const d of DEVICES) {
+      const dist = Math.hypot(d.nx*W - origin.x, d.ny*H - origin.y);
+      if (rp.r > dist - 10 && rp.r < dist + 10) {
+        d.litTarget = 1;
+        opsTarget = 142318;
+      }
+    }
+    return rp.r < Math.hypot(W, H);
+  });
+
+  drawConnections(V, now);
+
+  // animate lit toward target + draw each device-nostos
+  let syncedCount = 0;
+  for (const d of DEVICES) {
+    d.lit += (d.litTarget - d.lit) * (reduce ? 1 : 0.06);
+    if (d.lit > 0.92) syncedCount++;
+    drawNostos(d.nx * W, d.ny * H, d.slabs, d.lit, V, now);
+  }
+
+  // origin — the postgres source, warm pulsing core at bottom-center
+  const pulse = 0.5 + 0.5*Math.sin(now/300);
+  ctx.fillStyle = V.mark; ctx.globalAlpha = 0.18 + pulse*0.16;
+  ctx.beginPath(); ctx.arc(origin.x, origin.y, 12 + pulse*3, 0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = V.mark;
+  ctx.fillRect(origin.x - 14, origin.y - 2.5, 28, 5);
+
+  // HUD
+  ops += (opsTarget - ops) * 0.08; opsTarget *= 0.985; // decay so it eases up + down
+  if (ops < 5) ops = 0;
+  opsEl.textContent = Math.round(ops).toLocaleString();
+  devsEl.textContent = `${syncedCount} / ${DEVICES.length}`;
+
+  // handoff nostos: fills when the field is mostly synced
+  const fillRatio = syncedCount / DEVICES.length;
+  const big = document.getElementById('bigNostos');
+  const bigSlabs = [...big.querySelectorAll('.slab')];
+  const litCount = Math.floor(fillRatio * (bigSlabs.length + 0.05));
+  bigSlabs.forEach((s, i) => {
+    const within = i < litCount;
+    s.classList.toggle('on', within || reduce);
+  });
+
+  requestAnimationFrame(frame);
+}
+resize();
+requestAnimationFrame(frame);
+// life: a small welcome ripple
+addEventListener('load', () => setTimeout(emit, 500));
+</script>
+</body>
+</html>

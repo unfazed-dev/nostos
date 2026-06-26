@@ -153,7 +153,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
     // ---- shared store + use-cases (the same instances the server uses) ----
     let store: Arc<dyn nostos_application::ports::SessionStore> =
         Arc::new(InMemorySessionStore::new());
-    let manager = Arc::new(SessionManager::new(Arc::clone(&store)));
+    let manager = Arc::new(SessionManager::new(Arc::clone(&store), nostos_domain::Tier::Enterprise));
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
 
     // ---- in-process axum server on an ephemeral port ----

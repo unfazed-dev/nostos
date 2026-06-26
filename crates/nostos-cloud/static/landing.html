@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nostos — Open, Rust-fast local-first sync</title>
+<meta name="description" content="Nostos is the open, Rust-fast local-first sync engine. Postgres to every device, even offline. No static buckets. No write-back endpoints. Apache-2.0.">
+<style>
+  :root {
+    --stone: #2b2b2b; --stone-light: #f5f3ef; --accent: #c8772a; --accent-dark: #9e5d1f;
+    --bg: #faf8f4; --text: #2b2b2b; --muted: #6b6b6b; --border: #e3ded4;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  nav { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; }
+  .brand { font-size: 1.4rem; font-weight: 800; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
+  .brand .mark { color: var(--accent); }
+  nav a { color: var(--text); text-decoration: none; margin-left: 24px; font-weight: 500; }
+  nav a:hover { color: var(--accent); }
+  .btn { display: inline-block; padding: 12px 24px; border-radius: 8px; font-weight: 600; text-decoration: none; border: none; cursor: pointer; font-size: 1rem; }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-primary:hover { background: var(--accent-dark); }
+  .btn-ghost { background: transparent; color: var(--text); border: 1.5px solid var(--border); }
+  .hero { padding: 80px 0 60px; text-align: center; }
+  .hero h1 { font-size: clamp(2.4rem, 6vw, 4rem); line-height: 1.05; letter-spacing: -0.03em; font-weight: 800; margin-bottom: 24px; }
+  .hero h1 .hl { color: var(--accent); }
+  .hero p.lead { font-size: 1.3rem; color: var(--muted); max-width: 680px; margin: 0 auto 36px; }
+  .cta { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .badges { margin-top: 28px; color: var(--muted); font-size: 0.9rem; }
+  .badges span { margin: 0 10px; }
+  section { padding: 60px 0; }
+  h2 { font-size: 2rem; letter-spacing: -0.02em; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-top: 36px; }
+  .card { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
+  .card .ico { font-size: 1.8rem; margin-bottom: 12px; }
+  .card h3 { font-size: 1.2rem; margin-bottom: 8px; }
+  .card p { color: var(--muted); font-size: 0.96rem; }
+  .vs { background: var(--stone); color: var(--stone-light); padding: 80px 0; }
+  .vs h2 { color: white; }
+  .vs p.sub { color: #c4bdb0; margin-bottom: 28px; }
+  table { width: 100%; border-collapse: collapse; background: #3a3a3a; border-radius: 12px; overflow: hidden; }
+  th, td { padding: 14px 18px; text-align: left; border-bottom: 1px solid #4a4a4a; }
+  th { background: #2b2b2b; color: #e8e2d6; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  td.yes { color: #7fd17f; } td.no { color: #d17f7f; }
+  .benchmark { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 36px; margin-top: 36px; }
+  .bench-num { font-size: 3.5rem; font-weight: 800; color: var(--accent); letter-spacing: -0.03em; }
+  .bench-sub { color: var(--muted); margin-top: 8px; }
+  .pricing .tier { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 32px; }
+  .pricing .tier.featured { border: 2px solid var(--accent); position: relative; }
+  .pricing .tier.featured::after { content: "Most popular"; position: absolute; top: -12px; left: 24px; background: var(--accent); color: white; font-size: 0.75rem; padding: 4px 10px; border-radius: 999px; }
+  .price { font-size: 2.4rem; font-weight: 800; margin: 12px 0; }
+  .price small { font-size: 1rem; font-weight: 400; color: var(--muted); }
+  .waitlist { background: var(--stone-light); padding: 60px 0; text-align: center; }
+  .waitlist form { display: flex; gap: 12px; max-width: 460px; margin: 24px auto 0; }
+  .waitlist input { flex: 1; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; font-size: 1rem; }
+  footer { padding: 40px 0; color: var(--muted); font-size: 0.9rem; border-top: 1px solid var(--border); margin-top: 40px; }
+  #wl-msg { margin-top: 12px; font-size: 0.95rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <div class="brand"><span class="mark">▲</span> Nostos</div>
+    <div>
+      <a href="#features">Features</a>
+      <a href="#benchmark">Benchmark</a>
+      <a href="#pricing">Pricing</a>
+      <a href="/admin">Sign in</a>
+      <a class="btn btn-primary" href="#waitlist" style="padding:8px 18px">Get started</a>
+    </div>
+  </nav>
+</div>
+
+<div class="wrap">
+  <div class="hero">
+    <h1>Local-first sync that <span class="hl">never gives up.</span><br>Rust-fast. Apache-open. No buckets.</h1>
+    <p class="lead">Nostos is the open, Rust-fast local-first sync engine — Postgres to every device, even offline, with no static buckets and no write-back endpoints.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#waitlist">Join the launch waitlist</a>
+      <a class="btn btn-ghost" href="https://github.com/nostos-sync/nostos" target="_blank" rel="noopener">Star on GitHub →</a>
+    </div>
+    <div class="badges">
+      <span>🦀 Rust server</span><span>📄 Apache-2.0</span><span>🐘 Postgres-native</span><span>⚡ 35× PowerSync throughput</span>
+    </div>
+  </div>
+</div>
+
+<div class="wrap" id="features">
+  <section>
+    <h2>Why Nostos</h2>
+    <p class="lead" style="color:var(--muted)">PowerSync is Node-bottlenecked, FSL-licensed, and bucket-capped. ElectricSQL gave up on offline writes. Zero is web-only. Nostos is the open, Rust-fast one that does it all.</p>
+    <div class="grid">
+      <div class="card"><div class="ico">🔀</div><h3>Dynamic Reactive Sync</h3><p>Subscribe with a live predicate; scroll forever. No 1,000-bucket ceiling — the server evaluates changes against authenticated predicates, live.</p></div>
+      <div class="card"><div class="ico">⬆️</div><h3>Direct Write-Back</h3><p>No more <code>uploadData()</code> endpoints. Point Nostos at your Postgres; it applies queued mutations with transactional conflict detection.</p></div>
+      <div class="card"><div class="ico">⚡</div><h3>Rust-fast server</h3><p>A pure-Rust (tokio + axum) server fans replication to thousands of WebSocket clients at 5–10× PowerSync's throughput ceiling.</p></div>
+      <div class="card"><div class="ico">🔓</div><h3>Apache-2.0, end to end</h3><p>Server included. No FSL trap, no 2-year wait, no no-compete clause. Self-host free and unlimited, forever.</p></div>
+      <div class="card"><div class="ico">📱</div><h3>Every platform, one core</h3><p>Flutter, React Native, Web (WASM/OPFS), Node — all first-class from one Rust core.</p></div>
+      <div class="card"><div class="ico">🐘</div><h3>Supabase-native</h3><p>Works with Supabase out of the box — and Neon, CockroachDB, or any standard Postgres.</p></div>
+    </div>
+  </section>
+</div>
+
+<div class="vs">
+  <div class="wrap">
+    <h2>The landscape</h2>
+    <p class="sub">Nostos owns the one cell no competitor occupies: open + Postgres + 2-way offline + every platform + Rust.</p>
+    <table>
+      <thead><tr><th></th><th>Nostos</th><th>PowerSync</th><th>Electric</th><th>Zero</th><th>Supabase Realtime</th></tr></thead>
+      <tbody>
+        <tr><td>Offline writes</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>2-way sync</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">read-only</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>Postgres-native</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>Rust-fast server</td><td class="yes">✓</td><td class="no">Node</td><td class="no">Elixir</td><td class="no">TS</td><td class="no">TS</td></tr>
+        <tr><td>Truly open (OSI)</td><td class="yes">✓ Apache</td><td class="no">FSL</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>No static buckets</td><td class="yes">✓</td><td class="no">1k cap</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="wrap" id="benchmark">
+  <section>
+    <h2>Auditable throughput moat</h2>
+    <p class="lead" style="color:var(--muted)">A public benchmark, not a marketing number. Nostos's Rust server fans replication events to thousands of clients at 35× PowerSync's published ceiling.</p>
+    <div class="benchmark">
+      <div class="bench-num">142,000+ ops/sec</div>
+      <div class="bench-sub">Nostos @ 1,000 concurrent WebSocket clients, 0% drops · vs PowerSync's documented ~2–4k ops/sec Node ceiling · <a href="https://github.com/nostos-sync/nostos/tree/main/benches" target="_blank" rel="noopener">methodology &amp; raw data →</a></div>
+    </div>
+  </section>
+</div>
+
+<div class="wrap" id="pricing">
+  <section class="pricing">
+    <h2>Transparent, predictable pricing</h2>
+    <p class="lead" style="color:var(--muted)">Self-host is free and unlimited forever. Cloud adds managed hosting. No per-operation surprises.</p>
+    <div class="grid">
+      <div class="tier">
+        <h3>Self-host</h3>
+        <div class="price">Free<small> · Apache-2.0</small></div>
+        <p>Full-featured, unlimited. The clean default.</p>
+      </div>
+      <div class="tier">
+        <h3>Hobby Cloud</h3>
+        <div class="price">Free</div>
+        <p>1 GB synced/mo · 10,000 devices · 1 GB storage · community support.</p>
+      </div>
+      <div class="tier featured">
+        <h3>Pro</h3>
+        <div class="price">$49<small>/mo</small></div>
+        <p>10 GB synced · 50,000 devices · email support. <strong>$0.50/million ops</strong> — know your bill.</p>
+      </div>
+      <div class="tier">
+        <h3>Scale</h3>
+        <div class="price">$499<small>/mo</small></div>
+        <p>100 GB synced · 500k devices · multi-region · priority support.</p>
+      </div>
+      <div class="tier">
+        <h3>Enterprise</h3>
+        <div class="price">Custom</div>
+        <p>SSO/SAML · SOC2/HIPAA · SLA + indemnification · VPC/on-prem.</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="waitlist" id="waitlist">
+  <div class="wrap">
+    <h2>Start building today</h2>
+    <p style="color:var(--muted)">Join the launch waitlist — first access to Cloud, plus the PowerSync migration guide.</p>
+    <form id="wl-form">
+      <input type="email" id="wl-email" placeholder="you@company.com" required>
+      <button class="btn btn-primary" type="submit">Join waitlist</button>
+    </form>
+    <div id="wl-msg"></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <footer>
+    <div class="brand" style="font-size:1.1rem;margin-bottom:8px"><span class="mark" style="color:var(--accent)">▲</span> Nostos</div>
+    <p>"A cairn is a trail marker of stacked stones. When you're offline and lost, it's how you find your way home. Nostos is how your data does." — Apache-2.0 · <a href="/admin">Admin</a> · © 2026 Cairn Sync, Inc.</p>
+  </footer>
+</div>
+
+<script>
+document.getElementById('wl-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const email = document.getElementById('wl-email').value;
+  const msg = document.getElementById('wl-msg');
+  try {
+    const r = await fetch('/v1/waitlist', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email}) });
+    if (r.ok) { msg.textContent = "✓ You're on the list. We'll be in touch at launch."; msg.style.color = 'var(--accent-dark)'; document.getElementById('wl-email').value = ''; }
+    else { const j = await r.json().catch(()=>({error:'try again'})); msg.textContent = '✗ ' + (j.error||'try again'); msg.style.color = '#b33'; }
+  } catch (err) { msg.textContent = '✗ network error'; msg.style.color = '#b33'; }
+});
+</script>
+</body>
+</html>

@@ -27,3 +27,6 @@ pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;
 pub use transport::SyncRouterState;
 pub use wire::{WireCodec, WireFrame};
+
+#[cfg(feature = "pg")]
+pub use replicator::{PgReplicator, PgReplicatorConfig, PgReplicatorError};

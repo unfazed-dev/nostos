@@ -1,0 +1,16 @@
+/* Nostos web — app stylesheet. Imports the design tokens (the single source of
+   truth shared across landing + admin) and adds a couple of page-level resets. */
+@import './tokens.css';
+
+/* Lexend via Google Fonts (variable). Fetched at runtime; the static build
+   inlines the <link> in app.html. System fallback keeps first paint fast. */
+
+html, body { height: 100%; }
+body { min-height: 100dvh; }
+main { display: block; }
+:where(h1, h2, h3) { line-height: var(--lh-display); letter-spacing: -0.01em; }
+
+/* a thin scroll on the dark code blocks only; page stays calm */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}

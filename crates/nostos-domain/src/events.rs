@@ -70,6 +70,16 @@ impl RowOp {
         }
     }
 
+    /// The raw payload bytes (the tuple image), or empty for deletes.
+    #[inline]
+    #[must_use]
+    pub fn payload_bytes(&self) -> &[u8] {
+        match self {
+            RowOp::Insert { payload, .. } | RowOp::Update { payload, .. } => payload.as_ref(),
+            RowOp::Delete { .. } => &[],
+        }
+    }
+
     /// True if this op carries a payload (Insert/Update). Deletes don't.
     #[inline]
     #[must_use]
@@ -144,6 +154,15 @@ impl ReplicationEvent {
     #[must_use]
     pub fn payload_len(&self) -> usize {
         self.op.payload_len()
+    }
+
+    /// The raw payload bytes of this event's row op (the logical-replication
+    /// tuple image), or empty for deletes. Used by the server's predicate
+    /// extractor (and by the wire codec) to lift column values without re-parsing.
+    #[inline]
+    #[must_use]
+    pub fn payload_bytes(&self) -> &[u8] {
+        self.op.payload_bytes()
     }
 }
 

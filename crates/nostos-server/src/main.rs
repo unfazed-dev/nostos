@@ -16,13 +16,15 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::routing::get;
 use nostos_application::{FanOutService, SessionManager};
-use nostos_domain::ColumnValue;
+use nostos_domain::{ColumnValue, ReplicationEvent};
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 use clap::Parser;
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(not(feature = "pg"))]
+use tracing::warn;
 
 /// Command-line / env configuration for the sync server.
 #[derive(Debug, Clone, Parser)]
@@ -45,13 +47,35 @@ pub struct Config {
     session_buffer: usize,
 
     /// Replicator mode: "fake" (synthetic generator) or "pg" (real Postgres).
-    /// "pg" requires the `pg` feature on nostos-infra.
+    /// "pg" requires building with the `pg` feature (`--features pg`).
     #[arg(long, env = "NOSTOS_REPLICATOR", default_value = "fake")]
     replicator: String,
+
+    /// Postgres URL for the real replicator (`NOSTOS_REPLICATOR=pg`).
+    #[arg(
+        long,
+        env = "NOSTOS_PG_URL",
+        default_value = "postgresql://cairn:cairn@localhost:5433/cairn"
+    )]
+    pg_url: String,
+
+    /// Logical-replication slot name.
+    #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "cairn_slot")]
+    pg_slot: String,
+
+    /// Publication name.
+    #[arg(long, env = "NOSTOS_PG_PUBLICATION", default_value = "cairn_pub")]
+    pg_publication: String,
 
     /// Log filter (RUST_LOG-style).
     #[arg(long, env = "NOSTOS_LOG", default_value = "info,nostos=debug")]
     log: String,
+
+    /// Licensed tier for the concurrent-device cap. OSS self-host defaults to
+    /// `enterprise` (unlimited); a managed Cloud deploy stamps the licensed
+    /// tier here. One of: hobby, pro, scale, enterprise.
+    #[arg(long, env = "NOSTOS_TIER", default_value = "enterprise")]
+    tier: String,
 }
 
 #[tokio::main]
@@ -65,38 +89,84 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(InMemorySessionStore::new());
 
     // ---- inject into the application use-cases ----
-    let manager = Arc::new(SessionManager::new(Arc::clone(&store)));
+    // The licensed tier gates the concurrent-device cap. OSS self-host defaults
+    // to Enterprise (unlimited); a managed deploy sets NOSTOS_TIER=hobby|pro|scale.
+    let tier = match cfg.tier.as_str() {
+        "hobby" => nostos_domain::Tier::Hobby,
+        "pro" => nostos_domain::Tier::Pro,
+        "scale" => nostos_domain::Tier::Scale,
+        _ => nostos_domain::Tier::Enterprise,
+    };
+    info!(?tier, devices_cap = tier.device_cap(), "licensed tier");
+    let manager = Arc::new(SessionManager::new(Arc::clone(&store), tier));
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
 
     // ---- start the replicator → fan-out driver ----
-    // For Week 1 the default is the FakeReplicator. It generates synthetic WAL
-    // events that flow through the *real* fan-out pipeline. The PgReplicator
-    // (behind the `pg` feature) lands in Week 2.
+    // The extractor lifts named columns out of an event's payload so predicates
+    // (which match on column equality) can be evaluated. For the FakeReplicator
+    // the payload is opaque bytes, so we return `Any` (table-only matching). For
+    // the PgReplicator the payload is a small JSON object {col:val}, so we parse
+    // it and return real values — enabling filter predicates like org_id=acme.
     match cfg.replicator.as_str() {
         "fake" => {
-            // Generate a modest stream so the server has something to push to
-            // any connected client. The benchmark drives its own FakeReplicator
-            // at higher rates directly through the FanOutService.
             let mut repl = FakeReplicator::new(FakeReplicatorConfig::small(u64::MAX));
             let fanout_drv = Arc::clone(&fanout);
-            // Week-1 server extractor: the synthetic payload is opaque bytes,
-            // so we cannot extract real columns. Return Any → predicates match
-            // purely on table (the index prune). Real column extraction arrives
-            // with the PgReplicator (which parses the tuple image).
             let drv = tokio::spawn(async move {
-                let extract = |_e: &nostos_domain::ReplicationEvent,
-                               _col: &str|
-                 -> Option<ColumnValue> { Some(ColumnValue::Any) };
+                let extract = |_e: &ReplicationEvent, _col: &str| -> Option<ColumnValue> {
+                    Some(ColumnValue::Any)
+                };
                 let outcome = fanout_drv.run(&mut repl, extract).await;
                 info!(?outcome, "replicator stream ended");
             });
-            // The FakeReplicator with u64::MAX events never ends in practice;
-            // hold the join handle so it isn't dropped.
             std::mem::forget(drv);
             info!("replicator: FakeReplicator (synthetic, unbounded)");
         }
         "pg" => {
-            warn!("PG replicator requires the `pg` feature on nostos-infra; not compiled in for Week 1. Falling back to fake.");
+            #[cfg(feature = "pg")]
+            {
+                use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
+                let pg_cfg =
+                    PgReplicatorConfig::from_url(&cfg.pg_url, &cfg.pg_slot, &cfg.pg_publication)
+                        .context("invalid NOSTOS_PG_URL")?;
+                let mut repl = PgReplicator::new(pg_cfg);
+                let fanout_drv = Arc::clone(&fanout);
+                let drv = tokio::spawn(async move {
+                    // Extract a column from the JSON payload: parse the small
+                    // object and return the named field. Cheap (one parse per
+                    // candidate event) and keeps predicates honest.
+                    let extract = |e: &ReplicationEvent, col: &str| -> Option<ColumnValue> {
+                        let payload = e.payload_bytes();
+                        let parsed: serde_json::Value = serde_json::from_slice(payload).ok()?;
+                        parsed
+                            .get(col)
+                            .and_then(|v| v.as_str())
+                            .map(ColumnValue::text)
+                    };
+                    let outcome = fanout_drv.run(&mut repl, extract).await;
+                    info!(?outcome, "PgReplicator stream ended");
+                });
+                std::mem::forget(drv);
+                info!(
+                    slot = %cfg.pg_slot,
+                    publication = %cfg.pg_publication,
+                    "replicator: PgReplicator (real Postgres logical replication)"
+                );
+            }
+            #[cfg(not(feature = "pg"))]
+            {
+                warn!(
+                    "NOSTOS_REPLICATOR=pg but this binary was built without the `pg` feature. \
+                     Rebuild with `cargo build -p nostos-server --features pg`. Falling back to fake."
+                );
+                let mut repl = FakeReplicator::new(FakeReplicatorConfig::small(u64::MAX));
+                let fanout_drv = Arc::clone(&fanout);
+                let drv = tokio::spawn(async move {
+                    let extract = |_e: &ReplicationEvent, _col: &str| Some(ColumnValue::Any);
+                    let outcome = fanout_drv.run(&mut repl, extract).await;
+                    info!(?outcome, "replicator stream ended (fallback fake)");
+                });
+                std::mem::forget(drv);
+            }
         }
         other => {
             anyhow::bail!("unknown NOSTOS_REPLICATOR value: {other} (expected 'fake' or 'pg')");

@@ -115,7 +115,15 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState) {
 
     // 3. Register with the store via the manager.
     let manager = Arc::clone(&state.manager);
-    let id = manager.connect(session, sink_dyn).await;
+    let id = match manager.connect(session, sink_dyn).await {
+        Ok(id) => id,
+        Err(_e) => {
+            // Concurrent-device cap reached (or another connect failure). Close
+            // the socket so the client sees a clean end rather than a hang.
+            let _ = socket.close().await;
+            return;
+        }
+    };
 
     // 4. Drain the sink onto the wire until the client goes away.
     let codec = Arc::clone(&state.codec);
