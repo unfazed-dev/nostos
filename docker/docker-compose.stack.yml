@@ -1,0 +1,96 @@
+# Nostos — full stack compose.
+#
+# Brings up the whole launchable product:
+#   postgres     — the source DB (logical replication enabled)
+#   nostos-server — the sync engine (real PgReplicator → fan-out → WebSocket)
+#   nostos-cloud  — the control plane (accounts, projects, billing, admin SPA, landing)
+#
+#   docker compose -f docker/docker-compose.stack.yml up --build
+#
+# Then:
+#   Landing + admin:  http://localhost:9090        (cloud)
+#   Sync WebSocket:   ws://localhost:8800/sync     (server)
+#   Postgres:         localhost:5433 (cairn/cairn)
+#
+# First-run: visit http://localhost:9090/admin and sign up — the first account
+# becomes the Founder. Stripe is optional (endpoints 503 without keys).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nostos-stack-postgres
+    environment:
+      POSTGRES_USER: cairn
+      POSTGRES_PASSWORD: cairn
+      POSTGRES_DB: cairn
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_connections=200"
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./pg-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nostos-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: nostos:latest
+    container_name: nostos-stack-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NOSTOS_BIND: "0.0.0.0:8800"
+      NOSTOS_REPLICATOR: pg
+      NOSTOS_PG_URL: "postgresql://cairn:cairn@postgres:5432/cairn"
+      NOSTOS_PG_SLOT: cairn_slot
+      NOSTOS_PG_PUBLICATION: cairn_pub
+      NOSTOS_LOG: "info,nostos=debug"
+      RUST_LOG: "info,nostos=debug"
+    command: ["nostos-server"]
+    ports:
+      - "8800:8800"
+
+  nostos-cloud:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: nostos:latest
+    container_name: nostos-stack-cloud
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NOSTOS_CLOUD_BIND: "0.0.0.0:9090"
+      NOSTOS_LICENSE_SECRET: "change-me-in-production"
+      NOSTOS_CLOUD_DB: "/data/nostos-cloud.db"
+      NOSTOS_CLOUD_PUBLIC_URL: "http://localhost:9090"
+      # Optional — uncomment + set to enable billing:
+      # STRIPE_SECRET_KEY: sk_test_...
+      # STRIPE_WEBHOOK_SECRET: whsec_...
+      # STRIPE_PRICE_PRO: price_...
+      RUST_LOG: "info,nostos_cloud=debug"
+    command: ["nostos-cloud"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - cloud-data:/data
+
+volumes:
+  pgdata:
+  cloud-data:

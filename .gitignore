@@ -1,0 +1,45 @@
+# --- Rust ---
+/target
+**/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Per-crate target dirs (defensive)
+crates/*/target
+
+# --- Benchmark artifacts (regenerated) ---
+# Keep the canonical benches/results/ committed (the headline deliverable), but
+# ignore scratch per-tier dirs created during exploration.
+/benches/results-*
+/benches/r-*
+/benches/out
+target/criterion
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+nbproject/
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- OS ---
+Thumbs.db
+
+# --- Docker ---
+docker/data/
+
+# --- Coverage / profiling ---
+tarpaulin-report.html
+flamegraph.svg
+perf.data*

@@ -1,0 +1,115 @@
+# Week-1 Plan — Prove the throughput moat
+
+> **Goal, today:** a benchmark that proves Nostos's Rust server fans Postgres-style replication events out to thousands of concurrent WebSocket clients at **≥5× PowerSync's published 2–4k ops/sec server ceiling** — auditable, reproducible, with a comparison chart.
+
+This is the single most important artifact of Week 1. The benchmark funds everything else: if we can prove the speed claim credibly, the rest of the strategy (OSS launch, Supabase partnership, design-partner conversations) has a spine.
+
+---
+
+## 1. The claim we're proving
+
+PowerSync publishes these **server-side** performance limits ([source](https://docs.powersync.com/resources/performance-and-limits)):
+
+| Metric | PowerSync ceiling |
+|---|---|
+| Small-row throughput | ~2,000–4,000 ops/sec |
+| Large-row throughput | ~5 MB/sec |
+| Small-transaction rate | ~60 txn/sec |
+
+These are **Node.js-process ceilings.** Our claim: a **Rust** server (tokio + axum, same logical-replication → fan-out pipeline) sustains materially more.
+
+**Headline target: ≥5× → ≥10,000–20,000 ops/sec sustained** at thousands of concurrent WebSocket clients.
+
+---
+
+## 2. Why this benchmark is honest (and what it does NOT claim)
+
+**It DOES prove:** the maximum theoretical *fan-out* throughput of Nostos's internal pipeline — replicator → predicate evaluation → per-session bounded delivery → WebSocket frame write — at 1k/5k/10k concurrent clients.
+
+**It does NOT prove (yet):**
+- Real `pgoutput` parsing throughput (that's a Week-2 `PgReplicator`; the parsing crate `pgoutput` is well-trodden).
+- Real-network WAN latency (in-process loopback; a separate WAN test comes later).
+- End-to-end client SQLite apply (that's the client SDK, Month 2).
+
+So the chart says: *"Nostos's server can fan out at X ops/sec to N clients. PowerSync's published server ceiling is Y. Here's the ratio."* That's a fair, scoped, auditable claim — exactly the kind that survives scrutiny on HN and in a sales call.
+
+---
+
+## 3. The benchmark design
+
+### 3.1 Components
+
+```
+   nostos-bench (one process)
+   ├── starts nostos-server on 127.0.0.1:<port>   (real axum + ws)
+   ├── spawns N tokio tasks, each:
+   │     • opens a WebSocket to ws://127.0.0.1:<port>/sync
+   │     • sends a Subscribe{predicate} frame
+   │     • loops reading frames, increments per-client counter
+   ├── constructs a FakeReplicator (in-process handle into the server's FanOutService)
+   │     • generates M synthetic RowOps at controlled rate / unbounded
+   ├── waits until all M events are received (ack via AtomicUsize total)
+   └── measures: wall-clock, sustained ops/sec, drop rate, p99 client recv latency
+```
+
+### 3.2 Why a FakeReplicator (and not a real PG)
+
+A real Postgres at ~60 txn/sec would *itself* be the bottleneck — we'd be benchmarking PG, not Nostos. The `FakeReplicator` generates events faster than the router can push them, so the measured ceiling is **the router's**, not Postgres's. This isolates the moat. (The real `PgReplicator` benchmark comes in Week 2, against a `pgbench`-style synthetic write workload.)
+
+### 3.3 Backpressure contract (the part that makes it honest)
+
+Each client has a **bounded** channel of depth `NOSTOS_SESSION_BUFFER` (default 1024). If a client falls behind, the router **drops** events to that client with a metric increment (`session.dropped`). The benchmark reports the **drop rate** alongside ops/sec — so "100k ops/sec at 0% drops" means something, and "100k ops/sec at 40% drops" is called out as such. No silent backpressure hiding.
+
+### 3.4 Test matrix
+
+| Run | Clients | Total events | What it shows |
+|---|---|---|---|
+| 1 | 1,000 | 100,000 | Baseline fan-out |
+| 2 | 5,000 | 100,000 | Scale under concurrency |
+| 3 | 10,000 | 100,000 | The headline 10k-clients number |
+
+Plus a **pure-router micro-benchmark** (criterion, no network) to isolate the `SessionStore.matching` + delivery cost from WebSocket I/O.
+
+### 3.5 Payload sizes
+
+Two payload profiles:
+- **small** — ~100-byte row (the PowerSync "small row" regime).
+- **large** — ~4 KB row (to expose any per-byte copy cliffs; `Arc<[u8]>` should keep this flat).
+
+### 3.6 Output
+
+For each run, write:
+- `benches/results/<timestamp>.json` — full numbers.
+- `benches/results/RESULTS.md` — human-readable table + interpretation + comparison to PowerSync.
+- `benches/results/chart.svg` — ops/sec vs clients, with the PowerSync ceiling line drawn for contrast.
+
+---
+
+## 4. Acceptance criteria
+
+Week 1 is **done** when:
+
+- [ ] `make build` compiles the whole workspace clean.
+- [ ] `make test` passes — including domain property tests + application use-case tests with fake adapters.
+- [ ] `make clippy` is `-D warnings` clean.
+- [ ] `make bench` runs to completion and writes `RESULTS.md` + `chart.svg`.
+- [ ] **The sustained ops/sec at 10k clients is ≥3× PowerSync's 4k ceiling (≥12k ops/sec). Stretch: ≥5× (≥20k).**
+- [ ] Drop rate at the target throughput is <1% (else the number isn't honest).
+- [ ] `RESULTS.md` states the claim, the methodology, the caveats, and the comparison — auditable by a skeptic.
+
+---
+
+## 5. Risks for the day
+
+| Risk | Mitigation |
+|---|---|
+| WebSocket accept loop becomes the bottleneck (not the router) | measure with the pure-router micro-bench first to separate the two; if ws is the limit, that's still a fine Week-1 result (we beat PowerSync's *server* either way) |
+| 10k OS TCP connections on macOS hits `kern.maxfiles` | raise ulimits in the bench harness (`setrlimit`); fall back to 5k if blocked |
+| Drop rate is high even at low throughput | that's a real finding — investigate the bounded-buffer sizing; better to report an honest slow number than fake a fast one |
+| tokio-tungstenite frame encoding shows up as a hot spot | pre-encode the wire frame once per event, `clone` the `Bytes` to each session (the `Arc` pattern again) |
+
+---
+
+## 6. What "done today" looks like
+
+A repo you can `git clone`, `make bench`, and get a `RESULTS.md` that says *"Nostos sustained X ops/sec to 10,000 concurrent WebSocket clients — that's N× PowerSync's published server ceiling. Here's how we measured it."* Plus the hexagonal codebase that produced it, with tests green and clippy clean. That's the Week-1 deliverable.

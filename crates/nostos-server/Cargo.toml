@@ -1,0 +1,46 @@
+[package]
+name = "nostos-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nostos sync server binary (composition root)."
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "nostos-server"
+path = "src/main.rs"
+
+[features]
+default = []
+# Forward to nostos-infra's pg feature, enabling the real PgReplicator. Build with
+# `cargo build -p nostos-server --features pg` (or `--all-features`).
+pg = ["nostos-infra/pg"]
+
+[dependencies]
+nostos-domain = { workspace = true }
+nostos-application = { workspace = true }
+nostos-infra = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+dotenvy = { workspace = true }
+
+[lints]
+workspace = true

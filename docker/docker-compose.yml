@@ -1,0 +1,36 @@
+# Postgres for the real logical-replication replicator (Week 2+).
+# NOT required for the Week-1 synthetic benchmark — that one drives a
+# FakeReplicator through the real pipeline.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nostos-postgres
+    environment:
+      POSTGRES_USER: cairn
+      POSTGRES_PASSWORD: cairn
+      POSTGRES_DB: cairn
+      # Logical replication requires WAL level = logical.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_connections=200"
+    ports:
+      - "5433:5432"   # 5433 on host to avoid colliding with any local PG
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./pg-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

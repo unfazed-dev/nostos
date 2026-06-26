@@ -1,0 +1,67 @@
+[package]
+name = "nostos-cloud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nostos Cloud control plane — accounts, projects, API keys, billing, admin."
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "nostos-cloud"
+path = "src/main.rs"
+
+[features]
+default = []
+# Embedded admin SPA + marketing landing (served by the cloud binary).
+# The static assets live under crates/nostos-cloud/static/ and are include_str!'d.
+ui = []
+# PayPal payment provider — RESERVED seam. The stub compiles; the real
+# integration lands when PayPal is wired. Off by default so the default build
+# carries only Stripe.
+paypal = []
+
+[dependencies]
+nostos-domain = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tower-cookies = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+# embedded sqlite store — zero external deps to run the cloud control plane.
+rusqlite = { workspace = true }
+# Stripe REST (Checkout sessions, customer portal) — we only hit the REST API,
+# no SDK. Webhook verification is hand-rolled to the Stripe spec (HMAC-SHA256).
+reqwest = { workspace = true }
+# Webhook signature verification — HMAC-SHA256 per the Stripe spec.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+# Timestamps + expiry for licenses/subscriptions/audit.
+time = { workspace = true }
+# Random token generation (API keys, session ids, license keys).
+rand = { workspace = true }
+# Bytes for raw-body webhook capture.
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+# tower ServiceExt::oneshot for HTTP route smoke tests (no live server needed).
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

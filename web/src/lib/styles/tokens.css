@@ -1,0 +1,180 @@
+/* =============================================================================
+   Nostos · Design tokens — "The Nostos Field"
+   -----------------------------------------------------------------------------
+   The single source of truth for Nostos's visual identity. Shared across the
+   landing and the admin (one brand, two surfaces).
+
+   UNIFYING IDEA: a constellation of device-nostoss, where ripples are the force
+   that lights them. ONE PRIMITIVE (the cairn = stacked slabs), TWO SCALES:
+     · macro: the hero field — a top-down ripple canvas whose endpoints ARE nostos
+       stacks, each filling slab-by-slab as its LSN checkpoint arrives
+     · micro: the same nostos silhouette, flat — logo, divider, loader, sync pill
+   The terracotta crown (--mark) is the ONLY warm note in either theme.
+
+   THEMING: system default (follows prefers-color-scheme) + explicit light/dark
+   overrides set on <html data-theme>. app.html ships a no-flash inline script
+   that resolves the resolved theme before first paint.
+   ============================================================================= */
+
+:root {
+  /* --- light theme is the default :root block --- */
+  --ink:      oklch(0.28 0.018 250);   /* primary text — graphite, faintly cool */
+  --ink-soft: oklch(0.45 0.015 250);   /* secondary text */
+  --paper:    oklch(0.985 0.004 95);   /* page background — warm near-white */
+  --paper-2:  oklch(0.965 0.006 95);   /* raised surface / cards / field stage */
+  --stone-1:  oklch(0.90 0.008 85);    /* lightest stone — dividers, fills */
+  --stone-2:  oklch(0.72 0.012 80);    /* mid stone — borders, disabled */
+  --stone-3:  oklch(0.52 0.015 75);    /* dark stone — subdued labels */
+  --mark:     oklch(0.64 0.17 42);     /* THE trail-flag accent — terracotta. ≤3% area */
+  --mark-ink: oklch(0.52 0.16 42);     /* accent for text-on-paper (AA on paper) */
+  --mark-glow: oklch(0.64 0.17 42);    /* shadow/halo colour for the crown slab */
+  --code-bg:  oklch(0.24 0.012 250);   /* code/terminal surface — graphite */
+  --code-fg:  oklch(0.92 0.008 95);    /* code text */
+  --rule:     oklch(0.91 0.008 85);    /* hairline rule */
+  --field-veil: oklch(0.64 0.17 42);   /* radial veil behind the field origin */
+
+  /* --- type — Lexend (variable, readability-tuned) --- */
+  --font-sans: "Lexend", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+  /* 4px grid scale */
+  --t-12: 0.75rem;  --t-14: 0.875rem;  --t-16: 1rem;     --t-20: 1.25rem;
+  --t-28: 1.75rem;  --t-44: 2.75rem;   --t-72: 4.5rem;
+  --lh-body: 1.55;
+  --lh-display: 1.08;
+
+  /* --- layout --- */
+  --wrap: 1240px;
+  --gutter: 28px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* --- motion --- */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 220ms;
+  color-scheme: light;
+}
+
+/* --- dark theme: applies when system asks for dark AND user hasn't overridden --- */
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --ink:      oklch(0.93 0.008 95);
+    --ink-soft: oklch(0.74 0.012 95);
+    --paper:    oklch(0.155 0.005 250);
+    --paper-2:  oklch(0.195 0.006 250);
+    --stone-1:  oklch(0.27 0.008 250);
+    --stone-2:  oklch(0.40 0.010 250);
+    --stone-3:  oklch(0.62 0.012 95);
+    --mark:     oklch(0.70 0.15 45);
+    --mark-ink: oklch(0.72 0.14 45);
+    --mark-glow: oklch(0.70 0.15 45);
+    --code-bg:  oklch(0.12 0.004 250);
+    --code-fg:  oklch(0.90 0.008 95);
+    --rule:     oklch(0.29 0.008 250);
+    --field-veil: oklch(0.70 0.15 45);
+    color-scheme: dark;
+  }
+}
+
+/* --- explicit dark override --- */
+:root[data-theme="dark"] {
+  --ink:      oklch(0.93 0.008 95);
+  --ink-soft: oklch(0.74 0.012 95);
+  --paper:    oklch(0.155 0.005 250);
+  --paper-2:  oklch(0.195 0.006 250);
+  --stone-1:  oklch(0.27 0.008 250);
+  --stone-2:  oklch(0.40 0.010 250);
+  --stone-3:  oklch(0.62 0.012 95);
+  --mark:     oklch(0.70 0.15 45);
+  --mark-ink: oklch(0.72 0.14 45);
+  --mark-glow: oklch(0.70 0.15 45);
+  --code-bg:  oklch(0.12 0.004 250);
+  --code-fg:  oklch(0.90 0.008 95);
+  --rule:     oklch(0.29 0.008 250);
+  --field-veil: oklch(0.70 0.15 45);
+  color-scheme: dark;
+}
+
+/* --- explicit light override (resets the @media dark block when user picks light) --- */
+:root[data-theme="light"] {
+  --ink:      oklch(0.28 0.018 250);
+  --ink-soft: oklch(0.45 0.015 250);
+  --paper:    oklch(0.985 0.004 95);
+  --paper-2:  oklch(0.965 0.006 95);
+  --stone-1:  oklch(0.90 0.008 85);
+  --stone-2:  oklch(0.72 0.012 80);
+  --stone-3:  oklch(0.52 0.015 75);
+  --mark:     oklch(0.64 0.17 42);
+  --mark-ink: oklch(0.52 0.16 42);
+  --mark-glow: oklch(0.64 0.17 42);
+  --code-bg:  oklch(0.24 0.012 250);
+  --code-fg:  oklch(0.92 0.008 95);
+  --rule:     oklch(0.91 0.008 85);
+  --field-veil: oklch(0.64 0.17 42);
+  color-scheme: light;
+}
+
+/* ---- reset (shared) ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  font-family: var(--font-sans);
+  background: var(--paper);
+  color: var(--ink);
+  line-height: var(--lh-body);
+  font-size: var(--t-16);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  min-height: 100vh;
+  transition: background-color .3s ease, color .3s ease;
+  overflow-x: clip;
+}
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; cursor: pointer; }
+img, svg { display: block; max-width: 100%; }
+:where(input, select, textarea, button) { font: inherit; color: inherit; }
+::selection { background: var(--mark); color: var(--paper); }
+:focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
+
+/* ---- typographic primitives ---- */
+.label {
+  font-family: var(--font-mono);
+  font-size: var(--t-12); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.12em; color: var(--stone-3);
+}
+.lede { font-size: var(--t-20); color: var(--ink-soft); line-height: 1.45; }
+.mono, code, pre { font-family: var(--font-mono); font-feature-settings: "tnum" 1; }
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* ---- the nostos motif: stacked offset rectangles (structural, not literal) ----
+   A nostos mark = offset slabs in a narrowing silhouette (widest at the base,
+   narrowest at the crown). The crown slab is the trail-flag mark colour.
+   Reused as: the logo glyph, section dividers, the loader, the sync pill,
+   and — at macro scale — the device-nostoss in the hero field. */
+.nostos-rule { display: flex; gap: 5px; height: 2px; }
+.nostos-rule i { display: block; height: 2px; background: var(--ink); }
+.nostos-rule i:nth-child(1) { width: 60%; opacity: 0.5; }
+.nostos-rule i:nth-child(2) { width: 100%; }
+.nostos-rule i:nth-child(3) { width: 76%; opacity: 0.8; }
+
+/* nostos loader — vertical stack fills top→bottom; crown slab lights last */
+.nostos-loader { display: inline-flex; flex-direction: column-reverse; gap: 3px; width: 14px; }
+.nostos-loader i { height: 6px; border-radius: 1px; background: var(--stone-1); }
+.nostos-loader i.on { background: var(--mark); }
+
+/* admin sync pill — live state, crown blinks on checkpoint */
+.sync-pill {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 7px 13px 7px 11px; border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--mark) 35%, transparent);
+  background: color-mix(in srgb, var(--mark) 8%, transparent);
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--mark-ink);
+}
+.sync-pill .glyph { width: 14px; height: 14px; position: relative; display: inline-block; }
+.sync-pill .glyph i { position: absolute; left: 50%; transform: translateX(-50%); height: 2.5px; border-radius: 1px; background: var(--mark); }
+.sync-pill .glyph i:nth-child(1) { bottom: 0; width: 14px; opacity: 0.7; }
+.sync-pill .glyph i:nth-child(2) { bottom: 4px; width: 9px; opacity: 0.9; }
+.sync-pill .glyph i:nth-child(3) { bottom: 8px; width: 5px; box-shadow: 0 0 7px var(--mark-glow); animation: nostos-blink 2.4s var(--ease) infinite; }
+@keyframes nostos-blink { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .sync-pill .glyph i:nth-child(3) { animation: none; opacity: 1; } }

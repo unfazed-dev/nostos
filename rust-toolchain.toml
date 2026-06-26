@@ -1,0 +1,13 @@
+[toolchain]
+# Pinned for reproducible builds across CI, contributors, and the Cloud image.
+channel = "1.95.0"
+components = ["rustfmt", "clippy", "rust-src"]
+# Native + the SDK targets we ship from day one (Flutter/RN/Web/Node).
+targets = [
+    "aarch64-apple-darwin",
+    "wasm32-unknown-unknown",
+    "aarch64-linux-android",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+]
+profile = "minimal"

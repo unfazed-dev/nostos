@@ -1,0 +1,25 @@
+{
+  "environment": {
+    "rustc": "rustc 0.1.0 (nostos-bench build)",
+    "profile": "small",
+    "buffer": 2048,
+    "events": 1000,
+    "hostname": "unknown",
+    "cpu_cores": 10
+  },
+  "runs": [
+    {
+      "clients": 1000,
+      "events_total": 1000,
+      "events_delivered": 1000000,
+      "ops_per_sec": 142335.98894645582,
+      "drop_rate": 0.0,
+      "p50_us": 1.0,
+      "p99_us": 2.0,
+      "elapsed_secs": 7.025630042,
+      "profile": "small"
+    }
+  ],
+  "powersync_ceiling_ops_per_sec_low": 2000,
+  "powersync_ceiling_ops_per_sec_high": 4000
+}

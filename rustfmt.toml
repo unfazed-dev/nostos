@@ -1,0 +1,8 @@
+edition = "2021"
+max_width = 100
+# Note: `group_imports` and `imports_granularity` are nightly-only and emit
+# warnings on stable, so we omit them. Authors should still group imports
+# std → external → crate by convention (enforced in review).
+reorder_imports = true
+reorder_modules = true
+use_field_init_shorthand = true

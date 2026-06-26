@@ -1,0 +1,145 @@
+/* =============================================================================
+   Nostos · Design tokens — "Alpine Cadastral"
+   -----------------------------------------------------------------------------
+   The single source of truth for Nostos's visual identity. Both landing.html and
+   admin.html inline this exact block in a <style id="nostos-tokens"> tag so the
+   embedded binary ships one consistent brand with no external CSS dependency.
+
+   Brand idea: a cairn is a stack of stones marking a trail. Sync LSN checkpoints
+   ARE our cairns — durable markers that get your data home across outages. The
+   motif is expressed structurally (offset rectangles), never as literal rocks.
+   Palette is near-achromatic stone-on-paper; ONE warm "trail-flag" mark carries
+   brand recognition at ≤3% area. Zero gradients. Gravitas, not flash.
+   ============================================================================= */
+
+:root {
+  /* --- palette (oklch, near-achromatic stone scale + one warm mark) --- */
+  --ink:      oklch(0.28 0.018 250);   /* primary text — graphite, faintly cool */
+  --ink-soft: oklch(0.45 0.015 250);   /* secondary text */
+  --paper:    oklch(0.985 0.004 95);   /* page background — warm near-white */
+  --paper-2:  oklch(0.965 0.006 95);   /* raised surface / cards */
+  --stone-1:  oklch(0.90 0.008 85);    /* lightest stone — dividers, fills */
+  --stone-2:  oklch(0.72 0.012 80);    /* mid stone — borders, disabled */
+  --stone-3:  oklch(0.52 0.015 75);    /* dark stone — subdued labels */
+  --mark:     oklch(0.64 0.17 42);     /* THE trail-flag accent — terracotta. ≤3% area */
+  --mark-ink: oklch(0.52 0.16 42);     /* accent for text-on-paper (AA on paper) */
+  --code-bg:  oklch(0.24 0.012 250);   /* code/terminal surface — graphite */
+  --code-fg:  oklch(0.92 0.008 95);    /* code text */
+  --rule:     oklch(0.91 0.008 85);    /* hairline rule */
+
+  /* --- type — Lexend (variable, readability-tuned) --- */
+  --font-sans: "Lexend", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+  /* 4px grid scale */
+  --t-12: 0.75rem;  --t-14: 0.875rem;  --t-16: 1rem;     --t-20: 1.25rem;
+  --t-28: 1.75rem;  --t-44: 2.75rem;   --t-72: 4.5rem;
+  --lh-body: 1.55;
+  --lh-display: 1.08;
+
+  /* --- layout --- */
+  --wrap: 1120px;
+  --gutter: 28px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* --- motion --- */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 220ms;
+}
+
+/* ---- reset (shared) ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  font-family: var(--font-sans);
+  background: var(--paper);
+  color: var(--ink);
+  line-height: var(--lh-body);
+  font-size: var(--t-16);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; cursor: pointer; }
+img, svg { display: block; max-width: 100%; }
+:where(input, select, textarea, button) { font: inherit; color: inherit; }
+
+/* ---- typographic primitives ---- */
+.label {
+  font-size: var(--t-12);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--stone-3);
+}
+.lede { font-size: var(--t-20); color: var(--ink-soft); line-height: 1.45; }
+.mono, code, pre { font-family: var(--font-mono); font-feature-settings: "tnum" 1; }
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* ---- the nostos motif: stacked offset rectangles (structural, not literal) ----
+   A nostos mark = 3 thin-stroke slabs in cumulative 2-4px offset. Reused as:
+   - the logo glyph
+   - section dividers (a 1px-rule trio)
+   - the vertical load/progress indicator (fills slab-by-slab) */
+.nostos {
+  --slab-w: 14px;
+  --slab-h: 3px;
+  --gap: 2px;
+  --off: 3px;
+  display: inline-block;
+  position: relative;
+  width: calc(var(--slab-w) + var(--off) * 2);
+  height: calc(var(--slab-h) * 3 + var(--gap) * 2);
+  flex: none;
+}
+.nostos::before,
+.nostos::after,
+.nostos > i {
+  content: "";
+  position: absolute;
+  left: 0;
+  height: var(--slab-h);
+  border-radius: 1px;
+  background: currentColor;
+}
+.nostos::before { top: 0; width: calc(var(--slab-w) * 0.62); left: var(--off); opacity: 0.55; }
+.nostos > i     { top: calc(var(--slab-h) + var(--gap)); width: var(--slab-w); }
+.nostos::after  { top: calc((var(--slab-h) + var(--gap)) * 2); width: calc(var(--slab-w) * 0.78); left: 0; opacity: 0.8; }
+
+/* nostos as a vertical progress indicator (signature detail): slabs fill top→bottom */
+.nostos-stack { display: inline-flex; flex-direction: column-reverse; gap: 2px; align-items: flex-start; }
+.nostos-stack span {
+  display: block;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--stone-1);
+  transition: background var(--dur) var(--ease);
+}
+.nostos-stack span.on { background: var(--stone-3); }
+.nostos-stack span.crown.on { background: var(--mark); } /* top slab = the flag */
+
+/* ---- buttons ---- */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 20px;
+  border-radius: var(--radius);
+  font-size: var(--t-14); font-weight: 600;
+  border: 1px solid transparent;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+  white-space: nowrap;
+}
+.btn-primary { background: var(--ink); color: var(--paper); }
+.btn-primary:hover { background: oklch(0.22 0.02 250); }
+.btn-mark { background: var(--mark); color: var(--paper); }
+.btn-mark:hover { background: var(--mark-ink); }
+.btn-ghost { background: transparent; color: var(--ink); border-color: var(--stone-2); }
+.btn-ghost:hover { border-color: var(--ink); }
+.btn-sm { padding: 7px 14px; font-size: var(--t-12); }
+
+/* ---- hairline rules / dividers (offset-stacked trio = the nostos divider) ---- */
+.rule-trio { display: flex; gap: 4px; height: 1px; opacity: 0.9; }
+.rule-trio i { display: block; height: 1px; background: var(--rule); }
+.rule-trio i:nth-child(1) { width: 62%; }
+.rule-trio i:nth-child(2) { width: 100%; }
+.rule-trio i:nth-child(3) { width: 78%; }

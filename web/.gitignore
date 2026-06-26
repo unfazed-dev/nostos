@@ -1,0 +1,17 @@
+# SvelteKit / Vite
+node_modules/
+/build
+/.svelte-kit
+/package
+.env
+.env.*
+!.env.example
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Design scratch (mockups + screenshots from the exploration phase)
+/_design/node_modules/
+/_design/package.json
+/_design/package-lock.json
+/_design/*.mjs
+/_design/*.png

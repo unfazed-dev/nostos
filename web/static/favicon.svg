@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Nostos mark: three offset stacked slabs, the crown (top) in trail-flag mark. -->
+  <rect x="6"  y="4"  width="14" height="3.2" rx="1" fill="#000" opacity="0.55"/>
+  <rect x="4"  y="9.2" width="22" height="3.2" rx="1" fill="#000"/>
+  <rect x="7"  y="14.4" width="17" height="3.2" rx="1" fill="#000" opacity="0.8"/>
+  <rect x="9"  y="19.6" width="13" height="3.2" rx="1" fill="#000" opacity="0.55"/>
+  <rect x="5"  y="24.8" width="20" height="3.2" rx="1" fill="#000"/>
+  <!-- the trail-flag crown: one terracotta slab on top -->
+  <rect x="10" y="0.4" width="9" height="3.2" rx="1" fill="#c0622a"/>
+</svg>
