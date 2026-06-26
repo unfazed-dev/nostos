@@ -23,7 +23,7 @@ pub mod transport;
 pub mod wire;
 
 pub use replicator::{FakeReplicator, FakeReplicatorConfig};
-pub use router::{SessionSinkHandle, TokioEventSink};
+pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;
 pub use transport::SyncRouterState;
-pub use wire::{WireCodec, WireFrame, WireOp};
+pub use wire::{WireCodec, WireFrame};

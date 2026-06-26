@@ -17,7 +17,7 @@ pub mod lsn;
 pub mod predicate;
 pub mod session;
 
-pub use events::{Operation, ReplicationEvent, RowOp, TransactionBoundary};
+pub use events::{Operation, ReplicationEvent, RowOp};
 pub use lsn::Lsn;
 pub use predicate::{ColumnValue, Predicate, PredicateFilter};
 pub use session::{SessionId, SyncSession};

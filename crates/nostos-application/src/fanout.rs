@@ -91,48 +91,20 @@ impl FanOutService {
     where
         F: Fn(&ReplicationEvent, &str) -> Option<ColumnValue>,
     {
-        let candidates = self.store.candidates_for(event).await;
-        if candidates.is_empty() {
-            return FanOutOutcome::default();
-        }
-
-        // Pre-filter by predicate, then dispatch deliveries concurrently.
-        let matched: Vec<_> = candidates
+        // Pre-filter candidates by predicate, then dispatch deliveries
+        // concurrently. `deliver` is non-blocking (`try_send` on a bounded
+        // channel), so fanning out to 10,000 sessions spreads across the tokio
+        // runtime instead of serializing on one task — this is what lets the
+        // router scale past the 1-to-N sequential wall.
+        let matched: Vec<_> = self
+            .store
+            .candidates_for(event)
+            .await
             .into_iter()
             .filter(|c| c.predicate.matches(|col| column_extractor(event, col)))
             .collect();
-
         let matched_count = matched.len() as u64;
-        if matched.is_empty() {
-            return FanOutOutcome {
-                matched: 0,
-                delivered: 0,
-                dropped: 0,
-            };
-        }
 
-        // For very small fan-outs the JoinSet overhead isn't worth it; dispatch
-        // inline. The threshold is empirical — 16 is well below where the
-        // sequential loop starts to dominate.
-        if matched.len() <= 16 {
-            let mut delivered = 0u64;
-            let mut dropped = 0u64;
-            for c in matched {
-                match c.sink.deliver(event.clone()).await {
-                    DeliveryDecision::Delivered => delivered += 1,
-                    DeliveryDecision::Dropped => dropped += 1,
-                }
-            }
-            return FanOutOutcome {
-                matched: matched_count,
-                delivered,
-                dropped,
-            };
-        }
-
-        // Concurrent dispatch: one task per delivery. `deliver` is cheap and
-        // non-blocking; the JoinSet lets the runtime interleave them with the
-        // per-connection drain tasks (which are doing the actual WS writes).
         let mut set = tokio::task::JoinSet::new();
         for c in matched {
             let ev = event.clone();

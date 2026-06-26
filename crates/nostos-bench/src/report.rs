@@ -46,8 +46,7 @@ impl Environment {
             buffer: cfg.buffer,
             events: cfg.events,
             hostname: hostname(),
-            cpu_cores: std::thread::available_parallelism()
-                .map_or(0, std::num::NonZeroUsize::get),
+            cpu_cores: std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
         }
     }
 }

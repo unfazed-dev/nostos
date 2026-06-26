@@ -13,7 +13,6 @@
 //! to benchmark the fan-out path. The full boolean-tree expression engine
 //! arrives in Phase 2.
 
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 /// A single column-equality filter: `column = value`.
@@ -28,14 +27,11 @@ pub struct PredicateFilter {
 
 /// A value that can appear in a predicate filter or a row tuple.
 ///
-/// Kept deliberately small for Week 1 (text + blob). Phase 2 adds numbers,
+/// Kept deliberately small for Week 1 (text). Phase 2 adds numbers, bytes,
 /// booleans, timestamps with typed comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnValue {
     Text(String),
-    /// Opaque bytes — compared by identity. Used for UUIDs/blobs encoded as
-    /// raw bytes from the WAL. Cheaply cloneable (Arc-backed via [`Bytes`]).
-    Bytes(Bytes),
     /// Sentinel for "any value" — used in wildcard predicates.
     Any,
 }
@@ -128,14 +124,13 @@ impl Predicate {
     }
 }
 
-/// Compare a filter value against a row value. `Any` matches everything.
+/// Compare a filter value against a row value. `Any` (as a filter) matches
+/// everything; `Any` as an *actual* row value never arises (only filters use
+/// it), so any other combination is a non-match.
 fn matches_value(filter: &ColumnValue, actual: &ColumnValue) -> bool {
     match (filter, actual) {
         (ColumnValue::Any, _) => true,
         (ColumnValue::Text(a), ColumnValue::Text(b)) => a == b,
-        (ColumnValue::Bytes(a), ColumnValue::Bytes(b)) => a == b,
-        // Different encodings of "the same" value are NOT considered equal in
-        // Week 1 — the wire codec must normalize before reaching the domain.
         _ => false,
     }
 }

@@ -1,4 +1,4 @@
-//! Wire codec — translate between `ReplicationEvent` and on-the-wire frames.
+//! Wire codec — translate `ReplicationEvent` into a JSON frame on the wire.
 //!
 //! The Week-1 wire format is JSON (human-debuggable; the benchmark doesn't
 //! depend on encoding speed yet). Phase 2 will add a compact binary mode
@@ -12,11 +12,12 @@
 use nostos_domain::{Operation, ReplicationEvent, RowOp};
 use serde::{Deserialize, Serialize};
 
-/// One frame on the wire. A client receives a stream of these.
+/// One frame on the wire. A client receives a stream of these. Reuses
+/// [`Operation`] directly (it already serializes to `insert`/`update`/`delete`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireFrame {
     pub lsn: u64,
-    pub op: WireOp,
+    pub op: Operation,
     pub table: String,
     pub pk: String,
     /// Hex-encoded payload (omitted for deletes to keep frames small).
@@ -26,26 +27,7 @@ pub struct WireFrame {
     pub txn_id: Option<u64>,
 }
 
-/// Operation tag on the wire.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum WireOp {
-    Insert,
-    Update,
-    Delete,
-}
-
-impl From<Operation> for WireOp {
-    fn from(o: Operation) -> Self {
-        match o {
-            Operation::Insert => Self::Insert,
-            Operation::Update => Self::Update,
-            Operation::Delete => Self::Delete,
-        }
-    }
-}
-
-/// Encode/decode frames. Stateless — usable concurrently from many tasks.
+/// Stateless encoder. Usable concurrently from many tasks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WireCodec;
 
@@ -53,55 +35,41 @@ impl WireCodec {
     /// Encode an event to a JSON frame (as bytes). Used by the server transport.
     #[must_use]
     pub fn encode(&self, event: &ReplicationEvent) -> Vec<u8> {
-        let frame = self.to_frame(event);
-        // Unwrap is safe: our types are all JSON-serializable.
-        serde_json::to_vec(&frame).expect("wire frame must serialize")
-    }
-
-    /// Decode bytes back into a frame. Used by the benchmark client.
-    ///
-    /// Returns `None` on malformed input rather than propagating an error —
-    /// the benchmark treats a bad frame as a protocol bug and panics higher up.
-    #[must_use]
-    pub fn decode(&self, bytes: &[u8]) -> Option<WireFrame> {
-        serde_json::from_slice(bytes).ok()
-    }
-
-    /// Project an event to its wire representation.
-    #[must_use]
-    pub fn to_frame(&self, event: &ReplicationEvent) -> WireFrame {
         let (op, table, pk, payload) = match &event.op {
             RowOp::Insert { table, pk, payload } => (
-                WireOp::Insert,
+                Operation::Insert,
                 table.clone(),
                 pk.clone(),
                 Some(hex::encode(payload)),
             ),
             RowOp::Update { table, pk, payload } => (
-                WireOp::Update,
+                Operation::Update,
                 table.clone(),
                 pk.clone(),
                 Some(hex::encode(payload)),
             ),
-            RowOp::Delete { table, pk } => (WireOp::Delete, table.clone(), pk.clone(), None),
+            RowOp::Delete { table, pk } => (Operation::Delete, table.clone(), pk.clone(), None),
         };
-        WireFrame {
+        let frame = WireFrame {
             lsn: event.lsn.raw(),
             op,
             table,
             pk,
             payload,
             txn_id: event.txn_id,
-        }
+        };
+        // Safe: our types are all JSON-serializable.
+        serde_json::to_vec(&frame).expect("wire frame must serialize")
     }
 }
 
 /// Tiny hex encoder — avoids pulling a `hex` crate for one fn.
 mod hex {
+    use std::fmt::Write;
+
     pub fn encode(bytes: &[u8]) -> String {
         let mut s = String::with_capacity(bytes.len() * 2);
         for b in bytes {
-            use std::fmt::Write;
             let _ = write!(s, "{b:02x}");
         }
         s
@@ -112,6 +80,7 @@ mod hex {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use nostos_domain::Lsn;
 
     fn ev() -> ReplicationEvent {
         ReplicationEvent::new(
@@ -125,21 +94,20 @@ mod tests {
         .with_txn(7)
     }
 
-    use nostos_domain::Lsn;
-
     #[test]
-    fn encode_decode_roundtrip() {
+    fn encode_roundtrips_through_json() {
         let codec = WireCodec;
-        let original = ev();
-        let bytes = codec.encode(&original);
-        let frame = codec.decode(&bytes).expect("must decode");
-        assert_eq!(frame.lsn, 42);
-        assert_eq!(frame.op, WireOp::Insert);
-        assert_eq!(frame.table, "tasks");
-        assert_eq!(frame.pk, "1");
-        assert_eq!(frame.txn_id, Some(7));
+        let bytes = codec.encode(&ev());
+        // Decode the JSON to confirm the shape (no decode() on the codec —
+        // callers use serde_json directly if they need to read frames).
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["lsn"], 42);
+        assert_eq!(v["op"], "insert");
+        assert_eq!(v["table"], "tasks");
+        assert_eq!(v["pk"], "1");
+        assert_eq!(v["txn_id"], 7);
         // payload hex of b"hi" == "6869"
-        assert_eq!(frame.payload.as_deref(), Some("6869"));
+        assert_eq!(v["payload"], "6869");
     }
 
     #[test]
@@ -152,14 +120,9 @@ mod tests {
                 pk: "9".into(),
             },
         );
-        let frame = codec.to_frame(&del);
-        assert!(frame.payload.is_none());
-        assert_eq!(frame.op, WireOp::Delete);
-    }
-
-    #[test]
-    fn malformed_decodes_to_none() {
-        let codec = WireCodec;
-        assert!(codec.decode(b"not json").is_none());
+        let bytes = codec.encode(&del);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v.get("payload").is_none() || v["payload"].is_null());
+        assert_eq!(v["op"], "delete");
     }
 }

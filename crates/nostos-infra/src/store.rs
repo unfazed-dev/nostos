@@ -15,16 +15,14 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
-use nostos_application::ports::{SessionCandidate, SessionStore};
+use nostos_application::ports::{EventSink, SessionCandidate, SessionStore};
 use nostos_domain::{ReplicationEvent, SessionId, SyncSession};
-
-use crate::router::SessionSinkHandle;
 
 /// A concurrent, table-indexed session store.
 ///
-/// `by_table` maps `predicate.table → Vec<(SessionId, SessionSinkHandle)>`.
-/// The inner `Vec` is guarded by a per-table `Mutex` so add/remove on one
-/// table doesn't block lookups on another.
+/// `by_table` maps `predicate.table → Vec<StoredSession>`. The inner `Vec` is
+/// guarded by a per-table `Mutex` so add/remove on one table doesn't block
+/// lookups on another.
 pub struct InMemorySessionStore {
     by_table: DashMap<String, Arc<Mutex<Vec<StoredSession>>>>,
 }
@@ -32,7 +30,7 @@ pub struct InMemorySessionStore {
 struct StoredSession {
     id: SessionId,
     predicate: nostos_domain::Predicate,
-    handle: SessionSinkHandle,
+    sink: Arc<dyn EventSink>,
 }
 
 impl InMemorySessionStore {
@@ -53,12 +51,12 @@ impl Default for InMemorySessionStore {
 
 #[async_trait]
 impl SessionStore for InMemorySessionStore {
-    async fn add(&self, session: SyncSession, sink: Arc<dyn nostos_application::ports::EventSink>) {
+    async fn add(&self, session: SyncSession, sink: Arc<dyn EventSink>) {
         let table = session.predicate.table.clone();
         let stored = StoredSession {
             id: session.id,
             predicate: session.predicate,
-            handle: SessionSinkHandle::new(sink),
+            sink,
         };
         let entry = self
             .by_table
@@ -93,7 +91,7 @@ impl SessionStore for InMemorySessionStore {
             .map(|s| SessionCandidate {
                 id: s.id,
                 predicate: s.predicate.clone(),
-                sink: s.handle.sink(),
+                sink: Arc::clone(&s.sink),
             })
             .collect()
     }

@@ -147,15 +147,6 @@ impl ReplicationEvent {
     }
 }
 
-/// Transaction delimiters — emitted by some replicators to mark commit
-/// boundaries. Nostos applies events to clients in commit order so a partial
-/// transaction is never visible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TransactionBoundary {
-    Begin { txn_id: u64, lsn: Lsn },
-    Commit { txn_id: u64, lsn: Lsn },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

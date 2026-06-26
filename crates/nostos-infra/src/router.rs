@@ -15,17 +15,13 @@
 //! The receiver half is drained by the transport adapter (one task per
 //! WebSocket connection) which serializes events onto the wire.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use nostos_application::ports::{DeliveryDecision, EventSink};
 use nostos_domain::ReplicationEvent;
-
-/// Default per-session buffer depth. Overridable via `NOSTOS_SESSION_BUFFER`.
-pub const DEFAULT_SESSION_BUFFER: usize = 1024;
 
 /// An `EventSink` backed by a bounded tokio channel.
 ///
@@ -34,10 +30,7 @@ pub const DEFAULT_SESSION_BUFFER: usize = 1024;
 pub struct TokioEventSink {
     tx: mpsc::Sender<ReplicationEvent>,
     /// Lifetime open-flag, flipped to false when the transport task ends.
-    open: Arc<AtomicBool>,
-    /// Counters for observability (exported via metrics in the server).
-    delivered: AtomicU64,
-    dropped: AtomicU64,
+    open: AtomicBool,
 }
 
 impl TokioEventSink {
@@ -47,9 +40,7 @@ impl TokioEventSink {
         let (tx, rx) = mpsc::channel(buffer.max(1));
         let sink = Self {
             tx,
-            open: Arc::new(AtomicBool::new(true)),
-            delivered: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
+            open: AtomicBool::new(true),
         };
         (sink, rx)
     }
@@ -59,40 +50,20 @@ impl TokioEventSink {
     pub fn close(&self) {
         self.open.store(false, Ordering::Release);
     }
-
-    #[inline]
-    #[must_use]
-    pub fn delivered_count(&self) -> u64 {
-        self.delivered.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn dropped_count(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
-    }
 }
 
 #[async_trait]
 impl EventSink for TokioEventSink {
     async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
         if !self.open.load(Ordering::Acquire) {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
             return DeliveryDecision::Dropped;
         }
         // `try_send` is non-blocking — the whole point. A full buffer → drop.
         match self.tx.try_send(event) {
-            Ok(()) => {
-                self.delivered.fetch_add(1, Ordering::Relaxed);
-                DeliveryDecision::Delivered
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                DeliveryDecision::Dropped
-            }
+            Ok(()) => DeliveryDecision::Delivered,
+            Err(mpsc::error::TrySendError::Full(_)) => DeliveryDecision::Dropped,
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.open.store(false, Ordering::Release);
-                self.dropped.fetch_add(1, Ordering::Relaxed);
                 DeliveryDecision::Dropped
             }
         }
@@ -101,27 +72,6 @@ impl EventSink for TokioEventSink {
     #[inline]
     fn is_open(&self) -> bool {
         self.open.load(Ordering::Acquire)
-    }
-}
-
-/// A clonable handle the store keeps for a session. Wraps an `Arc<dyn EventSink>`
-/// so the router and store share one sink without owning the concrete type.
-#[derive(Clone)]
-pub struct SessionSinkHandle {
-    sink: Arc<dyn EventSink>,
-}
-
-impl SessionSinkHandle {
-    #[inline]
-    #[must_use]
-    pub fn new(sink: Arc<dyn EventSink>) -> Self {
-        Self { sink }
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn sink(&self) -> Arc<dyn EventSink> {
-        Arc::clone(&self.sink)
     }
 }
 
@@ -150,8 +100,6 @@ mod tests {
         assert_eq!(sink.deliver(ev(2)).await, DeliveryDecision::Delivered);
         // Buffer full now.
         assert_eq!(sink.deliver(ev(3)).await, DeliveryDecision::Dropped);
-        assert_eq!(sink.delivered_count(), 2);
-        assert_eq!(sink.dropped_count(), 1);
 
         // Drain one → next send succeeds again.
         rx.recv().await.unwrap();

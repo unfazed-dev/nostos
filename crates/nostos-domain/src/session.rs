@@ -52,13 +52,6 @@ impl SyncSession {
         }
     }
 
-    /// Construct with a fixed id (useful in tests / deterministic benchmarks).
-    #[inline]
-    #[must_use]
-    pub fn with_id(id: SessionId, predicate: Predicate) -> Self {
-        Self { id, predicate }
-    }
-
     /// The table this session is subscribed to (for indexing).
     #[inline]
     #[must_use]
