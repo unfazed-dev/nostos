@@ -409,6 +409,96 @@ mod tests {
         assert!(events.lock().unwrap().is_empty());
     }
 
+    /// ADR-0012 slice 1: the boolean tree routes through `fan_out` end-to-end.
+    /// An `Or`-predicate session receives events matching either branch; a
+    /// `Not`-predicate session excludes events its inner `Eq` would match.
+    #[tokio::test]
+    async fn boolean_tree_or_and_not_route_through_fanout() {
+        let store = make_store();
+        let sink_or = Arc::new(RecordingSink {
+            events: Arc::new(Mutex::new(vec![])),
+        });
+        let sink_not = Arc::new(RecordingSink {
+            events: Arc::new(Mutex::new(vec![])),
+        });
+        let events_or = sink_or.events.clone();
+        let events_not = sink_not.events.clone();
+
+        // Or-branch: status=open OR status=in_progress.
+        store
+            .add(
+                SyncSession::new(
+                    Predicate::eq("tasks", "status", ColumnValue::text("open"))
+                        .or_eq("status", ColumnValue::text("in_progress")),
+                ),
+                sink_or,
+            )
+            .await;
+        // Not-branch: NOT status=archived (everything that isn't archived).
+        store
+            .add(
+                SyncSession::new(!Predicate::eq(
+                    "tasks",
+                    "status",
+                    ColumnValue::text("archived"),
+                )),
+                sink_not,
+            )
+            .await;
+
+        // Extractor: lift `status` straight out of the payload bytes.
+        let extract_status = |e: &ReplicationEvent, col: &str| -> Option<ColumnValue> {
+            if col == "status" {
+                Some(ColumnValue::text(String::from_utf8_lossy(
+                    e.payload_bytes(),
+                )))
+            } else {
+                None
+            }
+        };
+
+        let svc = FanOutService::new(store);
+        // Helper to build an event carrying a `status` value as its payload.
+        let status_event = |status: &str| {
+            ReplicationEvent::new(
+                Lsn::new(1),
+                RowOp::Insert {
+                    table: "tasks".into(),
+                    pk: status.into(),
+                    payload: Bytes::copy_from_slice(status.as_bytes()),
+                },
+            )
+        };
+
+        // open → Or-branch matches (delivered to sink_or); Not(archived) also
+        // matches (delivered to sink_not).
+        let o = svc.fan_out(&status_event("open"), extract_status).await;
+        assert_eq!(o.matched, 2);
+        assert_eq!(o.delivered, 2);
+        assert_eq!(events_or.lock().unwrap().len(), 1);
+        assert_eq!(events_not.lock().unwrap().len(), 1);
+
+        // archived → Or-branch does NOT match; Not(archived) does NOT match
+        // either (the inner Eq matches, Not inverts it). So NEITHER predicate
+        // matches: matched=0, nothing delivered, nothing dropped (dropped only
+        // counts matched-but-undelivered).
+        let o = svc.fan_out(&status_event("archived"), extract_status).await;
+        assert_eq!(o.matched, 0);
+        assert_eq!(o.delivered, 0);
+        assert_eq!(o.dropped, 0);
+        // Still just the one event each from the previous fan-out.
+        assert_eq!(events_or.lock().unwrap().len(), 1);
+        assert_eq!(events_not.lock().unwrap().len(), 1);
+
+        // in_progress → Or-branch matches; Not(archived) matches.
+        let o = svc
+            .fan_out(&status_event("in_progress"), extract_status)
+            .await;
+        assert_eq!(o.delivered, 2);
+        assert_eq!(events_or.lock().unwrap().len(), 2);
+        assert_eq!(events_not.lock().unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn outcome_merges_accumulate() {
         let a = FanOutOutcome {

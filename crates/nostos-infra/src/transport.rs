@@ -261,21 +261,16 @@ fn build_predicate(
     let enforce_tenant = tenant_column.is_some() && !principal.is_anonymous();
     let tenant_col = tenant_column.unwrap_or("");
 
-    // The client's own filters — EXCLUDING any on the tenant column, which the
-    // server overrides with the principal's real value (never client-attested).
-    let client_filters: Vec<&crate::wire::FilterClause> = subscribe
-        .filters
-        .iter()
-        .filter(|f| !enforce_tenant || f.column != tenant_col)
-        .collect();
-
-    let mut p = if client_filters.is_empty() {
-        Predicate::all(&subscribe.table)
-    } else {
-        let f = client_filters[0];
-        Predicate::eq(&subscribe.table, &f.column, ColumnValue::text(&f.value))
-    };
-    for f in client_filters.get(1..).unwrap_or(&[]) {
+    // Start match-all, then fold in the client's own filters — EXCLUDING any on
+    // the tenant column, which the server overrides with the principal's real
+    // value (never client-attested). The `and_eq` combinator collapses the
+    // initial match-all down to a bare `Eq` leaf, so a single-filter predicate
+    // is structurally identical to the historical `Predicate::eq` form.
+    let mut p = Predicate::all(&subscribe.table);
+    for f in &subscribe.filters {
+        if enforce_tenant && f.column == tenant_col {
+            continue; // server injects the real tenant value below
+        }
         p = p.and_eq(&f.column, ColumnValue::text(&f.value));
     }
 
