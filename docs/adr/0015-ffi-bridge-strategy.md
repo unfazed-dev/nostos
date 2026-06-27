@@ -1,68 +1,90 @@
-# ADR-0015: FFI bridge strategy (Front 5 — deferred)
+# ADR-0015: FFI bridge strategy (Front 5)
 
-- **Status:** Deferred (Phase 2–3 — design sketch + kill criterion)
-- **Date:** 2026-06-27
+- **Status:** WASM shipped (in-memory apply bridge); Flutter / RN / Node-native remain
+- **Date:** 2026-06-27 (deferred) · 2026-06-28 (WASM shipped)
 
 ## Context
 
 Front 5 ("First-class Flutter + RN + Web from one core") requires shipping the
-Rust sync core to four platform ecosystems. The strategy doc specifies four
-crates: `nostos-core` (the platform-agnostic engine), `nostos-storage-*` (SQLite
-backends), `nostos-ffi-uniffi` (iOS/Android/RN), `nostos-ffi-frb` (Flutter),
-`nostos-ffi-wasm` (Web/Node). **None of these crates exist.** The server-side
-engine is real; the client core that would be bound across the bridges is not.
+Rust sync core to four platform ecosystems via four FFI bridges. As of Tier 2.5,
+the prerequisite is met: `nostos-core` (ADR-0016) exists as a pure, WASM-clean
+apply engine, and the first bridge — WASM — has shipped.
 
 ## Decision
 
-**Defer the bridges to Phase 2–3.** A bridge with nothing meaningful to bind is
-scaffolding; the client core (`nostos-core`: the apply state machine, the storage
-trait, the cursor/checkpoint) must exist first.
+**Ship the WASM bridge first; Flutter / RN / Node-native follow.** The
+Architecture advisor (GLM-5.2) chose FFI over the predicate engine (ADR-0012)
+because FFI delivers a usable product ("my Flutter app syncs offline and
+reconnects") while the predicate engine is invisible server-side IP. WASM is the
+canonical first bridge: it's the one that can be fully verified in-process
+(`wasm-pack build` + a Node smoke test) and proves the bundle-size kill
+criterion for all future bridges.
 
-**Design sketch:**
-1. Extract `nostos-core` from the current `nostos-domain` + `nostos-application` —
-   the pure sync state machine (apply a `RowOp` to a `Storage` trait, advance the
-   LSN checkpoint, evaluate a local predicate for what to request). Runtime-
-   agnostic, `Send + Sync`, no tokio.
-2. `nostos-storage-rusqlite` (native), `-sqlite-wasm` (web/OPFS), adapters for
-   `op-sqlite` (RN) + `sqlite3_flutter_libs` (Flutter).
-3. Four FFI shims:
-   - **Flutter → `flutter_rust_bridge` v2** (first-class `Stream`).
-   - **iOS/Android/RN → UniFFI** (callback-channel pattern for streaming).
-   - **Web → `wasm-bindgen` + `wasm-pack`** (Web Worker + OPFS).
-   - **Node/Electron → `napi-rs`**.
-4. **Critical principle:** the platform brings its own SQLite binary; Nostos
-   brings the sync. One `Storage` trait, one wire protocol.
+### What shipped (WASM)
 
-**The seam to manage:** `Send`/`Sync`/lifetime story across tokio (server/Node),
-the JS event loop (web), Dart isolates (Flutter), and the RN bridge thread —
-without leaking platform complexity into `nostos-core`.
+**`crates/nostos-ffi-wasm`** — a `wasm-bindgen` bridge over `nostos-core`. A thin
+projection of the apply engine's public surface to JS-friendly types:
 
-## Rationale
+- `NostosEngine` — wraps `ApplyEngine<InMemoryStorage>`. Methods: `feed(Frame)`,
+  `flush()`, `checkpoint`, `rowCount`.
+- `Frame` — mirrors `nostos_core::Frame`; `op` is a JS string (`"insert" |
+  "update" | "delete"`), `lsn`/`txn_id` are `f64` (no BigInt at the boundary —
+  real WAL positions stay under 2^53).
+- `Outcome` — the commit result (`checkpoint`, `rowsApplied`).
 
-- There is **no single FFI bridge** that serves all four ecosystems well
-  (streaming is the deciding factor — STRATEGY §5.3). Four bridges is the cost.
-- CI on all four from day one is the de-risk; keeping `nostos-core` runtime-
-  agnostic is the architectural guard.
+**Kill criterion met:** the `.wasm` is **17 KB gzipped — 3% of the 500 KB
+budget.** `nostos-core`'s deps are all pure-Rust (serde, serde_json, thiserror,
+uuid, bytes) with no tokio/SQLite, so the bundle is small. Verified by a Node
+smoke test (16 checks: frame construction, buffered feed, atomic flush,
+checkpoint advance, idempotency, deletes, transaction-boundary batching).
+
+**Toolchain note:** `uuid` needed the `js` feature added at the workspace level —
+a no-op on native (only activates browser RNG under `cfg(target_arch="wasm32")`).
+
+### A documented constraint (surfaced via `[$read-the-damn-docs]`)
+
+**OPFS persistence requires a Web Worker.** `createSyncAccessHandle` (the sync
+OPFS path) is Worker-only by spec, async to acquire, sync to use. A real
+browser-durable backend is therefore a Worker module with a message protocol —
+NOT a direct `wasm-bindgen` export. It also can't be verified in a Node-only
+test harness (Node has no `FileSystemSyncAccessHandle`). Per ponytail's
+no-unproven-code rule, OPFS is deferred to a verified follow-up that needs a
+browser test harness; this slice ships the in-memory apply path (survives the
+apply loop, not a page reload — honest about its scope).
+
+## What remains deferred
+
+- **OPFS persistence** — the browser-durable backend (Worker + sync-OPFS).
+- **The transport on WASM** — `SyncClient` (tokio) doesn't run on wasm; a
+  `web-sys` WebSocket transport is a separate slice (comes with OPFS).
+- **Flutter (`flutter_rust_bridge` v2)**, **iOS/Android/RN (UniFFI)**,
+  **Node-native (`napi-rs`)** — the other three bridges. They follow the same
+  `nostos-core` surface; each needs its platform's codegen tool exercised
+  against a real platform project to verify.
 
 ## Consequences
 
-**Positive:** when shipped, one core serves every platform — the Front-5 claim.
+**Positive:** the WASM apply path is real and proven; the bundle is far under
+budget; the JS↔Rust boundary works end-to-end. One bridge down, three to go.
 
-**Negative:** the 4-bridge maintenance tax (STRATEGY risk #5); the client core
-itself is the prerequisite, so this ADR gates on ADR-0016.
-
-**Kill criterion:** if the WASM bundle exceeds 500 KB gzipped, or if any bridge
-can't CI-build on every commit, the strategy's web/mobile claim is at risk
-(STRATEGY §9, risk #4/#5).
+**Negative:** the in-memory bridge doesn't survive a page reload (no OPFS yet),
+and there's no transport on WASM yet — so a browser client can't *connect* to
+`/sync`, only apply frames it's handed. The full browser demo waits on OPFS +
+the `web-sys` transport.
 
 ## Alternatives considered
 
-- **One bridge for all:** rejected — no single bridge does Flutter streaming +
-  WASM + RN well (STRATEGY §5.3).
-- **Ship empty crate skeletons now:** rejected — scaffolding with no core to
-  bind; violates ponytail.
+- **OPFS persistence now:** rejected — Worker-only by spec, unverifiable in
+  Node; would ship unproven code (ponytail).
+- **One bridge for all four ecosystems:** rejected — no single bridge does
+  Flutter streaming + WASM + RN well (STRATEGY §5.3).
+- **Predicate engine (ADR-0012) before FFI:** rejected by the advisor — it has
+  a hidden dependency (opaque payloads need a column decoder for typed
+  comparison) and is invisible to the buyer.
 
 ## References
 
+- Depends on: ADR-0016 (`nostos-core` — now exists).
+- Enables: the browser demo (with OPFS + transport, deferred).
+- Code: `crates/nostos-ffi-wasm` (bridge), `smoke.mjs` (the verification).
 - STRATEGY §5.1–§5.3 (the core + bridge architecture).
-- Depends on: ADR-0016 (the client core itself).

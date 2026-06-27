@@ -42,4 +42,4 @@ pub use storage::{Result, Storage, StorageError};
 
 // Re-export the domain types the client surface needs so downstream (nostos-client,
 // the FFI shims) can depend on `nostos-core` alone.
-pub use nostos_domain::{Lsn, RowOp};
+pub use nostos_domain::{Lsn, Operation, RowOp};

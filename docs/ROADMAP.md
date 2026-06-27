@@ -37,10 +37,10 @@
 **Headline:** A client subscribes with a live predicate and scrolls forever — on Flutter AND Web.
 
 **Deliverables:**
-- Predicate expression engine (boolean tree of equalities/ranges over auth-scoped params).
-- `nostos-core` WebAssembly build (`wasm-bindgen` + OPFS storage).
-- Flutter SDK via `flutter_rust_bridge` (first-class `Stream`).
-- The first end-to-end demo: "point at Supabase Postgres → offline reads on Flutter + Web."
+- Predicate expression engine (boolean tree of equalities/ranges over auth-scoped params). *(ADR-0012 — deferred; the client core now makes it testable.)*
+- `nostos-core` WebAssembly build (`wasm-bindgen` + OPFS storage). *(✅ in-memory apply bridge shipped ADR-0015; OPFS persistence deferred — Worker-only by spec.)*
+- Flutter SDK via `flutter_rust_bridge` (first-class `Stream`). *(ADR-0015 — deferred.)*
+- The first end-to-end demo: "point at Supabase Postgres → offline reads on Flutter + Web." *(gates on OPFS + transport + Flutter.)*
 
 ---
 

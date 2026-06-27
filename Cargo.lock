@@ -1141,6 +1141,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostos-ffi-wasm"
+version = "0.1.0"
+dependencies = [
+ "nostos-core",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "nostos-infra"
 version = "0.1.0"
 dependencies = [

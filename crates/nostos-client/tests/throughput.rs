@@ -96,11 +96,12 @@ fn batched_apply_is_faster_than_per_row() {
     let ratio = per_row_time.as_secs_f64() / batched_time.as_secs_f64().max(1e-9);
     eprintln!("batched={batched_time:?}, per_row={per_row_time:?}, ratio={ratio:.1}x");
     // A genuine regression here is "batched == per_row" (ratio ~1.0) — that would
-    // mean the transaction was split so each row commits alone. 3x leaves wide
-    // margin for CI variance while still catching that failure mode. Measured:
-    // ~5x on in-memory SQLite (per-transaction overhead, not a bug).
+    // mean the transaction was split so each row commits alone. 2.5x leaves wide
+    // margin for CI/machine-contention variance (measured 3–9x on a quiet
+    // machine, ~2.9x under concurrent wasm-build load) while still catching the
+    // split failure mode decisively.
     assert!(
-        ratio >= 3.0,
-        "batched apply should be ≥3x faster than per-row; got {ratio:.1}x — transaction may be split"
+        ratio >= 2.5,
+        "batched apply should be ≥2.5x faster than per-row; got {ratio:.1}x — transaction may be split"
     );
 }

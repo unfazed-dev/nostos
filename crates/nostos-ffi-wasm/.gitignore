@@ -1,0 +1,3 @@
+# wasm-pack output — generated from source by `wasm-pack build`. The smoke
+# test rebuilds it; committing it would drift on every code change.
+pkg/

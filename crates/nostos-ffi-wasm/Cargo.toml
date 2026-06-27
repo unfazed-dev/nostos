@@ -1,0 +1,29 @@
+[package]
+name = "nostos-ffi-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nostos WebAssembly FFI bridge — binds nostos-core's apply engine to JavaScript."
+repository.workspace = true
+homepage.workspace = true
+
+# wasm-pack invokes wasm-opt by default for the release build; the cached
+# binary in this env rejects rustc's bulk-memory ops (memory.copy) — and the
+# extra opt pass is redundant with rustc's fat-LTO release profile, so we
+# disable it. The .wasm is still fully optimized by rustc itself.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+# `cdylib` → a `.wasm` artifact for wasm-bindgen/js; `rlib` → so unit tests
+# (which run on the host, not wasm) still compile against this crate.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nostos-core = { workspace = true }
+wasm-bindgen = "0.2"
+
+[lints]
+workspace = true

@@ -143,6 +143,20 @@ impl<S: Storage> ApplyEngine<S> {
         self.storage
     }
 
+    /// Borrow the backing storage mutably. Lets a caller reach a backend-specific
+    /// accessor (e.g. `InMemoryStorage::row_count`) without consuming the engine.
+    /// The engine's own state (pending batch, high-water) is untouched.
+    #[must_use]
+    pub fn storage_mut(&mut self) -> &mut S {
+        &mut self.storage
+    }
+
+    /// Borrow the backing storage read-only.
+    #[must_use]
+    pub fn storage(&self) -> &S {
+        &self.storage
+    }
+
     /// The current durable checkpoint (delegates to storage).
     pub fn checkpoint(&self) -> crate::Result<Lsn> {
         self.storage.checkpoint()
