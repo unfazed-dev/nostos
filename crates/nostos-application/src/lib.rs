@@ -25,10 +25,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod eviction;
 pub mod fanout;
 pub mod ports;
 pub mod session;
 
+pub use eviction::EvictionPolicy;
 pub use fanout::{FanOutOutcome, FanOutService};
 pub use ports::{
     DeliveryDecision, EventSink, Metrics, MetricsSnapshot, ReplicatorStream, SessionCandidate,

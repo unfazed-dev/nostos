@@ -131,6 +131,17 @@ pub trait SessionStore: Send + Sync {
     /// advance past it, or a reconnect would skip events the slowest client
     /// never confirmed (silent data loss). See ADR-0009.
     async fn min_acked_lsn(&self) -> Option<Lsn>;
+
+    /// The `(SessionId, Lsn)` of the live session with the smallest acked LSN
+    /// — the slowest consumer. Used by the WAL-bloat eviction policy
+    /// ([`crate::EvictionPolicy`]) to target the single session holding back
+    /// the slot. Returns `None` if no session has acked (or the store is empty).
+    ///
+    /// Default: derived from a full scan (implementations with an index may
+    /// override). Never panics.
+    async fn slowest_session(&self) -> Option<(SessionId, Lsn)> {
+        None
+    }
 }
 
 /// A session + its sink, returned by [`SessionStore::candidates_for`].

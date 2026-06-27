@@ -37,8 +37,10 @@
 //! That was the original bug — it told Postgres we'd applied events the moment
 //! they arrived off the wire, before any client received them, so a reconnect
 //! silently skipped unacked data. The ack-driven model here is the fix
-//! (ADR-0009). WAL-bloat protection for a permanently-silent client
-//! (`max_slot_wal_keep_size` / age-based advance) is deferred — see ADR-0016.
+//! (ADR-0009). WAL-bloat protection ships alongside it: the application-level
+//! `EvictionPolicy` (applied by the fanout loop) disconnects lagging clients,
+//! and `max_slot_wal_keep_size_mb` here is the database-level backstop — see
+//! ADR-0016 (now shipped).
 //!
 //! ## Why two "Off" trait params for pgoutput
 //!
@@ -107,6 +109,13 @@ pub struct PgReplicatorConfig {
     pub publication: String,
     /// Resume from this LSN, or `None` to use the slot's last confirmed LSN.
     pub start_lsn: Option<Lsn>,
+    /// WAL-bloat backstop: set `max_slot_wal_keep_size` (MB) on the slot via
+    /// `ALTER_REPLICATION_SLOT` on startup. `0` = leave Postgres's default
+    /// (unbounded). This is the database-level cap; the application-level
+    /// eviction policy (`EvictionPolicy`, applied by the fanout loop) is the
+    /// first line of defense — this is the last resort that protects the primary
+    /// if a client vanishes entirely. See ADR-0016.
+    pub max_slot_wal_keep_size_mb: u64,
 }
 
 impl PgReplicatorConfig {
@@ -162,6 +171,7 @@ impl PgReplicatorConfig {
             slot: slot.into(),
             publication: publication.into(),
             start_lsn: None,
+            max_slot_wal_keep_size_mb: 0,
         })
     }
 }

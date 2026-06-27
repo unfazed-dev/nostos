@@ -192,6 +192,27 @@ impl SessionStore for InMemorySessionStore {
         }
         global_min.map(nostos_domain::Lsn::new)
     }
+
+    async fn slowest_session(&self) -> Option<(nostos_domain::SessionId, nostos_domain::Lsn)> {
+        // The session with the smallest acked LSN — the eviction target when
+        // WAL-bloat protection fires (ADR-0016). Same fold as min_acked_lsn,
+        // but tracks the SessionId alongside the minimum so the fanout loop can
+        // disconnect exactly this one session.
+        let mut slowest: Option<(nostos_domain::SessionId, u64)> = None;
+        for entry in &self.by_table {
+            let list = entry.value().lock().await;
+            for s in list.iter() {
+                if let Some(lsn) = s.sink.last_acked_lsn() {
+                    match slowest {
+                        None => slowest = Some((s.id, lsn.raw())),
+                        Some((_, cur)) if lsn.raw() < cur => slowest = Some((s.id, lsn.raw())),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        slowest.map(|(id, raw)| (id, nostos_domain::Lsn::new(raw)))
+    }
 }
 
 #[cfg(test)]

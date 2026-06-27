@@ -1,0 +1,34 @@
+[package]
+name = "nostos-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nostos native client — SqliteStorage backend + the tokio SyncClient (connect, apply, checkpoint, reconnect)."
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+nostos-core = { workspace = true }
+nostos-domain = { workspace = true }
+nostos-infra = { workspace = true }   # WireFrame decode (client ↔ server contract)
+rusqlite = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+nostos-core = { workspace = true }
+nostos-application = { workspace = true }
+nostos-infra = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

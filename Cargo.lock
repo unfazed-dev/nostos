@@ -1070,6 +1070,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostos-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "futures-util",
+ "nostos-application",
+ "nostos-core",
+ "nostos-domain",
+ "nostos-infra",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.23.1",
+ "tracing",
+]
+
+[[package]]
 name = "nostos-cloud"
 version = "0.1.0"
 dependencies = [
@@ -1095,6 +1116,17 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nostos-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "nostos-domain",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

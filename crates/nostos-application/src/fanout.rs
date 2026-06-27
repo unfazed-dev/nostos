@@ -74,6 +74,10 @@ pub struct FanOutService {
     /// Aggregate throughput counters, read by `/metrics`. `None` in unit tests
     /// that assert on `FanOutOutcome` directly (counters would duplicate it).
     metrics: Option<Arc<Metrics>>,
+    /// WAL-bloat protection: evict the slowest session when it lags further
+    /// than the policy's threshold behind the head of the stream. Default
+    /// disabled ([`EvictionPolicy::disabled`]) — see ADR-0016.
+    eviction: crate::EvictionPolicy,
 }
 
 impl FanOutService {
@@ -84,6 +88,7 @@ impl FanOutService {
             store,
             push_interval: std::time::Duration::ZERO,
             metrics: None,
+            eviction: crate::EvictionPolicy::disabled(),
         }
     }
 
@@ -93,6 +98,15 @@ impl FanOutService {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Enable WAL-bloat protection: evict the slowest session when its acked
+    /// LSN lags further than the policy's `max_lag` behind the head of the
+    /// stream. Disabled by default (ADR-0016) — a production deploy MUST opt in.
+    #[must_use]
+    pub fn with_eviction(mut self, policy: crate::EvictionPolicy) -> Self {
+        self.eviction = policy;
         self
     }
 
@@ -194,8 +208,26 @@ impl FanOutService {
             // live client has confirmed. None = no session has acked → don't
             // advance (WAL retained; no data loss). The replicator no-ops if
             // it has no real slot (FakeReplicator).
-            if let Some(safe) = self.store.min_acked_lsn().await {
+            // Ack-driven progress + WAL-bloat protection share the same scan
+            // (the slowest client's acked LSN), so compute it once.
+            let slowest_acked = self.store.min_acked_lsn().await;
+            if let Some(safe) = slowest_acked {
                 replicator.advance_progress(safe).await;
+            }
+            // WAL-bloat protection (ADR-0016): if the slowest client has fallen
+            // further than the policy's threshold behind this event (the head of
+            // the stream), disconnect it. It reconnects + re-syncs from a fresh
+            // checkpoint — trading a controlled replay window for source-DB
+            // safety. OFF by default; a production deploy opts in via config.
+            if self.eviction.should_evict(event.lsn, slowest_acked) {
+                if let Some((id, _)) = self.store.slowest_session().await {
+                    tracing::warn!(
+                        session = ?id,
+                        head = event.lsn.raw(),
+                        "evicting slowest session (WAL-bloat protection); client will reconnect + re-sync"
+                    );
+                    self.store.remove(id).await;
+                }
             }
             // Reactive-when-connected cadence: a zero interval (the default,
             // what the benchmark measures) is a no-op; a managed instance sets

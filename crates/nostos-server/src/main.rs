@@ -103,6 +103,24 @@ pub struct Config {
     /// permissive (any origin) for local dev; set explicitly for production.
     #[arg(long, env = "NOSTOS_CORS_ORIGINS", default_value = "")]
     cors_origins: String,
+
+    /// WAL-bloat protection: the maximum LSN-gap (in WAL bytes) a live client
+    /// may lag behind the head of the stream before it is evicted. A client
+    /// exceeding this is disconnected; it reconnects + re-syncs from a fresh
+    /// checkpoint — trading a controlled replay window for source-DB safety.
+    /// `0` (default) = eviction OFF (no client is ever dropped for lag). A
+    /// production deploy MUST set this AND `--pg-slot-wal-keep-size` to protect
+    /// the primary's disk (ADR-0016).
+    #[arg(long, env = "NOSTOS_SLOT_MAX_LAG", default_value_t = 0)]
+    slot_max_lag: u64,
+
+    /// Postgres `max_slot_wal_keep_size` for the replication slot (MB). Caps how
+    /// much WAL a lagging slot may retain on the primary before Postgres
+    /// itself invalidates the slot — the database-level backstop for WAL bloat.
+    /// `0` (default) = Postgres's built-in default (unbounded). Set alongside
+    /// `--slot-max-lag` in production (ADR-0016).
+    #[arg(long, env = "NOSTOS_PG_SLOT_WAL_KEEP_SIZE", default_value_t = 0)]
+    pg_slot_wal_keep_size: u64,
 }
 
 #[tokio::main]
@@ -159,8 +177,18 @@ async fn main() -> anyhow::Result<()> {
     // /metrics endpoint (reader). The session gauge is updated on connect/
     // disconnect by the manager — for now we snapshot the store count on read.
     let metrics = Arc::new(nostos_application::ports::Metrics::new());
-    let fanout =
-        Arc::new(FanOutService::new(Arc::clone(&store)).with_metrics(Arc::clone(&metrics)));
+    // WAL-bloat protection: OFF by default (slot_max_lag=0); a deploy that sets
+    // NOSTOS_SLOT_MAX_LAG opts into evicting clients that lag past it (ADR-0016).
+    let eviction = if cfg.slot_max_lag > 0 {
+        nostos_application::EvictionPolicy::new(cfg.slot_max_lag)
+    } else {
+        nostos_application::EvictionPolicy::disabled()
+    };
+    let fanout = Arc::new(
+        FanOutService::new(Arc::clone(&store))
+            .with_metrics(Arc::clone(&metrics))
+            .with_eviction(eviction),
+    );
 
     // ---- start the replicator → fan-out driver ----
     // The extractor lifts named columns out of an event's payload so predicates
@@ -186,9 +214,16 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "pg")]
             {
                 use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
-                let pg_cfg =
+                let mut pg_cfg =
                     PgReplicatorConfig::from_url(&cfg.pg_url, &cfg.pg_slot, &cfg.pg_publication)
                         .context("invalid NOSTOS_PG_URL")?;
+                pg_cfg.max_slot_wal_keep_size_mb = cfg.pg_slot_wal_keep_size;
+                if cfg.pg_slot_wal_keep_size > 0 {
+                    info!(
+                        keep_size_mb = cfg.pg_slot_wal_keep_size,
+                        "WAL-bloat backstop: will set max_slot_wal_keep_size on the slot"
+                    );
+                }
                 let mut repl = PgReplicator::new(pg_cfg);
                 let fanout_drv = Arc::clone(&fanout);
                 let drv = tokio::spawn(async move {

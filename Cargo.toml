@@ -21,6 +21,12 @@
 #                         ports and runs an axum HTTP/WS server.
 #   nostos-bench           the benchmark harness — Week-1 deliverable: proves ≥5×
 #                         PowerSync's 2-4k ops/sec throughput ceiling.
+#   nostos-core            the platform-agnostic client sync engine — pure Rust
+#                         (no tokio, no SQLite): the Storage seam + the apply
+#                         state machine. WASM-clean; what the FFI bridges bind.
+#   nostos-client          the native client: SqliteStorage (rusqlite) + the
+#                         tokio SyncClient that connects to /sync, applies frames,
+#                         checkpoints durably, and reconnects with resume_lsn.
 #
 # Rule enforced by structure + clippy: domain must never depend on application,
 # application must never depend on infrastructure. The dependency-inversion arrow
@@ -36,6 +42,8 @@ members = [
     "crates/nostos-server",
     "crates/nostos-bench",
     "crates/nostos-cloud",
+    "crates/nostos-core",
+    "crates/nostos-client",
 ]
 
 [workspace.package]
@@ -117,6 +125,9 @@ nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
 nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
 nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
 nostos-cloud = { path = "crates/nostos-cloud", version = "0.1.0" }
+nostos-core = { path = "crates/nostos-core", version = "0.1.0" }
+nostos-client = { path = "crates/nostos-client", version = "0.1.0" }
+nostos-server = { path = "crates/nostos-server", version = "0.1.0" }
 
 # -----------------------------------------------------------------------------
 # Workspace-wide lints. Fail CI on the things that matter; warn on the rest.
