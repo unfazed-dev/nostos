@@ -1,0 +1,35 @@
+# PowerSync Service config for the Nostos self-host comparison harness.
+#
+# Sources the SAME Postgres Nostos's PgReplicator reads (the `postgres` service
+# in docker-compose.yml), so a row inserted once is visible to both engines —
+# that's the apples-to-apples setup the smoke test asserts on.
+#
+# Bucket storage is reusing the same Postgres instance (PowerSync supports a
+# Postgres bucket storage backend since v1.3.8), so the stack needs no MongoDB.
+#
+# Auth is DEVELOPMENT MODE (dev_mode: true) — accepts any well-formed JWT and
+# issues an anonymous token. This is the documented local-dev path and is NOT
+# for production. It lets the smoke test connect without faking Supabase JWTs.
+#
+# Docs: https://docs.powersync.com/configuration/powersync-service/self-hosted-instances
+
+# dev_mode issues anonymous tokens client-side — no external JWT issuer needed.
+authentication:
+  dev_mode: true
+
+# The source Postgres — same host:port as nostos-infra's PgReplicator uses.
+sources:
+  - id: default
+    database:
+      connection_string: postgresql://cairn:cairn@postgres:5432/cairn
+    bucket_settings:
+      bucket_storage:
+        connection_string: postgresql://cairn:cairn@postgres:5432/cairn
+
+# The sync rules file (mounted into the container by docker-compose).
+sync_rules:
+  path: /app/sync-rules.yaml
+
+# Client sync API.
+client_sync:
+  max_params: 1000

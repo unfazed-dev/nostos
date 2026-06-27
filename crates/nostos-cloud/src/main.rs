@@ -107,10 +107,10 @@ async fn main() -> anyhow::Result<()> {
             .build()
             .context("build http client")?,
         public_base_url: cfg.public_base_url.clone(),
-        jwt_verifier: cfg
-            .supabase_jwt_secret
-            .as_ref()
-            .map(|s| Arc::new(nostos_cloud::auth::Hs256Verifier::new(s.as_bytes().to_vec())) as Arc<dyn nostos_cloud::auth::JwtVerifier>),
+        jwt_verifier: cfg.supabase_jwt_secret.as_ref().map(|s| {
+            Arc::new(nostos_cloud::auth::Hs256Verifier::new(s.as_bytes().to_vec()))
+                as Arc<dyn nostos_cloud::auth::JwtVerifier>
+        }),
     };
 
     let app = Router::new()

@@ -25,9 +25,6 @@ impl Lsn {
     /// The zero LSN — used as "no progress yet."
     pub const ZERO: Lsn = Lsn(0);
 
-    /// The maximum representable LSN.
-    pub const MAX: Lsn = Lsn(u64::MAX);
-
     #[inline]
     #[must_use]
     pub const fn new(v: u64) -> Self {
@@ -54,11 +51,15 @@ impl Lsn {
         }
     }
 
-    /// Distance between two LSNs in bytes of WAL (Postgres semantics).
+    /// The smaller of two LSNs. Used by the ack-driven slot-advance model
+    /// (ADR-0009): the safe-to-flush LSN is the minimum acked LSN across all
+    /// live sessions, so the slot never advances past data a client has
+    /// confirmed applied — preventing silent data loss on reconnect.
     #[inline]
     #[must_use]
-    pub const fn diff(self, earlier: Lsn) -> u64 {
-        self.0.saturating_sub(earlier.0)
+    pub const fn min(self, other: Lsn) -> Lsn {
+        // Manual compare: `u64::min` isn't const-stable yet.
+        Lsn(if self.0 <= other.0 { self.0 } else { other.0 })
     }
 }
 
@@ -121,9 +122,10 @@ mod tests {
     }
 
     #[test]
-    fn diff_is_saturating() {
-        assert_eq!(Lsn::new(30).diff(Lsn::new(10)), 20);
-        assert_eq!(Lsn::new(5).diff(Lsn::new(10)), 0); // never negative
+    fn min_picks_the_smaller() {
+        assert_eq!(Lsn::new(5).min(Lsn::new(20)), Lsn::new(5));
+        assert_eq!(Lsn::new(20).min(Lsn::new(5)), Lsn::new(5));
+        assert_eq!(Lsn::new(7).min(Lsn::new(7)), Lsn::new(7));
     }
 
     #[test]

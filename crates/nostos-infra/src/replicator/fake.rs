@@ -175,7 +175,11 @@ impl FakeReplicator {
                 pk,
             },
         };
-        Some(ReplicationEvent::new(lsn, op))
+        // Group events into transactions of 8 — mirrors what PgReplicator stamps
+        // from real Begin/Commit boundaries, so dedup/resume tests exercise the
+        // txn_id path against the fake (ADR-0009). txn id = floor(emitted / 8).
+        let txn_id = emitted / 8;
+        Some(ReplicationEvent::new(lsn, op).with_txn(txn_id))
     }
 }
 

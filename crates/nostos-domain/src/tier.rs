@@ -34,15 +34,4 @@ impl Tier {
             Self::Enterprise => u64::MAX,
         }
     }
-
-    /// Human label for the admin UI.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Hobby => "Hobby (Free)",
-            Self::Pro => "Pro",
-            Self::Scale => "Scale",
-            Self::Enterprise => "Enterprise",
-        }
-    }
 }

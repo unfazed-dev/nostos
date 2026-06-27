@@ -93,6 +93,28 @@ pg-logs: ## Tail Postgres logs.
 	docker compose -f docker/docker-compose.yml logs -f postgres
 
 # ----------------------------------------------------------------------------
+# PowerSync (the comparison harness — self-host, not a throughput race).
+# Brings up Postgres + the PowerSync Service together so the powersync_smoke
+# test can assert PowerSync ingests from the same PG Nostos reads. See
+# docs/COMPARISON.md for why the live head-to-head is deferred.
+# ----------------------------------------------------------------------------
+PS_COMPOSE := -f docker/docker-compose.yml -f docker/docker-compose.powersync.yml
+
+.PHONY: ps-up
+ps-up: ## Start Postgres + PowerSync (the comparison stack).
+	docker compose $(PS_COMPOSE) up -d postgres powersync
+	@echo "PowerSync sync API: http://localhost:8080"
+	@echo "Run the smoke test: NOSTOS_POWERSYNC=1 cargo test -p nostos-infra --test powersync_smoke -- --nocapture"
+
+.PHONY: ps-down
+ps-down: ## Stop Postgres + PowerSync.
+	docker compose $(PS_COMPOSE) down
+
+.PHONY: ps-logs
+ps-logs: ## Tail PowerSync logs.
+	docker compose $(PS_COMPOSE) logs -f powersync
+
+# ----------------------------------------------------------------------------
 # Benchmark — the Week-1 deliverable
 # ----------------------------------------------------------------------------
 .PHONY: bench

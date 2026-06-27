@@ -18,20 +18,23 @@
 
 #![cfg(feature = "pg")]
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::routing::get;
-use futures_util::{SinkExt, StreamExt};
 use tokio::sync::oneshot;
-use tokio_tungstenite::tungstenite::Message;
 
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, ReplicationEvent};
 use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
+
+use common::{decode_payload_hex, subscribe_and_collect};
 
 /// Env gate. The test self-skips when PG isn't available so unit-test CI stays green.
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
@@ -67,7 +70,10 @@ async fn spawn_server(
 ) {
     let store: Arc<dyn nostos_application::ports::SessionStore> =
         Arc::new(InMemorySessionStore::new());
-    let manager = Arc::new(SessionManager::new(Arc::clone(&store), nostos_domain::Tier::Enterprise));
+    let manager = Arc::new(SessionManager::new(
+        Arc::clone(&store),
+        nostos_domain::Tier::Enterprise,
+    ));
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
 
     // Replicator driver: PgReplicator → FanOutService, real column extraction.
@@ -85,7 +91,11 @@ async fn spawn_server(
         let _ = fanout_drv.run(&mut repl, extract).await;
     });
 
-    let state = SyncRouterState::new(Arc::clone(&manager)).with_buffer(1024);
+    let state = SyncRouterState::new(
+        Arc::clone(&manager),
+        Arc::new(nostos_infra::AllowAnonymous::new()),
+    )
+    .with_buffer(1024);
     let app = axum::Router::new()
         .route("/sync", get(sync_handler))
         .with_state(state);
@@ -141,49 +151,6 @@ async fn shutdown_server(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-}
-
-/// Open a WebSocket client, send a Subscribe frame, collect received frames.
-async fn subscribe_and_collect(
-    addr: SocketAddr,
-    table: &str,
-    timeout: Duration,
-) -> Vec<serde_json::Value> {
-    let url = format!("ws://{addr}/sync");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .expect("ws connect");
-    let sub = serde_json::json!({ "table": table, "filters": [] });
-    ws.send(Message::Text(sub.to_string())).await.unwrap();
-    let mut got = Vec::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if let Ok(Some(Ok(Message::Binary(b)))) =
-            tokio::time::timeout(Duration::from_millis(200), ws.next()).await
-        {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                got.push(v);
-            }
-        }
-    }
-    got
-}
-
-/// Decode the server's hex-encoded wire payload back to bytes, for assertions.
-/// (The transport's WireCodec hex-encodes payloads; a real client SDK would
-/// decode the same way.)
-fn decode_payload_hex(hex: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let bytes = hex.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        let hi = (bytes[i] as char).to_digit(16).unwrap_or(0);
-        let lo = (bytes[i + 1] as char).to_digit(16).unwrap_or(0);
-        // ponytail: hex digit pairs are 0..=255; unwrap is infallible here.
-        out.push(u8::try_from(hi * 16 + lo).expect("hex pair fits in u8"));
-        i += 2;
-    }
-    out
 }
 
 /// One inserted row → one delivered frame. The core Phase-1 claim.
@@ -342,10 +309,17 @@ async fn smoke_fake_replicator_delivers_via_ws() {
 
     let store: Arc<dyn nostos_application::ports::SessionStore> =
         Arc::new(InMemorySessionStore::new());
-    let manager = Arc::new(SessionManager::new(Arc::clone(&store), nostos_domain::Tier::Enterprise));
+    let manager = Arc::new(SessionManager::new(
+        Arc::clone(&store),
+        nostos_domain::Tier::Enterprise,
+    ));
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
 
-    let state = SyncRouterState::new(Arc::clone(&manager)).with_buffer(1024);
+    let state = SyncRouterState::new(
+        Arc::clone(&manager),
+        Arc::new(nostos_infra::AllowAnonymous::new()),
+    )
+    .with_buffer(1024);
     let app = axum::Router::new()
         .route("/sync", get(sync_handler))
         .with_state(state);

@@ -26,7 +26,7 @@ use tracing::trace;
 
 use nostos_domain::{ColumnValue, ReplicationEvent};
 
-use crate::ports::{DeliveryDecision, ReplicatorStream, SessionStore};
+use crate::ports::{DeliveryDecision, Metrics, ReplicatorStream, SessionStore};
 
 /// The result of fanning one event out to all matching sessions.
 ///
@@ -71,6 +71,9 @@ impl FanOutOutcome {
 pub struct FanOutService {
     store: Arc<dyn SessionStore>,
     push_interval: std::time::Duration,
+    /// Aggregate throughput counters, read by `/metrics`. `None` in unit tests
+    /// that assert on `FanOutOutcome` directly (counters would duplicate it).
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl FanOutService {
@@ -80,7 +83,17 @@ impl FanOutService {
         Self {
             store,
             push_interval: std::time::Duration::ZERO,
+            metrics: None,
         }
+    }
+
+    /// Attach an aggregate metrics handle updated on every fan-out dispatch.
+    /// The server constructs one `Arc<Metrics>` and shares it between this
+    /// service (writer) and the `/metrics` endpoint (reader).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Set the minimum interval between fan-out dispatches in `run`.
@@ -144,6 +157,13 @@ impl FanOutService {
             delivered,
             dropped,
         };
+        // Aggregate counters for /metrics (lock-free; no-op when no handle).
+        if let Some(m) = &self.metrics {
+            use std::sync::atomic::Ordering;
+            m.matched.fetch_add(outcome.matched, Ordering::Relaxed);
+            m.delivered.fetch_add(outcome.delivered, Ordering::Relaxed);
+            m.dropped.fetch_add(outcome.dropped, Ordering::Relaxed);
+        }
         trace!(?outcome, "fan_out complete");
         outcome
     }
@@ -153,6 +173,12 @@ impl FanOutService {
     ///
     /// `column_extractor` is called once per candidate per event — see
     /// [`Self::fan_out`].
+    ///
+    /// After each event is fanned out, the loop advances the replicator's
+    /// durable-progress cursor to the minimum acked LSN across live sessions
+    /// (ADR-0009: ack-driven slot advance). This is what prevents the source's
+    /// WAL-retention slot from advancing past data a client never confirmed —
+    /// the silent-data-loss-on-resume bug the per-event advance had.
     pub async fn run<F>(
         &self,
         replicator: &mut dyn ReplicatorStream,
@@ -164,6 +190,13 @@ impl FanOutService {
         let mut total = FanOutOutcome::default();
         while let Some(event) = replicator.next_event().await {
             total = total.merged(self.fan_out(&event, &column_extractor).await);
+            // Ack-driven progress: advance the slot only as far as the slowest
+            // live client has confirmed. None = no session has acked → don't
+            // advance (WAL retained; no data loss). The replicator no-ops if
+            // it has no real slot (FakeReplicator).
+            if let Some(safe) = self.store.min_acked_lsn().await {
+                replicator.advance_progress(safe).await;
+            }
             // Reactive-when-connected cadence: a zero interval (the default,
             // what the benchmark measures) is a no-op; a managed instance sets
             // ~1-2s to coalesce bursts server-side.
@@ -190,7 +223,6 @@ mod tests {
     /// A sink that records every delivered event and never drops.
     struct RecordingSink {
         events: Arc<Mutex<Vec<ReplicationEvent>>>,
-        open: Arc<Mutex<bool>>,
     }
 
     #[async_trait]
@@ -198,9 +230,6 @@ mod tests {
         async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
             self.events.lock().unwrap().push(event);
             DeliveryDecision::Delivered
-        }
-        fn is_open(&self) -> bool {
-            *self.open.lock().unwrap()
         }
     }
 
@@ -225,6 +254,26 @@ mod tests {
                 .or_default()
                 .push(cand);
         }
+        async fn try_add_below_cap(
+            &self,
+            session: SyncSession,
+            sink: Arc<dyn EventSink>,
+            cap: u64,
+        ) -> Result<SessionId, crate::ports::StoreRejection> {
+            let mut g = self.by_table.lock().unwrap();
+            let live: usize = g.values().map(Vec::len).sum();
+            if (live as u64) >= cap {
+                return Err(crate::ports::StoreRejection::CapExceeded { cap });
+            }
+            let id = session.id;
+            let table = session.predicate.table.clone();
+            g.entry(table).or_default().push(SessionCandidate {
+                id,
+                predicate: session.predicate,
+                sink,
+            });
+            Ok(id)
+        }
         async fn remove(&self, id: SessionId) {
             let mut g = self.by_table.lock().unwrap();
             for sessions in g.values_mut() {
@@ -241,6 +290,9 @@ mod tests {
         }
         async fn len(&self) -> usize {
             self.by_table.lock().unwrap().values().map(Vec::len).sum()
+        }
+        async fn min_acked_lsn(&self) -> Option<nostos_domain::Lsn> {
+            None
         }
     }
 
@@ -276,11 +328,9 @@ mod tests {
         // Two sessions on "tasks": one scoped to org_id=acme, one match-all.
         let sink_a = Arc::new(RecordingSink {
             events: Arc::new(Mutex::new(vec![])),
-            open: Arc::new(Mutex::new(true)),
         });
         let sink_b = Arc::new(RecordingSink {
             events: Arc::new(Mutex::new(vec![])),
-            open: Arc::new(Mutex::new(true)),
         });
         let events_a = sink_a.events.clone();
         let events_b = sink_b.events.clone();
@@ -313,7 +363,6 @@ mod tests {
         let store = make_store();
         let sink = Arc::new(RecordingSink {
             events: Arc::new(Mutex::new(vec![])),
-            open: Arc::new(Mutex::new(true)),
         });
         let events = sink.events.clone();
         store

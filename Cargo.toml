@@ -70,16 +70,11 @@ dashmap = "6.1"
 
 # --- infrastructure / async runtime ---
 tokio = { version = "1.39", features = ["full"] }
-tokio-util = "0.7"
-tokio-stream = "0.1"
 futures-util = "0.3"
 tokio-tungstenite = "0.23"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
-hyper = "1.4"
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
 
 # --- postgres logical replication (the core capability) ---
 # Used by the real PgReplicator (Phase 1). Week-1 benchmark uses a FakeReplicator
@@ -96,13 +91,10 @@ pgwire-replication = "0.3"
 
 # --- observability ---
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.23"
-metrics-exporter-prometheus = "0.15"
 
 # --- config / error / cli ---
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
-config = "0.14"
 
 # --- nostos-cloud (control plane: auth, billing, projects) ---
 # rusqlite = embedded sqlite for the cloud store (zero external deps to run).
@@ -119,13 +111,6 @@ time = { version = "0.3", features = ["serde", "serde-human-readable"] }
 tower-cookies = "0.10"
 # Random token generation (API keys, session ids, license keys).
 rand = "0.8"
-
-# --- dev / test / bench ---
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-proptest = "1.5"
-pretty_assertions = "1.4"
-dotenvy = "0.15"
-fastrand = "2.1"
 
 # internal crates (so members can reference each other via the workspace)
 nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }

@@ -21,16 +21,9 @@ nostos-domain = { workspace = true }
 nostos-application = { workspace = true }
 
 tokio = { workspace = true }
-tokio-util = { workspace = true }
-tokio-stream = { workspace = true }
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 axum = { workspace = true }
-tower = { workspace = true }
-tower-http = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true }
-http-body-util = { workspace = true }
 dashmap = { workspace = true }
 
 # pg-only (optional — enabled by the `pg` feature)
@@ -41,18 +34,21 @@ pgwire-replication = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
 bytes = { workspace = true }
-fastrand = { workspace = true }
+# JWT signature verification for /sync auth (HMAC-SHA256, no SDK — mirrors
+# nostos-cloud's Hs256Verifier; see ADR-0010 on why this isn't shared).
+hmac = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 serde_json = { workspace = true }
+# Used by the pg-feature e2e test to mint unique row titles.
+uuid = { workspace = true }
 
 [lints]
 workspace = true

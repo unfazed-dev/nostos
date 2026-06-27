@@ -48,24 +48,28 @@ impl SessionManager {
     /// Returns `Err(DeviceCapReached)` when accepting the session would exceed
     /// the licensed tier's concurrent-device ceiling. The transport should close
     /// the connection with a 429-style signal in that case.
+    ///
+    /// The cap check + insert are **atomic** (via `try_add_below_cap`) so
+    /// concurrent connects cannot overshoot the cap — closing the check-then-act
+    /// TOCTOU the separate `len()` + `add()` sequence had.
     pub async fn connect(
         &self,
         session: SyncSession,
         sink: Arc<dyn EventSink>,
     ) -> Result<SessionId, ConnectError> {
         let cap = self.tier.device_cap();
-        let live = self.store.len().await;
-        // Compare in u64 (widening usize is always safe). Enterprise's cap is
-        // u64::MAX, so the check is never true for the unlimited tier.
-        if live as u64 >= cap {
-            return Err(ConnectError::DeviceCapReached {
-                tier: self.tier,
-                cap,
-            });
-        }
-        let id = session.id;
-        self.store.add(session, sink).await;
-        Ok(id)
+        // Enterprise's cap is u64::MAX, so try_add_below_cap never rejects it.
+        self.store
+            .try_add_below_cap(session, sink, cap)
+            .await
+            .map_err(|rejection| match rejection {
+                crate::ports::StoreRejection::CapExceeded { cap } => {
+                    ConnectError::DeviceCapReached {
+                        tier: self.tier,
+                        cap,
+                    }
+                }
+            })
     }
 
     /// Unregister a session. Called by the transport when the connection closes.
@@ -77,18 +81,12 @@ impl SessionManager {
     pub async fn session_count(&self) -> usize {
         self.store.len().await
     }
-
-    /// The licensed tier this manager enforces.
-    #[must_use]
-    pub fn tier(&self) -> nostos_domain::Tier {
-        self.tier
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{DeliveryDecision, SessionCandidate};
+    use crate::ports::{DeliveryDecision, SessionCandidate, StoreRejection};
     use async_trait::async_trait;
     use nostos_domain::{Predicate, ReplicationEvent};
     use std::collections::HashMap;
@@ -99,9 +97,6 @@ mod tests {
     impl EventSink for NoopSink {
         async fn deliver(&self, _e: ReplicationEvent) -> DeliveryDecision {
             DeliveryDecision::Delivered
-        }
-        fn is_open(&self) -> bool {
-            true
         }
     }
 
@@ -118,6 +113,29 @@ mod tests {
                 },
             );
         }
+        // std::sync::Mutex makes check-and-insert naturally atomic — one lock
+        // acquire spans both the count and the insert.
+        async fn try_add_below_cap(
+            &self,
+            session: SyncSession,
+            sink: Arc<dyn EventSink>,
+            cap: u64,
+        ) -> Result<SessionId, StoreRejection> {
+            let mut g = self.0.lock().unwrap();
+            if (g.len() as u64) >= cap {
+                return Err(StoreRejection::CapExceeded { cap });
+            }
+            let id = session.id;
+            g.insert(
+                id,
+                SessionCandidate {
+                    id,
+                    predicate: session.predicate,
+                    sink,
+                },
+            );
+            Ok(id)
+        }
         async fn remove(&self, id: SessionId) {
             self.0.lock().unwrap().remove(&id);
         }
@@ -126,6 +144,12 @@ mod tests {
         }
         async fn len(&self) -> usize {
             self.0.lock().unwrap().len()
+        }
+        async fn min_acked_lsn(&self) -> Option<nostos_domain::Lsn> {
+            // Test double: no ack tracking. Returning None means "don't advance
+            // the slot" — safe (retains WAL) and correct for unit tests that
+            // never model client acks.
+            None
         }
     }
 
