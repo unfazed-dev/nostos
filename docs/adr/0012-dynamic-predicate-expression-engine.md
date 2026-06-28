@@ -138,6 +138,33 @@ Slices 1+2 prove the *correctness* (the tree routes and matches real rows); the
 parameter-set-digest indexing that makes the *scale* claim true is a separate,
 deferred slice.
 
+### Measured baseline (2026-06-27) — the index is data-justified, not premature
+
+`crates/nostos-application/tests/fanout_scale.rs` drives `FanOutService::fan_out`
+against 10,000 concurrently-registered predicate-bearing sessions (the exact
+workload the kill criterion names) in two regimes:
+
+- **Eval-only** (a row no predicate matches → empty JoinSet, isolating the
+  predicate-tree-evaluation cost): **≈ 80-150 events/sec through 10k predicates**
+  = ~0.8-1.5M predicate tree-evals/sec, ≈ 7-13 µs/event.
+- **Realistic matching** (a row matching thousands of sessions): **≈ 30-55
+  events/sec**, dominated by the `JoinSet` delivery dispatch (one spawned task
+  per match) — a separate concern from indexing.
+
+**What this resolved:** an architecture advisor initially flagged the
+param-set-digest index as "textbook premature optimization — zero production
+load." The baseline disproved that: ~80-150 events/sec through 10k predicates
+is a real, measured cost (the `extract` closure re-parses the row payload per
+leaf column per session). The index is therefore the **next increment, justified
+by data** — it should cut the eval-only cost by short-circuiting the per-session
+parse + tree walk when the predicate's equality filters cover the row's params.
+The follow-up benchmark will measure the delta.
+
+The test is `#[ignore]`'d (~30s) and run explicitly with `--ignored` so it
+doesn't slow the regular `cargo test` suite; its floor (30 events/sec) guards
+against regressions below the *current un-indexed* state, not against the
+optimization gap itself.
+
 ## Alternatives considered
 
 - **Ship a stub tree (Phase 0):** rejected — violates ponytail's no-scaffolding

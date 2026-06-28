@@ -37,7 +37,7 @@
 **Headline:** A client subscribes with a live predicate and scrolls forever — on Flutter AND Web.
 
 **Deliverables:**
-- Predicate expression engine (boolean tree of equalities/ranges over auth-scoped params). *(ADR-0012 — moat complete: boolean tree `And|Or|Not` + typed comparison `Lt|Gt|Le|Ge` over `Number/Float/Bool/Text`, proven against real PG rows via the JSON column extractor. Param-set-digest indexing + safe-SQL-subset compiler still deferred.)*
+- Predicate expression engine (boolean tree of equalities/ranges over auth-scoped params). *(ADR-0012 — moat complete: boolean tree `And|Or|Not` + typed comparison `Lt|Gt|Le|Ge` over `Number/Float/Bool/Text`, proven against real PG rows via the JSON column extractor. **Baseline measured:** ~80-150 eval-only events/sec through 10k predicates (test `fanout_scale`); the param-set-digest index is the next increment, **justified by the baseline** rather than deferred-as-promise.)*
 - `nostos-core` WebAssembly build (`wasm-bindgen` + OPFS storage). *(✅ in-memory apply bridge shipped ADR-0015; OPFS persistence deferred — Worker-only by spec.)*
 - Flutter SDK via `flutter_rust_bridge` (first-class `Stream`). *(ADR-0015 — deferred.)*
 - The first end-to-end demo: "point at Supabase Postgres → offline reads on Flutter + Web." *(gates on OPFS + transport + Flutter.)*
