@@ -172,6 +172,36 @@ doesn't slow the regular `cargo test` suite; its floor (50 events/sec on the
 parse-once path) guards against regressions below the *current un-indexed*
 production-shape state, not against the optimization gap itself.
 
+### Index experiment (2026-06-27) — built, measured, REVERTED
+
+The baseline above justified a param-set-digest / inverted-equality index as
+"the next increment." An `PredicateEqualityIndex` was built (correctness-verified
+by a randomized fast-match ⊆ true-match equivalence test, 8 unit tests) and
+wired into `FanOutService::fan_out`: pure-equality predicates (the production
+shape) fast-match via an O(1) lookup; the rest fall back to full eval.
+
+**Measured result — the index was a net 4-8× REGRESSION, and was reverted:**
+- Mixed-predicate workload (the baseline regime): **39 evt/s** (was 150-170) —
+  the predicates' `Ge` leaf makes them all non-indexable, so the index added
+  build cost with zero fast-match benefit.
+- Pure-equality workload (the index's *target*): **18 evt/s** (was 150-170) —
+  **8× slower** even on its best case.
+
+**Root cause:** the index was rebuilt from the candidate set on **every**
+`fan_out` call (O(candidates) per event), which swamped the fast-match savings.
+Caching the index across events is the obvious fix, but the session set churns
+(connects/disconnects), making invalidation complex — and the correctness path
+still full-evals every non-indexable predicate. The complexity isn't worth it at
+this scale.
+
+**The real conclusion:** ~150-170 evt/s through 10k predicates is ~1.5M
+predicate-evals/sec — already **orders of magnitude above** the PowerSync 2-4k
+ops/sec ceiling this moat targets. The eval loop is structurally the cost, but
+it is **not the binding constraint**. The index solves a problem that doesn't
+bind. Recorded here so the experiment isn't repeated: a per-event index rebuild
+regresses; a cached index is deferred until a real production load shows the
+eval loop binding (not before).
+
 ## Alternatives considered
 
 - **Ship a stub tree (Phase 0):** rejected — violates ponytail's no-scaffolding
