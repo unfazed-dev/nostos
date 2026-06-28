@@ -1,7 +1,7 @@
 # ADR-0012: Dynamic predicate expression engine (Front 1 — the marketed moat)
 
-- **Status:** Moat complete — slices 1 & 2 shipped (boolean tree + typed comparison over real decoded values). Parameter-set-digest indexing and the safe-SQL-subset compiler remain deferred.
-- **Date:** 2026-06-27 (sketch); slice 1 landed 2026-06-27; slice 2 landed 2026-06-27.
+- **Status:** Moat complete — slices 1 & 2 (boolean tree + typed comparison) + the safe-SQL-subset compiler shipped. Only the (data-rejected) param-set-digest indexing and the wire/subscribe integration remain.
+- **Date:** 2026-06-27 (sketch); slices 1+2 landed 2026-06-27; compiler landed 2026-06-27.
 
 ## Context
 
@@ -84,12 +84,16 @@ PG rows via the JSON path.
 
 ### Still deferred (separate slices)
 
-- **Parameter-set-digest indexing:** the table index already prunes the
-  candidate-session set to O(sessions-on-this-table). The digest makes the
-  constant factor smaller, not the architecture different.
-- **Safe-SQL-subset compiler** at the subscribe wire boundary (the wire message
-  still carries `FilterClause{column, value:String}`; typed predicates are
-  constructed server-side for now).
+- **Wire/subscribe integration of the compiler:** `parse_predicate_expr`
+  (`crates/nostos-domain/src/predicate_compile.rs`) now turns a client string
+  like `status = open AND priority >= 3` into the `PredicateExpr` tree — but the
+  subscribe wire message still carries `FilterClause{column, value:String}`.
+  Wiring the compiler into the subscribe path (so a client sends one predicate
+  string instead of a filter array) is a follow-up; it's a server-transport
+  change, deferred here to avoid premature wire-format lock-in.
+- **Parameter-set-digest indexing:** built, measured a 4-8× regression, and
+  reverted (see "Index experiment" below). The eval loop is structurally the
+  cost but not the binding constraint at this scale.
 - **Three-valued (NULL) logic** for the `!Eq{absent}` edge (see below).
 - `Timestamp` typed value + `In`/`Like`/`Between` leaves — none needed for
   "scroll forever"; add when a real query demands it.
