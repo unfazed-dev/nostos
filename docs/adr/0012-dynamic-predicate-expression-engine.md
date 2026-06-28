@@ -138,32 +138,39 @@ Slices 1+2 prove the *correctness* (the tree routes and matches real rows); the
 parameter-set-digest indexing that makes the *scale* claim true is a separate,
 deferred slice.
 
-### Measured baseline (2026-06-27) — the index is data-justified, not premature
+### Measured baseline (2026-06-27) — the index is data-justified, for the right reason
 
 `crates/nostos-application/tests/fanout_scale.rs` drives `FanOutService::fan_out`
 against 10,000 concurrently-registered predicate-bearing sessions (the exact
-workload the kill criterion names) in two regimes:
+workload the kill criterion names). It measures **three** regimes — two with the
+production-shape extractor, one with a naive extractor as a contrast:
 
-- **Eval-only** (a row no predicate matches → empty JoinSet, isolating the
-  predicate-tree-evaluation cost): **≈ 80-150 events/sec through 10k predicates**
-  = ~0.8-1.5M predicate tree-evals/sec, ≈ 7-13 µs/event.
-- **Realistic matching** (a row matching thousands of sessions): **≈ 30-55
+- **Parse-once eval-only** (production-shape: extract parses the row once, like
+  `extract_json_column`; a row no predicate matches → empty JoinSet): **≈ 150-170
+  events/sec through 10k predicates** = ~1.5-1.7M predicate tree-evals/sec,
+  ≈ 6-7 µs/event. *This is the number the index decision turns on.*
+- **Parse-once realistic** (matching thousands of sessions): **≈ 40-55
   events/sec**, dominated by the `JoinSet` delivery dispatch (one spawned task
   per match) — a separate concern from indexing.
+- **Naive re-parse eval-only** (a careless extractor that re-parses the payload
+  on every column lookup): **≈ 100 events/sec** — only **~1.5× slower** than
+  parse-once, kept as a contrast to document why parse-once matters.
 
-**What this resolved:** an architecture advisor initially flagged the
-param-set-digest index as "textbook premature optimization — zero production
-load." The baseline disproved that: ~80-150 events/sec through 10k predicates
-is a real, measured cost (the `extract` closure re-parses the row payload per
-leaf column per session). The index is therefore the **next increment, justified
-by data** — it should cut the eval-only cost by short-circuiting the per-session
-parse + tree walk when the predicate's equality filters cover the row's params.
-The follow-up benchmark will measure the delta.
+**What this resolved (read-the-damn-docs correction):** a first baseline pass
+hypothesized the cost was an extractor artifact (re-parsing per leaf) and that
+parse-once would close the gap. **It did not** — parse-once is only 1.5× faster.
+The structural bottleneck is the **per-session predicate-tree evaluation loop**
+itself (10k recursive bool evals per event), not the payload parse. The
+param-set-digest index is therefore genuinely justified: it short-circuits that
+loop for predicates whose equality filters cover the row's params, dropping them
+to an O(1) digest lookup instead of a full tree walk. This is the next increment,
+justified against the production-shape (~150-170 evt/s) number — not the naive
+one.
 
-The test is `#[ignore]`'d (~30s) and run explicitly with `--ignored` so it
-doesn't slow the regular `cargo test` suite; its floor (30 events/sec) guards
-against regressions below the *current un-indexed* state, not against the
-optimization gap itself.
+The test is `#[ignore]`'d (~35s) and run explicitly with `--ignored` so it
+doesn't slow the regular `cargo test` suite; its floor (50 events/sec on the
+parse-once path) guards against regressions below the *current un-indexed*
+production-shape state, not against the optimization gap itself.
 
 ## Alternatives considered
 
