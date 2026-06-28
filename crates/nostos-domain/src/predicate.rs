@@ -16,10 +16,13 @@
 //!   comparison leaves, on the existing text-only [`ColumnValue`]. The matcher
 //!   is fully decoupled from the payload codec via the `extract` closure, so it
 //!   is testable *without* the pgoutput column decoder.
-//! - **Deferred:** typed values (`Number`/`Float`/`Bool`) and ordered
-//!   comparisons (`Lt`/`Gt`/`Le`/`Ge`) — these genuinely require the column
-//!   decoder to prove real-world correctness. They extend this tree
-//!   additively; the recursion and combinator API below are the foundation.
+//! - **Slice 2 (shipped):** typed values (`Number`/`Float`/`Bool`) and ordered
+//!   comparisons (`Lt`/`Gt`/`Le`/`Ge`). The moat is now complete: ranges over
+//!   real decoded values, proven against real PG rows via the JSON payload
+//!   extractor in `nostos-infra`.
+//! - **Deferred:** parameter-set-digest indexing (the table index already prunes
+//!   to O(sessions-on-table)), and the safe-SQL-subset compiler at the subscribe
+//!   wire boundary.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +30,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Carries the column name + the value to compare against. The operator (`=` vs
 /// `!=`) is selected by which [`PredicateExpr`] variant wraps it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PredicateFilter {
     pub column: String,
     pub value: ColumnValue,
@@ -35,12 +38,16 @@ pub struct PredicateFilter {
 
 /// A value that can appear in a predicate filter or a row tuple.
 ///
-/// Slice 1 is text-only (`Text` + the `Any` wildcard). Typed values arrive with
-/// the pgoutput column decoder (ADR-0012 follow-up) — adding variants here is
-/// trivially additive.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Slice 2 adds the typed variants `Number`/`Float`/`Bool`. Rows decoded from
+/// the wire/payload typically arrive as [`ColumnValue::Text`] (the JSON payload
+/// quotes every value); ordered leaves (`Lt`/`Gt`/...) coerce a `Text` row value
+/// into the filter's type at match time, failing (no match) when it won't parse.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ColumnValue {
     Text(String),
+    Number(i64),
+    Float(f64),
+    Bool(bool),
     /// Sentinel for "any value" — used as a wildcard in filters.
     Any,
 }
@@ -51,18 +58,45 @@ impl ColumnValue {
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text(s.into())
     }
+
+    #[inline]
+    #[must_use]
+    pub fn number(n: i64) -> Self {
+        Self::Number(n)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn float(n: f64) -> Self {
+        Self::Float(n)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn boolean(b: bool) -> Self {
+        Self::Bool(b)
+    }
 }
 
 /// The boolean expression tree a [`Predicate`] evaluates (ADR-0012 slice 1).
 ///
-/// Leaves are comparisons (`Eq`/`Ne`) over a [`PredicateFilter`] (column +
-/// value). Combinators are `And`/`Or`/`Not`. `Any` is the match-all leaf — the
-/// root of a "give me everything on this table" subscription.
+/// Leaves are comparisons (`Eq`/`Ne`/`Lt`/`Gt`/`Le`/`Ge`) over a
+/// [`PredicateFilter`] (column + value). Combinators are `And`/`Or`/`Not`.
+/// `Any` is the match-all leaf — the root of a "give me everything on this
+/// table" subscription.
 ///
 /// The matcher takes a caller-supplied `extract` closure that lifts a column
 /// value out of the row's tuple image, keeping the domain decoupled from any
 /// specific payload encoding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Ordered comparison & type coercion
+///
+/// Ordered leaves (`Lt`/`Gt`/`Le`/`Ge`) are **typed on the filter side**. A row
+/// value arriving as [`ColumnValue::Text`] (the usual case — the JSON payload
+/// quotes every value) is parsed into the filter's type at match time; if it
+/// won't parse, the leaf does not match (defensive — never over-deliver). See
+/// [`PredicateExpr::matches`] and [`cmp_op`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PredicateExpr {
     /// Match-all leaf. The root of an unfiltered subscription.
     Any,
@@ -70,6 +104,14 @@ pub enum PredicateExpr {
     Eq(PredicateFilter),
     /// `column != value`.
     Ne(PredicateFilter),
+    /// `column < value` (typed — the row value is coerced to the filter type).
+    Lt(PredicateFilter),
+    /// `column > value`.
+    Gt(PredicateFilter),
+    /// `column <= value`.
+    Le(PredicateFilter),
+    /// `column >= value`.
+    Ge(PredicateFilter),
     /// All children must match (logical AND).
     And(Vec<PredicateExpr>),
     /// At least one child must match (logical OR).
@@ -103,6 +145,46 @@ impl PredicateExpr {
     #[must_use]
     pub fn ne(column: impl Into<String>, value: ColumnValue) -> Self {
         Self::Ne(PredicateFilter {
+            column: column.into(),
+            value,
+        })
+    }
+
+    /// A `<` leaf (ordered; row value coerced to the filter's type).
+    #[inline]
+    #[must_use]
+    pub fn lt(column: impl Into<String>, value: ColumnValue) -> Self {
+        Self::Lt(PredicateFilter {
+            column: column.into(),
+            value,
+        })
+    }
+
+    /// A `>` leaf (ordered; row value coerced to the filter's type).
+    #[inline]
+    #[must_use]
+    pub fn gt(column: impl Into<String>, value: ColumnValue) -> Self {
+        Self::Gt(PredicateFilter {
+            column: column.into(),
+            value,
+        })
+    }
+
+    /// A `<=` leaf (ordered; row value coerced to the filter's type).
+    #[inline]
+    #[must_use]
+    pub fn le(column: impl Into<String>, value: ColumnValue) -> Self {
+        Self::Le(PredicateFilter {
+            column: column.into(),
+            value,
+        })
+    }
+
+    /// A `>=` leaf (ordered; row value coerced to the filter's type).
+    #[inline]
+    #[must_use]
+    pub fn ge(column: impl Into<String>, value: ColumnValue) -> Self {
+        Self::Ge(PredicateFilter {
             column: column.into(),
             value,
         })
@@ -158,6 +240,10 @@ impl PredicateExpr {
             Self::Any => true,
             Self::Eq(f) => matches_filter_eq(f, extract),
             Self::Ne(f) => matches_filter_ne(f, extract),
+            Self::Lt(f) => matches_ordered(f, extract, Ordering::is_lt),
+            Self::Gt(f) => matches_ordered(f, extract, Ordering::is_gt),
+            Self::Le(f) => matches_ordered(f, extract, Ordering::is_le),
+            Self::Ge(f) => matches_ordered(f, extract, Ordering::is_ge),
             Self::And(parts) => parts.iter().all(|p| p.matches_dyn(extract)),
             Self::Or(parts) => parts.iter().any(|p| p.matches_dyn(extract)),
             Self::Not(inner) => !inner.matches_dyn(extract),
@@ -181,7 +267,7 @@ impl std::ops::Not for PredicateExpr {
 /// `table` indexes the predicate in the `SessionStore` so the router can prune
 /// the candidate-session set to O(sessions-on-this-table) before evaluating the
 /// expression tree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Predicate {
     pub table: String,
     /// The boolean expression evaluated against each row on `table`. Empty
@@ -217,6 +303,47 @@ impl Predicate {
         Self {
             table: table.into(),
             expr: PredicateExpr::ne(column, value),
+        }
+    }
+
+    /// A predicate matching `table` where `column < value` (ordered; the row
+    /// value is coerced to the filter's type — see [`PredicateExpr::lt`]).
+    #[inline]
+    #[must_use]
+    pub fn lt(table: impl Into<String>, column: impl Into<String>, value: ColumnValue) -> Self {
+        Self {
+            table: table.into(),
+            expr: PredicateExpr::lt(column, value),
+        }
+    }
+
+    /// A predicate matching `table` where `column > value` (ordered).
+    #[inline]
+    #[must_use]
+    pub fn gt(table: impl Into<String>, column: impl Into<String>, value: ColumnValue) -> Self {
+        Self {
+            table: table.into(),
+            expr: PredicateExpr::gt(column, value),
+        }
+    }
+
+    /// A predicate matching `table` where `column <= value` (ordered).
+    #[inline]
+    #[must_use]
+    pub fn le(table: impl Into<String>, column: impl Into<String>, value: ColumnValue) -> Self {
+        Self {
+            table: table.into(),
+            expr: PredicateExpr::le(column, value),
+        }
+    }
+
+    /// A predicate matching `table` where `column >= value` (ordered).
+    #[inline]
+    #[must_use]
+    pub fn ge(table: impl Into<String>, column: impl Into<String>, value: ColumnValue) -> Self {
+        Self {
+            table: table.into(),
+            expr: PredicateExpr::ge(column, value),
         }
     }
 
@@ -295,14 +422,144 @@ fn matches_filter_ne(f: &PredicateFilter, extract: &dyn Fn(&str) -> Option<Colum
     }
 }
 
-/// Compare a filter value against a row value. `Any` (as a filter) matches
-/// everything; `Any` as an *actual* row value never arises (only filters use
-/// it), so any other combination is a non-match.
+/// Compare a filter value against a row value for equality/inequality leaves.
+///
+/// `Any` (as a filter) matches everything. Like types compare by value. A typed
+/// filter (`Number`/`Float`/`Bool`) coerces a `Text` row the same way the
+/// ordered leaves do, so `eq(c, Bool(true))` matches a row `Text("true")`. A
+/// coercion that fails (unparseable text, or a cross-type numeric divide) is a
+/// non-match.
+//
+// Float equality is intentional: the row value is parsed from a deterministic
+// text form (e.g. "1.5" → 1.5) and compared against an exact filter value — no
+// arithmetic accumulation, so an epsilon margin would be incorrect (1.5 must
+// equal 1.5 exactly). The `float_cmp` lint assumes accumulated error, which
+// does not apply here.
+#[allow(clippy::float_cmp)]
 fn matches_value(filter: &ColumnValue, actual: &ColumnValue) -> bool {
     match (filter, actual) {
         (ColumnValue::Any, _) => true,
         (ColumnValue::Text(a), ColumnValue::Text(b)) => a == b,
+        (ColumnValue::Number(a), ColumnValue::Number(b)) => a == b,
+        (ColumnValue::Bool(a), ColumnValue::Bool(b)) => a == b,
+        // Float equality on coerced/exact float values. f64 == is the honest
+        // semantics here: a row Text("1.5") parses to exactly 1.5 and equals a
+        // Float(1.5) filter. NaN filters never match (NaN != NaN).
+        (ColumnValue::Float(a), ColumnValue::Float(b)) => a == b,
+        // Coerce a Text row value into the filter's type, then compare.
+        (ColumnValue::Number(a), ColumnValue::Text(s)) => s.parse::<i64>().ok().as_ref() == Some(a),
+        (ColumnValue::Bool(a), ColumnValue::Text(s)) => parse_bool(s).as_ref() == Some(a),
+        (ColumnValue::Float(a), ColumnValue::Text(s)) => {
+            s.parse::<f64>().ok().is_some_and(|b| a == &b)
+        }
         _ => false,
+    }
+}
+
+// --- ordered leaves (Lt/Gt/Le/Ge) -----------------------------------------
+
+/// The three-way ordering of two typed values, or `None` when they are not
+/// comparable (different types, or a row value that won't coerce to the filter
+/// type). `None` ⇒ the ordered leaf does not match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+impl Ordering {
+    #[inline]
+    fn is_lt(self) -> bool {
+        matches!(self, Self::Less)
+    }
+    #[inline]
+    fn is_gt(self) -> bool {
+        matches!(self, Self::Greater)
+    }
+    #[inline]
+    fn is_le(self) -> bool {
+        matches!(self, Self::Less | Self::Equal)
+    }
+    #[inline]
+    fn is_ge(self) -> bool {
+        matches!(self, Self::Greater | Self::Equal)
+    }
+}
+
+/// Evaluate an ordered leaf: extract the row value, coerce it to the filter's
+/// type, compare, and apply the predicate (Lt/Gt/Le/Ge). Absent column or
+/// non-coercible value ⇒ `false` (defensive — never over-deliver).
+fn matches_ordered(
+    f: &PredicateFilter,
+    extract: &dyn Fn(&str) -> Option<ColumnValue>,
+    keeps: impl Fn(Ordering) -> bool,
+) -> bool {
+    let Some(actual) = extract(&f.column) else {
+        return false;
+    };
+    match cmp_op(&f.value, &actual) {
+        Some(o) => keeps(o),
+        None => false,
+    }
+}
+
+/// Typed comparison of a filter value against a row value for ordered leaves.
+/// Typed comparison for ordered leaves, returning the **row value's position
+/// relative to the filter**: `Less` ⇔ row < filter (so an `Lt` leaf matches),
+/// `Greater` ⇔ row > filter (so `Gt` matches), `Equal` ⇔ row == filter (`Le`/
+/// `Ge` match).
+///
+/// The row value is coerced to the filter's type: a `Text("5")` row is parsed
+/// to `Number`/`Float`/`Bool` to match the filter's variant. Cross-type
+/// mismatch (filter `Number`, row is typed `Float`, etc.) or a parse failure
+/// returns `None` (the leaf does not match — never over-deliver).
+///
+/// Same-type comparisons are total: `Number` vs `Number` is integer compare,
+/// `Float` vs `Float` uses `partial_cmp` (NaN ⇒ `None`), `Text` vs `Text` is
+/// lexicographic, `Bool` orders `false < true`.
+//
+// Float comparison is intentional (see `matches_value` above): values come from
+// deterministic text parses, so `partial_cmp` is exact — an epsilon margin would
+// be wrong.
+#[allow(clippy::float_cmp)]
+fn cmp_op(filter: &ColumnValue, actual: &ColumnValue) -> Option<Ordering> {
+    use std::cmp::Ordering as StdOrd;
+    // Compute actual.cmp(filter) — the row value relative to the filter — so
+    // the leaf predicates (is_lt/is_gt/...) read naturally.
+    let o: StdOrd = match (filter, actual) {
+        // Like-with-like (filter already typed, row already typed).
+        (ColumnValue::Number(b), ColumnValue::Number(a)) => a.cmp(b),
+        (ColumnValue::Float(b), ColumnValue::Float(a)) => a.partial_cmp(b)?,
+        (ColumnValue::Bool(b), ColumnValue::Bool(a)) => a.cmp(b),
+        (ColumnValue::Text(b), ColumnValue::Text(a)) => a.cmp(b),
+        // Coerce a Text row value into the filter's type, then compare
+        // row-vs-filter.
+        (ColumnValue::Number(b), ColumnValue::Text(s)) => s.parse::<i64>().ok()?.cmp(b),
+        (ColumnValue::Float(b), ColumnValue::Text(s)) => s.parse::<f64>().ok()?.partial_cmp(b)?,
+        (ColumnValue::Bool(b), ColumnValue::Text(s)) => parse_bool(s)?.cmp(b),
+        _ => return None,
+    };
+    Some(to_ordering(o))
+}
+
+/// Map `std::cmp::Ordering` to our [`Ordering`] (kept private so the public API
+/// exposes only the four `is_lt`/`is_gt`/... predicates).
+#[inline]
+fn to_ordering(o: std::cmp::Ordering) -> Ordering {
+    match o {
+        std::cmp::Ordering::Less => Ordering::Less,
+        std::cmp::Ordering::Equal => Ordering::Equal,
+        std::cmp::Ordering::Greater => Ordering::Greater,
+    }
+}
+
+/// Parse a JSON/text bool. Accepts `true`/`false` (case-insensitive).
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -494,5 +751,117 @@ mod tests {
         let json = serde_json::to_string(&tree).expect("serialize");
         let back: PredicateExpr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(tree, back);
+    }
+
+    // ---- slice 2: typed comparison (Lt/Gt/Le/Ge) ----
+
+    #[test]
+    fn lt_number_with_text_row_coercion() {
+        // The realistic case: the JSON payload carries every value as a string,
+        // so the row value is Text("5"). The filter is typed; the row coerces.
+        let p = Predicate::lt("tasks", "priority", ColumnValue::number(10));
+        assert!(p.matches(row_view(&[("priority", ColumnValue::text("5"))])));
+        assert!(!p.matches(row_view(&[("priority", ColumnValue::text("10"))])));
+        assert!(!p.matches(row_view(&[("priority", ColumnValue::text("20"))])));
+    }
+
+    #[test]
+    fn gt_ge_le_boundaries() {
+        let gt = Predicate::gt("t", "n", ColumnValue::number(10));
+        let ge = Predicate::ge("t", "n", ColumnValue::number(10));
+        let le = Predicate::le("t", "n", ColumnValue::number(10));
+        // row = 10 → gt fails, ge passes, le passes.
+        assert!(!gt.matches(row_view(&[("n", ColumnValue::text("10"))])));
+        assert!(ge.matches(row_view(&[("n", ColumnValue::text("10"))])));
+        assert!(le.matches(row_view(&[("n", ColumnValue::text("10"))])));
+        // row = 11 → gt/ge pass, le fails.
+        assert!(gt.matches(row_view(&[("n", ColumnValue::text("11"))])));
+        assert!(ge.matches(row_view(&[("n", ColumnValue::text("11"))])));
+        assert!(!le.matches(row_view(&[("n", ColumnValue::text("11"))])));
+    }
+
+    #[test]
+    fn float_comparison() {
+        let p = Predicate::gt("t", "score", ColumnValue::float(1.5));
+        assert!(p.matches(row_view(&[("score", ColumnValue::text("2.7"))])));
+        assert!(!p.matches(row_view(&[("score", ColumnValue::text("1.5"))])));
+        assert!(!p.matches(row_view(&[("score", ColumnValue::text("0.9"))])));
+    }
+
+    #[test]
+    fn bool_orders_false_before_true() {
+        // Bool ordering: false < true. A filter `>= true` only matches true.
+        let p = Predicate::ge("t", "active", ColumnValue::boolean(true));
+        assert!(p.matches(row_view(&[("active", ColumnValue::text("true"))])));
+        assert!(!p.matches(row_view(&[("active", ColumnValue::text("false"))])));
+        // Accept 0/1 as bool spellings too.
+        assert!(p.matches(row_view(&[("active", ColumnValue::text("1"))])));
+        assert!(!p.matches(row_view(&[("active", ColumnValue::text("0"))])));
+    }
+
+    #[test]
+    fn typed_leaf_unparseable_row_does_not_match() {
+        // A text value that won't parse to a number ⇒ defensive no-match.
+        let p = Predicate::lt("t", "n", ColumnValue::number(10));
+        assert!(!p.matches(row_view(&[("n", ColumnValue::text("abc"))])));
+    }
+
+    #[test]
+    fn typed_leaf_missing_column_does_not_match() {
+        let p = Predicate::gt("t", "n", ColumnValue::number(0));
+        assert!(!p.matches(|_| None));
+    }
+
+    #[test]
+    fn cross_type_mismatch_does_not_match() {
+        // Filter is Number, row arrives as an already-typed Float — different
+        // numeric kind ⇒ None ⇒ no match (don't silently coerce across the
+        // int/float divide; the filter declares its expected type).
+        let p = Predicate::lt("t", "n", ColumnValue::number(10));
+        assert!(!p.matches(row_view(&[("n", ColumnValue::float(5.0))])));
+    }
+
+    #[test]
+    fn typed_value_roundtrips_through_serde() {
+        let tree = PredicateExpr::And(vec![
+            PredicateExpr::lt("n", ColumnValue::number(100)),
+            PredicateExpr::gt("score", ColumnValue::float(1.5)),
+            PredicateExpr::ge("active", ColumnValue::boolean(true)),
+        ]);
+        let json = serde_json::to_string(&tree).expect("serialize");
+        let back: PredicateExpr = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(tree, back);
+    }
+
+    #[test]
+    fn ordered_inside_or_and_not() {
+        // (priority > 5 AND active = true) OR NOT (score < 1.0)
+        let tree = PredicateExpr::Or(vec![
+            PredicateExpr::And(vec![
+                PredicateExpr::gt("priority", ColumnValue::number(5)),
+                PredicateExpr::eq("active", ColumnValue::boolean(true)),
+            ]),
+            !PredicateExpr::lt("score", ColumnValue::float(1.0)),
+        ]);
+        // priority=9, active=true → first branch matches.
+        assert!(tree.matches(row_view(&[
+            ("priority", ColumnValue::text("9")),
+            ("active", ColumnValue::text("true")),
+            ("score", ColumnValue::text("0.5")),
+        ])));
+        // priority=1, active=false, score=2.0 → first branch fails; second
+        // branch: NOT(score<1.0) = NOT(false) = true → matches.
+        assert!(tree.matches(row_view(&[
+            ("priority", ColumnValue::text("1")),
+            ("active", ColumnValue::text("false")),
+            ("score", ColumnValue::text("2.0")),
+        ])));
+        // priority=1, active=false, score=0.5 → first fails; second: NOT(true)
+        // = false → no match.
+        assert!(!tree.matches(row_view(&[
+            ("priority", ColumnValue::text("1")),
+            ("active", ColumnValue::text("false")),
+            ("score", ColumnValue::text("0.5")),
+        ])));
     }
 }

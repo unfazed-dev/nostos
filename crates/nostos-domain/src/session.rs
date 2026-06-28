@@ -42,7 +42,7 @@ impl std::fmt::Display for SessionId {
 /// `principal` is `None` only for the legacy/unauthenticated path; once
 /// `SyncAuth` is wired every session carries the resolved identity so the
 /// transport can inject the tenant filter (ADR-0011).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyncSession {
     pub id: SessionId,
     pub predicate: Predicate,

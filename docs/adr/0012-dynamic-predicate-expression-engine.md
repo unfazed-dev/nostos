@@ -1,7 +1,7 @@
 # ADR-0012: Dynamic predicate expression engine (Front 1 — the marketed moat)
 
-- **Status:** Slice 1 shipped (Phase 2 — boolean tree over text-only values); typed comparison deferred pending the pgoutput column decoder.
-- **Date:** 2026-06-27 (sketch); slice 1 landed 2026-06-27.
+- **Status:** Moat complete — slices 1 & 2 shipped (boolean tree + typed comparison over real decoded values). Parameter-set-digest indexing and the safe-SQL-subset compiler remain deferred.
+- **Date:** 2026-06-27 (sketch); slice 1 landed 2026-06-27; slice 2 landed 2026-06-27.
 
 ## Context
 
@@ -48,21 +48,51 @@ PredicateExpr ::= Any
   transport) was rewritten onto the new combinators — ADR-0011's tenant injection
   is preserved exactly.
 
-### Slice 2 — deferred (typed comparison)
+### Slice 2 — shipped (typed comparison + JSON extractor)
 
-`ColumnValue` gains `Number(i64)`, `Float(f64)`, `Bool`, `Timestamp`, and the
-ordered leaves `Lt | Gt | Le | Ge`. **Why deferred:** ordered comparison
-(`a < b`) is meaningless unless you can read real typed values out of the row —
-and the payload is still opaque `Bytes` (no column decoder). Shipping typed
-operators testable-only-against-synthetic data would inflate the diff with code
-that can't prove its real-world correctness. The decoder is the true gate;
-once it exists, slice 2 extends the tree *additively* (the recursion and
-combinator API below are the foundation).
+A re-examination of the codebase overturned the "no column decoder" premise that
+deferred this slice: `PgReplicator::tuple_to_json_payload` *already* decodes
+every real Postgres row into a JSON object `{"col":"val",...}` — every value is
+a JSON **string**, regardless of SQL type. So the decoder existed all along; the
+missing piece was just a JSON parser wired to the `extract` seam. Slice 2 ships:
 
-Also deferred (separate slices, not part of the moat's structural foundation):
-the parameter-set-digest indexing (the table index already prunes to
-O(sessions-on-table)), and the safe-SQL-subset compiler at the subscribe
-boundary.
+- **Typed `ColumnValue`:** `Number(i64)`, `Float(f64)`, `Bool(bool)` added to
+  the enum (alongside `Text`/`Any`).
+- **Ordered leaves** `Lt | Gt | Le | Ge` on `PredicateExpr`, with `Predicate`
+  builders `lt/gt/le/ge` + `PredicateExpr` leaf constructors.
+- **Type coercion on the filter side** (the decisive design call): the row value
+  arrives as `Text` (the JSON payload quotes everything), so ordered leaves
+  parse the row string into the filter's declared type at match time. A parse
+  failure or a cross-type numeric divide ⇒ no match (defensive, never
+  over-deliver). This sidesteps the i64/f64 ambiguity the advisor flagged: the
+  *filter* declares the type, the row conforms or fails.
+- **`extract_json_column`** in `nostos-infra` (new `replicator::extract` module):
+  parses the payload **once** into an owned `(String, ColumnValue)` map and
+  returns a closure for the `matches` seam. No lifetime gymnastics — the closure
+  owns its data. An end-to-end test proves `priority > 3` matches a row rendered
+  in the exact `tuple_to_json_payload` shape.
+
+**Float equality is intentional, not lint-suppressed by accident:** the row
+value comes from a deterministic text parse (e.g. `"1.5"` → `1.5`), so exact
+`==`/`partial_cmp` is correct — an epsilon margin would be wrong (1.5 must equal
+1.5). The `float_cmp` lint assumes accumulated arithmetic error, which doesn't
+apply; both comparison functions carry a scoped `#[allow(clippy::float_cmp)]`
+with that rationale.
+
+The moat is now complete: ranges over real decoded values, proven against real
+PG rows via the JSON path.
+
+### Still deferred (separate slices)
+
+- **Parameter-set-digest indexing:** the table index already prunes the
+  candidate-session set to O(sessions-on-this-table). The digest makes the
+  constant factor smaller, not the architecture different.
+- **Safe-SQL-subset compiler** at the subscribe wire boundary (the wire message
+  still carries `FilterClause{column, value:String}`; typed predicates are
+  constructed server-side for now).
+- **Three-valued (NULL) logic** for the `!Eq{absent}` edge (see below).
+- `Timestamp` typed value + `In`/`Like`/`Between` leaves — none needed for
+  "scroll forever"; add when a real query demands it.
 
 ## The one real semantic decision — missing columns under composition
 
@@ -94,16 +124,19 @@ predicate can now be a real boolean tree, not a flat AND list. Slice 2 is
 additive (new `ColumnValue` variants + new leaves), so later work lands without
 churn. The `matches(extract)` seam kept the change fully backward-compatible.
 
-**Negative:** Phase 2 still cannot honestly claim "dynamic reactive sync GA" in
-full — typed comparison (ranges, ordered filters) is the half the strategy doc
-sells for "scroll forever," and it gates on the decoder. This ADR records that
-honestly rather than overclaiming.
+**Negative:** the moat's *evaluation* is complete, but the *product* is not —
+Phase 2's "scroll forever on Flutter AND Web" demo still gates on OPFS
+persistence (browser-durable storage) and the WASM transport, neither shipped
+yet. The predicate engine is also missing its scaling accelerator
+(parameter-set-digest indexing) before it can credibly claim the 10k-concurrent-
+predicate bar. This ADR records those gaps honestly rather than overclaiming.
 
 **Kill criterion (carried from the sketch):** if the predicate engine can't
 evaluate 10k concurrent authenticated predicates against a live WAL stream
 without measurable source-DB read cost, the architecture is wrong (STRATEGY §10).
-Slice 1 doesn't yet reach that scale claim — the parameter-set-digest indexing
-that makes it true is a separate, deferred slice.
+Slices 1+2 prove the *correctness* (the tree routes and matches real rows); the
+parameter-set-digest indexing that makes the *scale* claim true is a separate,
+deferred slice.
 
 ## Alternatives considered
 
@@ -125,9 +158,18 @@ that makes it true is a separate, deferred slice.
 - ADR-0003 (the original predicate decision — this extends it).
 - ADR-0011 (server-enforced tenant predicates — `build_predicate` now builds on
   these combinators).
-- Code: `crates/nostos-domain/src/predicate.rs` (`Predicate`, `PredicateExpr`),
-  `crates/nostos-infra/src/transport.rs` (`build_predicate`),
-  `crates/nostos-application/src/fanout.rs`
-  (`boolean_tree_or_and_not_route_through_fanout` integration test).
-- Advisor consult (architecture, HIGH confidence): split the tree from typed
-  comparison; land `And|Or|Not` over `Eq|Ne` on text-only values first.
+- Code:
+  - `crates/nostos-domain/src/predicate.rs` — `Predicate`, `PredicateExpr` (the
+    tree + typed `ColumnValue` + ordered leaves + `cmp_op`).
+  - `crates/nostos-infra/src/replicator/extract.rs` — `extract_json_column`
+    (slice 2: wires the real JSON payload to the `matches` seam).
+  - `crates/nostos-infra/src/replicator/pg.rs` — `tuple_to_json_payload` (the
+    payload format the extractor reads).
+  - `crates/nostos-application/src/fanout.rs` —
+    `boolean_tree_or_and_not_route_through_fanout` integration test.
+- Advisor consults (architecture, HIGH confidence):
+  - Slice 1: split the tree from typed comparison; land `And|Or|Not` over
+    `Eq|Ne` on text-only values first.
+  - Slice 2: re-consulted after discovering the JSON payload already exists;
+    ship typed comparison + the JSON extractor now to finish the moat (FFI
+    breadth deferred — it gates on unstarted OPFS).
