@@ -18,10 +18,6 @@ default = []
 # Embedded admin SPA + marketing landing (served by the cloud binary).
 # The static assets live under crates/nostos-cloud/static/ and are include_str!'d.
 ui = []
-# PayPal payment provider — RESERVED seam. The stub compiles; the real
-# integration lands when PayPal is wired. Off by default so the default build
-# carries only Stripe.
-paypal = []
 
 [dependencies]
 nostos-domain = { workspace = true }
@@ -38,7 +34,6 @@ thiserror = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-async-trait = { workspace = true }
 
 # embedded sqlite store — zero external deps to run the cloud control plane.
 rusqlite = { workspace = true }

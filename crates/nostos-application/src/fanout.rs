@@ -26,7 +26,7 @@ use tracing::trace;
 
 use nostos_domain::{ColumnValue, ReplicationEvent};
 
-use crate::ports::{DeliveryDecision, ReplicatorStream, SessionStore};
+use crate::ports::{DeliveryDecision, Metrics, ReplicatorStream, SessionStore};
 
 /// The result of fanning one event out to all matching sessions.
 ///
@@ -71,6 +71,13 @@ impl FanOutOutcome {
 pub struct FanOutService {
     store: Arc<dyn SessionStore>,
     push_interval: std::time::Duration,
+    /// Aggregate throughput counters, read by `/metrics`. `None` in unit tests
+    /// that assert on `FanOutOutcome` directly (counters would duplicate it).
+    metrics: Option<Arc<Metrics>>,
+    /// WAL-bloat protection: evict the slowest session when it lags further
+    /// than the policy's threshold behind the head of the stream. Default
+    /// disabled ([`EvictionPolicy::disabled`]) — see ADR-0016.
+    eviction: crate::EvictionPolicy,
 }
 
 impl FanOutService {
@@ -80,7 +87,27 @@ impl FanOutService {
         Self {
             store,
             push_interval: std::time::Duration::ZERO,
+            metrics: None,
+            eviction: crate::EvictionPolicy::disabled(),
         }
+    }
+
+    /// Attach an aggregate metrics handle updated on every fan-out dispatch.
+    /// The server constructs one `Arc<Metrics>` and shares it between this
+    /// service (writer) and the `/metrics` endpoint (reader).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Enable WAL-bloat protection: evict the slowest session when its acked
+    /// LSN lags further than the policy's `max_lag` behind the head of the
+    /// stream. Disabled by default (ADR-0016) — a production deploy MUST opt in.
+    #[must_use]
+    pub fn with_eviction(mut self, policy: crate::EvictionPolicy) -> Self {
+        self.eviction = policy;
+        self
     }
 
     /// Set the minimum interval between fan-out dispatches in `run`.
@@ -144,6 +171,13 @@ impl FanOutService {
             delivered,
             dropped,
         };
+        // Aggregate counters for /metrics (lock-free; no-op when no handle).
+        if let Some(m) = &self.metrics {
+            use std::sync::atomic::Ordering;
+            m.matched.fetch_add(outcome.matched, Ordering::Relaxed);
+            m.delivered.fetch_add(outcome.delivered, Ordering::Relaxed);
+            m.dropped.fetch_add(outcome.dropped, Ordering::Relaxed);
+        }
         trace!(?outcome, "fan_out complete");
         outcome
     }
@@ -153,6 +187,12 @@ impl FanOutService {
     ///
     /// `column_extractor` is called once per candidate per event — see
     /// [`Self::fan_out`].
+    ///
+    /// After each event is fanned out, the loop advances the replicator's
+    /// durable-progress cursor to the minimum acked LSN across live sessions
+    /// (ADR-0009: ack-driven slot advance). This is what prevents the source's
+    /// WAL-retention slot from advancing past data a client never confirmed —
+    /// the silent-data-loss-on-resume bug the per-event advance had.
     pub async fn run<F>(
         &self,
         replicator: &mut dyn ReplicatorStream,
@@ -164,6 +204,31 @@ impl FanOutService {
         let mut total = FanOutOutcome::default();
         while let Some(event) = replicator.next_event().await {
             total = total.merged(self.fan_out(&event, &column_extractor).await);
+            // Ack-driven progress: advance the slot only as far as the slowest
+            // live client has confirmed. None = no session has acked → don't
+            // advance (WAL retained; no data loss). The replicator no-ops if
+            // it has no real slot (FakeReplicator).
+            // Ack-driven progress + WAL-bloat protection share the same scan
+            // (the slowest client's acked LSN), so compute it once.
+            let slowest_acked = self.store.min_acked_lsn().await;
+            if let Some(safe) = slowest_acked {
+                replicator.advance_progress(safe).await;
+            }
+            // WAL-bloat protection (ADR-0016): if the slowest client has fallen
+            // further than the policy's threshold behind this event (the head of
+            // the stream), disconnect it. It reconnects + re-syncs from a fresh
+            // checkpoint — trading a controlled replay window for source-DB
+            // safety. OFF by default; a production deploy opts in via config.
+            if self.eviction.should_evict(event.lsn, slowest_acked) {
+                if let Some((id, _)) = self.store.slowest_session().await {
+                    tracing::warn!(
+                        session = ?id,
+                        head = event.lsn.raw(),
+                        "evicting slowest session (WAL-bloat protection); client will reconnect + re-sync"
+                    );
+                    self.store.remove(id).await;
+                }
+            }
             // Reactive-when-connected cadence: a zero interval (the default,
             // what the benchmark measures) is a no-op; a managed instance sets
             // ~1-2s to coalesce bursts server-side.
@@ -190,7 +255,6 @@ mod tests {
     /// A sink that records every delivered event and never drops.
     struct RecordingSink {
         events: Arc<Mutex<Vec<ReplicationEvent>>>,
-        open: Arc<Mutex<bool>>,
     }
 
     #[async_trait]
@@ -198,9 +262,6 @@ mod tests {
         async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
             self.events.lock().unwrap().push(event);
             DeliveryDecision::Delivered
-        }
-        fn is_open(&self) -> bool {
-            *self.open.lock().unwrap()
         }
     }
 
@@ -225,6 +286,26 @@ mod tests {
                 .or_default()
                 .push(cand);
         }
+        async fn try_add_below_cap(
+            &self,
+            session: SyncSession,
+            sink: Arc<dyn EventSink>,
+            cap: u64,
+        ) -> Result<SessionId, crate::ports::StoreRejection> {
+            let mut g = self.by_table.lock().unwrap();
+            let live: usize = g.values().map(Vec::len).sum();
+            if (live as u64) >= cap {
+                return Err(crate::ports::StoreRejection::CapExceeded { cap });
+            }
+            let id = session.id;
+            let table = session.predicate.table.clone();
+            g.entry(table).or_default().push(SessionCandidate {
+                id,
+                predicate: session.predicate,
+                sink,
+            });
+            Ok(id)
+        }
         async fn remove(&self, id: SessionId) {
             let mut g = self.by_table.lock().unwrap();
             for sessions in g.values_mut() {
@@ -241,6 +322,9 @@ mod tests {
         }
         async fn len(&self) -> usize {
             self.by_table.lock().unwrap().values().map(Vec::len).sum()
+        }
+        async fn min_acked_lsn(&self) -> Option<nostos_domain::Lsn> {
+            None
         }
     }
 
@@ -276,11 +360,9 @@ mod tests {
         // Two sessions on "tasks": one scoped to org_id=acme, one match-all.
         let sink_a = Arc::new(RecordingSink {
             events: Arc::new(Mutex::new(vec![])),
-            open: Arc::new(Mutex::new(true)),
         });
         let sink_b = Arc::new(RecordingSink {
             events: Arc::new(Mutex::new(vec![])),
-            open: Arc::new(Mutex::new(true)),
         });
         let events_a = sink_a.events.clone();
         let events_b = sink_b.events.clone();
@@ -313,7 +395,6 @@ mod tests {
         let store = make_store();
         let sink = Arc::new(RecordingSink {
             events: Arc::new(Mutex::new(vec![])),
-            open: Arc::new(Mutex::new(true)),
         });
         let events = sink.events.clone();
         store
@@ -326,6 +407,96 @@ mod tests {
         assert_eq!(outcome.matched, 0);
         assert_eq!(outcome.delivered, 0);
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    /// ADR-0012 slice 1: the boolean tree routes through `fan_out` end-to-end.
+    /// An `Or`-predicate session receives events matching either branch; a
+    /// `Not`-predicate session excludes events its inner `Eq` would match.
+    #[tokio::test]
+    async fn boolean_tree_or_and_not_route_through_fanout() {
+        let store = make_store();
+        let sink_or = Arc::new(RecordingSink {
+            events: Arc::new(Mutex::new(vec![])),
+        });
+        let sink_not = Arc::new(RecordingSink {
+            events: Arc::new(Mutex::new(vec![])),
+        });
+        let events_or = sink_or.events.clone();
+        let events_not = sink_not.events.clone();
+
+        // Or-branch: status=open OR status=in_progress.
+        store
+            .add(
+                SyncSession::new(
+                    Predicate::eq("tasks", "status", ColumnValue::text("open"))
+                        .or_eq("status", ColumnValue::text("in_progress")),
+                ),
+                sink_or,
+            )
+            .await;
+        // Not-branch: NOT status=archived (everything that isn't archived).
+        store
+            .add(
+                SyncSession::new(!Predicate::eq(
+                    "tasks",
+                    "status",
+                    ColumnValue::text("archived"),
+                )),
+                sink_not,
+            )
+            .await;
+
+        // Extractor: lift `status` straight out of the payload bytes.
+        let extract_status = |e: &ReplicationEvent, col: &str| -> Option<ColumnValue> {
+            if col == "status" {
+                Some(ColumnValue::text(String::from_utf8_lossy(
+                    e.payload_bytes(),
+                )))
+            } else {
+                None
+            }
+        };
+
+        let svc = FanOutService::new(store);
+        // Helper to build an event carrying a `status` value as its payload.
+        let status_event = |status: &str| {
+            ReplicationEvent::new(
+                Lsn::new(1),
+                RowOp::Insert {
+                    table: "tasks".into(),
+                    pk: status.into(),
+                    payload: Bytes::copy_from_slice(status.as_bytes()),
+                },
+            )
+        };
+
+        // open → Or-branch matches (delivered to sink_or); Not(archived) also
+        // matches (delivered to sink_not).
+        let o = svc.fan_out(&status_event("open"), extract_status).await;
+        assert_eq!(o.matched, 2);
+        assert_eq!(o.delivered, 2);
+        assert_eq!(events_or.lock().unwrap().len(), 1);
+        assert_eq!(events_not.lock().unwrap().len(), 1);
+
+        // archived → Or-branch does NOT match; Not(archived) does NOT match
+        // either (the inner Eq matches, Not inverts it). So NEITHER predicate
+        // matches: matched=0, nothing delivered, nothing dropped (dropped only
+        // counts matched-but-undelivered).
+        let o = svc.fan_out(&status_event("archived"), extract_status).await;
+        assert_eq!(o.matched, 0);
+        assert_eq!(o.delivered, 0);
+        assert_eq!(o.dropped, 0);
+        // Still just the one event each from the previous fan-out.
+        assert_eq!(events_or.lock().unwrap().len(), 1);
+        assert_eq!(events_not.lock().unwrap().len(), 1);
+
+        // in_progress → Or-branch matches; Not(archived) matches.
+        let o = svc
+            .fan_out(&status_event("in_progress"), extract_status)
+            .await;
+        assert_eq!(o.delivered, 2);
+        assert_eq!(events_or.lock().unwrap().len(), 2);
+        assert_eq!(events_not.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

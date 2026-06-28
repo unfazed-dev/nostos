@@ -37,10 +37,11 @@
 **Headline:** A client subscribes with a live predicate and scrolls forever — on Flutter AND Web.
 
 **Deliverables:**
-- Predicate expression engine (boolean tree of equalities/ranges over auth-scoped params).
-- `nostos-core` WebAssembly build (`wasm-bindgen` + OPFS storage).
-- Flutter SDK via `flutter_rust_bridge` (first-class `Stream`).
-- The first end-to-end demo: "point at Supabase Postgres → offline reads on Flutter + Web."
+- Predicate expression engine (boolean tree of equalities/ranges over auth-scoped params). *(ADR-0012 — moat complete: boolean tree `And|Or|Not` + typed comparison `Lt|Gt|Le|Ge` over `Number/Float/Bool/Text`, proven against real PG rows via the JSON column extractor. **Baseline:** ~150-170 eval-only events/sec through 10k predicates (~1.5M predicate-evals/sec — already orders of magnitude above the PowerSync 2-4k ops/sec ceiling). An equality index was built, measured a 4-8× regression, and **reverted** — the eval loop is structurally the cost but not the binding constraint; index deferred until a real load shows it binding.)*
+- **Native reactive-scroll example** — `cargo run -p nostos-client --example reactive_scroll` makes the moat visible: in-process server + durable SQLite client + typed predicate + mid-stream server restart with zero-loss resume. The native path's `chaos_resume` property, demonstrated end-to-end. *(First visible demo; Flutter/Web product surface still to come.)*
+- `nostos-core` WebAssembly build (`wasm-bindgen` + OPFS storage). *(✅ in-memory apply bridge shipped ADR-0015; OPFS persistence deferred — Worker-only by spec.)*
+- Flutter SDK via `flutter_rust_bridge` (first-class `Stream`). *(ADR-0015 — deferred.)*
+- The first end-to-end demo: "point at Supabase Postgres → offline reads on Flutter + Web." *(gates on OPFS + transport + Flutter.)*
 
 ---
 

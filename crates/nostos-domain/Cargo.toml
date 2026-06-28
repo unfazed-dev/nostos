@@ -17,8 +17,6 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
-pretty_assertions = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]

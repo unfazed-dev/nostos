@@ -14,7 +14,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
+use axum::extract::State;
+use axum::response::Json;
 use axum::routing::get;
+use nostos_application::ports::{Metrics, SessionStore};
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, ReplicationEvent};
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
@@ -22,9 +25,7 @@ use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 use clap::Parser;
 use tower_http::trace::TraceLayer;
-use tracing::info;
-#[cfg(not(feature = "pg"))]
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Command-line / env configuration for the sync server.
 #[derive(Debug, Clone, Parser)]
@@ -76,6 +77,50 @@ pub struct Config {
     /// tier here. One of: hobby, pro, scale, enterprise.
     #[arg(long, env = "NOSTOS_TIER", default_value = "enterprise")]
     tier: String,
+
+    /// /sync authentication mode: "none" (anonymous — OSS dev default) or
+    /// "supabase-jwt" (HS256-verify a Supabase JWT). A managed multi-tenant
+    /// deploy MUST set "supabase-jwt"; "none" refuses to inject tenant filters
+    /// so it is single-tenant only (ADR-0010).
+    #[arg(long, env = "NOSTOS_SYNC_AUTH", default_value = "none")]
+    sync_auth: String,
+
+    /// The HS256 secret used to verify Supabase JWTs at /sync. Required when
+    /// `NOSTOS_SYNC_AUTH=supabase-jwt`; ignored otherwise. Matches Supabase's
+    /// `JWT_SECRET` (the project's GoTrue signing key).
+    #[arg(long, env = "NOSTOS_SUPABASE_JWT_SECRET", default_value = "")]
+    supabase_jwt_secret: String,
+
+    /// The tenant column server-enforced on every predicate (e.g. "org_id").
+    /// When set with `NOSTOS_SYNC_AUTH=supabase-jwt`, the server ANDs
+    /// `<column> = <principal.tenant_id>` into every subscription so the client
+    /// cannot read another tenant's rows (ADR-0011). Defaults to "org_id".
+    #[arg(long, env = "NOSTOS_TENANT_COLUMN", default_value = "org_id")]
+    tenant_column: String,
+
+    /// Allowed CORS origins for browser clients, comma-separated (e.g.
+    /// "https://app.example.com,http://localhost:3000"). Empty (default) =
+    /// permissive (any origin) for local dev; set explicitly for production.
+    #[arg(long, env = "NOSTOS_CORS_ORIGINS", default_value = "")]
+    cors_origins: String,
+
+    /// WAL-bloat protection: the maximum LSN-gap (in WAL bytes) a live client
+    /// may lag behind the head of the stream before it is evicted. A client
+    /// exceeding this is disconnected; it reconnects + re-syncs from a fresh
+    /// checkpoint — trading a controlled replay window for source-DB safety.
+    /// `0` (default) = eviction OFF (no client is ever dropped for lag). A
+    /// production deploy MUST set this AND `--pg-slot-wal-keep-size` to protect
+    /// the primary's disk (ADR-0016).
+    #[arg(long, env = "NOSTOS_SLOT_MAX_LAG", default_value_t = 0)]
+    slot_max_lag: u64,
+
+    /// Postgres `max_slot_wal_keep_size` for the replication slot (MB). Caps how
+    /// much WAL a lagging slot may retain on the primary before Postgres
+    /// itself invalidates the slot — the database-level backstop for WAL bloat.
+    /// `0` (default) = Postgres's built-in default (unbounded). Set alongside
+    /// `--slot-max-lag` in production (ADR-0016).
+    #[arg(long, env = "NOSTOS_PG_SLOT_WAL_KEEP_SIZE", default_value_t = 0)]
+    pg_slot_wal_keep_size: u64,
 }
 
 #[tokio::main]
@@ -99,7 +144,51 @@ async fn main() -> anyhow::Result<()> {
     };
     info!(?tier, devices_cap = tier.device_cap(), "licensed tier");
     let manager = Arc::new(SessionManager::new(Arc::clone(&store), tier));
-    let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
+
+    // ---- /sync authentication (ADR-0010) ----
+    // The OSS self-host default is `none` (anonymous — single-tenant dev). A
+    // managed deploy sets `supabase-jwt` + the secret; without it the server
+    // cannot enforce tenant scoping and refuses to inject predicates.
+    let auth: Arc<dyn nostos_application::ports::SyncAuth> = match cfg.sync_auth.as_str() {
+        "supabase-jwt" => {
+            if cfg.supabase_jwt_secret.is_empty() {
+                anyhow::bail!(
+                    "NOSTOS_SYNC_AUTH=supabase-jwt requires NOSTOS_SUPABASE_JWT_SECRET to be set"
+                );
+            }
+            info!("sync auth: supabase-jwt (HS256, tenant-enforced)");
+            Arc::new(nostos_infra::SupabaseJwtAuth::new(
+                cfg.supabase_jwt_secret.as_bytes().to_vec(),
+            ))
+        }
+        "none" => {
+            warn!(
+                "sync auth: NONE — /sync is unauthenticated. Single-tenant/dev only; \
+                 set NOSTOS_SYNC_AUTH=supabase-jwt for any multi-tenant deploy."
+            );
+            Arc::new(nostos_infra::AllowAnonymous::new())
+        }
+        other => anyhow::bail!(
+            "unknown NOSTOS_SYNC_AUTH value: {other} (expected 'none' or 'supabase-jwt')"
+        ),
+    };
+
+    // Aggregate metrics shared between the fan-out service (writer) and the
+    // /metrics endpoint (reader). The session gauge is updated on connect/
+    // disconnect by the manager — for now we snapshot the store count on read.
+    let metrics = Arc::new(nostos_application::ports::Metrics::new());
+    // WAL-bloat protection: OFF by default (slot_max_lag=0); a deploy that sets
+    // NOSTOS_SLOT_MAX_LAG opts into evicting clients that lag past it (ADR-0016).
+    let eviction = if cfg.slot_max_lag > 0 {
+        nostos_application::EvictionPolicy::new(cfg.slot_max_lag)
+    } else {
+        nostos_application::EvictionPolicy::disabled()
+    };
+    let fanout = Arc::new(
+        FanOutService::new(Arc::clone(&store))
+            .with_metrics(Arc::clone(&metrics))
+            .with_eviction(eviction),
+    );
 
     // ---- start the replicator → fan-out driver ----
     // The extractor lifts named columns out of an event's payload so predicates
@@ -125,9 +214,16 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "pg")]
             {
                 use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
-                let pg_cfg =
+                let mut pg_cfg =
                     PgReplicatorConfig::from_url(&cfg.pg_url, &cfg.pg_slot, &cfg.pg_publication)
                         .context("invalid NOSTOS_PG_URL")?;
+                pg_cfg.max_slot_wal_keep_size_mb = cfg.pg_slot_wal_keep_size;
+                if cfg.pg_slot_wal_keep_size > 0 {
+                    info!(
+                        keep_size_mb = cfg.pg_slot_wal_keep_size,
+                        "WAL-bloat backstop: will set max_slot_wal_keep_size on the slot"
+                    );
+                }
                 let mut repl = PgReplicator::new(pg_cfg);
                 let fanout_drv = Arc::clone(&fanout);
                 let drv = tokio::spawn(async move {
@@ -174,9 +270,54 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ---- build the axum router + transport ----
-    let state = SyncRouterState::new(Arc::clone(&manager)).with_buffer(cfg.session_buffer);
+    // Tenant column is enforced only under supabase-jwt auth — the anonymous
+    // mode has no principal to scope with (see ADR-0011).
+    let tenant_col = if cfg.sync_auth == "supabase-jwt" {
+        Some(cfg.tenant_column.as_str())
+    } else {
+        None
+    };
+    let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
+        .with_buffer(cfg.session_buffer);
+    if let Some(col) = tenant_col {
+        state_builder = state_builder.with_tenant_column(col);
+    }
+    let state = state_builder;
+
+    // CORS: explicit origins in production, permissive for local dev (the
+    // empty-default case). Web clients need this to reach /sync from a browser.
+    let cors = if cfg.cors_origins.is_empty() {
+        tower_http::cors::CorsLayer::permissive()
+    } else {
+        let origins: Vec<_> = cfg
+            .cors_origins
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        info!(?origins, "CORS: explicit origins");
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers(tower_http::cors::Any)
+            .allow_credentials(true)
+    };
+
     let app = axum::Router::new()
         .route(&cfg.ws_path, get(sync_handler))
+        .route("/healthz", get(healthz))
+        .route(
+            "/metrics",
+            get({
+                let m = Arc::clone(&metrics);
+                let store_for_gauge = Arc::clone(&store);
+                move || metrics_handler(m.clone(), store_for_gauge.clone())
+            }),
+        )
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -189,6 +330,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
+    // Graceful drain: on SIGTERM/Ctrl-C, axum stops accepting new connections
+    // and waits for in-flight ones. The ack-driven slot model (ADR-0009) means
+    // the last confirmed LSN is already what every live client acked — no
+    // unflushed progress to lose. The replicator's keepalive loop will advance
+    // the slot one final time on the next status interval before the task ends.
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -201,6 +347,46 @@ fn init_tracing(filter: &str) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info")))
         .try_init();
+}
+
+// ---- health + metrics endpoints (ADR: operability, T1-6/T1-7) ----
+
+/// `GET /healthz` — liveness/readiness. Returns the live session count and
+/// tier, both cheap to read (O(1) atomic on the store). A load balancer polls
+/// this to decide whether to route traffic.
+async fn healthz(State(state): State<SyncRouterState>) -> Json<serde_json::Value> {
+    let sessions = state.manager.session_count().await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "sessions": sessions,
+    }))
+}
+
+/// `GET /metrics` — Prometheus text exposition format, hand-rolled (the
+/// workspace intentionally stays dependency-free for metrics per the
+/// ponytail-audit cuts). Counters are aggregate throughput from the fan-out
+/// service; the sessions gauge is snapshotted from the store.
+async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) -> String {
+    let snap = metrics.snapshot();
+    let sessions = store.len().await;
+    format!(
+        "# HELP cairn_events_matched_total Events whose predicate matched ≥1 session.\n\
+         # TYPE cairn_events_matched_total counter\n\
+         cairn_events_matched_total {matched}\n\
+         # HELP cairn_events_delivered_total Events accepted by a session sink.\n\
+         # TYPE cairn_events_delivered_total counter\n\
+         cairn_events_delivered_total {delivered}\n\
+         # HELP cairn_events_dropped_total Events dropped (full buffer / dedup / closed).\n\
+         # TYPE cairn_events_dropped_total counter\n\
+         cairn_events_dropped_total {dropped}\n\
+         # HELP cairn_live_sessions Current live sync sessions.\n\
+         # TYPE cairn_live_sessions gauge\n\
+         cairn_live_sessions {sessions}\n",
+        matched = snap.matched,
+        delivered = snap.delivered,
+        dropped = snap.dropped,
+        sessions = sessions,
+    )
 }
 
 async fn shutdown_signal() {

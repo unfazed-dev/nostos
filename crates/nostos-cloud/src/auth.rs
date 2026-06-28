@@ -3,7 +3,8 @@
 //! **ADD, not replace** (per architecture consult): managed-cloud callers send
 //! a Supabase-issued `Authorization: Bearer <jwt>`; self-hosted OSS callers
 //! (and the web admin) use the existing email/password → session-cookie flow.
-//! Both resolve to the same account id.
+//! Both resolve to the same account id — the resolution itself lives inline in
+//! `routes::current_account_id`.
 //!
 //! The JWT verifier is a trait so `cfg(test)` can inject one that accepts any
 //! well-formed token — smoke tests run with no external Supabase. The default
@@ -12,14 +13,9 @@
 //! upgrade behind this same trait).
 
 use crate::license::base64url_decode;
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
-use std::sync::Arc;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -49,8 +45,7 @@ impl JwtVerifier for Hs256Verifier {
         let payload_b64 = parts.next()?;
         let sig_b64 = parts.next()?;
         // Recompute HS256 over header.payload and constant-time compare.
-        let signing_input =
-            format!("{header_b64}.{payload_b64}").into_bytes();
+        let signing_input = format!("{header_b64}.{payload_b64}").into_bytes();
         let mut mac = HmacSha256::new_from_slice(&self.secret).ok()?;
         mac.update(&signing_input);
         let expected = mac.finalize().into_bytes();
@@ -87,70 +82,6 @@ struct SupabaseClaims {
     sub: String,
 }
 
-/// The error returned when no auth credential resolves an account.
-#[derive(Debug)]
-pub struct AuthError;
-
-impl IntoResponse for AuthError {
-    fn into_response(self) -> axum::response::Response {
-        (StatusCode::UNAUTHORIZED, "not authenticated").into_response()
-    }
-}
-
-/// Extractor: pull a `Bearer` token from the `Authorization` header.
-/// Returns `None` (not an error) when no bearer token is present — callers
-/// fall back to the session cookie. Only fails on a *malformed* Authorization
-/// header that isn't a Bearer scheme.
-pub struct BearerToken(pub Option<String>);
-
-#[axum::async_trait]
-impl<S> FromRequestParts<S> for BearerToken
-where
-    S: Send + Sync,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(header) = parts.headers.get("authorization") else {
-            return Ok(Self(None));
-        };
-        let Ok(s) = header.to_str() else {
-            return Ok(Self(None));
-        };
-        let token = s.strip_prefix("Bearer ").unwrap_or("");
-        if token.is_empty() {
-            return Ok(Self(None));
-        }
-        Ok(Self(Some(token.to_string())))
-    }
-}
-
-/// Resolve an account id from either credential path:
-///
-/// 1. `Authorization: Bearer <jwt>` → verify via the configured verifier → `sub`
-/// 2. else the `cairn_session` cookie → account id (existing flow)
-///
-/// Returns `Err` only when neither path yields a valid account.
-pub fn resolve_account_id(
-    bearer: &BearerToken,
-    cookie_id: Option<&str>,
-    verifier: &Arc<dyn JwtVerifier>,
-) -> Result<String, AuthError> {
-    // Path 1: JWT.
-    if let Some(token) = &bearer.0 {
-        if let Some(sub) = verifier.verify_sub(token) {
-            return Ok(sub);
-        }
-    }
-    // Path 2: session cookie.
-    if let Some(id) = cookie_id {
-        if !id.is_empty() {
-            return Ok(id.to_string());
-        }
-    }
-    Err(AuthError)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,34 +100,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jwt_path_resolves_sub() {
-        let verifier: Arc<dyn JwtVerifier> = Arc::new(TestVerifier);
-        let bearer = BearerToken(Some(fake_jwt("user_42")));
-        let id = resolve_account_id(&bearer, None, &verifier).unwrap();
-        assert_eq!(id, "user_42");
-    }
-
-    #[tokio::test]
-    async fn cookie_path_resolves_when_no_bearer() {
-        let verifier: Arc<dyn JwtVerifier> = Arc::new(TestVerifier);
-        let bearer = BearerToken(None);
-        let id = resolve_account_id(&bearer, Some("acc_99"), &verifier).unwrap();
-        assert_eq!(id, "acc_99");
-    }
-
-    #[tokio::test]
-    async fn no_credential_is_unauthorized() {
-        let verifier: Arc<dyn JwtVerifier> = Arc::new(TestVerifier);
-        let bearer = BearerToken(None);
-        assert!(resolve_account_id(&bearer, None, &verifier).is_err());
-    }
-
-    #[tokio::test]
-    async fn jwt_takes_precedence_over_cookie() {
-        let verifier: Arc<dyn JwtVerifier> = Arc::new(TestVerifier);
-        let bearer = BearerToken(Some(fake_jwt("jwt_user")));
-        let id = resolve_account_id(&bearer, Some("cookie_user"), &verifier).unwrap();
-        assert_eq!(id, "jwt_user");
+    async fn jwt_verifier_resolves_sub() {
+        let verifier = TestVerifier;
+        assert_eq!(
+            verifier.verify_sub(&fake_jwt("user_42")),
+            Some("user_42".into())
+        );
     }
 
     #[test]

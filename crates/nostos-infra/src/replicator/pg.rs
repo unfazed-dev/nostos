@@ -25,11 +25,22 @@
 //! ## LSN checkpointing (the "no data loss, no duplication" contract)
 //!
 //! Postgres holds WAL until the replication slot's `confirmed_flush_lsn` passes
-//! it. We advance that LSN **only after** the fan-out has accepted the event —
-//! via [`ReplicationClient::update_applied_lsn`]. So on crash/reconnect:
-//! Postgres replays from the last confirmed LSN. Combined with the client's own
-//! LSN checkpoint, sync is exactly-once across restarts. This is the
-//! "kill criterion" for Phase 1 (ROADMAP).
+//! it. We advance that LSN **only after a client ACKs** — the fan-out loop
+//! queries the session store's `min_acked_lsn` and calls `advance_progress`,
+//! which feeds pgwire-replication's progress atomic (the worker sends the
+//! actual standby_status_update wire message on its own schedule). So on
+//! crash/reconnect: Postgres replays from the last *client-acknowledged* LSN.
+//! Combined with the client's own LSN checkpoint, sync is exactly-once across
+//! restarts. This is the "kill criterion" for Phase 1 (ROADMAP).
+//!
+//! **What we deliberately do NOT do:** advance the slot per-event on XLogData.
+//! That was the original bug — it told Postgres we'd applied events the moment
+//! they arrived off the wire, before any client received them, so a reconnect
+//! silently skipped unacked data. The ack-driven model here is the fix
+//! (ADR-0009). WAL-bloat protection ships alongside it: the application-level
+//! `EvictionPolicy` (applied by the fanout loop) disconnects lagging clients,
+//! and `max_slot_wal_keep_size_mb` here is the database-level backstop — see
+//! ADR-0016 (now shipped).
 //!
 //! ## Why two "Off" trait params for pgoutput
 //!
@@ -98,6 +109,13 @@ pub struct PgReplicatorConfig {
     pub publication: String,
     /// Resume from this LSN, or `None` to use the slot's last confirmed LSN.
     pub start_lsn: Option<Lsn>,
+    /// WAL-bloat backstop: set `max_slot_wal_keep_size` (MB) on the slot via
+    /// `ALTER_REPLICATION_SLOT` on startup. `0` = leave Postgres's default
+    /// (unbounded). This is the database-level cap; the application-level
+    /// eviction policy (`EvictionPolicy`, applied by the fanout loop) is the
+    /// first line of defense — this is the last resort that protects the primary
+    /// if a client vanishes entirely. See ADR-0016.
+    pub max_slot_wal_keep_size_mb: u64,
 }
 
 impl PgReplicatorConfig {
@@ -153,6 +171,7 @@ impl PgReplicatorConfig {
             slot: slot.into(),
             publication: publication.into(),
             start_lsn: None,
+            max_slot_wal_keep_size_mb: 0,
         })
     }
 }
@@ -171,8 +190,13 @@ pub struct PgReplicator {
     /// The current in-progress transaction id (set on Begin, cleared on Commit).
     /// Events within one Postgres txn share this so the client can batch them.
     current_txn: Option<u64>,
-    /// Highest LSN we have told Postgres we've durably applied. On reconnect we
-    /// resume from here — that is the exactly-once boundary.
+    /// Highest WAL position we have SEEN off the wire (for diagnostics and the
+    /// `last_confirmed_lsn()` accessor). This is NOT the LSN we've told Postgres
+    /// we applied — that is ack-driven via [`Self::advance_progress`].
+    last_seen: Lsn,
+    /// Highest LSN we have told Postgres we durably applied (via
+    /// `update_applied_lsn` in `advance_progress`). On reconnect we resume from
+    /// here — that is the exactly-once boundary. Advanced ONLY from client ACKs.
     last_confirmed: Lsn,
 }
 
@@ -186,6 +210,7 @@ impl PgReplicator {
             client: None,
             relations: HashMap::new(),
             current_txn: None,
+            last_seen: Lsn::ZERO,
             last_confirmed: Lsn::ZERO,
         }
     }
@@ -363,7 +388,7 @@ impl PgReplicator {
 
         // Explicit start LSN wins.
         if let Some(explicit) = self.cfg.start_lsn {
-            self.last_confirmed = explicit;
+            self.seed_resume(explicit);
             return Ok(PgLsn::from_u64(explicit.raw()));
         }
 
@@ -380,12 +405,12 @@ impl PgReplicator {
         let restart: Option<String> = row.get(1);
         if let Some(s) = confirmed.filter(|s| !s.is_empty()) {
             let lsn = PgLsn::parse(&s).map_err(|e| PgReplicatorError::Lsn(e.to_string()))?;
-            self.last_confirmed = Lsn::new(lsn.as_u64());
+            self.seed_resume(Lsn::new(lsn.as_u64()));
             return Ok(lsn);
         }
         if let Some(s) = restart.filter(|s| !s.is_empty()) {
             let lsn = PgLsn::parse(&s).map_err(|e| PgReplicatorError::Lsn(e.to_string()))?;
-            self.last_confirmed = Lsn::new(lsn.as_u64());
+            self.seed_resume(Lsn::new(lsn.as_u64()));
             return Ok(lsn);
         }
 
@@ -396,15 +421,32 @@ impl PgReplicator {
             .map_err(|e| PgReplicatorError::ControlPlane(e.to_string()))?;
         let now: String = row.get(0);
         let lsn = PgLsn::parse(&now).map_err(|e| PgReplicatorError::Lsn(e.to_string()))?;
-        self.last_confirmed = Lsn::new(lsn.as_u64());
+        self.seed_resume(Lsn::new(lsn.as_u64()));
         Ok(lsn)
     }
 
-    /// The highest LSN Postgres has been told we applied. Read by the server
-    /// for checkpoint/metrics and by tests asserting resume correctness.
+    /// The highest LSN Postgres has been told we applied (ack-driven). Read by
+    /// the server for checkpoint/metrics and by tests asserting resume
+    /// correctness. This advances ONLY when a client ACKs — never per-event.
     #[must_use]
     pub fn last_confirmed_lsn(&self) -> Lsn {
         self.last_confirmed
+    }
+
+    /// The highest WAL position observed off the wire (diagnostic). May be ahead
+    /// of `last_confirmed_lsn()` when clients are lagging — that gap is exactly
+    /// the WAL Postgres retains for them.
+    #[must_use]
+    pub fn last_seen_lsn(&self) -> Lsn {
+        self.last_seen
+    }
+
+    /// Seed both progress cursors at the resume point on (re)connect. The slot
+    /// will start streaming from here; `last_confirmed` is what the previous
+    /// connection last told Postgres it applied (the exactly-once boundary).
+    fn seed_resume(&mut self, lsn: Lsn) {
+        self.last_confirmed = lsn;
+        self.last_seen = lsn;
     }
 
     /// Pull the next event off the wire and translate it to a Nostos event.
@@ -440,19 +482,22 @@ impl PgReplicator {
             };
             match ev {
                 ReplicationEvent::XLogData { wal_end, data, .. } => {
-                    // Decode first (mutates self.relations); then advance the
-                    // slot's confirmed LSN on the client (separate borrow).
-                    // Pass wal_end so the decoded event carries its true LSN
-                    // (self.last_confirmed isn't updated until after decode).
+                    // Decode first (mutates self.relations). We deliberately do
+                    // NOT call `update_applied_lsn` here — that was the
+                    // silent-data-loss-on-resume bug: it advanced the slot past
+                    // events the client had not yet received. The ack-driven
+                    // advance now happens in `advance_progress`, called by the
+                    // fan-out loop with the min acked LSN across sessions.
+                    // Pass wal_end so the decoded event carries its true LSN.
                     let decoded = if data.is_empty() {
                         None
                     } else {
                         self.decode(&data, Lsn::new(wal_end.as_u64()))
                     };
-                    if let Some(client) = self.client.as_mut() {
-                        client.update_applied_lsn(wal_end);
-                    }
-                    self.last_confirmed = Lsn::new(wal_end.as_u64());
+                    // Track the highest WAL position we've SEEN (for diagnostics
+                    // and resume bookkeeping) — but do not tell Postgres we've
+                    // applied it. That is the caller's job, ack-driven.
+                    self.last_seen = Lsn::new(wal_end.as_u64());
                     if let Some(decoded) = decoded {
                         return Ok(Some(decoded));
                     }
@@ -460,16 +505,18 @@ impl PgReplicator {
                 }
                 ReplicationEvent::Commit { end_lsn, .. } => {
                     self.current_txn = None;
-                    if let Some(client) = self.client.as_mut() {
-                        client.update_applied_lsn(end_lsn);
-                    }
-                    self.last_confirmed = Lsn::new(end_lsn.as_u64());
+                    // Record the commit boundary but DO NOT advance the slot
+                    // here — the commit LSN may be past unconsumed rows for a
+                    // slow client. Ack-driven advance in `advance_progress`.
+                    self.last_seen = Lsn::new(end_lsn.as_u64());
                 }
                 ReplicationEvent::KeepAlive { wal_end, .. } => {
-                    if let Some(client) = self.client.as_mut() {
-                        client.update_applied_lsn(wal_end);
-                    }
-                    self.last_confirmed = Lsn::new(wal_end.as_u64());
+                    // Server heartbeat. The pgwire-replication worker handles
+                    // sending standby_status_update wire feedback on its own
+                    // schedule (status_interval + reply requests), reading the
+                    // applied-LSN we set via `update_applied_lsn` in
+                    // `advance_progress`. We only record what we've seen.
+                    self.last_seen = Lsn::new(wal_end.as_u64());
                 }
                 // Begin / StoppedAt / Message: transaction boundaries and control
                 // frames we don't turn into row ops — loop and pull the next.
@@ -511,7 +558,9 @@ impl PgReplicator {
             BaseEvent::Begin(begin) => {
                 // ponytail: xid is i32 from pg; clamp negatives to 0 (they never
                 // occur for real transactions). u32::try_from is infallible after max(0).
-                self.current_txn = Some(u64::from(u32::try_from(begin.transaction_id.max(0)).unwrap_or(0)));
+                self.current_txn = Some(u64::from(
+                    u32::try_from(begin.transaction_id.max(0)).unwrap_or(0),
+                ));
                 None
             }
             BaseEvent::Commit(_) => {
@@ -524,7 +573,9 @@ impl PgReplicator {
             BaseEvent::Update(upd) => {
                 self.full_row_op(upd.oid, &upd.data, nostos_domain::Operation::Update, lsn)
             }
-            BaseEvent::Delete(del) => self.pk_only_op(del.oid, del.old_data_or_primary_key.as_ref(), lsn),
+            BaseEvent::Delete(del) => {
+                self.pk_only_op(del.oid, del.old_data_or_primary_key.as_ref(), lsn)
+            }
             BaseEvent::Type(_) | BaseEvent::Truncate(_) => None,
         }
     }
@@ -698,6 +749,25 @@ impl ReplicatorStream for PgReplicator {
                     let _ = self.ensure_connected().await;
                 }
             }
+        }
+    }
+
+    /// Advance Postgres's `confirmed_flush_lsn` to `lsn` — declaring every event
+    /// up to here has been acknowledged by all live clients (ADR-0009).
+    ///
+    /// This feeds pgwire-replication's shared progress atomic; the worker sends
+    /// the actual standby_status_update wire message on its own schedule
+    /// (status_interval + keepalive replies). We never advance past `lsn`, so a
+    /// reconnect replays from the last confirmed point — no silent data loss.
+    async fn advance_progress(&mut self, lsn: Lsn) {
+        // Monotonic: ignore a lower LSN (can happen if a stale ack races in).
+        if lsn.raw() <= self.last_confirmed.raw() {
+            return;
+        }
+        if let Some(client) = self.client.as_ref() {
+            client.update_applied_lsn(PgLsn::from_u64(lsn.raw()));
+            self.last_confirmed = lsn;
+            debug!(confirmed_lsn = %lsn, "advanced replication slot (ack-driven)");
         }
     }
 }

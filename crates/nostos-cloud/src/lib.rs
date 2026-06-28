@@ -14,13 +14,11 @@
 //! - [`license`] — HMAC-signed offline license tokens (tier + device cap + expiry).
 //! - [`store`] — bundled-sqlite persistence (accounts, projects, api keys, subs).
 //! - [`stripe`] — webhook signature verification (to spec) + Checkout creation.
-//! - [`payments`] — the PaymentProvider trait seam (Stripe live, PayPal stub).
 
 #![forbid(unsafe_code)]
 
 pub mod auth;
 pub mod license;
-pub mod payments;
 pub mod routes;
 pub mod store;
 pub mod stripe;

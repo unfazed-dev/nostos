@@ -16,17 +16,19 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod replicator;
 pub mod router;
 pub mod store;
 pub mod transport;
 pub mod wire;
 
+pub use auth::{AllowAnonymous, SupabaseJwtAuth};
 pub use replicator::{FakeReplicator, FakeReplicatorConfig};
 pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;
 pub use transport::SyncRouterState;
-pub use wire::{WireCodec, WireFrame};
+pub use wire::{decode_client_message, encode_event, ClientMessage, FilterClause, WireFrame};
 
 #[cfg(feature = "pg")]
 pub use replicator::{PgReplicator, PgReplicatorConfig, PgReplicatorError};

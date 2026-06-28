@@ -153,11 +153,20 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
     // ---- shared store + use-cases (the same instances the server uses) ----
     let store: Arc<dyn nostos_application::ports::SessionStore> =
         Arc::new(InMemorySessionStore::new());
-    let manager = Arc::new(SessionManager::new(Arc::clone(&store), nostos_domain::Tier::Enterprise));
+    let manager = Arc::new(SessionManager::new(
+        Arc::clone(&store),
+        nostos_domain::Tier::Enterprise,
+    ));
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
 
     // ---- in-process axum server on an ephemeral port ----
-    let state = SyncRouterState::new(Arc::clone(&manager)).with_buffer(cfg.buffer);
+    // The bench measures raw fan-out throughput; auth isAllowAnonymous (no
+    // principal, no tenant filter) so the benchmark isn't gated on JWT minting.
+    let state = SyncRouterState::new(
+        Arc::clone(&manager),
+        Arc::new(nostos_infra::AllowAnonymous::new()),
+    )
+    .with_buffer(cfg.buffer);
     let app = axum::Router::new()
         .route("/sync", get(sync_handler))
         .with_state(state);

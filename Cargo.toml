@@ -21,6 +21,15 @@
 #                         ports and runs an axum HTTP/WS server.
 #   nostos-bench           the benchmark harness — Week-1 deliverable: proves ≥5×
 #                         PowerSync's 2-4k ops/sec throughput ceiling.
+#   nostos-core            the platform-agnostic client sync engine — pure Rust
+#                         (no tokio, no SQLite): the Storage seam + the apply
+#                         state machine. WASM-clean; what the FFI bridges bind.
+#   nostos-client          the native client: SqliteStorage (rusqlite) + the
+#                         tokio SyncClient that connects to /sync, applies frames,
+#                         checkpoints durably, and reconnects with resume_lsn.
+#   nostos-ffi-wasm        the WebAssembly FFI bridge — binds nostos-core's apply
+#                         engine to JavaScript (wasm-bindgen). The first FFI
+#                         target; Flutter/RN/Node follow the same nostos-core.
 #
 # Rule enforced by structure + clippy: domain must never depend on application,
 # application must never depend on infrastructure. The dependency-inversion arrow
@@ -36,6 +45,9 @@ members = [
     "crates/nostos-server",
     "crates/nostos-bench",
     "crates/nostos-cloud",
+    "crates/nostos-core",
+    "crates/nostos-client",
+    "crates/nostos-ffi-wasm",
 ]
 
 [workspace.package]
@@ -59,7 +71,7 @@ categories = ["database", "database-implementations"]
 # --- domain (kept minimal: only serde + uuid for cross-boundary value types) ---
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.10", features = ["v4", "serde"] }
+uuid = { version = "1.10", features = ["v4", "serde", "js"] }
 bytes = { version = "1.7", features = ["serde"] }
 thiserror = "1.0"
 
@@ -70,16 +82,11 @@ dashmap = "6.1"
 
 # --- infrastructure / async runtime ---
 tokio = { version = "1.39", features = ["full"] }
-tokio-util = "0.7"
-tokio-stream = "0.1"
 futures-util = "0.3"
 tokio-tungstenite = "0.23"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
-hyper = "1.4"
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
 
 # --- postgres logical replication (the core capability) ---
 # Used by the real PgReplicator (Phase 1). Week-1 benchmark uses a FakeReplicator
@@ -96,13 +103,10 @@ pgwire-replication = "0.3"
 
 # --- observability ---
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.23"
-metrics-exporter-prometheus = "0.15"
 
 # --- config / error / cli ---
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
-config = "0.14"
 
 # --- nostos-cloud (control plane: auth, billing, projects) ---
 # rusqlite = embedded sqlite for the cloud store (zero external deps to run).
@@ -120,18 +124,14 @@ tower-cookies = "0.10"
 # Random token generation (API keys, session ids, license keys).
 rand = "0.8"
 
-# --- dev / test / bench ---
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-proptest = "1.5"
-pretty_assertions = "1.4"
-dotenvy = "0.15"
-fastrand = "2.1"
-
 # internal crates (so members can reference each other via the workspace)
 nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
 nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
 nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
 nostos-cloud = { path = "crates/nostos-cloud", version = "0.1.0" }
+nostos-core = { path = "crates/nostos-core", version = "0.1.0" }
+nostos-client = { path = "crates/nostos-client", version = "0.1.0" }
+nostos-server = { path = "crates/nostos-server", version = "0.1.0" }
 
 # -----------------------------------------------------------------------------
 # Workspace-wide lints. Fail CI on the things that matter; warn on the rest.

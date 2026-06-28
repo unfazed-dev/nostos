@@ -15,12 +15,16 @@
 pub mod events;
 pub mod lsn;
 pub mod predicate;
+pub mod predicate_compile;
+pub mod principal;
 pub mod session;
 pub mod tier;
 
 pub use events::{Operation, ReplicationEvent, RowOp};
 pub use lsn::Lsn;
-pub use predicate::{ColumnValue, Predicate, PredicateFilter};
+pub use predicate::{ColumnValue, Predicate, PredicateExpr, PredicateFilter};
+pub use predicate_compile::{parse_predicate_expr, ParseError};
+pub use principal::Principal;
 pub use session::{SessionId, SyncSession};
 pub use tier::Tier;
 

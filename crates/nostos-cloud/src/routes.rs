@@ -428,7 +428,6 @@ async fn waitlist_count(State(st): State<CloudState>) -> Result<impl IntoRespons
 }
 
 /// Redirect the Checkout success URL back to the admin project view.
-/// Redirect the Checkout success URL back to the admin project view.
 /// `async` because axum's `Handler` trait requires it (the body doesn't await).
 #[allow(clippy::unused_async)]
 pub async fn checkout_ok(Path(id): Path<String>) -> Redirect {
@@ -552,7 +551,7 @@ mod tests {
     // configured; the webhook path uses the test secret). They prove the
     // wiring end-to-end: signup → cookie → me → projects → keys → license.
 
-    use axum::body::{Body, to_bytes};
+    use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
     use tower_cookies::CookieManagerLayer;
@@ -577,14 +576,11 @@ mod tests {
 
     /// Pull the `cairn_session` cookie value out of a response's Set-Cookie.
     fn session_cookie(resp: &axum::response::Response) -> Option<String> {
-        resp.headers()
-            .get_all("set-cookie")
-            .iter()
-            .find_map(|h| {
-                let s = h.to_str().ok()?;
-                let part = s.strip_prefix("cairn_session=")?;
-                Some(part.split(';').next()?.to_string())
-            })
+        resp.headers().get_all("set-cookie").iter().find_map(|h| {
+            let s = h.to_str().ok()?;
+            let part = s.strip_prefix("cairn_session=")?;
+            Some(part.split(';').next()?.to_string())
+        })
     }
 
     async fn body_text(resp: axum::response::Response) -> String {
@@ -600,7 +596,11 @@ mod tests {
         let app = test_app(st.clone());
         let resp = app
             .clone()
-            .oneshot(json_req("POST", "/v1/auth/signup", Some(serde_json::json!({"email":"full@nostos.run","password":"password123"}))))
+            .oneshot(json_req(
+                "POST",
+                "/v1/auth/signup",
+                Some(serde_json::json!({"email":"full@nostos.run","password":"password123"})),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -615,7 +615,10 @@ mod tests {
         let resp = app.oneshot(me_req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_text(resp).await;
-        assert!(body.contains("full@nostos.run"), "me echoes the email: {body}");
+        assert!(
+            body.contains("full@nostos.run"),
+            "me echoes the email: {body}"
+        );
     }
 
     #[tokio::test]
@@ -626,7 +629,11 @@ mod tests {
         // 1. signup
         let resp = app
             .clone()
-            .oneshot(json_req("POST", "/v1/auth/signup", Some(serde_json::json!({"email":"flow@nostos.run","password":"password123"}))))
+            .oneshot(json_req(
+                "POST",
+                "/v1/auth/signup",
+                Some(serde_json::json!({"email":"flow@nostos.run","password":"password123"})),
+            ))
             .await
             .unwrap();
         let cookie = session_cookie(&resp).expect("cookie after signup");
@@ -645,7 +652,11 @@ mod tests {
         // 2. create a project
         let resp = app
             .clone()
-            .oneshot(authed("POST", "/v1/projects", Some(serde_json::json!({"name":"Demo"}))))
+            .oneshot(authed(
+                "POST",
+                "/v1/projects",
+                Some(serde_json::json!({"name":"Demo"})),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -653,7 +664,11 @@ mod tests {
         let proj_id = proj_body["id"].as_str().expect("project id").to_string();
 
         // 3. list projects → has the one we made
-        let resp = app.clone().oneshot(authed("GET", "/v1/projects", None)).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(authed("GET", "/v1/projects", None))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let list: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
         assert!(list.as_array().unwrap().iter().any(|p| p["id"] == proj_id));
@@ -661,7 +676,11 @@ mod tests {
         // 4. create an API key
         let resp = app
             .clone()
-            .oneshot(authed("POST", &format!("/v1/projects/{proj_id}/keys"), None))
+            .oneshot(authed(
+                "POST",
+                &format!("/v1/projects/{proj_id}/keys"),
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -669,7 +688,11 @@ mod tests {
         // 5. mint a license (Hobby — no subscription)
         let resp = app
             .clone()
-            .oneshot(authed("GET", &format!("/v1/projects/{proj_id}/license"), None))
+            .oneshot(authed(
+                "GET",
+                &format!("/v1/projects/{proj_id}/license"),
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -683,10 +706,7 @@ mod tests {
     #[tokio::test]
     async fn unauthenticated_request_is_401() {
         let app = test_app(test_state());
-        let resp = app
-            .oneshot(json_req("GET", "/v1/me", None))
-            .await
-            .unwrap();
+        let resp = app.oneshot(json_req("GET", "/v1/me", None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -698,7 +718,11 @@ mod tests {
         // signup → capture the real account id + cookie
         let resp = app
             .clone()
-            .oneshot(json_req("POST", "/v1/auth/signup", Some(serde_json::json!({"email":"c@nostos.run","password":"password123"}))))
+            .oneshot(json_req(
+                "POST",
+                "/v1/auth/signup",
+                Some(serde_json::json!({"email":"c@nostos.run","password":"password123"})),
+            ))
             .await
             .unwrap();
         let cookie = session_cookie(&resp).expect("cookie");
@@ -726,7 +750,11 @@ mod tests {
         let app = test_app(test_state());
         let resp = app
             .clone()
-            .oneshot(json_req("POST", "/v1/waitlist", Some(serde_json::json!({"email":"w@nostos.run"}))))
+            .oneshot(json_req(
+                "POST",
+                "/v1/waitlist",
+                Some(serde_json::json!({"email":"w@nostos.run"})),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
