@@ -69,7 +69,7 @@ Highest-risk-first: the replication boundary is where the benchmarked engine mee
 **Interfaces:**
 - Produces: the canonical agent onboarding document every later task assumes is loaded.
 
-- [ ] **Step 1: Prepend this content to `CLAUDE.md`** (above the context-mode block, separated by `---`):
+- [x] **Step 1: Prepend this content to `CLAUDE.md`** (above the context-mode block, separated by `---`):
 
 ```markdown
 # Nostos — Project Memory
@@ -119,22 +119,22 @@ docs/ARCHITECTURE.md → ADRs 0001, 0003, 0009, 0011, 0012, 0013 → docs/ROADMA
 Strategy/positioning: docs/STRATEGY.md. Benchmark rules: docs/BENCHMARK-METHODOLOGY.md.
 ```
 
-- [ ] **Step 2: Create the cross-tool alias**
+- [x] **Step 2: Create the cross-tool alias**
 
 ```bash
 ln -s CLAUDE.md AGENTS.md
 ```
 
-- [ ] **Step 3: Verify** — `head -5 AGENTS.md` prints the Nostos header; `make ci` still green (no code touched).
+- [x] **Step 3: Verify** — `head -5 AGENTS.md` prints the Nostos header; `make ci` still green (no code touched).
 
-- [ ] **Step 4: Commit** — `git add CLAUDE.md AGENTS.md && git commit -m "docs: add project memory to CLAUDE.md and AGENTS.md alias for agent onboarding"`
+- [x] **Step 4: Commit** — `git add CLAUDE.md AGENTS.md && git commit -m "docs: add project memory to CLAUDE.md and AGENTS.md alias for agent onboarding"`
 
 ### Task A2: Permissions allowlist — .claude/settings.json
 
 **Files:**
 - Create: `.claude/settings.json`
 
-- [ ] **Step 1: Write the allowlist** (unblocks autonomous `cargo`/`make`/`git`/compose loops):
+- [x] **Step 1: Write the allowlist** (unblocks autonomous `cargo`/`make`/`git`/compose loops):
 
 ```json
 {
@@ -162,8 +162,8 @@ ln -s CLAUDE.md AGENTS.md
 }
 ```
 
-- [ ] **Step 2: Verify** — JSON parses: `python3 -c "import json;json.load(open('.claude/settings.json'))"`.
-- [ ] **Step 3: Commit** — `git add .claude/settings.json && git commit -m "chore: add agent permissions allowlist for autonomous build-test loops"`
+- [x] **Step 2: Verify** — JSON parses: `python3 -c "import json;json.load(open('.claude/settings.json'))"`.
+- [x] **Step 3: Commit** — `git add .claude/settings.json && git commit -m "chore: add agent permissions allowlist for autonomous build-test loops"`
 
 ### Task A3: Personas — .claude/agents/
 
@@ -176,7 +176,7 @@ ln -s CLAUDE.md AGENTS.md
 **Interfaces:**
 - Produces: four named subagent types callable via the Agent tool (`subagent_type: "domain-guardian"` etc.) for delegation in every later phase.
 
-- [ ] **Step 1: Write `domain-guardian.md`** — the architecture reviewer:
+- [x] **Step 1: Write `domain-guardian.md`** — the architecture reviewer:
 
 ```markdown
 ---
@@ -205,7 +205,7 @@ Verdict format: APPROVE or REJECT, then findings as file:line + one-line reason
 + the minimal fix. No style nitpicks — clippy owns style.
 ```
 
-- [ ] **Step 2: Write `pg-integrator.md`** — the replication-boundary owner:
+- [x] **Step 2: Write `pg-integrator.md`** — the replication-boundary owner:
 
 ```markdown
 ---
@@ -239,7 +239,7 @@ Report format: what you changed, the exact commands you ran, pass/fail output,
 and any edge case you deferred (with its ponytail comment location).
 ```
 
-- [ ] **Step 3: Write `bench-runner.md`** — the honest-numbers enforcer:
+- [x] **Step 3: Write `bench-runner.md`** — the honest-numbers enforcer:
 
 ```markdown
 ---
@@ -269,7 +269,7 @@ Report format: command, environment block, results table (throughput + drops +
 p99), delta vs baseline, verdict (keep/revert).
 ```
 
-- [ ] **Step 4: Write `docs-curator.md`** — the truth-keeper:
+- [x] **Step 4: Write `docs-curator.md`** — the truth-keeper:
 
 ```markdown
 ---
@@ -296,14 +296,14 @@ soften a limitation; state it. New architectural decisions are NOT yours to
 make — flag them for an ADR instead.
 ```
 
-- [ ] **Step 5: Verify** — each file's frontmatter parses (name/description/tools/model present); commit: `git add .claude/agents && git commit -m "feat: add domain-guardian, pg-integrator, bench-runner, docs-curator agent personas"`
+- [x] **Step 5: Verify** — each file's frontmatter parses (name/description/tools/model present); commit: `git add .claude/agents && git commit -m "feat: add domain-guardian, pg-integrator, bench-runner, docs-curator agent personas"`
 
 ### Task A4: Project skill — the canonical verify loop
 
 **Files:**
 - Create: `.claude/skills/verify-nostos/SKILL.md`
 
-- [ ] **Step 1: Write the skill:**
+- [x] **Step 1: Write the skill:**
 
 ```markdown
 ---
@@ -334,7 +334,7 @@ Run the cheapest sufficient rung, escalate by what the diff touched:
 Report what rungs ran with real output, not "should pass".
 ```
 
-- [ ] **Step 2: Commit** — `git add .claude/skills && git commit -m "feat: add verify-nostos project skill with tiered verification ladder"`
+- [x] **Step 2: Commit** — `git add .claude/skills && git commit -m "feat: add verify-nostos project skill with tiered verification ladder"`
 
 ### Task A5: Hygiene — CONTRIBUTING.md, deny.toml, .editorconfig, stale-comment fix
 
@@ -343,7 +343,7 @@ Report what rungs ran with real output, not "should pass".
 - Modify: `crates/nostos-infra/src/lib.rs:10` (stale "PgReplicator stub" comment), `.github/workflows/ci.yml` (add cargo-deny job)
 - Delete: `docs/decisions/` (empty dir; ADRs live in `docs/adr/`)
 
-- [ ] **Step 1: Write `CONTRIBUTING.md`:**
+- [x] **Step 1: Write `CONTRIBUTING.md`:**
 
 ```markdown
 # Contributing to Nostos
@@ -368,7 +368,7 @@ Apache-2.0. By contributing you agree your work is licensed the same way.
 New dependencies must be Apache-2.0-compatible (checked by `cargo deny` in CI).
 ```
 
-- [ ] **Step 2: Write `deny.toml`:**
+- [x] **Step 2: Write `deny.toml`:**
 
 ```toml
 [licenses]
@@ -384,7 +384,7 @@ yanked = "deny"
 multiple-versions = "warn"
 ```
 
-- [ ] **Step 3: Write `.editorconfig`:**
+- [x] **Step 3: Write `.editorconfig`:**
 
 ```ini
 root = true
@@ -405,9 +405,9 @@ indent_style = space
 indent_size = 2
 ```
 
-- [ ] **Step 4: Fix the stale comment** — in `crates/nostos-infra/src/lib.rs` line 10, replace the "`PgReplicator` stub (Week 2)" phrasing with: `PgReplicator — real pgoutput logical replication (feature "pg"); FakeReplicator — synthetic WAL generator for benches/tests.` (Match the file's existing comment style.)
+- [x] **Step 4: Fix the stale comment** — in `crates/nostos-infra/src/lib.rs` line 10, replace the "`PgReplicator` stub (Week 2)" phrasing with: `PgReplicator — real pgoutput logical replication (feature "pg"); FakeReplicator — synthetic WAL generator for benches/tests.` (Match the file's existing comment style.)
 
-- [ ] **Step 5: Add cargo-deny to CI** — in `.github/workflows/ci.yml`, add a job after the lint job:
+- [x] **Step 5: Add cargo-deny to CI** — in `.github/workflows/ci.yml`, add a job after the lint job:
 
 ```yaml
   deny:
@@ -419,32 +419,32 @@ indent_size = 2
           command: check licenses advisories bans
 ```
 
-- [ ] **Step 6: Remove the empty dir** — `rmdir docs/decisions` (git doesn't track it; also remove the pointer to it in `docs/ARCHITECTURE.md` — covered in A6).
+- [x] **Step 6: Remove the empty dir** — `rmdir docs/decisions` (git doesn't track it; also remove the pointer to it in `docs/ARCHITECTURE.md` — covered in A6).
 
-- [ ] **Step 7: Verify** — `cargo deny check licenses` passes locally (install with `cargo install cargo-deny` if absent; if any existing dep fails the allowlist, add its exact license to `deny.toml` allow-list rather than dropping the gate). `make ci` green.
+- [x] **Step 7: Verify** — `cargo deny check licenses` passes locally (install with `cargo install cargo-deny` if absent; if any existing dep fails the allowlist, add its exact license to `deny.toml` allow-list rather than dropping the gate). `make ci` green.
 
-- [ ] **Step 8: Commit** — `git add -A && git commit -m "chore: add CONTRIBUTING, cargo-deny gate, editorconfig; fix stale PgReplicator stub comment"`
+- [x] **Step 8: Commit** — `git add -A && git commit -m "chore: add CONTRIBUTING, cargo-deny gate, editorconfig; fix stale PgReplicator stub comment"`
 
 ### Task A6: Docs truth sweep (make every published claim true)
 
 **Files:**
 - Modify: `README.md`, `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/WEEK-01-PLAN.md`, `docs/COMPARISON.md`, `docs/STRATEGY.md`, `crates/nostos-bench/src/report.rs`
 
-- [ ] **Step 1: README.md** — change the status badge/line from "week-1 spike" to `status: alpha — Phases 0–1 proven, v0.1 in progress`; update the layout section to all 9 crates (copy the crate table from CLAUDE.md Task A1); delete "The multi-platform client SDKs ship in later weeks" (nostos-core/client/ffi-wasm exist); keep the not-production-ready warning.
+- [x] **Step 1: README.md** — change the status badge/line from "week-1 spike" to `status: alpha — Phases 0–1 proven, v0.1 in progress`; update the layout section to all 9 crates (copy the crate table from CLAUDE.md Task A1); delete "The multi-platform client SDKs ship in later weeks" (nostos-core/client/ffi-wasm exist); keep the not-production-ready warning.
 
-- [ ] **Step 2: docs/ROADMAP.md** — change the footer `Today: **Phase 0 🚧**` to `Today: **Phase 1 🔬 — real-PG default + write-back v1 in progress** (see docs/plans/complete-nostos-fully-wired-operational.md)`.
+- [x] **Step 2: docs/ROADMAP.md** — change the footer `Today: **Phase 0 🚧**` to `Today: **Phase 1 🔬 — real-PG default + write-back v1 in progress** (see docs/plans/complete-nostos-fully-wired-operational.md)`.
 
-- [ ] **Step 3: docs/ARCHITECTURE.md** — update the "as-built Week-1" framing to "as-built (updated 2026-07)"; list all 9 crates; replace "`PgReplicator` Stubbed in Week 1" with the real description (pgoutput + pgwire-replication behind feature `pg`); replace the `docs/decisions/` pointer with `docs/adr/0015`/`0016`; update the predicate note to point at ADR-0012's shipped engine.
+- [x] **Step 3: docs/ARCHITECTURE.md** — update the "as-built Week-1" framing to "as-built (updated 2026-07)"; list all 9 crates; replace "`PgReplicator` Stubbed in Week 1" with the real description (pgoutput + pgwire-replication behind feature `pg`); replace the `docs/decisions/` pointer with `docs/adr/0015`/`0016`; update the predicate note to point at ADR-0012's shipped engine.
 
-- [ ] **Step 4: docs/WEEK-01-PLAN.md** — add a banner at the top: `> **Historical document (executed).** Outcome: 142,336 ops/sec @ 1k clients, 0% drops = 35.6× target baseline — see benches/results/RESULTS.md. Kept for methodology.` Tick the acceptance boxes that RESULTS.md proves; where the 10k-client `<1% drop` bar was NOT met (17.26% drops), do NOT tick — annotate: `10k-client drop rate 17.26% — WS write path is the known limit; fix tracked in plan Phase C3.`
+- [x] **Step 4: docs/WEEK-01-PLAN.md** — add a banner at the top: `> **Historical document (executed).** Outcome: 142,336 ops/sec @ 1k clients, 0% drops = 35.6× target baseline — see benches/results/RESULTS.md. Kept for methodology.` Tick the acceptance boxes that RESULTS.md proves; where the 10k-client `<1% drop` bar was NOT met (17.26% drops), do NOT tick — annotate: `10k-client drop rate 17.26% — WS write path is the known limit; fix tracked in plan Phase C3.`
 
-- [ ] **Step 5: docs/COMPARISON.md + docs/STRATEGY.md (positioning rewrite)** — apply the July-2026 market facts from Part I §7: remove/rewrite "static buckets only" and "1,000-bucket hard cap" attack lines (Sync Streams GA; cap is soft); reposition the wedge as (1) Rust server throughput vs Node's 2–4k ops/sec replication ceiling, (2) Apache-2.0 **today** vs FSL's 2-year delay, (3) write-back without customer-built endpoints (vs ElectricSQL read-only and PowerSync's uploadData), (4) free full-featured self-host. Add a "Threats" note: Supabase/Triplit first-party offline ambitions. In COMPARISON.md, label every Nostos number as eval-only or end-to-end and only compare same-denominator pairs.
+- [x] **Step 5: docs/COMPARISON.md + docs/STRATEGY.md (positioning rewrite)** — apply the July-2026 market facts from Part I §7: remove/rewrite "static buckets only" and "1,000-bucket hard cap" attack lines (Sync Streams GA; cap is soft); reposition the wedge as (1) Rust server throughput vs Node's 2–4k ops/sec replication ceiling, (2) Apache-2.0 **today** vs FSL's 2-year delay, (3) write-back without customer-built endpoints (vs ElectricSQL read-only and PowerSync's uploadData), (4) free full-featured self-host. Add a "Threats" note: Supabase/Triplit first-party offline ambitions. In COMPARISON.md, label every Nostos number as eval-only or end-to-end and only compare same-denominator pairs.
 
-- [ ] **Step 6: Fix bench env capture** — in `crates/nostos-bench/src/report.rs`, the results JSON records `rustc: "rustc 0.1.0 (nostos-bench build)"` and `hostname: "unknown"`. Replace with real values: shell out once at report time (`rustc --version` via `std::process::Command`, hostname via `std::process::Command::new("hostname")`), falling back to `"unknown"` only on error. Add a unit test asserting the rustc field starts with `"rustc 1."` on the build machine.
+- [x] **Step 6: Fix bench env capture** — in `crates/nostos-bench/src/report.rs`, the results JSON records `rustc: "rustc 0.1.0 (nostos-bench build)"` and `hostname: "unknown"`. Replace with real values: shell out once at report time (`rustc --version` via `std::process::Command`, hostname via `std::process::Command::new("hostname")`), falling back to `"unknown"` only on error. Add a unit test asserting the rustc field starts with `"rustc 1."` on the build machine.
 
-- [ ] **Step 7: Verify** — `make ci`; grep for leftovers: `grep -rn "week-1 spike\|Stubbed in Week\|1,000 buckets" README.md docs/ --include="*.md"` returns only historical-context hits (WEEK-01-PLAN banner text is fine).
+- [x] **Step 7: Verify** — `make ci`; grep for leftovers: `grep -rn "week-1 spike\|Stubbed in Week\|1,000 buckets" README.md docs/ --include="*.md"` returns only historical-context hits (WEEK-01-PLAN banner text is fine).
 
-- [ ] **Step 8: Commit** — `git add -A && git commit -m "docs: truth sweep — status, crate map, benchmark honesty, July-2026 competitive repositioning"`
+- [x] **Step 8: Commit** — `git add -A && git commit -m "docs: truth sweep — status, crate map, benchmark honesty, July-2026 competitive repositioning"`
 
 ---
 
