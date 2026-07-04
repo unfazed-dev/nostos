@@ -14,9 +14,11 @@ name = "nostos-server"
 path = "src/main.rs"
 
 [features]
-default = []
-# Forward to nostos-infra's pg feature, enabling the real PgReplicator. Build with
-# `cargo build -p nostos-server --features pg` (or `--all-features`).
+# `pg` is on by default so `cargo build -p nostos-server` includes the real
+# PgReplicator. Disable it with `cargo build -p nostos-server --no-default-features`
+# (the runtime default stays `NOSTOS_REPLICATOR=fake`, so a featureless binary still
+# runs — it just can't be switched to the real replicator).
+default = ["pg"]
 pg = ["nostos-infra/pg"]
 
 [dependencies]

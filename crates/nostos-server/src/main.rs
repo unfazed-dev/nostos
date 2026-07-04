@@ -48,16 +48,16 @@ pub struct Config {
     session_buffer: usize,
 
     /// Replicator mode: "fake" (synthetic generator) or "pg" (real Postgres).
-    /// "pg" requires building with the `pg` feature (`--features pg`).
+    /// "pg" requires the `pg` feature, which is on by default (disable with
+    /// `--no-default-features`). Runtime default stays "fake" so zero-setup
+    /// `cargo run` keeps working.
     #[arg(long, env = "NOSTOS_REPLICATOR", default_value = "fake")]
     replicator: String,
 
     /// Postgres URL for the real replicator (`NOSTOS_REPLICATOR=pg`).
-    #[arg(
-        long,
-        env = "NOSTOS_PG_URL",
-        default_value = "postgresql://cairn:cairn@localhost:5433/cairn"
-    )]
+    /// Empty by default — selecting `pg` without setting `NOSTOS_PG_URL` fails
+    /// fast with an actionable error (see the replicator match below).
+    #[arg(long, env = "NOSTOS_PG_URL", default_value = "")]
     pg_url: String,
 
     /// Logical-replication slot name.
@@ -214,6 +214,13 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "pg")]
             {
                 use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
+                if cfg.pg_url.trim().is_empty() {
+                    anyhow::bail!(
+                        "NOSTOS_REPLICATOR=pg but NOSTOS_PG_URL is not set. \
+                         Set NOSTOS_PG_URL, e.g. after: \
+                         docker compose -f docker/docker-compose.yml up -d"
+                    );
+                }
                 let mut pg_cfg =
                     PgReplicatorConfig::from_url(&cfg.pg_url, &cfg.pg_slot, &cfg.pg_publication)
                         .context("invalid NOSTOS_PG_URL")?;
