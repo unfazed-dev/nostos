@@ -31,6 +31,15 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  deny:
+    name: cargo-deny (licenses, advisories, bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories bans
+
   benchmark:
     name: throughput benchmark (smoke)
     runs-on: ubuntu-latest

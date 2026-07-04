@@ -7,7 +7,7 @@
 //! |---|---|---|
 //! | [`store`] | `SessionStore` | `DashMap`-indexed-by-table in-memory store |
 //! | [`router`] | `EventSink` | Bounded per-session tokio channel with drop-on-full backpressure |
-//! | [`replicator`] | `ReplicatorStream` | `FakeReplicator` (Week 1) + `PgReplicator` stub (Week 2) |
+//! | [`replicator`] | `ReplicatorStream` | `PgReplicator` — real pgoutput logical replication (feature "pg"); `FakeReplicator` — synthetic WAL generator for benches/tests. |
 //! | [`wire`] | — | `ReplicationEvent` ↔ JSON/binary frame codec |
 //! | [`transport`] | — | axum WebSocket server adapter |
 //!
