@@ -92,8 +92,12 @@ subscriptions, WS batching, write-back v1 with offline outbox, WASM transport
 **Conspicuously later:** browser-durable storage (OPFS) is deferred past v0.1
 (ADR-0017 — the Worker re-architecture is the cost, not the VFS choice; we
 picked SQLite-WASM `opfs-sahpool` post-launch to avoid the COOP/COEP tax).
-Flutter/RN/Node SDKs are scoped, not shipped. Conflict-resolution tiers above
-LWW, declarative write rules, and function mode are Phase 4.
+The web client's `localStorage` checkpoint is **best-effort durability** — the
+browser may evict it under storage pressure; correctness is unaffected (the
+client re-fetches from `resume_lsn` on reconnect), but a cold tab may replay
+more than expected. Flutter/RN/Node SDKs are scoped, not shipped.
+Conflict-resolution tiers above LWW, declarative write rules, and function
+mode are Phase 4.
 
 ## Try it
 
