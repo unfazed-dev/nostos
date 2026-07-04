@@ -145,3 +145,43 @@ clean: ## Remove all build artifacts.
 .PHONY: git-init
 git-init: ## Initialize git (idempotent) + initial commit.
 	@if [ ! -d .git ]; then git init -q && echo "✓ git initialized"; else echo "✓ git already initialized"; fi
+
+# ----------------------------------------------------------------------------
+# Flutter fixtures (the pomodoro reference app — see docs/testing/persona-e2e-baseline.md)
+# Deliberately NOT in `make ci`: the Rust pipeline must not pay Flutter's
+# build cost per-push. If CI coverage is wanted later, add a separate GitHub
+# Actions workflow triggered on fixtures/** paths only.
+# ----------------------------------------------------------------------------
+.PHONY: fixture-test
+fixture-test: ## fixture-test: flutter fixture unit/widget suites + persona-mapping guard.
+	cd fixtures/flutter/pomodoro && flutter test test/
+
+## fixture-e2e: smoke + persona journeys on the macOS desktop target.
+## Runs each integration file in its own flutter invocation: Flutter desktop
+## can't foreground the same .app for multiple files in one invocation
+## (known tooling limit — failures are at launch, not assertions). This
+## per-file loop is the standard desktop-integration CI pattern.
+## Wrapped in `caffeinate -i` (prevents macOS App Nap / idle throttling):
+## the fixture's SystemTicker drives the state machine off a real wall-clock
+## Stream.periodic, so a backgrounded app's timers drift and waitForText
+## times out. caffeinate keeps the host awake so the launched .app isn't
+## throttled. Each file is also preceded by a pkill+settle so a prior file's
+## .app can't race the next launch.
+## ponytail: deviates from the plan's verbatim `flutter test integration_test
+## -d macos` (single invocation) because that aggregate-launches the .app once
+## per file against one debug port and only the first file passes. Ceiling:
+## single-file-per-invocation + host-caffeination + inter-file teardown until
+## Flutter desktop lands reliable aggregate foregrounding. Residual flakiness
+## (a random file's waitForText timing out) traces to the fixture using real
+## wall-clock timers in desktop E2E — a fixture-level concern to revisit when
+## the SDK sync layer lands a controllable clock port, NOT a Make bug.
+.PHONY: fixture-e2e
+fixture-e2e: ## fixture-e2e: smoke + persona journeys on the macOS desktop target (per-file loop).
+	@cd fixtures/flutter/pomodoro && \
+	  caffeinate -i bash -c ' \
+	    for f in integration_test/smoke_test.dart integration_test/journeys/*_journey_test.dart; do \
+	      pkill -f "pomodoro" 2>/dev/null || true; \
+	      sleep 3; \
+	      echo "=== $$f ==="; \
+	      flutter test "$$f" -d macos || exit 1; \
+	    done'
