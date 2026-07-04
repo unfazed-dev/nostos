@@ -79,6 +79,9 @@ thiserror = "1.0"
 async-trait = "0.1"
 tracing = "0.1"
 dashmap = "6.1"
+# Identifier validation for the write-back adapter (D2): strict regex over
+# table/column names so a client-controlled identifier can never reach SQL.
+regex = "1.10"
 
 # --- infrastructure / async runtime ---
 tokio = { version = "1.39", features = ["full"] }

@@ -11,6 +11,7 @@
 
 use nostos_domain::{Operation, ReplicationEvent, RowOp};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _; // ponytail: single write!() in push_json_string
 
 /// One frame on the wire (server → client). A client receives a stream of
 /// these. Reuses [`Operation`] directly (it already serializes to
@@ -29,13 +30,15 @@ pub struct WireFrame {
 }
 
 /// A message from the client (client → server). Tagged by `type` so the same
-/// socket carries the initial subscription, subsequent ACKs, and (future)
-/// predicate updates. This is the inbound decode path that didn't exist before
-/// T0-4 — `wire.rs` was encode-only.
+/// socket carries the initial subscription, subsequent ACKs, write requests,
+/// and (future) predicate updates. This is the inbound decode path that didn't
+/// exist before T0-4 — `wire.rs` was encode-only.
 ///
 /// - `subscribe` — the first frame: what to receive + where to resume from.
 /// - `ack` — the client confirms it has applied through `lsn`; drives the
 ///   ack-driven slot advance (ADR-0009).
+/// - `write` — a client-initiated upsert/delete applied to the source DB via
+///   the `WriteBack` port (ADR-0013). Only valid AFTER the subscribe handshake.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ClientMessage {
@@ -58,6 +61,29 @@ pub enum ClientMessage {
     },
     /// Acknowledge applied progress (highest applied LSN).
     Ack { lsn: u64 },
+    /// Apply a client-submitted write to the source database (ADR-0013). The
+    /// server acks with a `WriteResult` frame carrying the same
+    /// `client_write_id` so the client can correlate the response. The written
+    /// row then flows back out through normal replication to every subscriber
+    /// (including the writer, where the idempotent apply is a no-op).
+    Write {
+        /// Target table — MUST be in the server's `NOSTOS_WRITE_TABLES` allowlist.
+        table: String,
+        /// `"upsert"` or `"delete"`.
+        op: String,
+        /// Primary-key value (v1 convention: pk column is `id`).
+        pk: String,
+        /// The row image for an upsert: a JSON object of column → value, the
+        /// same tuple-image shape the read path delivers. Absent (`None`) for
+        /// deletes. A non-object (array / scalar / null) is rejected as
+        /// `InvalidPayload` before any SQL is built.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        /// Client-supplied correlation id, echoed back in the `WriteResult`.
+        /// Lets the client match each ack to its request (the round-trip is
+        /// asynchronous: the write task may be behind the client's send loop).
+        client_write_id: String,
+    },
 }
 
 /// One column-equality filter in a `Subscribe` message.
@@ -109,6 +135,54 @@ pub fn encode_event(event: &ReplicationEvent) -> Vec<u8> {
     };
     // Safe: our types are all JSON-serializable.
     serde_json::to_vec(&frame).expect("wire frame must serialize")
+}
+
+/// Encode a `WriteResult` frame (server → client) as JSON bytes. This is the
+/// ack for a client's `Write` message (ADR-0013). Beside [`encode_event`] —
+/// it's a distinct server→client shape (no `lsn`/`op`/`table`; it carries the
+/// correlation id + outcome), so it gets its own `"type":"write_result"` tag
+/// rather than reusing [`WireFrame`].
+///
+/// `error` is `Some(msg)` when `ok` is `false`; `None` (omitted on the wire)
+/// when `ok` is `true`. The `client_write_id` echoes the request so the client
+/// can correlate the response.
+#[must_use]
+pub fn encode_write_result(client_write_id: &str, ok: bool, error: Option<&str>) -> Vec<u8> {
+    // Hand-built JSON keeps this allocation-light and avoids inventing a struct
+    // for one outbound shape. The fields are simple (string/bool), so escaping
+    // the two free-form strings (id + error) is the only care needed.
+    let mut out = String::with_capacity(64 + client_write_id.len());
+    out.push_str("{\"type\":\"write_result\",\"client_write_id\":");
+    push_json_string(&mut out, client_write_id);
+    out.push_str(",\"ok\":");
+    out.push_str(if ok { "true" } else { "false" });
+    if let Some(err) = error {
+        out.push_str(",\"error\":");
+        push_json_string(&mut out, err);
+    }
+    out.push('}');
+    out.into_bytes()
+}
+
+/// Minimal JSON string escaping (in-place append) — used by
+/// [`encode_write_result`] for the `client_write_id` and `error` fields, which
+/// are free-form client/adapter strings.
+fn push_json_string(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// Encode a slice of events as **one JSON array of frames** (C3 batched-writes).
@@ -401,5 +475,76 @@ mod tests {
         assert!(decode_client_message(b"{\"type\":\"unknown\"}").is_none());
         // Missing required `lsn` on an ack.
         assert!(decode_client_message(b"{\"type\":\"ack\"}").is_none());
+    }
+
+    // ---- D2 write-back wire tests ----
+
+    #[test]
+    fn decode_write_upsert() {
+        let json = r#"{"type":"write","table":"tasks","op":"upsert","pk":"1","payload":{"title":"x"},"client_write_id":"w1"}"#;
+        let msg = decode_client_message(json.as_bytes()).expect("valid write");
+        let ClientMessage::Write {
+            table,
+            op,
+            pk,
+            payload,
+            client_write_id,
+        } = msg
+        else {
+            panic!("expected Write");
+        };
+        assert_eq!(table, "tasks");
+        assert_eq!(op, "upsert");
+        assert_eq!(pk, "1");
+        assert_eq!(client_write_id, "w1");
+        assert_eq!(payload, Some(serde_json::json!({"title": "x"})));
+    }
+
+    #[test]
+    fn decode_write_delete_omits_payload() {
+        // payload is optional (skip_serializing_if = "Option::is_none"); a
+        // delete need not carry one.
+        let json =
+            r#"{"type":"write","table":"tasks","op":"delete","pk":"9","client_write_id":"w2"}"#;
+        let msg = decode_client_message(json.as_bytes()).expect("valid write");
+        let ClientMessage::Write {
+            op, pk, payload, ..
+        } = msg
+        else {
+            panic!("expected Write");
+        };
+        assert_eq!(op, "delete");
+        assert_eq!(pk, "9");
+        assert_eq!(payload, None);
+    }
+
+    #[test]
+    fn encode_write_result_ok_omits_error() {
+        let bytes = encode_write_result("w1", true, None);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "write_result");
+        assert_eq!(v["client_write_id"], "w1");
+        assert_eq!(v["ok"], true);
+        // error must be absent on the ok=true path.
+        assert!(v.get("error").is_none() || v["error"].is_null());
+    }
+
+    #[test]
+    fn encode_write_result_err_includes_message() {
+        let bytes = encode_write_result("w9", false, Some("table not writable: x"));
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "write_result");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "table not writable: x");
+    }
+
+    #[test]
+    fn encode_write_result_escapes_quotes_in_error() {
+        // The error string is free-form adapter text; it must not break the
+        // JSON. A double-quote + backslash round-trips cleanly.
+        let bytes = encode_write_result("w\"", false, Some("bad \"col\\name\""));
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "bad \"col\\name\"");
+        assert_eq!(v["client_write_id"], "w\"");
     }
 }

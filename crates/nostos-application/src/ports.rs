@@ -195,6 +195,80 @@ pub trait SyncAuth: Send + Sync {
     async fn authenticate(&self, token: &str) -> Option<Principal>;
 }
 
+/// Applies client-submitted writes to the source database (ADR-0013 v1).
+///
+/// This is the driven-side port that turns Nostos's read-only sync socket into
+/// a bidirectional one: a client sends a `Write` frame, the transport hands it
+/// here, and the adapter upserts/deletes the row in the *source* Postgres. The
+/// resulting row change then flows back out through the normal replication
+/// path (`ReplicatorStream` → `FanOutService`) — so a write is confirmed to
+/// the writer AND fanned out to every subscriber, including the writer itself
+/// (where the idempotent apply is a no-op). LWW by WAL order.
+///
+/// Implementations:
+/// - `PgWriteBack` (infra, feature `pg`) — the real adapter: identifier
+///   validation + table allowlist + parameterized SQL against the source PG.
+/// - `NoWriteBack` (infra) — the fake-mode stub: returns `Backend` for every
+///   call (the FakeReplicator has no database to write to).
+/// - test doubles — record calls for unit tests.
+///
+/// **Trust boundary:** every implementation MUST validate the `table` against
+/// an allowlist and the identifiers against a strict regex BEFORE any SQL is
+/// built, and MUST bind values as parameters (`$1…$n`) — never string-interpolate
+/// them. Authenticated clients can still attempt injection; the allowlist +
+/// regex + parameters are defense-in-depth. See ADR-0013.
+#[async_trait]
+pub trait WriteBack: Send + Sync {
+    /// Upsert one row: `payload_json` is a JSON object of column → value, the
+    /// same tuple-image shape the read path delivers. LWW by WAL order. The
+    /// `pk` is the row's primary-key value (v1 convention: pk column is `id`).
+    ///
+    /// # Errors
+    /// - [`WriteBackError::TableNotAllowed`] if `table` is not in the allowlist.
+    /// - [`WriteBackError::InvalidPayload`] if `payload_json` is not a JSON
+    ///   object, or contains a column name that fails identifier validation.
+    /// - [`WriteBackError::Backend`] for any underlying database error.
+    async fn upsert(&self, table: &str, pk: &str, payload_json: &str)
+        -> Result<(), WriteBackError>;
+
+    /// Delete by primary key. A missing row is a success (idempotent) — so a
+    /// redelivery of a delete after the row is already gone does not surface
+    /// an error to the client.
+    ///
+    /// # Errors
+    /// - [`WriteBackError::TableNotAllowed`] if `table` is not in the allowlist.
+    /// - [`WriteBackError::Backend`] for any underlying database error.
+    async fn delete(&self, table: &str, pk: &str) -> Result<(), WriteBackError>;
+}
+
+/// Why a [`WriteBack`] call failed. Surfaced to the client as the `error`
+/// string in a `WriteResult{ok:false}` frame.
+///
+/// The variants map 1:1 to the three things that can go wrong: the table
+/// isn't writable (allowlist), the payload is malformed (not an object / bad
+/// column name), or the database itself errored. The error strings are
+/// user-facing (they go on the wire), so they carry no internal detail beyond
+/// the category — `Backend` wraps the underlying message but the adapter is
+/// responsible for not leaking connection strings.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteBackError {
+    /// The table is not in the `NOSTOS_WRITE_TABLES` allowlist. The allowlist
+    /// is the first line of defense: a table not explicitly writable can never
+    /// reach the SQL builder, so its name can never be interpolated.
+    #[error("table not writable: {0}")]
+    TableNotAllowed(String),
+    /// The payload JSON is not a JSON object, or one of its keys fails the
+    /// identifier regex (`^[a-z_][a-z0-9_]*$`). Both are client-controlled, so
+    /// both are validated before any SQL is constructed.
+    #[error("invalid payload: {0}")]
+    InvalidPayload(String),
+    /// The underlying database errored (connection, syntax the validator
+    /// should have caught, constraint violation, …). The wrapped string is the
+    /// backend's message; adapters MUST scrub it of secrets before returning.
+    #[error("backend: {0}")]
+    Backend(String),
+}
+
 /// Aggregate throughput/accounting counters, updated by the fan-out loop and
 /// read by the `/metrics` endpoint. Lock-free (atomics); rendered to
 /// Prometheus text by the server.

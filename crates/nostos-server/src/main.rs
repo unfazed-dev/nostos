@@ -60,6 +60,16 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_PG_URL", default_value = "")]
     pg_url: String,
 
+    /// Comma-separated list of tables clients may write to over the sync socket
+    /// (ADR-0013 write-back v1). Exact-match allowlist — a table not listed
+    /// here can never reach the SQL builder. Empty (default) = no tables
+    /// writable; clients get a clear "table not writable" error. Example:
+    /// `tasks,notes`. Only meaningful under `NOSTOS_REPLICATOR=pg` (the fake
+    /// replicator has no source database, so writes return
+    /// "write-back requires pg replicator" even when allowlisted).
+    #[arg(long, env = "NOSTOS_WRITE_TABLES", default_value = "")]
+    write_tables: String,
+
     /// Logical-replication slot name.
     #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "cairn_slot")]
     pg_slot: String,
@@ -289,6 +299,41 @@ async fn main() -> anyhow::Result<()> {
     if let Some(col) = tenant_col {
         state_builder = state_builder.with_tenant_column(col);
     }
+
+    // ---- write-back adapter (ADR-0013) ----
+    // The writable-table allowlist is enforced by the transport FIRST (a
+    // single trust-boundary gate), then again by PgWriteBack as
+    // defense-in-depth. Under `NOSTOS_REPLICATOR=pg` (feature `pg`) we inject a
+    // real PgWriteBack connected to the source; otherwise NoWriteBack returns
+    // a clear "write-back requires pg replicator" error. The allowlist is
+    // always set on the state so the transport's gate is uniform.
+    let write_tables = nostos_infra::parse_allowlist(&cfg.write_tables);
+    #[cfg(feature = "pg")]
+    let write_back: Arc<dyn nostos_application::ports::WriteBack> = if cfg.replicator == "pg" {
+        if cfg.pg_url.trim().is_empty() {
+            anyhow::bail!(
+                "NOSTOS_REPLICATOR=pg but NOSTOS_PG_URL is not set (required for write-back). \
+                 Set NOSTOS_PG_URL, e.g. after: docker compose -f docker/docker-compose.yml up -d"
+            );
+        }
+        info!(tables = ?write_tables, "write-back: PgWriteBack (real source)");
+        Arc::new(nostos_infra::PgWriteBack::new(
+            &cfg.pg_url,
+            write_tables.clone(),
+        ))
+    } else {
+        info!("write-back: NoWriteBack (fake replicator — writes return pg-required error)");
+        Arc::new(nostos_infra::NoWriteBack::new())
+    };
+    #[cfg(not(feature = "pg"))]
+    let write_back: Arc<dyn nostos_application::ports::WriteBack> = {
+        let _ = &cfg.pg_url; // unused without the pg feature
+        info!("write-back: NoWriteBack (binary built without `pg` feature)");
+        Arc::new(nostos_infra::NoWriteBack::new())
+    };
+    state_builder = state_builder
+        .with_write_back(Arc::clone(&write_back))
+        .with_write_tables(write_tables);
     let state = state_builder;
 
     // CORS: explicit origins in production, permissive for local dev (the

@@ -22,13 +22,21 @@ pub mod router;
 pub mod store;
 pub mod transport;
 pub mod wire;
+pub mod write_back;
 
 pub use auth::{AllowAnonymous, SupabaseJwtAuth};
 pub use replicator::{FakeReplicator, FakeReplicatorConfig};
 pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;
 pub use transport::SyncRouterState;
-pub use wire::{decode_client_message, encode_event, ClientMessage, FilterClause, WireFrame};
+pub use wire::{
+    decode_client_message, encode_event, encode_write_result, ClientMessage, FilterClause,
+    WireFrame,
+};
+pub use write_back::{parse_allowlist, NoWriteBack};
 
 #[cfg(feature = "pg")]
 pub use replicator::{PgReplicator, PgReplicatorConfig, PgReplicatorError};
+
+#[cfg(feature = "pg")]
+pub use write_back::PgWriteBack;

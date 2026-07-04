@@ -25,7 +25,9 @@ use nostos_application::FanOutService;
 use nostos_domain::{ColumnValue, Lsn, Operation, Principal, ReplicationEvent, RowOp};
 
 use nostos_application::ports::SyncAuth;
-use common::{decode_payload_hex, spawn_fake_server, spawn_fake_server_with};
+use common::{
+    decode_payload_hex, spawn_fake_server, spawn_fake_server_with, spawn_fake_server_with_tables,
+};
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -533,6 +535,243 @@ async fn where_sql_cannot_shed_tenant_enforcement() {
         frames.is_empty(),
         "a tenant-B row must NOT be delivered to tenant A even when where_sql matches \
          it — the server ANDs tenant_id='A' outside the client expression. got: {frames:?}"
+    );
+}
+
+// ===========================================================================
+// D2 write-back contract tests (no PG — fake mode).
+//
+// Four reject-path contract tests for the new `Write` client message +
+// `WriteResult` server frame. These run with the `FakeReplicator` setup
+// (`spawn_fake_server`), which injects the `NoWriteBack` stub — so the only
+// legitimate *success* path (real PG round-trip) is covered by
+// `e2e_pg_writeback.rs`. Here we prove the four reject paths hold before any
+// real database is involved:
+//
+//   (a) `Write` to a non-allowlisted table → `WriteResult{ok:false,
+//       error:"table not writable…"}`.
+//   (b) `Write` before `Subscribe` → socket closed (same discipline as an
+//       early ACK).
+//   (c) malformed payload (non-object) → `ok:false`, error mentions
+//       "invalid payload".
+//   (d) in fake mode with an allowlisted table → `ok:false`,
+//       "write-back requires pg replicator" (v1: the fake has no database).
+// ===========================================================================
+
+/// A well-formed upsert Write frame for the given table + payload JSON.
+fn write_upsert_frame(table: &str, pk: &str, payload: &str) -> String {
+    format!(
+        "{{\"type\":\"write\",\"table\":\"{table}\",\"op\":\"upsert\",\"pk\":\"{pk}\",\
+         \"payload\":{payload},\"client_write_id\":\"w1\"}}"
+    )
+}
+
+/// (a) Write to a non-allowlisted table → ok:false, "table not writable".
+#[tokio::test]
+async fn write_to_non_allowlisted_table_is_rejected() {
+    let (addr, _server, _mgr, _store) = spawn_fake_server(64).await;
+
+    // Subscribe first (so we're past the handshake; the table-allow check is
+    // the thing under test, not Write-before-Subscribe).
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(common::subscribe_frame("tasks", &[])))
+        .await
+        .unwrap();
+    // Drain the subscribe ack window.
+    let _ = tokio::time::timeout(Duration::from_millis(200), ws.next()).await;
+
+    // "secret_table" is NOT in the allowlist (NoWriteBack's allowlist is empty
+    // in fake mode, so every table is non-allowlisted).
+    ws.send(Message::Text(write_upsert_frame(
+        "secret_table",
+        "1",
+        r#"{"title":"x"}"#,
+    )))
+    .await
+    .unwrap();
+
+    // Collect the next frame — it must be a WriteResult with ok:false.
+    let mut result: Option<serde_json::Value> = None;
+    let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Binary(b)))) =
+            tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+        {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("write_result") {
+                    result = Some(v);
+                    break;
+                }
+            }
+        }
+    }
+    let result = result.expect("expected a WriteResult frame");
+    assert_eq!(
+        result["ok"], false,
+        "non-allowlisted write must report ok:false"
+    );
+    let err = result["error"].as_str().expect("error string present");
+    assert!(
+        err.contains("table not writable"),
+        "error must mention 'table not writable', got: {err}"
+    );
+}
+
+/// (b) Write before Subscribe → socket closed (same discipline as early ACK).
+#[tokio::test]
+async fn write_before_subscribe_closes_socket() {
+    let (addr, _server, _mgr, _store) = spawn_fake_server(64).await;
+
+    // Connect and immediately send a Write WITHOUT subscribing first.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(write_upsert_frame(
+        "tasks",
+        "1",
+        r#"{"title":"x"}"#,
+    )))
+    .await
+    .unwrap();
+
+    // The server must close the socket. Drain until we see a Close / None / Err.
+    let mut closed = false;
+    let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(Ok(Message::Binary(b)))) => {
+                // A stray frame — must NOT be a successful WriteResult. If the
+                // server somehow acked an out-of-order write, that's a hole.
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                    assert_ne!(
+                        v.get("type").and_then(|t| t.as_str()),
+                        Some("write_result"),
+                        "server must not ack a Write that arrived before Subscribe"
+                    );
+                }
+            }
+            // Text/Ping/Pong frames or a single-recv timeout — keep waiting for
+            // the close (or the deadline to expire).
+            _ => {}
+        }
+    }
+    assert!(
+        closed,
+        "socket should close when Write arrives before Subscribe"
+    );
+}
+
+/// (c) Malformed payload (non-object JSON) → ok:false, "invalid payload".
+#[tokio::test]
+async fn write_with_non_object_payload_is_rejected() {
+    // `tasks` must be allowlisted so the test reaches the payload check (not
+    // the allowlist gate). The fake NoWriteBack stub then never runs: the
+    // transport rejects the non-object payload first.
+    let (addr, _server, _mgr, _store) = spawn_fake_server_with_tables(
+        64,
+        Arc::new(nostos_infra::AllowAnonymous::new()),
+        None,
+        vec!["tasks".to_string()],
+    )
+    .await;
+
+    // Subscribe, then send a Write whose payload is a JSON array (not object).
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(common::subscribe_frame("tasks", &[])))
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_millis(200), ws.next()).await;
+
+    // payload is an array — not a JSON object.
+    let bad = "{\"type\":\"write\",\"table\":\"tasks\",\"op\":\"upsert\",\
+               \"pk\":\"1\",\"payload\":[1,2,3],\"client_write_id\":\"w1\"}";
+    ws.send(Message::Text(bad.to_string())).await.unwrap();
+
+    let mut result: Option<serde_json::Value> = None;
+    let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Binary(b)))) =
+            tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+        {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("write_result") {
+                    result = Some(v);
+                    break;
+                }
+            }
+        }
+    }
+    let result = result.expect("expected a WriteResult frame");
+    assert_eq!(
+        result["ok"], false,
+        "non-object payload must report ok:false"
+    );
+    let err = result["error"].as_str().expect("error string present");
+    assert!(
+        err.contains("invalid payload"),
+        "error must mention 'invalid payload', got: {err}"
+    );
+}
+
+/// (d) Fake mode (no PG) with an allowlisted table → ok:false,
+/// "write-back requires pg replicator". The NoWriteBack stub always errors.
+#[tokio::test]
+async fn write_in_fake_mode_reports_pg_required() {
+    // `tasks` is allowlisted (so the test reaches NoWriteBack, not the
+    // allowlist gate); NoWriteBack then returns its fixed fake-mode error.
+    let (addr, _server, _mgr, _store) = spawn_fake_server_with_tables(
+        64,
+        Arc::new(nostos_infra::AllowAnonymous::new()),
+        None,
+        vec!["tasks".to_string()],
+    )
+    .await;
+
+    // Subscribe, THEN write → the NoWriteBack stub returns its fixed error.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(common::subscribe_frame("tasks", &[])))
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_millis(200), ws.next()).await;
+
+    ws.send(Message::Text(write_upsert_frame(
+        "tasks",
+        "1",
+        r#"{"title":"x"}"#,
+    )))
+    .await
+    .unwrap();
+
+    let mut found: Option<serde_json::Value> = None;
+    let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Binary(b)))) =
+            tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+        {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("write_result") {
+                    found = Some(v);
+                    break;
+                }
+            }
+        }
+    }
+    let found = found.expect("expected a WriteResult frame from NoWriteBack");
+    assert_eq!(found["ok"], false, "fake-mode write must report ok:false");
+    let err = found["error"].as_str().expect("error string present");
+    assert!(
+        err.contains("write-back requires pg replicator"),
+        "fake-mode error must mention 'write-back requires pg replicator', got: {err}"
     );
 }
 
