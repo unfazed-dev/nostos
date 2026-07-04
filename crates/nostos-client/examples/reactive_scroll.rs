@@ -8,8 +8,10 @@
 //!    `org_id`/`status`/`priority` as a JSON payload — the exact shape
 //!    `PgReplicator::tuple_to_json_payload` emits) into the store.
 //! 3. A `SyncClient` with durable `SqliteStorage` (a temp file), reconnect
-//!    enabled, subscribing with a **typed predicate** (`status=open AND
-//!    priority>=3`) — exercising the ADR-0012 boolean tree + typed comparison.
+//!    enabled, subscribing with a **`where_sql` predicate** (`status = open AND
+//!    priority >= 3`) — exercising the Tier-7 safe-SQL compiler + typed
+//!    comparison end-to-end (the predicate is compiled on the server and ANDed
+//!    into the session; only matching rows are delivered).
 //! 4. Each applied row printed live: `[lsn] op tasks pk {json}`. This is the
 //!    visible reactive stream.
 //! 5. A mid-run server restart — the client's `run_with_reconnect` resumes from
@@ -186,13 +188,19 @@ async fn main() {
     let config = SyncClientConfig {
         table: "tasks".into(),
         token: Some("anon".into()),
+        // Subscribe with a where_sql — the Tier-7 safe-SQL compiler compiles
+        // this on the server and ANDs it into the session predicate. Only rows
+        // matching `status = open AND priority >= 3` are delivered (the
+        // FanOutService's extract_json lifts real decoded values for the
+        // predicate engine to evaluate). Exercises the compiler end-to-end.
+        where_sql: Some("status = open AND priority >= 3".into()),
         base_backoff: Duration::from_millis(50),
         max_backoff: Duration::from_millis(500),
         max_retries: Some(3),
         idle_timeout: Some(Duration::from_secs(2)),
     };
     let client = SyncClient::new(url, storage, config);
-    println!("[client] subscribing to tasks; applying rows as they stream in...\n");
+    println!("[client] subscribing to tasks (where status = open AND priority >= 3); applying rows as they stream in...\n");
 
     let outcome = client.run_once().await.expect("client run_once");
     println!(
@@ -208,7 +216,8 @@ async fn main() {
     println!("[server] back up on http://{addr2}/sync");
 
     // The client reconnects to the new address. Its durable checkpoint means it
-    // resumes from where it left off — no loss, no duplication.
+    // resumes from where it left off — no loss, no duplication. Same where_sql
+    // (the predicate is per-session, so the resumed session re-establishes it).
     let storage2 = SqliteStorage::open(&db_path).expect("reopen sqlite");
     let client2 = SyncClient::new(
         format!("ws://{addr2}/sync"),
@@ -216,6 +225,7 @@ async fn main() {
         SyncClientConfig {
             table: "tasks".into(),
             token: Some("anon".into()),
+            where_sql: Some("status = open AND priority >= 3".into()),
             base_backoff: Duration::from_millis(50),
             max_backoff: Duration::from_millis(500),
             max_retries: Some(3),

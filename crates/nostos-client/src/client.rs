@@ -63,6 +63,15 @@ pub struct SyncClientConfig {
     /// is what makes a "sync then disconnect" client deterministic; a
     /// long-lived client leaves this `None` and relies on reconnect-on-drop.
     pub idle_timeout: Option<Duration>,
+    /// An optional safe-SQL-subset predicate (ADR-0012) the server compiles and
+    /// ANDs into the session — e.g. `"priority > 5"` or
+    /// `"status = open AND priority >= 3"`. The grammar is the six comparison
+    /// operators + `AND`/`OR`/`NOT` + parens (see `parse_predicate_expr`); a
+    /// parse failure closes the socket with an `invalid where_sql:` reason
+    /// before any event flows. `None` (the default) = match-all on `table`.
+    /// Server-enforced: the principal's tenant scoping always wraps this, so a
+    /// `where_sql` can never widen scope past its tenant.
+    pub where_sql: Option<String>,
 }
 
 impl Default for SyncClientConfig {
@@ -74,6 +83,7 @@ impl Default for SyncClientConfig {
             max_backoff: Duration::from_secs(5),
             max_retries: None,
             idle_timeout: None,
+            where_sql: None,
         }
     }
 }
@@ -146,7 +156,7 @@ impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
         let subscribe = ClientMessage::Subscribe {
             table: self.config.table.clone(),
             filters: vec![],
-            where_sql: None,
+            where_sql: self.config.where_sql.clone(),
             resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
         };
         let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");

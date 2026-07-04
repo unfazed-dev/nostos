@@ -153,9 +153,22 @@ impl From<ApplyOutcome> for Outcome {
 ///
 /// Construct with `new NostosEngine()`. Feed frames; flush to commit a pending
 /// batch; read `checkpoint` to drive `resume_lsn` on reconnect.
+///
+/// ## `where_sql` (ADR-0012)
+///
+/// The engine carries an optional `where_sql` predicate string
+/// ([`NostosEngine::set_where_sql`]) that the WASM transport (E1) will attach to
+/// the subscribe frame when it connects. The apply engine itself does NOT
+/// evaluate it — the server compiles + ANDs it into the session predicate, so
+/// only matching rows are ever sent. Storing it on the engine lets E1 read it
+/// at connect time without a separate config object crossing the JS boundary.
 #[wasm_bindgen]
 pub struct NostosEngine {
     inner: ApplyEngine<InMemoryStorage>,
+    /// The optional safe-SQL predicate for the next subscribe. Held here so the
+    /// future WASM transport (E1) can read it when sending the subscribe frame;
+    /// the in-memory apply path ignores it (the server filters upstream).
+    where_sql: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -166,7 +179,32 @@ impl NostosEngine {
     pub fn new() -> Self {
         Self {
             inner: ApplyEngine::new(InMemoryStorage::new()),
+            where_sql: None,
         }
+    }
+
+    /// Set the `where_sql` predicate the transport (E1) will attach to the next
+    /// subscribe frame — e.g. `"priority > 5"`. Pass `null`/`undefined` to clear
+    /// it. The grammar is the safe-SQL subset (six comparison operators +
+    /// `AND`/`OR`/`NOT` + parens); a parse failure closes the server socket with
+    /// an `invalid where_sql:` reason before any event flows. The apply engine
+    /// stores this for E1; it does not evaluate it locally (the server filters).
+    ///
+    /// JS:
+    /// ```js
+    /// const eng = new NostosEngine();
+    /// eng.setWhereSql("status = open AND priority >= 3");
+    /// ```
+    #[wasm_bindgen(js_name = setWhereSql)]
+    pub fn set_where_sql(&mut self, sql: Option<String>) {
+        self.where_sql = sql.filter(|s| !s.is_empty());
+    }
+
+    /// The configured `where_sql`, or `null` if none. E1's transport reads this
+    /// when building the subscribe frame.
+    #[wasm_bindgen(getter, js_name = whereSql)]
+    pub fn where_sql(&self) -> Option<String> {
+        self.where_sql.clone()
     }
 
     /// Feed a frame. Returns an `Outcome` if the frame triggered a commit (a
@@ -214,5 +252,44 @@ impl NostosEngine {
 impl Default for NostosEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `where_sql` field is the storage seam for the future WASM transport
+    /// (E1): the engine holds the predicate so E1 can attach it to the subscribe
+    /// frame. The apply path ignores it (the server filters upstream). These
+    /// tests pin the getter/setter contract — the JS smoke test mirrors them.
+    #[test]
+    fn fresh_engine_has_no_where_sql() {
+        let eng = NostosEngine::new();
+        assert!(eng.where_sql.is_none());
+    }
+
+    #[test]
+    fn set_where_sql_round_trips() {
+        let mut eng = NostosEngine::new();
+        eng.set_where_sql(Some("priority > 5".into()));
+        assert_eq!(eng.where_sql(), Some("priority > 5".to_string()));
+    }
+
+    #[test]
+    fn set_where_sql_none_clears() {
+        let mut eng = NostosEngine::new();
+        eng.set_where_sql(Some("priority > 5".into()));
+        eng.set_where_sql(None);
+        assert!(eng.where_sql.is_none());
+    }
+
+    #[test]
+    fn set_where_sql_empty_string_is_treated_as_none() {
+        // An empty predicate is a no-op (match-all); treat it as `None` so the
+        // transport doesn't send `where_sql: ""` over the wire.
+        let mut eng = NostosEngine::new();
+        eng.set_where_sql(Some(String::new()));
+        assert!(eng.where_sql.is_none());
     }
 }

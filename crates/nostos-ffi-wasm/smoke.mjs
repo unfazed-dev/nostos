@@ -51,5 +51,17 @@ eng.feed(new Frame(51, "insert", "tasks", "b", [0], 100)); // txn 100 (buffered)
 const r3 = eng.feed(new Frame(52, "insert", "tasks", "c", [0], null)); // closes txn → flush
 check("txn boundary fires a commit", typeof r3 === "object" && r3.rowsApplied === 2);
 
+// --- where_sql: the engine stores the predicate for the transport (E1) ---
+// The apply engine does NOT evaluate where_sql (the server filters upstream);
+// it just holds the string so E1's transport can attach it to the subscribe
+// frame. Getter/setter round-trip + null-clear are the contract.
+check("fresh whereSql is null", eng.whereSql === null);
+eng.setWhereSql("priority > 5");
+check("setWhereSql stores the predicate", eng.whereSql === "priority > 5");
+eng.setWhereSql(null);
+check("setWhereSql(null) clears it", eng.whereSql === null);
+eng.setWhereSql("status = open AND priority >= 3");
+check("complex predicate round-trips", eng.whereSql === "status = open AND priority >= 3");
+
 console.log(`\n${failures === 0 ? "ALL PASS" : failures + " FAILED"}`);
 process.exit(failures === 0 ? 0 : 1);
