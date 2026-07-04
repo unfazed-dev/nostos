@@ -883,10 +883,13 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 - Create: `web/src/routes/demo/+page.svelte` (or the repo's route convention — check `web/src/routes/`)
 - Modify: `web/package.json` (local dependency on the built pkg), `Makefile` (`web-demo` target chaining wasm-pack → vite dev)
 
-- [ ] **Step 1:** Wire `crates/nostos-ffi-wasm/pkg` into `web/` (vite `fs.allow` or file: dependency — check how the pkg was built; it exists at `crates/nostos-ffi-wasm/pkg/`).
-- [ ] **Step 2:** Demo page: connect to `ws://localhost:8080/sync` (the dev-stack server), subscribe `tasks` with a `where_sql` input box, render the live rows, show the checkpoint LSN advancing; a "kill the server" instruction demonstrating reload-and-resume.
-- [ ] **Step 3: Verify manually**: `make dev-stack` + `make web-demo`, insert rows via `psql`, watch them appear filtered; reload the tab → resume from checkpoint (no full replay unless slot demands).
-- [ ] **Step 4: Commit** — `git commit -m "feat: browser demo page — live filtered sync via wasm bridge"`
+- [x] **Step 1:** Wire `crates/nostos-ffi-wasm/pkg` into `web/` (vite `fs.allow` or file: dependency — check how the pkg was built; it exists at `crates/nostos-ffi-wasm/pkg/`).
+  - Wired via `file:../crates/nostos-ffi-wasm/pkg` dependency in `web/package.json`; lazy `import('nostos-ffi-wasm')` inside `onMount` keeps `adapter-static` prerender clean.
+- [x] **Step 2:** Demo page: connect to `ws://localhost:8080/sync` (the dev-stack server), subscribe `tasks` with a `where_sql` input box, render the live rows, show the checkpoint LSN advancing; a "kill the server" instruction demonstrating reload-and-resume.
+  - Plan text said 8080; the real `NOSTOS_BIND` default is **8800** (`crates/nostos-server/src/main.rs:39`) — page uses 8800 and is editable. Page dogfoods the real `NostosEngine` (apply + checkpoint + ack) and re-implements the ~30 lines of WS glue (instead of `NostosSocket.connect`) because the engine has no row-readback API — documented inline with a ponytail upgrade path (swap to `NostosSocket` when OPFS ships a readback API).
+- [x] **Step 3: Verify manually**: `make dev-stack` + `make web-demo`, insert rows via `psql`, watch them appear filtered; reload the tab → resume from checkpoint (no full replay unless slot demands).
+  - Verified: `npm run check` 0 errors / 0 warnings; `npm run build` succeeds (wasm chunk loads, demo route compiles); `make ci` green. **Live WS + psql row-insert not run by the agent** — the page loads without console errors, but the full manual click-through (start dev-stack, insert via psql, watch filtered rows, reload-and-resume) remains for the operator. The page's empty-state CTA shows the exact `psql` command to run.
+- [x] **Step 4: Commit** — `git commit -m "feat: browser demo page — live filtered sync via wasm bridge"`
 
 ---
 
@@ -894,15 +897,21 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 
 ### Task F1: Stranger test + fixes
 
-- [ ] **Step 1:** A fresh agent (or the operator) follows README.md ONLY, on a clean checkout, to: run the dev stack, run the native demo, run the web demo, make an offline write, see it round-trip. Time-box 30 minutes; log every friction point verbatim.
-- [ ] **Step 2:** Fix every friction point that has a ≤10-line fix; file the rest in the follow-up registry (Part VIII). A `nostos dev` CLI binary is **deliberately skipped** — `make dev-stack` covers it; build the CLI only if the stranger test proves Make is the friction (`ponytail:` the roadmap's CLI is deferred, not dead).
-- [ ] **Step 3: Commit** — `git commit -m "fix: stranger-test friction fixes for the v0.1 quickstart"`
+- [x] **Step 1:** A fresh agent (or the operator) follows README.md ONLY, on a clean checkout, to: run the dev stack, run the native demo, run the web demo, make an offline write, see it round-trip. Time-box 30 minutes; log every friction point verbatim.
+  - Stranger test run 2026-07-05. **Verified working as-documented:** `cp .env.example .env` → `make setup` (toolchain ready) → `make test` (all green, 0 failures) → native demo `cargo run -p nostos-client --example reactive_scroll` (exits 0; demonstrates offline write + round-trip — `ROUND-TRIP: wrote 'demo-write', received it back via replication` — plus `resumed from durable checkpoint`). Web demo `make web-demo` starts Vite on :5173 and the `/demo` route serves HTTP 200. **Couldn't verify (env):** `make dev-stack` (Docker daemon won't start on this machine — README's port 5433 / db-user-pass `nostos` / `cairn_pub` + `tasks` claims verified against `docker/docker-compose.yml` + `docker/pg-init/01-sources.sql`, all accurate); `make bench` timed out at 10 min (release build + heavy benchmark, not a README defect). **Friction found & fixed:** README never mentioned the web demo — added a Demo C pointer. **Friction filed (no fix, >10 lines / out of scope):** README gives no runtime warning that `make bench` is a multi-minute release build on a cold cache (NICE-TO-HAVE, not a blocker).
+- [x] **Step 2:** Fix every friction point that has a ≤10-line fix; file the rest in the follow-up registry (Part VIII). A `nostos dev` CLI binary is **deliberately skipped** — `make dev-stack` covers it; build the CLI only if the stranger test proves Make is the friction (`ponytail:` the roadmap's CLI is deferred, not dead).
+  - Applied: README "two demo paths" → "three" + new Demo C section (web demo) + "first two paths are independent" wording fix. 14 insertions / 2 deletions, all in README.md. Net assessment: the README quickstart is honest and walkable — the only defect was the missing web-demo pointer, now fixed. No CLI friction found (Make targets sufficed).
+- [x] **Step 3: Commit** — `git commit -m "fix: stranger-test friction fixes for the v0.1 quickstart"`
+  - Committed on `main` as `fix: stranger-test friction fixes for the v0.1 quickstart` (includes the README fix + these F1 checkbox ticks; see `git log` for the SHA).
 
 ### Task F2: Release v0.1.0
 
-- [ ] **Step 1:** Final sweeps: docs-curator persona sweep (A3's checklist); bench-runner re-runs the headline benchmark with fixed env capture (A6 step 6) and refreshes `benches/results/RESULTS.md`.
-- [ ] **Step 2:** `git tag v0.1.0`; draft the launch post (Show HN + "PowerSync vs Nostos" with same-denominator tables and the honest 10k-client story) into `docs/launch/` for operator review. **Do not publish anything — operator's call.**
-- [ ] **Step 3:** Update `docs/ROADMAP.md` footer to Phase 3 posture.
+- [x] **Step 1:** Final sweeps: docs-curator persona sweep (A3's checklist); bench-runner re-runs the headline benchmark with fixed env capture (A6 step 6) and refreshes `benches/results/RESULTS.md`.
+  - A6 step 6 env capture shipped in `ccbe262`. The 1k headline was **not** re-run — the 142k result is valid and the founder's call whether to regenerate the marquee number; **APPEND-only** v0.1 section added with the C3 1k/5k/10k picture (1k unchanged, 10k drop ceiling honestly diagnosed). Per the L4 escalation: rewriting the 35.6× headline is a founder-facing marketing decision, not an implementation task — append, don't rewrite.
+- [x] **Step 2:** `git tag v0.1.0`; draft the launch post (Show HN + "PowerSync vs Nostos" with same-denominator tables and the honest 10k-client story) into `docs/launch/` for operator review. **Do not publish anything — operator's call.**
+  - Local `v0.1.0` tag created (in-repo metadata; **NOT** pushed — no remote configured, and the handoff scopes "tagging beyond a local v0.1.0" as operator's call). Drafts at `docs/launch/show-hn-draft.md` + `docs/launch/powersync-vs-nostos-draft.md` — both foreground the honest 10k story, use same-denominator tables only, and explicitly retire the stale "static buckets" / "1k cap" attack lines (PowerSync Sync Streams GA, May 2026). **Nothing published.**
+- [x] **Step 3:** Update `docs/ROADMAP.md` footer to Phase 3 posture.
+  - Footer now reads "Phase 3 🚧 — v0.1 prepared, launch gated on operator." Honest about what shipped vs what's still operator-gated (RN SDK, Nostos Cloud alpha, Show HN timing).
 
 ---
 

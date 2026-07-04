@@ -107,4 +107,4 @@
 - 🚀 **GA** — production-ready for the phase's scope.
 - 📈 **Scaling** — optimization & hardening.
 
-Today: **Phase 1 🔬 — real-PG default + write-back v1 in progress** (see docs/plans/complete-nostos-fully-wired-operational.md).
+Today: **Phase 3 🚧 — v0.1 prepared, launch gated on operator.** v0.1 scope is code-complete: real-PG default + snapshot, `where_sql` predicate subscriptions, WS batching, write-back v1 with offline outbox, WASM transport + `/demo` page, two Flutter fixtures, stranger-tested README quickstart. RESULTS.md carries the honest 1k/5k/10k picture (1k headline 35.6× PowerSync unchanged; 10k drop ceiling diagnosed — table-sharded router is the Phase 2 fix). Launch post drafts in `docs/launch/`, local `v0.1.0` tag; **publication, the RN SDK, Nostos Cloud alpha, and Show HN timing remain operator calls** (see `docs/plans/complete-nostos-fully-wired-operational.md` Phase F2).

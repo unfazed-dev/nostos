@@ -121,6 +121,15 @@ dev-stack: ## Real-Postgres quickstart: compose up + run server with PgReplicato
 pg-down: ## Stop Postgres.
 	docker compose -f docker/docker-compose.yml down
 
+# web-demo: rebuild the WASM pkg (if stale) then start the Vite dev server for
+# the /demo page. Run in a SECOND terminal alongside `make dev-stack` — the demo
+# page connects cross-origin to the server's WS (default ws://localhost:8800/sync)
+# so no Vite WS proxy is wired. wasm-pack is a no-op when nothing changed.
+.PHONY: web-demo
+web-demo: ## Rebuild the WASM pkg + start the web dev server (run alongside dev-stack).
+	wasm-pack build crates/nostos-ffi-wasm --target web
+	cd web && npm install && npm run dev
+
 .PHONY: pg-logs
 pg-logs: ## Tail Postgres logs.
 	docker compose -f docker/docker-compose.yml logs -f postgres
