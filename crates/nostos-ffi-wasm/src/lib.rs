@@ -456,8 +456,12 @@ impl NostosSocket {
 
     /// Enumerate the `(pk, payload)` pairs the socket's engine holds for
     /// `table`. Mirrors `NostosEngine::rows_for` — the readback the demo renders
-    /// from. Borrows the engine briefly (the WS glue's onmessage pump holds the
-    /// borrow only per-message, so a render tick won't deadlock).
+    /// from. Safe because WASM is single-threaded and the JS event loop is
+    /// cooperative — `setInterval(snapshot, …)` and the WS `onmessage` pump
+    /// never run concurrently, so the `borrow_mut()` in the pump
+    /// (`transport.rs`) and this `borrow()` can't overlap (a `RefCell` panics
+    /// on re-borrow mid-`borrow_mut`; it doesn't deadlock, but the
+    /// cooperative-event-loop invariant is what keeps that from happening).
     #[wasm_bindgen(js_name = rowsFor)]
     pub fn rows_for(&self, table: &str) -> Vec<RowEntry> {
         self.inner.engine.borrow().rows_for(table)
