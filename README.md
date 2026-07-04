@@ -116,14 +116,58 @@ make setup
 # 2. Run the test suite
 make test
 
-# 3. Run the Week-1 benchmark — the headline chart
+# 3. Run the Week-1 benchmark — the headline chart (no Postgres needed)
 make bench            # → benches/results/RESULTS.md
-
-# 4. Or run the server standalone
-make run              # → ws://localhost:8800/sync
 ```
 
-> **The Week-1 benchmark needs no Postgres.** It drives a synthetic `FakeReplicator` through the *real* fan-out pipeline to isolate the server's throughput ceiling. The real `PgReplicator` arrives in Week 2 (`make pg-up`).
+There are **two demo paths** — pick the one that matches what you want to see.
+
+### A. Zero-setup demo (no Docker) — native client + reconnect/resume
+
+```bash
+cargo run -p nostos-client --example reactive_scroll
+```
+
+This spins an **in-process** axum sync server, a durable SQLite client, and a
+mid-run server restart that proves the client reconnects and **resumes from its
+durable checkpoint** (no loss, no duplication). It uses a `FakeReplicator` plus
+synthetic events shaped like real `tasks` rows — so it exercises the *real*
+client apply engine and storage layer without needing Postgres. Exits 0 when the
+demo completes; look for `resumed from durable checkpoint` in the output.
+
+### B. Real-Postgres dev stack — the actual `PgReplicator`
+
+```bash
+make dev-stack
+```
+
+This is the **real** path: `docker compose up` brings up Postgres 16 with
+`wal_level=logical` (host port `5433`, db/user/pass `nostos`, publication
+`cairn_pub` + `tasks` table from `docker/pg-init`), the target waits for the
+publication to exist, then runs `nostos-server` with
+`NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn`.
+Look for the `replicator: PgReplicator (real Postgres logical replication)` log
+line. From another terminal you can insert a row and watch it flow:
+
+```bash
+docker compose -f docker/docker-compose.yml exec postgres \
+  psql -U cairn -d cairn -c \
+  "INSERT INTO tasks (org_id, title) VALUES ('00000000-0000-0000-0000-000000000001', 'hello nostos');"
+```
+
+Then connect your own client to `ws://localhost:8800/sync` (or `psql` directly)
+to watch events stream. Ctrl-C stops the server; tear down Postgres with
+`make pg-down`.
+
+> **The two paths are independent.** `reactive_scroll` brings its *own*
+> in-process server and does **not** connect to the `dev-stack` server — pick
+> one or the other, not both. `dev-stack` is the only path that exercises real
+> Postgres logical replication; `reactive_scroll` is the fastest way to see the
+> native client + reconnect/resume in action.
+
+> **The Week-1 benchmark needs no Postgres.** `make bench` drives a synthetic
+> `FakeReplicator` through the *real* fan-out pipeline to isolate the server's
+> throughput ceiling.
 
 ---
 

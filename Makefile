@@ -13,6 +13,11 @@ BENCH_CLIENTS ?= 1000,5000,10000
 # How many replication events to push per client-tier during a bench run.
 BENCH_EVENTS  ?= 100000
 
+# Default Postgres URL for `make dev-stack` — mirrors docker/docker-compose.yml
+# (host port 5433 → container 5432, user/db/pass = nostos). Override by setting
+# this env var if you point dev-stack at a different Postgres.
+NOSTOS_PG_URL_DEFAULT ?= postgresql://cairn:cairn@localhost:5433/cairn
+
 CARGO := cargo
 
 .PHONY: help
@@ -83,6 +88,34 @@ run: ## Run the sync server (port 8800 by default; see .env).
 .PHONY: pg-up
 pg-up: ## Start a Postgres 16 with logical replication enabled (docker).
 	docker compose -f docker/docker-compose.yml up -d postgres
+
+# dev-stack: real-Postgres quickstart — compose up, wait for the publication,
+# then run nostos-server against it with PgReplicator. The readiness poll gates
+# on `cairn_pub` existing (not just `pg_isready`): during first init the
+# entrypoint runs a *temporary* server to apply pg-init scripts, then restarts
+# into the real one, so a plain readiness probe flips accepting -> rejecting
+# -> accepting and can fool `sleep 3`. The publication only exists once the
+# real server is up AND pg-init/01-sources.sql has run. (Same gate the B3
+# e2e-pg CI job uses.) Ctrl-C stops the server; `make pg-down` tears down PG.
+.PHONY: dev-stack
+dev-stack: ## Real-Postgres quickstart: compose up + run server with PgReplicator.
+	docker compose -f docker/docker-compose.yml up -d
+	@echo "waiting for postgres (polling for cairn_pub publication)…"
+	@for i in $$(seq 1 60); do \
+	  if docker compose -f docker/docker-compose.yml exec -T postgres \
+	       psql -U cairn -d cairn -tAc \
+	       "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" \
+	       | grep -q 1; then \
+	    echo "Postgres ready (cairn_pub present) after $${i}s"; \
+	    break; \
+	  fi; \
+	  sleep 1; \
+	done
+	@docker compose -f docker/docker-compose.yml exec -T postgres \
+	  psql -U cairn -d cairn -tAc \
+	  "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" | grep -q 1 \
+	  || { echo "Postgres did not become ready in 60s — try 'make pg-logs'"; exit 1; }
+	NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=$(NOSTOS_PG_URL_DEFAULT) $(CARGO) run -p nostos-server
 
 .PHONY: pg-down
 pg-down: ## Stop Postgres.
