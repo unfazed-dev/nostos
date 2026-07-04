@@ -460,7 +460,7 @@ indent_size = 2
 - Consumes: existing `pg` feature forwarding (`nostos-server` → `nostos-infra/pg`).
 - Produces: `cargo build -p nostos-server` (no flags) includes `PgReplicator`; `NOSTOS_REPLICATOR` runtime default stays `fake` so zero-setup `cargo run` keeps working.
 
-- [ ] **Step 1: Make the feature default** — in `crates/nostos-server/Cargo.toml`:
+- [x] **Step 1: Make the feature default** — in `crates/nostos-server/Cargo.toml`:
 
 ```toml
 [features]
@@ -468,11 +468,11 @@ default = ["pg"]
 pg = ["nostos-infra/pg"]
 ```
 
-- [ ] **Step 2: Improve the failure mode** — in `main.rs`'s replicator match: when `NOSTOS_REPLICATOR=pg` and `NOSTOS_PG_URL` is unset/unreachable, the error must name the fix verbatim: `set NOSTOS_PG_URL, e.g. after: docker compose -f docker/docker-compose.yml up -d`. When the binary was built without the feature (`--no-default-features`), keep the existing warn-and-fallback but include `rebuild with --features pg` in the message.
+- [x] **Step 2: Improve the failure mode** — in `main.rs`'s replicator match: when `NOSTOS_REPLICATOR=pg` and `NOSTOS_PG_URL` is unset/unreachable, the error must name the fix verbatim: `set NOSTOS_PG_URL, e.g. after: docker compose -f docker/docker-compose.yml up -d`. When the binary was built without the feature (`--no-default-features`), keep the existing warn-and-fallback but include `rebuild with --features pg` in the message.
 
-- [ ] **Step 3: Verify both builds** — `cargo build -p nostos-server` and `cargo build -p nostos-server --no-default-features` both compile; `NOSTOS_REPLICATOR=pg cargo run -p nostos-server` without a DB prints the actionable error and exits non-zero.
+- [x] **Step 3: Verify both builds** — `cargo build -p nostos-server` and `cargo build -p nostos-server --no-default-features` both compile; `NOSTOS_REPLICATOR=pg cargo run -p nostos-server` without a DB prints the actionable error and exits non-zero.
 
-- [ ] **Step 4: Run `make ci`; commit** — `git commit -m "feat: compile pg replicator by default with actionable misconfiguration errors"`
+- [x] **Step 4: Run `make ci`; commit** — `git commit -m "feat: compile pg replicator by default with actionable misconfiguration errors"`
 
 ### Task B2: Initial snapshot via COPY (the missing first sync)
 
@@ -487,9 +487,9 @@ The gap: a client subscribing to a populated table receives nothing until rows c
 - Consumes: `ReplicatorStream::next_event() -> Option<ReplicationEvent>` (verified seam — snapshot rows flow through the same port; no fan-out or client changes needed) and `pg.rs`'s existing `tuple_to_json_payload` row-encoding shape.
 - Produces: on first start (slot does not exist), `next_event` yields one `ReplicationEvent` insert per existing row in every table of the publication, at the slot's consistent-point LSN, then seamlessly continues with live streamed events. On restart (slot exists), no snapshot is emitted.
 
-- [ ] **Step 1: Read the current docs before coding** (the crates are young; do not trust memory): [docs.rs/pgwire-replication/0.3.2](https://docs.rs/pgwire-replication) for `CREATE_REPLICATION_SLOT … (SNAPSHOT 'export')` support and the returned `consistent_point`/`snapshot_name`; [docs.rs/tokio-postgres](https://docs.rs/tokio-postgres) for `copy_out` and `SET TRANSACTION SNAPSHOT`. If pgwire-replication 0.3.2 cannot create a slot with an exported snapshot, the fallback design is: create the slot via SQL on a regular connection (`SELECT pg_create_logical_replication_slot('cairn_slot','pgoutput')` inside the same transaction discipline) — decide based on what the docs actually say and record the choice as a comment citing the doc section.
+- [x] **Step 1: Read the current docs before coding** (the crates are young; do not trust memory): [docs.rs/pgwire-replication/0.3.2](https://docs.rs/pgwire-replication) for `CREATE_REPLICATION_SLOT … (SNAPSHOT 'export')` support and the returned `consistent_point`/`snapshot_name`; [docs.rs/tokio-postgres](https://docs.rs/tokio-postgres) for `copy_out` and `SET TRANSACTION SNAPSHOT`. If pgwire-replication 0.3.2 cannot create a slot with an exported snapshot, the fallback design is: create the slot via SQL on a regular connection (`SELECT pg_create_logical_replication_slot('cairn_slot','pgoutput')` inside the same transaction discipline) — decide based on what the docs actually say and record the choice as a comment citing the doc section.
 
-- [ ] **Step 2: Write the failing e2e test** (`crates/nostos-infra/tests/e2e_pg_snapshot.rs`, gated like the existing e2e on `NOSTOS_PG_URL`):
+- [x] **Step 2: Write the failing e2e test** (`crates/nostos-infra/tests/e2e_pg_snapshot.rs`, gated like the existing e2e on `NOSTOS_PG_URL`):
 
 ```rust
 //! Snapshot-then-stream: a fresh slot must deliver pre-existing rows first.
@@ -518,7 +518,7 @@ async fn fresh_slot_yields_snapshot_rows_then_live_stream() {
 
 Flesh the comment skeleton into real code by copying the connection/seed helpers from `crates/nostos-infra/tests/e2e_pg_replication.rs` (they exist — that file is the pattern). Run: `NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg fresh_slot` → FAIL (snapshot events never arrive).
 
-- [ ] **Step 3: Implement `snapshot.rs`** — one public async fn:
+- [x] **Step 3: Implement `snapshot.rs`** — one public async fn:
 
 ```rust
 //! Initial table snapshot: COPY every publication table under the slot's
@@ -546,20 +546,20 @@ pub(crate) async fn snapshot_events(
 
 Identifier safety: quote schema/table with `quote_ident` semantics (tokio-postgres `escape_identifier` or manual `"` doubling); names come from `pg_publication_tables`, not from clients, but quote anyway. Memory ceiling: this buffers the snapshot in RAM — acceptable v1; add the comment `// ponytail: whole-snapshot buffered in memory; stream per-table batches through a channel when a real dataset exceeds RAM`.
 
-- [ ] **Step 4: Wire into `pg.rs`** — on connect, when the slot is newly created: call `snapshot_events(...)`, hold the Vec, and have `next_event()` drain it before polling the replication stream. When the slot already existed: skip. Match the existing code style; the seam stays `ReplicatorStream`.
+- [x] **Step 4: Wire into `pg.rs`** — on connect, when the slot is newly created: call `snapshot_events(...)`, hold the Vec, and have `next_event()` drain it before polling the replication stream. When the slot already existed: skip. Match the existing code style; the seam stays `ReplicatorStream`.
 
-- [ ] **Step 5: Concurrent-writes-during-snapshot test** (the classic slot-snapshot landmine — advisor-flagged CRITICAL): add a second test that INSERTs rows *while* the snapshot COPY is in flight (spawn the write task right after the replicator starts) and asserts every pk appears **exactly once** across snapshot events + streamed events — never zero times (lost between snapshot and stream start) and never twice (in both). The exported-snapshot + consistent-point design makes this hold structurally; this test is what proves it.
+- [x] **Step 5: Concurrent-writes-during-snapshot test** (the classic slot-snapshot landmine — advisor-flagged CRITICAL): add a second test that INSERTs rows *while* the snapshot COPY is in flight (spawn the write task right after the replicator starts) and asserts every pk appears **exactly once** across snapshot events + streamed events — never zero times (lost between snapshot and stream start) and never twice (in both). The exported-snapshot + consistent-point design makes this hold structurally; this test is what proves it.
 
-- [ ] **Step 6: Run the tests** — `docker compose -f docker/docker-compose.yml up -d && NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg fresh_slot` → PASS (both). Also re-run the full existing e2e: `cargo test -p nostos-infra --features pg` → all green (no regression in resume/ack semantics).
+- [x] **Step 6: Run the tests** — `docker compose -f docker/docker-compose.yml up -d && NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg fresh_slot` → PASS (both). Also re-run the full existing e2e: `cargo test -p nostos-infra --features pg` → all green (no regression in resume/ack semantics).
 
-- [ ] **Step 7: Commit** — `git commit -m "feat: initial snapshot via COPY under exported slot snapshot — fresh clients get existing rows"`
+- [x] **Step 7: Commit** — `git commit -m "feat: initial snapshot via COPY under exported slot snapshot — fresh clients get existing rows"`
 
 ### Task B3: CI runs the real-Postgres e2e
 
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Add the job** (mirror the compose setup; check `docker/pg-init/01-sources.sql` for init):
+- [x] **Step 1: Add the job** (mirror the compose setup; check `docker/pg-init/01-sources.sql` for init):
 
 ```yaml
   e2e-pg:
@@ -590,14 +590,14 @@ Identifier safety: quote schema/table with `quote_ident` semantics (tokio-postgr
 
 Note: GH Actions `services:` containers can't take `command:` args, hence the ALTER SYSTEM + restart dance; if it proves flaky, switch the job to `docker compose -f docker/docker-compose.yml up -d` directly on the runner (compose already sets `wal_level=logical` — check that file first and prefer whichever is simpler; that's a judgment call the executor makes and records in the commit).
 
-- [ ] **Step 2: Verify on a branch push** — job green in Actions; then commit to main: `git commit -m "ci: run real-Postgres logical-replication e2e on every push"`
+- [x] **Step 2: Verify on a branch push** — job green in Actions; then commit to main: `git commit -m "ci: run real-Postgres logical-replication e2e on every push"`
 
 ### Task B4: One-command dev stack + README quickstart
 
 **Files:**
 - Modify: `Makefile` (target `dev-stack`), `README.md` (quickstart section)
 
-- [ ] **Step 1: Add the Make target** (check `docker/docker-compose.yml` for the actual port/credentials and reuse them verbatim):
+- [x] **Step 1: Add the Make target** (check `docker/docker-compose.yml` for the actual port/credentials and reuse them verbatim):
 
 ```make
 ## dev-stack: real-Postgres quickstart — compose up, wait, run server against it
@@ -609,9 +609,9 @@ dev-stack:
 
 with `NOSTOS_PG_URL_DEFAULT` defined at the top of the Makefile from the compose file's values.
 
-- [ ] **Step 2: README quickstart** — replace/extend the quickstart with the 3-command real path: `make dev-stack` (terminal 1), `cargo run -p nostos-client --example reactive_scroll` pointed at it (terminal 2 — if the example currently spins an in-process server, note it as the zero-setup path and show the WS-URL env override for the real-server path only if the example already supports one; do not add flags speculatively).
-- [ ] **Step 3: Verify by executing the README steps exactly as written** — a wrong quickstart is worse than none.
-- [ ] **Step 4: Commit** — `git commit -m "feat: make dev-stack one-command real-Postgres quickstart"`
+- [x] **Step 2: README quickstart** — replace/extend the quickstart with the 3-command real path: `make dev-stack` (terminal 1), `cargo run -p nostos-client --example reactive_scroll` pointed at it (terminal 2 — if the example currently spins an in-process server, note it as the zero-setup path and show the WS-URL env override for the real-server path only if the example already supports one; do not add flags speculatively).
+- [x] **Step 3: Verify by executing the README steps exactly as written** — a wrong quickstart is worse than none.
+- [x] **Step 4: Commit** — `git commit -m "feat: make dev-stack one-command real-Postgres quickstart"`
 
 ---
 
@@ -627,7 +627,7 @@ with `NOSTOS_PG_URL_DEFAULT` defined at the top of the Makefile from the compose
 - Consumes: `nostos_domain::predicate_compile::parse_predicate_expr(&str) -> Result<PredicateExpr, ParseError>` (verified); `Predicate { table, expr }` public fields (verified); transport's existing tenant enforcement `p.and_eq(tenant_col, …)` (verified, ADR-0011).
 - Produces: wire schema v-next — `Subscribe { table, filters, where_sql: Option<String>, resume_lsn }`; invalid SQL → socket closed with reason `"invalid where_sql: <ParseError>"` before any event flows.
 
-- [ ] **Step 1: Write the failing contract tests** in `ws_contract.rs` (follow the file's existing connect-and-frame helpers):
+- [x] **Step 1: Write the failing contract tests** in `ws_contract.rs` (follow the file's existing connect-and-frame helpers):
 
 ```rust
 #[tokio::test]
@@ -654,7 +654,7 @@ async fn where_sql_cannot_shed_tenant_enforcement() {
 
 Run: `cargo test -p nostos-infra ws_contract` → 3 FAIL (unknown field / no filtering).
 
-- [ ] **Step 2: Extend the wire type** — in `wire.rs`'s `ClientMessage::Subscribe`:
+- [x] **Step 2: Extend the wire type** — in `wire.rs`'s `ClientMessage::Subscribe`:
 
 ```rust
     Subscribe {
@@ -672,7 +672,7 @@ Run: `cargo test -p nostos-infra ws_contract` → 3 FAIL (unknown field / no fil
 
 Thread `where_sql` through transport's `SubscribeRequest`.
 
-- [ ] **Step 3: Compile and combine in transport.rs** — where the predicate is built today (the fn ending in the ADR-0011 tenant `and_eq`), before tenant enforcement:
+- [x] **Step 3: Compile and combine in transport.rs** — where the predicate is built today (the fn ending in the ADR-0011 tenant `and_eq`), before tenant enforcement:
 
 ```rust
     if let Some(sql) = &req.where_sql {
@@ -686,8 +686,8 @@ Thread `where_sql` through transport's `SubscribeRequest`.
 
 (Adjust the exact plumbing to the fn's real signature — it currently returns `Predicate` infallibly; make it `Result` and close the socket with the reason string at the caller. Import path for `parse_predicate_expr` per `nostos-domain`'s re-exports — check `crates/nostos-domain/src/lib.rs`.)
 
-- [ ] **Step 4: Run the tests** — 3 PASS; full `make ci` green.
-- [ ] **Step 5: Commit** — `git commit -m "feat: wire safe-SQL predicate compiler into subscribe path with server-enforced tenant clauses"`
+- [x] **Step 4: Run the tests** — 3 PASS; full `make ci` green.
+- [x] **Step 5: Commit** — `git commit -m "feat: wire safe-SQL predicate compiler into subscribe path with server-enforced tenant clauses"`
 
 ### Task C2: Expose `where_sql` in the native client and WASM bridge
 
@@ -695,11 +695,11 @@ Thread `where_sql` through transport's `SubscribeRequest`.
 - Modify: `crates/nostos-client/src/client.rs` (SyncClient subscribe config), `crates/nostos-ffi-wasm/src/lib.rs` (constructor/subscribe param), `crates/nostos-client/examples/reactive_scroll.rs` (use it)
 - Test: `crates/nostos-client/tests/` (one round-trip), wasm unit via existing pattern
 
-- [ ] **Step 1: Failing test** — in nostos-client's test suite, spin the in-process server (pattern: `reactive_scroll.rs` / `chaos_resume.rs`), subscribe with `where_sql: Some("priority > 5".into())`, publish 3/7, assert only 7 lands in SQLite.
-- [ ] **Step 2: Add the field** to the client's subscribe/config struct and serialize it into the Subscribe frame (it already serializes `ClientMessage`; the field flows for free once present). Mirror in the WASM bridge as an optional string param.
-- [ ] **Step 3: Update `reactive_scroll.rs`** to subscribe with a `where_sql` instead of (or alongside) equality filters — the demo now exercises the Tier-7 compiler end to end.
-- [ ] **Step 4:** Tests pass; `cargo run -p nostos-client --example reactive_scroll` still exits 0 with resume intact; `wasm-pack build crates/nostos-ffi-wasm --target web` still under budget.
-- [ ] **Step 5: Commit** — `git commit -m "feat: where_sql subscriptions in native client, wasm bridge, and reactive_scroll demo"`
+- [x] **Step 1: Failing test** — in nostos-client's test suite, spin the in-process server (pattern: `reactive_scroll.rs` / `chaos_resume.rs`), subscribe with `where_sql: Some("priority > 5".into())`, publish 3/7, assert only 7 lands in SQLite.
+- [x] **Step 2: Add the field** to the client's subscribe/config struct and serialize it into the Subscribe frame (it already serializes `ClientMessage`; the field flows for free once present). Mirror in the WASM bridge as an optional string param.
+- [x] **Step 3: Update `reactive_scroll.rs`** to subscribe with a `where_sql` instead of (or alongside) equality filters — the demo now exercises the Tier-7 compiler end to end.
+- [x] **Step 4:** Tests pass; `cargo run -p nostos-client --example reactive_scroll` still exits 0 with resume intact; `wasm-pack build crates/nostos-ffi-wasm --target web` still under budget.
+- [x] **Step 5: Commit** — `git commit -m "feat: where_sql subscriptions in native client, wasm bridge, and reactive_scroll demo"`
 
 ### Task C3: 10k-client drop-rate fix (measure → batch → verify)
 
@@ -709,11 +709,11 @@ The known limit: 45,964 ops/sec @ 17.26% drops at 10k clients — per-connection
 - Modify: `crates/nostos-infra/src/transport.rs` (batch frames per flush tick), possibly `crates/nostos-infra/src/router.rs`
 - Test: `make bench` at 1k/5k/10k; existing `ws_contract.rs` must stay green
 
-- [ ] **Step 1: Baseline** — `make bench` at 1k/5k/10k on an idle machine; record env + 3-run variance into `benches/results/` (bench-runner persona's format).
-- [ ] **Step 2: Batch the write path** — in the per-session sink→socket pump, drain up to N pending frames (start N=64) from the session channel and send as one WS message containing a JSON array of frames; client `decode` already iterates frames? — **check first**: if the client/wire decode expects one frame per message, extend `decode` to accept `[{...},{...}]` arrays (server can then batch without a wire version bump; old single-frame messages remain valid). Keep the flush immediate when the channel is empty (no latency tax at low rates): batching only kicks in under backlog.
-- [ ] **Step 3: Re-measure** — same 3×3 matrix. Accept if: 10k-client drop rate < 1% at ≥ PowerSync-ceiling throughput AND 1k-client headline within noise of baseline. Otherwise revert and record the numbers in `docs/ROADMAP.md` the way Tier 5 did.
-- [ ] **Step 4: Reconnect-storm probe (decision point, advisor-flagged)** — batching fixes steady-state throughput; a reconnect storm is a different failure mode. Extend `nostos-bench` (or a one-off harness in `benches/`) to drop and simultaneously reconnect 5k of the 10k clients mid-stream, each re-subscribing with a `resume_lsn`; record peak per-session queue depth, drop rate, and time-to-drain. If the storm exceeds sustainable queue depth (sustained drops after batching), file the finding + numbers as the opening measurement of a follow-up admission-control/token-bucket task **before Phase D lands**; if it drains cleanly, record the numbers and move on — do not build admission control speculatively.
-- [ ] **Step 5: Commit (either outcome)** — `git commit -m "feat: batched WS writes — 10k-client drops X% -> Y%"` or `git commit -m "docs: WS batching measured, regressed 1k headline, reverted"` (+ storm numbers in the message body of the ROADMAP note, commit itself single-line)
+- [x] **Step 1: Baseline** — `make bench` at 1k/5k/10k on an idle machine; record env + 3-run variance into `benches/results/` (bench-runner persona's format).
+- [x] **Step 2: Batch the write path** — in the per-session sink→socket pump, drain up to N pending frames (start N=64) from the session channel and send as one WS message containing a JSON array of frames; client `decode` already iterates frames? — **check first**: if the client/wire decode expects one frame per message, extend `decode` to accept `[{...},{...}]` arrays (server can then batch without a wire version bump; old single-frame messages remain valid). Keep the flush immediate when the channel is empty (no latency tax at low rates): batching only kicks in under backlog.
+- [x] **Step 3: Re-measure** — same 3×3 matrix. Accept if: 10k-client drop rate < 1% at ≥ PowerSync-ceiling throughput AND 1k-client headline within noise of baseline. Otherwise revert and record the numbers in `docs/ROADMAP.md` the way Tier 5 did.
+- [x] **Step 4: Reconnect-storm probe (decision point, advisor-flagged)** — batching fixes steady-state throughput; a reconnect storm is a different failure mode. Extend `nostos-bench` (or a one-off harness in `benches/`) to drop and simultaneously reconnect 5k of the 10k clients mid-stream, each re-subscribing with a `resume_lsn`; record peak per-session queue depth, drop rate, and time-to-drain. If the storm exceeds sustainable queue depth (sustained drops after batching), file the finding + numbers as the opening measurement of a follow-up admission-control/token-bucket task **before Phase D lands**; if it drains cleanly, record the numbers and move on — do not build admission control speculatively.
+- [x] **Step 5: Commit (either outcome)** — `git commit -m "feat: batched WS writes — 10k-client drops X% -> Y%"` or `git commit -m "docs: WS batching measured, regressed 1k headline, reverted"` (+ storm numbers in the message body of the ROADMAP note, commit itself single-line)
 
 ---
 
@@ -726,7 +726,7 @@ Design decision this plan makes (operator may veto): **v1 write-back rides the e
 **Files:**
 - Modify: `docs/adr/0013-direct-write-back-design.md` (append an addendum section)
 
-- [ ] **Step 1: Append:**
+- [x] **Step 1: Append:**
 
 ```markdown
 ## Addendum (2026-07): v1 ships over the sync WebSocket
@@ -743,7 +743,7 @@ v1 scope shipped ahead of Phase 4 (plan: docs/plans/complete-nostos-fully-wired-
   echo is a no-op.
 ```
 
-- [ ] **Step 2: Commit** — `git commit -m "docs: ADR-0013 addendum — v1 write-back over sync socket, LWW, table allowlist"`
+- [x] **Step 2: Commit** — `git commit -m "docs: ADR-0013 addendum — v1 write-back over sync socket, LWW, table allowlist"`
 
 ### Task D2: Write port + Postgres adapter (server side)
 
@@ -780,9 +780,9 @@ pub enum WriteBackError {
 
 - Produces (wire): `ClientMessage::Write { table, op, pk, payload, client_write_id }` (`op`: `"upsert" | "delete"`; `payload`: JSON object, absent for delete) and a new server→client frame `WriteResult { client_write_id, ok, error }`.
 
-- [ ] **Step 1: Failing contract tests** (fake-replicator mode, no PG needed): (a) `Write` to a non-allowlisted table → `WriteResult{ok:false, error:"table not writable…"}`; (b) `Write` before `Subscribe` → socket closed (same discipline as early-ACK); (c) malformed payload (non-object) → `ok:false, InvalidPayload`; (d) in fake mode with an allowlisted table → `ok:false, error:"write-back requires pg replicator"` (v1: writes need the real source; the fake has no database). Run → FAIL.
-- [ ] **Step 2: Wire types** — add `Write` to `ClientMessage`, add the `WriteResult` outbound frame beside `encode_event` (same JSON, `"type":"write_result"`).
-- [ ] **Step 3: Port + adapter** — trait as above in `ports.rs`. `PgWriteBack` in `write_back.rs`: owns a `tokio_postgres::Client` pool-of-one (`ponytail: single connection; pool when a real load shows contention`), allowlist `HashSet<String>` from `NOSTOS_WRITE_TABLES` (comma-separated, exact match). Upsert SQL built as: identifiers validated against `^[a-z_][a-z0-9_]*$` **and** the allowlist, then ident-quoted; column names from the payload JSON keys validated by the same regex; values bound as parameters (`$1…$n`, `serde_json::Value` → text with `::jsonb`/`::text` casts as the column requires — v1 binds everything as text and lets PG coerce, `ponytail: text-cast binding; typed binding when a schema registry exists (ADR-0012 follow-on)`). Statement shape:
+- [x] **Step 1: Failing contract tests** (fake-replicator mode, no PG needed): (a) `Write` to a non-allowlisted table → `WriteResult{ok:false, error:"table not writable…"}`; (b) `Write` before `Subscribe` → socket closed (same discipline as early-ACK); (c) malformed payload (non-object) → `ok:false, InvalidPayload`; (d) in fake mode with an allowlisted table → `ok:false, error:"write-back requires pg replicator"` (v1: writes need the real source; the fake has no database). Run → FAIL.
+- [x] **Step 2: Wire types** — add `Write` to `ClientMessage`, add the `WriteResult` outbound frame beside `encode_event` (same JSON, `"type":"write_result"`).
+- [x] **Step 3: Port + adapter** — trait as above in `ports.rs`. `PgWriteBack` in `write_back.rs`: owns a `tokio_postgres::Client` pool-of-one (`ponytail: single connection; pool when a real load shows contention`), allowlist `HashSet<String>` from `NOSTOS_WRITE_TABLES` (comma-separated, exact match). Upsert SQL built as: identifiers validated against `^[a-z_][a-z0-9_]*$` **and** the allowlist, then ident-quoted; column names from the payload JSON keys validated by the same regex; values bound as parameters (`$1…$n`, `serde_json::Value` → text with `::jsonb`/`::text` casts as the column requires — v1 binds everything as text and lets PG coerce, `ponytail: text-cast binding; typed binding when a schema registry exists (ADR-0012 follow-on)`). Statement shape:
 
 ```sql
 INSERT INTO "t" ("id","col1",…) VALUES ($1,$2,…)
@@ -790,9 +790,9 @@ ON CONFLICT ("id") DO UPDATE SET "col1"=EXCLUDED."col1", …
 ```
 
 pk column name: v1 convention `id` (`ponytail: pk column fixed to "id"; read from pg_constraint when a design partner needs composite/renamed pks`). Deletes: `DELETE FROM "t" WHERE "id" = $1`.
-- [ ] **Step 4: Transport + composition** — extend `handle_client_message`'s match with `Write`: call the injected `Arc<dyn WriteBack>`, send `WriteResult`. Compose `PgWriteBack` in `main.rs` under feature `pg` when `NOSTOS_REPLICATOR=pg` (reuse `NOSTOS_PG_URL`); otherwise inject a `NoWriteBack` stub that returns the fake-mode error.
-- [ ] **Step 5: Contract tests PASS; then the real e2e** (`e2e_pg_writeback.rs`, `NOSTOS_PG_URL`-gated): client A writes a row over WS → assert `WriteResult ok` → assert the row arrives back through replication to client B (and to A, where the idempotent apply is a no-op — assert row count 1). `make ci` + feature e2e green.
-- [ ] **Step 6: Commit** — `git commit -m "feat: write-back v1 — WriteBack port, PgWriteBack upsert/delete with table allowlist, wire and transport"`
+- [x] **Step 4: Transport + composition** — extend `handle_client_message`'s match with `Write`: call the injected `Arc<dyn WriteBack>`, send `WriteResult`. Compose `PgWriteBack` in `main.rs` under feature `pg` when `NOSTOS_REPLICATOR=pg` (reuse `NOSTOS_PG_URL`); otherwise inject a `NoWriteBack` stub that returns the fake-mode error.
+- [x] **Step 5: Contract tests PASS; then the real e2e** (`e2e_pg_writeback.rs`, `NOSTOS_PG_URL`-gated): client A writes a row over WS → assert `WriteResult ok` → assert the row arrives back through replication to client B (and to A, where the idempotent apply is a no-op — assert row count 1). `make ci` + feature e2e green.
+- [x] **Step 6: Commit** — `git commit -m "feat: write-back v1 — WriteBack port, PgWriteBack upsert/delete with table allowlist, wire and transport"`
 
 ### Task D3: Client outbox — durable offline writes
 
@@ -829,10 +829,10 @@ pub struct PendingWrite {
 
 and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the connected loop flushes `pending()` in order, `mark_done` on each `WriteResult{ok:true}`; on `ok:false` the write stays queued and the error surfaces via the client's existing error/log channel with the write id (`ponytail: failed writes retry forever and block the queue head; add a dead-letter policy when a design partner hits a permanent rejection`).
 
-- [ ] **Step 1: Failing test** (`offline_writes.rs`, in-process server pattern): start client with server DOWN → `client.write(upsert of pk "a")` succeeds (enqueued) → assert `pending().len()==1` via a fresh `SqliteStorage` handle on the same file (durability) → start server → client connects → assert `WriteResult` processed, `pending()` empty, and the row round-trips back into the client's SQLite. Kill-restart variant: enqueue, drop the client process entirely, recreate from the same file, connect → flush still happens (the queue survived).
-- [ ] **Step 2: Implement** — `outbox` table in `sqlite.rs` (`id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, op TEXT, pk TEXT, payload TEXT`), same connection/transaction discipline as the checkpoint table; `Outbox` impl for `SqliteStorage`; flush loop in `client.rs` after subscribe-ack, serialized with the apply loop (single-threaded by construction, per the Storage contract).
-- [ ] **Step 3: Tests PASS; `make ci`; run `reactive_scroll` (unchanged behavior).**
-- [ ] **Step 4: Commit** — `git commit -m "feat: durable client outbox — offline writes survive restarts and flush on reconnect"`
+- [x] **Step 1: Failing test** (`offline_writes.rs`, in-process server pattern): start client with server DOWN → `client.write(upsert of pk "a")` succeeds (enqueued) → assert `pending().len()==1` via a fresh `SqliteStorage` handle on the same file (durability) → start server → client connects → assert `WriteResult` processed, `pending()` empty, and the row round-trips back into the client's SQLite. Kill-restart variant: enqueue, drop the client process entirely, recreate from the same file, connect → flush still happens (the queue survived).
+- [x] **Step 2: Implement** — `outbox` table in `sqlite.rs` (`id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, op TEXT, pk TEXT, payload TEXT`), same connection/transaction discipline as the checkpoint table; `Outbox` impl for `SqliteStorage`; flush loop in `client.rs` after subscribe-ack, serialized with the apply loop (single-threaded by construction, per the Storage contract).
+- [x] **Step 3: Tests PASS; `make ci`; run `reactive_scroll` (unchanged behavior).**
+- [x] **Step 4: Commit** — `git commit -m "feat: durable client outbox — offline writes survive restarts and flush on reconnect"`
 
 ### Task D4: Chaos: 2-way offline end-to-end
 
@@ -840,10 +840,10 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 - Create: `crates/nostos-client/tests/chaos_write_resume.rs`
 - Modify: `crates/nostos-client/examples/reactive_scroll.rs` (add one local write to the demo script)
 
-- [ ] **Step 0: Prove the idempotency premise first** (the whole no-echo-suppression design rests on it — make it a test, not a doc claim): unit test in `crates/nostos-client/tests/` (or extend nostos-core's suite): deliver the SAME `RowOp` (same table+pk+payload, same LSN batch) to `SqliteStorage::apply_batch` twice, and in a second case via two separate batches; assert row count 1 and final payload identical both times. If this fails, STOP — D2/D4's design assumption is broken and echo suppression must be designed before proceeding.
-- [ ] **Step 1: The test that makes "2-way offline" a true sentence** — combining chaos_resume's restart pattern with D3: client online syncing → server killed → client makes 2 offline writes + keeps working → server restarts → client reconnects, resumes from checkpoint (no loss), flushes outbox → both rows visible via replication echo → total row count exact (no duplication from echo or replay). Assert all invariants with counts, not "no crash".
-- [ ] **Step 2: PASS; update `reactive_scroll.rs`** to perform one `client.write(...)` mid-script and print the round-trip, so the demo demonstrates 2-way.
-- [ ] **Step 3: Commit** — `git commit -m "test: chaos write-resume — offline writes + mid-stream restart, zero loss zero duplication"`
+- [x] **Step 0: Prove the idempotency premise first** (the whole no-echo-suppression design rests on it — make it a test, not a doc claim): unit test in `crates/nostos-client/tests/` (or extend nostos-core's suite): deliver the SAME `RowOp` (same table+pk+payload, same LSN batch) to `SqliteStorage::apply_batch` twice, and in a second case via two separate batches; assert row count 1 and final payload identical both times. If this fails, STOP — D2/D4's design assumption is broken and echo suppression must be designed before proceeding.
+- [x] **Step 1: The test that makes "2-way offline" a true sentence** — combining chaos_resume's restart pattern with D3: client online syncing → server killed → client makes 2 offline writes + keeps working → server restarts → client reconnects, resumes from checkpoint (no loss), flushes outbox → both rows visible via replication echo → total row count exact (no duplication from echo or replay). Assert all invariants with counts, not "no crash".
+- [x] **Step 2: PASS; update `reactive_scroll.rs`** to perform one `client.write(...)` mid-script and print the round-trip, so the demo demonstrates 2-way.
+- [x] **Step 3: Commit** — `git commit -m "test: chaos write-resume — offline writes + mid-stream restart, zero loss zero duplication"`
 
 ---
 
