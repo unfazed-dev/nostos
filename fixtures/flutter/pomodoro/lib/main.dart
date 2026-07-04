@@ -1,20 +1,9 @@
 import 'package:flutter/material.dart';
 
+import 'domain/timer_config.dart';
+import 'views/pomodoro_view.dart';
+
 void main() {
-  runApp(const MainApp());
-}
-
-class MainApp extends StatelessWidget {
-  const MainApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return const MaterialApp(
-      home: Scaffold(
-        body: Center(
-          child: Text('Hello World!'),
-        ),
-      ),
-    );
-  }
+  const demo = bool.fromEnvironment('DEMO_MODE');
+  runApp(const PomodoroApp(config: demo ? TimerConfig.demo() : TimerConfig()));
 }
