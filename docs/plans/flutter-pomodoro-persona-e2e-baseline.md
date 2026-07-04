@@ -953,7 +953,7 @@ Same discipline as the Rust side of this repo: **fake and real adapters behind o
 **Interfaces:**
 - Produces (later tasks depend on these exact names): `Env.{supabaseUrl,supabaseAnonKey,testEmail,testPassword,isLive}`; `Session {userId, email}`; `AuthGateway {restore(), signIn(email,password), signOut()}` throwing `AuthException.invalidCredentials | .network(msg)`; `Todo {id,title,done}`; `TodoRepository {watch(), add(title), toggle(id)}`; `FakeAuthGateway.demoEmail/demoPassword` constants.
 
-- [ ] **Step 1: Scaffold + deps.** Before adding, verify the current major on pub.dev (read-the-damn-docs; app-example pins `supabase_flutter ^2.15.1` as of 2026-06 — expect 2.x):
+- [x] **Step 1: Scaffold + deps.** Before adding, verify the current major on pub.dev (read-the-damn-docs; app-example pins `supabase_flutter ^2.15.1` as of 2026-06 — expect 2.x):
 
 ```bash
 cd fixtures/flutter/todo && flutter pub add supabase_flutter && flutter pub add dev:mocktail dev:integration_test --sdk=flutter
@@ -961,7 +961,7 @@ cd fixtures/flutter/todo && flutter pub add supabase_flutter && flutter pub add 
 
 (`integration_test` is an SDK package: declare it in `dev_dependencies` with `sdk: flutter`, as in the pomodoro fixture's pubspec.)
 
-- [ ] **Step 2: `lib/env.dart`** — the single mock/live switch, compile-time:
+- [x] **Step 2: `lib/env.dart`** — the single mock/live switch, compile-time:
 
 ```dart
 /// Live-mode switch. Values arrive ONLY via --dart-define / --dart-define-from-file
@@ -978,7 +978,7 @@ class Env {
 }
 ```
 
-- [ ] **Step 3: Domain ports** (`lib/domain/auth_gateway.dart`):
+- [x] **Step 3: Domain ports** (`lib/domain/auth_gateway.dart`):
 
 ```dart
 class Session {
@@ -1027,9 +1027,9 @@ abstract interface class TodoRepository {
 }
 ```
 
-- [ ] **Step 4: Fakes** — `FakeAuthGateway` accepts exactly `demoEmail`/`demoPassword` (`demo@nostos.run` / `demo-1234`, exposed as static consts so the smoke test and any human demoing the app use the same values), throws `AuthException.invalidCredentials()` otherwise, `restore()` returns null; `InMemoryTodoRepository` holds a list behind a broadcast `StreamController`, re-emitting on every mutation. Both are ~30 lines; write them fully.
+- [x] **Step 4: Fakes** — `FakeAuthGateway` accepts exactly `demoEmail`/`demoPassword` (`demo@nostos.run` / `demo-1234`, exposed as static consts so the smoke test and any human demoing the app use the same values), throws `AuthException.invalidCredentials()` otherwise, `restore()` returns null; `InMemoryTodoRepository` holds a list behind a broadcast `StreamController`, re-emitting on every mutation. Both are ~30 lines; write them fully.
 
-- [ ] **Step 5: Supabase adapters** — real code, only *constructed* in live mode (verify exact API against the installed supabase_flutter 2.x docs before writing — the shapes below are the v2 API as of 2026-06):
+- [x] **Step 5: Supabase adapters** — real code, only *constructed* in live mode (verify exact API against the installed supabase_flutter 2.x docs before writing — the shapes below are the v2 API as of 2026-06):
 
 ```dart
 // supabase_auth_gateway.dart
@@ -1081,7 +1081,7 @@ class SupabaseAuthGateway implements AuthGateway {
 
 `SupabaseTodoRepository`: `watch()` via `_client.from('todos').stream(primaryKey: ['id']).order('created_at')` mapped to `Todo`; `add` inserts `{title, user_id: _client.auth.currentUser!.id}`; `toggle` flips `done` by id. Write fully at implementation time against the installed version's docs.
 
-- [ ] **Step 6: `supabase/schema.sql`** — the contract the operator applies:
+- [x] **Step 6: `supabase/schema.sql`** — the contract the operator applies:
 
 ```sql
 create table if not exists todos (
@@ -1100,7 +1100,7 @@ create policy "owner full access" on todos
 
 RLS owner-only also isolates the live smoke's writes to the dedicated test user — no cross-talk with any other data in the project.
 
-- [ ] **Step 7: `env.example.json`** (committed) + gitignore `env.json`:
+- [x] **Step 7: `env.example.json`** (committed) + gitignore `env.json`:
 
 ```json
 {
@@ -1113,7 +1113,7 @@ RLS owner-only also isolates the live smoke's writes to the dedicated test user 
 
 Note in the fixture README: the test user must exist and be email-confirmed BEFORE the live smoke runs (the suite fails with a provisioning message otherwise, it does not create users).
 
-- [ ] **Step 8: Verify** — `flutter analyze` clean (adapters compile in mock mode too). Commit: `git commit -m "feat: todo fixture scaffold with auth and repository ports, fakes, supabase adapters, env seam"`
+- [x] **Step 8: Verify** — `flutter analyze` clean (adapters compile in mock mode too). Commit: `git commit -m "feat: todo fixture scaffold with auth and repository ports, fakes, supabase adapters, env seam"`
 
 ### Task 9: Sign-in + todo views, viewmodels, unit/widget tests
 
@@ -1127,10 +1127,10 @@ Note in the fixture README: the test user must exist and be email-confirmed BEFO
 - Consumes: ports + fakes (Task 8).
 - Produces: `TodoApp({required AuthGateway auth, required TodoRepository todos})` root widget; keys `auth.email`, `auth.password`, `auth.submit`, `auth.error`, `auth.signout`, `todos.input`, `todos.add`, `todos.list`.
 
-- [ ] **Step 1: Failing unit tests first** (mocktail on the ports, pomodoro Task 2 harness style): `AuthViewModel` — signIn success exposes `session` and clears busy; `invalidCredentials` exposes `errorMessage` ('Invalid email or password'), never throws to the view; network error exposes the network message; signOut clears session. `TodoViewModel` — `watch` stream re-renders list; `add` delegates with trimmed title, ignores empty; `toggle` delegates by id. Run → FAIL.
-- [ ] **Step 2: Implement the two ViewModels** (plain `ChangeNotifier`, exactly the states the tests pin — no more).
-- [ ] **Step 3: Failing widget test** — `SignInView` with a mocktail `AuthGateway` throwing `invalidCredentials`: enter text in `auth.email`/`auth.password`, tap `auth.submit`, expect `auth.error` visible with the message. Run → FAIL.
-- [ ] **Step 4: Views + composition.** `SignInView`: two `TextField`s + `FilledButton` + error `Text` (keys above). `TodoView`: `TextField(key: todos.input)` + add `IconButton(key: todos.add)` + `ListView(key: todos.list)` of `CheckboxListTile`s + sign-out `IconButton(key: auth.signout)`. `TodoApp` swaps SignInView↔TodoView on the auth VM's session. `main.dart`:
+- [x] **Step 1: Failing unit tests first** (mocktail on the ports, pomodoro Task 2 harness style): `AuthViewModel` — signIn success exposes `session` and clears busy; `invalidCredentials` exposes `errorMessage` ('Invalid email or password'), never throws to the view; network error exposes the network message; signOut clears session. `TodoViewModel` — `watch` stream re-renders list; `add` delegates with trimmed title, ignores empty; `toggle` delegates by id. Run → FAIL.
+- [x] **Step 2: Implement the two ViewModels** (plain `ChangeNotifier`, exactly the states the tests pin — no more).
+- [x] **Step 3: Failing widget test** — `SignInView` with a mocktail `AuthGateway` throwing `invalidCredentials`: enter text in `auth.email`/`auth.password`, tap `auth.submit`, expect `auth.error` visible with the message. Run → FAIL.
+- [x] **Step 4: Views + composition.** `SignInView`: two `TextField`s + `FilledButton` + error `Text` (keys above). `TodoView`: `TextField(key: todos.input)` + add `IconButton(key: todos.add)` + `ListView(key: todos.list)` of `CheckboxListTile`s + sign-out `IconButton(key: auth.signout)`. `TodoApp` swaps SignInView↔TodoView on the auth VM's session. `main.dart`:
 
 ```dart
 Future<void> main() async {
@@ -1150,7 +1150,7 @@ Future<void> main() async {
 }
 ```
 
-- [ ] **Step 5: All `flutter test test/` green; `flutter analyze` clean. Commit** — `git commit -m "feat: todo fixture sign-in and list views with viewmodels over mocked ports"`
+- [x] **Step 5: All `flutter test test/` green; `flutter analyze` clean. Commit** — `git commit -m "feat: todo fixture sign-in and list views with viewmodels over mocked ports"`
 
 ### Task 10: The dual-mode smoke test — app + cloud + authentication
 
@@ -1162,7 +1162,7 @@ Future<void> main() async {
 - Consumes: `TodoApp` wiring via the real `main()` (mock mode) and `Env` (Task 8), keys (Task 9).
 - Produces: ONE test file, two modes. Mock mode: CI-safe, runs today with zero credentials. Live mode: same steps against real Supabase cloud auth + database, activated purely by `--dart-define-from-file=env.json`.
 
-- [ ] **Step 1: Write it** (single file — one step list, no mock/live drift; advisor-mandated guard first):
+- [x] **Step 1: Write it** (single file — one step list, no mock/live drift; advisor-mandated guard first):
 
 ```dart
 import 'package:flutter/material.dart';
@@ -1247,7 +1247,7 @@ Future<void> _settle(WidgetsTester tester) async {
 
 (Adjust `_settle` to the pomodoro fixture's `waitForText` helper style if plain fixed polling proves flaky in live mode — poll-for-state beats fixed loops; the executor picks whichever the live run proves out, and the unique `marker` string keeps repeat live runs from colliding with prior rows.)
 
-- [ ] **Step 2: Make verbs** (nostos root Makefile, next to the pomodoro verbs):
+- [x] **Step 2: Make verbs** (nostos root Makefile, next to the pomodoro verbs):
 
 ```make
 ## fixture-todo-test: todo fixture unit/widget suites (mocked ports)
@@ -1263,8 +1263,8 @@ fixture-todo-smoke-live:
 	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos --dart-define-from-file=env.json
 ```
 
-- [ ] **Step 3: Verify mock mode end-to-end today** — `make fixture-todo-test` and `make fixture-todo-smoke` green with zero credentials. Live mode stays parked at the Operator handoff checklist above; the suite's guard messages tell the operator exactly what's missing if run early.
-- [ ] **Step 4: Commit** — `git commit -m "test: dual-mode supabase auth smoke for todo fixture — mocked now, live on operator credentials"`
+- [x] **Step 3: Verify mock mode end-to-end today** — `make fixture-todo-test` and `make fixture-todo-smoke` green with zero credentials. Live mode stays parked at the Operator handoff checklist above; the suite's guard messages tell the operator exactly what's missing if run early.
+- [x] **Step 4: Commit** — `git commit -m "test: dual-mode supabase auth smoke for todo fixture — mocked now, live on operator credentials"`
 
 ---
 
