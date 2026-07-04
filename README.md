@@ -120,7 +120,7 @@ make test
 make bench            # → benches/results/RESULTS.md
 ```
 
-There are **two demo paths** — pick the one that matches what you want to see.
+There are **three demo paths** — pick the one that matches what you want to see.
 
 ### A. Zero-setup demo (no Docker) — native client + reconnect/resume
 
@@ -159,7 +159,19 @@ Then connect your own client to `ws://localhost:8800/sync` (or `psql` directly)
 to watch events stream. Ctrl-C stops the server; tear down Postgres with
 `make pg-down`.
 
-> **The two paths are independent.** `reactive_scroll` brings its *own*
+### C. Web demo — the WASM client + `/demo` page
+
+```bash
+make web-demo
+```
+
+Runs **alongside** `make dev-stack` (run dev-stack first, in another terminal):
+`wasm-pack build`s the `nostos-ffi-wasm` bridge, installs web deps, and starts
+the Vite dev server on http://localhost:5173/. Open the `/demo` page — it
+connects cross-origin to the server's WS (`ws://localhost:8800/sync`), so no
+Vite WS proxy is wired. Ctrl-C stops the dev server.
+
+> **The first two paths are independent.** `reactive_scroll` brings its *own*
 > in-process server and does **not** connect to the `dev-stack` server — pick
 > one or the other, not both. `dev-stack` is the only path that exercises real
 > Postgres logical replication; `reactive_scroll` is the fastest way to see the
