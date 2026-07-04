@@ -33,14 +33,23 @@ use tracing::{debug, warn};
 
 use nostos_application::ports::SyncAuth;
 use nostos_application::SessionManager;
-use nostos_domain::{ColumnValue, Predicate, Principal, SyncSession};
+use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SyncSession};
 
 use crate::router::TokioEventSink;
-use crate::wire::{decode_client_message, encode_event, ClientMessage};
+use crate::wire::{decode_client_message, encode_event, encode_events, ClientMessage};
 
 /// Default per-session bounded-buffer depth. Slow clients that fall this far
 /// behind are dropped (an explicit, observable choice — never silent OOM).
 const DEFAULT_SESSION_BUFFER: usize = 1024;
+
+/// Max frames coalesced into one WebSocket message under backlog (C3
+/// batched-writes). The write task drains up to this many *immediately
+/// available* frames after the first; the first always arrives via an
+/// `await`, so there is **zero latency tax at low rates** — batching only
+/// kicks in when the channel already has a backlog (≥2 pending frames). The
+/// receiver decodes both the batched array and the legacy single-object form,
+/// so no wire-version bump is needed.
+const MAX_BATCH_FRAMES: usize = 64;
 
 /// Shared state injected into the axum router.
 #[derive(Clone)]
@@ -206,12 +215,42 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
     let write_loop = tokio::spawn(async move {
         use futures_util::sink::SinkExt as _;
         let mut writer = writer;
-        while let Some(event) = rx.recv().await {
-            let frame = encode_event(&event);
-            // SplitSink::send owns the message; flush per frame so a slow
-            // consumer's backpressure surfaces as a full buffer (not buffering
-            // unbounded in the sink).
-            if writer.send(Message::Binary(frame)).await.is_err() {
+        // C3 batched-writes: the first frame is awaited (no busy-spin, no
+        // latency tax when idle). Once one is in hand, drain up to
+        // `MAX_BATCH_FRAMES - 1` MORE frames that are *immediately available*
+        // (non-blocking `try_recv`). If only the awaited frame is available,
+        // send it as a single object — byte-identical to the pre-batching wire
+        // (so the low-rate path adds zero cost and stays wire-compatible with
+        // any client that only understands single-object messages). Only when
+        // the channel has a backlog (≥2 pending) do we coalesce into one JSON
+        // array message, amortizing N frame-encode + socket-send costs into
+        // one wire write. The receiver decodes both forms (`decode_frames`).
+        while let Some(first) = rx.recv().await {
+            // Collect the awaited frame + any backlog, capped at MAX_BATCH_FRAMES.
+            let mut batch: Vec<ReplicationEvent> = Vec::with_capacity(MAX_BATCH_FRAMES);
+            batch.push(first);
+            // Non-blocking drain of the backlog.
+            while batch.len() < MAX_BATCH_FRAMES {
+                match rx.try_recv() {
+                    Ok(ev) => batch.push(ev),
+                    // Empty or closed → stop draining. (Closed is fine: the
+                    // outer `recv().await` will return None on the next loop
+                    // iteration and we exit cleanly after flushing this batch.)
+                    Err(_) => break,
+                }
+            }
+            // Single frame → legacy single-object form (no array wrapper).
+            // Multiple → one JSON-array message.
+            let msg = if batch.len() == 1 {
+                Message::Binary(encode_event(&batch[0]))
+            } else {
+                let refs: Vec<&ReplicationEvent> = batch.iter().collect();
+                Message::Binary(encode_events(&refs))
+            };
+            // SplitSink::send owns the message; one wire write per batch. A
+            // slow consumer's backpressure surfaces as a full buffer upstream
+            // (the bounded sink drops rather than buffering unbounded here).
+            if writer.send(msg).await.is_err() {
                 break; // client gone
             }
         }

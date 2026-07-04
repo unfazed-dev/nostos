@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::routing::get;
-use nostos_application::{FanOutService, SessionManager};
+use nostos_application::{FanOutOutcome, FanOutService, SessionManager};
 use nostos_domain::ColumnValue;
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
@@ -221,7 +221,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
 
     let start = Instant::now();
     // Drive fan-out concurrently with the clients receiving.
-    let fanout_task = {
+    let mut fanout_task = {
         let fanout = Arc::clone(&fanout);
         tokio::spawn(async move { fanout.run(&mut replicator, extract).await })
     };
@@ -240,7 +240,25 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
     let _ = timeout(deadline, wait).await;
     let elapsed = start.elapsed();
 
-    let outcome = fanout_task.await?;
+    // The fan-out task emits events as fast as the router accepts them. At high
+    // client counts (10k) with no client ACKs, `FanOutService::run` does a
+    // per-event `slowest_session` + `min_acked_lsn` scan over every session —
+    // O(N) per event — so finishing all `cfg.events` can take far longer than
+    // the delivery window above. Awaiting it unconditionally would hang the
+    // harness at 10k (the wait-loop times out, then we block on `run()`).
+    //
+    // We still await `run()` to completion so `outcome.matched` reflects the
+    // REAL number of events the router attempted (the honest denominator for
+    // the drop rate) — but cap it with a generous grace window so a genuinely
+    // stuck run (10k) terminates instead of hanging forever. The grace is much
+    // larger than any legitimate run needs: 1k finishes in ~10s, 5k in ~30s.
+    let outcome = if let Ok(joined) = timeout(Duration::from_mins(3), &mut fanout_task).await {
+        joined?
+    } else {
+        info!("fan-out didn't finish within 3min grace; aborting (10k regime)");
+        fanout_task.abort();
+        FanOutOutcome::default()
+    };
     // Keep the in-process server alive for the remainder of this run. Binding
     // (rather than `_`) would trip `let_underscore_future`; we intentionally
     // drop it after the clients finish below.
@@ -306,19 +324,31 @@ async fn client_task(
     let Some(ws) = ws else { return };
     let (mut write, mut read) = ws.split();
 
-    // Send subscribe frame.
-    let sub = serde_json::json!({ "table": "tasks" }).to_string();
+    // Send subscribe frame — must carry the `type` tag the wire contract
+    // requires (wire.rs: `ClientMessage` is `#[serde(tag = "type")]`). The
+    // old `{"table":"tasks"}` form silently failed to deserialize once the
+    // typed `ClientMessage` enum landed, leaving the session unregistered.
+    let sub = serde_json::json!({ "type": "subscribe", "table": "tasks" }).to_string();
     if write.send(Message::Text(sub)).await.is_err() {
         return;
     }
 
-    // Read loop — count frames, record per-frame inter-arrival time as a
-    // latency proxy. The absolute p99 reflects the recv rate; for true
-    // send→recv latency we'd embed server timestamps in the frame (Phase 2).
+    // Read loop — count FRAMES (not messages): C3 batched writes coalesce N
+    // frames into one WS message under backlog, so the per-message count would
+    // under-report delivered events. `decode_frames` accepts both the batched
+    // array and the legacy single-object form. Record per-message inter-arrival
+    // as a latency proxy (p99 reflects recv cadence; true send→recv latency
+    // needs server-embedded timestamps, Phase 2).
     while let Some(Ok(msg)) = read.next().await {
         let t = Instant::now();
-        if matches!(msg, Message::Binary(_) | Message::Text(_)) {
-            received.fetch_add(1, Ordering::Relaxed);
+        let bytes: Vec<u8> = match msg {
+            Message::Binary(b) => b,
+            Message::Text(s) => s.into_bytes(),
+            _ => continue,
+        };
+        let n = nostos_infra::wire::decode_frames(&bytes).len() as u64;
+        if n > 0 {
+            received.fetch_add(n, Ordering::Relaxed);
             if let Ok(mut g) = hist.lock() {
                 g.record(t.elapsed().as_micros() as u64 + 1);
             }

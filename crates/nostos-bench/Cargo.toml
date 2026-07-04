@@ -13,6 +13,26 @@ homepage.workspace = true
 name = "nostos-bench"
 path = "src/main.rs"
 
+# A lean 10k-client probe (C3): same server + fan-out + frame-counting as
+# `nostos-bench`, but it drops the per-client latency histograms (whose 10k-way
+# mutex merge is what hangs the main harness's teardown at 10k) and exits hard
+# via `process::exit` after the measurement window. Used to get real 10k
+# before/after numbers for the batched-writes Tier comparison where the full
+# harness's teardown stalls. Not the headline reporter — a measurement shim.
+[[bin]]
+name = "nostos-bench-10k"
+path = "src/bin/probe_10k.rs"
+
+# Reconnect-storm probe (C3 Step 4, advisor-flagged decision point): spins up N
+# clients, drives a steady event stream, then mid-stream drops + simultaneously
+# reconnects half of them (each re-subscribing with a resume_lsn). Records
+# peak per-session queue depth proxy, drop rate during/after the storm, and
+# time-to-drain. Decides whether admission control / token-bucket is needed
+# before Phase D — the probe is the MEASUREMENT, not an admission-control build.
+[[bin]]
+name = "nostos-reconnect-storm"
+path = "src/bin/reconnect_storm.rs"
+
 [dependencies]
 nostos-domain = { workspace = true }
 nostos-application = { workspace = true }

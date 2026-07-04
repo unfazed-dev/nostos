@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use nostos_core::{ApplyEngine, ApplyOutcome, Frame};
 use nostos_domain::Lsn;
-use nostos_infra::wire::{ClientMessage, WireFrame};
+use nostos_infra::wire::{decode_frames, ClientMessage};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -200,48 +200,47 @@ impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
                 _ => continue,
             };
 
-            let frame: WireFrame = match serde_json::from_slice(&bytes) {
-                Ok(f) => f,
-                Err(e) => {
-                    warn!(error = %e, "malformed frame; skipping");
-                    continue;
-                }
-            };
-            frames_received += 1;
+            // C3 batched-writes: one WS message may carry a JSON array of
+            // frames (server coalesces under backlog) OR a legacy single object.
+            // `decode_frames` handles both; iterate every frame inside it.
+            for frame in decode_frames(&bytes) {
+                frames_received += 1;
 
-            // Hex-decode the payload once, at the boundary (the wire carries
-            // hex; downstream everything is raw bytes).
-            let payload = frame.payload.as_deref().map(decode_hex).and_then(|opt| opt);
+                // Hex-decode the payload once, at the boundary (the wire
+                // carries hex; downstream everything is raw bytes).
+                let payload = frame.payload.as_deref().map(decode_hex).and_then(|opt| opt);
 
-            let core_frame = Frame {
-                lsn: frame.lsn,
-                op: frame.op,
-                table: frame.table,
-                pk: frame.pk,
-                payload,
-                txn_id: frame.txn_id,
-            };
+                let core_frame = Frame {
+                    lsn: frame.lsn,
+                    op: frame.op,
+                    table: frame.table,
+                    pk: frame.pk,
+                    payload,
+                    txn_id: frame.txn_id,
+                };
 
-            // Feed the engine; if this frame triggered a commit, ack it.
-            let engine = Arc::clone(&self.engine);
-            let outcome =
-                tokio::task::spawn_blocking(move || -> nostos_core::Result<Option<ApplyOutcome>> {
-                    let mut engine = engine.blocking_lock();
-                    engine.feed(core_frame)
-                })
+                // Feed the engine; if this frame triggered a commit, ack it.
+                let engine = Arc::clone(&self.engine);
+                let outcome = tokio::task::spawn_blocking(
+                    move || -> nostos_core::Result<Option<ApplyOutcome>> {
+                        let mut engine = engine.blocking_lock();
+                        engine.feed(core_frame)
+                    },
+                )
                 .await
                 .map_err(|e| ClientError::Join(e.to_string()))??;
 
-            if let Some(outcome) = outcome {
-                commits += 1;
-                let ack = ClientMessage::Ack {
-                    lsn: outcome.checkpoint.raw(),
-                };
-                let ack_json = serde_json::to_string(&ack).expect("ack serializes");
-                write
-                    .send(Message::Text(ack_json))
-                    .await
-                    .map_err(|e| ClientError::Send(e.to_string()))?;
+                if let Some(outcome) = outcome {
+                    commits += 1;
+                    let ack = ClientMessage::Ack {
+                        lsn: outcome.checkpoint.raw(),
+                    };
+                    let ack_json = serde_json::to_string(&ack).expect("ack serializes");
+                    write
+                        .send(Message::Text(ack_json))
+                        .await
+                        .map_err(|e| ClientError::Send(e.to_string()))?;
+                }
             }
         }
 

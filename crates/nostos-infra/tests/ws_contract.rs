@@ -535,3 +535,74 @@ async fn where_sql_cannot_shed_tenant_enforcement() {
          it — the server ANDs tenant_id='A' outside the client expression. got: {frames:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 8 (C3 batched-writes): when the per-session write task has a
+// backlog (≥2 frames queued before it drains), it coalesces them into one
+// WebSocket message carrying a JSON array. A client must still receive EVERY
+// frame — whether the server sent them as a batched array or as separate
+// single-object messages (both are valid wire forms; the timing decides which).
+//
+// This test fires several events in rapid succession at one session and
+// asserts the client decodes the full set. It does NOT assert *which* wire
+// form was used (that's an implementation/timing detail) — only that no frame
+// is lost across the single↔array boundary, which is the contract that matters.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn batched_writes_deliver_every_frame() {
+    let (addr, _server, _mgr, store) = spawn_fake_server(64).await;
+
+    // Collector that decodes BOTH wire forms (single object + JSON array) via
+    // `decode_frames`, so it tolerates whichever form the server picks.
+    let collect = tokio::spawn(async move {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+            .await
+            .expect("ws connect");
+        ws.send(Message::Text(common::subscribe_frame("tasks", &[])))
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(Message::Binary(b)))) =
+                tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            {
+                for f in nostos_infra::wire::decode_frames(&b) {
+                    got.push(f);
+                }
+            }
+        }
+        got
+    });
+
+    // Give the session time to subscribe + register.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Fire 8 events in rapid succession. The bounded buffer (64) holds them
+    // all; the writer task's `recv().await` + non-blocking `try_recv` drain
+    // should coalesce some/all into array messages.
+    let svc = Arc::new(FanOutService::new(store.clone()));
+    for i in 1..=8_u64 {
+        let event = ReplicationEvent::new(
+            Lsn::new(i),
+            RowOp::Insert {
+                table: "tasks".into(),
+                pk: i.to_string(),
+                payload: Bytes::from_static(b"x"),
+            },
+        );
+        svc.fan_out(&event, |_, _| Some(ColumnValue::Any)).await;
+    }
+
+    let frames = collect.await.unwrap();
+    // Every one of the 8 frames must arrive, regardless of how they were
+    // batched on the wire.
+    let mut lsns: Vec<u64> = frames.iter().map(|f| f.lsn).collect();
+    lsns.sort_unstable();
+    assert_eq!(
+        lsns,
+        vec![1, 2, 3, 4, 5, 6, 7, 8],
+        "every fanned-out frame must reach the client across the batch boundary; got {lsns:?}"
+    );
+}

@@ -111,6 +111,93 @@ pub fn encode_event(event: &ReplicationEvent) -> Vec<u8> {
     serde_json::to_vec(&frame).expect("wire frame must serialize")
 }
 
+/// Encode a slice of events as **one JSON array of frames** (C3 batched-writes).
+///
+/// When the per-session write task drains more than one pending frame under
+/// backlog, it coalesces them into a single WebSocket message carrying a JSON
+/// array — one wire write amortizes N frame-encode + socket-send costs. The
+/// receiver decodes via [`decode_frames`], which accepts both the array form
+/// (this function's output) and the legacy single-object form ([`encode_event`]),
+/// so the server can start batching with no wire-version bump and old
+/// single-frame messages stay valid.
+///
+/// A single-event slice produces a one-element array; callers that know they
+/// have exactly one event should prefer [`encode_event`] (no array wrapper) to
+/// keep the low-rate path identical to the pre-batching wire.
+#[must_use]
+pub fn encode_events(events: &[&ReplicationEvent]) -> Vec<u8> {
+    // Serialize each frame to a serde_json::Value, then write them into an
+    // array in one pass. We go through `Serializer` per frame (rather than
+    // building a `Vec<Value>`) to avoid retaining the intermediate tree.
+    let mut out = Vec::with_capacity(events.len() * 128 + 4);
+    out.push(b'[');
+    for (i, ev) in events.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        // Serialize straight into the output buffer.
+        let frame = event_to_frame_value(ev);
+        serde::Serialize::serialize(&frame, &mut serde_json::Serializer::new(&mut out))
+            .expect("wire frame must serialize");
+    }
+    out.push(b']');
+    out
+}
+
+/// Build the [`WireFrame`] for an event (the shared shape between
+/// [`encode_event`] and [`encode_events`]).
+fn event_to_frame_value(event: &ReplicationEvent) -> WireFrame {
+    let (op, table, pk, payload) = match &event.op {
+        RowOp::Insert { table, pk, payload } => (
+            Operation::Insert,
+            table.clone(),
+            pk.clone(),
+            Some(hex::encode(payload)),
+        ),
+        RowOp::Update { table, pk, payload } => (
+            Operation::Update,
+            table.clone(),
+            pk.clone(),
+            Some(hex::encode(payload)),
+        ),
+        RowOp::Delete { table, pk } => (Operation::Delete, table.clone(), pk.clone(), None),
+    };
+    WireFrame {
+        lsn: event.lsn.raw(),
+        op,
+        table,
+        pk,
+        payload,
+        txn_id: event.txn_id,
+    }
+}
+
+/// Decode a WebSocket message into zero or more frames (C3 batched-writes).
+///
+/// Accepts BOTH wire forms so the server can batch without a version bump:
+/// - **single object** `{...}` (legacy, [`encode_event`]) → one frame, and
+/// - **JSON array** `[{...},{...}]` ([`encode_events`]) → N frames.
+///
+/// Returns an empty `Vec` on a malformed message (callers ignore it, matching
+/// the prior `Option`-based single-frame decode's "drop malformed" behavior).
+///
+/// The dispatch is O(1): it peeks the first significant byte (`[` → array,
+/// `{` → object) rather than attempting a full parse twice.
+#[must_use]
+pub fn decode_frames(data: &[u8]) -> Vec<WireFrame> {
+    // Peek the first significant (non-whitespace) byte to pick the branch.
+    let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
+    match first {
+        Some(b'[') => serde_json::from_slice::<Vec<WireFrame>>(data).unwrap_or_default(),
+        Some(b'{') => match serde_json::from_slice::<WireFrame>(data) {
+            Ok(f) => vec![f],
+            Err(_) => Vec::new(),
+        },
+        // Empty message or anything else → no frames.
+        _ => Vec::new(),
+    }
+}
+
 /// Tiny hex encoder — avoids pulling a `hex` crate for one fn.
 mod hex {
     use std::fmt::Write;
@@ -155,6 +242,94 @@ mod tests {
         assert_eq!(v["txn_id"], 7);
         // payload hex of b"hi" == "6869"
         assert_eq!(v["payload"], "6869");
+    }
+
+    // ---- C3 batched-writes codec tests ----
+
+    fn ev_n(i: u64) -> ReplicationEvent {
+        ReplicationEvent::new(
+            Lsn::new(i),
+            RowOp::Insert {
+                table: "tasks".into(),
+                pk: i.to_string(),
+                payload: Bytes::from_static(b"hi"),
+            },
+        )
+        .with_txn(i)
+    }
+
+    #[test]
+    fn encode_events_produces_a_json_array() {
+        let e1 = ev_n(1);
+        let e2 = ev_n(2);
+        let e3 = ev_n(3);
+        let bytes = encode_events(&[&e1, &e2, &e3]);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = v.as_array().expect("batch encodes as a JSON array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["lsn"], 1);
+        assert_eq!(arr[1]["lsn"], 2);
+        assert_eq!(arr[2]["lsn"], 3);
+    }
+
+    #[test]
+    fn decode_frames_accepts_an_array() {
+        let e1 = ev_n(10);
+        let e2 = ev_n(11);
+        let bytes = encode_events(&[&e1, &e2]);
+        let frames = decode_frames(&bytes);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].lsn, 10);
+        assert_eq!(frames[1].lsn, 11);
+        assert_eq!(frames[0].pk, "10");
+    }
+
+    #[test]
+    fn decode_frames_accepts_a_single_object_back_compat() {
+        // Legacy single-frame messages ([`encode_event`]) must still decode.
+        let bytes = encode_event(&ev_n(7));
+        let frames = decode_frames(&bytes);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].lsn, 7);
+    }
+
+    #[test]
+    fn decode_frames_empty_array_is_empty() {
+        let frames = decode_frames(b"[]");
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn decode_frames_malformed_is_empty() {
+        // Garbage → empty Vec (caller ignores), matching the prior Option(None).
+        assert!(decode_frames(b"not json").is_empty());
+        assert!(decode_frames(b"").is_empty());
+        assert!(decode_frames(b"  ").is_empty());
+        // Array with a non-WireFrame element → parse fails → empty.
+        assert!(decode_frames(b"[\"not a frame\"]").is_empty());
+    }
+
+    #[test]
+    fn decode_frames_handles_leading_whitespace() {
+        // A decoder that dispatches on the first byte must skip whitespace.
+        let bytes = encode_event(&ev_n(5));
+        let padded = format!("   {}", std::str::from_utf8(&bytes).unwrap());
+        let frames = decode_frames(padded.as_bytes());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].lsn, 5);
+    }
+
+    #[test]
+    fn encode_then_decode_batch_roundtrips() {
+        let events: Vec<ReplicationEvent> = (1..=5).map(ev_n).collect();
+        let refs: Vec<&ReplicationEvent> = events.iter().collect();
+        let bytes = encode_events(&refs);
+        let frames = decode_frames(&bytes);
+        assert_eq!(frames.len(), 5);
+        for (i, f) in frames.iter().enumerate() {
+            assert_eq!(f.lsn, (i as u64) + 1);
+            assert_eq!(f.pk, ((i as u64) + 1).to_string());
+        }
     }
 
     #[test]
