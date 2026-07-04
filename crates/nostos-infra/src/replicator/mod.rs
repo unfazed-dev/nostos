@@ -15,6 +15,11 @@ pub mod fake;
 #[cfg(feature = "pg")]
 pub mod pg;
 
+/// Initial table snapshot (COPY under the slot's exported snapshot). Lives
+/// behind the `pg` feature with the rest of the replication adapter.
+#[cfg(feature = "pg")]
+mod snapshot;
+
 /// Column extraction for the predicate `matches` seam (ADR-0012 slice 2).
 /// Always available — pure JSON parsing, no `pg` feature required.
 pub mod extract;
