@@ -1,8 +1,8 @@
-# Flutter Pomodoro Fixture — Persona-Driven Smoke + E2E Baseline Implementation Plan
+# Flutter Fixtures — Persona-Driven Smoke + E2E Baseline Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a minimal Flutter pomodoro app to nostos as a **test fixture** (`fixtures/flutter/pomodoro/`), with documented user personas that map 1:1 to smoke + E2E journeys — establishing the reusable persona→E2E convention every future Flutter fixture in nostos follows (and which the Phase-G Flutter SDK plan will retrofit with real nostos sync).
+**Goal:** Add two Flutter apps to nostos as **test fixtures**: (Part I, Tasks 1–7) a pomodoro app with documented user personas mapping 1:1 to smoke + E2E journeys — the reusable persona→E2E convention every future Flutter fixture follows; (Part II, Tasks 8–10) a **todo app with Supabase cloud + authentication**, whose dual-mode smoke test runs fully mocked today and flips to live Supabase the moment the operator provides API keys. The Phase-G Flutter SDK plan retrofits real nostos sync into both.
 
 **Architecture:** Plain `ChangeNotifier` ViewModel + a domain `Ticker` port (the clock seam — unit tests drive time by hand, no real waits). Compressed-time `TimerConfig.demo()` is a real user-facing demo mode (`--dart-define=DEMO_MODE=true`), which is also what makes E2E persona journeys run in seconds. E2E via Flutter's official `integration_test` on the macOS desktop target; Patrol is the documented native-escalation path (patrol_cli 4.4.0 is installed) but is not needed while the fixture has no native surfaces.
 
@@ -929,17 +929,360 @@ assertions (offline write → reconnect → row echoed).
 
 ---
 
+## Part II — Todo fixture: Supabase cloud + auth smoke (Tasks 8–10)
+
+Same discipline as the Rust side of this repo: **fake and real adapters behind one port, env-gated live runs** (`FakeReplicator` vs `PgReplicator`, `NOSTOS_PG_URL`-gated e2e — this is the Flutter mirror of that pattern). All Supabase values are mocked until the operator provides credentials; the live path is real code, compiled always, selected only by env. Supabase is not incidental: nostos is Supabase-first (ADR-0007) and `SupabaseJwtAuth` already verifies Supabase JWTs on `/sync` — this fixture's auth session is the exact token the future SDK hands to nostos.
+
+**Operator handoff (live mode activation — nothing below blocks on it):**
+- [ ] Create a Supabase project; apply `fixtures/flutter/todo/supabase/schema.sql`.
+- [ ] Create a pre-confirmed test user (email confirmation off, or confirm manually).
+- [ ] Copy `env.example.json` → `env.json` (gitignored) and fill `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_TEST_EMAIL`, `SUPABASE_TEST_PASSWORD`.
+- [ ] Run `make fixture-todo-smoke-live`.
+
+### Task 8: Todo fixture scaffold — ports, fakes, Supabase adapters, env seam
+
+**Files:**
+- Create: `fixtures/flutter/todo/` (via `flutter create --project-name todo --org run.nostos --platforms macos,ios,android --empty fixtures/flutter/todo`)
+- Create: `fixtures/flutter/todo/lib/env.dart`
+- Create: `fixtures/flutter/todo/lib/domain/auth_gateway.dart`, `lib/domain/todo_repository.dart`
+- Create: `fixtures/flutter/todo/lib/infra/fake_auth_gateway.dart`, `lib/infra/in_memory_todo_repository.dart`
+- Create: `fixtures/flutter/todo/lib/infra/supabase_auth_gateway.dart`, `lib/infra/supabase_todo_repository.dart`
+- Create: `fixtures/flutter/todo/supabase/schema.sql`, `fixtures/flutter/todo/env.example.json`
+- Modify: `fixtures/flutter/todo/pubspec.yaml`, `fixtures/flutter/todo/.gitignore` (add `env.json`)
+
+**Interfaces:**
+- Produces (later tasks depend on these exact names): `Env.{supabaseUrl,supabaseAnonKey,testEmail,testPassword,isLive}`; `Session {userId, email}`; `AuthGateway {restore(), signIn(email,password), signOut()}` throwing `AuthException.invalidCredentials | .network(msg)`; `Todo {id,title,done}`; `TodoRepository {watch(), add(title), toggle(id)}`; `FakeAuthGateway.demoEmail/demoPassword` constants.
+
+- [ ] **Step 1: Scaffold + deps.** Before adding, verify the current major on pub.dev (read-the-damn-docs; app-example pins `supabase_flutter ^2.15.1` as of 2026-06 — expect 2.x):
+
+```bash
+cd fixtures/flutter/todo && flutter pub add supabase_flutter && flutter pub add dev:mocktail dev:integration_test --sdk=flutter
+```
+
+(`integration_test` is an SDK package: declare it in `dev_dependencies` with `sdk: flutter`, as in the pomodoro fixture's pubspec.)
+
+- [ ] **Step 2: `lib/env.dart`** — the single mock/live switch, compile-time:
+
+```dart
+/// Live-mode switch. Values arrive ONLY via --dart-define / --dart-define-from-file
+/// (see env.example.json); nothing is ever hardcoded or committed.
+class Env {
+  static const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
+  static const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
+  static const testEmail = String.fromEnvironment('SUPABASE_TEST_EMAIL');
+  static const testPassword = String.fromEnvironment('SUPABASE_TEST_PASSWORD');
+
+  /// Both-or-neither: the smoke suite fails closed on a contradictory env
+  /// (exactly one of url/key set) — see smoke_auth_test.dart's guard.
+  static const isLive = supabaseUrl != '' && supabaseAnonKey != '';
+}
+```
+
+- [ ] **Step 3: Domain ports** (`lib/domain/auth_gateway.dart`):
+
+```dart
+class Session {
+  const Session({required this.userId, required this.email});
+  final String userId;
+  final String email;
+}
+
+sealed class AuthException implements Exception {
+  const AuthException();
+  const factory AuthException.invalidCredentials() = InvalidCredentials;
+  const factory AuthException.network(String message) = NetworkAuthException;
+}
+
+final class InvalidCredentials extends AuthException {
+  const InvalidCredentials();
+}
+
+final class NetworkAuthException extends AuthException {
+  const NetworkAuthException(this.message);
+  final String message;
+}
+
+/// Auth port. Fake by default; Supabase adapter when Env.isLive.
+abstract interface class AuthGateway {
+  Future<Session?> restore();
+  Future<Session> signIn(String email, String password);
+  Future<void> signOut();
+}
+```
+
+and (`lib/domain/todo_repository.dart`):
+
+```dart
+class Todo {
+  const Todo({required this.id, required this.title, this.done = false});
+  final String id;
+  final String title;
+  final bool done;
+}
+
+abstract interface class TodoRepository {
+  Stream<List<Todo>> watch();
+  Future<void> add(String title);
+  Future<void> toggle(String id);
+}
+```
+
+- [ ] **Step 4: Fakes** — `FakeAuthGateway` accepts exactly `demoEmail`/`demoPassword` (`demo@nostos.run` / `demo-1234`, exposed as static consts so the smoke test and any human demoing the app use the same values), throws `AuthException.invalidCredentials()` otherwise, `restore()` returns null; `InMemoryTodoRepository` holds a list behind a broadcast `StreamController`, re-emitting on every mutation. Both are ~30 lines; write them fully.
+
+- [ ] **Step 5: Supabase adapters** — real code, only *constructed* in live mode (verify exact API against the installed supabase_flutter 2.x docs before writing — the shapes below are the v2 API as of 2026-06):
+
+```dart
+// supabase_auth_gateway.dart
+class SupabaseAuthGateway implements AuthGateway {
+  SupabaseAuthGateway(this._client);
+  final SupabaseClient _client;
+
+  @override
+  Future<Session?> restore() async {
+    final s = _client.auth.currentSession;
+    final u = s?.user;
+    return u == null ? null : Session(userId: u.id, email: u.email ?? '');
+  }
+
+  @override
+  Future<Session> signIn(String email, String password) =>
+      _withRetry(() async {
+        try {
+          final res = await _client.auth
+              .signInWithPassword(email: email, password: password);
+          final u = res.user!;
+          return Session(userId: u.id, email: u.email ?? '');
+        } on AuthApiException catch (e) {
+          // Wrong creds are NOT retried — only transport failures are.
+          throw e.statusCode == '400'
+              ? const AuthException.invalidCredentials()
+              : AuthException.network(e.message);
+        }
+      });
+
+  @override
+  Future<void> signOut() => _client.auth.signOut();
+
+  /// ponytail: 2 retries, 1s/2s backoff, network errors only — enough to
+  /// absorb transient Supabase 5xx in the live smoke; a real app grows a
+  /// proper retry policy with the SDK retrofit.
+  Future<T> _withRetry<T>(Future<T> Function() op) async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await op();
+      } on NetworkAuthException {
+        if (attempt >= 2) rethrow;
+        await Future<void>.delayed(Duration(seconds: 1 << attempt));
+      }
+    }
+  }
+}
+```
+
+`SupabaseTodoRepository`: `watch()` via `_client.from('todos').stream(primaryKey: ['id']).order('created_at')` mapped to `Todo`; `add` inserts `{title, user_id: _client.auth.currentUser!.id}`; `toggle` flips `done` by id. Write fully at implementation time against the installed version's docs.
+
+- [ ] **Step 6: `supabase/schema.sql`** — the contract the operator applies:
+
+```sql
+create table if not exists todos (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  title text not null,
+  done boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+alter table todos enable row level security;
+
+create policy "owner full access" on todos
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+```
+
+RLS owner-only also isolates the live smoke's writes to the dedicated test user — no cross-talk with any other data in the project.
+
+- [ ] **Step 7: `env.example.json`** (committed) + gitignore `env.json`:
+
+```json
+{
+  "SUPABASE_URL": "https://YOUR-PROJECT.supabase.co",
+  "SUPABASE_ANON_KEY": "YOUR-ANON-KEY",
+  "SUPABASE_TEST_EMAIL": "PRE-PROVISIONED-TEST-USER@example.com",
+  "SUPABASE_TEST_PASSWORD": "ITS-PASSWORD"
+}
+```
+
+Note in the fixture README: the test user must exist and be email-confirmed BEFORE the live smoke runs (the suite fails with a provisioning message otherwise, it does not create users).
+
+- [ ] **Step 8: Verify** — `flutter analyze` clean (adapters compile in mock mode too). Commit: `git commit -m "feat: todo fixture scaffold with auth and repository ports, fakes, supabase adapters, env seam"`
+
+### Task 9: Sign-in + todo views, viewmodels, unit/widget tests
+
+**Files:**
+- Create: `fixtures/flutter/todo/lib/viewmodels/auth_viewmodel.dart`, `lib/viewmodels/todo_viewmodel.dart`
+- Create: `fixtures/flutter/todo/lib/views/sign_in_view.dart`, `lib/views/todo_view.dart`
+- Modify: `fixtures/flutter/todo/lib/main.dart`
+- Test: `fixtures/flutter/todo/test/viewmodels/auth_viewmodel_test.dart`, `test/viewmodels/todo_viewmodel_test.dart`, `test/views/sign_in_view_test.dart`
+
+**Interfaces:**
+- Consumes: ports + fakes (Task 8).
+- Produces: `TodoApp({required AuthGateway auth, required TodoRepository todos})` root widget; keys `auth.email`, `auth.password`, `auth.submit`, `auth.error`, `auth.signout`, `todos.input`, `todos.add`, `todos.list`.
+
+- [ ] **Step 1: Failing unit tests first** (mocktail on the ports, pomodoro Task 2 harness style): `AuthViewModel` — signIn success exposes `session` and clears busy; `invalidCredentials` exposes `errorMessage` ('Invalid email or password'), never throws to the view; network error exposes the network message; signOut clears session. `TodoViewModel` — `watch` stream re-renders list; `add` delegates with trimmed title, ignores empty; `toggle` delegates by id. Run → FAIL.
+- [ ] **Step 2: Implement the two ViewModels** (plain `ChangeNotifier`, exactly the states the tests pin — no more).
+- [ ] **Step 3: Failing widget test** — `SignInView` with a mocktail `AuthGateway` throwing `invalidCredentials`: enter text in `auth.email`/`auth.password`, tap `auth.submit`, expect `auth.error` visible with the message. Run → FAIL.
+- [ ] **Step 4: Views + composition.** `SignInView`: two `TextField`s + `FilledButton` + error `Text` (keys above). `TodoView`: `TextField(key: todos.input)` + add `IconButton(key: todos.add)` + `ListView(key: todos.list)` of `CheckboxListTile`s + sign-out `IconButton(key: auth.signout)`. `TodoApp` swaps SignInView↔TodoView on the auth VM's session. `main.dart`:
+
+```dart
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  late final AuthGateway auth;
+  late final TodoRepository todos;
+  if (Env.isLive) {
+    await Supabase.initialize(url: Env.supabaseUrl, anonKey: Env.supabaseAnonKey);
+    final client = Supabase.instance.client;
+    auth = SupabaseAuthGateway(client);
+    todos = SupabaseTodoRepository(client);
+  } else {
+    auth = FakeAuthGateway();
+    todos = InMemoryTodoRepository();
+  }
+  runApp(TodoApp(auth: auth, todos: todos));
+}
+```
+
+- [ ] **Step 5: All `flutter test test/` green; `flutter analyze` clean. Commit** — `git commit -m "feat: todo fixture sign-in and list views with viewmodels over mocked ports"`
+
+### Task 10: The dual-mode smoke test — app + cloud + authentication
+
+**Files:**
+- Create: `fixtures/flutter/todo/integration_test/smoke_auth_test.dart`
+- Modify: `Makefile` (nostos root — todo fixture verbs)
+
+**Interfaces:**
+- Consumes: `TodoApp` wiring via the real `main()` (mock mode) and `Env` (Task 8), keys (Task 9).
+- Produces: ONE test file, two modes. Mock mode: CI-safe, runs today with zero credentials. Live mode: same steps against real Supabase cloud auth + database, activated purely by `--dart-define-from-file=env.json`.
+
+- [ ] **Step 1: Write it** (single file — one step list, no mock/live drift; advisor-mandated guard first):
+
+```dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:integration_test/integration_test.dart';
+import 'package:todo/env.dart';
+import 'package:todo/infra/fake_auth_gateway.dart';
+import 'package:todo/main.dart' as app;
+
+void main() {
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  // Fail-closed branch guard: a contradictory env (exactly one of url/key)
+  // must abort loudly, never silently fall back to mock and "pass".
+  test('adapter selection matches the provided environment', () {
+    final url = Env.supabaseUrl.isNotEmpty;
+    final key = Env.supabaseAnonKey.isNotEmpty;
+    expect(url == key, isTrue,
+        reason: 'contradictory env: provide BOTH SUPABASE_URL and '
+            'SUPABASE_ANON_KEY (live) or NEITHER (mock)');
+    expect(Env.isLive, url && key);
+    if (Env.isLive) {
+      expect(Env.testEmail.isNotEmpty && Env.testPassword.isNotEmpty, isTrue,
+          reason: 'live mode needs SUPABASE_TEST_EMAIL/PASSWORD for a '
+              'PRE-PROVISIONED, email-confirmed test user (the suite '
+              'does not create users)');
+    }
+  });
+
+  final email = Env.isLive ? Env.testEmail : FakeAuthGateway.demoEmail;
+  final password = Env.isLive ? Env.testPassword : FakeAuthGateway.demoPassword;
+
+  testWidgets(
+    'smoke: boot -> reject bad password -> authenticate -> add todo -> sign out',
+    timeout: const Timeout(Duration(seconds: 30)), // live-mode latency budget
+    (tester) async {
+      app.main();
+      await tester.pumpAndSettle();
+
+      // Boot: sign-in screen renders.
+      expect(find.byKey(const Key('auth.email')), findsOneWidget);
+
+      // Wrong password is rejected with a visible error (real round-trip in
+      // live mode; FakeAuthGateway path in mock mode — same assertion).
+      await tester.enterText(find.byKey(const Key('auth.email')), email);
+      await tester.enterText(
+          find.byKey(const Key('auth.password')), 'wrong-password');
+      await tester.tap(find.byKey(const Key('auth.submit')));
+      await _settle(tester);
+      expect(find.byKey(const Key('auth.error')), findsOneWidget);
+
+      // Correct credentials authenticate into the todo home.
+      await tester.enterText(
+          find.byKey(const Key('auth.password')), password);
+      await tester.tap(find.byKey(const Key('auth.submit')));
+      await _settle(tester);
+      expect(find.byKey(const Key('todos.list')), findsOneWidget);
+
+      // A write lands and renders (in live mode this is a real insert under
+      // RLS as the test user, streamed back from Supabase).
+      final marker = 'smoke ${DateTime.now().millisecondsSinceEpoch}';
+      await tester.enterText(find.byKey(const Key('todos.input')), marker);
+      await tester.tap(find.byKey(const Key('todos.add')));
+      await _settle(tester);
+      expect(find.text(marker), findsOneWidget);
+
+      // Sign out returns to the sign-in screen.
+      await tester.tap(find.byKey(const Key('auth.signout')));
+      await _settle(tester);
+      expect(find.byKey(const Key('auth.email')), findsOneWidget);
+    },
+  );
+}
+
+/// pumpAndSettle with a poll loop tolerant of live-mode stream latency.
+Future<void> _settle(WidgetsTester tester) async {
+  for (var i = 0; i < 50; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+```
+
+(Adjust `_settle` to the pomodoro fixture's `waitForText` helper style if plain fixed polling proves flaky in live mode — poll-for-state beats fixed loops; the executor picks whichever the live run proves out, and the unique `marker` string keeps repeat live runs from colliding with prior rows.)
+
+- [ ] **Step 2: Make verbs** (nostos root Makefile, next to the pomodoro verbs):
+
+```make
+## fixture-todo-test: todo fixture unit/widget suites (mocked ports)
+fixture-todo-test:
+	cd fixtures/flutter/todo && flutter test test/
+
+## fixture-todo-smoke: dual-mode smoke, MOCK mode (no credentials needed)
+fixture-todo-smoke:
+	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos
+
+## fixture-todo-smoke-live: same smoke against real Supabase (needs env.json — see env.example.json)
+fixture-todo-smoke-live:
+	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos --dart-define-from-file=env.json
+```
+
+- [ ] **Step 3: Verify mock mode end-to-end today** — `make fixture-todo-test` and `make fixture-todo-smoke` green with zero credentials. Live mode stays parked at the Operator handoff checklist above; the suite's guard messages tell the operator exactly what's missing if run early.
+- [ ] **Step 4: Commit** — `git commit -m "test: dual-mode supabase auth smoke for todo fixture — mocked now, live on operator credentials"`
+
+---
+
 ## Risks
 
 1. **[HIGH] Wall-clock flakiness** — the whole design routes around it (poll-for-state, transition assertions); the one legitimate wait-then-assert-frozen step (Sam #2) asserts *absence of change*, which is load-tolerant. Any future journey asserting elapsed time is a review-blocker.
 2. **[MED] First macOS integration build is slow** (full runner compile) and needs Xcode signing defaults — verified working on this machine via app-example precedent; CI would need a macOS runner (deliberately deferred).
 3. **[MED] Compressed-time blind spots** — 3-second phases can't surface bugs that only exist at scale (int overflow won't, but notification scheduling might, later). Mitigated by the equivalence test + keeping `demo()` shape-identical to real configs; revisit when native surfaces (notifications) arrive with Patrol.
 4. **[LOW] Persona/doc drift** — mechanically guarded (Task 4 test); the doc-table-as-comments convention keeps the human-readable spec reviewable against the executable one.
-5. **[LOW] Fixture scope creep** — the pomodoro app must stay SDK-free until `flutter-sdk.md` opens; anything sync-shaped lands there, not here.
+5. **[LOW] Fixture scope creep** — the fixtures stay SDK-free until `flutter-sdk.md` opens; anything nostos-sync-shaped lands there, not here.
+6. **[CRITICAL→mitigated] Silent mock fallback in the todo smoke** — a typo'd env would otherwise make the "live" run pass in mock mode; the fail-closed branch guard (Task 10 Step 1) is the first test in the file for exactly this reason.
+7. **[HIGH] Live-mode flakiness** — Supabase latency/transient 5xx: 30s per-test timeout + network-only retry with backoff in the adapter (never retrying invalid-credential responses). Repeat live runs can't collide: each run's todo carries a unique timestamp marker and RLS confines everything to the dedicated test user.
+8. **[MED] Secrets hygiene** — `env.json` is gitignored, values flow only through `--dart-define-from-file`, nothing is hardcoded; `env.example.json` carries placeholders only. The live smoke never creates or deletes users.
 
 ## Execution notes
 
-- Strictly sequential Tasks 1→6 (each consumes the previous task's interfaces); Task 7 last. One executor session suffices; no parallelism needed.
+- Part I: strictly sequential Tasks 1→6, Task 7 last. Part II (Tasks 8→10) is independent of Part I and may run before, after, or in parallel with it; within Part II the order is 8→9→10. One executor session suffices.
+- Part II is fully verifiable TODAY in mock mode (zero credentials); live mode activates via the Operator handoff checklist and changes no code — only `env.json`.
 - Everything runs inside `/Volumes/developer_ssd/Developer/nostos`; the fixture is committed to the nostos repo including platform scaffolding (Flutter's generated `.gitignore` inside the fixture already excludes `build/`, `.dart_tool/`).
 - Task 4's guard is committed red only if Task 6 follows in the same run — otherwise mark it `skip:` (see Task 4 Step 6).
 - Nothing here publishes, deploys, or touches anything outside the nostos tree.

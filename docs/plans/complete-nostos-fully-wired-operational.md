@@ -909,7 +909,7 @@ Per the writing-plans scope rule, these are independent subsystems; each gets it
 
 | Future plan | Gate that opens it | One-line scope |
 |---|---|---|
-| `docs/plans/flutter-pomodoro-persona-e2e-baseline.md` (**authored**) | ready now (independent of product phases) | Flutter pomodoro fixture in `fixtures/flutter/pomodoro/` + persona-driven smoke/E2E convention (`docs/testing/persona-e2e-baseline.md`) that the flutter-sdk plan's example apps inherit |
+| `docs/plans/flutter-pomodoro-persona-e2e-baseline.md` (**authored**) | ready now (independent of product phases) | Two Flutter fixtures: pomodoro (persona-driven smoke/E2E convention, `docs/testing/persona-e2e-baseline.md`) + todo (Supabase cloud + auth dual-mode smoke — mocked until operator supplies keys); both inherited by the flutter-sdk plan's example apps |
 | `docs/plans/flutter-sdk.md` | v0.1 tagged | flutter_rust_bridge v2 over nostos-core; `sqlite3_flutter_libs` Storage impl; Stream API; example app; retrofits sync into the pomodoro fixture |
 | `docs/plans/react-native-sdk.md` | Flutter SDK shipped (patterns proven) | UniFFI bindings + RN Turbo Module; op-sqlite Storage |
 | `docs/plans/node-sdk.md` | demand signal | napi-rs + better-sqlite3 Storage |
