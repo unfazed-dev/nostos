@@ -30,6 +30,17 @@
 
 **Kill criterion:** if the PG logical-replication state machine can't survive a mid-LSN crash without data loss or duplication, we don't have a product — fix before anything else.
 
+**Ratified decisions (2026-07):**
+- `NOSTOS_PG_URL` defaults to empty, not `localhost:5433`. Selecting
+  `NOSTOS_REPLICATOR=pg` without a URL fails fast with the actionable error
+  `Set NOSTOS_PG_URL, e.g. after: docker compose -f docker/docker-compose.yml up -d`.
+  Rationale: a silent fallback to a localhost DB that may not exist masks
+  misconfiguration; an actionable error is the correct operability bar for a
+  real-PG-by-default binary.
+- Write-back parameter binding is typed-inference (`SqlValue`), not the plan's
+  text-cast-with-coercion — Postgres does not coerce `text`→`uuid` parameters.
+  See ADR-0013 addendum "Typed parameter binding".
+
 ---
 
 ## Phase 2 — Dynamic predicates + multi-platform SDKs  *(Weeks 4–5)*

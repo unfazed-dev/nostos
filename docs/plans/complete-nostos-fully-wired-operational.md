@@ -591,6 +591,7 @@ Identifier safety: quote schema/table with `quote_ident` semantics (tokio-postgr
 Note: GH Actions `services:` containers can't take `command:` args, hence the ALTER SYSTEM + restart dance; if it proves flaky, switch the job to `docker compose -f docker/docker-compose.yml up -d` directly on the runner (compose already sets `wal_level=logical` — check that file first and prefer whichever is simpler; that's a judgment call the executor makes and records in the commit).
 
 - [x] **Step 2: Verify on a branch push** — job green in Actions; then commit to main: `git commit -m "ci: run real-Postgres logical-replication e2e on every push"`
+  - **Validation status (2026-07):** `actionlint` clean on `.github/workflows/ci.yml` (local). Remote push-validation **pending**: `git remote -v` is empty — the operator must configure a remote and push for the Actions run to execute. Job YAML is final and ready.
 
 ### Task B4: One-command dev stack + README quickstart
 
