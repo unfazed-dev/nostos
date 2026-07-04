@@ -171,3 +171,23 @@ fixture-e2e: ## fixture-e2e: smoke + persona journeys on the macOS desktop targe
 	    echo "=== $$f ==="; \
 	    flutter test "$$f" -d macos || exit 1; \
 	  done
+
+# ----------------------------------------------------------------------------
+# Flutter fixtures — todo (the Supabase-backed fixture: mock today, live on
+# operator credentials). Same NOT-in-`make ci` rationale as the pomodoro verbs.
+# The dual-mode smoke runs a SINGLE integration file per invocation, so it does
+# NOT hit the per-file aggregate-launch limit noted on fixture-e2e above.
+# ----------------------------------------------------------------------------
+.PHONY: fixture-todo-test
+fixture-todo-test: ## fixture-todo-test: todo fixture unit/widget suites (mocked ports).
+	cd fixtures/flutter/todo && flutter test test/
+
+## fixture-todo-smoke: dual-mode smoke, MOCK mode (no credentials needed)
+.PHONY: fixture-todo-smoke
+fixture-todo-smoke:
+	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos
+
+## fixture-todo-smoke-live: same smoke against real Supabase (needs env.json — see env.example.json)
+.PHONY: fixture-todo-smoke-live
+fixture-todo-smoke-live:
+	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos --dart-define-from-file=env.json
