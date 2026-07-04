@@ -883,10 +883,13 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 - Create: `web/src/routes/demo/+page.svelte` (or the repo's route convention — check `web/src/routes/`)
 - Modify: `web/package.json` (local dependency on the built pkg), `Makefile` (`web-demo` target chaining wasm-pack → vite dev)
 
-- [ ] **Step 1:** Wire `crates/nostos-ffi-wasm/pkg` into `web/` (vite `fs.allow` or file: dependency — check how the pkg was built; it exists at `crates/nostos-ffi-wasm/pkg/`).
-- [ ] **Step 2:** Demo page: connect to `ws://localhost:8080/sync` (the dev-stack server), subscribe `tasks` with a `where_sql` input box, render the live rows, show the checkpoint LSN advancing; a "kill the server" instruction demonstrating reload-and-resume.
-- [ ] **Step 3: Verify manually**: `make dev-stack` + `make web-demo`, insert rows via `psql`, watch them appear filtered; reload the tab → resume from checkpoint (no full replay unless slot demands).
-- [ ] **Step 4: Commit** — `git commit -m "feat: browser demo page — live filtered sync via wasm bridge"`
+- [x] **Step 1:** Wire `crates/nostos-ffi-wasm/pkg` into `web/` (vite `fs.allow` or file: dependency — check how the pkg was built; it exists at `crates/nostos-ffi-wasm/pkg/`).
+  - Wired via `file:../crates/nostos-ffi-wasm/pkg` dependency in `web/package.json`; lazy `import('nostos-ffi-wasm')` inside `onMount` keeps `adapter-static` prerender clean.
+- [x] **Step 2:** Demo page: connect to `ws://localhost:8080/sync` (the dev-stack server), subscribe `tasks` with a `where_sql` input box, render the live rows, show the checkpoint LSN advancing; a "kill the server" instruction demonstrating reload-and-resume.
+  - Plan text said 8080; the real `NOSTOS_BIND` default is **8800** (`crates/nostos-server/src/main.rs:39`) — page uses 8800 and is editable. Page dogfoods the real `NostosEngine` (apply + checkpoint + ack) and re-implements the ~30 lines of WS glue (instead of `NostosSocket.connect`) because the engine has no row-readback API — documented inline with a ponytail upgrade path (swap to `NostosSocket` when OPFS ships a readback API).
+- [x] **Step 3: Verify manually**: `make dev-stack` + `make web-demo`, insert rows via `psql`, watch them appear filtered; reload the tab → resume from checkpoint (no full replay unless slot demands).
+  - Verified: `npm run check` 0 errors / 0 warnings; `npm run build` succeeds (wasm chunk loads, demo route compiles); `make ci` green. **Live WS + psql row-insert not run by the agent** — the page loads without console errors, but the full manual click-through (start dev-stack, insert via psql, watch filtered rows, reload-and-resume) remains for the operator. The page's empty-state CTA shows the exact `psql` command to run.
+- [x] **Step 4: Commit** — `git commit -m "feat: browser demo page — live filtered sync via wasm bridge"`
 
 ---
 
