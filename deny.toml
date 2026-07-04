@@ -1,0 +1,14 @@
+[licenses]
+allow = [
+  "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC",
+  "Zlib", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0",
+  # CDLA-Permissive-2.0: webpki-roots bundles the Mozilla CA root list, which is
+  # licensed CDLA-Permissive-2.0 (pulled in transitively via reqwest/hyper-rustls).
+  "CDLA-Permissive-2.0",
+]
+
+[advisories]
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"

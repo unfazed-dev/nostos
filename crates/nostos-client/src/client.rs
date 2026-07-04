@@ -18,11 +18,29 @@
 //! `spawn_blocking` so the async runtime stays responsive. On WASM (no
 //! `spawn_blocking`) the FFI shim runs the engine inline — see ADR-0015.
 //!
+//! ## The write half — durable outbox (ADR-0013, D3)
+//!
+//! `SyncClient::write` enqueues a [`PendingWrite`] to the durable outbox and
+//! returns immediately — it NEVER blocks on the network to capture user intent.
+//! After each subscribe-ack, the connected loop flushes `pending()` in order:
+//! each queued write goes out as a `Write` frame; the matching `WriteResult`
+//! frame (correlated by `client_write_id == outbox id`) drives `mark_done` on
+//! `ok:true`. On `ok:false` the write stays queued and the error surfaces via
+//! the client's log channel.
+//!
+//! ponytail: failed writes retry forever and block the queue head; add a
+//! dead-letter policy when a design partner hits a permanent rejection.
+//!
+//! The flush and the apply both reach the storage through the same engine
+//! mutex, so they're serialized by construction (single-threaded, per the
+//! [`nostos_core::Storage`] contract — the outbox and the data share one SQLite
+//! connection).
+//!
 //! ## Auth
 //!
 //! The bearer token is passed via `?token=` on the WebSocket URL. Browsers
-//! can't set headers on a WS handshake, so the transport accepts the token as a
-//! query parameter (ADR-0010); we use the same path for consistency across
+//! can't set headers on a WS handshake, so the transport accepts the token as
+//! a query parameter (ADR-0010); we use the same path for consistency across
 //! native + future-FFI clients.
 //!
 //! ## Reconnect semantics
@@ -36,9 +54,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostos_core::{ApplyEngine, ApplyOutcome, Frame};
+use nostos_core::{ApplyEngine, ApplyOutcome, Frame, Outbox, PendingWrite};
 use nostos_domain::Lsn;
-use nostos_infra::wire::{ClientMessage, WireFrame};
+use nostos_infra::wire::{decode_frames, ClientMessage};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -63,6 +81,15 @@ pub struct SyncClientConfig {
     /// is what makes a "sync then disconnect" client deterministic; a
     /// long-lived client leaves this `None` and relies on reconnect-on-drop.
     pub idle_timeout: Option<Duration>,
+    /// An optional safe-SQL-subset predicate (ADR-0012) the server compiles and
+    /// ANDs into the session — e.g. `"priority > 5"` or
+    /// `"status = open AND priority >= 3"`. The grammar is the six comparison
+    /// operators + `AND`/`OR`/`NOT` + parens (see `parse_predicate_expr`); a
+    /// parse failure closes the socket with an `invalid where_sql:` reason
+    /// before any event flows. `None` (the default) = match-all on `table`.
+    /// Server-enforced: the principal's tenant scoping always wraps this, so a
+    /// `where_sql` can never widen scope past its tenant.
+    pub where_sql: Option<String>,
 }
 
 impl Default for SyncClientConfig {
@@ -74,6 +101,7 @@ impl Default for SyncClientConfig {
             max_backoff: Duration::from_secs(5),
             max_retries: None,
             idle_timeout: None,
+            where_sql: None,
         }
     }
 }
@@ -91,13 +119,26 @@ pub struct SessionOutcome {
 /// A Nostos sync client. Owns its storage + apply engine; the engine is held
 /// behind a `Mutex` because the apply runs on `spawn_blocking` (a separate
 /// thread) while the WS reader stays on the async task.
-pub struct SyncClient<S: nostos_core::Storage + Send + 'static> {
+///
+/// The storage `S` implements BOTH [`nostos_core::Storage`] (the apply/checkpoint
+/// surface) AND [`nostos_core::Outbox`] (the durable write queue). For
+/// `SqliteStorage` both are backed by the same SQLite file + connection, so a
+/// crash can't strand the outbox without the data (ADR-0013). The flush loop
+/// reaches the outbox through the same engine mutex as the apply loop — they're
+/// serialized by construction.
+pub struct SyncClient<S>
+where
+    S: nostos_core::Storage + Outbox + Send + 'static,
+{
     url: String,
     config: SyncClientConfig,
     engine: Arc<Mutex<ApplyEngine<S>>>,
 }
 
-impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
+impl<S> SyncClient<S>
+where
+    S: nostos_core::Storage + Outbox + Send + 'static,
+{
     /// Build a client targeting `url` (e.g. `ws://127.0.0.1:9999/sync`), with
     /// the given storage backend and config.
     #[must_use]
@@ -113,6 +154,57 @@ impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
     /// Read the current durable checkpoint (delegates through the engine).
     pub async fn checkpoint(&self) -> nostos_core::Result<Lsn> {
         self.engine.lock().await.checkpoint()
+    }
+
+    /// Enqueue a local write to the durable outbox. Returns the write's
+    /// monotonically increasing id (the correlation key on the wire).
+    ///
+    /// **Always succeeds regardless of connection state** — that's the whole
+    /// point of the outbox: a user action is captured durably the instant it
+    /// happens, not gated on a server round-trip. The connected flush loop (in
+    /// [`Self::run_once`]) drains the queue after each subscribe-ack.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::Storage`] only if the durable enqueue itself
+    /// failed (disk full, SQLite busy) — i.e. the write did NOT land and the
+    /// caller MUST surface that to the user.
+    pub async fn write(&self, write: PendingWrite) -> Result<u64, ClientError> {
+        let engine = Arc::clone(&self.engine);
+        let id = tokio::task::spawn_blocking(move || -> nostos_core::Result<u64> {
+            let mut engine = engine.blocking_lock();
+            engine.storage_mut().enqueue(write)
+        })
+        .await
+        .map_err(|e| ClientError::Join(e.to_string()))??;
+        debug!(write_id = id, "enqueued local write to outbox");
+        Ok(id)
+    }
+
+    /// Snapshot the durable outbox (oldest first). Used by the flush loop in
+    /// [`Self::run_once`] to send pending writes after a subscribe-ack.
+    async fn pending_writes(&self) -> Result<Vec<(u64, PendingWrite)>, ClientError> {
+        let engine = Arc::clone(&self.engine);
+        let pending = tokio::task::spawn_blocking(move || -> nostos_core::Result<Vec<_>> {
+            // `pending` takes `&self` — borrow the storage through the engine
+            // without taking the write half of the mutex exclusively for long.
+            let engine = engine.blocking_lock();
+            engine.storage().pending()
+        })
+        .await
+        .map_err(|e| ClientError::Join(e.to_string()))??;
+        Ok(pending)
+    }
+
+    /// Mark an outbox write done (the server ack'd it with `WriteResult{ok:true}`).
+    async fn mark_write_done(&self, id: u64) -> Result<(), ClientError> {
+        let engine = Arc::clone(&self.engine);
+        tokio::task::spawn_blocking(move || -> nostos_core::Result<()> {
+            let mut engine = engine.blocking_lock();
+            engine.storage_mut().mark_done(id)
+        })
+        .await
+        .map_err(|e| ClientError::Join(e.to_string()))??;
+        Ok(())
     }
 
     /// The WS URL to connect to, with `?token=` appended if a token is set.
@@ -146,6 +238,7 @@ impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
         let subscribe = ClientMessage::Subscribe {
             table: self.config.table.clone(),
             filters: vec![],
+            where_sql: self.config.where_sql.clone(),
             resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
         };
         let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
@@ -157,6 +250,43 @@ impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
 
         let mut frames_received: u64 = 0;
         let mut commits: u64 = 0;
+
+        // ---- Flush the durable outbox (ADR-0013, D3) ----
+        // Send every pending write as a `Write` frame, oldest first. The
+        // matching `WriteResult` acks are handled in the receive loop below
+        // (correlated by `client_write_id == outbox id`). The writes go out
+        // fire-and-forget here; the acks arrive asynchronously, interleaved
+        // with replication frames. Sending them all up front means a backlog
+        // of offline writes clears in one round-trip, not one-per-RTT.
+        //
+        // The flush and the apply share the engine mutex, so they're serialized
+        // by construction (single-threaded per the Storage contract). We read
+        // `pending()` and send each frame; `mark_done` happens later, in the
+        // receive loop, when each `WriteResult{ok:true}` lands.
+        let pending = self.pending_writes().await?;
+        if !pending.is_empty() {
+            debug!(n = pending.len(), "flushing pending outbox writes");
+            for (id, pw) in &pending {
+                // The outbox id IS the wire correlation key — a string on the
+                // wire (ClientMessage::Write::client_write_id is a String), so
+                // render the u64 once here. The server echoes it verbatim.
+                let wire = ClientMessage::Write {
+                    table: pw.table.clone(),
+                    op: pw.op.as_wire_str().to_string(),
+                    pk: pw.pk.clone(),
+                    payload: pw
+                        .payload_json
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+                    client_write_id: id.to_string(),
+                };
+                let json = serde_json::to_string(&wire).expect("write serializes");
+                write
+                    .send(Message::Text(json))
+                    .await
+                    .map_err(|e| ClientError::Send(e.to_string()))?;
+            }
+        }
 
         // ---- Receive → apply → ack loop ----
         // When `idle_timeout` is set, a gap longer than it means "caught up":
@@ -189,48 +319,91 @@ impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
                 _ => continue,
             };
 
-            let frame: WireFrame = match serde_json::from_slice(&bytes) {
-                Ok(f) => f,
-                Err(e) => {
-                    warn!(error = %e, "malformed frame; skipping");
+            // D3: a `write_result` frame is its own wire shape (a single JSON
+            // object tagged `"type":"write_result"`, never batched with
+            // replication events). It won't decode as a `WireFrame` (it carries
+            // no lsn/op/table), so intercept it BEFORE `decode_frames` and drive
+            // the outbox ack. Anything else falls through to the replication
+            // path below.
+            if let Some(result) = decode_write_result(&bytes) {
+                // Correlate by client_write_id == outbox id.
+                let id: u64 = if let Ok(id) = result.client_write_id.parse() {
+                    id
+                } else {
+                    warn!(
+                        client_write_id = %result.client_write_id,
+                        "write_result with non-numeric client_write_id; ignoring"
+                    );
                     continue;
+                };
+                if result.ok {
+                    // Ack'd: remove from the durable outbox. Idempotent — a
+                    // redelivery after a partial flush removes nothing (already
+                    // gone), not an error.
+                    if let Err(e) = self.mark_write_done(id).await {
+                        warn!(write_id = id, error = %e, "mark_done failed; write stays queued");
+                    } else {
+                        debug!(write_id = id, "write ack'd — removed from outbox");
+                    }
+                } else {
+                    // ok:false — the write is NOT removed. It stays at the queue
+                    // head and is retried on the next flush. The error surfaces
+                    // here so an operator sees it; the user-facing surface is a
+                    // Phase-2 concern.
+                    //
+                    // ponytail: failed writes retry forever and block the queue
+                    // head; add a dead-letter policy when a design partner hits
+                    // a permanent rejection.
+                    warn!(
+                        write_id = id,
+                        error = result.error.as_deref().unwrap_or("(no detail)"),
+                        "write rejected by server; stays queued, will retry"
+                    );
                 }
-            };
-            frames_received += 1;
+                continue;
+            }
 
-            // Hex-decode the payload once, at the boundary (the wire carries
-            // hex; downstream everything is raw bytes).
-            let payload = frame.payload.as_deref().map(decode_hex).and_then(|opt| opt);
+            // C3 batched-writes: one WS message may carry a JSON array of
+            // frames (server coalesces under backlog) OR a legacy single object.
+            // `decode_frames` handles both; iterate every frame inside it.
+            for frame in decode_frames(&bytes) {
+                frames_received += 1;
 
-            let core_frame = Frame {
-                lsn: frame.lsn,
-                op: frame.op,
-                table: frame.table,
-                pk: frame.pk,
-                payload,
-                txn_id: frame.txn_id,
-            };
+                // Hex-decode the payload once, at the boundary (the wire
+                // carries hex; downstream everything is raw bytes).
+                let payload = frame.payload.as_deref().map(decode_hex).and_then(|opt| opt);
 
-            // Feed the engine; if this frame triggered a commit, ack it.
-            let engine = Arc::clone(&self.engine);
-            let outcome =
-                tokio::task::spawn_blocking(move || -> nostos_core::Result<Option<ApplyOutcome>> {
-                    let mut engine = engine.blocking_lock();
-                    engine.feed(core_frame)
-                })
+                let core_frame = Frame {
+                    lsn: frame.lsn,
+                    op: frame.op,
+                    table: frame.table,
+                    pk: frame.pk,
+                    payload,
+                    txn_id: frame.txn_id,
+                };
+
+                // Feed the engine; if this frame triggered a commit, ack it.
+                let engine = Arc::clone(&self.engine);
+                let outcome = tokio::task::spawn_blocking(
+                    move || -> nostos_core::Result<Option<ApplyOutcome>> {
+                        let mut engine = engine.blocking_lock();
+                        engine.feed(core_frame)
+                    },
+                )
                 .await
                 .map_err(|e| ClientError::Join(e.to_string()))??;
 
-            if let Some(outcome) = outcome {
-                commits += 1;
-                let ack = ClientMessage::Ack {
-                    lsn: outcome.checkpoint.raw(),
-                };
-                let ack_json = serde_json::to_string(&ack).expect("ack serializes");
-                write
-                    .send(Message::Text(ack_json))
-                    .await
-                    .map_err(|e| ClientError::Send(e.to_string()))?;
+                if let Some(outcome) = outcome {
+                    commits += 1;
+                    let ack = ClientMessage::Ack {
+                        lsn: outcome.checkpoint.raw(),
+                    };
+                    let ack_json = serde_json::to_string(&ack).expect("ack serializes");
+                    write
+                        .send(Message::Text(ack_json))
+                        .await
+                        .map_err(|e| ClientError::Send(e.to_string()))?;
+                }
             }
         }
 
@@ -323,6 +496,75 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
+}
+
+/// A decoded `WriteResult` frame (server → client, the ack for a `Write`).
+///
+/// This is the client-side decode of the shape `nostos_infra::wire::encode_write_result`
+/// produces (D2). It lives here rather than in the wire module because D3 is the
+/// first consumer of the DECODED form — the wire module only encodes it (the
+/// server side). When a second consumer appears, promote this to `nostos_infra::wire`.
+///
+/// `client_write_id` echoes the request's correlation id (the outbox row id,
+/// rendered as a string on the wire). `error` is `Some` iff `ok` is `false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteResult {
+    client_write_id: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// Decode a `WriteResult` frame from a WS message's bytes. Returns `None` for
+/// anything that isn't a `write_result` frame (so the caller can fall through to
+/// the replication-frame path). A malformed `write_result` (missing fields, bad
+/// JSON) also returns `None` — it's logged + dropped, matching the
+/// replication path's "drop malformed" behavior.
+fn decode_write_result(bytes: &[u8]) -> Option<WriteResult> {
+    // Cheap reject: only attempt the parse if the message looks like a
+    // write_result frame. The tag is always present (`encode_write_result`
+    // emits it), so a substring check avoids a full serde parse on every
+    // replication frame. The replication path is the hot one; this keeps it
+    // untouched.
+    if !memchr_looks_like_write_result(bytes) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("write_result") {
+        return None;
+    }
+    Some(WriteResult {
+        client_write_id: v.get("client_write_id")?.as_str()?.to_string(),
+        ok: v
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        error: v
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// Cheap pre-filter for [`decode_write_result`]: does this byte slice look like
+/// a `write_result` frame? A direct byte scan for the tag substring, avoiding a
+/// full JSON parse on the hot replication path. Whitespace-tolerant enough for
+/// the wire (the server emits compact JSON with no leading whitespace).
+fn memchr_looks_like_write_result(bytes: &[u8]) -> bool {
+    // The encoder emits `"type":"write_result"` (compact). Allow optional
+    // whitespace around the colon for robustness.
+    const NEEDLE: &[u8] = b"\"type\"";
+    if !contains(bytes, NEEDLE) {
+        return false;
+    }
+    contains(bytes, b"write_result")
+}
+
+/// Boyer-Moore-less substring search — fine for a tiny needle on a small frame.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 #[cfg(test)]

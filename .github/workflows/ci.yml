@@ -31,6 +31,57 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  e2e-pg:
+    name: real-Postgres logical-replication e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Postgres (logical replication + publication from pg-init)
+        run: |
+          docker compose -f docker/docker-compose.yml up -d
+          # Wait for Postgres to be fully ready. We gate on the publication
+          # existing rather than on `pg_isready` alone: during first init the
+          # entrypoint runs a *temporary* server to apply pg-init scripts, then
+          # restarts into the real server, so `pg_isready` flips accepting ->
+          # rejecting -> accepting and can fool a plain readiness poll. The
+          # `cairn_pub` publication only exists once the real server is up AND
+          # pg-init/01-sources.sql has run — which is exactly the precondition
+          # the e2e tests need. Poll until present (timeout 60s).
+          for i in $(seq 1 60); do
+            if docker compose -f docker/docker-compose.yml exec -T postgres \
+                 psql -U cairn -d cairn -tAc \
+                 "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" \
+                 | grep -q 1; then
+              echo "Postgres ready (publication cairn_pub present) after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          # Final check: fail loudly if it never came up.
+          docker compose -f docker/docker-compose.yml exec -T postgres \
+            psql -U cairn -d cairn -tAc \
+            "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" | grep -q 1
+      - name: Run feature-gated e2e
+        run: |
+          NOSTOS_E2E_PG=1 \
+          NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn \
+          cargo test -p nostos-infra --features pg -- --nocapture --test-threads=1
+      - name: Tear down Postgres
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -v
+
+  deny:
+    name: cargo-deny (licenses, advisories, bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories bans
+
   benchmark:
     name: throughput benchmark (smoke)
     runs-on: ubuntu-latest

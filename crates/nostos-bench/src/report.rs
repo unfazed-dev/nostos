@@ -41,7 +41,7 @@ pub struct Environment {
 impl Environment {
     pub fn collect(cfg: &BenchConfig) -> Self {
         Self {
-            rustc: version_string(),
+            rustc: rustc_version(),
             profile: cfg.profile.clone(),
             buffer: cfg.buffer,
             events: cfg.events,
@@ -51,15 +51,56 @@ impl Environment {
     }
 }
 
-fn version_string() -> String {
-    // We can't call `rustc -vV` at runtime cheaply; use the compile-time version.
-    format!("rustc {} (nostos-bench build)", env!("CARGO_PKG_VERSION"))
+/// The sentinel returned when a real value can't be captured (binary missing,
+/// non-zero exit, non-UTF-8 output). Kept as a constant so callers and tests
+/// agree on the string.
+pub const UNKNOWN: &str = "unknown";
+
+/// Capture `rustc --version` once at report time. Falls back to [`UNKNOWN`] on
+/// any error (missing binary, non-zero exit, non-UTF-8).
+///
+/// Factored out so a unit test can exercise it directly.
+pub fn rustc_version() -> String {
+    run_capture("rustc", &["--version"])
 }
 
-fn hostname() -> String {
-    // Avoid a `hostname` feature on `nix`; use libc-free std where possible.
-    // std doesn't expose gethostname, so fall back to the env / "unknown".
-    std::env::var("NOSTOS_BENCH_HOST").unwrap_or_else(|_| "unknown".to_string())
+/// Capture the machine hostname once at report time via `hostname`. Falls back
+/// to [`UNKNOWN`] on any error. The legacy `NOSTOS_BENCH_HOST` env override is
+/// still honored (useful for reproducible local runs).
+pub fn hostname() -> String {
+    if let Ok(h) = std::env::var("NOSTOS_BENCH_HOST") {
+        return h;
+    }
+    run_capture("hostname", &[])
+}
+
+/// Shell out once, returning trimmed UTF-8 stdout or [`UNKNOWN`] on any error.
+fn run_capture(cmd: &str, args: &[&str]) -> String {
+    match std::process::Command::new(cmd).args(args).output() {
+        Ok(out) if out.status.success() => match String::from_utf8(out.stdout) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => UNKNOWN.to_string(),
+        },
+        _ => UNKNOWN.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On the build machine `rustc` is installed, so the helper must return the
+    /// real toolchain line — which always starts with `rustc 1.`. We allow
+    /// `unknown` too so the test is robust to sandboxed envs where `rustc` is
+    /// not on PATH, but in practice the build machine has it.
+    #[test]
+    fn rustc_version_is_real_on_build_machine() {
+        let v = rustc_version();
+        assert!(
+            v.starts_with("rustc 1.") || v == UNKNOWN,
+            "rustc_version() returned an unexpected value: {v:?}"
+        );
+    }
 }
 
 #[derive(Debug, Serialize)]

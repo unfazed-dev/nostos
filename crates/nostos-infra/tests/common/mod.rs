@@ -56,6 +56,24 @@ pub async fn spawn_fake_server_with(
     Arc<SessionManager>,
     Arc<dyn nostos_application::ports::SessionStore>,
 ) {
+    spawn_fake_server_with_tables(buffer, auth, tenant_column, Vec::new()).await
+}
+
+/// Like [`spawn_fake_server_with`] but also configures the writable-table
+/// allowlist (ADR-0013) — used by the D2 write-back contract tests. Tables in
+/// `write_tables` pass the transport's allowlist gate so the test can target
+/// the next layer (NoWriteBack's fake-mode error, payload validation, etc.).
+pub async fn spawn_fake_server_with_tables(
+    buffer: usize,
+    auth: Arc<dyn SyncAuth>,
+    tenant_column: Option<&str>,
+    write_tables: Vec<String>,
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<SessionManager>,
+    Arc<dyn nostos_application::ports::SessionStore>,
+) {
     let store: Arc<dyn nostos_application::ports::SessionStore> =
         Arc::new(InMemorySessionStore::new());
     let manager = Arc::new(SessionManager::new(
@@ -66,6 +84,10 @@ pub async fn spawn_fake_server_with(
     let mut state = SyncRouterState::new(Arc::clone(&manager), auth).with_buffer(buffer);
     if let Some(col) = tenant_column {
         state = state.with_tenant_column(col);
+    }
+    if !write_tables.is_empty() {
+        let set: std::collections::HashSet<String> = write_tables.into_iter().collect();
+        state = state.with_write_tables(set);
     }
     let app = axum::Router::new()
         .route("/sync", get(sync_handler))

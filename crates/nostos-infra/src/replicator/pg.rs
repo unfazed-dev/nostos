@@ -81,16 +81,20 @@ type Event = PgEvent<BinaryValueTraitOff, StreamingValueTraitOff>;
 /// pgoutput sends a `Relation` message once per relation (table) before the
 /// first change to it, then refers to rows by OID. We must remember the
 /// OID→table-name mapping (and the PK column positions) to decode row ops.
+///
+/// `pub(crate)` so the snapshot module (`snapshot.rs`) can reuse the same
+/// shape — snapshot rows and streamed rows must decode to byte-identical
+/// payloads, so they share this metadata type.
 #[derive(Debug, Clone)]
-struct RelationMeta {
+pub(crate) struct RelationMeta {
     /// `<namespace>.<name>`, e.g. `public.tasks`. We strip the `public.` prefix
     /// on emit so predicates (which use bare table names like `tasks`) match.
-    qualified_name: String,
+    pub(crate) qualified_name: String,
     /// Indices of columns flagged as part of the replica identity / primary key.
-    /// Used to extract a string PK for the `RowOp`.
-    pk_indices: Vec<usize>,
+    /// Used to extract a string pk for the `RowOp`.
+    pub(crate) pk_indices: Vec<usize>,
     /// Column names in tuple order — used to build the JSON-ish payload.
-    columns: Vec<String>,
+    pub(crate) columns: Vec<String>,
 }
 
 /// Configuration for [`PgReplicator`].
@@ -198,6 +202,12 @@ pub struct PgReplicator {
     /// `update_applied_lsn` in `advance_progress`). On reconnect we resume from
     /// here — that is the exactly-once boundary. Advanced ONLY from client ACKs.
     last_confirmed: Lsn,
+    /// Initial-snapshot rows (fresh slot only). Drained by `next_event`
+    /// BEFORE the live replication stream is polled, so a client subscribing
+    /// to a populated table receives the existing rows first, then live
+    /// changes. Empty on restart with an existing slot (no snapshot replay).
+    /// See `snapshot.rs` and the module-level "initial snapshot" docs.
+    pending_snapshot: std::collections::VecDeque<nostos_domain::ReplicationEvent>,
 }
 
 impl PgReplicator {
@@ -212,6 +222,7 @@ impl PgReplicator {
             current_txn: None,
             last_seen: Lsn::ZERO,
             last_confirmed: Lsn::ZERO,
+            pending_snapshot: std::collections::VecDeque::new(),
         }
     }
 
@@ -221,13 +232,23 @@ impl PgReplicator {
     /// connection (`tokio_postgres`) to run the DDL, then opens the replication
     /// connection (`pgwire_replication`).
     ///
+    /// On a FRESH slot (did not exist on connect): the existing rows are snapshotted
+    /// via [`snapshot::snapshot_events`] under the slot's exported snapshot and
+    /// staged in [`Self::pending_snapshot`]. `next_event` drains those rows before
+    /// polling the live stream, so a client subscribing to a populated table gets
+    /// the full current state first, then live changes (roadmap Phase 1). On
+    /// restart with an EXISTING slot, no snapshot is emitted. All snapshot logic
+    /// lives in [`Self::ensure_slot_and_publication`].
+    ///
     /// # Errors
     /// Connection or SQL errors bubble up as [`PgReplicatorError`].
     pub async fn ensure_connected(&mut self) -> Result<(), PgReplicatorError> {
-        // 1. Control-plane connection: ensure publication + slot, resolve start LSN.
+        // 1. Control-plane: ensure publication + slot, resolve start LSN, and
+        //    (for a fresh slot) capture + stage the initial snapshot.
         let start_lsn = self.ensure_slot_and_publication().await?;
 
-        // 2. Replication connection.
+        // 2. Replication connection. `start_lsn` is the slot's consistent point
+        //    (fresh slot) or the slot's last confirmed flush (restart).
         let cfg = ReplicationConfig {
             host: self.cfg.host.clone(),
             port: self.cfg.port,
@@ -254,6 +275,16 @@ impl PgReplicator {
             "PgReplicator connected to Postgres logical replication"
         );
         Ok(())
+    }
+
+    /// The libpq-style URL for this replicator's config. Used for the snapshot
+    /// read connection (which must be separate from both the control-plane and
+    /// the replication connections).
+    fn pg_url(&self) -> String {
+        format!(
+            "postgresql://{}:{}@{}:{}/{}",
+            self.cfg.user, self.cfg.password, self.cfg.host, self.cfg.port, self.cfg.database
+        )
     }
 
     /// Pre-seed `relations` from `pg_class`/`pg_attribute` so row decoding works
@@ -336,24 +367,63 @@ impl PgReplicator {
         );
     }
 
-    /// Create publication + slot if absent, resolve the start LSN.
+    /// Create publication + slot if absent, resolve the start LSN. On a FRESH
+    /// slot, also capture the initial snapshot (under the slot's exported
+    /// snapshot) and stage it in [`Self::pending_snapshot`] for `next_event`
+    /// to drain before the live stream.
+    ///
+    /// Returns the streaming start LSN. The snapshot (if any) is staged as a
+    /// side effect on `self.pending_snapshot`.
+    ///
+    /// ## How the snapshot is obtained (the design decision)
+    ///
+    /// `pgwire-replication` 0.3.2's `ReplicationClient` only issues
+    /// `START_REPLICATION SLOT … LOGICAL` (crate src `client/worker.rs:186`);
+    /// it does NOT send `CREATE_REPLICATION_SLOT`, and the crate exposes no
+    /// path to the walsender-protocol `CREATE_REPLICATION_SLOT … (SNAPSHOT
+    /// 'export')` variant that would return `consistent_point` +
+    /// `snapshot_name` (see docs.rs/pgwire-replication/0.3.2 — there is no
+    /// slot-creation API; the example flow pre-creates the slot out-of-band).
+    /// So for a FRESH slot we create it via the **SQL** function
+    /// `pg_create_logical_replication_slot(name, plugin)` inside the SAME
+    /// REPEATABLE READ transaction that calls `pg_export_snapshot()`. Both
+    /// operations materialize against the transaction's snapshot, so the
+    /// exported snapshot's view of the database is exactly the state the slot
+    /// will start streaming from (its `consistent_point`). The transaction
+    /// stays OPEN across the call so the snapshot id remains importable while
+    /// `snapshot::snapshot_events` reads the tables on a second connection
+    /// (the snapshot id is only valid until the exporting txn commits — see
+    /// the `SET TRANSACTION SNAPSHOT` docs). We commit before returning.
+    ///
+    /// ## Slot-exists-on-start edge case
+    ///
+    /// If the slot already exists (restart), we do NOT export a snapshot —
+    /// there is no fresh consistent point, and re-emitting the snapshot would
+    /// duplicate rows the client already has. The start LSN resolves from the
+    /// slot's `confirmed_flush_lsn` → `restart_lsn` → current WAL, unchanged.
+    ///
+    /// ## Explicit-start-LSN edge case
+    ///
+    /// If the caller set `cfg.start_lsn`, we honor it verbatim and skip the
+    /// snapshot — that path is for resuming at an exact point, not for the
+    /// initial sync. (ponytail: if a caller later wants a snapshot AT a
+    /// specific LSN, the snapshot-vs-start-LSN interaction needs its own
+    /// design; for now they are mutually exclusive.)
     ///
     /// Preference: explicit `cfg.start_lsn` → slot's `confirmed_flush_lsn` →
     /// slot's `restart_lsn` → `pg_current_wal_lsn()`. This is the exact
     /// pattern from `pgwire-replication`'s own `checkpointed` example.
     async fn ensure_slot_and_publication(&mut self) -> Result<PgLsn, PgReplicatorError> {
-        let dsn = format!(
-            "host={} port={} user={} password={} dbname={}",
-            self.cfg.host, self.cfg.port, self.cfg.user, self.cfg.password, self.cfg.database
-        );
-        let (sql, conn) = tokio_postgres::connect(&dsn, NoTls)
+        let (sql, conn) = tokio_postgres::connect(&self.pg_url(), NoTls)
             .await
             .map_err(|e| PgReplicatorError::ControlPlane(e.to_string()))?;
         tokio::spawn(async move {
             let _ = conn.await;
         });
 
-        // Publication (best-effort — may already exist).
+        // Publication (best-effort — may already exist). This is the
+        // publication-missing edge case: a fresh DB with no publication must
+        // still work, and an existing publication must not error.
         if let Err(e) = sql
             .batch_execute(&format!(
                 "DO $$ BEGIN \
@@ -375,24 +445,104 @@ impl PgReplicator {
         // connection to the same slot starts with an empty client-side cache.
         self.bootstrap_relations_from_catalog(&sql).await;
 
-        // Slot (best-effort — may already exist).
-        if let Err(e) = sql
-            .batch_execute(&format!(
-                "SELECT * FROM pg_create_logical_replication_slot('{}', 'pgoutput');",
-                self.cfg.slot
-            ))
-            .await
-        {
-            debug!(error = %e, "could not create slot (may already exist)");
-        }
-
-        // Explicit start LSN wins.
+        // Explicit start LSN wins — skip snapshot (resume-at-exact-LSN path).
         if let Some(explicit) = self.cfg.start_lsn {
+            // Make sure the slot exists for START_REPLICATION (best-effort —
+            // the resume path may legitimately target a pre-existing slot).
+            let _ = sql
+                .batch_execute(&format!(
+                    "SELECT * FROM pg_create_logical_replication_slot('{}', 'pgoutput');",
+                    self.cfg.slot
+                ))
+                .await;
             self.seed_resume(explicit);
             return Ok(PgLsn::from_u64(explicit.raw()));
         }
 
-        // Otherwise resume from the slot's last confirmed flush.
+        // Detect existing slot (slot-exists-on-start edge case). If the slot
+        // exists, this is a RESTART: no snapshot, resolve LSN from the slot.
+        let exists: bool = sql
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+                &[&self.cfg.slot],
+            )
+            .await
+            .is_ok_and(|r| r.get::<_, bool>(0));
+        if exists {
+            return self.resolve_resume_lsn(&sql).await;
+        }
+
+        // ── FRESH slot: create it inside a REPEATABLE READ txn that also
+        //    exports a snapshot, and hold that txn open while the snapshot is
+        //    read. This is the snapshot-vs-stream exactly-once boundary.
+        sql.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            .await
+            .map_err(|e| PgReplicatorError::ControlPlane(e.to_string()))?;
+        let snapshot_name: String = sql
+            .query_one("SELECT pg_export_snapshot()", &[])
+            .await
+            .map_err(|e| PgReplicatorError::ControlPlane(e.to_string()))?
+            .get(0);
+        // pg_create_logical_replication_slot returns (slot_name, lsn). The lsn
+        // is the slot's consistent point — where streaming will start, and the
+        // LSN at which the exported snapshot is consistent.
+        let consistent_point: String = sql
+            .query_one(
+                "SELECT lsn::text FROM pg_create_logical_replication_slot($1, 'pgoutput')",
+                &[&self.cfg.slot],
+            )
+            .await
+            .map_err(|e| PgReplicatorError::ControlPlane(e.to_string()))?
+            .get(0);
+        let consistent_lsn =
+            PgLsn::parse(&consistent_point).map_err(|e| PgReplicatorError::Lsn(e.to_string()))?;
+
+        // Run the snapshot read while the exporting txn is still open. The
+        // snapshot id is invalid the moment this txn commits. (See module
+        // docs on snapshot.rs for the exactly-once boundary rationale.)
+        let snapshot_events = match crate::replicator::snapshot::snapshot_events(
+            &self.pg_url(),
+            &self.cfg.publication,
+            &snapshot_name,
+            Lsn::new(consistent_lsn.as_u64()),
+        )
+        .await
+        {
+            Ok(events) => {
+                info!(
+                    slot = %self.cfg.slot,
+                    rows = events.len(),
+                    consistent_point = %consistent_lsn,
+                    "initial snapshot captured; will drain before live stream"
+                );
+                events
+            }
+            Err(e) => {
+                // Snapshot failure is not fatal: the live stream still
+                // delivers changes from the consistent point forward. But
+                // existing rows would be missed, so log loudly. We still
+                // commit the txn (to release the slot-creation) and proceed.
+                warn!(error = %e, "initial snapshot failed; clients will NOT receive pre-existing rows (live stream still active)");
+                Vec::new()
+            }
+        };
+        sql.batch_execute("COMMIT")
+            .await
+            .map_err(|e| PgReplicatorError::ControlPlane(e.to_string()))?;
+
+        // Stage the snapshot rows for `next_event` to drain before the stream.
+        self.pending_snapshot.extend(snapshot_events);
+
+        self.seed_resume(Lsn::new(consistent_lsn.as_u64()));
+        Ok(consistent_lsn)
+    }
+
+    /// Resolve the streaming start LSN for a RESTART (existing slot):
+    /// `confirmed_flush_lsn` → `restart_lsn` → `pg_current_wal_lsn()`.
+    async fn resolve_resume_lsn(
+        &mut self,
+        sql: &tokio_postgres::Client,
+    ) -> Result<PgLsn, PgReplicatorError> {
         let row = sql
             .query_one(
                 "SELECT confirmed_flush_lsn::text, restart_lsn::text \
@@ -413,8 +563,6 @@ impl PgReplicator {
             self.seed_resume(Lsn::new(lsn.as_u64()));
             return Ok(lsn);
         }
-
-        // Fresh slot: start from the current WAL head.
         let row = sql
             .query_one("SELECT pg_current_wal_lsn()::text", &[])
             .await
@@ -712,7 +860,10 @@ fn tuple_to_json_payload(meta: &RelationMeta, data: &TupleData<BinaryValueTraitO
 }
 
 /// Minimal JSON string escaping (in-place append).
-fn json_escape_into(out: &mut String, s: &str) {
+///
+/// `pub(crate)` so the snapshot module can build payloads byte-identical to the
+/// streaming path's `tuple_to_json_payload`.
+pub(crate) fn json_escape_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -733,6 +884,15 @@ fn json_escape_into(out: &mut String, s: &str) {
 #[async_trait]
 impl ReplicatorStream for PgReplicator {
     async fn next_event(&mut self) -> Option<NostosEvent> {
+        // Drain the initial snapshot FIRST — these are the pre-existing rows a
+        // fresh client must receive before live changes. All snapshot rows are
+        // stamped at the slot's consistent point; the live stream begins at
+        // exactly that point, so no row is missed or duplicated across the
+        // snapshot→stream boundary (see snapshot.rs module docs + the
+        // concurrent-writes e2e test). Empty on restart (existing slot).
+        if let Some(ev) = self.pending_snapshot.pop_front() {
+            return Some(ev);
+        }
         loop {
             match self.next_row().await {
                 Ok(Some(ev)) => return Some(ev),

@@ -1,23 +1,26 @@
 # Nostos — Strategic Product Brief
-### The open, Rust-fast, local-first sync engine that kills PowerSync's buckets.
+### The open, Rust-fast, local-first sync engine.
 
 > *"A cairn is a trail marker of stacked stones. When you're offline and lost, it's how you find your way home. Nostos is how your data does."*
 
-**Status:** Founder strategy + v1 design — 2026-06-26
+**Status:** Founder strategy + v1 design — revised July 2026 (repositioned for PowerSync Sync Streams GA)
 **Author:** Founder (synthesized via deep research + GLM-5.2 L4 ultrathink)
-**Tagline:** *Local-first sync that never gives up. Rust-fast. Apache-open. No buckets, no endpoints, no lock-in.*
+**Tagline:** *Local-first sync that never gives up. Rust-fast. Apache-open. No write-back endpoints, no lock-in.*
 
 ---
 
 ## 0. TL;DR (read this if nothing else)
 
-PowerSync owns local-first sync but has three self-inflicted wounds we exploit:
+PowerSync owns local-first sync but still carries four real, current limits Nostos exploits (audited July 2026):
 
-1. **Its server is TypeScript/Node.js, not Rust.** Only the *client* core is Rust. The server — the replicator, the sync router, the bucket engine — is a Node process capped at **~2–4k ops/sec, ~5 MB/sec, ~60 txn/sec.** A from-scratch **Rust server** can credibly claim **5–10×** throughput and lower tail latency.
-2. **Its server license is FSL** (source-available, not OSI-open, 2-year change date, no-compete clause). Enterprise legal hates it.
-3. **The 1,000-bucket-per-user cap with static-only sync rules** is the #1 developer complaint — and it breaks the moment your dataset is large or user-driven (infinite scroll, many-to-many, per-friend, per-tag).
+1. **Its server is TypeScript/Node.js, not Rust.** Only the *client* core is Rust. The server — the replicator, the sync router — is a Node process capped at **~2–4k ops/sec, ~5 MB/sec, ~60 txn/sec.** A from-scratch **Rust server** credibly delivers **5–10×** throughput and lower tail latency. Nostos's proven number: 142k ops/sec @ 1k clients, 0% drops (end-to-end through the fan-out pipeline).
+2. **Its server license is FSL** (source-available, not OSI-open, 2-year change date, no-compete clause). Enterprise legal hates it. **Nostos is Apache-2.0 today** — no 2-year wait.
+3. **Write-back is on you.** PowerSync's client queues mutations; **you implement and host `uploadData()`**. ElectricSQL is read-path only. **Nostos's direct write-back** (ADR-0013) writes to your Postgres for you — no customer-built endpoints.
+4. **Self-host isn't free-and-clean.** PowerSync Cloud is metered per-op; the FSL "Open Edition" carries the license delay. **Nostos self-host is free, full-featured, and unlimited.**
 
-Meanwhile **ElectricSQL abandoned 2-way offline sync entirely**, **Zero is web-only and not offline-first**, and **Supabase Realtime has no offline/conflict/local-DB layer** (it's a feeder, not a competitor).
+> **Retired attack lines (no longer true as of July 2026):** *"static buckets only"* — PowerSync shipped **Sync Streams (dynamic, on-demand sync) to GA in May 2026**; legacy YAML bucket rules are now "legacy." And *"1,000-bucket hard cap"* — the 1,000-bucket limit is a **soft default (10k configurable)**, not a hard ceiling. These are no longer quoted as Nostos wedges.
+
+Meanwhile **ElectricSQL abandoned 2-way offline sync entirely (read-path only)**, **Zero is web-only and explicitly disabled offline writes**, and **Supabase Realtime has no offline/conflict/local-DB layer** (it's a feeder, not a competitor). **Threat:** Supabase acquired Triplit (Oct 2025) explicitly citing offline demand — a first-party offline layer from Supabase is the live risk; see §9.
 
 **The white space:** *An Apache-2.0, Postgres-logical-replication-based, 2-way offline-first sync engine with first-class Flutter + React Native + Web SDKs, a Rust core, a Rust server, and a genuinely free self-host.* **No product occupies that cell today.** That cell is **Nostos**.
 
@@ -48,7 +51,7 @@ Supabase users needing offline are *forced* onto PowerSync/Electric/RxDB. PowerS
 - **Architecture:** `Client SDK + local SQLite ⇄ (HTTP streaming/WebSocket) ⇄ PowerSync Service ⇄ (logical replication) ⇄ Postgres/MongoDB/MySQL/SQL Server/Convex`.
 - **PowerSync Service = TypeScript/Node.js** (`powersync-ja/powersync-service`, ~99.5% TS). Two subsystems: **Replicator** (consumes the PG WAL replication slot / Mongo change streams) and **Sync API** (streams bucketed ops to clients). Maintains its *own* data store (doesn't pollute your source DB).
 - **Client core = Rust** (`powersync-sqlite-core`, Apache-2.0) — a SQLite native extension doing bucket-merge/JSON decoding *inside* SQLite. Shared by all SDKs. This is their real performance moat on the client.
-- **Sync rules:** legacy YAML buckets (rigid: every data query must use every bucket param) **and** newer "Sync Streams." Both create **one bucket per unique filter value**.
+- **Sync rules:** **Sync Streams (dynamic, on-demand sync) shipped to GA in May 2026** — the modern dynamic-sync path; the legacy YAML bucket rules are now "legacy" (still supported, create one bucket per unique filter value). *Nostos no longer positions "static buckets only" as a wedge — PowerSync can now do dynamic sync.*
 - **Write path:** you build it. Client queues mutations; **you implement `uploadData()`** and host your own endpoint. PowerSync does not write to your DB. **#1 DX complaint.**
 - **Conflict resolution:** last-write-wins per field. No CRDTs. Custom logic is DIY.
 - **License:** client SDKs Apache-2.0; **Service = FSL** (source-available; auto-converts to Apache after 2 years; no-competing-use clause).
@@ -56,10 +59,12 @@ Supabase users needing offline are *forced* onto PowerSync/Electric/RxDB. PowerS
 - **SDKs:** Dart/Flutter (best), RN/Expo, JS/Web, Node (beta), Kotlin, Swift, Rust (alpha), Tauri.
 
 ### 2.2 PowerSync's published limits (our wedge targets)
-- **1,000 buckets per user/client hard cap** (10k by request). Exceeding it → **sync connection fails before any data loads.**
-- **No dynamic/partial sync** — can't "load more as the user scrolls." Rules are static per session.
-- **Throughput ceiling:** ~2–4k ops/sec (small rows), ~5 MB/sec (large rows), ~60 txn/sec (small txns). This is a *single Node process* ceiling.
-- **Full reprocessing, not incremental** — a single change can trigger full reprocessing of buckets/streams (their own proposal #349 admits it).
+- **1,000 buckets per user/client soft default** (10k configurable by request). *Not a hard cap — no longer quoted as a hard ceiling.*
+- ~~No dynamic/partial sync~~ — **Sync Streams GA'd May 2026**; dynamic, on-demand sync is now supported. *Retired as a wedge.*
+- **Throughput ceiling:** ~2–4k ops/sec (small rows), ~5 MB/sec (large rows), ~60 txn/sec (small txns). This is a *single Node process* ceiling. **Still holds — Nostos's primary throughput wedge.**
+- **Full reprocessing, not incremental** — a single change can trigger full reprocessing of buckets/streams (their own proposal #349 admits it). *Still holds.*
+- **Write-back is DIY** (`uploadData()`). *Still holds — Nostos's primary DX wedge.*
+- **License = FSL** (2-yr Apache conversion, no-compete). *Still holds — Nostos's primary license wedge.*
 - **Security history:** GHSA-q6wc-xx4m-92fj — sync filters silently ignored on Service 1.20.0, potential auth bypass.
 
 ### 2.3 The landscape matrix (who owns which cell)
@@ -89,10 +94,10 @@ Supabase users needing offline are *forced* onto PowerSync/Electric/RxDB. PowerS
 
 Eight fronts. The first three are the headline moats; the rest are table-stakes we must match or beat.
 
-### Front 1 — **Dynamic Reactive Sync (kill the buckets)** 🏆 *THE moat*
-> **Claim: *"Sync terabytes without static buckets. Subscribe with a live query; scroll forever."***
+### Front 1 — **Predicate-based Reactive Sync (cursor-resumable, no full reprocessing)**
+> **Claim: *"Subscribe with a live predicate; scroll forever. Cursor-resumable, incremental — never full-reprocess."***
 
-PowerSync forces you to pre-partition data into ≤1,000 static buckets per user; exceed it and sync fails. **Nostos replaces static buckets with dynamic, predicate-based reactive sync.** The client subscribes with a *live predicate* (a scoped, authorized query — e.g. `org_id == $org AND updated_at > $cursor`); the server continuously evaluates incoming logical-replication deltas against the set of *authenticated, live* client predicates and streams only matching deltas. State is **cursor-based (LSN + op offset)**, so it's resumable, incremental, and has **no fixed cardinality ceiling.** A user with 100,000 items scrolls and syncs exactly what they look at. This single feature is why developers leave PowerSync — and we make it the default.
+PowerSync shipped **Sync Streams (dynamic sync) to GA in May 2026**, so "dynamic sync" alone is no longer a differentiator. What still is: Nostos's subscription model is **predicate-based and cursor-resumable from day one.** The client subscribes with a *live predicate* (a scoped, authorized query — e.g. `org_id == $org AND updated_at > $cursor`); the server continuously evaluates incoming logical-replication deltas against the set of *authenticated, live* client predicates (ADR-0012's shipped boolean-tree engine) and streams only matching deltas. State is **cursor-based (LSN + op offset)**, so it's resumable and **incremental** — a single change does *not* trigger full reprocessing of the matched set (PowerSync's own proposal #349 admits their bucket/streams path can). A user with 100,000 items scrolls and syncs exactly what they look at, with no fixed cardinality ceiling.
 
 ### Front 2 — **Direct Write-Back (no endpoints)** 🏆 *DX moat*
 > **Claim: *"Zero upload endpoints. Nostos writes to your Postgres for you — safely."***
@@ -139,7 +144,7 @@ First-class Supabase integration (Postgres + RLS + Auth wired), because that's w
 - **Alternatives if Nostos is taken:** **Ply** (strands woven into one — sync merges streams), **Flint** (Rust-fast sparks), **Tideline** (the line sync draws across devices).
 
 ### Positioning (one sentence)
-**"Nostos is the open, Rust-fast local-first sync engine — Postgres to every device, even offline, with no static buckets and no write-back endpoints."**
+**"Nostos is the open, Rust-fast local-first sync engine — Postgres to every device, even offline, with no write-back endpoints and no license lock-in."**
 
 ### Identity pillars
 - **Reliable** (the nostos metaphor: never lose your data, never give up on sync)
@@ -212,18 +217,18 @@ There is **no single FFI bridge** that serves Flutter + RN + Web + Node well. Th
 
 ## 6. The two technical moats, in depth
 
-### 6.1 Dynamic Reactive Sync — killing the bucket ceiling
+### 6.1 Predicate-based Reactive Sync — cursor-resumable, incremental
 
-**PowerSync's problem:** buckets are *static and cardinality-bound*. One bucket per unique filter value → a user with 10k chats or 50k items either can't sync or must manually bucket. The connection *fails* past 1,000.
+**PowerSync's current state:** Sync Streams (dynamic, on-demand sync) shipped to GA in May 2026, so *dynamic sync itself* is table-stakes now, not a Nostos-only feature. The 1,000-bucket limit is a **soft default (10k configurable)**, not a hard failure ceiling. What still differentiates Nostos: **cursor-based, incremental** resume with no full-reprocessing cliff, and a predicate-evaluation engine purpose-built for it (ADR-0012).
 
 **Nostos's model:**
 1. The client opens a **sync session** authenticated with **parameters** (its `user_id`, `org_id`, roles) — same idea as PowerSync's parameter queries.
 2. The client subscribes with one or more **live predicates** — a small, safe subset of SQL scoped by the auth parameters: `SELECT * FROM tasks WHERE org_id = $org AND assignee_id = $user ORDER BY updated_at DESC` plus optional windowing/cursors.
 3. The server maintains the set of *authenticated, live* predicates across all connected clients. As **logical-replication deltas** arrive, the server evaluates each changed row against *only the predicates whose parameter sets could match* (indexed by parameter → predicate), and streams matching deltas to the right clients.
-4. State is **cursor-based** (LSN + per-stream op offset), so reconnects resume exactly where they left off — **no full reprocessing** (PowerSync's proposal #349 admits they don't have this).
+4. State is **cursor-based** (LSN + per-stream op offset), so reconnects resume exactly where they left off — **no full reprocessing** (PowerSync's proposal #349 admits their bucket/streams path can trigger full reprocessing on a single change).
 5. As the user scrolls, the client **expands its predicate window** dynamically; the server streams more. **No fixed ceiling.** Complexity is **O(changed rows × matching predicates)**, not O(all buckets).
 
-**Why it's a moat:** PowerSync's entire bucket/sync-rules subsystem is built around static partitioning; unwinding it is a multi-year rewrite for them. For us it's day-one architecture. And the predicate-evaluation engine is *the* piece of hard IP we build first and benchmark hardest.
+**Why it's a moat (narrowed, honestly):** the cursor-resumable, no-full-reprocessing property is the durable technical differentiator vs PowerSync's reprocessing-on-change behavior. The predicate-evaluation engine (ADR-0012) is the hard IP — shipped, benchmarked (~1.5M predicate-evals/sec eval-only through 10k predicates). We no longer claim "static buckets" as the wedge; we claim *incremental cursor resume + a purpose-built eval engine*.
 
 **De-risk now:** prototype in month 1 — prove that evaluating thousands of concurrent authenticated predicates against a live PG stream doesn't degrade source-DB read performance (index the predicate lookup, never touch the source DB for evaluation).
 
@@ -282,7 +287,7 @@ This is the cleanest possible land-and-expand: **dev tries OSS locally (5-min se
 **Flutter + Expo/React Native developers building offline-first B2B SaaS and field-worker apps** — specifically the intersection of (a) the **Realm/Atlas-Device-Sync exodus** (MongoDB killed it), (b) **Supabase users who hit the "no offline" wall**, and (c) **PowerSync dissidents** (the Reddit/GitHub crowd complaining about buckets, setup, and pricing). These are pre-qualified, motivated, and currently have no clean-open option.
 
 ### 8.2 The narrative
-> *"PowerSync works — but it's Node-bottlenecked, FSL-licensed, bucket-capped, and makes you build your own write-back endpoints. ElectricSQL gave up on offline writes. Zero is web-only. Supabase can't do offline. **Nostos is the open, Rust-fast one that does it all — no buckets, no endpoints, no lock-in.**"*
+> *"PowerSync works — but it's Node-bottlenecked, FSL-licensed, and makes you build your own write-back endpoints. ElectricSQL gave up on offline writes. Zero is web-only and disabled offline writes. Supabase can't do offline (yet — they bought Triplit). **Nostos is the open, Rust-fast one that does it all — no write-back endpoints, no lock-in, free self-host.**"*
 
 Launch beats: an **auditable public benchmark** vs. PowerSync's published ceiling (5–10× throughput), a **"migrate from PowerSync in 10 minutes"** guide, and a **"migrate from Realm in 1 hour"** guide.
 
@@ -310,7 +315,7 @@ Launch beats: an **auditable public benchmark** vs. PowerSync's published ceilin
 | # | Risk (what kills us) | Likelihood | De-risking |
 |---|---|---|---|
 | **1** | **The PG logical-replication state machine.** Stateful binary stream; LSN checkpoints, standby heartbeats/feedback, slot management, reconnect/reshard, WAL-bloat if consumer stalls, gap-filling on crash. This is PowerSync's hardest-won IP. | High | **Start here in week 1.** Build the durable-checkpoint/reconnect/failover story first; treat `pgwire-replication` as protocol-only and build the orchestration ourselves; chaos-test reconnects, crashes, slot loss. |
-| **2** | **Cloud build-vs-buy:** Supabase or a hyperscaler ships a native Postgres→device sync engine, making us a feature. | Medium | **Become Supabase's official partner** so building-their-own is moot; Apache-2.0 means they're *welcome* to use us (we win either way); move faster than a hyperscaler can. |
+| **2** | **Threats — first-party offline from Supabase/hyperscalers.** **Supabase acquired Triplit (Oct 2025)** explicitly citing offline demand — a Supabase-native offline sync layer is the live, named risk. A hyperscaler shipping native Postgres→device sync would similarly make Nostos a feature. | Medium-High (elevated — Triplit deal is a concrete signal) | **Become Supabase's official partner before they ship their own** (the window is now narrower); Apache-2.0 means they're *welcome* to use us (we win adoption either way); move faster than a hyperscaler-acquired team can integrate; win on *server throughput + license + write-back DX* which a bolt-on acquisition won't match day-one. |
 | **3** | **Memory/backpressure meltdowns** under tens of thousands of concurrent sync sessions — concurrent state machines + replication slots in Rust are leak/backpressure-prone. | Medium | Design backpressure into the core from day one; relentless load testing (10k+ concurrent clients); predicate engine must be **O(changed rows × matching predicates)**, never O(all predicates); per-connection memory budgets with hard eviction. |
 | **4** | **WASM bundle-size rejection** — the web ecosystem is militant about bundle size; a 2 MB+ WASM core gets rejected for TTI. | Medium | **Hard size budget: <500 KB gzipped** for the web core; tree-shake aggressively; lazy-load the CRDT module; offer a **"lite" pure-TS read-path** for bundle-obsessed teams. |
 | **5** | **The 4-bridge FFI maintenance tax** (UniFFI + FRB + napi-rs + wasm-bindgen), each with its own threading/runtime model. | Medium-High | First-class CI on all four from day one; keep `nostos-core` runtime-agnostic & `Send + Sync`; push all platform threading into thin FFI shims; the streaming seam (UniFFI's weak point) solved with a uniform callback-channel pattern. |

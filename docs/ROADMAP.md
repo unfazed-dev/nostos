@@ -11,7 +11,7 @@
 **Deliverables:**
 - Hexagonal server skeleton: `nostos-domain` / `nostos-application` / `nostos-infra` / `nostos-server`.
 - `FakeReplicator` → `FanOutService` → bounded per-session sinks → WebSocket transport.
-- `nostos-bench` harness: in-process WS client swarm, measures sustained ops/sec + drop rate + p99.
+- `nostos-bench` harness: in-process WS client swarm, measures sustained ops/sec + drop rate + p99. *(C3 — batched WS writes shipped: the per-session write task now drains up to 64 immediately-available frames into one JSON-array WS message under backlog, while sending a single object — byte-identical to the legacy wire — when only one frame is pending (zero latency tax at low rates). Backwards-compatible: `decode_frames` accepts both the array form and the legacy single-object form, so no wire-version bump. **Measured on Apple Silicon / 10 cores / rustc 1.95.0** — 1k headline: 833k → 833k ops/sec @ 0% drops (within noise, no regression); 5k: 592k → 660k ops/sec, drops 0.00% → 0.91%; 10k (probe — the full harness's `FanOutService::run` is O(N×E) via per-event full-store ack/eviction scans and hangs in teardown at 10k, so a lean `nostos-bench-10k` shim measures it): ~406k → ~483k ops/sec, drops ~67.5% → ~61.4%. **The 10k <1%-drop goal was NOT met** — batching is a strict improvement at every tier but the dominant 10k cost is the per-event store scan, not the per-connection WS write path; the named follow-up is the table-sharded router. ws_contract 8/8 green. Reconnect-storm probe (`nostos-reconnect-storm`): dropping+reconnecting 1k–2k of 2k–3k clients mid-stream drains cleanly — post-storm drop rate 0.00% across runs (pre-storm 0–14% reflects steady-state noise); **admission control / token-bucket NOT needed** and not built speculatively.)*
 - `RESULTS.md` with the comparison chart vs PowerSync's published limits.
 
 **Kill criterion:** if we can't demonstrate ≥3× over PowerSync's ceiling, the architecture is wrong — pivot before building more.
@@ -29,6 +29,17 @@
 - Chaos test: kill the server mid-stream → client reconnects → no data loss, no duplication.
 
 **Kill criterion:** if the PG logical-replication state machine can't survive a mid-LSN crash without data loss or duplication, we don't have a product — fix before anything else.
+
+**Ratified decisions (2026-07):**
+- `NOSTOS_PG_URL` defaults to empty, not `localhost:5433`. Selecting
+  `NOSTOS_REPLICATOR=pg` without a URL fails fast with the actionable error
+  `Set NOSTOS_PG_URL, e.g. after: docker compose -f docker/docker-compose.yml up -d`.
+  Rationale: a silent fallback to a localhost DB that may not exist masks
+  misconfiguration; an actionable error is the correct operability bar for a
+  real-PG-by-default binary.
+- Write-back parameter binding is typed-inference (`SqlValue`), not the plan's
+  text-cast-with-coercion — Postgres does not coerce `text`→`uuid` parameters.
+  See ADR-0013 addendum "Typed parameter binding".
 
 ---
 
@@ -96,4 +107,4 @@
 - 🚀 **GA** — production-ready for the phase's scope.
 - 📈 **Scaling** — optimization & hardening.
 
-Today: **Phase 0 🚧.**
+Today: **Phase 1 🔬 — real-PG default + write-back v1 in progress** (see docs/plans/complete-nostos-fully-wired-operational.md).

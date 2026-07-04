@@ -37,6 +37,13 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
+# Identifier validation for the write-back adapter (D2): strict regex over
+# table/column names so a client-controlled identifier can never reach SQL.
+regex = { workspace = true }
+# UUID parsing for typed write-back binding (D2): a pk/string that parses as a
+# uuid is bound as uuid::Uuid so PG accepts it on a uuid column (text→uuid is
+# not an implicit cast). Already pulled transitively by tokio-postgres.
+uuid = { workspace = true }
 # JWT signature verification for /sync auth (HMAC-SHA256, no SDK — mirrors
 # nostos-cloud's Hs256Verifier; see ADR-0010 on why this isn't shared).
 hmac = { workspace = true }

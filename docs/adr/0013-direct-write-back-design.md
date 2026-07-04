@@ -59,3 +59,39 @@ strategy doc must not market write-back as shipped until this ADR is implemented
 
 - STRATEGY §6.2 (the write-back moat in depth).
 - Depends on: ADR-0009 (resume), ADR-0010 (auth), ADR-0014 (conflict).
+
+## Addendum (2026-07): v1 ships over the sync WebSocket
+
+v1 scope shipped ahead of Phase 4 (plan: docs/plans/complete-nostos-fully-wired-operational.md):
+- Transport: `ClientMessage::Write` on the existing authenticated /sync socket —
+  zero new deps, one auth path, ordered with ACKs. The HTTP POST path described
+  above remains the Phase-4 design for gateway/enterprise deployments.
+- Rules: per-table allowlist (`NOSTOS_WRITE_TABLES`), pk upsert/delete only,
+  server-authoritative LWW by WAL order (ADR-0004/0014 tier (a)).
+- Conflict checks (version/etag), declarative write rules, and function mode
+  remain Phase 4. Echo suppression is unnecessary: client apply is an
+  idempotent upsert (nostos-core Storage contract), so the write's replication
+  echo is a no-op.
+
+### Typed parameter binding (deviation from plan, ratified 2026-07)
+
+The plan specified text-cast binding for v1 ("bind everything as text and let
+PG coerce, `ponytail:` typed binding when a schema registry exists"). This is
+**incorrect for typed columns** and was deviated from: the adapter infers the
+Rust type from the JSON value shape and binds via a `SqlValue` enum
+(`Uuid`/`Bool`/`I64`/`F64`/`Jsonb`/`Text`/`Null`). The hard-won finding:
+
+> Postgres does **not** implicitly coerce a `text`-bound parameter to `uuid`
+> for `INSERT`/`UPDATE`. `PREPARE t(text) AS INSERT INTO tasks (id) VALUES ($1)`
+> fails with `column "id" is of type uuid but parameter is of type text`.
+> Binding by inferred type is **required**, not an optimization.
+
+Rationale: (1) the schema-registry ponytail is not load-bearing — JSON value
+shape + a `uuid::Uuid::parse_str` attempt covers every column type nostos v1
+writes, with a `Text` fallback; (2) parameterization (the actual safety
+property) is unchanged — every value still binds via `$1…$n`, never
+interpolated. The upgrade path is binding by *column* type (read from
+`pg_attribute`/`pg_constraint`) rather than by *value* shape, which becomes
+necessary only when a column type has no JSON-shape signal (e.g. `timestamptz`
+stored as a numeric epoch). Code doc: `crates/nostos-infra/src/write_back.rs`
+(`SqlValue` enum + `json_value_to_sql`).

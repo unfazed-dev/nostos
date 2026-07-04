@@ -24,6 +24,39 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 nostos-core = { workspace = true }
 wasm-bindgen = "0.2"
+# E1: the WASM WebSocket transport. `web-sys` is feature-gated per API; the
+# list below is the exact surface the transport touches — anything else pulls
+# dead bytes into the .wasm. `js-sys` for `js_sys::Function`/`Reflect`; 
+# `wasm-bindgen-futures` bridges the async connect() Promise.
+serde = { workspace = true }
+serde_json = { workspace = true }
+js-sys = "0.3"
+# NOTE: wasm-bindgen-futures is on the 0.4 line (its versioning is independent
+# of wasm-bindgen's 0.2 line — confusingly, "0.2" here would resolve to a
+# 2018-era 0.2.x that pulls a broken js-sys 0.2). 0.4.x tracks wasm-bindgen 0.2.
+wasm-bindgen-futures = "0.4"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "WebSocket",
+    "MessageEvent",
+    "BinaryType",
+    "CloseEvent",
+    "ErrorEvent",
+    # localStorage checkpoint persistence (the plan's interface contract).
+    "Window",
+    "Storage",
+]
+
+[dev-dependencies]
+# ponytail: browser wasm-bindgen-test setup is env-flaky (needs a headless
+# browser + `wasm-pack test --chrome`); the real coverage is the host cargo
+# unit tests of the pure frame-pump/subscribe/checkpoint fns (which run in
+# `make ci`). This dep is here so a future browser test of the WS glue can be
+# added without a Cargo.toml churn; the WS glue itself is covered by the E3
+# demo page manual check.
+wasm-bindgen-test = "0.2"
 
 [lints]
 workspace = true
