@@ -548,9 +548,11 @@ Identifier safety: quote schema/table with `quote_ident` semantics (tokio-postgr
 
 - [ ] **Step 4: Wire into `pg.rs`** — on connect, when the slot is newly created: call `snapshot_events(...)`, hold the Vec, and have `next_event()` drain it before polling the replication stream. When the slot already existed: skip. Match the existing code style; the seam stays `ReplicatorStream`.
 
-- [ ] **Step 5: Run the test** — `docker compose -f docker/docker-compose.yml up -d && NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg fresh_slot` → PASS. Also re-run the full existing e2e: `cargo test -p nostos-infra --features pg` → all green (no regression in resume/ack semantics).
+- [ ] **Step 5: Concurrent-writes-during-snapshot test** (the classic slot-snapshot landmine — advisor-flagged CRITICAL): add a second test that INSERTs rows *while* the snapshot COPY is in flight (spawn the write task right after the replicator starts) and asserts every pk appears **exactly once** across snapshot events + streamed events — never zero times (lost between snapshot and stream start) and never twice (in both). The exported-snapshot + consistent-point design makes this hold structurally; this test is what proves it.
 
-- [ ] **Step 6: Commit** — `git commit -m "feat: initial snapshot via COPY under exported slot snapshot — fresh clients get existing rows"`
+- [ ] **Step 6: Run the tests** — `docker compose -f docker/docker-compose.yml up -d && NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg fresh_slot` → PASS (both). Also re-run the full existing e2e: `cargo test -p nostos-infra --features pg` → all green (no regression in resume/ack semantics).
+
+- [ ] **Step 7: Commit** — `git commit -m "feat: initial snapshot via COPY under exported slot snapshot — fresh clients get existing rows"`
 
 ### Task B3: CI runs the real-Postgres e2e
 
@@ -710,7 +712,8 @@ The known limit: 45,964 ops/sec @ 17.26% drops at 10k clients — per-connection
 - [ ] **Step 1: Baseline** — `make bench` at 1k/5k/10k on an idle machine; record env + 3-run variance into `benches/results/` (bench-runner persona's format).
 - [ ] **Step 2: Batch the write path** — in the per-session sink→socket pump, drain up to N pending frames (start N=64) from the session channel and send as one WS message containing a JSON array of frames; client `decode` already iterates frames? — **check first**: if the client/wire decode expects one frame per message, extend `decode` to accept `[{...},{...}]` arrays (server can then batch without a wire version bump; old single-frame messages remain valid). Keep the flush immediate when the channel is empty (no latency tax at low rates): batching only kicks in under backlog.
 - [ ] **Step 3: Re-measure** — same 3×3 matrix. Accept if: 10k-client drop rate < 1% at ≥ PowerSync-ceiling throughput AND 1k-client headline within noise of baseline. Otherwise revert and record the numbers in `docs/ROADMAP.md` the way Tier 5 did.
-- [ ] **Step 4: Commit (either outcome)** — `git commit -m "feat: batched WS writes — 10k-client drops X% -> Y%"` or `git commit -m "docs: WS batching measured, regressed 1k headline, reverted"`
+- [ ] **Step 4: Reconnect-storm probe (decision point, advisor-flagged)** — batching fixes steady-state throughput; a reconnect storm is a different failure mode. Extend `nostos-bench` (or a one-off harness in `benches/`) to drop and simultaneously reconnect 5k of the 10k clients mid-stream, each re-subscribing with a `resume_lsn`; record peak per-session queue depth, drop rate, and time-to-drain. If the storm exceeds sustainable queue depth (sustained drops after batching), file the finding + numbers as the opening measurement of a follow-up admission-control/token-bucket task **before Phase D lands**; if it drains cleanly, record the numbers and move on — do not build admission control speculatively.
+- [ ] **Step 5: Commit (either outcome)** — `git commit -m "feat: batched WS writes — 10k-client drops X% -> Y%"` or `git commit -m "docs: WS batching measured, regressed 1k headline, reverted"` (+ storm numbers in the message body of the ROADMAP note, commit itself single-line)
 
 ---
 
@@ -837,6 +840,7 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 - Create: `crates/nostos-client/tests/chaos_write_resume.rs`
 - Modify: `crates/nostos-client/examples/reactive_scroll.rs` (add one local write to the demo script)
 
+- [ ] **Step 0: Prove the idempotency premise first** (the whole no-echo-suppression design rests on it — make it a test, not a doc claim): unit test in `crates/nostos-client/tests/` (or extend nostos-core's suite): deliver the SAME `RowOp` (same table+pk+payload, same LSN batch) to `SqliteStorage::apply_batch` twice, and in a second case via two separate batches; assert row count 1 and final payload identical both times. If this fails, STOP — D2/D4's design assumption is broken and echo suppression must be designed before proceeding.
 - [ ] **Step 1: The test that makes "2-way offline" a true sentence** — combining chaos_resume's restart pattern with D3: client online syncing → server killed → client makes 2 offline writes + keeps working → server restarts → client reconnects, resumes from checkpoint (no loss), flushes outbox → both rows visible via replication echo → total row count exact (no duplication from echo or replay). Assert all invariants with counts, not "no crash".
 - [ ] **Step 2: PASS; update `reactive_scroll.rs`** to perform one `client.write(...)` mid-script and print the round-trip, so the demo demonstrates 2-way.
 - [ ] **Step 3: Commit** — `git commit -m "test: chaos write-resume — offline writes + mid-stream restart, zero loss zero duplication"`
@@ -919,7 +923,8 @@ Per the writing-plans scope rule, these are independent subsystems; each gets it
 2. **[HIGH] Competitive window**: PowerSync Sync Streams GA killed the buckets attack line; Supabase/Triplit may ship first-party offline. Mitigation: A6 repositioning now, F2 launch sooner over feature-completeness.
 3. **[MED] Write-back trust boundary**: D2's identifier validation + allowlist + parameterized values is the security-critical surface; domain-guardian + a focused review pass before merge (never ponytail this away).
 4. **[MED] wire compat churn**: C1/C3/D2 all touch the wire. All changes are additive-optional (serde defaults), so old clients keep working; still, land C1 → C3 → D2 in order, never parallel.
-5. **[LOW] OPFS browser variance** — contained by E2 being decision-first.
+5. **[MED] Slot retention growth** if clients disconnect mid-snapshot or a slow client never acks — the WAL-bloat eviction policy (ADR-0016, `EvictionPolicy` + `max_slot_wal_keep_size`) exists but is off by default; B4's dev-stack should enable a sane default and the cloud-beta plan must treat it as required config.
+6. **[LOW] OPFS browser variance** — contained by E2 being decision-first.
 
 ## Execution notes
 
