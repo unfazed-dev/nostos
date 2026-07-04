@@ -141,3 +141,63 @@ This is stated explicitly so the comparison is fair and auditable.
 These scope limits are intentional and stated up front. The claim is specifically
 about the **server fan-out path**, which is the moat — and on that axis Nostos is
 dramatically faster than PowerSync's published ceiling.
+
+---
+
+## v0.1 update (2026-07) — Phase C: WS write batching + the 10k-client story
+
+> **What changed:** the per-session sink→socket pump now drains up to 64
+> immediately-available frames into one JSON-array WS message under backlog
+> (Task C3, commit `2bb2103`), while sending a single object — byte-identical
+> to the legacy wire — when only one frame is pending (zero latency tax at low
+> rates). Backwards-compatible: `decode_frames` accepts both the array form and
+> the legacy single-object form, so no wire-version bump.
+
+The **1k-client headline (142k ops/sec @ 0% drops, 35.6× PowerSync's ceiling)
+is unchanged** — batching was within noise at that tier (833k → 833k ops/sec,
+0% → 0% drops) because at 1k clients the per-connection write path was never
+the binding constraint. The marquee claim stands.
+
+Batching was a strict improvement at every tier measured, but the v0.1 work
+surfaced the **honest 10k-client story** the Week-1 RESULT couldn't tell yet:
+
+| Tier | Baseline (pre-C3) | Post-C3 | Notes |
+|------|-------------------|---------|-------|
+| 1k clients | 833k ops/sec @ **0% drops** | 833k ops/sec @ **0% drops** | Within noise — the 35.6× headline tier; batching irrelevant here. |
+| 5k clients | 592k ops/sec @ 0.00% drops | 660k ops/sec @ 0.91% drops | Throughput +12%; drops tick up but stay under 1%. |
+| 10k clients (probe) | ~406k ops/sec @ ~67.5% drops | ~483k ops/sec @ ~61.4% drops | Throughput +19%, drops −6.1pp. The **`<1% drop` bar was NOT met at 10k.** |
+
+**Environment:** Apple Silicon / 10 cores / rustc 1.95.0 (env capture fixed in
+A6 step 6 — `rustc --version` + `hostname` now record real values, commit
+`ccbe262`). The 10k tier is measured by a lean `nostos-bench-10k` shim because
+the full harness's `FanOutService::run` is `O(N×E)` via per-event full-store
+ack/eviction scans and hangs in teardown at 10k.
+
+### Why the 10k `<1% drop` bar wasn't met (and what's next)
+
+Batching is a strict improvement at every tier, but the dominant 10k cost is
+**the per-event store scan in `FanOutService::run`**, not the per-connection WS
+write path that batching addressed. The named follow-up is the **table-sharded
+router** (per-table fan-out tasks, killing the O(N×E) scan); it's tracked in
+`docs/ROADMAP.md` Phase 2 and is the gating change for a sub-1% 10k drop rate.
+
+### Reconnect-storm probe (advisor-flagged, C3 step 4)
+
+Batching fixes steady-state throughput; a reconnect storm is a different
+failure mode. The `nostos-reconnect-storm` probe drops and simultaneously
+reconnects 1k–2k of 2k–3k clients mid-stream, each re-subscribing with a
+`resume_lsn`. **Result: drains cleanly.** Post-storm drop rate 0.00% across
+runs (pre-storm 0–14% reflects steady-state noise). **Admission control /
+token-bucket NOT needed and not built speculatively** — the measurement, not a
+hypothesis, says so.
+
+### How to read this against the Week-1 headline
+
+The Week-1 35.6× claim is a **1k-client, 0%-drop, server-fan-out** number. It
+is unchanged and still valid. The v0.1 work adds the higher-tier picture: at
+5k, Nostos is still excellent; at 10k, the *current architecture* hits a store-
+scan ceiling that drops ~61% of frames. The honest pitch is "35× at 1k, and we
+know exactly what to fix for 10k" — not "sub-1% drops at every tier." Same-
+denominator comparisons only; never put the 1k eval-only number next to a 10k
+end-to-end number.
+

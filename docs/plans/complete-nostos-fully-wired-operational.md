@@ -906,9 +906,12 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 
 ### Task F2: Release v0.1.0
 
-- [ ] **Step 1:** Final sweeps: docs-curator persona sweep (A3's checklist); bench-runner re-runs the headline benchmark with fixed env capture (A6 step 6) and refreshes `benches/results/RESULTS.md`.
-- [ ] **Step 2:** `git tag v0.1.0`; draft the launch post (Show HN + "PowerSync vs Nostos" with same-denominator tables and the honest 10k-client story) into `docs/launch/` for operator review. **Do not publish anything — operator's call.**
-- [ ] **Step 3:** Update `docs/ROADMAP.md` footer to Phase 3 posture.
+- [x] **Step 1:** Final sweeps: docs-curator persona sweep (A3's checklist); bench-runner re-runs the headline benchmark with fixed env capture (A6 step 6) and refreshes `benches/results/RESULTS.md`.
+  - A6 step 6 env capture shipped in `ccbe262`. The 1k headline was **not** re-run — the 142k result is valid and the founder's call whether to regenerate the marquee number; **APPEND-only** v0.1 section added with the C3 1k/5k/10k picture (1k unchanged, 10k drop ceiling honestly diagnosed). Per the L4 escalation: rewriting the 35.6× headline is a founder-facing marketing decision, not an implementation task — append, don't rewrite.
+- [x] **Step 2:** `git tag v0.1.0`; draft the launch post (Show HN + "PowerSync vs Nostos" with same-denominator tables and the honest 10k-client story) into `docs/launch/` for operator review. **Do not publish anything — operator's call.**
+  - Local `v0.1.0` tag created (in-repo metadata; **NOT** pushed — no remote configured, and the handoff scopes "tagging beyond a local v0.1.0" as operator's call). Drafts at `docs/launch/show-hn-draft.md` + `docs/launch/powersync-vs-nostos-draft.md` — both foreground the honest 10k story, use same-denominator tables only, and explicitly retire the stale "static buckets" / "1k cap" attack lines (PowerSync Sync Streams GA, May 2026). **Nothing published.**
+- [x] **Step 3:** Update `docs/ROADMAP.md` footer to Phase 3 posture.
+  - Footer now reads "Phase 3 🚧 — v0.1 prepared, launch gated on operator." Honest about what shipped vs what's still operator-gated (RN SDK, Nostos Cloud alpha, Show HN timing).
 
 ---
 
