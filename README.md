@@ -1,30 +1,31 @@
 # 🪨 Nostos
 
 > **The open, Rust-fast local-first sync engine.**
-> *Postgres to every device, even offline. No static buckets. No write-back endpoints. Apache-2.0, end to end.*
+> *Postgres to every device, even offline. No write-back endpoints. Rust-fast. Apache-2.0, end to end.*
 
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)]() &nbsp;
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue) &nbsp;
 ![Rust](https://img.shields.io/badge/rust-1.95-orange) &nbsp;
-![Status](https://img.shields.io/badge/status-week--1%20spike-red)
+![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20Phases%200--1%20proven%2C%20v0.1%20in%20progress-orange)
 
 Nostos is a from-scratch, **Rust-native** competitor to [PowerSync](https://powersync.com): a sync engine that keeps an on-device SQLite database in sync with a server-side Postgres, **even when the device is offline.** It targets the empty market cell that no incumbent occupies today — *Apache-2.0 + Postgres-logical-replication + 2-way offline + first-class Flutter/RN/Web SDKs + Rust-fast + free self-host.*
 
-> **Status:** 🚧 Week-1 spike — proving the headline performance moat (≥5× PowerSync's 2–4k ops/sec server ceiling). Not production-ready. See [`docs/WEEK-01-PLAN.md`](docs/WEEK-01-PLAN.md).
+> **Status:** alpha — Phases 0–1 proven, v0.1 in progress. Not production-ready. The server fan-out moat is proven (142k ops/sec @ 1k clients, 0% drops = 35.6× PowerSync's published ceiling — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator and native client are in, and write-back v1 is under way. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
 ## Why Nostos exists
 
-PowerSync works — but it has three self-inflicted wounds Nostos exploits:
+PowerSync is the incumbent — and still carries real, current limits Nostos exploits. The defensible wedges (audited July 2026):
 
-| Wound | PowerSync today | Nostos's answer |
+| Wedge | The incumbent's limit | Nostos's answer |
 |---|---|---|
-| **Server bottleneck** | Server is **TypeScript/Node.js** — capped at ~2–4k ops/sec | **Pure-Rust server** (tokio + axum) — target ≥5–10× |
-| **License** | Server is **FSL** (source-available, no-compete, 2-yr wait) | **Apache-2.0** end to end — clean for enterprise legal |
-| **Buckets** | **1,000 buckets/user hard cap**; static-only sync rules | **Dynamic reactive sync** — live predicates, scroll forever, no ceiling |
+| **Server throughput** | PowerSync's server is **TypeScript/Node.js** — published ceiling ~2–4k ops/sec | **Pure-Rust server** (tokio + axum) — proven 142k ops/sec @ 1k clients, 0% drops (35.6×) |
+| **License** | PowerSync's server is **FSL** (source-available, no-compete, 2-yr wait to Apache) | **Apache-2.0 today** — server, core, and every SDK. Clean for enterprise legal |
+| **Write-back** | You build & host the `uploadData()` endpoint; ElectricSQL is read-only | **Direct write-back** — Nostos writes to your Postgres for you, no customer-built endpoints |
+| **Self-host** | PowerSync Cloud is metered per-op; FSL "Open Edition" carries the license delay | **Free, full-featured, unlimited self-host** — no feature gates |
 
-Meanwhile **ElectricSQL abandoned 2-way offline sync**, **Zero is web-only**, and **Supabase Realtime has no offline layer**. Nostos fills the open cell.
+Meanwhile **ElectricSQL abandoned 2-way offline sync (read-path only)**, **Zero is web-only**, **Zero disabled offline writes**, and **Supabase Realtime has no offline layer**. Nostos fills the open cell. (PowerSync shipped dynamic **Sync Streams** to GA in May 2026, so the old "static buckets only" framing no longer holds — see the honest comparison in [`docs/COMPARISON.md`](docs/COMPARISON.md).)
 
 Full strategic brief: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
@@ -54,11 +55,23 @@ Full strategic brief: [`docs/STRATEGY.md`](docs/STRATEGY.md).
          flutter_libs)      native SQLite)        + OPFS)
 ```
 
-**The repo you're looking at implements the server half + the Week-1 benchmark.** The multi-platform client SDKs (`nostos-core` + FFI bridges) ship in later weeks.
+**The repo you're looking at implements the server, the native client, the WASM bridge, and the benchmark harness.**
 
 ---
 
 ## Repository layout — Ports & Adapters (hexagonal) + DDD
+
+| Crate | Role | Depends on |
+|---|---|---|
+| `nostos-domain` | pure types + invariants (Predicate, Lsn, events). Zero I/O, zero async | — |
+| `nostos-application` | use-cases + port traits (FanOutService, SessionStore, ReplicatorStream, SyncAuth) | domain |
+| `nostos-infra` | adapters: PgReplicator (feature `pg`), FakeReplicator, WS transport, wire codec, auth | application, domain |
+| `nostos-server` | composition root — the axum binary | all above |
+| `nostos-core` | client apply engine + Storage trait. WASM-clean: no tokio, no SQLite | domain |
+| `nostos-client` | native client: SqliteStorage (rusqlite) + tokio SyncClient | core, domain, infra |
+| `nostos-ffi-wasm` | wasm-bindgen bridge over nostos-core | core |
+| `nostos-bench` | throughput harness — honest numbers (drops reported, env recorded) | domain, application, infra |
+| `nostos-cloud` | control plane: auth / Stripe / licensing (separate binary) | domain |
 
 ```
 nostos/
@@ -67,9 +80,13 @@ nostos/
 │   ├── nostos-application/    # Use-cases + PORT TRAITS (interfaces). Depends only on domain.
 │   ├── nostos-infra/          # ADAPTERS: pg logical replication, tokio router, ws transport.
 │   ├── nostos-server/         # Composition root (binary). Wires adapters → ports.
-│   └── nostos-bench/          # Week-1 throughput benchmark harness.
+│   ├── nostos-core/           # Client apply engine + Storage trait (WASM-clean).
+│   ├── nostos-client/         # Native client: rusqlite Storage + tokio SyncClient.
+│   ├── nostos-ffi-wasm/       # wasm-bindgen bridge over nostos-core (web/Worker).
+│   ├── nostos-bench/          # Throughput benchmark harness.
+│   └── nostos-cloud/          # Control plane: auth / Stripe / licensing (separate binary).
 ├── docs/                     # Architecture, ADRs, roadmap, strategy.
-├── docker/                   # Postgres for the real replicator (Week 2+).
+├── docker/                   # Postgres for the real replicator.
 ├── benches/results/          # Benchmark output (RESULTS.md + chart).
 └── Makefile                  # Founder's control panel.
 ```
@@ -133,6 +150,6 @@ Output: `benches/results/RESULTS.md` + a JSON artifact + an SVG chart. See [`doc
 
 ## Contributing
 
-Pre-1.0. The architecture and strategy are pinned; the code is a Week-1 spike. If you want to follow along, watch [`docs/ROADMAP.md`](docs/ROADMAP.md). Once v0.1 ships, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Pre-1.0. The architecture and strategy are pinned; the code is alpha (Phases 0–1 proven, v0.1 in progress). If you want to follow along, watch [`docs/ROADMAP.md`](docs/ROADMAP.md). Once v0.1 ships, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 > *A cairn is a pile of stones that marks a trail. When you're offline and lost, it's how you find your way home. **Sync checkpoints (LSNs) are our cairns** — durable markers that mean your data always finds its way back to the source of truth, across devices, through outages, around the world.*

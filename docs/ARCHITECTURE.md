@@ -2,7 +2,7 @@
 
 > *Ports & Adapters (hexagonal) + DDD. The domain never knows about tokio, postgres, or axum — and that is the whole point.*
 
-This document describes the **as-built** Week-1 architecture of the *server* half of Nostos (replicator → predicate engine → fan-out router → WebSocket transport). The multi-platform *client* SDKs (`nostos-core` + FFI bridges) ship in later weeks and are described in [`docs/decisions/`](decisions/) once built.
+This document describes the **as-built** architecture of Nostos (updated 2026-07) — server, native client, and WASM bridge. The repo currently spans nine crates; the multi-platform *native* SDKs (Flutter via FRB, RN via UniFFI, Node via napi-rs) remain on the roadmap under [ADR-0015](adr/0015-ffi-bridge-strategy.md) and [ADR-0016](adr/0016-client-sdk-and-wal-bloat-protection.md).
 
 ---
 
@@ -31,6 +31,20 @@ This document describes the **as-built** Week-1 architecture of the *server* hal
 
 The arrow of compile-time dependency **always points inward.** Domain has no deps on the upper layers. Application defines *ports* (trait interfaces) that infra implements — *dependency inversion.* This is what lets the benchmark swap a `FakeReplicator` in for the real `PgReplicator` with zero changes to domain or use-case code.
 
+### 1.1 The nine crates (as-built)
+
+| Crate | Role | Depends on |
+|---|---|---|
+| `nostos-domain` | pure types + invariants (Predicate, Lsn, events). Zero I/O, zero async | — |
+| `nostos-application` | use-cases + port traits (FanOutService, SessionStore, ReplicatorStream, SyncAuth) | domain |
+| `nostos-infra` | adapters: PgReplicator (feature `pg`), FakeReplicator, WS transport, wire codec, auth | application, domain |
+| `nostos-server` | composition root — the axum binary | domain, application, infra |
+| `nostos-core` | client apply engine + Storage trait. WASM-clean: no tokio, no SQLite | domain |
+| `nostos-client` | native client: SqliteStorage (rusqlite) + tokio SyncClient | core, domain, infra |
+| `nostos-ffi-wasm` | wasm-bindgen bridge over nostos-core | core |
+| `nostos-bench` | throughput harness — honest numbers (drops reported, env recorded) | domain, application, infra |
+| `nostos-cloud` | control plane: auth / Stripe / licensing (separate binary) | domain |
+
 ---
 
 ## 2. The layers
@@ -43,7 +57,7 @@ The arrow of compile-time dependency **always points inward.** Domain has no dep
 - `Lsn` — a Postgres Log Sequence Number (newtype over `u64`). The fundamental unit of replication progress.
 - `RowOp { Insert, Update, Delete }` — one row change. Payload is `Arc<[u8]>` (cheap to clone across a 1-to-N fan-out).
 - `ReplicationEvent { lsn, op, txn_id? }` — an `RowOp` tagged with its source LSN.
-- `Predicate { table, filter }` — the *dynamic* subscription filter (Week-1: table + simple equality; later: full boolean expressions). **This is the moat — it replaces PowerSync's static buckets.**
+- `Predicate { table, filter }` — the *dynamic* subscription filter. **This is the moat** — a full boolean-tree expression engine (`And|Or|Not` + typed comparison `Lt|Gt|Le|Ge` over `Number/Float/Bool/Text`, proven against real PG rows via the JSON column extractor), shipped and documented in [ADR-0012](adr/0012-dynamic-predicate-expression-engine.md). Baseline: ~150–170 eval-only events/sec through 10k predicates (~1.5M predicate-evals/sec).
 - `SyncSession { id, predicate }` — one connected client's subscription.
 
 **Why pure:** deterministically unit-testable with no runtime; survives any future async-runtime or framework swap.
@@ -83,7 +97,7 @@ Each adapter implements one application port. **All `tokio`/`axum`/`postgres` co
 
 | Adapter | Implements port | Notes |
 |---|---|---|
-| `PgReplicator` | `ReplicatorStream` | Real PG logical replication via `tokio-postgres` + `pgoutput`. **Stubbed in Week 1.** |
+| `PgReplicator` | `ReplicatorStream` | Real PG logical replication: `pgoutput` parsing via `pgwire-replication` + `tokio-postgres`, behind feature `pg`. LSN checkpointing, slot management, reconnect/heartbeat (ADR-0009). `FakeReplicator` is the synthetic no-PG fallback used by the benchmark. |
 | `FakeReplicator` | `ReplicatorStream` | Synthetic WAL generator — drives the benchmark with no PG. Configurable rate & payload size. |
 | `InMemorySessionStore` | `SessionStore` | `DashMap` keyed by `Predicate.table` for O(1) predicate lookup. The index that makes dynamic sync fast. |
 | `TokioEventSink` | `EventSink` | Wraps a per-session bounded `mpsc::Sender`. **Slow clients dropped** at the buffer cap (explicit, observable — never silent OOM). |
@@ -114,7 +128,7 @@ for (id, sink) in matches {
 }
         │
         ▼
-advance watermark LSN                ← durable checkpoint (Week 2)
+advance watermark LSN                ← durable checkpoint (ADR-0009, shipped)
 ```
 
 **Three properties that make this fast:**
@@ -128,10 +142,11 @@ advance watermark LSN                ← durable checkpoint (Week 2)
 
 | Feature | Why deferred | When |
 |---|---|---|
-| Real `PgReplicator` (pgoutput parsing) | The Week-1 chart proves the *fan-out* moat, which is what's novel; pgoutput parsing is well-trodden (`pgwire-replication`) | Week 2 |
-| Dynamic-predicate expression engine (boolean exprs) | Week 1 ships table + equality predicates only — enough to benchmark fan-out | Week 3 |
-| Direct write-back (the DX moat) | Requires Postgres write-path + conflict resolution design | Week 4 |
-| Client SDKs (Flutter/RN/Web) | Server must be right first | Month 2 |
+| ~~Real `PgReplicator` (pgoutput parsing)~~ | ✅ Shipped behind feature `pg` (`pgoutput` via `pgwire-replication`). | — |
+| ~~Dynamic-predicate expression engine (boolean exprs)~~ | ✅ Shipped — boolean tree + typed comparison (ADR-0012). | — |
+| ~~Native client + durable checkpoint~~ | ✅ Shipped — `nostos-client` (rusqlite + tokio SyncClient) + `nostos-ffi-wasm` (ADR-0016). | — |
+| Direct write-back (the DX moat) | Postgres write-path + conflict resolution; design landed (ADR-0013), v1 in progress | Phase 4 (ROADMAP) |
+| Flutter / RN / Node-native FFI bridges | FRB / UniFFI / napi-rs — the hardest threading seams | ADR-0015 |
 
 Each deferral has an ADR in [`docs/adr/`](adr/) explaining the trade-off.
 

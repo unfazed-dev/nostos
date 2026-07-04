@@ -96,4 +96,4 @@
 - 🚀 **GA** — production-ready for the phase's scope.
 - 📈 **Scaling** — optimization & hardening.
 
-Today: **Phase 0 🚧.**
+Today: **Phase 1 🔬 — real-PG default + write-back v1 in progress** (see docs/plans/complete-nostos-fully-wired-operational.md).
