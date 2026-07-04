@@ -44,6 +44,13 @@ pub enum ClientMessage {
         table: String,
         #[serde(default)]
         filters: Vec<FilterClause>,
+        /// Optional safe-SQL-subset expression (ADR-0012 compiler). Compiled
+        /// server-side; ANDed with `filters` and with server-enforced clauses
+        /// (e.g. tenant scoping, ADR-0011) so a client can never widen scope
+        /// past its own tenant. Invalid SQL closes the socket with a reason of
+        /// `"invalid where_sql: <ParseError>"` before any event flows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        where_sql: Option<String>,
         /// Resume from this LSN — the client has already applied through here,
         /// so the server seeds its ack cursor and skips re-delivering ≤ it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +179,7 @@ mod tests {
         let ClientMessage::Subscribe {
             table,
             filters,
+            where_sql,
             resume_lsn,
         } = msg
         else {
@@ -181,6 +189,7 @@ mod tests {
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].column, "org_id");
         assert_eq!(filters[0].value, "acme");
+        assert_eq!(where_sql, None);
         assert_eq!(resume_lsn, Some(12345));
     }
 
@@ -192,6 +201,7 @@ mod tests {
         let ClientMessage::Subscribe {
             table,
             filters,
+            where_sql,
             resume_lsn,
         } = msg
         else {
@@ -199,6 +209,7 @@ mod tests {
         };
         assert_eq!(table, "users");
         assert!(filters.is_empty());
+        assert_eq!(where_sql, None);
         assert_eq!(resume_lsn, None);
     }
 

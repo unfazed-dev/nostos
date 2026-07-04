@@ -146,6 +146,7 @@ impl<S: nostos_core::Storage + Send + 'static> SyncClient<S> {
         let subscribe = ClientMessage::Subscribe {
             table: self.config.table.clone(),
             filters: vec![],
+            where_sql: None,
             resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
         };
         let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");

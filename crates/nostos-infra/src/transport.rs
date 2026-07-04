@@ -141,9 +141,28 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         return; // client disconnected without subscribing
     };
 
-    // 2. Build the predicate: the client's filters, intersected with the
-    //    server-injected tenant filter (never client-attested).
-    let predicate = build_predicate(&subscribe, &principal, state.tenant_column.as_deref());
+    // 2. Build the predicate: the client's filters + optional safe-SQL
+    //    `where_sql` (ADR-0012), intersected with the server-injected tenant
+    //    filter (never client-attested). A where_sql parse failure closes the
+    //    socket with a reason before any event flows (no session is registered,
+    //    so nothing can leak).
+    let predicate = match build_predicate(&subscribe, &principal, state.tenant_column.as_deref()) {
+        Ok(p) => p,
+        Err(reason) => {
+            debug!(%reason, "closing socket: where_sql rejected");
+            // Send an explicit close frame so the client sees the reason
+            // (axum's `WebSocket::close()` would drop it). The reason already
+            // contains the canonical "invalid where_sql: " prefix.
+            let frame = axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::INVALID,
+                reason: reason.into(),
+            };
+            let _ = socket
+                .send(axum::extract::ws::Message::Close(Some(frame)))
+                .await;
+            return;
+        }
+    };
 
     // 3. Allocate the bounded sink. We keep the *concrete* `Arc<TokioEventSink>`
     //    for close()/record_ack(), and a type-erased clone for the store.
@@ -253,11 +272,17 @@ fn handle_client_message(data: &[u8], sink: &TokioEventSink) {
 /// on the tenant column and injects the principal's real tenant value (so the
 /// predicate is never the impossible `org=X AND org=Y`). Anonymous principals
 /// get no injection (single-tenant dev mode).
+///
+/// The optional `where_sql` (ADR-0012 safe-SQL-subset compiler) is compiled and
+/// ANDed in **before** the tenant clause — so the server-injected tenant scoping
+/// wraps the client expression and a `where_sql` can never shed it. A parse
+/// failure is returned as `Err(reason)`; the caller closes the socket with that
+/// reason (prefixed `"invalid where_sql: "`) before any event flows.
 fn build_predicate(
     subscribe: &SubscribeRequest,
     principal: &Principal,
     tenant_column: Option<&str>,
-) -> Predicate {
+) -> Result<Predicate, String> {
     let enforce_tenant = tenant_column.is_some() && !principal.is_anonymous();
     let tenant_col = tenant_column.unwrap_or("");
 
@@ -274,12 +299,31 @@ fn build_predicate(
         p = p.and_eq(&f.column, ColumnValue::text(&f.value));
     }
 
+    // Compile the optional safe-SQL-subset expression (ADR-0012) and AND it in.
+    // Done BEFORE tenant enforcement so the server-injected tenant clause wraps
+    // the client expression — a where_sql can never widen scope past its tenant.
+    if let Some(sql) = &subscribe.where_sql {
+        match nostos_domain::parse_predicate_expr(sql) {
+            // `Predicate` has no `and(PredicateExpr)` method (only `and_eq`),
+            // so fold the parsed expression into the predicate's public `expr`
+            // field via `PredicateExpr::and`. Keeps the table binding intact.
+            Ok(expr) => {
+                p = Predicate {
+                    table: p.table,
+                    expr: p.expr.and(expr),
+                }
+            }
+            Err(e) => return Err(format!("invalid where_sql: {e}")),
+        }
+    }
+
     // Server-enforced tenant scoping (ADR-0011). Always injected for an
-    // authenticated principal when a tenant column is configured.
+    // authenticated principal when a tenant column is configured. This stays
+    // LAST so it wraps everything above (filters + where_sql).
     if enforce_tenant {
         p = p.and_eq(tenant_col, ColumnValue::text(&principal.tenant_id));
     }
-    p
+    Ok(p)
 }
 
 /// The parsed first-frame subscribe request (internal shape; the wire type is
@@ -287,6 +331,9 @@ fn build_predicate(
 struct SubscribeRequest {
     table: String,
     filters: Vec<crate::wire::FilterClause>,
+    /// Optional safe-SQL-subset expression — compiled in `build_predicate` and
+    /// ANDed in BEFORE tenant enforcement (so it can never widen scope).
+    where_sql: Option<String>,
     resume_lsn: Option<u64>,
 }
 
@@ -306,10 +353,12 @@ async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
             ClientMessage::Subscribe {
                 table,
                 filters,
+                where_sql,
                 resume_lsn,
             } => Some(SubscribeRequest {
                 table,
                 filters,
+                where_sql,
                 resume_lsn,
             }),
             ClientMessage::Ack { .. } => {
