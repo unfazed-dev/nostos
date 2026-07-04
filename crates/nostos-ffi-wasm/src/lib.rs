@@ -7,16 +7,20 @@
 //!
 //! ## Scope (ADR-0015)
 //!
-//! This first slice exposes the **in-memory apply path**: build an engine, feed
-//! frames, flush, read the checkpoint + row count. It proves the WASM bundle
-//! stays under budget (ADR-0015's kill criterion) and that the JS↔Rust boundary
-//! works end-to-end.
+//! This slice exposes the **in-memory apply path** AND the **browser WebSocket
+//! transport** (E1): build an engine, connect a `NostosSocket`, and frames flow
+//! in → applied → acked → checkpoint persisted to `localStorage`. It proves the
+//! WASM bundle stays under budget (ADR-0015's kill criterion) and that the
+//! JS↔Rust boundary works end-to-end.
 //!
 //! What's NOT here (ponytail — deferred):
 //! - **OPFS persistence** — the browser-durable backend needs a Web Worker +
-//!   sync-OPFS plumbing (Worker-only by spec); a verified follow-up.
-//! - **The transport** — `SyncClient` (tokio) doesn't run on wasm; a
-//!   `web-sys` WebSocket transport is a separate slice.
+//!   sync-OPFS plumbing (Worker-only by spec); a verified follow-up (E2/ADR-0017).
+//!   The ceiling today is "reload replays from `resume_lsn`" — the
+//!   `localStorage` checkpoint survives, the in-memory rows don't.
+//! - **The browser WS glue's automated test** — `web_sys::WebSocket` can't run
+//!   headless in CI without a flaky browser harness; the pure frame-pump is
+//!   host-tested, the glue is covered by the E3 demo page manual check.
 //! - **Flutter / RN / Node-native bridges** — the other FFI targets.
 //!
 //! ## JS type ergonomics
@@ -219,6 +223,24 @@ impl NostosEngine {
         }
     }
 
+    /// Feed a decoded [`nostos_core::Frame`] directly (no JS `Frame` wrapper).
+    /// This is the seam the WASM transport's frame-pump (`transport::on_message`)
+    /// uses: it hex-decodes the wire payload into bytes once, then feeds the
+    /// pure frame. The public JS `feed` does the same work through the JS `Frame`
+    /// boundary; this variant skips that boundary for the in-Rust pump.
+    ///
+    /// Not exported to JS (no `#[wasm_bindgen]`) — it takes a non-JS type.
+    pub(crate) fn feed_frame(
+        &mut self,
+        frame: nostos_core::Frame,
+    ) -> Result<Option<Outcome>, JsValue> {
+        match self.inner.feed(frame) {
+            Ok(Some(outcome)) => Ok(Some(outcome.into())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(JsValue::from_str(&e.to_string())),
+        }
+    }
+
     /// Flush any buffered frames as one atomic commit. Returns `undefined` if
     /// nothing was pending. Call this when the stream goes idle or the
     /// connection closes to make the last partial batch durable.
@@ -254,6 +276,137 @@ impl Default for NostosEngine {
         Self::new()
     }
 }
+
+// =============================================================================
+// E1: the WASM WebSocket transport.
+// =============================================================================
+//
+// Two layers, deliberately split by testability:
+//
+// 1. **The pure frame-pump** (`transport` module below) — decode a WS message's
+//    bytes → feed frames → flush → tell the caller what to ACK + persist. Host-
+//    unit-tested in `#[cfg(test)]` (runs in `make ci`). This is the real
+//    coverage: every wire shape, every apply/ack/checkpoint transition.
+//
+// 2. **The `web_sys::WebSocket` glue** (`NostosSocket`) — connect, wire the
+//    pump into `onmessage`, send subscribe/ack frames, persist the checkpoint
+//    to `localStorage`. Thin and NOT host-tested: a browser can't be spawned
+//    in CI without a flaky headless harness, and the glue is just plumbing
+//    over the tested pump. Covered by the E3 demo page manual check
+//    (ponytail: WS glue untested in CI).
+//
+// The wire format is MIRRORED from `nostos-infra::wire`, not imported —
+// `nostos-infra` is NOT WASM-clean (tokio, axum, tokio-postgres). The decode
+// surface here is the tiny twin of `decode_frames` + the `WireFrame` struct;
+// the outbound `subscribe`/`ack` shapes are built with serde to match
+// `ClientMessage`'s `#[serde(tag="type", rename_all="lowercase")]` tag exactly.
+
+/// The WASM WebSocket transport: pure frame-pump + thin `web_sys` glue.
+pub mod transport;
+
+/// A live WebSocket sync session in the browser.
+///
+/// Construct with [`NostosSocket::connect`], which returns a `Promise` that
+/// resolves to the socket once the browser has opened it and the subscribe
+/// frame is queued (sent on `open`). The server then streams events; each
+/// inbound message is decoded by the pure frame-pump, applied to the socket's
+/// engine, ACKed per committed batch, and the resulting checkpoint is
+/// persisted to `localStorage` under the `cairn:checkpoint:<table>` key so a
+/// reload can resume.
+///
+/// ## Resume
+///
+/// On `connect`, `resume_lsn` is read from `localStorage` (falling back to 0)
+/// and attached to the subscribe frame. The server skips re-delivering anything
+/// ≤ that LSN.
+///
+/// ## What's NOT durable (ponytail)
+///
+/// Only the checkpoint survives a reload — the applied rows live in the
+/// engine's `InMemoryStorage` and are lost on reload, so a reconnect replays
+/// from `resume_lsn`. Durable rows arrive with OPFS in E2 (ADR-0017).
+///
+/// ## JS
+///
+/// ```js
+/// const sock = await NostosSocket.connect(
+///   "ws://localhost:8080/sync", "tok", "tasks", "priority > 5"
+/// );
+/// // rows flow in; checkpoint persists to localStorage["cairn:checkpoint:tasks"]
+/// console.log(sock.checkpoint, sock.rowCount);
+/// sock.close();
+/// ```
+#[wasm_bindgen]
+pub struct NostosSocket {
+    inner: Rc<transport::SocketInner>,
+    // The closures are kept alive on the socket so they outlive `connect`'s
+    // stack frame — without this ownership, wasm-bindgen drops each Closure
+    // (and detaches its JS callback) the moment `connect` returns, so the
+    // socket stops firing. They're never *read* after construction; their
+    // mere presence on the struct is what keeps the WS callbacks live. Each
+    // captures a clone of `inner`; the socket owns `inner` too, so dropping
+    // the socket drops every clone → the `Rc` cycle-free.
+    #[allow(dead_code)]
+    on_open: Option<Closure<dyn FnMut(JsValue)>>,
+    #[allow(dead_code)]
+    on_message: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
+    #[allow(dead_code)]
+    on_error: Option<Closure<dyn FnMut(web_sys::ErrorEvent)>>,
+    #[allow(dead_code)]
+    on_close: Option<Closure<dyn FnMut(web_sys::CloseEvent)>>,
+}
+
+#[wasm_bindgen]
+impl NostosSocket {
+    /// Connect to `url`, await the browser's `open`, then resolve. JS sees an
+    /// `async` fn, so `await NostosSocket.connect(...)` returns the ready socket.
+    /// The subscribe frame is sent in the `onopen` handler; inbound frames flow
+    /// into the socket's engine, are acked per committed batch, and the
+    /// checkpoint is persisted to `localStorage[cairn:checkpoint:<table>]`.
+    ///
+    /// `token` is appended as `?token=` on the URL (browsers can't set headers
+    /// on a WS handshake — same convention as the native `SyncClient`).
+    /// `table` is the table to subscribe; `where_sql` is the optional safe-SQL
+    /// predicate (cleared if empty/`null`). `resume_lsn` is read from
+    /// `localStorage[cairn:checkpoint:<table>]`, falling back to 0.
+    ///
+    /// # Errors
+    /// The `Promise` rejects if the browser can't open the socket (e.g. mixed
+    /// content) or the handshake fails before OPEN.
+    #[wasm_bindgen]
+    pub async fn connect(
+        url: String,
+        token: Option<String>,
+        table: String,
+        where_sql: Option<String>,
+    ) -> Result<NostosSocket, JsValue> {
+        transport::connect(url, token, table, where_sql).await
+    }
+
+    /// The current durable checkpoint (the LSN persisted to `localStorage`).
+    /// Mirrors `NostosEngine::checkpoint`.
+    #[wasm_bindgen(getter)]
+    pub fn checkpoint(&self) -> f64 {
+        self.inner.engine.borrow().checkpoint()
+    }
+
+    /// Rows the in-memory store currently holds. Mirrors `NostosEngine::row_count`.
+    #[wasm_bindgen(getter, js_name = rowCount)]
+    pub fn row_count(&self) -> usize {
+        self.inner.engine.borrow().row_count()
+    }
+
+    /// Close the socket. The server treats this as a session end; the client
+    /// keeps its checkpoint so the next `connect` resumes.
+    pub fn close(&self) {
+        // Code 1000 = "normal closure". Errors here (e.g. already closed) are
+        // ignorable — the socket is going away regardless.
+        let _ = self.inner.ws.close_with_code(1000);
+    }
+}
+
+use std::rc::Rc;
+use wasm_bindgen::closure::Closure;
 
 #[cfg(test)]
 mod tests {
@@ -291,5 +444,375 @@ mod tests {
         let mut eng = NostosEngine::new();
         eng.set_where_sql(Some(String::new()));
         assert!(eng.where_sql.is_none());
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    //! Host unit tests for the E1 transport's PURE layer. These run in `make ci`
+    //! and are the real coverage (the browser WS glue is covered by the E3 demo
+    //! page manual check — ponytail: browser wasm-bindgen-test setup is
+    //! env-flaky; pure fns covered by host cargo tests; WS glue covered by E3).
+    //!
+    //! Tested here:
+    //! - `decode_frames` (array + single-object + malformed + whitespace)
+    //! - `decode_hex` (roundtrip, odd-length, non-hex)
+    //! - `build_subscribe_frame` (with/without where_sql, with/without resume_lsn)
+    //! - `build_ack_frame`
+    //! - `on_message` pump (apply outcomes, ack LSN, batched arrays, deletes)
+    //! - `checkpoint_key` + `parse_checkpoint`
+    use super::*;
+    use nostos_core::Operation;
+    use transport::{
+        build_ack_frame, build_subscribe_frame, checkpoint_from, checkpoint_key, decode_frames,
+        decode_hex, on_message, parse_checkpoint, PumpResult,
+    };
+
+    // ---- wire decode (mirror of nostos_infra::wire::decode_frames) ----
+
+    fn frame_json(lsn: u64, op: &str, table: &str, pk: &str, payload_hex: Option<&str>) -> String {
+        let payload = match payload_hex {
+            Some(h) => format!(",\"payload\":\"{h}\""),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"type":"event","lsn":{lsn},"op":"{op}","table":"{table}","pk":"{pk}"{payload}}}"#
+        )
+    }
+
+    #[test]
+    fn decode_single_object_frame() {
+        let bytes = frame_json(10, "insert", "tasks", "1", Some("6869")); // "hi"
+        let frames = decode_frames(bytes.as_bytes());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].lsn, 10);
+        assert_eq!(frames[0].op, Operation::Insert);
+        assert_eq!(frames[0].table, "tasks");
+        assert_eq!(frames[0].pk, "1");
+        assert_eq!(frames[0].payload.as_deref(), Some("6869"));
+    }
+
+    #[test]
+    fn decode_array_of_frames_batched() {
+        // C3 batched form: a JSON array of frames in one WS message.
+        let arr = format!(
+            "[{},{}]",
+            frame_json(10, "insert", "tasks", "1", Some("6869")),
+            frame_json(11, "update", "tasks", "2", Some("6f6b"))
+        );
+        let frames = decode_frames(arr.as_bytes());
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].lsn, 10);
+        assert_eq!(frames[1].lsn, 11);
+        assert_eq!(frames[0].op, Operation::Insert);
+        assert_eq!(frames[1].op, Operation::Update);
+    }
+
+    #[test]
+    fn decode_delete_has_no_payload() {
+        let bytes = frame_json(5, "delete", "tasks", "9", None);
+        let frames = decode_frames(bytes.as_bytes());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].op, Operation::Delete);
+        // payload absent on the wire → None.
+        assert!(frames[0].payload.is_none());
+    }
+
+    #[test]
+    fn decode_malformed_is_empty() {
+        // Mirrors decode_frames' "drop malformed" contract.
+        assert!(decode_frames(b"not json").is_empty());
+        assert!(decode_frames(b"").is_empty());
+        assert!(decode_frames(b"   ").is_empty());
+        assert!(decode_frames(b"[\"not a frame\"]").is_empty());
+    }
+
+    #[test]
+    fn decode_handles_leading_whitespace() {
+        // The dispatch peeks the first NON-whitespace byte, so leading spaces
+        // must not misroute an object into the array branch.
+        let bytes = frame_json(7, "insert", "tasks", "1", Some("00"));
+        let padded = format!("   {bytes}");
+        let frames = decode_frames(padded.as_bytes());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].lsn, 7);
+    }
+
+    #[test]
+    fn decode_empty_array_is_empty() {
+        assert!(decode_frames(b"[]").is_empty());
+    }
+
+    #[test]
+    fn wire_frame_op_lowercase_round_trips() {
+        // The server emits lowercase op (Operation's serde rename_all); the
+        // decode must accept exactly insert/update/delete.
+        for op in ["insert", "update", "delete"] {
+            let bytes = frame_json(1, op, "t", "1", None);
+            let frames = decode_frames(bytes.as_bytes());
+            assert_eq!(frames.len(), 1, "op={op} decoded");
+        }
+    }
+
+    // ---- hex decode (mirror of nostos_client::decode_hex) ----
+
+    #[test]
+    fn decode_hex_round_trips() {
+        assert_eq!(decode_hex("6869").as_deref(), Some(b"hi".as_slice()));
+        assert_eq!(
+            decode_hex("00ff10").as_deref(),
+            Some(&[0x00, 0xff, 0x10][..])
+        );
+        assert_eq!(decode_hex("").as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn decode_hex_odd_length_is_none() {
+        assert_eq!(decode_hex("6"), None);
+        assert_eq!(decode_hex("686"), None);
+    }
+
+    #[test]
+    fn decode_hex_non_hex_is_none() {
+        assert_eq!(decode_hex("6zzz"), None); // even length, bad chars
+        assert_eq!(decode_hex("gg"), None);
+    }
+
+    // ---- subscribe frame builder (mirrors ClientMessage::Subscribe) ----
+
+    #[test]
+    fn subscribe_minimal_no_where_no_resume() {
+        let json = build_subscribe_frame("tasks", None, None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "subscribe");
+        assert_eq!(v["table"], "tasks");
+        assert_eq!(v["filters"], serde_json::json!([]));
+        // resume_lsn + where_sql must be ABSENT (skip_serializing_if = None).
+        assert!(v.get("resume_lsn").is_none());
+        assert!(v.get("where_sql").is_none());
+    }
+
+    #[test]
+    fn subscribe_with_where_sql_and_resume() {
+        let json = build_subscribe_frame(
+            "tasks",
+            Some("status = 'open' AND priority >= 3"),
+            Some(12_345),
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "subscribe");
+        assert_eq!(v["table"], "tasks");
+        assert_eq!(v["filters"], serde_json::json!([]));
+        assert_eq!(v["resume_lsn"], 12_345);
+        assert_eq!(v["where_sql"], "status = 'open' AND priority >= 3");
+    }
+
+    #[test]
+    fn subscribe_resume_only_no_where() {
+        let json = build_subscribe_frame("users", None, Some(99));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["resume_lsn"], 99);
+        assert!(v.get("where_sql").is_none(), "where_sql omitted when None");
+    }
+
+    #[test]
+    fn subscribe_empty_where_sql_is_dropped() {
+        // An empty predicate must NOT be sent (the server would reject "").
+        let json = build_subscribe_frame("tasks", Some(""), Some(1));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("where_sql").is_none(), "empty where_sql dropped");
+    }
+
+    #[test]
+    fn subscribe_decodes_back_as_clientmessage_shape() {
+        // Round-trip: the JSON we build must be shape-compatible with the
+        // server's decode_client_message. We mirror the field set here by
+        // re-parsing into a Value and checking the tag.
+        let json = build_subscribe_frame("tasks", Some("x > 1"), Some(5));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"].as_str(), Some("subscribe"));
+        assert!(v["filters"].is_array());
+    }
+
+    // ---- ack frame builder ----
+
+    #[test]
+    fn ack_frame_shape() {
+        let json = build_ack_frame(42);
+        assert_eq!(json, r#"{"type":"ack","lsn":42}"#);
+    }
+
+    #[test]
+    fn ack_frame_zero() {
+        let json = build_ack_frame(0);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "ack");
+        assert_eq!(v["lsn"], 0);
+    }
+
+    // ---- checkpoint key + parse ----
+
+    #[test]
+    fn checkpoint_key_format() {
+        assert_eq!(checkpoint_key("tasks"), "cairn:checkpoint:tasks");
+        assert_eq!(
+            checkpoint_key("org_members"),
+            "cairn:checkpoint:org_members"
+        );
+    }
+
+    #[test]
+    fn parse_checkpoint_valid() {
+        assert_eq!(parse_checkpoint(Some("42")), Some(42));
+        assert_eq!(parse_checkpoint(Some("  100  ")), Some(100)); // trimmed
+        assert_eq!(parse_checkpoint(Some("0")), Some(0));
+    }
+
+    #[test]
+    fn parse_checkpoint_missing_or_malformed() {
+        assert_eq!(parse_checkpoint(None), None);
+        assert_eq!(parse_checkpoint(Some("not a number")), None);
+        assert_eq!(parse_checkpoint(Some("")), None);
+        assert_eq!(parse_checkpoint(Some("12.5")), None); // not an integer
+    }
+
+    // ---- the pure frame-pump (on_message) ----
+
+    #[test]
+    fn pump_single_frame_buffers_until_flush_no_ack() {
+        // A single standalone frame is buffered (no commit boundary) → no ack.
+        let mut eng = NostosEngine::new();
+        let bytes = frame_json(10, "insert", "tasks", "1", Some("6869"));
+        let result = on_message(&mut eng, bytes.as_bytes()).unwrap();
+        assert_eq!(result.applied, 1);
+        assert_eq!(result.ack, None, "buffered frame → no commit → no ack");
+        assert_eq!(eng.row_count(), 0, "not yet flushed");
+    }
+
+    #[test]
+    fn pump_batched_frames_buffer_then_commit_on_flush() {
+        // Two non-boundary frames in one message: the pump feeds both, but
+        // neither triggers an in-message commit (no txn boundary, no soft
+        // cap hit). They stay buffered; checkpoint is unchanged.
+        let mut eng = NostosEngine::new();
+        let batch = format!(
+            "[{},{}]",
+            frame_json(10, "insert", "tasks", "a", Some("00")),
+            frame_json(11, "insert", "tasks", "b", Some("00"))
+        );
+        let _ = on_message(&mut eng, batch.as_bytes()).unwrap();
+        // Nothing committed yet (both buffered, no boundary in this message).
+        assert_eq!(eng.checkpoint() as u64, 0);
+
+        // Flush via the engine directly (the WS glue does this on close/idle).
+        let outcome = eng.flush().unwrap().expect("had pending");
+        assert_eq!(outcome.checkpoint() as u64, 11);
+        assert_eq!(eng.row_count(), 2);
+    }
+
+    #[test]
+    fn pump_batched_array_applies_all_frames() {
+        // A C3 batched array: 3 frames in one message. With the default soft
+        // cap (256), none commit in-message; we flush + assert all applied.
+        let mut eng = NostosEngine::new();
+        let batch = format!(
+            "[{},{},{}]",
+            frame_json(10, "insert", "tasks", "1", Some("6869")),
+            frame_json(20, "insert", "tasks", "2", Some("6f6b")),
+            frame_json(30, "insert", "tasks", "3", Some("00")),
+        );
+        let result = on_message(&mut eng, batch.as_bytes()).unwrap();
+        assert_eq!(result.applied, 3);
+        let outcome = eng.flush().unwrap().expect("had pending");
+        assert_eq!(outcome.checkpoint() as u64, 30);
+        assert_eq!(eng.row_count(), 3);
+    }
+
+    #[test]
+    fn pump_delete_payload_decodes_to_none() {
+        // A delete carries no payload; the pump must hex-decode None → None and
+        // the engine removes the row (idempotent on absent row).
+        let mut eng = NostosEngine::new();
+        // Seed a row first.
+        let seed = frame_json(10, "insert", "tasks", "1", Some("6869"));
+        let _ = on_message(&mut eng, seed.as_bytes()).unwrap();
+        eng.flush().unwrap();
+        assert_eq!(eng.row_count(), 1);
+
+        // Delete it.
+        let del = frame_json(20, "delete", "tasks", "1", None);
+        let _ = on_message(&mut eng, del.as_bytes()).unwrap();
+        eng.flush().unwrap();
+        assert_eq!(eng.row_count(), 0, "delete removed the row");
+        assert_eq!(eng.checkpoint() as u64, 20);
+    }
+
+    #[test]
+    fn pump_malformed_message_is_no_op() {
+        // Garbage bytes → decode_frames returns [] → applied=0, no ack, no panic.
+        let mut eng = NostosEngine::new();
+        let result = on_message(&mut eng, b"totally not json").unwrap();
+        assert_eq!(
+            result,
+            PumpResult {
+                applied: 0,
+                ack: None
+            }
+        );
+    }
+
+    #[test]
+    fn pump_checkpoint_from_helper() {
+        // checkpoint_from(result) == result.ack — the named accessor for the
+        // localStorage-write value.
+        let result = PumpResult {
+            applied: 2,
+            ack: Some(50),
+        };
+        assert_eq!(checkpoint_from(result), Some(50));
+        let result = PumpResult {
+            applied: 2,
+            ack: None,
+        };
+        assert_eq!(checkpoint_from(result), None);
+    }
+
+    #[test]
+    fn pump_hex_payload_decodes_before_apply() {
+        // The wire payload is hex; the pump hex-decodes it once. b"hi" == "6869".
+        // We can't read the decoded bytes back through the engine (opaque), but
+        // we assert the apply succeeded with the right row count — a decode
+        // failure (None payload on an insert) would still apply (empty payload),
+        // so this is a smoke that the path doesn't panic on valid hex.
+        let mut eng = NostosEngine::new();
+        let bytes = frame_json(10, "insert", "tasks", "1", Some("6869"));
+        let result = on_message(&mut eng, bytes.as_bytes()).unwrap();
+        assert_eq!(result.applied, 1);
+        eng.flush().unwrap();
+        assert_eq!(eng.row_count(), 1);
+    }
+
+    #[test]
+    fn pump_replay_is_idempotent_through_resume() {
+        // The resume contract: after a flush at LSN 20, re-feeding frames ≤ 20
+        // must not duplicate rows (idempotent upsert-by-pk). This is the
+        // localStorage-checkpoint + replay ceiling.
+        let mut eng = NostosEngine::new();
+
+        // Apply frames 10 + 20.
+        let batch = format!(
+            "[{},{}]",
+            frame_json(10, "insert", "tasks", "1", Some("6869")),
+            frame_json(20, "insert", "tasks", "2", Some("6f6b")),
+        );
+        let _ = on_message(&mut eng, batch.as_bytes()).unwrap();
+        eng.flush().unwrap();
+        assert_eq!(eng.checkpoint() as u64, 20);
+        assert_eq!(eng.row_count(), 2);
+
+        // "Replay" the same frames (idempotent).
+        let _ = on_message(&mut eng, batch.as_bytes()).unwrap();
+        eng.flush().unwrap();
+        assert_eq!(eng.row_count(), 2, "replay did not duplicate");
     }
 }

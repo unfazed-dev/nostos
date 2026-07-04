@@ -860,10 +860,10 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 - Consumes: existing `NostosEngine` apply API and the wire JSON (`ClientMessage::Subscribe`/`Ack`, event frames, `where_sql` from C2).
 - Produces: `NostosSocket::connect(url, token, table, where_sql: Option<String>) -> Promise`; incoming frames applied to the engine; checkpoint persisted to `localStorage` key `cairn:checkpoint:<table>`; ACKs sent per applied batch; `resume_lsn` read from localStorage on connect. (`ponytail: localStorage checkpoint + in-memory rows; durable rows arrive with OPFS in E2 — the ceiling is "reload replays from resume_lsn".`)
 
-- [ ] **Step 1: Read the docs first** — wasm-bindgen web-sys WebSocket example (rustwasm book), `wasm-bindgen-futures` for the async bridge; verify against the pinned wasm-bindgen version in Cargo.toml.
-- [ ] **Step 2: Failing wasm test** — `wasm_bindgen_test` against an in-process… no: browser tests can't spawn the Rust server. Test seam instead: factor frame-pump logic (`on_message(bytes) -> {apply, maybe_ack, checkpoint}`) as a pure function over `NostosEngine` + a `Sender` closure; unit-test THAT in wasm (feed encoded frames, assert apply outcomes + ack bytes + stored checkpoint), leaving only the thin `web_sys::WebSocket` glue untested (`ponytail: WS glue untested in CI; covered by the E3 demo page manual check`).
-- [ ] **Step 3: Implement; `wasm-pack build --target web` stays under the 500 KB budget** (currently 17 KB; web-sys adds little).
-- [ ] **Step 4: Commit** — `git commit -m "feat: wasm websocket transport — browser subscribes, applies, acks, resumes from localStorage checkpoint"`
+- [x] **Step 1: Read the docs first** — wasm-bindgen web-sys WebSocket example (rustwasm book), `wasm-bindgen-futures` for the async bridge; verify against the pinned wasm-bindgen version in Cargo.toml.
+- [x] **Step 2: Failing wasm test** — `wasm_bindgen_test` against an in-process… no: browser tests can't spawn the Rust server. Test seam instead: factor frame-pump logic (`on_message(bytes) -> {apply, maybe_ack, checkpoint}`) as a pure function over `NostosEngine` + a `Sender` closure; unit-test THAT in wasm (feed encoded frames, assert apply outcomes + ack bytes + stored checkpoint), leaving only the thin `web_sys::WebSocket` glue untested (`ponytail: WS glue untested in CI; covered by the E3 demo page manual check`).
+- [x] **Step 3: Implement; `wasm-pack build --target web` stays under the 500 KB budget** (currently 17 KB; web-sys adds little).
+- [x] **Step 4: Commit** — `git commit -m "feat: wasm websocket transport — browser subscribes, applies, acks, resumes from localStorage checkpoint"`
 
 ### Task E2: OPFS durability decision (docs-gated spike, may conclude "defer")
 
