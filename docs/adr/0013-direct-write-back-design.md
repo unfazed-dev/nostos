@@ -59,3 +59,16 @@ strategy doc must not market write-back as shipped until this ADR is implemented
 
 - STRATEGY §6.2 (the write-back moat in depth).
 - Depends on: ADR-0009 (resume), ADR-0010 (auth), ADR-0014 (conflict).
+
+## Addendum (2026-07): v1 ships over the sync WebSocket
+
+v1 scope shipped ahead of Phase 4 (plan: docs/plans/complete-nostos-fully-wired-operational.md):
+- Transport: `ClientMessage::Write` on the existing authenticated /sync socket —
+  zero new deps, one auth path, ordered with ACKs. The HTTP POST path described
+  above remains the Phase-4 design for gateway/enterprise deployments.
+- Rules: per-table allowlist (`NOSTOS_WRITE_TABLES`), pk upsert/delete only,
+  server-authoritative LWW by WAL order (ADR-0004/0014 tier (a)).
+- Conflict checks (version/etag), declarative write rules, and function mode
+  remain Phase 4. Echo suppression is unnecessary: client apply is an
+  idempotent upsert (nostos-core Storage contract), so the write's replication
+  echo is a no-op.
