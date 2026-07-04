@@ -43,7 +43,7 @@ Verified toolchain facts (2026-07-04): Flutter 3.44.0 stable via fvm; `patrol_cl
 **Interfaces:**
 - Produces: `TimerConfig` (`work`, `shortBreak`, `longBreak`, `cyclesPerLongBreak`, `autoAdvance`, plus `const TimerConfig.demo()`) and `Ticker`/`SystemTicker` — every later task consumes these exact names.
 
-- [ ] **Step 1: Scaffold** (from the nostos repo root; `--empty` keeps main.dart minimal):
+- [x] **Step 1: Scaffold** (from the nostos repo root; `--empty` keeps main.dart minimal):
 
 ```bash
 cd /Volumes/developer_ssd/Developer/nostos
@@ -51,7 +51,7 @@ mkdir -p fixtures/flutter
 flutter create --project-name pomodoro --org run.nostos --platforms macos,ios,android --empty fixtures/flutter/pomodoro
 ```
 
-- [ ] **Step 2: pubspec** — replace the generated `dev_dependencies`/description so the full file reads:
+- [x] **Step 2: pubspec** — replace the generated `dev_dependencies`/description so the full file reads:
 
 ```yaml
 name: pomodoro
@@ -78,7 +78,7 @@ flutter:
   uses-material-design: true
 ```
 
-- [ ] **Step 3: `lib/domain/timer_config.dart`:**
+- [x] **Step 3: `lib/domain/timer_config.dart`:**
 
 ```dart
 /// Phase durations and cycle policy for the pomodoro machine.
@@ -120,7 +120,7 @@ class TimerConfig {
 }
 ```
 
-- [ ] **Step 4: `lib/domain/ticker.dart`:**
+- [x] **Step 4: `lib/domain/ticker.dart`:**
 
 ```dart
 /// The clock port. The ViewModel consumes ticks through this seam so unit
@@ -138,8 +138,8 @@ class SystemTicker implements Ticker {
 }
 ```
 
-- [ ] **Step 5: Verify** — `cd fixtures/flutter/pomodoro && flutter pub get && flutter analyze` → no issues.
-- [ ] **Step 6: Commit** — `git add fixtures/flutter/pomodoro && git commit -m "feat: scaffold flutter pomodoro fixture with TimerConfig and Ticker port"`
+- [x] **Step 5: Verify** — `cd fixtures/flutter/pomodoro && flutter pub get && flutter analyze` → no issues.
+- [x] **Step 6: Commit** — `git add fixtures/flutter/pomodoro && git commit -m "feat: scaffold flutter pomodoro fixture with TimerConfig and Ticker port"`
 
 ### Task 2: ViewModel — TDD with the advisor's regression guards
 
@@ -151,7 +151,7 @@ class SystemTicker implements Ticker {
 - Consumes: `Ticker`, `TimerConfig` (Task 1).
 - Produces: `Phase { work, shortBreak, longBreak }` and `PomodoroViewModel` with `phase`, `remaining` (Duration), `running` (bool), `completedWork` (int), `start()`, `pause()`, `reset()`, `skip()`, `onLifecycle(AppLifecycleState)` — Tasks 3, 5, 6 rely on these exact names.
 
-- [ ] **Step 1: Write the failing tests** (`test/viewmodels/pomodoro_viewmodel_test.dart`):
+- [x] **Step 1: Write the failing tests** (`test/viewmodels/pomodoro_viewmodel_test.dart`):
 
 ```dart
 import 'dart:async';
@@ -314,8 +314,8 @@ void main() {
 }
 ```
 
-- [ ] **Step 2: Run — expect FAIL** (`PomodoroViewModel` undefined): `flutter test test/viewmodels/`
-- [ ] **Step 3: Implement `lib/viewmodels/pomodoro_viewmodel.dart`:**
+- [x] **Step 2: Run — expect FAIL** (`PomodoroViewModel` undefined): `flutter test test/viewmodels/`
+- [x] **Step 3: Implement `lib/viewmodels/pomodoro_viewmodel.dart`:**
 
 ```dart
 import 'dart:async';
@@ -421,8 +421,8 @@ class PomodoroViewModel extends ChangeNotifier {
 
 Note one subtlety the tests pin down: `skip()` from a work phase with zero completed sessions must go to `shortBreak`, not `longBreak` — hence the `_completedWork > 0` guard.
 
-- [ ] **Step 4: Run — expect PASS**: `flutter test test/viewmodels/` (11 tests green).
-- [ ] **Step 5: Commit** — `git commit -m "feat: pomodoro viewmodel with ticker port, lifecycle auto-pause, and equivalence-proven transitions"`
+- [x] **Step 4: Run — expect PASS**: `flutter test test/viewmodels/` (11 tests green).
+- [x] **Step 5: Commit** — `git commit -m "feat: pomodoro viewmodel with ticker port, lifecycle auto-pause, and equivalence-proven transitions"`
 
 ### Task 3: View + widget tests
 
@@ -435,7 +435,7 @@ Note one subtlety the tests pin down: `skip()` from a work phase with zero compl
 - Consumes: `PomodoroViewModel` (Task 2).
 - Produces: `PomodoroApp({TimerConfig config, Ticker? ticker})` — the injectable root Tasks 5–6 pump; keys `timer.display|phase|sessions|start|reset|skip`.
 
-- [ ] **Step 1: Failing widget tests** (`test/views/pomodoro_view_test.dart`) — same mocktail ticker harness as Task 2:
+- [x] **Step 1: Failing widget tests** (`test/views/pomodoro_view_test.dart`) — same mocktail ticker harness as Task 2:
 
 ```dart
 // Pump PomodoroApp(config: TimerConfig.demo(), ticker: mockTicker); then:
@@ -457,7 +457,7 @@ testWidgets('reset returns the UI to the initial state', (t) async { /* tap rese
 
 Write these as real assertions (the comments above give the exact expectations); run → FAIL.
 
-- [ ] **Step 2: Implement the view** — single screen, Material 3, no packages:
+- [x] **Step 2: Implement the view** — single screen, Material 3, no packages:
 
 ```dart
 import 'package:flutter/material.dart';
@@ -565,7 +565,7 @@ class _PomodoroViewState extends State<PomodoroView> with WidgetsBindingObserver
 }
 ```
 
-- [ ] **Step 3: `lib/main.dart`** — demo mode is a real run mode:
+- [x] **Step 3: `lib/main.dart`** — demo mode is a real run mode:
 
 ```dart
 import 'package:flutter/material.dart';
@@ -579,8 +579,8 @@ void main() {
 }
 ```
 
-- [ ] **Step 4: Run — PASS**: `flutter test test/` and `flutter analyze` clean.
-- [ ] **Step 5: Commit** — `git commit -m "feat: pomodoro view with keyed controls and demo-mode entrypoint"`
+- [x] **Step 4: Run — PASS**: `flutter test test/` and `flutter analyze` clean.
+- [x] **Step 5: Commit** — `git commit -m "feat: pomodoro view with keyed controls and demo-mode entrypoint"`
 
 ### Task 4: Persona documentation + the persona↔journey guard
 
@@ -594,7 +594,7 @@ void main() {
 **Interfaces:**
 - Produces: the naming contract — persona file `<slug>.md` ⇄ journey file `integration_test/journeys/<slug_with_underscores>_journey_test.dart` — enforced mechanically by the guard test.
 
-- [ ] **Step 1: `docs/personas/README.md`** — the local convention:
+- [x] **Step 1: `docs/personas/README.md`** — the local convention:
 
 ```markdown
 # User Personas — testable specs
@@ -618,7 +618,7 @@ Journeys assert phase/sessions transitions, never wall-clock elapsed time.
 The repo-wide convention this instantiates: `docs/testing/persona-e2e-baseline.md`.
 ```
 
-- [ ] **Step 2: `docs/personas/maya-strict-cycles.md`:**
+- [x] **Step 2: `docs/personas/maya-strict-cycles.md`:**
 
 ```markdown
 # Maya — the strict-cycle deep worker
@@ -647,7 +647,7 @@ break type is decided by `completedWork % cyclesPerLongBreak`; timer never
 runs without Maya pressing start.
 ```
 
-- [ ] **Step 3: `docs/personas/sam-interruptions.md`:**
+- [x] **Step 3: `docs/personas/sam-interruptions.md`:**
 
 ```markdown
 # Sam — the interrupt-driven starter
@@ -675,7 +675,7 @@ phases that steal or grant session credit.
 skip never credits a session; backgrounding never lets time leak.
 ```
 
-- [ ] **Step 4: `docs/personas/rio-long-haul.md`:**
+- [x] **Step 4: `docs/personas/rio-long-haul.md`:**
 
 ```markdown
 # Rio — the custom-duration long-hauler
@@ -704,7 +704,7 @@ non-default policies.
 long-break placement follows `cyclesPerLongBreak`, not a hard-coded 4.
 ```
 
-- [ ] **Step 5: The guard test** (`test/persona_mapping_test.dart`) — pure Dart IO, runs with the unit suite:
+- [x] **Step 5: The guard test** (`test/persona_mapping_test.dart`) — pure Dart IO, runs with the unit suite:
 
 ```dart
 import 'dart:io';
@@ -737,14 +737,14 @@ void main() {
 }
 ```
 
-- [ ] **Step 6: Run** — guard FAILS (journeys don't exist yet — correct: it's the red state Task 6 turns green). Commit docs + guard together: `git commit -m "docs: pomodoro personas as testable specs with persona-journey mapping guard"` (committing a red guard is acceptable only because Task 6 follows immediately in the same execution run; if execution pauses here, mark the test `skip:` with a TODO-Task-6 note instead).
+- [x] **Step 6: Run** — guard FAILS (journeys don't exist yet — correct: it's the red state Task 6 turns green). Commit docs + guard together: `git commit -m "docs: pomodoro personas as testable specs with persona-journey mapping guard"` (committing a red guard is acceptable only because Task 6 follows immediately in the same execution run; if execution pauses here, mark the test `skip:` with a TODO-Task-6 note instead).
 
 ### Task 5: Smoke test — the app boots
 
 **Files:**
 - Create: `fixtures/flutter/pomodoro/integration_test/smoke_test.dart`
 
-- [ ] **Step 1: Write it:**
+- [x] **Step 1: Write it:**
 
 ```dart
 import 'package:flutter_test/flutter_test.dart';
@@ -766,8 +766,8 @@ void main() {
 }
 ```
 
-- [ ] **Step 2: Run on the macOS desktop target** — `flutter test integration_test/smoke_test.dart -d macos` → PASS (first run compiles the macOS runner; allow several minutes). Optional richer smoke: drive the built app with probe-runner (`~/.agents/skills/probe-runner`) for a boot screenshot — worthwhile once, not per-run.
-- [ ] **Step 3: Commit** — `git commit -m "test: pomodoro boot smoke test on macos target"`
+- [x] **Step 2: Run on the macOS desktop target** — `flutter test integration_test/smoke_test.dart -d macos` → PASS (first run compiles the macOS runner; allow several minutes). Optional richer smoke: drive the built app with probe-runner (`~/.agents/skills/probe-runner`) for a boot screenshot — worthwhile once, not per-run.
+- [x] **Step 3: Commit** — `git commit -m "test: pomodoro boot smoke test on macos target"`
 
 ### Task 6: Persona E2E journeys
 
@@ -781,7 +781,7 @@ void main() {
 - Consumes: `PomodoroApp(config:, ticker:)` (Task 3), persona docs (Task 4 — each journey's steps mirror its doc's Journey table as comments).
 - Produces: green `flutter test integration_test -d macos`; guard test from Task 4 goes green.
 
-- [ ] **Step 1: `helpers.dart`** — the one shared utility (poll-until-state, never sleep-and-hope):
+- [x] **Step 1: `helpers.dart`** — the one shared utility (poll-until-state, never sleep-and-hope):
 
 ```dart
 import 'package:flutter/widgets.dart';
@@ -814,7 +814,7 @@ Future<void> tapKey(WidgetTester tester, String key) async {
 }
 ```
 
-- [ ] **Step 2: Maya** (`maya_strict_cycles_journey_test.dart`) — spec: `docs/personas/maya-strict-cycles.md`:
+- [x] **Step 2: Maya** (`maya_strict_cycles_journey_test.dart`) — spec: `docs/personas/maya-strict-cycles.md`:
 
 ```dart
 import 'package:flutter_test/flutter_test.dart';
@@ -858,12 +858,12 @@ void main() {
 }
 ```
 
-- [ ] **Step 3: Sam** (`sam_interruptions_journey_test.dart`) — spec: `docs/personas/sam-interruptions.md`. Same harness; steps: start → `waitForText` display `00:02` → tap `timer.start` (pause) → `await tester.pump(const Duration(seconds: 2))` → assert display STILL `00:02` (frozen-while-paused: this is a state assertion, the pump is only a wait) → resume → wait for `Short break`/sessions `1` → tap `timer.skip` → assert `Focus` + sessions still `1` → start then tap `timer.reset` → assert `Focus`/`00:03`/sessions `0` → simulate lifecycle via `tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused)` then assert frozen display and, after `resumed`, still stopped. Every step carries its doc-table comment.
+- [x] **Step 3: Sam** (`sam_interruptions_journey_test.dart`) — spec: `docs/personas/sam-interruptions.md`. Same harness; steps: start → `waitForText` display `00:02` → tap `timer.start` (pause) → `await tester.pump(const Duration(seconds: 2))` → assert display STILL `00:02` (frozen-while-paused: this is a state assertion, the pump is only a wait) → resume → wait for `Short break`/sessions `1` → tap `timer.skip` → assert `Focus` + sessions still `1` → start then tap `timer.reset` → assert `Focus`/`00:03`/sessions `0` → simulate lifecycle via `tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused)` then assert frozen display and, after `resumed`, still stopped. Every step carries its doc-table comment.
 
-- [ ] **Step 4: Rio** (`rio_long_haul_journey_test.dart`) — spec: `docs/personas/rio-long-haul.md`. Pump `PomodoroApp(config: TimerConfig(work: Duration(seconds: 4), shortBreak: Duration(seconds: 2), longBreak: Duration(seconds: 5), cyclesPerLongBreak: 3))`; assert initial display `00:04`; loop work+break twice asserting sessions 1 then 2 with `Short break` both times; complete work #3 → assert `Long break` + sessions `3`; complete it → `Focus`, sessions `3`.
+- [x] **Step 4: Rio** (`rio_long_haul_journey_test.dart`) — spec: `docs/personas/rio-long-haul.md`. Pump `PomodoroApp(config: TimerConfig(work: Duration(seconds: 4), shortBreak: Duration(seconds: 2), longBreak: Duration(seconds: 5), cyclesPerLongBreak: 3))`; assert initial display `00:04`; loop work+break twice asserting sessions 1 then 2 with `Short break` both times; complete work #3 → assert `Long break` + sessions `3`; complete it → `Focus`, sessions `3`.
 
-- [ ] **Step 5: Run everything** — `flutter test integration_test -d macos` → smoke + 3 journeys PASS (~1 min after first build; journeys are seconds each in demo time). `flutter test test/` → unit + widget + persona-mapping guard all PASS (guard now green).
-- [ ] **Step 6: Commit** — `git commit -m "test: persona e2e journeys for maya, sam, and rio in compressed demo time"`
+- [x] **Step 5: Run everything** — `flutter test integration_test -d macos` → smoke + 3 journeys PASS (~1 min after first build; journeys are seconds each in demo time). `flutter test test/` → unit + widget + persona-mapping guard all PASS (guard now green).
+- [x] **Step 6: Commit** — `git commit -m "test: persona e2e journeys for maya, sam, and rio in compressed demo time"`
 
 ### Task 7: Repo wiring — Make verbs + the reusable convention doc
 
@@ -872,7 +872,7 @@ void main() {
 - Create: `docs/testing/persona-e2e-baseline.md`
 - Modify: `docs/plans/complete-nostos-fully-wired-operational.md` (Part VIII registry gains this plan's row)
 
-- [ ] **Step 1: Make targets** (append; keep `make ci` Rust-only):
+- [x] **Step 1: Make targets** (append; keep `make ci` Rust-only):
 
 ```make
 ## fixture-test: flutter fixture unit/widget suites + persona-mapping guard
@@ -886,7 +886,7 @@ fixture-e2e:
 
 CI note: GitHub's macOS runners can run `fixture-e2e`, but the Rust pipeline must not pay that cost per-push — if CI coverage is wanted later, add a separate workflow triggered on `fixtures/**` paths only. Deliberately not added now (`ponytail:` local verbs suffice until a second fixture exists).
 
-- [ ] **Step 2: `docs/testing/persona-e2e-baseline.md`** — the recipe other fixtures follow:
+- [x] **Step 2: `docs/testing/persona-e2e-baseline.md`** — the recipe other fixtures follow:
 
 ```markdown
 # Persona-driven E2E baseline for Flutter fixtures
@@ -922,10 +922,10 @@ sync layer; persona journeys then double as SDK E2E: same personas, plus sync
 assertions (offline write → reconnect → row echoed).
 ```
 
-- [ ] **Step 3: Verify the master-plan registry row** — `docs/plans/complete-nostos-fully-wired-operational.md` Part VIII already lists this plan as its first row (added at plan authoring); confirm it's intact and mark it done there once this plan completes.
+- [x] **Step 3: Verify the master-plan registry row** — `docs/plans/complete-nostos-fully-wired-operational.md` Part VIII already lists this plan as its first row (added at plan authoring); confirm it's intact and mark it done there once this plan completes.
 
-- [ ] **Step 4: Verify** — `make fixture-test` and `make fixture-e2e` green; `make ci` untouched and green.
-- [ ] **Step 5: Commit** — `git commit -m "feat: fixture make verbs, persona-e2e baseline convention doc, master plan registry entry"`
+- [x] **Step 4: Verify** — `make fixture-test` and `make fixture-e2e` green; `make ci` untouched and green.
+- [x] **Step 5: Commit** — `git commit -m "feat: fixture make verbs, persona-e2e baseline convention doc, master plan registry entry"`
 
 ---
 
