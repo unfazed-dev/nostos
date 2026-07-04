@@ -870,10 +870,12 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 **Files:**
 - Create: `docs/adr/0017-web-persistence.md`
 
-- [ ] **Step 1: Research current state (July 2026)** of: official SQLite WASM OPFS (`sqlite.org/wasm`), `wa-sqlite`, and raw-OPFS row storage; constraints: Worker-only OPFS, COOP/COEP headers, Safari support.
-- [ ] **Step 2: Write ADR-0017** with the chosen mechanism + measured bundle-size and latency implications; if the verdict is "raw OPFS keyed rows now, SQLite-WASM later" or even "defer durability, localStorage checkpoint is enough for v0.1 demos", say so with the evidence. The ADR, not this plan, owns that call — it needs facts this plan can't know without the spike.
-- [ ] **Step 3: If (and only if) the ADR picks a v0.1 mechanism**, implement it as a `Storage` impl behind the existing trait; the E1 pump code does not change (that's the seam paying rent).
-- [ ] **Step 4: Commit** — `git commit -m "docs: ADR-0017 web persistence decision"` (+ impl commit if chosen)
+- [x] **Step 1: Research current state (July 2026)** of: official SQLite WASM OPFS (`sqlite.org/wasm`), `wa-sqlite`, and raw-OPFS row storage; constraints: Worker-only OPFS, COOP/COEP headers, Safari support.
+- [x] **Step 2: Write ADR-0017** with the chosen mechanism + measured bundle-size and latency implications; if the verdict is "raw OPFS keyed rows now, SQLite-WASM later" or even "defer durability, localStorage checkpoint is enough for v0.1 demos", say so with the evidence. The ADR, not this plan, owns that call — it needs facts this plan can't know without the spike.
+  - **Verdict: defer past v0.1; commit to SQLite-WASM `opfs-sahpool` post-launch.** Evidence + rejection of wa-sqlite (COOP/COEP tax) and raw OPFS (no atomicity) in `docs/adr/0017-web-persistence.md`. Write-back v1 raised the trait surface from 2 to 5 methods, making the Worker re-architecture the dominant cost.
+- [x] **Step 3: If (and only if) the ADR picks a v0.1 mechanism**, implement it as a `Storage` impl behind the existing trait; the E1 pump code does not change (that's the seam paying rent).
+  - **N/A — ADR-0017 deferred.** No v0.1 mechanism chosen; the `Storage`/`Outbox` seam is unchanged and ready for the post-launch slice.
+- [x] **Step 4: Commit** — `git commit -m "docs: ADR-0017 web persistence decision"` (+ impl commit if chosen)
 
 ### Task E3: The web demo — moat visible in a browser tab
 

@@ -15,7 +15,9 @@
 //!
 //! What's NOT here (ponytail — deferred):
 //! - **OPFS persistence** — the browser-durable backend needs a Web Worker +
-//!   sync-OPFS plumbing (Worker-only by spec); a verified follow-up (E2/ADR-0017).
+//!   sync-OPFS plumbing (Worker-only by spec); deferred past v0.1 per ADR-0017
+//!   (decision: ship localStorage checkpoint + replay-from-resume_lsn now;
+//!   adopt SQLite-WASM `opfs-sahpool` post-launch — no COOP/COEP tax).
 //!   The ceiling today is "reload replays from `resume_lsn`" — the
 //!   `localStorage` checkpoint survives, the in-memory rows don't.
 //! - **The browser WS glue's automated test** — `web_sys::WebSocket` can't run
@@ -178,7 +180,7 @@ pub struct NostosEngine {
 #[wasm_bindgen]
 impl NostosEngine {
     /// Create an in-memory engine. Data survives the apply loop but NOT a page
-    /// reload — real browser persistence (OPFS) is a deferred follow-up.
+    /// reload — real browser persistence (OPFS) is deferred past v0.1 (ADR-0017).
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
@@ -324,7 +326,7 @@ pub mod transport;
 ///
 /// Only the checkpoint survives a reload — the applied rows live in the
 /// engine's `InMemoryStorage` and are lost on reload, so a reconnect replays
-/// from `resume_lsn`. Durable rows arrive with OPFS in E2 (ADR-0017).
+/// from `resume_lsn`. Durable rows arrive with OPFS post-v0.1 (ADR-0017).
 ///
 /// ## JS
 ///
