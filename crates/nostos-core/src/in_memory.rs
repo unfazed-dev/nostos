@@ -1,9 +1,11 @@
-//! In-memory `Storage` — the test double and the executable contract reference.
+//! In-memory `Storage` + `Outbox` — the test double and the executable contract
+//! reference.
 //!
 //! This exists so the apply engine (and every unit test) can be exercised
 //! without a SQLite build. The [`InMemoryStorage`] implements [`crate::Storage`]
-//! with the exact semantics the trait documents: atomic batch apply (all rows +
-//! the checkpoint move together), idempotent upsert-by-pk, monotonic LSN.
+//! AND [`crate::Outbox`] with the exact semantics the traits document: atomic
+//! batch apply (all rows + the checkpoint move together), idempotent upsert-by-pk,
+//! monotonic LSN; and a monotonic-id write queue that mirrors `cairn_outbox`.
 //!
 //! The data model mirrors what `SqliteStorage` will persist: a row keyed by
 //! `(table, pk)` holding the opaque payload bytes, plus a single checkpoint LSN.
@@ -12,9 +14,10 @@ use std::collections::BTreeMap;
 
 use nostos_domain::{Lsn, RowOp};
 
-use crate::{Storage, StorageError};
+use crate::{Outbox, PendingWrite, Storage, StorageError};
 
-/// An in-memory store: rows keyed by `(table, pk)`, plus the durable checkpoint.
+/// An in-memory store: rows keyed by `(table, pk)`, plus the durable checkpoint
+/// and a write outbox.
 ///
 /// "Durable" here means "survives the engine's apply loop" — it does NOT survive
 /// a process crash (there's no disk). It is the reference for the trait contract
@@ -23,6 +26,10 @@ use crate::{Storage, StorageError};
 pub struct InMemoryStorage {
     rows: BTreeMap<(String, String), Vec<u8>>,
     checkpoint: Lsn,
+    /// The write outbox: `(id, PendingWrite)` pairs, oldest first. The next id
+    /// to assign is `next_write_id` (monotonic, mirrors AUTOINCREMENT).
+    outbox: BTreeMap<u64, PendingWrite>,
+    next_write_id: u64,
 }
 
 impl InMemoryStorage {
@@ -44,6 +51,12 @@ impl InMemoryStorage {
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.rows.len()
+    }
+
+    /// How many writes are queued in the outbox (for test assertions).
+    #[must_use]
+    pub fn outbox_len(&self) -> usize {
+        self.outbox.len()
     }
 }
 
@@ -72,6 +85,36 @@ impl Storage for InMemoryStorage {
         if checkpoint > self.checkpoint {
             self.checkpoint = checkpoint;
         }
+        Ok(())
+    }
+}
+
+impl Outbox for InMemoryStorage {
+    fn enqueue(&mut self, write: PendingWrite) -> crate::Result<u64> {
+        // Monotonic id (never reused — mirrors `AUTOINCREMENT` semantics).
+        self.next_write_id = self
+            .next_write_id
+            .checked_add(1)
+            .expect("write id space exhausted");
+        let id = self.next_write_id;
+        self.outbox.insert(id, write);
+        Ok(id)
+    }
+
+    fn pending(&self) -> crate::Result<Vec<(u64, PendingWrite)>> {
+        // BTreeMap iterates in ascending key order → oldest first, as the
+        // contract requires.
+        Ok(self
+            .outbox
+            .iter()
+            .map(|(&id, pw)| (id, pw.clone()))
+            .collect())
+    }
+
+    fn mark_done(&mut self, id: u64) -> crate::Result<()> {
+        // Idempotent: removing an unknown id is a no-op (BTreeMap::remove
+        // returns Option, not an error).
+        self.outbox.remove(&id);
         Ok(())
     }
 }

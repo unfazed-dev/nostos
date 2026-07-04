@@ -27,17 +27,22 @@
 //! - The network/transport (`SyncClient` lives in `nostos-client`).
 //! - The native SQLite backend (`SqliteStorage` lives in `nostos-client`).
 //! - Column-level decoding (opaque payload bytes only until ADR-0012).
-//! - Direct write-back / mutation queue (ADR-0013, Phase 4).
 //! - CRDT / custom merge (ADR-0014, Phase 4).
+//!
+//! The client outbox *queue contract* IS here ([`Outbox`], [`PendingWrite`]) —
+//! the durable surface for offline writes (ADR-0013). The native `rusqlite` impl
+//! of it lives in `nostos-client`, same as `Storage`.
 
 #![forbid(unsafe_code)]
 
 pub mod apply;
 pub mod in_memory;
+pub mod outbox;
 pub mod storage;
 
 pub use apply::{ApplyEngine, ApplyOutcome, Frame};
 pub use in_memory::InMemoryStorage;
+pub use outbox::{Outbox, PendingWrite, WriteOp};
 pub use storage::{Result, Storage, StorageError};
 
 // Re-export the domain types the client surface needs so downstream (nostos-client,

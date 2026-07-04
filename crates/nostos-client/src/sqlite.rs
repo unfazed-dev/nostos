@@ -1,9 +1,12 @@
 //! `SqliteStorage` — the real durable backend for the native client.
 //!
-//! Implements [`nostos_core::Storage`] over `rusqlite` (workspace `bundled`
-//! feature, so this crate brings its own SQLite binary — zero external deps to
-//! run). Rows are stored as opaque payload bytes keyed by `(table, pk)`; the
-//! LSN checkpoint lives in a `cairn_meta` row.
+//! Implements [`nostos_core::Storage`] (the apply/checkpoint surface) AND
+//! [`nostos_core::Outbox`] (the durable write-queue surface) over `rusqlite`
+//! (workspace `bundled` feature, so this crate brings its own SQLite binary —
+//! zero external deps to run). Both surfaces share ONE SQLite file so a crash
+//! can't strand one without the other (ADR-0013). Rows are stored as opaque
+//! payload bytes keyed by `(table, pk)`; the LSN checkpoint lives in a
+//! `cairn_meta` row; the pending write-queue lives in `cairn_outbox`.
 //!
 //! ## Why opaque bytes
 //!
@@ -21,14 +24,22 @@
 //! the process dies mid-batch the transaction rolls back — **no row is committed
 //! without its checkpoint, no checkpoint advances past un-applied rows.** This
 //! is what makes reconnect resume correct (ADR-0009 on the client side).
+//!
+//! The outbox methods ([`Outbox::enqueue`], [`Outbox::mark_done`]) each run in
+//! their own transaction, so an enqueued write is durable the instant `enqueue`
+//! returns — a crash between a user action and the server's ack leaves the
+//! write queued, not lost.
 
 use std::sync::Mutex;
 
-use nostos_core::{Storage, StorageError};
+use nostos_core::{Outbox, PendingWrite, Storage, StorageError, WriteOp};
 use nostos_domain::{Lsn, RowOp};
 use rusqlite::Connection;
 
-/// The opaque-bytes row table. One row per `(table, pk)`.
+/// The opaque-bytes row table + the meta table + the durable write outbox.
+/// One row per `(table, pk)` in `cairn_data`; the LSN checkpoint is the single
+/// `checkpoint` row in `cairn_meta`; `cairn_outbox` holds client writes that
+/// have not yet been ack'd by the server (ADR-0013).
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS cairn_data (\
     table_name TEXT NOT NULL,\
@@ -41,6 +52,13 @@ CREATE TABLE IF NOT EXISTS cairn_meta (\
     value TEXT NOT NULL\
 );\
 INSERT OR IGNORE INTO cairn_meta (key, value) VALUES ('checkpoint', '0');\
+CREATE TABLE IF NOT EXISTS cairn_outbox (\
+    id INTEGER PRIMARY KEY AUTOINCREMENT,\
+    table_name TEXT NOT NULL,\
+    op TEXT NOT NULL,\
+    pk TEXT NOT NULL,\
+    payload TEXT\
+);\
 ";
 
 /// The single meta key holding the last-applied LSN (`u64` decimal).
@@ -93,6 +111,17 @@ impl SqliteStorage {
             .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
             .expect("count query is infallible on a valid schema");
         usize::try_from(count).expect("row count is non-negative")
+    }
+
+    /// Borrow the underlying connection under the mutex (test-only). Lets an
+    /// integration test read rows out of `cairn_data` / `cairn_outbox` directly
+    /// for assertions that aren't worth a public accessor (e.g. a round-trip
+    /// payload check). The guard releases on drop, matching the internal usage.
+    #[doc(hidden)]
+    pub fn conn_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .expect("conn_for_test: storage mutex poisoned")
     }
 }
 
@@ -172,6 +201,83 @@ impl Storage for SqliteStorage {
         .map_err(rusqlite_err)?;
 
         tx.commit().map_err(rusqlite_err)?;
+        Ok(())
+    }
+}
+
+impl Outbox for SqliteStorage {
+    fn enqueue(&mut self, write: PendingWrite) -> nostos_core::Result<u64> {
+        let mut conn = self.conn.lock().expect("enqueue: storage mutex poisoned");
+        // One-row transaction: the write is durable the instant this commits.
+        // A crash between now and the server's ack leaves the write queued, not
+        // lost — exactly the property the outbox exists for.
+        let tx = conn.transaction().map_err(rusqlite_err)?;
+        let op_wire = write.op.as_wire_str();
+        tx.execute(
+            "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![write.table, op_wire, write.pk, write.payload_json],
+        )
+        .map_err(rusqlite_err)?;
+        let id: i64 = tx
+            .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+            .map_err(rusqlite_err)?;
+        tx.commit().map_err(rusqlite_err)?;
+        // AUTOINCREMENT guarantees monotonicity (never reuses a deleted id), so
+        // the returned u64 is a stable correlation key on the wire.
+        Ok(u64::try_from(id).expect("rowid is non-negative"))
+    }
+
+    fn pending(&self) -> nostos_core::Result<Vec<(u64, PendingWrite)>> {
+        let conn = self.conn.lock().expect("pending: storage mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT id, table_name, op, pk, payload FROM cairn_outbox ORDER BY id ASC")
+            .map_err(rusqlite_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let table: String = row.get(1)?;
+                let op_wire: String = row.get(2)?;
+                let pk: String = row.get(3)?;
+                let payload: Option<String> = row.get(4)?;
+                let op = WriteOp::from_wire_str(&op_wire).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        format!("corrupt outbox op {op_wire:?}").into(),
+                    )
+                })?;
+                Ok((
+                    u64::try_from(id).expect("rowid is non-negative"),
+                    PendingWrite {
+                        table,
+                        op,
+                        pk,
+                        payload_json: payload,
+                    },
+                ))
+            })
+            .map_err(rusqlite_err)?;
+        // Drain the iterator into a Vec, surfacing any conversion error (a
+        // corrupt op string would be db damage — fail the read rather than
+        // silently dropping a queued write).
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(rusqlite_err)?);
+        }
+        Ok(out)
+    }
+
+    fn mark_done(&mut self, id: u64) -> nostos_core::Result<()> {
+        let mut conn = self.conn.lock().expect("mark_done: storage mutex poisoned");
+        let tx = conn.transaction().map_err(rusqlite_err)?;
+        tx.execute(
+            "DELETE FROM cairn_outbox WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(rusqlite_err)?;
+        tx.commit().map_err(rusqlite_err)?;
+        // Idempotent: deleting a row that's already gone affects 0 rows — not
+        // an error (a redelivery after a partial flush must not fail).
         Ok(())
     }
 }
