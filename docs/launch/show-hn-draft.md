@@ -10,7 +10,7 @@
 **Title options (pick one):**
 
 - *Show HN: Nostos — a Rust, Apache-2.0 PowerSync alternative with 2-way offline sync*
-- *Show HN: We built a Postgres→SQLite sync engine in Rust that hits 142k ops/sec*
+- *Show HN: We built a Postgres→SQLite sync engine in Rust that hits 833k ops/sec*
 - *Show HN: Nostos — local-first sync, Rust-fast, Apache-open, no write-back endpoints*
 
 ---
@@ -48,13 +48,15 @@ We measured server fan-out against PowerSync's **published** server ceiling of
 
 | Tier | Nostos | Drops | vs PowerSync ceiling |
 |------|-------|-------|----------------------|
-| **1k clients** | **142,336 ops/sec** | **0%** | **35.6× their high ceiling** |
+| **1k clients** | **833,308 ops/sec** | **0%** | **208× their high ceiling** (417× their low) |
 | 5k clients | 660k ops/sec | 0.91% | still dramatically faster |
 | 10k clients (probe) | ~483k ops/sec | ~61.4% | throughput high, drops NOT under 1% |
 
-The **headline is 1k @ 0% drops = 35.6× PowerSync's ceiling.** That's a real
-number, end-to-end through the fan-out pipeline (synthetic source on loopback,
-real router, real bounded WS fan-out, real WS client receive).
+The **headline is 1k @ 0% drops = 208× PowerSync's published high ceiling.**
+That's a real number, end-to-end through the fan-out pipeline (synthetic source
+on loopback, real router, real bounded WS fan-out, real WS client receive). The
+original Week-1 proof was 142k @ 35.6×; the v0.1 WS write-path + router work
+multiplied the 1k figure ~6×.
 
 The **10k-client story is honest, not pretty.** Throughput at 10k is still
 ~483k ops/sec, but the current architecture drops ~61% of frames because
