@@ -6,7 +6,7 @@
   // `import.meta.url` + fetches a .wasm at runtime). Loading it inside onMount
   // keeps the static export clean (gate 4). The default export is the async
   // `init()` (wasm-bindgen convention); named exports are the classes.
-  import type { NostosEngine, Outcome } from 'nostos-ffi-wasm';
+  import type { NostosSocket, RowEntry } from 'nostos-ffi-wasm';
 
   /**
    * /demo — the moat, visible in a browser tab.
@@ -15,22 +15,41 @@
    * predicate input, the live filtered rows, and the checkpoint LSN ticking
    * forward. Reload the tab → it resumes from the persisted checkpoint.
    *
-   * Architecture (read this before editing): the page owns the WebSocket and
-   * drives a real `NostosEngine` (from nostos-ffi-wasm) with every inbound frame.
-   * The engine owns the in-memory row store + the checkpoint; the page reads
-   * `engine.checkpoint` / `engine.rowCount` to render the durable state, and
-   * renders the rows from the frames it decodes for display.
+   * Architecture (read this before editing): the page owns NOTHING of the
+   * transport. `NostosSocket.connect(...)` (from nostos-ffi-wasm) owns the
+   * WebSocket, the engine, the apply loop, the ack, AND the localStorage
+   * checkpoint persistence. This page only:
+   *   1. Calls `NostosSocket.connect(url, token, table, whereSql)`.
+   *   2. Polls `socket.checkpoint` / `socket.rowCount` / `socket.rowsFor(table)`
+   *      on a render tick (every 250ms while live) to drive the UI.
+   * That's it. There is no decode/apply/ack/persist logic here — the ~30 lines
+   * of WS glue + the engine's atomic apply + the idempotency + the resume all
+   * live in `NostosSocket`, which IS the WS-glue manual check ADR-0017 calls out
+   * ("WS glue untested in CI; covered by the E3 demo page manual check").
    *
-   * Why not `NostosSocket.connect(...)`? That wrapper owns its own `onmessage`
-   * and there is no API to read applied rows back out of the engine — so a
-   * page that used `NostosSocket` could show counts + checkpoint but not the
-   * rows themselves. This page keeps the engine (the load-bearing part: the
-   * atomic apply, idempotency, checkpoint) and re-implements the ~30 lines of
-   * WS glue `NostosSocket` provides. The glue it duplicates is the exact seam
-   * ADR-0017 marks "WS glue untested in CI; covered by the E3 demo page manual
-   * check" — this page IS that manual check, made interactive.
-   * ponytail: when the engine gains a row-readback API (OPFS slice, E2
-   * follow-up), swap this back to `NostosSocket` and drop the local decode.
+   * ## Why current-state, not event-log (the design choice)
+   *
+   * The previous version rendered an append-only event log (each inbound frame
+   * → a row in the list). `NostosSocket` has no per-frame callback hook (its
+   * WS closures are private, kept-alive-only fields), and adding one is scope
+   * creep beyond the readback fix. So this page renders the engine's
+   * *current state*: `rowsFor(table)` on a tick → the rows that match the
+   * predicate RIGHT NOW. The op/lsn history is dropped — honest to what the
+   * engine knows ("these are the matching rows"), and a better demo than a raw
+   * event feed. The live `rowCount` + advancing `checkpoint` already show
+   * activity; the row list shows the filtered table state.
+   * ponytail: if a future event-feed view is wanted, add a per-frame callback
+   * to `NostosSocket` (a JS-side `onframe` setter) rather than reviving the
+   * duplicated WS glue here.
+   *
+   * ## localStorage checkpoint
+   *
+   * `NostosSocket` persists the checkpoint to `localStorage[cairn:checkpoint:<table>]`
+   * internally on every ack + on close (verified in nostos-ffi-wasm/src/transport.rs).
+   * The socket does NOT expose the *resumed-from* value back to JS, so for the
+   * "resumed from N" subtitle this page reads the key once on connect
+   * (display-only — the socket is the single writer). If the key is absent,
+   * resume is 0 (full snapshot).
    */
 
   // ---- connection config (editable; the verified dev-stack default is 8800) ----
@@ -54,101 +73,64 @@
   let err = $state<string | null>(null);
 
   // A rendered row: pk + the decoded tuple image (we attempt JSON, fall back to
-  // the raw hex). The engine stores opaque bytes; we render what came off the
-  // wire so the operator can see real data flowing.
-  type Row = { pk: string; op: string; lsn: number; payload: Record<string, unknown> | string };
+  // the raw hex). The engine stores opaque bytes; `rowsFor` hands us the
+  // `(pk, Uint8Array)` pairs and we decode for display only.
+  type Row = { pk: string; payload: Record<string, unknown> | string };
   let rows = $state<Row[]>([]);
   let checkpoint = $state(0);
   let rowCount = $state(0);
   let resumedFrom = $state<number | null>(null);
 
-  let ws: WebSocket | null = null;
-  let engine: NostosEngine | null = null;
+  let socket: NostosSocket | null = null;
   let initMod: typeof import('nostos-ffi-wasm') | null = null;
+  // The render tick: re-reads the socket's state on an interval while live.
+  let tickHandle: ReturnType<typeof setInterval> | null = null;
 
-  const CHECKPOINT_KEY = () => `cairn:checkpoint:${table}`;
-
-  /** Hex-decode the wire payload (the engine's transport does the same). */
-  function decodeHex(hex: string): Uint8Array {
-    const bytes = new Uint8Array(hex.length / 2);
-    for (let i = 0; i < hex.length; i += 2) {
-      bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-    }
-    return bytes;
-  }
+  /** The localStorage key NostosSocket persists the checkpoint under. */
+  const checkpointKey = () => `cairn:checkpoint:${table}`;
 
   /**
-   * Decode a hex payload to a displayable value: the PgReplicator emits a small
-   * JSON object {col:val} (see the extractor in crates/nostos-server/src/main.rs);
-   * try that first, fall back to raw hex on any failure. The apply engine itself
-   * never inspects payload contents — this is display-only.
+   * Decode a row's opaque payload bytes to a displayable value: the
+   * PgReplicator emits a small JSON object {col:val} (see the extractor in
+   * crates/nostos-server/src/main.rs); try that first, fall back to a hex string
+   * on any failure. The apply engine itself never inspects payload contents —
+   * this is display-only.
    */
-  function decodePayload(hex: string | null | undefined): Record<string, unknown> | string {
-    if (!hex) return '(delete — no payload)';
+  function decodePayload(bytes: Uint8Array): Record<string, unknown> | string {
     try {
-      const text = new TextDecoder().decode(decodeHex(hex));
+      const text = new TextDecoder().decode(bytes);
       return JSON.parse(text) as Record<string, unknown>;
     } catch {
-      return hex;
+      // Fallback: render the raw bytes as hex so the operator at least sees
+      // something distinguishing per row.
+      return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
     }
-  }
-
-  /** The persisted checkpoint drives `resume_lsn` on (re)connect. */
-  function readCheckpoint(): number {
-    const raw = localStorage.getItem(CHECKPOINT_KEY());
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) ? n : 0;
-  }
-  function writeCheckpoint(lsn: number) {
-    localStorage.setItem(CHECKPOINT_KEY(), String(lsn));
   }
 
   /**
-   * Decode one inbound WS message into display rows + NostosEngine frames, apply,
-   * flush, ack, persist. Mirrors `transport::on_message` in nostos-ffi-wasm: a
-   * message may be a single object OR a JSON array of frames (C3 batched writes).
+   * Read the engine's current state through the socket's readback API and
+   * refresh the rendered rows. Called on the render tick while live. We snapshot
+   * checkpoint + rowCount alongside so the stats panel and the row list stay in
+   * sync (no half-updated frame mid-tick).
    */
-  function handleMessage(data: ArrayBuffer | string) {
-    if (!engine || !ws) return;
-    const text = typeof data === 'string' ? data : new TextDecoder().decode(data);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return; // drop malformed (matches decode_frames' contract)
-    }
-    const frames: Record<string, unknown>[] = Array.isArray(parsed) ? parsed : [parsed];
-    if (!frames.length) return;
+  function snapshot() {
+    if (!socket) return;
+    checkpoint = socket.checkpoint;
+    rowCount = socket.rowCount;
+    const entries: RowEntry[] = socket.rowsFor(table);
+    rows = entries.map((e) => ({ pk: e.pk, payload: decodePayload(e.payload) }));
+  }
 
-    // Build + feed NostosEngine frames. The engine takes a Uint8Array payload;
-    // we hex-decode once at the boundary (same as the transport's decode_hex).
-    // We feed frames one at a time and flush at the end of the message — the
-    // engine's soft-cap commit isn't needed here (we want every row visible).
-    for (const f of frames) {
-      const lsn = Number(f.lsn ?? 0);
-      const op = String(f.op ?? 'insert');
-      const pk = String(f.pk ?? '');
-      const payloadHex = typeof f.payload === 'string' ? (f.payload as string) : null;
-      const payloadBytes = payloadHex ? decodeHex(payloadHex) : null;
-
-      // Feed the real WASM engine. The Frame constructor signature is
-      // (lsn, op, table, pk, payload?, txn_id?).
-      const { Frame } = initMod!;
-      engine.feed(new Frame(lsn, op, table, pk, payloadBytes, null));
-
-      // Render the row for display (the engine gives no readback API).
-      rows = [{ pk, op, lsn, payload: decodePayload(payloadHex) }, ...rows].slice(0, 200);
-    }
-
-    // Flush → atomic commit → checkpoint advances. The Outcome carries the new
-    // checkpoint + rows-applied; we ack it to the server + persist it.
-    const outcome = engine.flush() as Outcome | undefined;
-    if (outcome) {
-      checkpoint = outcome.checkpoint;
-      writeCheckpoint(outcome.checkpoint);
-      ws.send(JSON.stringify({ type: 'ack', lsn: outcome.checkpoint }));
-    }
-    rowCount = engine.rowCount;
+  /**
+   * Read the persisted checkpoint for display only ("resumed from N"). The
+   * socket owns persistence; this is a read-only peek at the same key
+   * `NostosSocket` writes (nostos-ffi-wasm/src/transport.rs::checkpoint_key).
+   * Returns 0 if the key is absent/malformed (matches the socket's resume-fallback).
+   */
+  function readPersistedCheckpoint(): number {
+    const raw = localStorage.getItem(checkpointKey());
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) ? n : 0;
   }
 
   async function connect() {
@@ -161,57 +143,65 @@
         initMod = await import('nostos-ffi-wasm');
         await initMod.default();
       }
-      // Fresh engine per session (in-memory rows do NOT survive reload —
-      // ADR-0017. Only the checkpoint does, read below).
-      engine = new initMod.NostosEngine();
 
-      const resumeLsn = readCheckpoint();
-      resumedFrom = resumeLsn;
+      // Snapshot the resume point for the "resumed from N" subtitle BEFORE
+      // connect — NostosSocket reads + sends resume_lsn internally; this read is
+      // display-only.
+      resumedFrom = readPersistedCheckpoint();
 
-      const fullUrl = token ? `${url}${url.includes('?') ? '&' : '?'}token=${token}` : url;
-      ws = new WebSocket(fullUrl);
-      ws.binaryType = 'arraybuffer';
+      // NostosSocket owns the WS handshake, the subscribe frame (with resume_lsn
+      // + where_sql), the apply loop, the ack, AND the localStorage checkpoint
+      // persistence. This page does none of that.
+      socket = await initMod.NostosSocket.connect(
+        url,
+        token || null,
+        table,
+        whereSql.trim() || null
+      );
+      status = 'live';
 
-      ws.onopen = () => {
-        // Build + send the subscribe frame. `filters: []` is required on the
-        // wire (the server rejects the frame without it); where_sql is omitted
-        // when empty. resume_lsn lets the server skip already-acked events.
-        const sub: Record<string, unknown> = { type: 'subscribe', table, filters: [] };
-        if (resumeLsn > 0) sub.resume_lsn = resumeLsn;
-        if (whereSql.trim()) sub.where_sql = whereSql.trim();
-        ws!.send(JSON.stringify(sub));
-        status = 'live';
-      };
-      ws.onmessage = (e) => handleMessage(e.data);
-      ws.onerror = () => {
-        status = 'error';
-        err = 'WebSocket error — is the dev-stack server running? (make dev-stack)';
-      };
-      ws.onclose = () => {
-        if (status !== 'error') status = 'closed';
-      };
+      // Prime the view immediately (rows may already have arrived between the
+      // socket's OPEN and this await resolving), then poll on a tick.
+      snapshot();
+      tickHandle = setInterval(snapshot, 250);
     } catch (e) {
       status = 'error';
-      err = (e as Error).message;
+      err = (e as Error).message ?? String(e);
+      stopTick();
+    }
+  }
+
+  function stopTick() {
+    if (tickHandle !== null) {
+      clearInterval(tickHandle);
+      tickHandle = null;
     }
   }
 
   function disconnect() {
-    ws?.close();
-    ws = null;
-    status = 'idle';
+    socket?.close();
+    socket = null;
+    stopTick();
+    // No final snapshot here: socket.close() triggers the onclose flush
+    // asynchronously (the closure runs on a later tick, after `socket = null`),
+    // so a snapshot now wouldn't reflect the final flush. The next `connect()`
+    // re-seeds `rows` from the engine's current state.
+    status = 'closed';
   }
 
-  /** Wipe the persisted checkpoint + in-memory rows (start completely fresh). */
+  /** Wipe the persisted checkpoint (start completely fresh on next connect). */
   function reset() {
-    localStorage.removeItem(CHECKPOINT_KEY());
+    localStorage.removeItem(checkpointKey());
     rows = [];
     checkpoint = 0;
     rowCount = 0;
     resumedFrom = null;
   }
 
-  onMount(() => () => disconnect());
+  onMount(() => () => {
+    disconnect();
+    stopTick();
+  });
 </script>
 
 <svelte:head>
@@ -287,14 +277,14 @@
       <span class="sub">applied via the WASM engine</span>
     </div>
     <div class="stat">
-      <dt>Rendered</dt>
+      <dt>Matching rows</dt>
       <dd class="tnum mono">{rows.length}</dd>
-      <span class="sub">most recent first</span>
+      <span class="sub">current state of subscribed table</span>
     </div>
   </div>
 
   <div class="rows-wrap">
-    <div class="rows-head">Live rows</div>
+    <div class="rows-head">Live rows — current table state</div>
     {#if rows.length === 0}
       <p class="empty">
         No rows yet. Connect, then insert one from Postgres:<br />
@@ -303,10 +293,8 @@
       </p>
     {:else}
       <ul class="rows">
-        {#each rows as r (r.lsn + '-' + r.pk)}
+        {#each rows as r (r.pk)}
           <li>
-            <span class="lsn mono">{r.lsn}</span>
-            <span class="op op-{r.op}">{r.op}</span>
             <span class="pk mono">{r.pk}</span>
             <span class="payload mono">
               {#if typeof r.payload === 'string'}{r.payload}{:else}{JSON.stringify(r.payload)}{/if}
@@ -327,25 +315,86 @@
 </section>
 
 <style>
-  .demo { max-width: 980px; margin: 0 auto; padding: 40px var(--gutter) 96px; }
+  .demo {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 40px var(--gutter) 96px;
+  }
   .demo-head {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     margin-bottom: 40px;
   }
-  .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; font-size: var(--t-20); letter-spacing: -0.02em; }
-  .sync-pill { font-size: 13px; color: var(--ink-soft); }
-  .sync-pill.live { color: var(--mark-ink); }
-  .sync-pill .glyph { display: inline-flex; gap: 2px; margin-right: 6px; vertical-align: middle; }
-  .sync-pill .glyph i { width: 3px; height: 11px; background: var(--stone-2); border-radius: 1px; display: inline-block; }
-  .sync-pill.live .glyph i { background: var(--mark); animation: pulse 1.1s var(--ease) infinite; }
-  .sync-pill.live .glyph i:nth-child(2) { animation-delay: 0.15s; }
-  .sync-pill.live .glyph i:nth-child(3) { animation-delay: 0.3s; }
-  @keyframes pulse { 0%, 100% { transform: scaleY(0.5); opacity: 0.6; } 50% { transform: scaleY(1); opacity: 1; } }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 800;
+    font-size: var(--t-20);
+    letter-spacing: -0.02em;
+  }
+  .sync-pill {
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+  .sync-pill.live {
+    color: var(--mark-ink);
+  }
+  .sync-pill .glyph {
+    display: inline-flex;
+    gap: 2px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .sync-pill .glyph i {
+    width: 3px;
+    height: 11px;
+    background: var(--stone-2);
+    border-radius: 1px;
+    display: inline-block;
+  }
+  .sync-pill.live .glyph i {
+    background: var(--mark);
+    animation: pulse 1.1s var(--ease) infinite;
+  }
+  .sync-pill.live .glyph i:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+  .sync-pill.live .glyph i:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      transform: scaleY(0.5);
+      opacity: 0.6;
+    }
+    50% {
+      transform: scaleY(1);
+      opacity: 1;
+    }
+  }
 
-  .intro h1 { font-size: 1.7rem; font-weight: 640; letter-spacing: -0.02em; margin-bottom: 10px; }
-  .lede { color: var(--ink-soft); line-height: var(--lh-body); max-width: 64ch; }
-  .ceiling { font-size: 13px; color: var(--stone-3); margin-top: 10px; }
-  .ceiling a { color: var(--mark-ink); }
+  .intro h1 {
+    font-size: 1.7rem;
+    font-weight: 640;
+    letter-spacing: -0.02em;
+    margin-bottom: 10px;
+  }
+  .lede {
+    color: var(--ink-soft);
+    line-height: var(--lh-body);
+    max-width: 64ch;
+  }
+  .ceiling {
+    font-size: 13px;
+    color: var(--stone-3);
+    margin-top: 10px;
+  }
+  .ceiling a {
+    color: var(--mark-ink);
+  }
 
   .controls {
     margin-top: 28px;
@@ -357,9 +406,19 @@
     border-radius: var(--radius-lg);
     background: var(--paper-2);
   }
-  .controls label { display: grid; gap: 5px; font-size: 12px; color: var(--ink-soft); }
-  .controls label em { font-style: normal; color: var(--stone-3); }
-  .controls .grow { grid-column: 1 / -1; }
+  .controls label {
+    display: grid;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+  .controls label em {
+    font-style: normal;
+    color: var(--stone-3);
+  }
+  .controls .grow {
+    grid-column: 1 / -1;
+  }
   .controls input {
     padding: 10px 12px;
     border: 1px solid var(--stone-2);
@@ -369,10 +428,27 @@
     font-family: var(--font-mono);
     font-size: 13px;
   }
-  .controls input:focus { outline: 2px solid var(--mark); outline-offset: 1px; }
-  .actions { grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap; }
-  .err { grid-column: 1 / -1; color: var(--mark-ink); font-size: 13px; }
-  .hint { grid-column: 1 / -1; font-size: 12px; color: var(--stone-3); line-height: 1.5; }
+  .controls input:focus {
+    outline: 2px solid var(--mark);
+    outline-offset: 1px;
+  }
+  .actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .err {
+    grid-column: 1 / -1;
+    color: var(--mark-ink);
+    font-size: 13px;
+  }
+  .hint {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    color: var(--stone-3);
+    line-height: 1.5;
+  }
 
   .stats {
     margin-top: 24px;
@@ -386,11 +462,29 @@
     border-radius: var(--radius-lg);
     background: var(--paper-2);
   }
-  .stat dt { font-size: 11px; color: var(--stone-3); text-transform: uppercase; letter-spacing: 0.1em; }
-  .stat dd { font-size: 1.5rem; font-weight: 600; margin-top: 6px; }
-  .stat .sub { display: block; font-size: 11px; color: var(--stone-3); margin-top: 4px; }
-  .tnum { font-variant-numeric: tabular-nums; }
-  .mono { font-family: var(--font-mono); }
+  .stat dt {
+    font-size: 11px;
+    color: var(--stone-3);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .stat dd {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-top: 6px;
+  }
+  .stat .sub {
+    display: block;
+    font-size: 11px;
+    color: var(--stone-3);
+    margin-top: 4px;
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
 
   .rows-wrap {
     margin-top: 24px;
@@ -409,26 +503,48 @@
     opacity: 0.7;
     border-bottom: 1px solid color-mix(in srgb, var(--code-fg) 12%, transparent);
   }
-  .empty { padding: 20px 16px; font-size: 13px; line-height: 1.6; opacity: 0.85; }
-  .empty code { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
-  .rows { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow-y: auto; }
+  .empty {
+    padding: 20px 16px;
+    font-size: 13px;
+    line-height: 1.6;
+    opacity: 0.85;
+  }
+  .empty code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    word-break: break-all;
+  }
+  .rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 340px;
+    overflow-y: auto;
+  }
   .rows li {
     display: grid;
-    grid-template-columns: 90px 70px 130px 1fr;
+    grid-template-columns: 200px 1fr;
     gap: 12px;
     padding: 8px 16px;
     font-size: 12px;
     border-bottom: 1px solid color-mix(in srgb, var(--code-fg) 6%, transparent);
     align-items: center;
   }
-  .rows li:last-child { border-bottom: 0; }
-  .rows .lsn { opacity: 0.6; text-align: right; }
-  .rows .op { font-weight: 600; }
-  .rows .op-insert { color: #6fcf97; }
-  .rows .op-update { color: #f2c94c; }
-  .rows .op-delete { color: #eb5757; }
-  .rows .pk { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rows .payload { opacity: 0.92; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rows li:last-child {
+    border-bottom: 0;
+  }
+  .rows .pk {
+    opacity: 0.8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rows .payload {
+    opacity: 0.92;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .kill-note {
     margin-top: 24px;
@@ -440,13 +556,23 @@
     line-height: 1.55;
     color: var(--ink-soft);
   }
-  .kill-note strong { color: var(--ink); }
-  .kill-note code { font-family: var(--font-mono); font-size: 12px; }
+  .kill-note strong {
+    color: var(--ink);
+  }
+  .kill-note code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
 
   @media (max-width: 720px) {
-    .controls { grid-template-columns: 1fr; }
-    .stats { grid-template-columns: 1fr; }
-    .rows li { grid-template-columns: 60px 60px 1fr; }
-    .rows .pk { display: none; }
+    .controls {
+      grid-template-columns: 1fr;
+    }
+    .stats {
+      grid-template-columns: 1fr;
+    }
+    .rows li {
+      grid-template-columns: 90px 1fr;
+    }
   }
 </style>

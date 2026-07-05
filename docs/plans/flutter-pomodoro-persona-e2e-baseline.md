@@ -939,6 +939,14 @@ Same discipline as the Rust side of this repo: **fake and real adapters behind o
 - [ ] Copy `env.example.json` → `env.json` (gitignored) and fill `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_TEST_EMAIL`, `SUPABASE_TEST_PASSWORD`.
 - [ ] Run `make fixture-todo-smoke-live`.
 
+> **Status (2026-07, v0.1 prep):** mock mode verified — `make fixture-todo-test`
+> → 11/11 unit/widget tests pass; `make fixture-todo-smoke` → 2/2 integration
+> tests pass (boot → reject bad password → authenticate → add todo → sign out).
+> Live mode is real code, compiled always, selected only by `env.json`; the
+> four checkboxes above remain operator-gated on Supabase credentials.
+> `make fixture-todo-smoke-live` now fails fast with the exact setup steps if
+> `env.json` is absent (commit `caf3619`).
+
 ### Task 8: Todo fixture scaffold — ports, fakes, Supabase adapters, env seam
 
 **Files:**

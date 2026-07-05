@@ -155,6 +155,34 @@ impl From<ApplyOutcome> for Outcome {
     }
 }
 
+/// One `(pk, payload)` pair returned by [`NostosEngine::rows_for`]. The JS-facing
+/// projection of `InMemoryStorage`'s readback — `pk` is the row's primary key,
+/// `payload` is the opaque tuple image (the bytes the engine applied), exposed
+/// as a `Uint8Array` (matches the `Frame` payload convention).
+///
+/// Not constructable from JS: instances only flow OUT of the engine (the engine
+/// is the source of truth for row state). JS reads `entry.pk` / `entry.payload`.
+#[wasm_bindgen]
+pub struct RowEntry {
+    pk: String,
+    payload: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl RowEntry {
+    /// The row's primary key.
+    #[wasm_bindgen(getter)]
+    pub fn pk(&self) -> String {
+        self.pk.clone()
+    }
+
+    /// The opaque tuple image bytes (decode/interpret on the JS side).
+    #[wasm_bindgen(getter)]
+    pub fn payload(&self) -> Vec<u8> {
+        self.payload.clone()
+    }
+}
+
 /// The Nostos apply engine, running in-memory in the browser.
 ///
 /// Construct with `new NostosEngine()`. Feed frames; flush to commit a pending
@@ -270,6 +298,34 @@ impl NostosEngine {
         // accessor (the Storage trait itself has no row_count — it's not part of
         // the core contract; this is a JS/diagnostics convenience).
         self.inner.storage().row_count()
+    }
+
+    /// Enumerate the `(pk, payload)` pairs the engine currently holds for
+    /// `table`, sorted by pk. The readback the browser demo renders from: each
+    /// entry's `payload` is a `Uint8Array` (the opaque tuple image the engine
+    /// applied); decode/interpret on the JS side.
+    ///
+    /// This is a JS/diagnostics convenience — NOT part of the `Storage` trait
+    /// (the trait stays minimal: `checkpoint` + `apply_batch`). It reaches the
+    /// concrete `InMemoryStorage` through the engine's read-only accessor.
+    /// Deletes are excluded (a delete removes the row from the store, so its pk
+    /// is absent); the enumeration reflects the engine's *current* state, not
+    /// its event history.
+    ///
+    /// JS:
+    /// ```js
+    /// for (const entry of eng.rowsFor("tasks")) {
+    ///   console.log(entry.pk, entry.payload);  // string, Uint8Array
+    /// }
+    /// ```
+    #[wasm_bindgen(js_name = rowsFor)]
+    pub fn rows_for(&self, table: &str) -> Vec<RowEntry> {
+        self.inner
+            .storage()
+            .rows_for(table)
+            .into_iter()
+            .map(|(pk, payload)| RowEntry { pk, payload })
+            .collect()
     }
 }
 
@@ -398,6 +454,19 @@ impl NostosSocket {
         self.inner.engine.borrow().row_count()
     }
 
+    /// Enumerate the `(pk, payload)` pairs the socket's engine holds for
+    /// `table`. Mirrors `NostosEngine::rows_for` — the readback the demo renders
+    /// from. Safe because WASM is single-threaded and the JS event loop is
+    /// cooperative — `setInterval(snapshot, …)` and the WS `onmessage` pump
+    /// never run concurrently, so the `borrow_mut()` in the pump
+    /// (`transport.rs`) and this `borrow()` can't overlap (a `RefCell` panics
+    /// on re-borrow mid-`borrow_mut`; it doesn't deadlock, but the
+    /// cooperative-event-loop invariant is what keeps that from happening).
+    #[wasm_bindgen(js_name = rowsFor)]
+    pub fn rows_for(&self, table: &str) -> Vec<RowEntry> {
+        self.inner.engine.borrow().rows_for(table)
+    }
+
     /// Close the socket. The server treats this as a session end; the client
     /// keeps its checkpoint so the next `connect` resumes.
     pub fn close(&self) {
@@ -446,6 +515,71 @@ mod tests {
         let mut eng = NostosEngine::new();
         eng.set_where_sql(Some(String::new()));
         assert!(eng.where_sql.is_none());
+    }
+
+    // ---- rows_for: the readback the WASM FFI surfaces to JS ----
+    //
+    // These mirror the `InMemoryStorage::rows_for` host tests but through the
+    // `NostosEngine` wrapper + `RowEntry` projection, so the JS-boundary types
+    // (the `Vec<u8>` payload, the `RowEntry` shape) are pinned. The engine
+    // feeds frames via its public `feed` (the same path JS takes), flushes, and
+    // asserts the enumeration.
+
+    fn feed_ins(eng: &mut NostosEngine, lsn: f64, table: &str, pk: &str, payload: &[u8]) {
+        let frame = Frame::new(lsn, "insert", table, pk, Some(payload.to_vec()), None);
+        // A standalone frame buffers; the outcome is None until flush.
+        assert!(eng.feed(frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn rows_for_returns_flushed_rows_in_pk_order() {
+        let mut eng = NostosEngine::new();
+        // Insert out of pk order — the accessor hands back sorted.
+        feed_ins(&mut eng, 10.0, "tasks", "2", b"bob");
+        feed_ins(&mut eng, 20.0, "tasks", "1", b"alice");
+        feed_ins(&mut eng, 30.0, "users", "9", b"carol"); // other table
+        eng.flush().unwrap();
+
+        let rows = eng.rows_for("tasks");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pk(), "1");
+        assert_eq!(rows[0].payload(), b"alice");
+        assert_eq!(rows[1].pk(), "2");
+        assert_eq!(rows[1].payload(), b"bob");
+
+        // A table with no rows yields an empty Vec.
+        assert!(eng.rows_for("absent").is_empty());
+    }
+
+    #[test]
+    fn rows_for_empty_before_any_flush() {
+        // Buffered-but-not-flushed frames are NOT yet in the store, so the
+        // readback is empty until a commit lands.
+        let mut eng = NostosEngine::new();
+        feed_ins(&mut eng, 10.0, "tasks", "1", b"x");
+        assert!(
+            eng.rows_for("tasks").is_empty(),
+            "buffered, not yet applied"
+        );
+        eng.flush().unwrap();
+        assert_eq!(eng.rows_for("tasks").len(), 1);
+    }
+
+    #[test]
+    fn rows_for_excludes_deleted_rows() {
+        let mut eng = NostosEngine::new();
+        feed_ins(&mut eng, 10.0, "tasks", "1", b"keep");
+        feed_ins(&mut eng, 20.0, "tasks", "2", b"drop");
+        eng.flush().unwrap();
+
+        let del = Frame::new(30.0, "delete", "tasks", "2", None, None);
+        eng.feed(del).unwrap();
+        eng.flush().unwrap();
+
+        let rows = eng.rows_for("tasks");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pk(), "1");
+        assert_eq!(rows[0].payload(), b"keep");
     }
 }
 

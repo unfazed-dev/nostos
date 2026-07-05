@@ -232,4 +232,11 @@ fixture-todo-smoke:
 ## fixture-todo-smoke-live: same smoke against real Supabase (needs env.json — see env.example.json)
 .PHONY: fixture-todo-smoke-live
 fixture-todo-smoke-live:
+	@if [ ! -f fixtures/flutter/todo/env.json ]; then \
+		echo "ERROR: fixtures/flutter/todo/env.json not found."; \
+		echo "       Copy env.example.json → env.json and fill SUPABASE_URL / SUPABASE_ANON_KEY /"; \
+		echo "       SUPABASE_TEST_EMAIL / SUPABASE_TEST_PASSWORD from your Supabase project."; \
+		echo "       Apply fixtures/flutter/todo/supabase/schema.sql to your project first."; \
+		exit 1; \
+	fi
 	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos --dart-define-from-file=env.json

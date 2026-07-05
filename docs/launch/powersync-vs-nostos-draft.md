@@ -41,16 +41,18 @@ that.
 
 | Metric | Nostos | PowerSync | Same denominator? |
 |--------|-------|-----------|-------------------|
-| **1k-client fan-out** | **142,336 ops/sec @ 0% drops** | ~2–4k ops/sec (their published server ceiling) | ✅ both are server-process replication rates |
+| **1k-client fan-out** | **833,308 ops/sec @ 0% drops** | ~2–4k ops/sec (their published server ceiling) | ✅ both are server-process replication rates |
 | 5k-client fan-out | 660k ops/sec @ 0.91% drops | not published | Nostos-only |
 | 10k-client fan-out (probe) | ~483k ops/sec @ ~61.4% drops | not published | Nostos-only |
 | Predicate eval (microbench) | ~1.5M evals/sec through 10k predicates | not published | eval-only — **never** compared to PowerSync's end-to-end number |
 
-**The 35.6× headline is the 1k-client, 0%-drop, server-fan-out number.** That
-ratio is real. The 10k-client story is honest: throughput stays high but the
-*current* architecture drops ~61% of frames at 10k because `FanOutService::run`
-does a per-event full-store scan. The fix (table-sharded router) is scoped for
-Phase 2; the measurement, not the marketing, says so.
+**The 208× headline is the 1k-client, 0%-drop, server-fan-out number (current,
+2026-07).** That ratio is real. The original Week-1 proof was 142k @ 35.6×; the
+v0.1 WS write-path + router work multiplied the 1k figure ~6×. The 10k-client
+story is honest: throughput stays high but the *current* architecture drops
+~61% of frames at 10k because `FanOutService::run` does a per-event full-store
+scan. The fix (table-sharded router) is scoped for Phase 2; the measurement,
+not the marketing, says so.
 
 A same-Postgres-source, same-client-count, same-apply-cost live race against
 PowerSync's self-host stack is the next methodological step. Until that

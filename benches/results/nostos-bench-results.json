@@ -1,22 +1,22 @@
 {
   "environment": {
-    "rustc": "rustc 0.1.0 (nostos-bench build)",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "profile": "small",
-    "buffer": 2048,
-    "events": 1000,
-    "hostname": "unknown",
+    "buffer": 1024,
+    "events": 100000,
+    "hostname": "unfazed-macbook-air.local",
     "cpu_cores": 10
   },
   "runs": [
     {
       "clients": 1000,
-      "events_total": 1000,
-      "events_delivered": 1000000,
-      "ops_per_sec": 142335.98894645582,
-      "drop_rate": 0.0,
+      "events_total": 100000,
+      "events_delivered": 99997199,
+      "ops_per_sec": 833307.5834633043,
+      "drop_rate": 0.000028009999999967228,
       "p50_us": 1.0,
       "p99_us": 2.0,
-      "elapsed_secs": 7.025630042,
+      "elapsed_secs": 120.000346792,
       "profile": "small"
     }
   ],

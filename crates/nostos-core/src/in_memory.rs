@@ -47,6 +47,27 @@ impl InMemoryStorage {
             .map(Vec::as_slice)
     }
 
+    /// Enumerate the `(pk, payload_bytes)` pairs the store holds for `table`,
+    /// sorted by pk (BTreeMap iteration is already sorted; this preserves it).
+    ///
+    /// A diagnostic accessor — NOT part of the [`Storage`] trait (the trait
+    /// stays minimal: `checkpoint` + `apply_batch`). Exists so the WASM FFI
+    /// (`nostos-ffi-wasm::NostosEngine`) and the browser demo can render the
+    /// engine's *current state* without re-implementing the apply path. Deletes
+    /// are naturally excluded (they `remove` the row, so the pk is absent).
+    #[must_use]
+    pub fn rows_for(&self, table: &str) -> Vec<(String, Vec<u8>)> {
+        // `range((table, "")..)` would be cleaner, but it can't express "all
+        // keys whose first element == table" without a sentinel upper bound
+        // (and `(table, \u{10FFFF})` is ugly). The `BTreeMap` is small (it's a
+        // single client's view), so a filtered scan is fine and obvious.
+        self.rows
+            .iter()
+            .filter(|((t, _), _)| t == table)
+            .map(|((_, pk), bytes)| (pk.clone(), bytes.clone()))
+            .collect()
+    }
+
     /// How many rows the store holds (for test assertions).
     #[must_use]
     pub fn row_count(&self) -> usize {
@@ -259,5 +280,78 @@ mod tests {
         .unwrap();
         assert_eq!(s.row_count(), 0);
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(5));
+    }
+
+    #[test]
+    fn rows_for_returns_inserted_rows_in_pk_order() {
+        // The readback accessor the WASM FFI + demo render from. It must return
+        // the (pk, payload) pairs for the table, sorted by pk (BTreeMap order),
+        // and exclude other tables.
+        let mut s = InMemoryStorage::new();
+        // Insert out of pk order — the accessor must still hand back sorted.
+        let ops = [
+            ins("tasks", "2", b"bob"),
+            ins("tasks", "1", b"alice"),
+            ins("users", "9", b"carol"), // different table — must be excluded
+        ];
+        s.apply_batch(&ops, Lsn::new(10)).unwrap();
+
+        let rows = s.rows_for("tasks");
+        assert_eq!(
+            rows,
+            vec![
+                ("1".to_string(), b"alice".to_vec()),
+                ("2".to_string(), b"bob".to_vec()),
+            ],
+            "sorted by pk, excludes other tables"
+        );
+
+        // A table with no rows yields an empty Vec (not an error).
+        assert!(s.rows_for("absent").is_empty());
+    }
+
+    #[test]
+    fn rows_for_excludes_deleted_rows() {
+        // A delete `remove`s the row from the BTreeMap, so the enumeration must
+        // no longer surface it — the readback reflects the engine's *current*
+        // state, not its history.
+        let mut s = InMemoryStorage::new();
+        s.apply_batch(
+            &[ins("tasks", "1", b"keep"), ins("tasks", "2", b"drop")],
+            Lsn::new(10),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[RowOp::Delete {
+                table: "tasks".into(),
+                pk: "2".into(),
+            }],
+            Lsn::new(20),
+        )
+        .unwrap();
+
+        let rows = s.rows_for("tasks");
+        assert_eq!(rows, vec![("1".to_string(), b"keep".to_vec())]);
+    }
+
+    #[test]
+    fn rows_for_reflects_update_in_place() {
+        // An update overwrites the payload by pk; the enumeration must show the
+        // latest bytes, not the original insert.
+        let mut s = InMemoryStorage::new();
+        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
+            .unwrap();
+        s.apply_batch(
+            &[RowOp::Update {
+                table: "tasks".into(),
+                pk: "1".into(),
+                payload: Bytes::copy_from_slice(b"v2"),
+            }],
+            Lsn::new(20),
+        )
+        .unwrap();
+
+        let rows = s.rows_for("tasks");
+        assert_eq!(rows, vec![("1".to_string(), b"v2".to_vec())]);
     }
 }
