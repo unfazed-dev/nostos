@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Fill sdk/nostos_flutter/hook/prebuilt.json's per-target `url`/`sha256`
+entries from a release's built artifacts, and write the same content to
+release-prebuilt-manifest.json (a standalone release asset).
+
+Invoked by .github/workflows/release.yml's `update-manifest` job — see that
+job's comment block for the full manifest-update flow (why this can't be a
+straight auto-commit to `main`). Lives under packaging/, not .github/scripts/,
+so release.yml's supporting code stays alongside the rest of the release
+tooling (packaging/homebrew/nostos.rb).
+
+Usage: fill_prebuilt_manifest.py <base_url> <ref_name>
+  base_url: the release's asset download prefix, e.g.
+    https://github.com/nostos-sync/nostos/releases/download/v0.1.0
+  ref_name: the tag name, e.g. v0.1.0
+
+Expects a `dist/` directory (relative to cwd) containing a
+`<filename>.sha256` file for every filename in KEY_TO_FILENAME below — see
+.github/workflows/release.yml's flutter-android/flutter-ios/flutter-macos
+jobs for what produces them.
+"""
+import json
+import pathlib
+import sys
+
+KEY_TO_FILENAME = {
+    "macos-universal": "libnostos_flutter_rust-macos-universal.dylib",
+    "android-arm64-v8a": "libnostos_flutter_rust-android-arm64-v8a.so",
+    "android-armeabi-v7a": "libnostos_flutter_rust-android-armeabi-v7a.so",
+    "android-x86_64": "libnostos_flutter_rust-android-x86_64.so",
+    "ios-device-arm64": "libnostos_flutter_rust-ios-device-arm64.dylib",
+    "ios-simulator-arm64": "libnostos_flutter_rust-ios-simulator-arm64.dylib",
+    "ios-simulator-x64": "libnostos_flutter_rust-ios-simulator-x64.dylib",
+}
+
+
+def main() -> None:
+    base_url, ref_name = sys.argv[1], sys.argv[2]
+    dist = pathlib.Path("dist")
+    manifest_path = pathlib.Path("sdk/nostos_flutter/hook/prebuilt.json")
+
+    manifest = json.loads(manifest_path.read_text())
+    manifest["version"] = ref_name.lstrip("v")
+
+    for key, filename in KEY_TO_FILENAME.items():
+        sha_file = dist / f"{filename}.sha256"
+        manifest["artifacts"][key] = {
+            "url": f"{base_url}/{filename}",
+            "sha256": sha_file.read_text().strip(),
+        }
+
+    out = json.dumps(manifest, indent=2) + "\n"
+    pathlib.Path("release-prebuilt-manifest.json").write_text(out)
+    manifest_path.write_text(out)
+
+
+if __name__ == "__main__":
+    main()
