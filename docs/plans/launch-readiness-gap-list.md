@@ -84,6 +84,21 @@ this on first contact (W5 did). Typed payload mapping is deferred per
 ADR-0016/0012; before launch either implement basic type mapping or document
 the string-typing contract loudly in QUICKSTART + SDK README.
 
+*F5 research verdict (2026-07-12, industry survey: pgoutput/Debezium/PowerSync/
+ElectricSQL/Supabase-Realtime/wal2json/RFC 8259):* implement **server-side
+OID-keyed mapping inside PgReplicator** — pgoutput Relation messages already
+carry column type OIDs (`RelationMeta` currently discards them; pg.rs:89,842),
+so no client schema artifact is needed (preserves the anti-PowerSync
+differentiator; matches Supabase Realtime + current ElectricSQL direction).
+Mapping: bool→bool; int2/4→number; float→number with NaN/±Inf→string guard
+(RFC 8259 forbids them); numeric/decimal→string (arbitrary precision);
+timestamps→RFC 3339 UTC strings; uuid/enum→string; bytea→base64;
+json(b)→serialized string; arrays deferred. int8: number vs string is the one
+contested call (JS 2^53 hazard vs Dart/SQLite exact int64) — decision recorded
+in the F5 ADR when implemented. Predicate engine verified NOT at risk (it
+already coerces text numerically; predicate.rs:538). No released clients exist,
+so changing the wire NOW is free; after launch it's a breaking change.
+
 ## F. New blockers surfaced by the Supabase bar
 
 | # | Item | Evidence |
