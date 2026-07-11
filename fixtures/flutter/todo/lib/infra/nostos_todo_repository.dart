@@ -94,13 +94,13 @@ class NostosTodoRepository implements TodoRepository {
     );
   }
 
-  /// `PgReplicator::tuple_to_json_payload` (crates/nostos-infra) renders
-  /// every column as a JSON string (pgoutput hands over text, and the
-  /// opaque-bytes payload contract — ADR-0016 — defers typed column
-  /// decoding to the caller until ADR-0012 ships) — so a real Postgres
-  /// source delivers `"done":"false"`, not the JSON boolean a mock/fake
-  /// source might use. Accept either shape rather than crashing on the
-  /// real one.
+  /// `PgReplicator::tuple_to_json_payload` (crates/nostos-infra) now renders
+  /// a Postgres `boolean` column as a real JSON bool (ADR-0019's OID-keyed
+  /// mapping) — a real Postgres source delivers `"done":true`, matching a
+  /// mock/fake source. The `String` arm below is kept as defensive
+  /// passthrough (e.g. for a hand-rolled test payload or a future non-pg
+  /// source using the pre-ADR-0019 shape), not because the real wire needs
+  /// it anymore.
   static bool _asBool(Object? value) => switch (value) {
     bool b => b,
     String s => s == 'true',

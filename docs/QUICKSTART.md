@@ -73,6 +73,14 @@ dev` picked up from `.env`'s `NOSTOS_SUPABASE_JWT_SECRET` — see
 `fixtures/flutter/todo/tool/mint_jwt.sh` for a working example (`sub` becomes
 both account id and tenant id).
 
+**Wire types** (ADR-0019): `watch()` rows carry native JSON types — a
+Postgres `boolean` is a Dart `bool`, `int2`/`int4` are `int`, and so on. Two
+precision-preserving exceptions arrive as `String`: `int8`/`numeric`/`money`
+(can exceed the 2^53 range a `double`/JS `number` holds exactly — parse with
+`int.parse`/a `Decimal` type, never `num.parse`), and `bytea` (base64 —
+decode with `base64Decode`). Timestamps arrive as RFC 3339 UTC strings
+(`...Z`) — parse with `DateTime.parse`.
+
 ### The full working example
 
 `fixtures/flutter/todo` is a real Flutter app with three interchangeable

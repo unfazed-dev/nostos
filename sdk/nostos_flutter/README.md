@@ -79,6 +79,26 @@ actually runs. `supabase_flutter`'s session token auto-refreshes; re-call
   Reconnect (with backoff) is automatic; this stream is a UI signal, not
   something you need to drive.
 
+### Wire types
+
+Row values arrive natively typed (ADR-0019): a Postgres `boolean` column is a
+Dart `bool`, `int2`/`int4` are `int`, and so on — `payload`/`watch()` rows are
+`Map<String, dynamic>` with real JSON types, not the earlier all-string
+shape. Two deliberate exceptions, both precision-preserving:
+
+- **`int8`, `oid`, `numeric`, and `money` arrive as `String`, not `num`.**
+  `int8` can exceed 2^53 (JS/`dart2js` `int`'s exact-integer ceiling — Flutter
+  Web is in scope, so this isn't hypothetical), and `numeric` needs arbitrary
+  precision a `double` can't hold. **Never `num.parse`/`double.parse` these
+  as if they were pre-parsed numbers** — use `int.parse` for `int8`/`oid`
+  (exact in that range) or a `Decimal` type for `numeric`/`money`.
+- **`bytea` arrives as a base64 `String`** (Postgres's own hex `\x...` text
+  form, re-encoded) — decode with `base64Decode` from `dart:convert`.
+
+Timestamps (`timestamp`, `timestamptz`, `timetz`) arrive as RFC 3339 UTC
+strings (`...Z`) — parse with `DateTime.parse`. See ADR-0019 for the full
+per-type mapping table and the `int8`-as-string rationale.
+
 ## Platforms
 
 | Platform | Status |

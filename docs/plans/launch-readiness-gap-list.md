@@ -93,9 +93,13 @@ differentiator; matches Supabase Realtime + current ElectricSQL direction).
 Mapping: bool→bool; int2/4→number; float→number with NaN/±Inf→string guard
 (RFC 8259 forbids them); numeric/decimal→string (arbitrary precision);
 timestamps→RFC 3339 UTC strings; uuid/enum→string; bytea→base64;
-json(b)→serialized string; arrays deferred. int8: number vs string is the one
-contested call (JS 2^53 hazard vs Dart/SQLite exact int64) — decision recorded
-in the F5 ADR when implemented. Predicate engine verified NOT at risk (it
+json(b)→serialized string; arrays deferred. int8/oid/numeric/money→**string**,
+settled 2026-07-12 by the non-CDC industry cross-check (protobuf JSON mapping,
+Google Discovery, Twitter id_str, OpenAPI int64 format registry, GraphQL,
+Stripe/Microsoft opaque-ID practice — unanimous: >2^53-capable ints are
+strings on uncontrolled JSON wires; and dart2js `int` is 2^53-bounded, so
+Flutter Web puts even our official client in the vulnerable population).
+Predicate engine verified NOT at risk (it
 already coerces text numerically; predicate.rs:538). No released clients exist,
 so changing the wire NOW is free; after launch it's a breaking change.
 
