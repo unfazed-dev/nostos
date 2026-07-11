@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use nostos_domain::{Lsn, Predicate, Principal, ReplicationEvent, SessionId, SyncSession};
+use nostos_domain::{
+    Lsn, Predicate, Principal, ReplicationEvent, SessionId, SyncSession, TenantScope,
+};
 
 /// The outcome of attempting to deliver an event to a session.
 ///
@@ -217,6 +219,18 @@ pub trait SyncAuth: Send + Sync {
 /// built, and MUST bind values as parameters (`$1…$n`) — never string-interpolate
 /// them. Authenticated clients can still attempt injection; the allowlist +
 /// regex + parameters are defense-in-depth. See ADR-0013.
+///
+/// **Tenant scoping (ADR-0018):** the `tenant` parameter, when `Some`, is the
+/// server-computed [`TenantScope`] for this write — never the client's own
+/// claim (the transport derives it from the authenticated [`Principal`] via
+/// [`Principal::tenant_scope`], the same seam the read path uses). An
+/// implementation that honors it MUST: (1) force-stamp the tenant column in
+/// an upserted payload to `tenant.value`, overwriting any client-supplied
+/// value; (2) refuse to let an upsert change ownership of a row that already
+/// belongs to a different tenant (reject, don't silently no-op — see
+/// `PgWriteBack`); (3) scope a delete to `tenant.value` so a client can never
+/// delete another tenant's row. `None` means no tenant enforcement is active
+/// (anonymous/single-tenant deploys) — behavior is unchanged from pre-ADR-0018.
 #[async_trait]
 pub trait WriteBack: Send + Sync {
     /// Upsert one row: `payload_json` is a JSON object of column → value, the
@@ -227,18 +241,37 @@ pub trait WriteBack: Send + Sync {
     /// - [`WriteBackError::TableNotAllowed`] if `table` is not in the allowlist.
     /// - [`WriteBackError::InvalidPayload`] if `payload_json` is not a JSON
     ///   object, or contains a column name that fails identifier validation.
+    /// - [`WriteBackError::Forbidden`] if `tenant` is `Some` and the target row
+    ///   already exists under a different tenant (ADR-0018).
     /// - [`WriteBackError::Backend`] for any underlying database error.
-    async fn upsert(&self, table: &str, pk: &str, payload_json: &str)
-        -> Result<(), WriteBackError>;
+    async fn upsert(
+        &self,
+        table: &str,
+        pk: &str,
+        payload_json: &str,
+        tenant: Option<TenantScope<'_>>,
+    ) -> Result<(), WriteBackError>;
 
-    /// Delete by primary key. A missing row is a success (idempotent) — so a
-    /// redelivery of a delete after the row is already gone does not surface
-    /// an error to the client.
+    /// Delete by primary key, scoped to `tenant` when `Some` (ADR-0018). A
+    /// missing row — or, when tenant-scoped, a row that belongs to a
+    /// different tenant and therefore cannot be observed to exist — is a
+    /// success (idempotent), so a redelivery of a delete after the row is
+    /// already gone does not surface an error to the client. A row that DOES
+    /// exist but under a different tenant is a [`WriteBackError::Forbidden`]
+    /// rejection, not a silent no-op (see `PgWriteBack`'s doc for the
+    /// existence-disclosure trade-off this implies).
     ///
     /// # Errors
     /// - [`WriteBackError::TableNotAllowed`] if `table` is not in the allowlist.
+    /// - [`WriteBackError::Forbidden`] if `tenant` is `Some` and the row exists
+    ///   under a different tenant (ADR-0018).
     /// - [`WriteBackError::Backend`] for any underlying database error.
-    async fn delete(&self, table: &str, pk: &str) -> Result<(), WriteBackError>;
+    async fn delete(
+        &self,
+        table: &str,
+        pk: &str,
+        tenant: Option<TenantScope<'_>>,
+    ) -> Result<(), WriteBackError>;
 }
 
 /// Why a [`WriteBack`] call failed. Surfaced to the client as the `error`
@@ -262,6 +295,12 @@ pub enum WriteBackError {
     /// both are validated before any SQL is constructed.
     #[error("invalid payload: {0}")]
     InvalidPayload(String),
+    /// A tenant-scoped write (ADR-0018) targeted a row that exists under a
+    /// DIFFERENT tenant than the authenticated principal's. The write is
+    /// rejected outright — never silently applied and never silently
+    /// dropped — so the client learns its write did not take effect.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     /// The underlying database errored (connection, syntax the validator
     /// should have caught, constraint violation, …). The wrapped string is the
     /// backend's message; adapters MUST scrub it of secrets before returning.

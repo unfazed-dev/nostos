@@ -223,6 +223,13 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         );
     }
 
+    // Clone the principal for the write path (ADR-0018) BEFORE it's moved into
+    // the session below — the read path (predicate injection) and the write
+    // path (tenant-scoped stamping/guards) both need it, from the same
+    // authenticated identity.
+    let write_principal = principal.clone();
+    let tenant_column_for_writes = state.tenant_column.clone();
+
     let session = SyncSession::new_authenticated(predicate, principal);
 
     // 5. Register with the store via the manager.
@@ -331,6 +338,8 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
                         &ack_sink,
                         &write_back,
                         &write_tables,
+                        &write_principal,
+                        tenant_column_for_writes.as_deref(),
                         &server_frames_tx,
                     )
                     .await;
@@ -341,6 +350,8 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
                         &ack_sink,
                         &write_back,
                         &write_tables,
+                        &write_principal,
+                        tenant_column_for_writes.as_deref(),
                         &server_frames_tx,
                     )
                     .await;
@@ -364,7 +375,9 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
 /// - `Ack` → stamp the sink's ack cursor (drives ack-driven slot advance).
 /// - `Write` → enforce the table allowlist FIRST, then call the injected
 ///   write-back port and queue a `WriteResult` ack frame to the writer task
-///   (ADR-0013).
+///   (ADR-0013). The write-back call is tenant-scoped exactly like the read
+///   path (ADR-0018): `principal.tenant_scope(tenant_column)` is the same
+///   seam `build_predicate` uses, so the two enforcement points can't drift.
 ///
 /// Anything else (a stray second subscribe, malformed) is ignored — the
 /// session is already subscribed. `Write`-before-`Subscribe` is impossible
@@ -375,6 +388,8 @@ async fn handle_client_message(
     sink: &TokioEventSink,
     write_back: &Arc<dyn WriteBack>,
     allowlist: &HashSet<String>,
+    principal: &Principal,
+    tenant_column: Option<&str>,
     server_frames_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
 ) {
     match decode_client_message(data) {
@@ -403,10 +418,15 @@ async fn handle_client_message(
                 debug!(table = %table, "write rejected: table not writable");
                 return;
             }
+            // ADR-0018: the tenant scope, if enforcement is active, travels
+            // with the write so the adapter can force-stamp/guard by it —
+            // never trust anything the client sent for the tenant column.
+            let tenant = principal.tenant_scope(tenant_column);
             // Dispatch to the write-back port. The result is reported back to
             // the client as a WriteResult frame; the written row then flows
             // out through normal replication to every subscriber.
-            let result = dispatch_write(write_back, &table, &op, &pk, payload.as_ref()).await;
+            let result =
+                dispatch_write(write_back, &table, &op, &pk, payload.as_ref(), tenant).await;
             let (ok, error) = match result {
                 Ok(()) => (true, None),
                 Err(e) => (false, Some(e.to_string())),
@@ -438,13 +458,16 @@ async fn handle_client_message(
 /// Translate a `Write` client message into a `WriteBack` port call. The op
 /// string is `"upsert" | "delete"`; anything else is an `InvalidPayload`. The
 /// payload (a `serde_json::Value`) is rendered back to JSON text for the
-/// upsert path (the port takes `&str`).
+/// upsert path (the port takes `&str`). `tenant` (ADR-0018) is forwarded
+/// verbatim to the adapter — `dispatch_write` doesn't interpret it, just
+/// relays the scope the caller already computed from the principal.
 async fn dispatch_write(
     write_back: &Arc<dyn WriteBack>,
     table: &str,
     op: &str,
     pk: &str,
     payload: Option<&serde_json::Value>,
+    tenant: Option<nostos_domain::TenantScope<'_>>,
 ) -> Result<(), WriteBackError> {
     match op {
         "upsert" => {
@@ -461,9 +484,9 @@ async fn dispatch_write(
                 ));
             }
             let json = value.to_string();
-            write_back.upsert(table, pk, &json).await
+            write_back.upsert(table, pk, &json, tenant).await
         }
-        "delete" => write_back.delete(table, pk).await,
+        "delete" => write_back.delete(table, pk, tenant).await,
         other => Err(WriteBackError::InvalidPayload(format!(
             "unknown op: {other} (expected 'upsert' or 'delete')"
         ))),
@@ -485,13 +508,16 @@ async fn dispatch_write(
 /// wraps the client expression and a `where_sql` can never shed it. A parse
 /// failure is returned as `Err(reason)`; the caller closes the socket with that
 /// reason (prefixed `"invalid where_sql: "`) before any event flows.
+///
+/// The IF-to-enforce decision is [`Principal::tenant_scope`] — the same seam
+/// the write path (`dispatch_write`, ADR-0018) calls, so the read and write
+/// enforcement conditions cannot drift apart.
 fn build_predicate(
     subscribe: &SubscribeRequest,
     principal: &Principal,
     tenant_column: Option<&str>,
 ) -> Result<Predicate, String> {
-    let enforce_tenant = tenant_column.is_some() && !principal.is_anonymous();
-    let tenant_col = tenant_column.unwrap_or("");
+    let scope = principal.tenant_scope(tenant_column);
 
     // Start match-all, then fold in the client's own filters — EXCLUDING any on
     // the tenant column, which the server overrides with the principal's real
@@ -500,7 +526,7 @@ fn build_predicate(
     // is structurally identical to the historical `Predicate::eq` form.
     let mut p = Predicate::all(&subscribe.table);
     for f in &subscribe.filters {
-        if enforce_tenant && f.column == tenant_col {
+        if scope.is_some_and(|s| f.column == s.column) {
             continue; // server injects the real tenant value below
         }
         p = p.and_eq(&f.column, ColumnValue::text(&f.value));
@@ -527,8 +553,8 @@ fn build_predicate(
     // Server-enforced tenant scoping (ADR-0011). Always injected for an
     // authenticated principal when a tenant column is configured. This stays
     // LAST so it wraps everything above (filters + where_sql).
-    if enforce_tenant {
-        p = p.and_eq(tenant_col, ColumnValue::text(&principal.tenant_id));
+    if let Some(s) = scope {
+        p = p.and_eq(s.column, ColumnValue::text(s.value));
     }
     Ok(p)
 }

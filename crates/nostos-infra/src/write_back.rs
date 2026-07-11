@@ -42,6 +42,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use nostos_application::ports::{WriteBack, WriteBackError};
+use nostos_domain::TenantScope;
 
 /// Parse the comma-separated `NOSTOS_WRITE_TABLES` env value into a `HashSet`
 /// of bare table names. Empty entries are skipped; whitespace is trimmed.
@@ -89,13 +90,19 @@ impl WriteBack for NoWriteBack {
         _table: &str,
         _pk: &str,
         _payload_json: &str,
+        _tenant: Option<TenantScope<'_>>,
     ) -> Result<(), WriteBackError> {
         Err(WriteBackError::Backend(
             "write-back requires pg replicator".to_string(),
         ))
     }
 
-    async fn delete(&self, _table: &str, _pk: &str) -> Result<(), WriteBackError> {
+    async fn delete(
+        &self,
+        _table: &str,
+        _pk: &str,
+        _tenant: Option<TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
         Err(WriteBackError::Backend(
             "write-back requires pg replicator".to_string(),
         ))
@@ -109,6 +116,7 @@ impl WriteBack for NoWriteBack {
 mod pg {
     use async_trait::async_trait;
     use nostos_application::ports::{WriteBack, WriteBackError};
+    use nostos_domain::TenantScope;
     use std::collections::HashSet;
     use std::fmt::Write as _; // ponytail: single write!() for the $n placeholder
     use std::sync::Arc;
@@ -228,6 +236,7 @@ mod pg {
             table: &str,
             pk: &str,
             payload_json: &str,
+            tenant: Option<TenantScope<'_>>,
         ) -> Result<(), WriteBackError> {
             // 1. ALLOWLIST FIRST. A table not in NOSTOS_WRITE_TABLES can never
             //    reach the SQL builder.
@@ -247,11 +256,26 @@ mod pg {
 
             // 3. Parse + validate the payload. Must be a JSON object; every key
             //    (a column name) must pass the identifier regex.
-            let payload: serde_json::Value = serde_json::from_str(payload_json)
+            let mut payload: serde_json::Value = serde_json::from_str(payload_json)
                 .map_err(|e| WriteBackError::InvalidPayload(format!("not JSON: {e}")))?;
-            let obj = payload.as_object().ok_or_else(|| {
+            let obj = payload.as_object_mut().ok_or_else(|| {
                 WriteBackError::InvalidPayload("payload must be a JSON object".to_string())
             })?;
+
+            // 3b. ADR-0018: force-stamp the tenant column with the principal's
+            //     tenant value — overwriting any client-supplied value for that
+            //     key. This is NOT a client-attested field once tenant scoping
+            //     is active; it becomes just another column in the INSERT/ON
+            //     CONFLICT SET list below, so it flows through the same
+            //     identifier-regex + parameterized-value path as every other
+            //     column (no special-casing of the SQL builder needed).
+            //     ponytail: assumes `tenant.column != PK_COLUMN` (an operator
+            //     misconfiguring `NOSTOS_TENANT_COLUMN=id` — not attacker-
+            //     reachable — would make the stamped value get filtered back
+            //     out by the `!= PK_COLUMN` guard below, so the ON CONFLICT
+            //     guard's `rows == 0` check could misfire as a false
+            //     `Forbidden`). Not validated; no design partner has hit it.
+            stamp_tenant_column(obj, tenant);
 
             // Order columns deterministically (sorted) so the same payload
             // always builds the same SQL — reproducible + cacheable. The pk
@@ -311,6 +335,23 @@ mod pg {
 
             // ON CONFLICT DO UPDATE SET "col"=EXCLUDED."col", ... for each
             // payload column (NOT the pk — the pk is the conflict target).
+            //
+            // ADR-0018 tenant guard: when `tenant` is `Some`, the tenant column
+            // is always present in `columns` (stamped in step 3b above), so
+            // `conflict_sets` is never empty here — the DO NOTHING branch below
+            // is unreachable under tenant scoping. We add
+            // `WHERE "table"."tenant_col" = EXCLUDED."tenant_col"` to the DO
+            // UPDATE: since EXCLUDED's tenant column is always the PRINCIPAL's
+            // tenant value (never the client's own claim), this guard reads as
+            // "only update if the row ALREADY belongs to this principal's
+            // tenant" — a conflict against a row owned by a different tenant
+            // leaves that row untouched (0 rows affected), which we detect
+            // below and turn into an explicit `Forbidden` rejection rather
+            // than a silent ownership change. The existing-row side MUST be
+            // qualified with the table name — Postgres rejects a bare
+            // `"tenant_col" = EXCLUDED."tenant_col"` as an ambiguous column
+            // reference (it can't tell which side of the comparison the bare
+            // name refers to).
             let mut conflict_sets: Vec<String> = Vec::with_capacity(columns.len());
             for col in &columns {
                 let q = quote_ident(col);
@@ -318,11 +359,18 @@ mod pg {
             }
             let on_conflict = if conflict_sets.is_empty() {
                 // Payload had only... nothing? No columns to update. A pure-pk
-                // upsert is a no-op ON CONFLICT DO NOTHING.
+                // upsert is a no-op ON CONFLICT DO NOTHING. (Never reached when
+                // `tenant` is `Some` — see the guard note above.)
                 "ON CONFLICT DO NOTHING".to_string()
             } else {
+                let guard = tenant
+                    .map(|t| {
+                        let q = quote_ident(t.column);
+                        format!(" WHERE {quoted_table}.{q} = EXCLUDED.{q}")
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "ON CONFLICT ({quoted_pk}) DO UPDATE SET {sets}",
+                    "ON CONFLICT ({quoted_pk}) DO UPDATE SET {sets}{guard}",
                     sets = conflict_sets.join(", ")
                 )
             };
@@ -344,8 +392,20 @@ mod pg {
                 all_values.iter().map(SqlValue::as_tosql).collect();
             let result = client.execute(&sql, &params).await;
             match result {
-                Ok(_) => {
+                Ok(rows) => {
                     self.return_client(client).await;
+                    // A fresh insert (no conflict) always affects exactly one
+                    // row regardless of the guard, so 0 rows here can ONLY
+                    // happen when tenant scoping is active AND the ON CONFLICT
+                    // WHERE guard fired — i.e. the pk already exists under a
+                    // DIFFERENT tenant. Reject explicitly (ADR-0018): the
+                    // client's write did not take effect and must not be told
+                    // otherwise.
+                    if tenant.is_some() && rows == 0 {
+                        return Err(WriteBackError::Forbidden(format!(
+                            "row {pk} in {table} belongs to a different tenant"
+                        )));
+                    }
                     Ok(())
                 }
                 Err(e) => {
@@ -355,7 +415,12 @@ mod pg {
             }
         }
 
-        async fn delete(&self, table: &str, pk: &str) -> Result<(), WriteBackError> {
+        async fn delete(
+            &self,
+            table: &str,
+            pk: &str,
+            tenant: Option<TenantScope<'_>>,
+        ) -> Result<(), WriteBackError> {
             // 1. ALLOWLIST FIRST.
             if !self.allowlist.contains(table) {
                 return Err(WriteBackError::TableNotAllowed(table.to_string()));
@@ -367,21 +432,83 @@ mod pg {
                 )));
             }
 
-            // 3. Build + execute. pk bound as $1 (NEVER interpolated), typed by
-            //    inference (uuid pk → Uuid). A missing row is success
-            //    (idempotent) — Postgres's DELETE returns 0 rows affected,
-            //    which is not an error.
             let quoted_table = quote_ident(table);
             let quoted_pk = quote_ident(PK_COLUMN);
-            let sql = format!("DELETE FROM {quoted_table} WHERE {quoted_pk} = $1");
 
+            // 3a. No tenant scoping active: unchanged v1 behavior. pk bound as
+            //     $1 (NEVER interpolated), typed by inference (uuid pk → Uuid).
+            //     A missing row is success (idempotent) — Postgres's DELETE
+            //     returns 0 rows affected, which is not an error.
+            let Some(scope) = tenant else {
+                let sql = format!("DELETE FROM {quoted_table} WHERE {quoted_pk} = $1");
+                let client = self.client().await?;
+                let pk_value = SqlValue::from_pk(pk);
+                let params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [pk_value.as_tosql()];
+                return match client.execute(&sql, &params).await {
+                    Ok(_) => {
+                        self.return_client(client).await;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.drop_client().await;
+                        Err(WriteBackError::Backend(e.to_string()))
+                    }
+                };
+            };
+
+            // 3b. ADR-0018 tenant-scoped delete: the DELETE is constrained to
+            //     `pk = $1 AND tenant_col = $2`, so it can NEVER remove a row
+            //     belonging to a different tenant. But a bare 0-rows-affected
+            //     result is ambiguous — it means EITHER "no such row" (keep the
+            //     idempotent-delete contract: success) OR "that row exists, but
+            //     under someone else's tenant" (must be a clear rejection, not
+            //     a silent no-op — the plan's explicit ask). We distinguish the
+            //     two with a single round-trip: a data-modifying CTE that
+            //     deletes under the tenant guard, then an EXISTS check (no
+            //     tenant filter) to see whether the pk is still present.
+            //
+            //     Trade-off (documented, not swept under a ponytail): the
+            //     EXISTS check reveals to the caller whether a pk they already
+            //     named exists AT ALL, even under another tenant. We accept
+            //     this for v1 — the caller supplied the pk themselves, so this
+            //     adds at most one bit of information beyond what an upsert
+            //     conflict on the same pk would already reveal (see the upsert
+            //     guard above). A stricter mode that always returns idempotent
+            //     success would need its own config flag; no design partner has
+            //     asked for it. See docs/adr/0018-write-path-tenant-enforcement.md.
+            if let Err(bad) = validate_ident(scope.column) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad tenant column identifier: {bad}"
+                )));
+            }
+            let quoted_tenant_col = quote_ident(scope.column);
+            let sql = format!(
+                "WITH deleted AS (\
+                     DELETE FROM {quoted_table} WHERE {quoted_pk} = $1 AND {quoted_tenant_col} = $2 \
+                     RETURNING 1\
+                 ) \
+                 SELECT (SELECT count(*) FROM deleted)::bigint AS deleted_count, \
+                        EXISTS(SELECT 1 FROM {quoted_table} WHERE {quoted_pk} = $1) AS still_exists"
+            );
             let client = self.client().await?;
             let pk_value = SqlValue::from_pk(pk);
-            let params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [pk_value.as_tosql()];
-            match client.execute(&sql, &params).await {
-                Ok(_) => {
+            let tenant_value = SqlValue::from_scalar(scope.value);
+            let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] =
+                [pk_value.as_tosql(), tenant_value.as_tosql()];
+            match client.query_one(&sql, &params).await {
+                Ok(row) => {
                     self.return_client(client).await;
-                    Ok(())
+                    let deleted_count: i64 = row.get(0);
+                    if deleted_count > 0 {
+                        return Ok(());
+                    }
+                    let still_exists: bool = row.get(1);
+                    if still_exists {
+                        return Err(WriteBackError::Forbidden(format!(
+                            "row {pk} in {table} belongs to a different tenant"
+                        )));
+                    }
+                    Ok(()) // idempotent: the row never existed
                 }
                 Err(e) => {
                     self.drop_client().await;
@@ -413,14 +540,22 @@ mod pg {
     }
 
     impl SqlValue {
-        /// Build the SqlValue for a primary-key string. v1 pk convention is a
-        /// uuid, so parse it; if the column's pk isn't a uuid (future), fall
-        /// back to text and let PG complain with a clear type error.
-        fn from_pk(pk: &str) -> Self {
-            match uuid::Uuid::parse_str(pk) {
+        /// Build the SqlValue for a client-facing scalar identifier string —
+        /// either the primary-key value or, per ADR-0018, a tenant-scope
+        /// value. v1 convention is that such scalars are uuids, so parse as
+        /// one; if not, fall back to text and let PG complain with a clear
+        /// type error.
+        fn from_scalar(s: &str) -> Self {
+            match uuid::Uuid::parse_str(s) {
                 Ok(u) => SqlValue::Uuid(u),
-                Err(_) => SqlValue::Text(pk.to_string()),
+                Err(_) => SqlValue::Text(s.to_string()),
             }
+        }
+
+        /// Build the SqlValue for a primary-key string (alias of
+        /// [`Self::from_scalar`] kept for call-site clarity).
+        fn from_pk(pk: &str) -> Self {
+            Self::from_scalar(pk)
         }
 
         /// Borrow the value as `&dyn ToSql` for the params slice.
@@ -478,6 +613,24 @@ mod pg {
         }
     }
 
+    /// ADR-0018: force-stamp the tenant column into an upsert payload with the
+    /// principal's tenant value, overwriting any client-supplied value for
+    /// that key. A no-op when `tenant` is `None` (no enforcement active).
+    ///
+    /// Pulled out as a pure function (no I/O) so the stamping logic is
+    /// unit-testable without a database.
+    fn stamp_tenant_column(
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        tenant: Option<TenantScope<'_>>,
+    ) {
+        if let Some(scope) = tenant {
+            obj.insert(
+                scope.column.to_string(),
+                serde_json::Value::String(scope.value.to_string()),
+            );
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -514,6 +667,41 @@ mod pg {
             // A hypothetical escaped quote — doubled, not backslashed.
             assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
         }
+
+        // -------------------------------------------------------------------
+        // ADR-0018: tenant-column stamping (pure logic, no database needed).
+        // -------------------------------------------------------------------
+
+        #[test]
+        fn stamp_tenant_column_noop_when_no_scope() {
+            let mut obj = serde_json::Map::new();
+            obj.insert("title".to_string(), serde_json::json!("hello"));
+            stamp_tenant_column(&mut obj, None);
+            assert_eq!(obj.len(), 1);
+            assert!(!obj.contains_key("org_id"));
+        }
+
+        #[test]
+        fn stamp_tenant_column_inserts_when_absent() {
+            let mut obj = serde_json::Map::new();
+            obj.insert("title".to_string(), serde_json::json!("hello"));
+            let scope = TenantScope::new("org_id", "acme");
+            stamp_tenant_column(&mut obj, Some(scope));
+            assert_eq!(obj.get("org_id"), Some(&serde_json::json!("acme")));
+        }
+
+        #[test]
+        fn stamp_tenant_column_overwrites_client_supplied_value() {
+            // The security-critical case: a client that tries to claim a
+            // DIFFERENT tenant in its own payload must be overridden, never
+            // trusted (mirrors ADR-0011's read-side "server injects, client's
+            // own value is dropped").
+            let mut obj = serde_json::Map::new();
+            obj.insert("org_id".to_string(), serde_json::json!("attacker-tenant"));
+            let scope = TenantScope::new("org_id", "acme");
+            stamp_tenant_column(&mut obj, Some(scope));
+            assert_eq!(obj.get("org_id"), Some(&serde_json::json!("acme")));
+        }
     }
 }
 
@@ -540,14 +728,14 @@ mod tests {
     #[tokio::test]
     async fn nowriteback_always_errors_with_pg_required() {
         let wb = NoWriteBack::new();
-        let upsert_err = wb.upsert("tasks", "1", "{}").await;
+        let upsert_err = wb.upsert("tasks", "1", "{}", None).await;
         match upsert_err {
             Err(WriteBackError::Backend(msg)) => {
                 assert!(msg.contains("write-back requires pg replicator"));
             }
             other => panic!("upsert should error Backend, got {other:?}"),
         }
-        let delete_err = wb.delete("tasks", "1").await;
+        let delete_err = wb.delete("tasks", "1", None).await;
         match delete_err {
             Err(WriteBackError::Backend(msg)) => {
                 assert!(msg.contains("write-back requires pg replicator"));

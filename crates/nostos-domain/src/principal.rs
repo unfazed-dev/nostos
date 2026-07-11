@@ -59,9 +59,73 @@ impl Principal {
     }
 }
 
+/// A server-computed tenant scope for one write (ADR-0018, extending
+/// ADR-0011's read-side injection to the write path). Carries the operator-
+/// configured tenant column name and the authenticated principal's tenant
+/// value — never the client's own claim.
+///
+/// Construction is gated by the SAME condition as the read-side predicate
+/// injection ([`Principal::is_anonymous`] + a configured tenant column) — see
+/// [`Principal::tenant_scope`], the single seam both paths call so the two
+/// enforcement points can't drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantScope<'a> {
+    /// The tenant column name (operator config, e.g. `org_id`).
+    pub column: &'a str,
+    /// The authenticated principal's tenant value — server-derived, never
+    /// client-attested.
+    pub value: &'a str,
+}
+
+impl<'a> TenantScope<'a> {
+    #[inline]
+    #[must_use]
+    pub fn new(column: &'a str, value: &'a str) -> Self {
+        Self { column, value }
+    }
+}
+
+impl Principal {
+    /// The single seam that decides IF tenant scoping applies, for both the
+    /// read path (`build_predicate`) and the write path (`dispatch_write`):
+    /// a tenant column must be configured AND the principal must be a real,
+    /// authenticated identity (not [`Principal::anonymous`] — there is no
+    /// tenant to scope an anonymous connection to). Returns `None` when
+    /// either condition fails, `Some(scope)` otherwise.
+    #[inline]
+    #[must_use]
+    pub fn tenant_scope<'a>(&'a self, tenant_column: Option<&'a str>) -> Option<TenantScope<'a>> {
+        let column = tenant_column?;
+        if self.is_anonymous() {
+            return None;
+        }
+        Some(TenantScope::new(column, &self.tenant_id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_scope_none_when_anonymous() {
+        let p = Principal::anonymous();
+        assert!(p.tenant_scope(Some("org_id")).is_none());
+    }
+
+    #[test]
+    fn tenant_scope_none_when_no_column_configured() {
+        let p = Principal::new("u1", "acme");
+        assert!(p.tenant_scope(None).is_none());
+    }
+
+    #[test]
+    fn tenant_scope_some_for_authenticated_principal_with_column() {
+        let p = Principal::new("u1", "acme");
+        let scope = p.tenant_scope(Some("org_id")).expect("scoped");
+        assert_eq!(scope.column, "org_id");
+        assert_eq!(scope.value, "acme");
+    }
 
     #[test]
     fn anonymous_is_flagged() {
