@@ -31,6 +31,12 @@ const _crateName = 'nostos_flutter_rust';
 
 void main(List<String> args) async {
   await build(args, (input, output) async {
+    // `flutter run` (unlike `flutter test`) also invokes hooks in phases
+    // that don't build code assets; touching `config.code` there throws
+    // "Bad state". Guard first, per the hooks API contract.
+    if (!input.config.buildCodeAssets) {
+      return;
+    }
     final code = input.config.code;
     final libFileName = switch (code.targetOS) {
       OS.windows => '$_crateName.dll',
