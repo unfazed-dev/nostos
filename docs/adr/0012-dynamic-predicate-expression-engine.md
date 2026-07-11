@@ -1,6 +1,6 @@
 # ADR-0012: Dynamic predicate expression engine (Front 1 — the marketed moat)
 
-- **Status:** Moat complete — slices 1 & 2 (boolean tree + typed comparison) + the safe-SQL-subset compiler shipped. Only the (data-rejected) param-set-digest indexing and the wire/subscribe integration remain.
+- **Status:** Moat complete — slices 1 & 2 (boolean tree + typed comparison), the safe-SQL-subset compiler, and the wire/subscribe integration (`where_sql` on `Subscribe`, compiled server-side and ANDed under tenant enforcement — Task C1, `crates/nostos-infra/src/transport.rs`) all shipped. Only the (data-rejected) param-set-digest indexing remains, and it stays deferred by design (see the "reverted" note below).
 - **Date:** 2026-06-27 (sketch); slices 1+2 landed 2026-06-27; compiler landed 2026-06-27.
 
 ## Context

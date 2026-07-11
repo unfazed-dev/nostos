@@ -122,7 +122,7 @@ PowerSync treats Flutter as best-in-class and leaves RN/Web/Rust as second-class
 ### Front 6 — **Tiered Conflict Resolution (LWW → CRDT-per-field → custom)**
 > **Claim: *"Last-write-wins by default, conflict-free fields when you want them, custom merge when you need it."***
 
-PowerSync gives you LWW-per-field and says "good luck." **Nostos ships three tiers:** (a) server-authoritative LWW per field (sane default, Postgres is source of truth), (b) **opt-in CRDT-per-field** for specific columns (counters, sets, rich-text — via Loro-style primitives — without bolting a whole CRDT doc onto your schema), (c) **custom merge functions** for the hard cases. The right primitive per column, not a one-size hammer.
+PowerSync gives you LWW-per-field and says "good luck." **Nostos's design is three tiers** (ADR-0014): (a) server-authoritative LWW per field — **shipped**, the default apply semantics (sane default, Postgres is source of truth); (b) **opt-in CRDT-per-field** for specific columns (counters, sets, rich-text — via Loro-style primitives — without bolting a whole CRDT doc onto your schema) — **deferred to Phase 4**; (c) **custom merge functions** for the hard cases — **deferred to Phase 4**. The right primitive per column, not a one-size hammer, once (b) and (c) land.
 
 ### Front 7 — **Transparent, predictable pricing**
 > **Claim: *"No per-operation metering. Know your bill before you ship."***

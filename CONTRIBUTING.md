@@ -13,7 +13,8 @@ Pre-1.0; architecture is pinned by ADRs (docs/adr/), code is moving fast.
 - Perf changes need before/after numbers (docs/BENCHMARK-METHODOLOGY.md).
 - Commits: single line, conventional prefix (`feat:`/`fix:`/`test:`/`docs:`/`chore:`).
 - Tests accompany every non-trivial change; the e2e suite for replication changes:
-  `NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg`.
+  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg`. Without
+  `NOSTOS_E2E_PG=1` the real-PG tests self-skip and report a false-positive pass.
 
 ## License
 Apache-2.0. By contributing you agree your work is licensed the same way.

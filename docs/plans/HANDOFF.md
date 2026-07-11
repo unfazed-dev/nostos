@@ -7,7 +7,7 @@ You are the **implementation agent** for nostos. The planning phase is done; you
 1. **Everything happens inside this repo** (`/Volumes/developer_ssd/Developer/nostos`). Flutter apps included — they are fixtures under `fixtures/flutter/`. Never create files outside the tree.
 2. **Execution method:** superpowers:executing-plans (inline) or superpowers:subagent-driven-development (fresh subagent per task). Tick the `- [ ]` checkboxes in the plan files as you complete steps; commit per task.
 3. **Commits:** single line, conventional prefix (`feat:`/`fix:`/`test:`/`docs:`/`chore:`), no author mentions, no trailers.
-4. **Verification gates:** `make ci` after every task (Rust); `NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg` for replication tasks (compose file: `docker/docker-compose.yml`); `flutter test` / `flutter test integration_test -d macos` for fixtures. Report real output, never "should pass".
+4. **Verification gates:** `make ci` after every task (Rust); `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg` for replication tasks (without `NOSTOS_E2E_PG=1` the real-PG tests self-skip and report a false-positive pass; compose file: `docker/docker-compose.yml`); `flutter test` / `flutter test integration_test -d macos` for fixtures. Report real output, never "should pass".
 5. **Perf changes** ship with before/after numbers or get reverted (Tier-5 precedent in `docs/ROADMAP.md`). Deliberate shortcuts carry `ponytail:` comments naming the ceiling.
 
 ## The plans (execute in this order)

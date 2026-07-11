@@ -6,11 +6,11 @@
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)]() &nbsp;
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue) &nbsp;
 ![Rust](https://img.shields.io/badge/rust-1.95-orange) &nbsp;
-![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20Phases%200--1%20proven%2C%20v0.1%20in%20progress-orange)
+![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20Phase%203%2C%20v0.1%20prepared%2C%20launch%20gated-orange)
 
 Nostos is a from-scratch, **Rust-native** competitor to [PowerSync](https://powersync.com): a sync engine that keeps an on-device SQLite database in sync with a server-side Postgres, **even when the device is offline.** It targets the empty market cell that no incumbent occupies today — *Apache-2.0 + Postgres-logical-replication + 2-way offline + first-class Flutter/RN/Web SDKs + Rust-fast + free self-host.*
 
-> **Status:** alpha — Phases 0–1 proven, v0.1 in progress. Not production-ready. The server fan-out moat is proven (142k ops/sec @ 1k clients, 0% drops = 35.6× PowerSync's published ceiling — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator and native client are in, and write-back v1 is under way. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** alpha — Phase 3 🚧, v0.1 prepared, launch gated on the operator (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). Not production-ready. The server fan-out moat is proven (833,308 ops/sec @ 1k clients, 0.00% drops = 208× PowerSync's published ceiling — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator, native client, and write-back v1 are shipped. Public launch is now gated on the Flutter+Supabase plug-and-play bar — see [`docs/plans/flutter-supabase-plug-and-play-launch.md`](docs/plans/flutter-supabase-plug-and-play-launch.md).
 
 ---
 
@@ -20,7 +20,7 @@ PowerSync is the incumbent — and still carries real, current limits Nostos exp
 
 | Wedge | The incumbent's limit | Nostos's answer |
 |---|---|---|
-| **Server throughput** | PowerSync's server is **TypeScript/Node.js** — published ceiling ~2–4k ops/sec | **Pure-Rust server** (tokio + axum) — proven 142k ops/sec @ 1k clients, 0% drops (35.6×) |
+| **Server throughput** | PowerSync's server is **TypeScript/Node.js** — published ceiling ~2–4k ops/sec | **Pure-Rust server** (tokio + axum) — proven 833,308 ops/sec @ 1k clients, 0.00% drops (208×) |
 | **License** | PowerSync's server is **FSL** (source-available, no-compete, 2-yr wait to Apache) | **Apache-2.0 today** — server, core, and every SDK. Clean for enterprise legal |
 | **Write-back** | You build & host the `uploadData()` endpoint; ElectricSQL is read-only | **Direct write-back** — Nostos writes to your Postgres for you, no customer-built endpoints |
 | **Self-host** | PowerSync Cloud is metered per-op; FSL "Open Edition" carries the license delay | **Free, full-featured, unlimited self-host** — no feature gates |
@@ -204,8 +204,24 @@ Output: `benches/results/RESULTS.md` + a JSON artifact + an SVG chart. See [`doc
 
 ---
 
+## Managed deploys — beta waitlist
+
+Self-hosting is free forever (see License). If you'd rather never operate the
+sync server yourself, a managed `nostos deploy` beta is coming: we run your
+Nostos instance, tier-stamped and metered, connected to your own Postgres or
+Supabase database. Email **founders@nostos.run** with subject `waitlist` to get
+in line for the design-partner beta.
+
+---
+
+## Security
+
+See [`SECURITY.md`](SECURITY.md) for vulnerability reporting, and [`docs/SECURITY-MODEL.md`](docs/SECURITY-MODEL.md) for why Nostos's server-enforced predicates — not Postgres RLS — are the authorization layer for sync traffic.
+
+---
+
 ## Contributing
 
-Pre-1.0. The architecture and strategy are pinned; the code is alpha (Phases 0–1 proven, v0.1 in progress). If you want to follow along, watch [`docs/ROADMAP.md`](docs/ROADMAP.md). Once v0.1 ships, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Pre-1.0. The architecture and strategy are pinned; the code is alpha (Phase 3 🚧 — v0.1 prepared, launch gated on the operator). If you want to follow along, watch [`docs/ROADMAP.md`](docs/ROADMAP.md). Once v0.1 ships, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 > *A cairn is a pile of stones that marks a trail. When you're offline and lost, it's how you find your way home. **Sync checkpoints (LSNs) are our cairns** — durable markers that mean your data always finds its way back to the source of truth, across devices, through outages, around the world.*
