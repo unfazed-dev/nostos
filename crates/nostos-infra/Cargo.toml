@@ -48,6 +48,10 @@ uuid = { workspace = true }
 # nostos-cloud's Hs256Verifier; see ADR-0010 on why this isn't shared).
 hmac = { workspace = true }
 sha2 = { workspace = true }
+# RS256/ES256 JWT verification against a Supabase JWKS (ADR-0010 addendum).
+jsonwebtoken = { workspace = true }
+# JWKS fetch over HTTPS (same crate nostos-cloud uses for the Stripe REST call).
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -56,6 +60,12 @@ futures-util = { workspace = true }
 serde_json = { workspace = true }
 # Used by the pg-feature e2e test to mint unique row titles.
 uuid = { workspace = true }
+# JWKS fixture-server tests: mint RSA/EC/Ed25519 keypairs + JWKs, serve them
+# over a local axum listener (axum is already a non-dev dependency above).
+rsa = { workspace = true }
+p256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
 
 [lints]
 workspace = true

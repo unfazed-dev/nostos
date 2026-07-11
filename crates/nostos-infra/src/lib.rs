@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+mod jwks;
 pub mod replicator;
 pub mod router;
 pub mod store;
