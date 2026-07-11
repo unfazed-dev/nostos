@@ -240,3 +240,22 @@ fixture-todo-smoke-live:
 		exit 1; \
 	fi
 	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos --dart-define-from-file=env.json
+
+## fixture-todo-nostos-live-up: bring up the Nostos "local live" harness (real
+## nostos-server + real docker Postgres + dev JWTs — stands in for a real
+## Supabase project until W0b is unblocked; see docs/QUICKSTART.md).
+.PHONY: fixture-todo-nostos-live-up
+fixture-todo-nostos-live-up:
+	fixtures/flutter/todo/tool/nostos_live_up.sh
+
+## fixture-todo-nostos-live-down: stop the `nostos dev` process (pass PG=1 to also stop docker Postgres).
+.PHONY: fixture-todo-nostos-live-down
+fixture-todo-nostos-live-down:
+	@if [ "$(PG)" = "1" ]; then fixtures/flutter/todo/tool/nostos_live_down.sh --pg; \
+	else fixtures/flutter/todo/tool/nostos_live_down.sh; fi
+
+## fixture-todo-nostos-live-proof: the W5 acceptance test — two-user offline
+## sync + read/write tenant isolation against the harness above (must already be up).
+.PHONY: fixture-todo-nostos-live-proof
+fixture-todo-nostos-live-proof:
+	cd fixtures/flutter/todo && flutter test integration_test/nostos_live_test.dart -d macos

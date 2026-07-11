@@ -46,3 +46,8 @@ app.*.map.json
 
 # Local Supabase env (operator-provided; env.example.json is committed)
 /env.json
+
+# Nostos "local live" harness state (tool/nostos_live_up.sh) — nostos.toml/.env
+# hold a real (dev-only) HS256 secret + the docker Postgres URL; regenerated
+# by the harness every run, never committed.
+/.nostos/
