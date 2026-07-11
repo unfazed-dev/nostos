@@ -34,6 +34,9 @@ pub async fn run(cwd: &Path) -> Result<()> {
         }
         Err(e) => {
             report(&mut all_ok, false, &format!("Postgres unreachable: {e:#}"));
+            if let Some(hint) = ipv6_only_hint(&pg_url).await {
+                println!("    {hint}");
+            }
             print_summary(all_ok);
             anyhow::bail!("doctor found blocking issues");
         }
@@ -168,4 +171,29 @@ fn print_summary(all_ok: bool) {
             "one or more checks failed — see \u{2717} above"
         }
     );
+}
+
+/// When the DB host resolves to ONLY IPv6 addresses (Supabase free-tier
+/// direct connections are IPv6-only), a failed connect is almost always
+/// missing IPv6 egress on the local network — which surfaces as an opaque
+/// "No route to host". Name the real problem and the two ways out.
+/// Best-effort: any resolution error returns `None` (the original connect
+/// error already printed).
+async fn ipv6_only_hint(pg_url: &str) -> Option<String> {
+    let host = pg_url.parse::<reqwest::Url>().ok()?.host_str()?.to_string();
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 5432))
+        .await
+        .ok()?
+        .collect();
+    if !addrs.is_empty() && addrs.iter().all(std::net::SocketAddr::is_ipv6) {
+        Some(format!(
+            "hint: {host} is IPv6-only (no A records). If your network lacks \
+             working IPv6 egress this fails as \"no route to host\". Fixes: \
+             use a network with IPv6, or enable the Supabase IPv4 add-on \
+             (paid) for the direct connection. Poolers don't carry logical \
+             replication."
+        ))
+    } else {
+        None
+    }
 }

@@ -168,9 +168,15 @@ author present), which stays a launch-blocking TODO.
 
 1. Create a Supabase project (or use an existing one).
 2. Database → get the **direct connection string** (not the pooler — logical
-   replication needs it; free-tier direct connections are IPv6-only — ⏳
-   pending live verification of reachability from a typical dev network,
-   see W0's risk list).
+   replication needs it).
+   > **⚠️ IPv6 warning (verified 2026-07-12):** free-tier direct connections
+   > are **IPv6-only** (AAAA records only), and a network that *assigns* your
+   > machine an IPv6 address does not necessarily *route* it — we reproduced
+   > exactly this on a real dev network: global IPv6 address present, all v6
+   > TCP failing "no route to host". `nostos doctor` detects this case and
+   > names it. Fixes: a network with working IPv6 egress, or the Supabase
+   > IPv4 add-on (paid, Pro+) for the direct connection. Poolers do NOT
+   > carry logical replication.
 3. `nostos init --db-url <direct connection string> --tables <your tables>
    --write-tables <writable subset> --tenant-column <your tenant column>
    --supabase-url https://<project-ref>.supabase.co` — creates the
