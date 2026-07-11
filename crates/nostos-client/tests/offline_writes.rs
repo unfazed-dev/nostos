@@ -77,6 +77,7 @@ impl WriteBack for RecordingWriteBack {
         table: &str,
         pk: &str,
         payload_json: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
     ) -> Result<(), WriteBackError> {
         // Realistic shape: an Insert carrying the JSON tuple image (the same
         // tuple-image the read path delivers). This is what the client will
@@ -96,7 +97,12 @@ impl WriteBack for RecordingWriteBack {
         Ok(())
     }
 
-    async fn delete(&self, table: &str, pk: &str) -> Result<(), WriteBackError> {
+    async fn delete(
+        &self,
+        table: &str,
+        pk: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
         let lsn = self
             .next_lsn
             .fetch_add(10, std::sync::atomic::Ordering::Relaxed);

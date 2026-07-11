@@ -9,6 +9,12 @@ description = "Nostos native client — SqliteStorage backend + the tokio SyncCl
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+# Pulls in nostos-infra's real Postgres logical-replication adapter for the
+# `e2e_pg_sync` test only. OFF by default — mirrors nostos-infra's own `pg`
+# feature (see that crate's Cargo.toml doc).
+pg = ["nostos-infra/pg"]
+
 [dependencies]
 nostos-core = { workspace = true }
 nostos-domain = { workspace = true }
@@ -29,6 +35,11 @@ nostos-infra = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
+# pg-only (behind the `pg` feature above) — the e2e_pg_sync harness needs a
+# control-plane SQL client (slot cleanup, direct-row assertions) and typed
+# uuid binding, matching nostos-infra's own e2e_pg_* tests.
+tokio-postgres = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

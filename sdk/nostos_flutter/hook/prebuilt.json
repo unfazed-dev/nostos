@@ -1,0 +1,13 @@
+{
+  "_comment": "Placeholder. No GitHub Release exists yet (see docs/plans/flutter-supabase-plug-and-play-launch.md W6 and .github/workflows/release.yml). Until an entry's url is set, hook/build.dart falls back to `cargo build --release` for that target — that fallback is the ACTIVE path today for every key below. Keys are (targetOS, targetArchitecture[, iOS device-vs-simulator]) tuples, computed by hook/build.dart's _manifestKey(); they must exactly match the artifact names release.yml's flutter-macos/flutter-ios/flutter-android jobs publish. macOS is a single lipo'd universal dylib (one key covers both arm64 and x86_64 hosts). iOS keys are the raw per-slice dylibs the hook downloads directly — NOT the .xcframework.zip release.yml also publishes (that's a separate convenience artifact for manual/non-Flutter iOS integration; the native-assets hook always wants a single-architecture file, so it can't consume a multi-slice xcframework bundle as-is). Linux/Windows have no keys yet: those are fast-follow platforms for the Flutter glue (see README's Platforms table) and always take the cargo-build fallback. release.yml's `update-manifest` job emits the fully filled-in version of this file as a release asset (release-prebuilt-manifest.json) plus opens a PR against this exact path — see that job's comments for why this can't be fully automated (the manifest must be committed and published to pub.dev in a follow-up step, after artifact hashes are known).",
+  "version": "0.1.0",
+  "artifacts": {
+    "macos-universal": { "url": "", "sha256": "" },
+    "android-arm64-v8a": { "url": "", "sha256": "" },
+    "android-armeabi-v7a": { "url": "", "sha256": "" },
+    "android-x86_64": { "url": "", "sha256": "" },
+    "ios-device-arm64": { "url": "", "sha256": "" },
+    "ios-simulator-arm64": { "url": "", "sha256": "" },
+    "ios-simulator-x64": { "url": "", "sha256": "" }
+  }
+}

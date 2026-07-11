@@ -162,6 +162,21 @@ impl<S: Storage> ApplyEngine<S> {
         self.storage.checkpoint()
     }
 
+    /// Is there a buffered-but-unflushed batch right now? `true` between a
+    /// frame that got admitted (buffered) and the next commit boundary /
+    /// explicit [`Self::flush`].
+    ///
+    /// This is the seam a caller uses to arm a time-bounded flush: `feed`'s
+    /// return value alone is NOT the right signal (it returns `Some` on a
+    /// txn-boundary flush that *also* buffers the new frame — see `feed`'s
+    /// doc — so checking the return value would miss that a new batch is now
+    /// pending). No I/O; safe to call from an async context without
+    /// `spawn_blocking`.
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// Feed a frame. Returns `Some(outcome)` if this frame triggered a commit
     /// (a transaction closed, or the soft cap was reached), or `None` if the
     /// frame was buffered pending a future boundary.
@@ -454,6 +469,37 @@ mod tests {
             replayed.row_count(),
             5,
             "idempotent re-apply did not duplicate rows"
+        );
+    }
+
+    #[test]
+    fn has_pending_reflects_buffered_state() {
+        let mut engine = ApplyEngine::new(InMemoryStorage::new());
+        assert!(!engine.has_pending(), "nothing fed yet");
+
+        engine.feed(frame(10, "1", Some(7))).unwrap();
+        assert!(engine.has_pending(), "a txn frame is buffered");
+
+        engine.feed(frame(11, "2", Some(7))).unwrap();
+        assert!(engine.has_pending(), "still accumulating the same txn");
+
+        engine.flush().unwrap();
+        assert!(!engine.has_pending(), "explicit flush drains the buffer");
+    }
+
+    #[test]
+    fn has_pending_true_after_a_boundary_flush_that_buffers_the_next_frame() {
+        // The exact trap the doc comment warns about: `feed` returns `Some`
+        // (a txn boundary flushed) on the SAME call that buffers the new
+        // frame — checking the return value alone would miss that a fresh
+        // batch is now pending. `has_pending` must catch it.
+        let mut engine = ApplyEngine::new(InMemoryStorage::new());
+        engine.feed(frame(10, "1", Some(7))).unwrap();
+        let outcome = engine.feed(frame(20, "2", Some(8))).unwrap();
+        assert!(outcome.is_some(), "txn 7 closed on this call");
+        assert!(
+            engine.has_pending(),
+            "frame 2 (txn 8) is buffered by the same call"
         );
     }
 

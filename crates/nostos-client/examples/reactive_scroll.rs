@@ -146,6 +146,7 @@ impl WriteBack for RecordingWriteBack {
         table: &str,
         pk: &str,
         payload_json: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
     ) -> Result<(), WriteBackError> {
         let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
         let ev = ReplicationEvent::new(
@@ -160,7 +161,12 @@ impl WriteBack for RecordingWriteBack {
         Ok(())
     }
 
-    async fn delete(&self, table: &str, pk: &str) -> Result<(), WriteBackError> {
+    async fn delete(
+        &self,
+        table: &str,
+        pk: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
         let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
         let ev = ReplicationEvent::new(
             Lsn::new(lsn),
@@ -309,6 +315,7 @@ async fn main() {
         max_backoff: Duration::from_millis(500),
         max_retries: Some(3),
         idle_timeout: Some(Duration::from_secs(2)),
+        ..SyncClientConfig::default()
     };
     let client = SyncClient::new(url, storage, config);
     println!("[client] subscribing to tasks (where status = open AND priority >= 3); applying rows as they stream in...\n");
@@ -338,6 +345,7 @@ async fn main() {
             max_backoff: Duration::from_millis(500),
             max_retries: Some(3),
             idle_timeout: Some(Duration::from_millis(500)),
+            ..SyncClientConfig::default()
         },
     );
     let written = PendingWrite {
@@ -428,6 +436,7 @@ async fn main() {
             max_backoff: Duration::from_millis(500),
             max_retries: Some(3),
             idle_timeout: Some(Duration::from_secs(1)),
+            ..SyncClientConfig::default()
         },
     );
     let outcome2 = client2.run_once().await.expect("client2 run_once");

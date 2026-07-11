@@ -123,6 +123,37 @@ impl SqliteStorage {
             .lock()
             .expect("conn_for_test: storage mutex poisoned")
     }
+
+    /// Enumerate the `(pk, payload_bytes)` pairs currently held for `table`,
+    /// sorted by pk. The `SqliteStorage` counterpart to
+    /// [`nostos_core::InMemoryStorage::rows_for`] — same signature/shape, real
+    /// SQLite-backed. Exists so an in-process readback consumer (the FFI
+    /// bridges, e.g. `nostos_flutter`'s `watch()`) can render the engine's
+    /// *current durable state* for a table without re-implementing the apply
+    /// path or keeping a parallel in-memory index. A diagnostic/readback
+    /// accessor — NOT part of the [`nostos_core::Storage`] trait, which stays
+    /// minimal (`checkpoint` + `apply_batch`).
+    ///
+    /// # Errors
+    /// Returns [`StorageError::Backend`] if the read query fails.
+    pub fn rows_for(&self, table: &str) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let conn = self.conn.lock().expect("rows_for: storage mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT pk, payload FROM cairn_data WHERE table_name = ?1 ORDER BY pk ASC")
+            .map_err(rusqlite_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![table], |row| {
+                let pk: String = row.get(0)?;
+                let payload: Vec<u8> = row.get(1)?;
+                Ok((pk, payload))
+            })
+            .map_err(rusqlite_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(rusqlite_err)?);
+        }
+        Ok(out)
+    }
 }
 
 impl Storage for SqliteStorage {
@@ -387,6 +418,46 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn rows_for_returns_sorted_pk_payload_pairs_scoped_to_table() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_batch(
+            &[
+                ins("tasks", "2", b"bob"),
+                ins("tasks", "1", b"alice"),
+                ins("notes", "1", b"other-table"),
+            ],
+            Lsn::new(10),
+        )
+        .unwrap();
+
+        let rows = s.rows_for("tasks").unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("1".to_string(), b"alice".to_vec()),
+                ("2".to_string(), b"bob".to_vec()),
+            ]
+        );
+        assert!(s.rows_for("nonexistent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rows_for_excludes_deleted_rows() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_batch(&[ins("tasks", "1", b"x")], Lsn::new(10))
+            .unwrap();
+        s.apply_batch(
+            &[RowOp::Delete {
+                table: "tasks".into(),
+                pk: "1".into(),
+            }],
+            Lsn::new(20),
+        )
+        .unwrap();
+        assert!(s.rows_for("tasks").unwrap().is_empty());
     }
 
     #[test]

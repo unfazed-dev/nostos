@@ -84,6 +84,7 @@ impl WriteBack for RecordingWriteBack {
         table: &str,
         pk: &str,
         payload_json: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
     ) -> Result<(), WriteBackError> {
         let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
         let ev = ReplicationEvent::new(
@@ -98,7 +99,12 @@ impl WriteBack for RecordingWriteBack {
         Ok(())
     }
 
-    async fn delete(&self, table: &str, pk: &str) -> Result<(), WriteBackError> {
+    async fn delete(
+        &self,
+        table: &str,
+        pk: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
         let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
         let ev = ReplicationEvent::new(
             Lsn::new(lsn),
