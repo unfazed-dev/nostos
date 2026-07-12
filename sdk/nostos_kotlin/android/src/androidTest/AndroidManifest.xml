@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test-app-only manifest overlay. Forces `extractNativeLibs="true"` on the
+     auto-generated test app: JNA's `System.loadLibrary("jnidispatch")` lookup
+     needs the .so files extracted to `/data/app/.../lib/arm64/` rather than
+     page-mapped from the apk (AGP 8.x's default for `extractNativeLibs=false`
+     breaks JNA's loader on the test app's process). The library's
+     `useLegacyPackaging = true` in build.gradle.kts is the same intent for the
+     shipped .aar; this manifest overlay applies the same flag to the test app
+     that AGP spins up for `connectedDebugAndroidTest`. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:extractNativeLibs="true" />
+</manifest>

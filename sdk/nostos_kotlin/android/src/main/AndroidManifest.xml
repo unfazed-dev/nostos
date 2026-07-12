@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Minimal Android library manifest. The library has no activities,
+     services, or permissions at v0 — it exposes a pure-JNI SyncClient
+     surface that consumers invoke from their own process. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

@@ -164,8 +164,8 @@ Rust `nostos-client`):
 | Web / WASM | ✅ GA `@powersync/web` 1.39.0 | ✅ `crates/nostos-ffi-wasm` + `sdk/nostos_web` (`@nostos-sync/web`, PowerSync-style API; node smoke `SMOKE_OK`; browser WS via web-sys — OPFS deferred) |
 | React Native | ✅ GA `@powersync/react-native` 1.35.9 | ❌ ROADMAP Phase 3 (ADR-0015 UniFFI) |
 | Node | 🟡 Beta `@powersync/node` 0.19.4 | 🟡 `sdk/nostos_node` (napi-rs) — **loads in node, async query round-trips `EXIT=0` (verified independently)**; offline-only (no live `subscribe`/replicator path yet) |
-| Kotlin (KMP) | ✅ GA `com.powersync:core` 1.12.0 | ❌ |
-| Swift (iOS/macOS) | ✅ GA `powersync-swift` | 🟡 `sdk/nostos_swift` (UniFFI) — Rust compiles (host + `aarch64-apple-ios`) + 2 integration tests + clippy clean; UniFFI generates Swift bindings (`swiftc -typecheck` OK); SPM `.binaryTarget`/xcframework is the next increment; `forbid(unsafe)` |
+| Kotlin (KMP) | ✅ GA `com.powersync:core` 1.12.0 | 🟡 `sdk/nostos_kotlin` (UniFFI) — Tier 1 verified (`cargo test` 2/2, `.so` cross-compiles aarch64-linux-android, gradle `assembleDebug`→`.aar`); `.so` **loads on emulator-5554** (logcat). Tier 2 construct blocked by JNA `libjnidispatch.so` vs Android-16 (API 37) 16KB-page linker — upstream ecosystem issue; fix = API 34/35 emu / JNA 5.17+ / direct-JNI. `forbid(unsafe)` |
+| Swift (iOS/macOS) | ✅ GA `powersync-swift` | 🟢 `sdk/nostos_swift` (UniFFI) — **sim-E2E proven**: `connect`+`query` ran on the **iPhone 17 sim** (iOS 26.5, captured stdout, independently reproduced); Rust compiles host + iOS + sim; `forbid(unsafe)`. SPM `.binaryTarget`/xcframework packaging is the remaining polish |
 | Capacitor | 🟡 Beta | ❌ |
 | Tauri | 🔴 Alpha | 🟡 `sdk/nostos_tauri` plugin (tauri 2) — compiles + 2 integration tests green (offline connect/query round-trip; write-before-connect contract); `forbid(unsafe)`; `subscribe` run-loop + JS bindings deferred |
 | .NET | 🟡 Beta | ❌ |
@@ -241,7 +241,7 @@ reachable end-to-end.
    thesis** (the Flutter `Runtime::new()` + `SyncClient` FFI pattern ported
    straight to napi). Honest scope: offline-only (no live `subscribe`/replicator
    path verified yet) + a `u64→f64` id-precision `ponytail:`. Nostos is now
-   **7/10 platforms** (Flutter + WASM + Node + Rust + Web-JS + Tauri + Swift — see items 5–8).
+   **8/10 platforms** (Flutter + WASM + Node + Rust + Web-JS + Tauri + Swift + Kotlin — see items 5–9).
 4. P5 Sync Streams — biggest remaining *feature* gap for the "equivalent SDK"
    claim.
 5. ✅ **DONE** — `nostos-client` documented as the Rust SDK (README + public-API
@@ -270,6 +270,18 @@ reachable end-to-end.
    the agent's build FINISHED and reported accurately — every gate reproduced
    on my independent re-run. SPM `.binaryTarget`/xcframework wrapping the `.a`
    is the next increment (`ponytail:`-marked). **7/10.**
+9. 🟡 **PARTIAL — Kotlin/Android SDK** (`sdk/nostos_kotlin`, UniFFI). **Tier 1
+   verified independently**: `cargo test` 2/2, `libnostos_kotlin.so`
+   cross-compiles for `aarch64-linux-android`, gradle `assembleDebug` → `.aar`
+   bundling `jni/arm64-v8a/libnostos_kotlin.so` + `classes.jar`. **Tier 2
+   partial**: the `.so` **loads on emulator-5554** (logcat proof), but
+   constructing `NostosClient` is blocked by UniFFI-Kotlin's JNA
+   `libjnidispatch.so` being rejected by Android 16's (API 37) 16KB-page linker
+   — an upstream ecosystem issue (affects all JNA libs on Android-16), NOT a
+   Nostos bug. Fix paths: retest on API 34/35 emulator (lax enforcement; needs
+   an image download here), wait for JNA 5.17+, or hand-write a direct-JNI
+   bridge (~1 day). `forbid(unsafe)`; `.so` gitignored as a build artifact.
+   **8/10 (Kotlin at device-load; full construct-E2E pending the JNA fix).**
 
 ### Path to 10/10 (honest roadmap)
 
@@ -286,7 +298,7 @@ this-session verifiability noted:
 | ✅ Tauri | `sdk/nostos_tauri` plugin over `nostos-client` (Rust-native) | yes (`cargo test` 2/2) | scaffold shipped (6/10) |
 | ✅ Web JS SDK | `sdk/nostos_web` (`@nostos-sync/web`) over `nostos-ffi-wasm` | yes (node smoke `SMOKE_OK`) | scaffold shipped (5/10) |
 | React Native | reuse the JS core (RN shares it, like `@powersync/web`↔RN) | partial (Jest; full E2E needs device) | medium |
-| Kotlin/KMP | UniFFI; android cross-targets present, JDK present | compile yes; E2E needs Android SDK/gradle | medium-large |
+| 🟡 Kotlin/KMP | `sdk/nostos_kotlin` (UniFFI) over `nostos-client` | Tier 1 yes (`cargo test` 2/2 + `.aar`); `.so` loads on emulator-5554; Tier 2 blocked (JNA/Android-16) | scaffold shipped (8/10) |
 | ✅ Swift/iOS | `sdk/nostos_swift` (UniFFI) over `nostos-client` | yes (`cargo test` 2/2 + `swiftc -typecheck`) | scaffold shipped (7/10) |
 | .NET | uniffi-cs / cbindgen + DllImport | needs .NET SDK (not probed) | medium-large |
 | Capacitor | JS facade over the web JS core | partial | small-medium |

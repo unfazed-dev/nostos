@@ -1,0 +1,35 @@
+# =============================================================================
+# NDK linker config for cross-compiling nostos-kotlin to aarch64-linux-android.
+# -----------------------------------------------------------------------------
+# The Android NDK ships a one-piece clang toolchain (the
+# `aarch64-linux-android24-clang` wrapper) that self-contains ar, ranlib, and
+# the Android sysroot — no separate AR / RANLIB env wiring needed.
+# API level 24 in the wrapper name is the floor (≥ Android 7.0); the running
+# emulator is API 37 (Android 16). Mirrors Mozilla application-services
+# `.cargo/config.toml` for the same target.
+#
+# ponytail: hard-coded to NDK 28.2.13676358 (the only confirmed-good NDK on
+# this machine). The upgrade path on NDK bump is a one-line edit to the version
+# segment of the path; if a CI matrix needs to support multiple NDK versions,
+# switch to `linker = "aarch64-linux-android24-clang"` + put the NDK's
+# `prebuilt/darwin-x86_64/bin` on PATH at build time.
+#
+# NOTE on `cc`-crate propagation: this `linker` config does NOT propagate to
+# the `cc` crate (used by `rusqlite/bundled`'s SQLite build). The build
+# commands set `CC_aarch64_linux_android` + `ANDROID_NDK_HOME` in the env to
+# point the `cc` crate at the same NDK clang — see sdk/nostos_kotlin/README.md
+# (the build script) when it lands; until then, run cargo via the documented
+# one-liner with the env prefix.
+# =============================================================================
+[target.aarch64-linux-android]
+linker = "/Users/unfazed-mac/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android24-clang"
+
+# rustflags: force 16KB ELF program alignment so the .so loads on Android 15+ /
+# 16 (API 35+) devices that ship with 16KB page sizes. NDK 28's clang defaults
+# to 4KB-aligned program headers (the historical Android floor); without this
+# flag, `dlopen` on a 16KB-page device rejects `libnostos_kotlin.so` with the
+# same "program alignment (4096) cannot be smaller than system page size
+# (16384)" error that breaks JNA 5.14.0's libjnidispatch.so on this emulator.
+# `-z max-page-size=16384` is the Android-recommended value (compatible with
+# both 4KB and 16KB page sizes — the loader rounds up).
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
