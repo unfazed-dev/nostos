@@ -167,7 +167,7 @@ Rust `nostos-client`):
 | Kotlin (KMP) | ✅ GA `com.powersync:core` 1.12.0 | ❌ |
 | Swift (iOS/macOS) | ✅ GA `powersync-swift` | ❌ |
 | Capacitor | 🟡 Beta | ❌ |
-| Tauri | 🔴 Alpha | ❌ |
+| Tauri | 🔴 Alpha | 🟡 `sdk/nostos_tauri` plugin (tauri 2) — compiles + 2 integration tests green (offline connect/query round-trip; write-before-connect contract); `forbid(unsafe)`; `subscribe` run-loop + JS bindings deferred |
 | .NET | 🟡 Beta | ❌ |
 | Rust | 🔴 Alpha | ✅ `crates/nostos-client` — native Rust SDK (`SyncClient`/`SqliteStorage`, `forbid(unsafe)`, live-Supabase-tested, README). Not yet on crates.io |
 
@@ -241,7 +241,7 @@ reachable end-to-end.
    thesis** (the Flutter `Runtime::new()` + `SyncClient` FFI pattern ported
    straight to napi). Honest scope: offline-only (no live `subscribe`/replicator
    path verified yet) + a `u64→f64` id-precision `ponytail:`. Nostos is now
-   **5/10 platforms** (Flutter + WASM + Node + Rust + Web-JS — see items 5–6).
+   **6/10 platforms** (Flutter + WASM + Node + Rust + Web-JS + Tauri — see items 5–7).
 4. P5 Sync Streams — biggest remaining *feature* gap for the "equivalent SDK"
    claim.
 5. ✅ **DONE** — `nostos-client` documented as the Rust SDK (README + public-API
@@ -252,6 +252,16 @@ reachable end-to-end.
    engine; API is PowerSync-shaped. Browser live-WS rides the wasm's existing
    `NostosSocket` (web-sys); an automated browser-test of that path + a node WS
    adapter are the next increments (`ponytail:`-marked). **5/10.**
+7. ✅ **DONE** — **Tauri plugin** (`sdk/nostos_tauri`, tauri 2). Compiles +
+   `cargo test` 2/2 green (offline `connect`+`query` round-trip through
+   `NostosState` → `SyncClient` → `SqliteStorage`; write-before-connect
+   contract); `cargo clippy -D warnings` clean; `forbid(unsafe)`. The agent's
+   build never finished, so 5 defects were caught + fixed only by independent
+   compile/test (build.rs `Builder::new` command-args, Cargo `links`, the
+   nested-`Result` flatten in `query`, a dead owned-runtime that dropped-panicked
+   inside the test runtime, a wrong `SELECT 1` assertion) — the PROCESS LESSON
+   in action. `subscribe` run-loop + JS bindings deferred (`ponytail:`-marked).
+   **6/10.**
 
 ### Path to 10/10 (honest roadmap)
 
@@ -265,7 +275,7 @@ this-session verifiability noted:
 | ✅ WASM/Web | wasm-bindgen | yes (`smoke.mjs`) | shipped |
 | ✅ Node | napi-rs | **yes (`node smoke` EXIT=0)** | scaffold shipped |
 | ✅ Rust SDK | `nostos-client` + README (native, `forbid(unsafe)`, live-tested) | yes (`cargo test`) | shipped (4/10) |
-| Tauri | tauri-plugin over `nostos-client` (Rust-native — most natural next) | yes (`cargo build`) | small-medium |
+| ✅ Tauri | `sdk/nostos_tauri` plugin over `nostos-client` (Rust-native) | yes (`cargo test` 2/2) | scaffold shipped (6/10) |
 | ✅ Web JS SDK | `sdk/nostos_web` (`@nostos-sync/web`) over `nostos-ffi-wasm` | yes (node smoke `SMOKE_OK`) | scaffold shipped (5/10) |
 | React Native | reuse the JS core (RN shares it, like `@powersync/web`↔RN) | partial (Jest; full E2E needs device) | medium |
 | Kotlin/KMP | UniFFI; android cross-targets present, JDK present | compile yes; E2E needs Android SDK/gradle | medium-large |
