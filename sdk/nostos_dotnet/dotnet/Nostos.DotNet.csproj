@@ -1,0 +1,81 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+  =============================================================================
+  Nostos.DotNet — .NET projection over the Nord UniFFI-CS generated surface.
+  -----------------------------------------------------------------------------
+  THIS FILE IS NOT BUILT ON THIS HOST — `dotnet` is not installed (E2E is
+  SKIP-with-reason; see ../README.md). The committed dotnet/generated/
+  nostos.cs IS the visible artifact; this .csproj is the multi-target
+  shell that wraps it when a reviewer does install the .NET SDK.
+
+  Multi-targeting:
+    - net8.0-ios          (iOS device + sim — links libnostos_dotnet.dylib via
+                           __Internal / DllImport for the .NET iOS workload)
+    - net8.0-android      (Android — loads libnostos_dotnet.so via JNI/DllImport
+                           for the .NET Android workload)
+    - net8.0-windows      (Windows — loads libnostos_dotnet.dll via DllImport)
+    - net8.0-maccatalyst  (macOS Catalyst — loads libnostos_dotnet.dylib)
+
+  AllowUnsafeBlocks:
+    The Nord uniffi-bindgen-cs emits P/Invoke pointers (IntPtr,
+    unsafe-pointer casts, Marshal.AllocHGlobal). C# requires `unsafe` blocks
+    to touch those. This is a C#-project property ONLY — the Rust crate at
+    ../src/lib.rs keeps #![forbid(unsafe_code)]; the bindgen-generated C# is
+    the ADR-0015 addendum machine-generated exception on the .NET side.
+  =============================================================================
+  -->
+
+  <PropertyGroup>
+    <!-- Multi-target iOS / Android / Windows / macOS Catalyst. net8.0 is the
+         floor; bump to net9.0/net10.0 when the CI image supports it. -->
+    <TargetFrameworks>net8.0-ios;net8.0-android;net8.0-windows;net8.0-maccatalyst</TargetFrameworks>
+    <RootNamespace>Nostos</RootNamespace>
+    <AssemblyName>Nostos.DotNet</AssemblyName>
+    <PackageId>Nostos.DotNet</PackageId>
+    <Version>0.0.0</Version>
+    <Description>UniFFI bridge exposing nostos-client's SyncClient&lt;SqliteStorage&gt; to .NET via Nord UniFFI-CS — feasibility scaffold.</Description>
+    <Authors>Cairn Sync, Inc.</Authors>
+    <Company>Cairn Sync, Inc.</Company>
+    <Copyright>Apache-2.0</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://nostos.run</PackageUrl>
+    <RepositoryUrl>https://github.com/nostos-sync/nostos</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <!-- C# side needs unsafe for the bindgen's IntPtr / P/Invoke glue.
+         Rust side stays forbid(unsafe_code) — see ../src/lib.rs. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Generate a NuGet .nupkg on pack (the next increment past this
+         scaffold; not wired today — see ../README.md). -->
+    <IsPackable>true</IsPackable>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The committed bindgen output. The Nord uniffi-bindgen-cs names the
+         file after the namespace (nostos.cs), NOT after the primary class.
+         Regenerate via:
+         uniffi-bindgen-cs --library ../target/release/libnostos_dotnet.dylib \
+           --out-dir generated --config ../uniffi.toml -->
+    <Compile Include="generated/**/*.cs" Exclude="bin/**;obj/**" />
+  </ItemGroup>
+
+  <!--
+  Native library packaging — the cross-compiled cdylibs land under
+  runtimes/<RID>/native/ in the .nupkg so the .NET loader picks them up
+  automatically. The actual copy step is the next increment (a build target
+  that ships libnostos_dotnet.{dylib,so,dll} into the right runtimes/ paths).
+  ponytail: not wired today; the .csproj compiles the C# surface standalone
+  for the typecheck gate, the native binaries are packaged separately.
+  -->
+  <ItemGroup Condition="'$(OS)' == 'Unix'">
+    <!-- Placeholder: when the native-packaging target lands, these will be
+         <None Include="..\target\aarch64-apple-ios\release\libnostos_dotnet.a"
+               Pack="true" PackagePath="runtimes/ios/native/" />
+         etc. — one per (TFM, RID). -->
+  </ItemGroup>
+
+</Project>

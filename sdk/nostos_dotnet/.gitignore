@@ -1,0 +1,23 @@
+# Build artifacts
+/target/
+
+# UniFFI-generated C# sources — emitted by `uniffi-bindgen-cs` into
+# dotnet/generated/. The committed dotnet/generated/NostosClient.cs IS checked
+# in (so reviewers can see the C# surface without installing dotnet); any
+# ADDITIONAL transient files the bindgen drops (e.g. *.csproj fragments, cs/
+# subdirs) are ignored here. Regenerate from the cdylib on demand.
+/dotnet/generated/*.csproj
+/dotnet/generated/cs/
+/dotnet/bin/
+/dotnet/obj/
+
+# .NET build output (if a reviewer does install dotnet and builds the .csproj)
+/dotnet/.bin/
+
+# NuGet artifacts
+*.nupkg
+*.snupkg
+**/packages/
+
+# macOS noise
+.DS_Store

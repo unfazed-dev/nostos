@@ -1,0 +1,21 @@
+# =============================================================================
+# NDK linker config for cross-compiling nostos-dotnet to aarch64-linux-android.
+# Verbatim copy of sdk/nostos_kotlin/.cargo/config.toml — the same Android NDK
+# toolchain that builds nostos_kotlin's .so builds nostos_dotnet's .so. See the
+# ponytail comment in sdk/nostos_kotlin/.cargo/config.toml for the NDK-version
+# hard-coding rationale and the `cc`-crate propagation note (the env vars
+# CC_aarch64_linux_android + ANDROID_NDK_HOME must be set in the shell that
+# runs `cargo build --target aarch64-linux-android`).
+# =============================================================================
+[target.aarch64-linux-android]
+linker = "/Users/unfazed-mac/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android24-clang"
+
+# rustflags: force 16KB ELF program alignment so the .so loads on Android 15+ /
+# 16 (API 35+) devices that ship with 16KB page sizes. NDK 28's clang defaults
+# to 4KB-aligned program headers (the historical Android floor); without this
+# flag, `dlopen` on a 16KB-page device rejects `libnostos_dotnet.so` with the
+# same "program alignment (4096) cannot be smaller than system page size
+# (16384)" error that breaks JNA 5.14.0's libjnidispatch.so on this emulator.
+# `-z max-page-size=16384` is the Android-recommended value (compatible with
+# both 4KB and 16KB page sizes — the loader rounds up).
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
