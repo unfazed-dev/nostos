@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+  =============================================================================
+  Nostos.Smoke — host console E2E for the .NET (C#) binding.
+  =============================================================================
+  A leaf console app, SEPARATE from ../Nostos.DotNet.csproj (which multi-targets
+  the MAUI TFMs net8.0-ios/android/windows/maccatalyst and so cannot `dotnet run`
+  on a host without the iOS/Android workloads). This project targets plain
+  net8.0 so `dotnet run` works on a host with only the .NET SDK installed.
+
+  It <Compile>s the SAME committed bindgen output (../generated/nostos.cs) the
+  MAUI shell ships, and copies the host libnostos_dotnet.dylib next to the
+  managed assembly so DllImport("nostos_dotnet") resolves via .NET's app-base
+  search path (MS native-library-loading) — no DYLD env, no resolver code.
+
+  Driven by ../../scripts/run-dotnet-e2e.sh (spawns the shared spine, sets
+  NOSTOS_E2E_PORT). The C# mirror of sdk/nostos_node/smoke_live.cjs.
+  =============================================================================
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- net8.0 is the scaffold floor (matches ../Nostos.DotNet.csproj).
+         RollForward=Major lets it execute on a newer installed runtime
+         (e.g. the .NET 10 SDK brew ships) without a net8.0 runtime installed. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Nostos.Smoke</RootNamespace>
+    <AssemblyName>Nostos.Smoke</AssemblyName>
+    <!-- Nord bindgen emits IntPtr / Marshal.AllocHGlobal P/Invoke glue. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Only the two files we name; the bindgen output is opt-in, not globbed. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../generated/nostos.cs" />
+    <Compile Include="Program.cs" />
+    <!-- Ship the host cdylib to the output dir so DllImport resolves from
+         app base. run-dotnet-e2e.sh guarantees a release build exists first. -->
+    <None Include="../../target/release/libnostos_dotnet.dylib"
+          Condition="Exists('../../target/release/libnostos_dotnet.dylib')"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="libnostos_dotnet.dylib" />
+  </ItemGroup>
+
+</Project>

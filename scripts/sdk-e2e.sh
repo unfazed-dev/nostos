@@ -65,11 +65,17 @@ want node      && run_slice node      "cd sdk/nostos_node && cargo build --relea
 want tauri     && run_slice tauri     "cd sdk/nostos_tauri && cargo test -- --nocapture"
 want web       && run_slice web       "cd sdk/nostos_web && npx playwright test --config=playwright.config.cjs"
 want capacitor && run_slice capacitor "cd sdk/nostos_capacitor && npm install --no-audit --no-fund && npm run build && cd example-app && npm install --no-audit --no-fund && npx playwright test --config=playwright.config.cjs"
-# dotnet — the Rust surface (the SDK's compiled core + unit tests). The C# runtime
-# live-E2E is SKIP everywhere: no dotnet on this host (the scaffold ships generated
-# C# for review; cross-compile of iOS/Android verified separately). PASS here =
-# the FFI core compiles + its 5 unit tests pass.
-want dotnet    && run_slice dotnet    "cd sdk/nostos_dotnet && cargo test --quiet && cargo build --release --quiet"
+# dotnet — C# binding live-E2E against the shared spine (PUSH+ECHO). Loads the
+# host libnostos_dotnet.dylib over the UniFFI-CS surface via the dotnet/smoke
+# console app (the C# mirror of sdk/nostos_node/smoke_live.cjs). Requires `dotnet`
+# (brew install --cask dotnet-sdk); SKIPs honestly when absent.
+if want dotnet; then
+  if command -v dotnet >/dev/null 2>&1 || [ -x "$HOME/.dotnet/dotnet" ]; then
+    run_slice dotnet "cd sdk/nostos_dotnet && ./scripts/run-dotnet-e2e.sh"
+  else
+    skip_slice dotnet "(dotnet not installed — dot.net/v1/dotnet-install.sh | bash, or brew install --cask dotnet-sdk)"
+  fi
+fi
 
 # Flutter — needs docker Postgres (the W5 nostos_live_test harness).
 if want flutter; then

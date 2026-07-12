@@ -45,11 +45,15 @@ thin-FFI-per-SDK bet (ADR-0015) makes UniFFI the consistent answer.
   ADR-0015 machine-generated exception); 2³¹-byte cap on strings/byte[]/lists; **no
   documented production MAUI deployment** (mechanical TFM compatibility, not
   battle-tested). The version pin (Rust `uniffi = "=0.28.3"` + Nord tag) is load-bearing.
-- **E2E: SKIP-with-reason** — `dotnet` is not installed on this macOS host. Deliverable =
-  Rust scaffold + cross-compile verify (`aarch64-apple-darwin`, `aarch64-apple-ios`,
-  `aarch64-apple-ios-sim`, `aarch64-linux-android`) + **committed generated C# binding
-  source for review.** `x86_64-pc-windows-msvc` link fails from macOS (no Windows
-  SDK/`lld-link`) → defer Windows to a Windows/dotnet CI runner.
+- **E2E: RESOLVED (2026-07-13)** — `dotnet` installed **no-sudo** via Microsoft's
+  per-user `dotnet-install.sh` (the brew `dotnet-sdk` cask needs sudo for its `.pkg`;
+  the per-user tarball does not → `~/.dotnet`, .NET 8.0.422 SDK). `sdk/nostos_dotnet/
+  dotnet/smoke` (leaf `net8.0` console) drives the C# binding over the host
+  `libnostos_dotnet.dylib` against the shared spine → `PUSH_OK` + `ECHO_OK` verified;
+  wired into the `dotnet` slice of `make sdk-e2e` (runner `dotnet PASS`). Cross-compile
+  verify stands (`aarch64-apple-darwin/ios/ios-sim`, `aarch64-linux-android`) +
+  committed generated C# source. `x86_64-pc-windows-msvc` link still defers to a
+  Windows CI runner (no Windows SDK/`lld-link` on macOS).
 
 ## React Native — Turbo Native Module over UniFFI (LARGE — the long pole; scope change)
 
@@ -92,19 +96,21 @@ All three shipped + independently verified (each agent's green report reproduced
 
 - **Capacitor** (`631ab1d`) — web-only v8 plugin over `@nostos-sync/web`'s browser path;
   Playwright PUSH+ECHO E2E (re-run: `[cap-e2e] PUSH_OK`/`ECHO_OK`, 1 passed).
-- **.NET** (`5658515`) — UniFFI-CS Nord `v0.9.2+v0.28.3` over the nostos-client
-  UniFFI surface; fresh host build + 5/5 tests + clippy `-D warnings` clean;
-  iOS/iOS-sim/Android cross-compile artifacts confirmed (iOS-sim freshly
-  re-cross-compiled); generated `nostos.cs` (1629 lines) committed. C# runtime E2E
-  **SKIP** (no dotnet on host).
+- **.NET** (`5658515`; C# runtime E2E added 2026-07-13) — UniFFI-CS Nord
+  `v0.9.2+v0.28.3` over the nostos-client UniFFI surface; fresh host build + 5/5 tests
+  + clippy `-D warnings` clean; iOS/iOS-sim/Android cross-compile artifacts confirmed
+  (iOS-sim freshly re-cross-compiled); generated `nostos.cs` (1629 lines) committed.
+  **C# runtime E2E now live** — `dotnet/smoke` PUSH+ECHO over the host `.dylib` vs the
+  spine (re-run: `PUSH_OK`/`ECHO_OK`; `dotnet PASS` through the runner).
 - **React Native** (`029eba7` Wave A + `e5b796e` Wave B) — Turbo Native Module over
   UniFFI (ADR-0020; Hermes has no WASM); reuses `nostos_kotlin` wholesale (untouched).
   Jest 7/7 + Android emu live PUSH+ECHO E2E re-run: `VERDICT: PUSH_OK=1 ECHO_OK=1
   xml_failures=0`. iOS TurboModule = fast-follow.
 
-**10/10 platform presence; 9/10 live-E2E-verified** (.NET SKIP — no dotnet; RN-iOS
-pending). `make sdk-e2e` extended to all 10 (host slices always run; device slices
-SKIP-with-reason where no runtime). ADR-0020 records the RN architecture.
+**10/10 platform presence; 10/10 with a live-E2E path** (.NET C# smoke live via
+`dotnet/smoke` 2026-07-13; RN-iOS TurboModule still pending, but RN-Android is
+emu-verified). `make sdk-e2e` extended to all 10 (host slices always run; device
+slices SKIP-with-reason where no runtime). ADR-0020 records the RN architecture.
 
 ## Verification discipline (process lesson, reaffirmed)
 
