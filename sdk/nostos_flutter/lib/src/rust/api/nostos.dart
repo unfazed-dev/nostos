@@ -50,6 +50,32 @@ abstract class NostosHandle implements RustOpaqueInterface {
     dbPath: dbPath,
   );
 
+  /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
+  /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
+  /// object per row, keyed by column name — which is the SAME shape the
+  /// `rows` tick stream emits, so Dart decodes it identically with
+  /// `jsonDecode`. The SQL typically uses
+  /// `json_extract(payload, '$.col')` to project the opaque payload (JSON1
+  /// ships in the bundled SQLite; ADR-0019) — e.g.
+  /// `SELECT json_extract(payload, '$.title') AS title FROM cairn_data`.
+  ///
+  /// Requires an active subscription: the [`Session`] owns the
+  /// [`SqliteStorage`] the client binds at `subscribe()` time, and
+  /// `with_storage` reaches the concrete backend the same way `rows_for`
+  /// does in `emit_snapshot` below (the closure param is `&SqliteStorage`,
+  /// not `&Storage`, so `.query()` is callable in that position). Parity
+  /// feature P1 — see `docs/plans/powersync-sdk-parity-plan.md`.
+  ///
+  /// This is a read-side accessor on the same `Mutex<Connection>` as the
+  /// write path; it shares no mutation surface with the outbox (see the
+  /// `Storage::query` doc in `nostos-core` for the trait-bound rationale).
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called yet, the
+  /// storage task panicked (`ClientError::Join`), or the SQL fails to
+  /// prepare / a row fails to decode (`StorageError::Backend`).
+  Future<String> query({required String sql});
+
   /// Subscribe to `table` (optionally filtered by `where_sql`, the safe-SQL
   /// subset ADR-0012 documents). Replaces any prior subscription on this
   /// handle. `rows_sink` receives one JSON-array string per tick — the

@@ -213,13 +213,16 @@ impl NostosHandle {
     /// through `subscribe`'s `rows_sink` once applied, same as any other
     /// replicated change, per `nostos-client`'s ADR-0013 outbox contract).
     ///
-    /// `op` is `"upsert"` (insert-or-update) or `"delete"`.
+    /// `op` is `"upsert"` (insert-or-update), `"delete"`, or `"patch"`
+    /// (column-level UPDATE of an existing row — `payload` carries only the
+    /// columns to change; P3 PowerSync PATCH parity).
     ///
     /// # Errors
     /// Returns an error string if `subscribe()` hasn't been called yet, `op`
-    /// is neither `"upsert"` nor `"delete"`, `table` doesn't match the active
-    /// subscription (v1 is one table per handle — see module docs), or the
-    /// local durable enqueue itself failed (disk full, SQLite busy).
+    /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` doesn't
+    /// match the active subscription (v1 is one table per handle — see module
+    /// docs), or the local durable enqueue itself failed (disk full, SQLite
+    /// busy).
     pub async fn write(
         &self,
         table: String,
@@ -230,9 +233,10 @@ impl NostosHandle {
         let write_op = match op.as_str() {
             "upsert" => WriteOp::Upsert,
             "delete" => WriteOp::Delete,
+            "patch" => WriteOp::Patch,
             other => {
                 return Err(format!(
-                    "unknown write op {other:?}: expected \"upsert\" or \"delete\""
+                    "unknown write op {other:?}: expected \"upsert\", \"delete\", or \"patch\""
                 ))
             }
         };
@@ -258,6 +262,48 @@ impl NostosHandle {
             })
             .await
             .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
+    /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
+    /// object per row, keyed by column name — which is the SAME shape the
+    /// `rows` tick stream emits, so Dart decodes it identically with
+    /// `jsonDecode`. The SQL typically uses
+    /// `json_extract(payload, '$.col')` to project the opaque payload (JSON1
+    /// ships in the bundled SQLite; ADR-0019) — e.g.
+    /// `SELECT json_extract(payload, '$.title') AS title FROM cairn_data`.
+    ///
+    /// Requires an active subscription: the [`Session`] owns the
+    /// [`SqliteStorage`] the client binds at `subscribe()` time, and
+    /// `with_storage` reaches the concrete backend the same way `rows_for`
+    /// does in `emit_snapshot` below (the closure param is `&SqliteStorage`,
+    /// not `&Storage`, so `.query()` is callable in that position). Parity
+    /// feature P1 — see `docs/plans/powersync-sdk-parity-plan.md`.
+    ///
+    /// This is a read-side accessor on the same `Mutex<Connection>` as the
+    /// write path; it shares no mutation surface with the outbox (see the
+    /// `Storage::query` doc in `nostos-core` for the trait-bound rationale).
+    ///
+    /// # Errors
+    /// Returns an error string if `subscribe()` hasn't been called yet, the
+    /// storage task panicked (`ClientError::Join`), or the SQL fails to
+    /// prepare / a row fails to decode (`StorageError::Backend`).
+    pub async fn query(&self, sql: String) -> Result<String, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "no active subscription — call subscribe() before query()".to_string())?;
+        // `with_storage` returns `Result<R, ClientError>` where `R` is whatever
+        // the closure returns — here `s.query()` itself yields a
+        // `Result<Vec<Map>, StorageError>`. Flatten both layers to a
+        // `Vec<Map>` (which serializes) before `to_string`.
+        let rows = session
+            .client
+            .with_storage(move |s| s.query(&sql))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&rows).map_err(|e| e.to_string())
     }
 
     /// Tear down the active subscription's background work — the

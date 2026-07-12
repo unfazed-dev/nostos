@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0-beta.5';
 
   @override
-  int get rustContentHash => -1980727479;
+  int get rustContentHash => 1770137513;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -84,6 +84,11 @@ abstract class RustLibApi extends BaseApi {
     required String url,
     String? token,
     required String dbPath,
+  });
+
+  Future<String> crateApiNostosNostosHandleQuery({
+    required NostosHandle that,
+    required String sql,
   });
 
   Future<void> crateApiNostosNostosHandleSubscribe({
@@ -186,6 +191,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> crateApiNostosNostosHandleQuery({
+    required NostosHandle that,
+    required String sql,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(sql, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleQueryConstMeta,
+        argValues: [that, sql],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleQueryConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_query",
+        argNames: ["that", "sql"],
+      );
+
+  @override
   Future<void> crateApiNostosNostosHandleSubscribe({
     required NostosHandle that,
     required String table,
@@ -211,7 +254,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 4,
             port: port_,
           );
         },
@@ -255,7 +298,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -285,7 +328,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },
@@ -735,6 +778,33 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// lifecycle callback, rather than waiting on GC.
   Future<void> close() =>
       RustLib.instance.api.crateApiNostosNostosHandleClose(that: this);
+
+  /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
+  /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
+  /// object per row, keyed by column name — which is the SAME shape the
+  /// `rows` tick stream emits, so Dart decodes it identically with
+  /// `jsonDecode`. The SQL typically uses
+  /// `json_extract(payload, '$.col')` to project the opaque payload (JSON1
+  /// ships in the bundled SQLite; ADR-0019) — e.g.
+  /// `SELECT json_extract(payload, '$.title') AS title FROM cairn_data`.
+  ///
+  /// Requires an active subscription: the [`Session`] owns the
+  /// [`SqliteStorage`] the client binds at `subscribe()` time, and
+  /// `with_storage` reaches the concrete backend the same way `rows_for`
+  /// does in `emit_snapshot` below (the closure param is `&SqliteStorage`,
+  /// not `&Storage`, so `.query()` is callable in that position). Parity
+  /// feature P1 — see `docs/plans/powersync-sdk-parity-plan.md`.
+  ///
+  /// This is a read-side accessor on the same `Mutex<Connection>` as the
+  /// write path; it shares no mutation surface with the outbox (see the
+  /// `Storage::query` doc in `nostos-core` for the trait-bound rationale).
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called yet, the
+  /// storage task panicked (`ClientError::Join`), or the SQL fails to
+  /// prepare / a row fails to decode (`StorageError::Backend`).
+  Future<String> query({required String sql}) =>
+      RustLib.instance.api.crateApiNostosNostosHandleQuery(that: this, sql: sql);
 
   /// Subscribe to `table` (optionally filtered by `where_sql`, the safe-SQL
   /// subset ADR-0012 documents). Replaces any prior subscription on this

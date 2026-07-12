@@ -53,6 +53,11 @@ abstract class NostosEngine {
     String? payloadJson,
   });
 
+  /// Run an arbitrary SELECT against on-device SQLite. Returns a JSON-array
+  /// string (same shape as [NostosSubscriptionStreams.rows]); decode with
+  /// jsonDecode. Requires an active subscription.
+  Future<String> query({required String sql});
+
   /// Tear down the active subscription's background work (the sync loop and
   /// the watch-stream pump). Safe to call with no active subscription and
   /// safe to call more than once.
@@ -109,6 +114,10 @@ class RustNostosEngine implements NostosEngine {
     );
     return id.toInt();
   }
+
+  @override
+  Future<String> query({required String sql}) =>
+      _handle.query(sql: sql);
 
   @override
   Future<void> close() => _handle.close();

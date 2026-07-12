@@ -103,11 +103,85 @@ class Nostos {
     return rows;
   }
 
+  /// Reactive SQL watch (PowerSync parity P1). Re-runs [sql] whenever the
+  /// synced data changes (the same change-tick [watch] pumps) and emits the
+  /// decoded result set. Requires an active subscription first (v1: one
+  /// table per `Nostos` instance — see the class doc). `sql` typically uses
+  /// `json_extract(payload, '$.col')` against the synced `cairn_data` table
+  /// (JSON1 ships in the bundled SQLite; ADR-0019).
+  ///
+  /// Unlike [watch] (which emits the full subscribed row set verbatim), this
+  /// lets the caller project / filter / join with arbitrary SQL — at the
+  /// cost of a fresh `SELECT` per tick.
+  ///
+  /// Optional PowerSync-parity refinements (audit table "Full-parity audit"
+  /// in docs/plans/powersync-sdk-parity-plan.md):
+  /// - [triggerOnTables] — tables whose mutation should re-run [sql].
+  ///   Defaults to the subscribed table. v1 is one-table-per-handle, so
+  ///   every entry MUST equal the subscribed table; any other name throws
+  ///   [ArgumentError] (the caller is asking for notifications this
+  ///   instance can never deliver).
+  /// - [throttle] — coalesce a burst of change-ticks into at most one
+  ///   re-query per window (trailing-edge debounce). null (the default)
+  ///   preserves the original one-re-query-per-tick behavior. The debounce
+  ///   sits BEFORE the `asyncMap` that runs the SQL, so it bounds the
+  ///   actual `_engine.query` call rate — not just the downstream emit
+  ///   rate.
+  Stream<List<Map<String, dynamic>>> watchQuery(
+    String sql, {
+    List<String>? triggerOnTables,
+    Duration? throttle,
+  }) {
+    final rows = _rowsStream;
+    if (rows == null) {
+      throw StateError(
+        'watchQuery("$sql") called without subscribe() first. nostos_flutter '
+        'v1 supports one active subscription per Nostos instance.',
+      );
+    }
+    // PowerSync `triggerOnTables` parity: validate the requested triggers
+    // against the active subscription. nostos_flutter v1 is one-table-per-
+    // handle, so the only legal entry is the subscribed table itself — a
+    // caller asking for any other table is requesting notifications this
+    // instance can never deliver, so fail loudly.
+    final activeTable = _subscribedTable!;
+    final triggers = triggerOnTables ?? [activeTable];
+    for (final t in triggers) {
+      if (t != activeTable) {
+        throw ArgumentError(
+          'triggerOnTables contains "$t", but this Nostos instance is '
+          'subscribed to "$activeTable". nostos_flutter v1 supports one '
+          'active subscription per instance; every triggerOnTables entry '
+          'must match it.',
+        );
+      }
+    }
+
+    // ponytail: with one-table-per-handle every tick on `rows` is already
+    // for `activeTable`, so `triggers` can't actually filter here yet.
+    // Once P5 (Sync Streams) lands multi-table sessions and ticks carry a
+    // source-table tag, re-derive this line into
+    // `rows.where((tick) => triggers.contains(tick.sourceTable))` and the
+    // filter becomes load-bearing. Until then `triggers` is purely an
+    // API-shape + validation check; `throttle` is the only knob here that
+    // changes runtime behavior.
+    final Stream<List<Map<String, dynamic>>> ticks =
+        throttle == null ? rows : _debounceTicks(rows, throttle);
+
+    return ticks.asyncMap((_) async =>
+        (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
+            .cast<Map<String, dynamic>>());
+  }
+
   /// Enqueue a durable write. Returns the local outbox id once the write is
   /// captured on disk — NOT once the server acks it; the applied row
   /// round-trips back through [watch] like any other replicated change (see
-  /// `nostos-client`'s ADR-0013 outbox contract). `op` is `"upsert"`
-  /// (insert-or-update) or `"delete"`.
+  /// `nostos-client`'s ADR-0013 outbox contract). `op` is one of:
+  /// - `"upsert"` — insert-or-update (full row image in [payload]).
+  /// - `"delete"` — delete by primary key.
+  /// - `"patch"` — column-level UPDATE of an existing row; [payload] carries
+  ///   ONLY the columns to change, columns absent are untouched, and the row
+  ///   is never inserted (P3 PowerSync PATCH parity).
   ///
   /// [table] must match the active subscription (v1 constraint — see the
   /// class doc).
@@ -150,6 +224,59 @@ class Nostos {
   static List<Map<String, dynamic>> _decodeRows(String jsonArray) {
     final decoded = jsonDecode(jsonArray) as List<dynamic>;
     return decoded.cast<Map<String, dynamic>>();
+  }
+
+  /// Trailing-edge debounce on the change-tick stream: each tick within
+  /// `duration` of the previous resets the timer; only the last tick of a
+  /// burst propagates. Used by [watchQuery] to coalesce ticks BEFORE the
+  /// `asyncMap` that runs the SQL, bounding `_engine.query` calls per
+  /// throttle window (PowerSync `throttle` contract — see
+  /// docs/plans/powersync-sdk-parity-plan.md).
+  ///
+  /// Single-subscription: matches `asyncMap`'s per-call semantics (each
+  /// `watchQuery()` caller gets its own debounce pipeline). Cancelling the
+  /// only listener tears down both the timer and the upstream subscription.
+  static Stream<List<Map<String, dynamic>>> _debounceTicks(
+    Stream<List<Map<String, dynamic>>> source,
+    Duration duration,
+  ) {
+    Timer? timer;
+    List<Map<String, dynamic>>? latest;
+    bool hasPending = false;
+    StreamSubscription<List<Map<String, dynamic>>>? sub;
+    late final StreamController<List<Map<String, dynamic>>> controller;
+    controller = StreamController<List<Map<String, dynamic>>>(
+      onListen: () {
+        sub = source.listen(
+          (event) {
+            latest = event;
+            hasPending = true;
+            timer?.cancel();
+            timer = Timer(duration, () {
+              if (!hasPending) return;
+              final pending = latest;
+              hasPending = false;
+              if (pending != null) controller.add(pending);
+            });
+          },
+          onError: controller.addError,
+          onDone: () {
+            timer?.cancel();
+            if (hasPending) {
+              final pending = latest;
+              hasPending = false;
+              if (pending != null) controller.add(pending);
+            }
+            controller.close();
+          },
+        );
+      },
+      onCancel: () {
+        timer?.cancel();
+        return sub?.cancel();
+      },
+    );
+    return controller.stream;
   }
 
   static Future<String> _defaultSqlitePath(String url) async {
