@@ -17,11 +17,18 @@
 // validated (pure-TS facade over a native JSI backend).
 //
 // METHOD-BY-METHOD MAPPING (spec → UniFFI in sdk/nostos_swift + sdk/nostos_kotlin)
-//   connect()                 → NostosClient::connect() -> Result<(), NostosError>
+//   connect(url, token, dbPath) → NostosClient::new(url, token, db_path) + NostosClient::connect() -> Result<(), NostosError>
 //   subscribe(table)          → NostosClient::subscribe(table: String) -> Result<(), NostosError>
 //   write(table, op, pk, pj)  → NostosClient::write(table, op, pk, payload_json: Option<String>) -> Result<u64, NostosError>
 //   query(sql)                → NostosClient::query(sql: String) -> Result<String, NostosError>  (JSON rows)
 //   checkpoint()              → NostosClient::checkpoint() -> Result<u64, NostosError>
+//
+// Wave-B note: TurboModules are singletons instantiated by RN with a no-arg
+// constructor — there is no JS-visible constructor surface to pass (url, token,
+// dbPath) through. The spec therefore grows `connect(url, token, dbPath)` so
+// the Kotlin module can lazily construct `uniffi.nostos_kotlin.NostosClient` on
+// first `connect(...)`. The TS facade (`NostosClient.ts`) captures these in its
+// config and passes them through on `connect()`.
 //
 // The native side blocks on its OWN tokio runtime (UniFFI sync methods — see
 // the `ponytail:` in sdk/nostos_swift/src/lib.rs for why block-on-owned-runtime
@@ -52,8 +59,17 @@ export const codegenConfig = {
  * annotation.
  */
 export interface Spec extends TurboModule {
-  /** Open the local SQLite store + build the SyncClient. No network I/O. */
-  connect(): Promise<void>;
+  /**
+   * Construct the backing UniFFI `NostosClient(url, token, dbPath)` (idempotent
+   * — re-connect reuses the existing handle) and open the local SQLite store +
+   * build the SyncClient. No network I/O until `subscribe(table)`.
+   *
+   * `url` is the sync spine's WebSocket URL (e.g. `ws://host:port/sync`);
+   * `token` is the optional auth bearer (null for anonymous); `dbPath` is the
+   * SQLite file path (`:memory:` for ephemeral). These three match the UniFFI
+   * `NostosClient::new` constructor args 1:1.
+   */
+  connect(url: string, token: string | null, dbPath: string): Promise<void>;
   /**
    * Start the live replication loop for `table` on the native side (spawns
    * `client.run_with_reconnect()` on the owned tokio runtime). The app polls

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Library manifest — empty (no permissions); consumer apps declare their own.
+     The <uses-permission> + cleartext flags live in src/androidTest only. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

@@ -50,10 +50,12 @@ describe("@nostos-sync/react-native — NostosClient facade (offline smoke)", ()
       dbPath: ":memory:",
     });
 
-    // (a) connect maps to NativeNostos.connect() with no args.
+    // (a) connect maps to NativeNostos.connect(url, token, dbPath) — the facade
+    //     threads its captured config through (TurboModules are singletons
+    //     with no JS-visible constructor).
     await client.connect();
     expect(native.connect).toHaveBeenCalledTimes(1);
-    expect(native.connect).toHaveBeenCalledWith();
+    expect(native.connect).toHaveBeenCalledWith("ws://example", "tok", ":memory:");
 
     // (a) subscribe maps to NativeNostos.subscribe(table) and returns a handle.
     const sub = await client.subscribe("tasks");

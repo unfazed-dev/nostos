@@ -54,17 +54,9 @@ export interface Subscription {
 export class NostosClient {
   /**
    * The resolved config (defaults applied). Exposed readonly for app-level
-   * introspection (`client.config.dbPath` etc.) and so the field is not a
-   * write-only dead store.
-   *
-   * ponytail: CEILING — config is captured here but NOT yet plumbed to the
-   * native module. The NativeNostos TurboModule spec (Wave A) declares exactly
-   * connect/subscribe/write/query/checkpoint (no constructor / configure),
-   * matching the UniFFI surface. Wave B's native module reads url/token/dbPath
-   * from native app config (Android gradle.properties / iOS Info.plist) OR the
-   * spec grows a setConfig() method — undecided, flagged as a Wave-B unknown
-   * in the README. The JS-side capture keeps the facade's shape aligned with
-   * @nostos-sync/web so the public API is stable when the plumbing lands.
+   * introspection (`client.config.dbPath` etc.). The same three values are
+   * plumbed through to the native TurboModule on `connect(...)` so the Kotlin
+   * module can lazily construct the UniFFI `NostosClient` on first connect.
    */
   readonly config: Required<Pick<NostosClientConfig, "dbPath">> &
     Pick<NostosClientConfig, "url" | "token">;
@@ -78,9 +70,19 @@ export class NostosClient {
     };
   }
 
-  /** Open the local SQLite store + build the SyncClient. No network I/O. */
+  /**
+   * Construct the backing UniFFI `NostosClient(url, token, dbPath)` + open the
+   * local SQLite store + build the SyncClient. No network I/O until
+   * `subscribe(table)`. The captured config is passed through to the native
+   * TurboModule here — TurboModules are singletons with no JS-visible
+   * constructor, so the facade threads the config through `connect(...)`.
+   */
   async connect(): Promise<void> {
-    await NativeNostos.connect();
+    await NativeNostos.connect(
+      this.config.url,
+      this.config.token,
+      this.config.dbPath,
+    );
   }
 
   /**
