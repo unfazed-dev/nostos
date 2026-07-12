@@ -1,0 +1,14 @@
+// @nostos-sync/react-native — public entrypoint.
+//
+// Re-exports the TS facade and the TurboModule spec type. The default
+// NativeNostos module instance is intentionally NOT re-exported — apps drive
+// the facade; direct native-module access is for advanced / debugging paths.
+
+export { NostosClient } from "./NostosClient";
+export type {
+  NostosClientConfig,
+  Row,
+  Subscription,
+  WriteOp,
+} from "./NostosClient";
+export type { Spec as NativeNostosSpec } from "./NativeNostos";
