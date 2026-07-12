@@ -182,15 +182,29 @@ author present), which stays a launch-blocking TODO.
    > machine an IPv6 address does not necessarily *route* it — we reproduced
    > exactly this on a real dev network: global IPv6 address present, all v6
    > TCP failing "no route to host". `nostos doctor` detects this case and
-   > names it. Fixes: a network with working IPv6 egress, or the Supabase
-   > IPv4 add-on (paid, Pro+) for the direct connection. Poolers do NOT
-   > carry logical replication.
+   > names it. Poolers do NOT carry logical replication, so you must reach the
+   > direct host. Fixes, easiest first:
+   > 1. **Userspace Cloudflare WARP** (free, no sudo, no macOS system
+   >    extension, does not disturb an existing full-tunnel VPN) —
+   >    `SUPABASE_REF=<ref> scripts/warp-ipv6-egress.sh up` runs WARP via
+   >    `wireproxy` in userspace and exposes `127.0.0.1:15433` → your Supabase
+   >    host. Point nostos at
+   >    `postgresql://postgres:<pw>@127.0.0.1:15433/postgres?sslmode=disable`
+   >    (nostos connects with NoTls today; Supabase's direct host permits
+   >    plaintext, so `sslmode=disable` — *not* `require`). Verified
+   >    end-to-end against a real project: the full replication e2e is green
+   >    through this tunnel. `…sh down` stops it.
+   > 2. A network with working IPv6 egress.
+   > 3. The Supabase IPv4 add-on (paid, Pro+) for the direct connection.
 3. `nostos init --db-url <direct connection string> --tables <your tables>
    --write-tables <writable subset> --tenant-column <your tenant column>
    --supabase-url https://<project-ref>.supabase.co` — creates the
    publication, derives the JWKS URL, writes `nostos.toml` + `.env`.
-   ⏳ pending live verification (publication/slot creation as the `postgres`
-   role, slot headroom on a real free-tier compute).
+   ✅ verified 2026-07-12 against project `ltamqsxxumtusyxswezi`: the
+   `postgres` role can create/drop a logical slot + publication (pgoutput),
+   5 slots / 0 used, and nostos's `PgReplicator` runs the full snapshot +
+   live + LSN-resume e2e green (`e2e_pg_replication` 3/3, `e2e_pg_snapshot`
+   2/2).
 4. `nostos dev` — prints the `ws://` URL.
 5. `flutter pub add nostos_flutter supabase_flutter`.
 6. ```dart

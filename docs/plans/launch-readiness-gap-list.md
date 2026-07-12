@@ -68,9 +68,10 @@ W2 ✅ (JWKS RS256/ES256/EdDSA + HS256 legacy, alg-confusion tested) · W3 ✅
 (nostos CLI, 19 tests) · W4 ✅ (nostos_flutter, real-server integration test) ·
 W5 ✅ (todo live mode; all 5 proof scenarios pass after the flush fix) · W6 ✅
 (release.yml + brew + pub.dev dry-run; unverifiable-without-remote items listed
-in workflow comments) · W7 ✅ · W8 ✅. **W0b remains operator-blocked** (needs a
-real Supabase project); stranger test (5-min stopwatch, fresh human+machine)
-still pending — both are launch gates.
+in workflow comments) · W7 ✅ · W8 ✅. **W0b ✅ VERIFIED (2026-07-12)** against
+operator project `ltamqsxxumtusyxswezi` — see the W0b verdict below. Stranger
+test (5-min stopwatch, fresh human+machine) is now the sole remaining
+engineering-side launch gate; the rest are operator launch ops (§A).
 
 Launch-blocking bug found & fixed by W5's proof: client txn batching buffered
 forever on idle tables (ApplyEngine flush heuristic + outbox drain gated on
@@ -102,6 +103,26 @@ Flutter Web puts even our official client in the vulnerable population).
 Predicate engine verified NOT at risk (it
 already coerces text numerically; predicate.rs:538). No released clients exist,
 so changing the wire NOW is free; after launch it's a breaking change.
+
+*W0b verdict (2026-07-12, operator project `ltamqsxxumtusyxswezi`, live):* the
+direct host is IPv6-only and this dev network has **no IPv6 egress** (router
+assigns a global v6 address but doesn't route it; a corp full-tunnel VPN holds
+the default route; no passwordless sudo). Resolved with a **userspace
+Cloudflare WARP tunnel** — `scripts/warp-ipv6-egress.sh` (`wgcf` + `wireproxy`;
+no sudo, no macOS system extension, doesn't disturb the existing VPN) exposes
+`127.0.0.1:15433` → the Supabase IPv6 host. Through it, nostos's **real
+`PgReplicator`** ran the full e2e against live Supabase PG 17.6
+(wal_level=logical): `postgres` role creates/drops a pgoutput slot +
+publication, 5 slots / 0 used, snapshot + live insert + LSN-resume all green
+(`e2e_pg_replication` 3/3, `e2e_pg_snapshot` 2/2), identical to the local-PG
+control run. nostos connects NoTls (plaintext); Supabase's direct host permits
+it, so the tunnel URL uses `sslmode=disable`. Gotchas surfaced: (1) the pooler
+cannot carry logical replication (confirmed — direct host required); (2)
+adding TLS to the replicator is a C-tier hardening item (production
+sync-server → Supabase should encrypt), not a dev-path launch blocker; (3)
+wireproxy's `Address` must stay comma-separated on one line or v6 egress
+silently fails. Project left clean (slots/tasks/pub all dropped post-test).
+QUICKSTART documents the WARP fix.
 
 ## F. New blockers surfaced by the Supabase bar
 
