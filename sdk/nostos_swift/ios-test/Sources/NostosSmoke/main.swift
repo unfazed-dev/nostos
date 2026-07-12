@@ -1,30 +1,115 @@
-// NostosSmoke — minimal iOS app that exercises the UniFFI-generated NostosClient
-// against the real nostos-client + nostos-core + rusqlite stack linked from the
-// Rust sim staticlib. Mirrors the offline smoke path in
-// sdk/nostos_swift/src/lib.rs (`nostos_client_offline_connect_query_round_trip`)
-// and the sibling SDKs' round-trip checks (nostos_node, nostos_tauri).
+// NostosSmoke — live-replication E2E on the iPhone simulator.
+//
+// Drives the SAME two-direction round-trip the Rust reference template
+// (`crates/nostos-client/tests/e2e_live_replication.rs`) proves, adapted to
+// Swift + UniFFI:
+//   1. connect() → subscribe("tasks") → run loop applies rows to cairn_data.
+//   2. POST /push to the spine → server pushes a `tasks` row → poll query()
+//      until the row lands on-device → [swift-e2e] PUSH_OK.
+//   3. SDK write()s `swift-echo` to its durable outbox → the spine's echo
+//      WriteBack re-emits it → run loop applies it → poll query() →
+//      [swift-e2e] ECHO_OK.
+//
+// The spine (target/debug/examples/e2e_server) is spawned by build.sh as a
+// background child; its NOSTOS_E2E_PORT is conveyed to this app via the
+// SIMCTL_CHILD_NOSTOS_E2E_PORT env var (simctl's documented injection prefix).
+// The iOS simulator shares the host's localhost, so the app reaches the spine
+// at ws://127.0.0.1:<port>/sync — no 10.0.2.2-style remap needed (that's
+// Android-emulator-only).
 //
 // This file is compiled INTO the same Swift module as the UniFFI-generated
 // `nostos_swift.swift` (added to the target's sources via project.yml), so the
 // `NostosClient` symbol is visible without a module import. The C FFI module
-// `nostos_swiftFFI` (modulemap + header in `../../swift-sources/`) is exposed
-// via the target's HEADER_SEARCH_PATHS — the generated Swift file's
-// `#if canImport(nostos_swiftFFI)` then resolves.
+// `nostos_swiftFFI` (header in `../../swift-sources/`) is exposed via the
+// target's HEADER_SEARCH_PATHS + the bridging header.
 //
-// ponytail: this is a smoke harness, not a shipping iOS app. It launches, runs
-// the round-trip on a background queue, prints a single delimited SUCCESS line
-// to stdout, and `exit(0)`s. The upgrade path is the real SDK's iOS demo app.
+// ponytail: this is a test harness, not a shipping iOS app. It launches, runs
+// the round-trip on a background queue, prints delimited [swift-e2e] lines to
+// stdout, and `exit(0)`s. The upgrade path is the real SDK's iOS demo app.
 
 import Foundation
 import UIKit
+
+// MARK: - Spine endpoint discovery
+
+/// The port the spine announced via `NOSTOS_E2E_PORT=`. build.sh injects this
+/// via `SIMCTL_CHILD_NOSTOS_E2E_PORT` (simctl's documented env-injection
+/// prefix). Fatal if absent — there's no useful test without a live spine.
+private func spinePort() -> UInt16 {
+    guard let raw = ProcessInfo.processInfo.environment["NOSTOS_E2E_PORT"],
+          let port = UInt16(raw)
+    else {
+        print("[swift-e2e] FAIL: NOSTOS_E2E_PORT env var not set or invalid")
+        exit(1)
+    }
+    return port
+}
+
+// MARK: - Synchronous HTTP POST /push
+
+/// POST a row to the spine's `/push` control endpoint and block until the
+/// spine responds. Mirrors the Rust template's `http_push`: the spine only
+/// needs `pk` + `payload` to inject a `tasks` row through the fan-out.
+private func httpPush(port: UInt16, body: String) {
+    let url = URL(string: "http://127.0.0.1:\(port)/push")!
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = body.data(using: .utf8)
+    let semaphore = DispatchSemaphore(value: 0)
+    var failure: String? = nil
+    URLSession.shared.dataTask(with: req) { _, response, error in
+        if let error = error {
+            failure = "transport: \(error)"
+        } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            failure = "non-2xx status: \(http.statusCode)"
+        }
+        semaphore.signal()
+    }.resume()
+    if semaphore.wait(timeout: .now() + .seconds(5)) == .timedOut {
+        print("[swift-e2e] FAIL: POST /push timed out after 5s")
+        exit(1)
+    }
+    if let failure = failure {
+        print("[swift-e2e] FAIL: POST /push \(failure)")
+        exit(1)
+    }
+}
+
+// MARK: - query() polling
+
+/// Poll `client.query(sql)` until the result string contains `needle` or the
+/// timeout fires. Returns true on hit, false on timeout. Mirrors the Rust
+/// template's `poll_row`: 100ms interval, generous bound for the WS round-trip
+/// + engine apply.
+private func pollQueryContains(_ client: NostosClient, sql: String, needle: String,
+                                timeoutSeconds: Double) -> Bool {
+    let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
+    while Date() < deadline {
+        do {
+            let rows = try client.query(sql: sql)
+            if rows.contains(needle) {
+                return true
+            }
+        } catch {
+            // query() can transiently fail if the run loop is mid-flush; the
+            // poll loop will retry until the deadline.
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    return false
+}
+
+// MARK: - App shell
 
 final class SmokeAppDelegate: UIResponder, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        // Run the smoke off the main run loop so UIApplication's main loop has
-        // been initialized before we tear the process down with exit(0).
+        // Run the round-trip off the main run loop so UIApplication's main
+        // loop has been initialized before we tear the process down with
+        // exit(0).
         DispatchQueue.global(qos: .userInitiated).async {
             Smoke.run()
         }
@@ -34,47 +119,79 @@ final class SmokeAppDelegate: UIResponder, UIApplicationDelegate {
 
 enum Smoke {
     static func run() {
-        // Marker line — anything we emit AFTER this is part of the test output.
-        print("[nostos-smoke] BEGIN iPhone-17-sim round-trip")
+        print("[swift-e2e] BEGIN iPhone-sim live round-trip")
+
+        let port = spinePort()
+        let wsUrl = "ws://127.0.0.1:\(port)/sync"
+        print("[swift-e2e] spine wsUrl=\(wsUrl)")
+
+        // File-based DB so the engine's apply path + durable outbox survive
+        // across the run loop's flush + echo re-emit (mirrors the Rust
+        // template's PID-unique temp path). Clean remove first so a stale
+        // file from a prior run can't yield a false positive.
+        let dbPath = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("nostos-swift-e2e-\(getpid()).sqlite")
+        try? FileManager.default.removeItem(atPath: dbPath)
 
         do {
-            // Construct the handle. URL/token are unused offline (no subscribe
-            // loop is wired — see src/lib.rs `connect()`). `:memory:` gives an
-            // ephemeral SQLite store so the test is hermetic.
-            let client = try NostosClient(
-                url: "ws://localhost:0",
-                token: nil,
-                dbPath: ":memory:"
-            )
-            print("[nostos-smoke] constructed NostosClient")
-
-            // Open the local SQLite store + build the SyncClient. No network.
+            let client = try NostosClient(url: wsUrl, token: nil, dbPath: dbPath)
             try client.connect()
-            print("[nostos-smoke] connect() ok")
+            print("[swift-e2e] connect() ok")
+            try client.subscribe(table: "tasks")
+            print("[swift-e2e] subscribe(\"tasks\") ok — run loop driving replication")
 
-            // Offline read — same SELECT the Rust test in lib.rs asserts.
-            let rowsJson = try client.query(sql: "SELECT 1 AS one")
-            print("[nostos-smoke] query() rows=\(rowsJson)")
+            // Let the subscribe land + the session register with the fan-out
+            // (the spine only delivers to sessions registered at fan-out
+            // time). Mirrors the Rust template's 500ms settle.
+            Thread.sleep(forTimeInterval: 0.5)
 
-            // Checkpoint read — proves the durable LSN accessor survives the
-            // FFI boundary too.
-            let lsn = try client.checkpoint()
-            print("[nostos-smoke] checkpoint() lsn=\(lsn)")
+            // ---- direction 1: server PUSH → on-device query ----
+            let pushBody = """
+                {"pk":"swift-push","payload":{"title":"from-server","status":"open","priority":"5"}}
+                """
+            httpPush(port: port, body: pushBody)
+            let pushSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='swift-push'"
+            if pollQueryContains(client, sql: pushSql, needle: "swift-push", timeoutSeconds: 8) {
+                print("[swift-e2e] PUSH_OK")
+            } else {
+                let rows = (try? client.query(sql: pushSql)) ?? "<query failed>"
+                print("[swift-e2e] FAIL: swift-push never landed in cairn_data; rows=\(rows)")
+                exit(1)
+            }
 
-            print("[nostos-smoke] SUCCESS")
+            // ---- direction 2: SDK write → server echo → on-device query ----
+            let echoPayload = "{\"title\":\"from-swift\",\"status\":\"open\",\"priority\":\"7\"}"
+            let writeId = try client.write(
+                table: "tasks",
+                op: "upsert",
+                pk: "swift-echo",
+                payloadJson: echoPayload
+            )
+            print("[swift-e2e] write() id=\(writeId) (swift-echo enqueued)")
+            let echoSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='swift-echo'"
+            if pollQueryContains(client, sql: echoSql, needle: "swift-echo", timeoutSeconds: 8) {
+                print("[swift-e2e] ECHO_OK")
+            } else {
+                let rows = (try? client.query(sql: echoSql)) ?? "<query failed>"
+                print("[swift-e2e] FAIL: swift-echo never echoed back; rows=\(rows)")
+                exit(1)
+            }
+
+            print("[swift-e2e] SUCCESS")
         } catch {
-            print("[nostos-smoke] FAIL: \(error)")
+            print("[swift-e2e] FAIL: \(error)")
+            exit(1)
         }
 
-        // Terminate the process so simctl launch returns and the harness can
-        // capture the full stdout. (Foundation.exit is the polite form; for
-        // iOS we drop to the C function.)
+        // Terminate so simctl launch returns and the harness captures stdout.
+        // Session::Drop aborts the spawned run_with_reconnect task; exit(0)
+        // rips the rest.
         exit(0)
     }
 }
 
-// UIApplicationMain/UIApplicationAdaptor shims — keep the file self-contained
-// (no @main attribute, which SwiftUI's App protocol would otherwise drive).
+// UIApplicationMain shims — keep the file self-contained (no @main attribute,
+// which SwiftUI's App protocol would otherwise drive).
 _ = UIApplicationMain(
     CommandLine.argc,
     CommandLine.unsafeArgv,
