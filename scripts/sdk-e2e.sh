@@ -23,7 +23,7 @@ cd "$(git rev-parse --show-toplevel)"
 GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; RED=$'\033[0;31m'
 BOLD=$'\033[1m';   RESET=$'\033[0m'
 
-ALL_SLICES=(rust node tauri web flutter swift kotlin)
+ALL_SLICES=(rust node tauri web capacitor dotnet flutter swift kotlin reactnative)
 if [ "$#" -gt 0 ]; then
   SLICES=("$@")
 else
@@ -60,10 +60,16 @@ echo -e "${BOLD}building the shared spine…${RESET}"
 cargo build -q -p nostos-infra --examples 2>&1 | tail -1
 echo -e "${BOLD}SDK live-E2E slices:${RESET}"
 
-want rust  && run_slice rust  "cargo test -q -p nostos-client --test e2e_live_replication -- --nocapture"
-want node  && run_slice node  "cd sdk/nostos_node && cargo build --release -q && node smoke_live.cjs"
-want tauri && run_slice tauri "cd sdk/nostos_tauri && cargo test -- --nocapture"
-want web   && run_slice web   "cd sdk/nostos_web && npx playwright test --config=playwright.config.cjs"
+want rust      && run_slice rust      "cargo test -q -p nostos-client --test e2e_live_replication -- --nocapture"
+want node      && run_slice node      "cd sdk/nostos_node && cargo build --release -q && node smoke_live.cjs"
+want tauri     && run_slice tauri     "cd sdk/nostos_tauri && cargo test -- --nocapture"
+want web       && run_slice web       "cd sdk/nostos_web && npx playwright test --config=playwright.config.cjs"
+want capacitor && run_slice capacitor "cd sdk/nostos_capacitor && npm install --no-audit --no-fund && npm run build && cd example-app && npm install --no-audit --no-fund && npx playwright test --config=playwright.config.cjs"
+# dotnet — the Rust surface (the SDK's compiled core + unit tests). The C# runtime
+# live-E2E is SKIP everywhere: no dotnet on this host (the scaffold ships generated
+# C# for review; cross-compile of iOS/Android verified separately). PASS here =
+# the FFI core compiles + its 5 unit tests pass.
+want dotnet    && run_slice dotnet    "cd sdk/nostos_dotnet && cargo test --quiet && cargo build --release --quiet"
 
 # Flutter — needs docker Postgres (the W5 nostos_live_test harness).
 if want flutter; then
@@ -90,6 +96,19 @@ if want kotlin; then
     run_slice kotlin "cd sdk/nostos_kotlin && ./scripts/run-live-e2e.sh"
   else
     skip_slice kotlin "(no booted Android emulator)"
+  fi
+fi
+
+# React Native — Android Kotlin TurboModule (reuses nostos_kotlin's .so + UniFFI
+# bindings). Needs a booted Android emulator; run-android-e2e.sh builds the .so,
+# spawns the spine, and runs the instrumented PUSH+ECHO round-trip. iOS TurboModule
+# is a fast-follow (nostos_swift is sim-proven, so the pieces exist).
+if want reactnative; then
+  ADB="${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb"
+  if [ -x "$ADB" ] && "$ADB" devices 2>/dev/null | grep -q 'emulator.*device'; then
+    run_slice reactnative "cd sdk/nostos_react_native && ./scripts/run-android-e2e.sh"
+  else
+    skip_slice reactnative "(no booted Android emulator)"
   fi
 fi
 

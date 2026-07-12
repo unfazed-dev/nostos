@@ -168,13 +168,13 @@ Rust `nostos-client`):
 |---|---|---|
 | Flutter (Dart) | ✅ GA `powersync` 2.3.1 | ✅ `sdk/nostos_flutter` (frb) |
 | Web / WASM | ✅ GA `@powersync/web` 1.39.0 | ✅ `crates/nostos-ffi-wasm` + `sdk/nostos_web` (`@nostos-sync/web`, PowerSync-style API; node smoke `SMOKE_OK`; browser WS via web-sys — OPFS deferred) |
-| React Native | ✅ GA `@powersync/react-native` 1.35.9 | ❌ ROADMAP Phase 3 (ADR-0015 UniFFI) |
+| React Native | ✅ GA `@powersync/react-native` 1.35.9 | 🟢 `sdk/nostos_react_native` — TurboModule over nostos_kotlin/nostos_swift UniFFI (ADR-0020; Hermes has no WASM so the JS core is facade-only); Android emu live PUSH+ECHO E2E verified (`xml_failures=0`); iOS TurboModule fast-follow |
 | Node | 🟡 Beta `@powersync/node` 0.19.4 | 🟡 `sdk/nostos_node` (napi-rs) — **loads in node, async query round-trips `EXIT=0` (verified independently)**; offline-only (no live `subscribe`/replicator path yet) |
 | Kotlin (KMP) | ✅ GA `com.powersync:core` 1.12.0 | 🟢 `sdk/nostos_kotlin` (UniFFI) — **device-verified**: `connectedDebugAndroidTest` PASS on Android 14 (API 34, arm64-v8a, **4KB pages**) — `NostosClient` construct + `connect` + `query("SELECT 1 AS one")` round-trip (`failures=0`, verified independently). JNA/Android-16 16KB-page wall confirmed as root cause; API 34 sidesteps it. `forbid(unsafe)` |
 | Swift (iOS/macOS) | ✅ GA `powersync-swift` | 🟢 `sdk/nostos_swift` (UniFFI) — **sim-E2E proven**: `connect`+`query` ran on the **iPhone 17 sim** (iOS 26.5, captured stdout, independently reproduced); Rust compiles host + iOS + sim; `forbid(unsafe)`. SPM `.binaryTarget`/xcframework packaging is the remaining polish |
-| Capacitor | 🟡 Beta | ❌ |
+| Capacitor | 🟡 Beta | 🟢 `sdk/nostos_capacitor` — web-only v8 plugin over `@nostos-sync/web`'s browser live path (webview WASM+WS unmodified); Playwright PUSH+ECHO E2E |
 | Tauri | 🔴 Alpha | 🟡 `sdk/nostos_tauri` plugin (tauri 2) — compiles + 2 integration tests green (offline connect/query round-trip; write-before-connect contract); `forbid(unsafe)`; `subscribe` run-loop + JS bindings deferred |
-| .NET | 🟡 Beta | ❌ |
+| .NET | 🟡 Beta | 🟢 `sdk/nostos_dotnet` — UniFFI-CS Nord `v0.9.2+v0.28.3` over the nostos-client UniFFI surface (reuses nostos_swift/kotlin's `#[derive(uniffi::Object)]`); iOS/iOS-sim/Android cross-compile verified; generated `nostos.cs` committed; C# runtime E2E SKIP (no dotnet on host) |
 | Rust | 🔴 Alpha | ✅ `crates/nostos-client` — native Rust SDK (`SyncClient`/`SqliteStorage`, `forbid(unsafe)`, live-Supabase-tested, README). Not yet on crates.io |
 
 Catch-up is **cheap, not foundational**: `nostos-core` is WASM-clean
@@ -247,7 +247,7 @@ reachable end-to-end.
    thesis** (the Flutter `Runtime::new()` + `SyncClient` FFI pattern ported
    straight to napi). Honest scope: offline-only (no live `subscribe`/replicator
    path verified yet) + a `u64→f64` id-precision `ponytail:`. Nostos is now
-   **7/10 platforms** (Flutter + JS-Web + Node + Rust + Tauri + Swift + Kotlin; RN/Capacitor/.NET remain — see items 5–9). Note: `nostos-ffi-wasm` + `sdk/nostos_web` are ONE platform (JavaScript Web, matching PowerSync's single `@powersync/web`); earlier incremental commit-msg counts double-counted them — the authoritative figure vs PowerSync's 10 is **7/10**.
+   **10/10 platforms** (Flutter + JS-Web + Node + Rust + Tauri + Swift + Kotlin + Capacitor + .NET + React Native; RN/Capacitor/.NET landed 2026-07-12 — see `docs/plans/sdk-parity-final-three.md` + ADR-0020). Note: `nostos-ffi-wasm` + `sdk/nostos_web` are ONE platform (JavaScript Web, matching PowerSync's single `@powersync/web`); the authoritative figure vs PowerSync's 10 is now **10/10** (9/10 live-E2E-verified; .NET SKIP — no dotnet on host; RN-iOS TurboModule pending).
 4. P5 Sync Streams — biggest remaining *feature* gap for the "equivalent SDK"
    claim.
 5. ✅ **DONE** — `nostos-client` documented as the Rust SDK (README + public-API
