@@ -1,0 +1,30 @@
+{
+  "name": "@nostos-sync/capacitor",
+  "version": "0.0.0",
+  "description": "Capacitor v8 web-only plugin re-exporting @nostos-sync/web's live browser sync path (NostosSocket via the --target web wasm build). No native android/ios source — the webview is a full browser engine, so WASM + WebSocket run unmodified.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\"",
+    "test:e2e": "cd example-app && npx playwright test --config=playwright.config.cjs",
+    "test": "npm run build && npm run test:e2e"
+  },
+  "license": "Apache-2.0",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@capacitor/core": "^8.0.0"
+  },
+  "dependencies": {
+    "@nostos-sync/web": "file:../nostos_web",
+    "tslib": "^2.6.0"
+  },
+  "devDependencies": {
+    "@capacitor/core": "^8.4.1",
+    "@playwright/test": "^1.40.0",
+    "typescript": "^5.4.0"
+  }
+}
