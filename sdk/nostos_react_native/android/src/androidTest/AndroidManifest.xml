@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test-app-only manifest overlay (parity with nostos_kotlin).
+     - `extractNativeLibs="true"`: JNA's `System.loadLibrary("jnidispatch")`
+       lookup needs the .so files extracted to /data/app/.../lib/arm64/ rather
+       than page-mapped from the apk (AGP 8.x's default
+       `extractNativeLibs=false` breaks JNA's loader on the test-app process).
+       The library's `useLegacyPackaging = false` in build.gradle.kts is the
+       shipped .aar's intent; this overlay applies the extract flag to the
+       test app AGP spins up for connectedDebugAndroidTest.
+     - `INTERNET` + `usesCleartextTraffic="true"`: the live-E2E test
+       (`live_connect_push_echo_roundTrip`) reaches the host-side spine at
+       `ws://10.0.2.2:<port>/sync` + `http://10.0.2.2:<port>/push`. Android 9+
+       (API 28+) blocks cleartext by default; the test app must opt in. Both
+       are test-only — the shipped library manifest stays empty. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application
+        android:extractNativeLibs="true"
+        android:usesCleartextTraffic="true" />
+</manifest>

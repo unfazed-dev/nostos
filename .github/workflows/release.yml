@@ -1,0 +1,385 @@
+name: Release
+
+# Tag-triggered: `git tag v0.1.0 && git push origin v0.1.0`. Nothing here has
+# been exercised end to end yet — there is no GitHub remote for this repo as
+# of writing (see docs/plans/flutter-supabase-plug-and-play-launch.md W6).
+# Every job below was designed against what's locally verifiable (target
+# lists, crate builds, action syntax via `actionlint`) and documented as
+# such; the first real tag push is this pipeline's first real test.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  NOSTOS_FLUTTER_RUST_DIR: sdk/nostos_flutter/rust
+
+jobs:
+  # ===========================================================================
+  # 1a. `nostos` + `nostos-server` CLI/server binaries.
+  # ===========================================================================
+
+  cli-server-macos:
+    name: cli/server — macOS (${{ matrix.target }})
+    runs-on: macos-14 # Apple Silicon runner — can cross-link x86_64 too via Xcode.
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-server-macos-${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p nostos-cli -p nostos-server
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="nostos-${{ matrix.target }}"
+          mkdir -p "$out"
+          cp target/${{ matrix.target }}/release/nostos "$out"/
+          cp target/${{ matrix.target }}/release/nostos-server "$out"/
+          tar czf "$out.tar.gz" "$out"
+          shasum -a 256 "$out.tar.gz" | awk '{print $1}' > "$out.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-server-${{ matrix.target }}
+          path: |
+            nostos-${{ matrix.target }}.tar.gz
+            nostos-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  cli-server-linux:
+    name: cli/server — Linux x86_64 (glibc-pinned)
+    runs-on: ubuntu-latest
+    # cargo-zigbuild over houseabsolute/actions-rust-cross: no Docker image to
+    # pull (actions-rust-cross/`cross` cross-compiles inside a per-target
+    # Docker container), and zigbuild's versioned target suffix
+    # (`x86_64-unknown-linux-gnu.2.17`) lets us pin the glibc floor precisely
+    # to the manylinux2014/CentOS-7 baseline for maximum old-distro
+    # compatibility, in one line, on the same runner as everything else here.
+    # rustls (not native-tls/openssl) throughout this workspace also means no
+    # system OpenSSL headers to worry about cross-linking.
+    env:
+      ZIG_TARGET: x86_64-unknown-linux-gnu.2.17
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-server-linux
+      - name: Install zig + cargo-zigbuild
+        run: |
+          pip install --user ziglang
+          cargo install cargo-zigbuild --locked
+      - name: Build
+        run: cargo zigbuild --release --target "$ZIG_TARGET" -p nostos-cli -p nostos-server
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="nostos-x86_64-unknown-linux-gnu"
+          mkdir -p "$out"
+          cp target/x86_64-unknown-linux-gnu/release/nostos "$out"/
+          cp target/x86_64-unknown-linux-gnu/release/nostos-server "$out"/
+          tar czf "$out.tar.gz" "$out"
+          shasum -a 256 "$out.tar.gz" | awk '{print $1}' > "$out.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-server-x86_64-unknown-linux-gnu
+          path: |
+            nostos-x86_64-unknown-linux-gnu.tar.gz
+            nostos-x86_64-unknown-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+
+  cli-server-windows:
+    name: cli/server — Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-server-windows
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc -p nostos-cli -p nostos-server
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "nostos-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Path $out | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/nostos.exe $out/
+          Copy-Item target/x86_64-pc-windows-msvc/release/nostos-server.exe $out/
+          Compress-Archive -Path $out -DestinationPath "$out.zip"
+          $hash = (Get-FileHash "$out.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$out.zip.sha256" -Value $hash -NoNewline
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-server-x86_64-pc-windows-msvc
+          path: |
+            nostos-x86_64-pc-windows-msvc.zip
+            nostos-x86_64-pc-windows-msvc.zip.sha256
+          if-no-files-found: error
+
+  # ===========================================================================
+  # 1b. Flutter glue cdylib (sdk/nostos_flutter/rust — crate `nostos_flutter_rust`).
+  #
+  # Artifact-name/manifest contract: every filename produced here (minus the
+  # ".sha256" suffix on the hash sidecars) becomes the `url` value the
+  # `update-manifest` job below writes into hook/prebuilt.json, keyed by the
+  # `_manifestKey()` names hook/build.dart computes at build-hook time from
+  # `input.config.code.{targetOS,targetArchitecture,iOS.targetSdk}`. Keep
+  # these three things in lockstep: this job's filenames, prebuilt.json's
+  # `artifacts` keys, and hook/build.dart's `_manifestKey()` switch — see
+  # prebuilt.json's `_comment` for the authoritative list of keys.
+  # ===========================================================================
+
+  flutter-android:
+    name: flutter glue — Android (arm64-v8a, armeabi-v7a, x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+          key: flutter-android
+      # Pinned NDK version, not whatever ubuntu-latest's image happens to
+      # preinstall (`ANDROID_NDK_LATEST_HOME`) — reproducibility across image
+      # updates matters more here than saving one download.
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+      - run: cargo install cargo-ndk --locked
+      - name: Build all three ABIs
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build --release
+      - name: Package + hash
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          set -euo pipefail
+          declare -A abi_to_triple=(
+            [arm64-v8a]=aarch64-linux-android
+            [armeabi-v7a]=armv7-linux-androideabi
+            [x86_64]=x86_64-linux-android
+          )
+          mkdir -p ../../../dist
+          for abi in "${!abi_to_triple[@]}"; do
+            triple="${abi_to_triple[$abi]}"
+            src="target/$triple/release/libnostos_flutter_rust.so"
+            dst="../../../dist/libnostos_flutter_rust-android-$abi.so"
+            cp "$src" "$dst"
+            shasum -a 256 "$dst" | awk '{print $1}' > "$dst.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flutter-android
+          path: dist/libnostos_flutter_rust-android-*
+          if-no-files-found: error
+
+  flutter-ios:
+    name: flutter glue — iOS (device + simulator XCFramework)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+          key: flutter-ios
+      - name: Build device + both simulator slices
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          cargo build --release --target aarch64-apple-ios
+          cargo build --release --target aarch64-apple-ios-sim
+          cargo build --release --target x86_64-apple-ios
+      - name: Package raw per-slice dylibs (what hook/build.dart downloads)
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../../../dist
+          cp target/aarch64-apple-ios/release/libnostos_flutter_rust.dylib \
+            ../../../dist/libnostos_flutter_rust-ios-device-arm64.dylib
+          cp target/aarch64-apple-ios-sim/release/libnostos_flutter_rust.dylib \
+            ../../../dist/libnostos_flutter_rust-ios-simulator-arm64.dylib
+          cp target/x86_64-apple-ios/release/libnostos_flutter_rust.dylib \
+            ../../../dist/libnostos_flutter_rust-ios-simulator-x64.dylib
+          for f in ../../../dist/libnostos_flutter_rust-ios-*.dylib; do
+            shasum -a 256 "$f" | awk '{print $1}' > "$f.sha256"
+          done
+      # Convenience asset for manual/non-Flutter iOS integration — NOT what
+      # hook/build.dart consumes; see hook/prebuilt.json's comment for why
+      # the hook wants raw single-slice dylibs instead.
+      - name: Build XCFramework
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          set -euo pipefail
+          # The two simulator arches (arm64 + x86_64) are the same xcframework
+          # "library identifier" slot (ios-simulator) and must be fused into
+          # one fat binary before xcodebuild will accept them as a single
+          # -library entry.
+          lipo -create \
+            target/aarch64-apple-ios-sim/release/libnostos_flutter_rust.dylib \
+            target/x86_64-apple-ios/release/libnostos_flutter_rust.dylib \
+            -output /tmp/libnostos_flutter_rust-ios-simulator-universal.dylib
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libnostos_flutter_rust.dylib \
+            -library /tmp/libnostos_flutter_rust-ios-simulator-universal.dylib \
+            -output ../../../dist/nostos_flutter_rust.xcframework
+          cd ../../../dist
+          zip -r nostos_flutter_rust.xcframework.zip nostos_flutter_rust.xcframework
+          rm -rf nostos_flutter_rust.xcframework
+          shasum -a 256 nostos_flutter_rust.xcframework.zip | awk '{print $1}' \
+            > nostos_flutter_rust.xcframework.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flutter-ios
+          path: |
+            dist/libnostos_flutter_rust-ios-*
+            dist/nostos_flutter_rust.xcframework.zip
+            dist/nostos_flutter_rust.xcframework.zip.sha256
+          if-no-files-found: error
+
+  flutter-macos:
+    name: flutter glue — macOS (universal)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+          key: flutter-macos
+      - name: Build both slices + lipo
+        working-directory: ${{ env.NOSTOS_FLUTTER_RUST_DIR }}
+        run: |
+          set -euo pipefail
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p ../../../dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/libnostos_flutter_rust.dylib \
+            target/x86_64-apple-darwin/release/libnostos_flutter_rust.dylib \
+            -output ../../../dist/libnostos_flutter_rust-macos-universal.dylib
+          shasum -a 256 ../../../dist/libnostos_flutter_rust-macos-universal.dylib \
+            | awk '{print $1}' > ../../../dist/libnostos_flutter_rust-macos-universal.dylib.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flutter-macos
+          path: dist/libnostos_flutter_rust-macos-universal.dylib*
+          if-no-files-found: error
+
+  # ===========================================================================
+  # 1c. Assemble the GitHub Release + the prebuilt.json manifest update.
+  #
+  # Manifest-update flow (per plan requirement — cannot be a straight
+  # auto-commit): hook/prebuilt.json ships INSIDE the pub.dev package, so its
+  # URLs/hashes must be correct *before* `dart pub publish` runs for this
+  # version. But the artifact sha256s only exist *after* this same tag's
+  # builds finish, and pub.dev packages are immutable once published. So the
+  # real sequence a maintainer follows is:
+  #   1. Push the `vX.Y.Z` tag → this workflow runs → GitHub Release created
+  #      with all binaries AND a `release-prebuilt-manifest.json` asset
+  #      (the fully filled-in hook/prebuilt.json for this tag).
+  #   2. This job also opens a PR against `main` that replaces
+  #      sdk/nostos_flutter/hook/prebuilt.json with that same content — a PR,
+  #      not a direct push, so a human reviews the URLs/hashes before they
+  #      ship inside a package.
+  #   3. Maintainer merges the PR, then runs `dart pub publish` from a
+  #      checkout of that merged commit (still a manual, human step — pub.dev
+  #      publish tokens are not wired into CI here; see the plan's "don't
+  #      over-automate" instruction, same reasoning as the Homebrew tap).
+  # ===========================================================================
+
+  update-manifest:
+    name: assemble prebuilt.json for this release
+    runs-on: ubuntu-latest
+    needs: [flutter-android, flutter-ios, flutter-macos]
+    outputs:
+      manifest-path: release-prebuilt-manifest.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: flutter-*
+          path: dist
+          merge-multiple: true
+      - name: Fill in hook/prebuilt.json from the built artifacts' hashes
+        # Logic lives in packaging/release/fill_prebuilt_manifest.py, not
+        # inline here: a `run: |` block scalar requires every line indented
+        # to match the surrounding YAML, but Python's top-level statements
+        # must start at column 0 — an inline heredoc can't satisfy both.
+        run: |
+          set -euo pipefail
+          base="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          python3 packaging/release/fill_prebuilt_manifest.py "$base" "${{ github.ref_name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-prebuilt-manifest
+          path: release-prebuilt-manifest.json
+          if-no-files-found: error
+      - name: Open PR to update hook/prebuilt.json on main
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore: fill hook/prebuilt.json for ${{ github.ref_name }}"
+          title: "chore: fill hook/prebuilt.json for ${{ github.ref_name }}"
+          body: |
+            Auto-generated by `.github/workflows/release.yml`'s `update-manifest`
+            job for tag `${{ github.ref_name }}`. Review the URLs/hashes against
+            the [release assets](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}),
+            then merge before running `dart pub publish` for this version — see
+            that job's comment block for the full manifest-update flow.
+          branch: release/${{ github.ref_name }}-prebuilt-manifest
+          add-paths: sdk/nostos_flutter/hook/prebuilt.json
+
+  create-release:
+    name: create GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      [
+        cli-server-macos,
+        cli-server-linux,
+        cli-server-windows,
+        flutter-android,
+        flutter-ios,
+        flutter-macos,
+        update-manifest,
+      ]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create release + attach all binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

@@ -1,0 +1,36 @@
+[package]
+name = "nostos_node"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Standalone workspace (mirrors sdk/nostos_flutter/rust/Cargo.toml): detaches
+# this crate from the root nostos Cargo.toml so the root `make ci` gate is not
+# entangled with an experimental napi scaffold. The root workspace already
+# forbids `unsafe`; the napi-derive macro is the machine-generated FFI glue
+# exception (ADR-0015 addendum) — see lib.rs ponytail.
+[workspace]
+
+[dependencies]
+napi = { version = "2", features = ["tokio_rt"] }
+napi-derive = "2"
+
+# Path deps — same shape as sdk/nostos_flutter/rust/Cargo.toml (this crate lives
+# at sdk/nostos_node/, so the crates are three levels up).
+nostos-client = { path = "../../crates/nostos-client" }
+nostos-core = { path = "../../crates/nostos-core" }
+nostos-domain = { path = "../../crates/nostos-domain" }
+
+tokio = { version = "1.39", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde_json = "1.0"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# Smaller artifacts for the napi addon; lto is off by default to keep the
+# scaffolding link fast (this is a feasibility build, not a shipped binary).
+opt-level = 1

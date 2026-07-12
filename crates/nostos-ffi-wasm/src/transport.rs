@@ -171,6 +171,85 @@ pub fn build_ack_frame(lsn: u64) -> String {
 }
 
 // -----------------------------------------------------------------------------
+// Wire encode (write) — pure, host-tested.
+// -----------------------------------------------------------------------------
+
+/// The serde shape of the outbound `write` frame, matching the
+/// `ClientMessage::Write` variant in `nostos_infra::wire` byte-for-byte:
+/// `{"type":"write","table":..,"op":..,"pk":..,"payload":..?,"client_write_id":..}`.
+/// `payload` is omitted when `None` (deletes); otherwise it MUST be a JSON
+/// object — the server's `ClientMessage::Write` rejects arrays / scalars /
+/// null as `InvalidPayload` before any SQL is built. We parse the caller's
+/// JSON string into a `serde_json::Value` here so a non-object surfaces as a
+/// local error rather than a closed socket.
+#[derive(Serialize)]
+struct WriteFrame<'a> {
+    #[serde(rename = "type")]
+    typ: &'static str,
+    table: &'a str,
+    op: &'a str,
+    pk: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
+    client_write_id: &'a str,
+}
+
+/// Build the outbound `write` frame as a JSON string, exactly the shape the
+/// server's `decode_client_message` accepts:
+///
+/// ```json
+/// {"type":"write","table":"<t>","op":"upsert","pk":"<id>","payload":{...},"client_write_id":"<id>"}
+/// ```
+///
+/// `payload_json` is the COLUMN→value tuple image (a JSON object) for upsert /
+/// patch; `None` (or an empty string) for delete. Non-object payloads (arrays,
+/// scalars, null) and malformed JSON return `Err` so the caller can surface it
+/// rather than ship a frame the server will reject.
+///
+/// # Errors
+/// - `Err(JsValue)` if `payload_json` is `Some` but not valid JSON
+/// - `Err(JsValue)` if the parsed payload is not a JSON object (the server's
+///   `ClientMessage::Write` rejects non-objects as `InvalidPayload`)
+pub fn build_write_frame(
+    table: &str,
+    op: &str,
+    pk: &str,
+    payload_json: Option<&str>,
+    client_write_id: &str,
+) -> Result<String, JsValue> {
+    let payload = match payload_json.map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s) => {
+            let v: serde_json::Value = serde_json::from_str(s).map_err(|e| {
+                JsValue::from_str(&format!("nostos write: invalid payload JSON: {e}"))
+            })?;
+            if !v.is_object() {
+                return Err(JsValue::from_str(&format!(
+                    "nostos write: payload must be a JSON object (got {})"
+                    // Cheap summary: array / scalar / null — no PII.
+                    , match v {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Null => "null",
+                        _ => "scalar",
+                    }
+                )));
+            }
+            Some(v)
+        }
+    };
+    let frame = WriteFrame {
+        typ: "write",
+        table,
+        op,
+        pk,
+        payload,
+        client_write_id,
+    };
+    serde_json::to_string(&frame)
+        .map_err(|e| JsValue::from_str(&format!("nostos write: frame serialize: {e}")))
+}
+
+// -----------------------------------------------------------------------------
 // The pure frame-pump — host-tested.
 // -----------------------------------------------------------------------------
 
@@ -370,7 +449,7 @@ pub(crate) async fn connect(
         let _ = inner_open.ws.send_with_str(&frame);
     });
 
-    // --- onmessage: the pure frame-pump → persist checkpoint → ack. ---
+    // --- onmessage: the pure frame-pump → idle-flush → persist checkpoint → ack. ---
     let inner_msg = Rc::clone(&inner);
     let on_message = Closure::new(move |evt: web_sys::MessageEvent| {
         let bytes = message_bytes(&evt);
@@ -379,15 +458,30 @@ pub(crate) async fn connect(
         // errors); on a future OPFS backend, close + reconnect. 1011 = "internal
         // error". ponytail: no retry/backoff — the E3 demo reloads the page; a
         // production client adds reconnect logic.
-        let Ok(result) = on_message(&mut engine, &bytes) else {
+        let Ok(pump) = on_message(&mut engine, &bytes) else {
             let _ = inner_msg.ws.close_with_code(1011);
             return;
         };
-        if let Some(ack_lsn) = checkpoint_from(result) {
+        // Idle-flush: the engine buffers standalone frames (no `txn_id`) until
+        // either a transaction boundary, the 256-frame soft cap, or an explicit
+        // flush — the WS transport sees one Nostos event per WS message (or a
+        // complete array), so commit any pending at message end. Mirrors what
+        // the native `SyncClient::run_once` does via `flush_quiesce` on an idle
+        // stream, but per-message here because the browser event loop delivers
+        // each WS message as a discrete, atomic unit. `flush()` is a no-op
+        // (returns `None`) when nothing is pending, so unconditional is safe.
+        let mut ack_lsn = pump.ack;
+        if let Ok(Some(outcome)) = engine.flush() {
+            // The pump may have already committed mid-message (transaction
+            // boundary); the flush is a no-op in that case. Either way, the
+            // last checkpoint wins (the engine's high-water is monotonic).
+            ack_lsn = Some(outcome.checkpoint() as u64);
+        }
+        if let Some(lsn) = ack_lsn {
             // Persist FIRST (so a crash between ack + persist doesn't lose the
             // checkpoint and force a full replay), then tell the server.
-            write_checkpoint_ls(&inner_msg.table, ack_lsn);
-            let _ = inner_msg.ws.send_with_str(&build_ack_frame(ack_lsn));
+            write_checkpoint_ls(&inner_msg.table, lsn);
+            let _ = inner_msg.ws.send_with_str(&build_ack_frame(lsn));
         }
     });
 

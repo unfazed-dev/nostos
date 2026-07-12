@@ -19,14 +19,20 @@ clients, 0% drops = 35.6× PowerSync's ceiling — see benches/results/RESULTS.m
 | nostos-bench | throughput harness — honest numbers (drops reported, env recorded) | domain, application, infra |
 | nostos-cloud | control plane: auth / Stripe / licensing (separate binary) | domain |
 
-`unsafe` is forbidden workspace-wide. Clippy pedantic is on; CI fails on warnings.
+`unsafe` is forbidden workspace-wide (all Cargo workspace members). The one
+exception is machine-generated FFI glue in the non-member crate
+`sdk/nostos_flutter/rust` (flutter_rust_bridge codegen — ADR-0015 addendum);
+hand-written `unsafe` is forbidden everywhere. Clippy pedantic is on; CI fails
+on warnings.
 
 ## Verbs (the only loops you need)
 - `make ci` — fmt-check + clippy (-D warnings) + full test suite. Gate for every change.
 - `cargo test -p <crate>` — focused iteration.
 - `docker compose -f docker/docker-compose.yml up -d` then
-  `NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg`
-  — the real-Postgres e2e. (Check docker/docker-compose.yml for the actual port/credentials.)
+  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg`
+  — the real-Postgres e2e. Without `NOSTOS_E2E_PG=1` the tests self-skip and
+  report a false-positive pass. (Check docker/docker-compose.yml for the
+  actual port/credentials.)
 - `make bench` — throughput benchmark. Record environment; report drop rates; never compare
   eval-only numbers against end-to-end numbers.
 - `cargo run -p nostos-client --example reactive_scroll` — end-to-end native demo.

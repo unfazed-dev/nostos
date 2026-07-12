@@ -467,6 +467,53 @@ impl NostosSocket {
         self.inner.engine.borrow().rows_for(table)
     }
 
+    /// Send a client write to the server over the open WS. The server's echo
+    /// `WriteBack` re-emits the row through the fan-out; the writer receives
+    /// its own write back as a `WireFrame` on this same socket, which the
+    /// `onmessage` pump applies to the engine — so the row lands in
+    /// `rowsFor(table)` after a round-trip, the same shape every SDK E2E
+    /// proves. JS:
+    ///
+    /// ```js
+    /// sock.write("tasks", "upsert", "row-1",
+    ///            JSON.stringify({ title: "x", status: "open" }), "w1");
+    /// // poll sock.rowsFor("tasks") for pk === "row-1" — appears after echo.
+    /// ```
+    ///
+    /// `op` is `"upsert" | "delete" | "patch"`. `payload_json` is the
+    /// COLUMN→value tuple image as a JSON string for upsert / patch, or
+    /// `null` / empty for delete (the server's `ClientMessage::Write` rejects
+    /// non-object payloads as `InvalidPayload`; `build_write_frame` validates
+    /// locally so the error surfaces here rather than as a closed socket).
+    /// `client_write_id` is the caller's correlation id, echoed in the
+    /// matching `WriteResult` frame.
+    ///
+    /// # Errors
+    /// `Err(JsValue)` if `payload_json` is malformed / non-object, or the
+    /// underlying `WebSocket.send_with_str` fails (socket not OPEN).
+    #[wasm_bindgen(js_name = write)]
+    #[allow(clippy::needless_pass_by_value)] // wasm-bindgen JS boundary: owned Option<String>
+    pub fn write(
+        &self,
+        table: &str,
+        op: &str,
+        pk: &str,
+        payload_json: Option<String>,
+        client_write_id: &str,
+    ) -> Result<(), JsValue> {
+        let frame = transport::build_write_frame(
+            table,
+            op,
+            pk,
+            payload_json.as_deref(),
+            client_write_id,
+        )?;
+        self.inner
+            .ws
+            .send_with_str(&frame)
+            .map_err(|_| JsValue::from_str("nostos write: WebSocket send failed (socket not OPEN)"))
+    }
+
     /// Close the socket. The server treats this as a session end; the client
     /// keeps its checkpoint so the next `connect` resumes.
     pub fn close(&self) {
@@ -600,8 +647,8 @@ mod transport_tests {
     use super::*;
     use nostos_core::Operation;
     use transport::{
-        build_ack_frame, build_subscribe_frame, checkpoint_from, checkpoint_key, decode_frames,
-        decode_hex, on_message, parse_checkpoint, PumpResult,
+        build_ack_frame, build_subscribe_frame, build_write_frame, checkpoint_from, checkpoint_key,
+        decode_frames, decode_hex, on_message, parse_checkpoint, PumpResult,
     };
 
     // ---- wire decode (mirror of nostos_infra::wire::decode_frames) ----
@@ -785,6 +832,59 @@ mod transport_tests {
         assert_eq!(v["type"], "ack");
         assert_eq!(v["lsn"], 0);
     }
+
+    // ---- write frame builder ----
+
+    #[test]
+    fn write_upsert_frame_shape() {
+        // Byte-for-byte the shape the spine's decode_client_message accepts:
+        // type=write, payload is a JSON OBJECT, client_write_id echoed.
+        let json = build_write_frame(
+            "tasks",
+            "upsert",
+            "web-echo",
+            Some(r#"{"title":"from-client","status":"open","priority":"5"}"#),
+            "w1",
+        )
+        .expect("valid upsert frame");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "write");
+        assert_eq!(v["table"], "tasks");
+        assert_eq!(v["op"], "upsert");
+        assert_eq!(v["pk"], "web-echo");
+        assert_eq!(v["payload"]["title"], "from-client");
+        assert_eq!(v["payload"]["status"], "open");
+        assert_eq!(v["payload"]["priority"], "5");
+        assert_eq!(v["client_write_id"], "w1");
+    }
+
+    #[test]
+    fn write_delete_frame_omits_payload() {
+        // Deletes carry no payload — skip_serializing_if = None.
+        let json =
+            build_write_frame("tasks", "delete", "stale", None, "w2").expect("valid delete frame");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "write");
+        assert_eq!(v["op"], "delete");
+        assert!(v.get("payload").is_none(), "payload absent on delete");
+        assert_eq!(v["client_write_id"], "w2");
+    }
+
+    #[test]
+    fn write_empty_payload_string_treated_as_delete() {
+        // Empty / whitespace-only payload string → None (safe default, matches
+        // the trim-and-filter guard in build_subscribe_frame).
+        let json = build_write_frame("tasks", "upsert", "x", Some("   "), "w3")
+            .expect("empty payload -> delete-shaped frame");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("payload").is_none());
+    }
+
+    // The error paths (non-object payload, malformed JSON) construct a
+    // `JsValue` via `from_str`, which panics on a non-wasm host (JsValue is
+    // browser-only). They're covered in the browser E2E
+    // (`sdk/nostos_web/e2e/browser_live.spec.cjs`) — see ponytail on the
+    // crate-level transport module for the testability split rationale.
 
     // ---- checkpoint key + parse ----
 

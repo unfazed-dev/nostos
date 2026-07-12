@@ -1,0 +1,10 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Nostos Tauri plugin — default permissions for the offline connect/write/query/checkpoint surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all four commands unconditionally."
+permissions = [
+    "allow-connect",
+    "allow-write",
+    "allow-query",
+    "allow-checkpoint",
+]

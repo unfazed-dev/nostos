@@ -1,0 +1,100 @@
+# =============================================================================
+# nostos-dotnet — UniFFI bridge exposing nostos-client's SyncClient<SqliteStorage>
+# to .NET (iOS / Android / Windows / macOS) via the Nord UniFFI-CS bindgen.
+# Mirrors sdk/nostos_swift/Cargo.toml and sdk/nostos_kotlin/Cargo.toml.
+# -----------------------------------------------------------------------------
+# Standalone workspace (mirrors sdk/nostos_swift/Cargo.toml +
+# sdk/nostos_kotlin/Cargo.toml + sdk/nostos_flutter/rust/Cargo.toml +
+# sdk/nostos_node/Cargo.toml + sdk/nostos_tauri/Cargo.toml): detaches this crate
+# from the root nostos Cargo.toml so the root `make ci` gate is not entangled
+# with an experimental .NET scaffold. The root workspace already forbids
+# hand-written `unsafe` workspace-wide; this crate keeps `#![forbid(unsafe_code)]`
+# — the forbid applies to THIS crate's source, not its dependencies', so
+# UniFFI's macro-generated FFI glue (the ADR-0015 addendum machine-generated
+# exception) is unaffected.
+# -----------------------------------------------------------------------------
+# Path deps — same shape as sdk/nostos_swift/Cargo.toml (this crate lives at
+# sdk/nostos_dotnet/, so the crates are three levels up). nostos-core is required
+# transitively: PendingWrite / WriteOp live there, and nostos-client re-exports
+# neither. nostos-domain is required for the Lsn accessor in checkpoint().
+# -----------------------------------------------------------------------------
+# UniFFI pin — "=0.28.3" (EXACT). nostos_swift and nostos_kotlin use "0.28"
+# (floats into the 0.28.x line) which works for the official
+# `uniffi-bindgen-cli`. nostos_dotnet pins EXACTLY because the Nord
+# `uniffi-bindgen-cs` tag `v0.9.2+v0.28.3` is itself pinned to UniFFI metadata
+# version 0.28.3: the Rust crate version and the bindgen version MUST agree on
+# the metadata encoding version, and the Nord tag encodes both
+# (bindgen 0.9.2 + uniffi 0.28.3). A float like "0.28" could resolve to 0.28.4
+# or 0.28.5 if those ever ship, which would mismatch the bindgen. The pin is
+# the belt-and-suspenders fix point. Upgrade path: bump both the Rust pin here
+# AND the `--tag` in the install command in README.md together.
+# =============================================================================
+
+[package]
+name = "nostos-dotnet"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "UniFFI bridge exposing nostos-client's SyncClient<SqliteStorage> to .NET (iOS/Android/Windows/macOS) via Nord UniFFI-CS — feasibility scaffold."
+license = "Apache-2.0"
+
+# Standalone workspace root — detaches from the parent nostos workspace (mirrors
+# sdk/nostos_swift/Cargo.toml + sdk/nostos_kotlin/Cargo.toml +
+# sdk/nostos_tauri/Cargo.toml + sdk/nostos_node/Cargo.toml +
+# sdk/nostos_flutter/rust/Cargo.toml). Required: without this, cargo walks up
+# and tries to enroll nostos-dotnet as a member of /Volumes/.../nostos/Cargo.toml,
+# which would entangle the root `make ci` gate with this scaffold.
+[workspace]
+
+[lib]
+# cdylib: .NET loads the native library via P/Invoke (DllImport on Windows,
+#         __Internal on iOS, JNI-on-Android-equivalent DllImport on Android).
+#         Also: uniffi-bindgen-cs reads the .dylib/.so to emit C# bindings.
+# lib:    cargo test / rust-analyzer.
+# (No staticlib — .NET consumers P/Invoke the cdylib; mirrors nostos_kotlin's
+#  Android shape. iOS links the cdylib too in the .NET iOS workload's
+#  NativeAOT cell, unlike Swift/Xcode which prefers a staticlib.)
+name = "nostos_dotnet"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nostos-client = { path = "../../crates/nostos-client" }
+nostos-core = { path = "../../crates/nostos-core" }
+nostos-domain = { path = "../../crates/nostos-domain" }
+
+# UniFFI 0.28.3 (PINNED — see header). proc-macro path (setup_scaffolding! +
+# #[derive(uniffi::Object)] + #[uniffi::export]). The bindgen CLI version MUST
+# match: `cargo install uniffi-bindgen-cs --git .../uniffi-bindgen-cs --tag
+# v0.9.2+v0.28.3` (Nord fork — the official mozilla/uniffi-bindgen-cli does
+# not emit C#). Verified compatible: Nord's tag tracks UniFFI metadata 0.28.3.
+uniffi = { version = "=0.28.3", features = ["cli"] }
+
+# Sync surface: each UniFFI method blocks_on the owned multi-thread runtime.
+# rt-multi-thread so block_on from the foreign (.NET P/Invoke) thread doesn't
+# starve the single-threaded current-thread runtime under concurrent .NET
+# calls.
+tokio = { version = "1.39", features = ["rt-multi-thread", "sync"] }
+serde_json = "1.0"
+# UniFFI 0.28 requires Result error types to be enum/struct derived via
+# `#[derive(uniffi::Error)]`; bare `String` panics in bindgen ("unknown throw
+# type: Some(String)"). `thiserror` supplies the Display + std::error::Error
+# impls that UniFFI's error trait requires — nostos-client uses the same crate.
+thiserror = "1.0"
+
+[build-dependencies]
+# ponytail: no build.rs today — the proc-macro path via setup_scaffolding!
+# emits the FFI scaffolding at compile time, no UDL file, no build.rs (mirrors
+# sdk/nostos_swift/Cargo.toml + sdk/nostos_kotlin/Cargo.toml exactly). The
+# Nord uniffi-bindgen-cs reads the metadata embedded in the compiled cdylib
+# via `--library` mode, so no UDL is needed for C# generation either. If a
+# future UniFFI version reintroduces a build.rs requirement for proc-macros,
+# this is the one-line fix point:
+#   uniffi = { version = "=0.28.3", features = ["build"] }
+# (mirrors nostos_tauri's tauri-plugin build dep). The `build` feature is OFF
+# by default because it pulls in the bindgen-runtime codegen that proc-macro
+# users do not need.
+
+[profile.release]
+# Smaller artifacts for the .dll/.dylib/.so; lto is off by default to keep the
+# scaffolding link fast (this is a feasibility build, not a shipped binary).
+opt-level = 2

@@ -43,3 +43,6 @@ docker/data/
 tarpaulin-report.html
 flamegraph.svg
 perf.data*
+
+.claude/
+.claude-flow/

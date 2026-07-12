@@ -112,6 +112,85 @@ is unacceptable, and both knobs now exist.
 - **Preemptive slot advance (ignore acks) to avoid bloat:** rejected — that's
   the original ADR-0009 bug (silent data loss). Correctness before disk.
 
+## Addendum: client apply flush bound + outbox re-flush trigger (2026-07-12)
+
+**Context.** The W5 showcase's Flutter integration test (real `PgReplicator`,
+real Postgres, `nostos-client::SyncClient`) found `ApplyEngine::feed`'s
+txn-boundary/soft-cap buffering (line 44 above) had no bounded fallback: a
+Postgres transaction's frames are only flushed when a *subsequent*,
+differing-`txn_id` frame arrives. On an otherwise-idle table, the last (often
+only) transaction's frames sat buffered forever — a single write by a single
+user never applied, never reached `watch()`/checkpoint. `nostos_flutter`'s glue
+had also set `idle_timeout: None` (the one existing safety net) to keep the
+connection long-lived, so nothing closed the batch. Separately, the durable
+outbox (D3, ADR-0013) was only ever drained once, immediately after
+subscribe-ack — a write enqueued *during* an already-connected session had no
+trigger to go out until the next reconnect.
+
+**Decision.**
+
+1. **`ApplyEngine::has_pending()`** (`crates/nostos-core/src/apply.rs`) — a
+   pure, I/O-free peek at whether a batch is buffered. `feed`'s return value
+   alone is not the right signal (it returns `Some` on a boundary flush that
+   *also* buffers the newly-admitted frame from the next txn), so a caller
+   arming a timer off the return value would miss that a fresh batch is now
+   pending.
+2. **`SyncClientConfig::flush_quiesce`** (default 50ms, `nostos-client`) — a new,
+   independent time bound: while a batch is pending, `SyncClient::run_once`'s
+   receive loop races the next WS frame against a quiesce timer (reset on
+   every frame received). If nothing arrives within the window, the pending
+   batch is force-flushed and `Ack`'d, exactly like a real transaction
+   boundary. This is deliberately NOT built on `idle_timeout` — that closes
+   the whole session (a hammer wrong for a long-lived client, which is why
+   the Flutter glue had disabled it); `flush_quiesce` closes only the
+   buffered batch and keeps the connection open. `idle_timeout` remains a
+   separate, session-level backstop; `nostos_flutter`'s glue now sets a
+   generous one (120s) as defense-in-depth instead of `None`, with backoff
+   reset on a clean (non-error) return so a routine backstop reconnect never
+   climbs toward `max_backoff` the way a real failure does.
+3. **`SyncClient::write_notify`** — a `tokio::sync::Notify` that `write()`
+   signals after enqueueing. `run_once`'s loop now races three branches (next
+   frame, quiesce timer, write-notify) via `tokio::select!`; a write made
+   mid-session re-drains the outbox immediately instead of waiting for a
+   reconnect. A per-connection `sent_this_conn: HashSet<u64>` avoids resending
+   a write whose ack hasn't landed yet on every notification; a genuine
+   reconnect gets a fresh set and legitimately resends anything still
+   outstanding (the server's ack path and `mark_done` are idempotent either
+   way).
+4. **`NostosHandle::close()`** (`sdk/nostos_flutter/rust/src/api/nostos.rs`,
+   exposed to Dart as `Nostos.close()`) — tears down the active subscription's
+   background tasks (the sync loop + the watch-stream pump) on demand, instead
+   of only on GC. Named `close`, not `dispose`, because every frb opaque
+   handle already implements `RustOpaqueInterface.dispose()` (sync, FFI-level
+   handle release) — reusing that name would collide.
+
+**Ponytail (named ceiling).** `flush_quiesce` is a heuristic, not a protocol
+guarantee: the wire carries no explicit commit marker (`PgReplicator` sees
+pgoutput `Begin`/`Commit` but does not forward them as frames — see
+`crates/nostos-infra/src/replicator/pg.rs`), so the client cannot distinguish
+"transaction still open, network is just slow" from "transaction is over."
+A single Postgres transaction whose frames are delivered with a gap wider than
+the quiesce window (a genuinely huge or slow-network-stalled transaction)
+would be force-flushed mid-transaction, splitting one atomic commit across two
+`apply_batch` calls. No data is lost or duplicated (each half still commits
+durably and the checkpoint still advances correctly), but a reader could
+transiently observe the transaction half-applied. Fixing this precisely
+requires the wire to carry an explicit commit boundary — a `nostos-infra` /
+wire-protocol change, deliberately out of scope for this fix (this fix's scope
+was `nostos-core`/`nostos-client`/the Flutter glue only). Upgrade path: thread
+`Commit`'s LSN through as an explicit end-of-batch wire marker and replace the
+time bound with it.
+
+**Validation.** `cargo test -p nostos-core -p nostos-client` (all existing +
+new tests green, including two new `has_pending` tests naming the trap in
+point 1); `crates/nostos-client/tests/e2e_pg_sync.rs` (new, `NOSTOS_E2E_PG=1
+cargo test -p nostos-client --features pg`) — a real `SyncClient` against a
+real `nostos-server`-shaped stack (`PgReplicator` + real Postgres) proves a
+single, isolated write on an idle table applies, becomes visible via
+`SqliteStorage::rows_for`, and advances the checkpoint within seconds; `flutter
+test integration_test/nostos_live_test.dart -d macos` (fixture, real stack) —
+scenarios a1/a2/b/d pass without the prior skip markers.
+
 ## References
 
 - Depends on: ADR-0009 (resume), ADR-0010 (auth), ADR-0011 (enforcement).

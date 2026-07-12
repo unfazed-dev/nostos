@@ -82,6 +82,60 @@ jobs:
         with:
           command: check licenses advisories bans
 
+  flutter:
+    name: nostos_flutter — analyze + test
+    # macos-latest, not ubuntu-latest: the only host build path this SDK has
+    # locally verified is macOS (see sdk/nostos_flutter/README.md's Platforms
+    # table — Linux isn't a supported target for the Flutter glue crate yet,
+    # v1 is macOS/iOS/Android). `flutter test` still invokes
+    # hook/build.dart's native-assets build hook for the *host* platform
+    # (cargo-fallback, since hook/prebuilt.json has no GitHub Release URLs
+    # yet), so running this on a platform we haven't validated the hook
+    # against would be new, untested surface, not just CI plumbing.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          # Exact pin, matching pubspec.yaml's environment.flutter floor and
+          # the version the W0a packaging spike (docs/plans/w4-packaging-fallback.md)
+          # verified native-assets against — see that doc's friction notes
+          # for why version drift here causes confusing failures.
+          flutter-version: "3.44.0"
+          channel: "stable"
+      - name: Enable native assets (still an opt-in flag on this Flutter/Dart era)
+        run: flutter config --enable-native-assets
+      # No GitHub Release exists yet, so every `flutter test` run here takes
+      # hook/build.dart's cargo-build fallback path — needs a Rust toolchain.
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: flutter pub get
+        working-directory: sdk/nostos_flutter
+        run: flutter pub get
+      - name: flutter analyze
+        working-directory: sdk/nostos_flutter
+        run: flutter analyze
+      - name: flutter test
+        # Unit tests only (test/), NOT example/integration_test/ -d macos:
+        # that integration test launches a real packaged .app against a real
+        # `cargo run -p nostos-server` subprocess, which needs a windowed
+        # runner (a GUI session, not just a headless macOS VM) and the
+        # App-Sandbox-subprocess-spawning exception already documented in
+        # example/macos/Runner/DebugProfile.entitlements — neither is
+        # reliably available on a hosted Actions runner. Left as a manual /
+        # local verification step (see README's Testing section) until a
+        # self-hosted or windowed runner is worth the maintenance cost.
+        working-directory: sdk/nostos_flutter
+        run: flutter test
+      # The glue crate is a deliberate non-workspace member (ADR-0015
+      # addendum), so the workspace-wide clippy/test jobs never see it —
+      # gate its Rust here explicitly.
+      - name: clippy + test (rust glue crate)
+        working-directory: sdk/nostos_flutter/rust
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
   benchmark:
     name: throughput benchmark (smoke)
     runs-on: ubuntu-latest

@@ -69,14 +69,15 @@ pub enum ClientMessage {
     Write {
         /// Target table — MUST be in the server's `NOSTOS_WRITE_TABLES` allowlist.
         table: String,
-        /// `"upsert"` or `"delete"`.
+        /// `"upsert"`, `"delete"`, or `"patch"` (P3 PowerSync PATCH parity).
         op: String,
         /// Primary-key value (v1 convention: pk column is `id`).
         pk: String,
         /// The row image for an upsert: a JSON object of column → value, the
-        /// same tuple-image shape the read path delivers. Absent (`None`) for
-        /// deletes. A non-object (array / scalar / null) is rejected as
-        /// `InvalidPayload` before any SQL is built.
+        /// same tuple-image shape the read path delivers. For a patch, the
+        /// PARTIAL column set to update (columns absent are untouched). Absent
+        /// (`None`) for deletes. A non-object (array / scalar / null) is
+        /// rejected as `InvalidPayload` before any SQL is built.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         /// Client-supplied correlation id, echoed back in the `WriteResult`.
@@ -516,6 +517,30 @@ mod tests {
         assert_eq!(op, "delete");
         assert_eq!(pk, "9");
         assert_eq!(payload, None);
+    }
+
+    #[test]
+    fn decode_write_patch_carries_partial_payload() {
+        // P3 parity: a patch carries ONLY the columns to change (not a full
+        // row image). The codec treats it like an upsert payload (a JSON
+        // object); the dispatch layer routes on `op`.
+        let json = r#"{"type":"write","table":"tasks","op":"patch","pk":"1","payload":{"title":"x"},"client_write_id":"w3"}"#;
+        let msg = decode_client_message(json.as_bytes()).expect("valid write");
+        let ClientMessage::Write {
+            table,
+            op,
+            pk,
+            payload,
+            client_write_id,
+        } = msg
+        else {
+            panic!("expected Write");
+        };
+        assert_eq!(table, "tasks");
+        assert_eq!(op, "patch");
+        assert_eq!(pk, "1");
+        assert_eq!(client_write_id, "w3");
+        assert_eq!(payload, Some(serde_json::json!({"title": "x"})));
     }
 
     #[test]

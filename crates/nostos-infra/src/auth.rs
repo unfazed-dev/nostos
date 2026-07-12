@@ -1,29 +1,47 @@
 //! `/sync` authentication adapters — implement the [`SyncAuth`] port.
 //!
 //! The transport resolves a connection's bearer token to a [`Principal`] before
-//! upgrading the WebSocket. Two implementations:
+//! upgrading the WebSocket. Implementations:
 //!
 //! - [`AllowAnonymous`] — OSS self-host dev default (`NOSTOS_SYNC_AUTH=none`).
 //!   Every connection becomes [`Principal::anonymous`]; no tenant filter is
 //!   injected. Never use in a multi-tenant managed deploy.
-//! - [`SupabaseJwtAuth`] — HS256-verifies a Supabase JWT and lifts `sub` as the
-//!   account id and tenant id. Mirrors `nostos_cloud::auth::Hs256Verifier`'s
-//!   algorithm exactly (HMAC-SHA256 over `header.payload`), kept here rather
-//!   than shared so `nostos-server` doesn't depend on the control-plane crate
-//!   (ADR-0010).
+//! - [`SupabaseJwtAuth`] — verifies a Supabase JWT and lifts `sub` as the
+//!   account id and tenant id. Routes on the token's header `alg`:
+//!   - `HS256` verifies against a configured shared secret. Mirrors
+//!     `nostos_cloud::auth::Hs256Verifier`'s algorithm exactly (HMAC-SHA256
+//!     over `header.payload`), kept here rather than shared so `nostos-server`
+//!     doesn't depend on the control-plane crate (ADR-0010).
+//!   - `RS256`/`ES256`/`EdDSA` verify against a fetched-and-cached JWKS (see
+//!     [`crate::jwks`]) — Supabase's default for projects created since
+//!     2025-10-01 (ADR-0010 addendum). Never confused with the HS256 path: an
+//!     HS256 token is never checked against JWKS key material, and vice
+//!     versa — the header `alg` selects the verifier deterministically and
+//!     `alg: none` is rejected outright (`jsonwebtoken`'s `Algorithm` has no
+//!     "none" variant, so header parsing itself fails).
 //!
 //! The tenant id in Phase 0 defaults to the `sub` itself (one tenant per
 //! account) — sufficient to prove the anti-self-attestation path. Phase 2
-//! resolves a real tenant claim / RLS join (ADR-0011).
+//! resolves a real tenant claim / RLS join (ADR-0011). This is identical
+//! across the HS256 and JWKS paths.
 
 use async_trait::async_trait;
 use nostos_application::ports::SyncAuth;
 use nostos_domain::Principal;
 use hmac::{Hmac, Mac};
+use jsonwebtoken::Algorithm;
 use sha2::Sha256;
+use std::time::Duration;
 use tracing::warn;
 
+use crate::jwks::JwksVerifier;
+
 type HmacSha256 = Hmac<Sha256>;
+
+/// Default JWKS cache TTL — matches Supabase's ~10-minute edge cache on
+/// `/.well-known/jwks.json` (ADR-0010 addendum). A deploy that wants a
+/// shorter window can be given a config knob later; no one has asked yet.
+pub const DEFAULT_JWKS_TTL: Duration = Duration::from_mins(10);
 
 /// Authenticate nobody — every token becomes the anonymous principal.
 ///
@@ -47,27 +65,72 @@ impl SyncAuth for AllowAnonymous {
     }
 }
 
-/// Authenticate a Supabase-issued HS256 JWT by verifying its signature and
-/// lifting the `sub` claim. No `exp`/`aud`/`iss` check in Phase 0 — Supabase's
-/// GoTrue mints short-lived tokens and the gateway handles expiry; we verify
-/// the signature so a forged token can't read another tenant's rows.
+/// Authenticate a Supabase-issued JWT, either HS256 (legacy shared secret) or
+/// RS256/ES256/EdDSA (JWKS — Supabase's default since 2025-10-01). At least
+/// one of `hs256_secret` / `jwks` must be configured (main.rs fails fast
+/// otherwise); both may be set at once, in which case each token's header
+/// `alg` picks the verifier.
+///
+/// HS256 verification: signature check + non-empty `sub` only. No
+/// `exp`/`aud`/`iss` check in Phase 0 — Supabase's GoTrue mints short-lived
+/// tokens and the gateway handles expiry; we verify the signature so a forged
+/// token can't read another tenant's rows. **Unchanged from before this JWKS
+/// addition** — existing HS256 behavior and tests are untouched.
+///
+/// JWKS verification additionally validates `exp` (via `jsonwebtoken`'s
+/// default `Validation`, which requires and checks it) — new relative to the
+/// HS256 path; `aud`/`role` are not checked either way, matching HS256's
+/// laxity, since `Principal` only ever lifts `sub`.
 pub struct SupabaseJwtAuth {
-    secret: Vec<u8>,
+    hs256_secret: Option<Vec<u8>>,
+    jwks: Option<JwksVerifier>,
 }
 
 impl SupabaseJwtAuth {
-    /// Construct from the raw JWT secret (`SUPABASE_JWT_SECRET`). Stored as
-    /// bytes; never logged.
+    /// Legacy path: HS256 shared-secret verification only. Kept as the
+    /// original constructor so existing callers/tests are untouched.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
-        Self { secret }
+        Self {
+            hs256_secret: Some(secret),
+            jwks: None,
+        }
+    }
+
+    /// Construct from the resolved config surface: an optional legacy HS256
+    /// secret and/or an optional JWKS URL. At least one must be `Some` — the
+    /// caller (`nostos-server`'s config wiring) enforces that and fails fast
+    /// otherwise, matching the existing missing-secret fail-fast style.
+    #[must_use]
+    pub fn from_config(hs256_secret: Option<Vec<u8>>, jwks_url: Option<String>) -> Self {
+        Self {
+            hs256_secret,
+            jwks: jwks_url.map(|url| JwksVerifier::new(url, DEFAULT_JWKS_TTL)),
+        }
     }
 }
 
 #[async_trait]
 impl SyncAuth for SupabaseJwtAuth {
     async fn authenticate(&self, token: &str) -> Option<Principal> {
-        verify_supabase_hs256(token, &self.secret)
+        // Peek the header only (alg + kid) — no signature check yet. An
+        // unparseable header (including `alg: "none"`, which has no
+        // `Algorithm` variant) is rejected here.
+        let header = jsonwebtoken::decode_header(token).ok()?;
+        match header.alg {
+            Algorithm::HS256 => {
+                let secret = self.hs256_secret.as_ref()?;
+                verify_supabase_hs256(token, secret)
+            }
+            Algorithm::RS256 | Algorithm::ES256 | Algorithm::EdDSA => {
+                let jwks = self.jwks.as_ref()?;
+                jwks.verify(token, &header).await
+            }
+            other => {
+                warn!(?other, "jwt rejected: unsupported/disallowed algorithm");
+                None
+            }
+        }
     }
 }
 
@@ -172,4 +235,111 @@ mod tests {
         // Invalid char.
         assert!(decode_base64url_to_bytes("!!!!").is_none());
     }
+
+    // ---- combined HS256+JWKS routing / algorithm-confusion tests ----
+    //
+    // These exercise `SupabaseJwtAuth::authenticate` end-to-end (not
+    // `JwksVerifier` directly, which `jwks::tests` already covers) to prove
+    // the header-`alg`-based routing between the two verifiers is correct and
+    // that neither verifier ever touches the other's key material.
+
+    use crate::jwks::test_support::{b64url, mint_token, rsa_key_and_jwk, FixtureJwks};
+    use jsonwebtoken::jwk::JwkSet;
+
+    fn valid_hs256_token(secret: &[u8], sub: &str) -> String {
+        let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = b64url(format!(r#"{{"sub":"{sub}"}}"#).as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let mut mac = HmacSha256::new_from_slice(secret).expect("hmac key");
+        mac.update(signing_input.as_bytes());
+        let sig = b64url(&mac.finalize().into_bytes());
+        format!("{signing_input}.{sig}")
+    }
+
+    #[tokio::test]
+    async fn alg_none_rejected_outright() {
+        // A token whose header claims `alg: none` — jsonwebtoken's `Algorithm`
+        // has no "none" variant, so header parsing itself must fail before
+        // either verifier is even selected.
+        let header = b64url(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = b64url(br#"{"sub":"user-1"}"#);
+        let token = format!("{header}.{payload}."); // empty signature, as alg=none tokens carry
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec());
+        assert!(auth.authenticate(&token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn hs256_token_rejected_when_only_jwks_configured() {
+        // JWKS-only config (no legacy secret): an HS256 token must be
+        // rejected outright, never checked against any key material.
+        let (_enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let auth = SupabaseJwtAuth::from_config(None, Some(fixture.url()));
+        let token = valid_hs256_token(b"whatever-secret", "user-1");
+        assert!(auth.authenticate(&token).await.is_none());
+        assert_eq!(fixture.hit_count(), 0, "HS256 token never touches JWKS");
+    }
+
+    #[tokio::test]
+    async fn rs256_token_rejected_when_only_hs256_configured() {
+        // HS256-only config (no JWKS): an RS256 token must be rejected
+        // outright, even though the signature itself is perfectly valid.
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        // Constructed but never registered with a JWKS endpoint the server
+        // knows about — proves the rejection is "no jwks configured", not
+        // "kid not found".
+        let _ = &jwk;
+        let auth = SupabaseJwtAuth::new(b"some-secret".to_vec());
+        let token = mint_token(&enc, jsonwebtoken::Algorithm::RS256, "k1", "user-1");
+        assert!(auth.authenticate(&token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn combined_mode_routes_hs256_and_jwks_to_correct_principals() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let secret = b"legacy-secret".to_vec();
+        let auth = SupabaseJwtAuth::from_config(Some(secret.clone()), Some(fixture.url()));
+
+        let hs_token = valid_hs256_token(&secret, "hs-user");
+        let hs_principal = auth.authenticate(&hs_token).await.expect("hs256 verifies");
+        assert_eq!(hs_principal.account_id, "hs-user");
+
+        let rs_token = mint_token(&enc, jsonwebtoken::Algorithm::RS256, "k1", "rs-user");
+        let rs_principal = auth.authenticate(&rs_token).await.expect("rs256 verifies");
+        assert_eq!(rs_principal.account_id, "rs-user");
+    }
+
+    #[tokio::test]
+    async fn alg_confusion_rsa_public_material_as_hmac_secret_rejected() {
+        // Classic RS256->HS256 downgrade attack: an attacker who only knows
+        // the RSA *public* key tries to forge an HS256 token using the
+        // public modulus bytes as if they were the HMAC secret, hoping a
+        // naive verifier derives its "secret" from the public key. Our
+        // HS256 path only ever checks against the explicitly configured
+        // `NOSTOS_SUPABASE_JWT_SECRET` — never anything derived from a JWKS —
+        // so this must fail regardless of what key material is public.
+        let (_enc, jwk) = rsa_key_and_jwk("k1");
+        let AlgorithmParametersForTest::RSA(params) = &jwk.algorithm else {
+            unreachable!("rsa_key_and_jwk always returns an RSA key")
+        };
+        let forged_secret = params.n.clone().into_bytes(); // attacker's guess: n as HMAC key
+        let real_secret = b"the-actual-configured-secret".to_vec();
+        let auth = SupabaseJwtAuth::new(real_secret);
+
+        let header = b64url(br#"{"alg":"HS256","typ":"JWT","kid":"k1"}"#);
+        let payload = b64url(br#"{"sub":"attacker"}"#);
+        let signing_input = format!("{header}.{payload}");
+        let mut mac = HmacSha256::new_from_slice(&forged_secret).expect("hmac key");
+        mac.update(signing_input.as_bytes());
+        let sig = b64url(&mac.finalize().into_bytes());
+        let token = format!("{signing_input}.{sig}");
+
+        assert!(auth.authenticate(&token).await.is_none());
+    }
+
+    // Local alias so the alg-confusion test above can pattern-match the JWK's
+    // algorithm variant without importing jsonwebtoken's type under a name
+    // that collides with anything in this module.
+    use jsonwebtoken::jwk::AlgorithmParameters as AlgorithmParametersForTest;
 }

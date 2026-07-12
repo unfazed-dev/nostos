@@ -39,15 +39,14 @@
 //! restart with an EXISTING slot there is no fresh snapshot to export, so this
 //! function is not called at all — no snapshot is replayed.
 
-use std::collections::BTreeMap;
-
 use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio_postgres::NoTls;
 
 use nostos_domain::{Lsn, ReplicationEvent, RowOp};
 
-use super::pg::{json_escape_into, RelationMeta};
+use super::pg::{catalog_relations, json_escape_into, RelationMeta};
+use super::typed::append_typed_value;
 
 /// Rows from all tables in `publication`, read under `snapshot_name`, encoded
 /// with the same JSON payload shape the streaming path uses
@@ -99,11 +98,14 @@ pub(crate) async fn snapshot_events(
         .await
         .map_err(|e| SnapshotError::Snapshot(e.to_string()))?;
 
-    // 3. Resolve publication tables + per-table column metadata, mirroring
-    //    pg.rs::bootstrap_relations_from_catalog so the JSON payload column
-    //    order matches the streaming path exactly. PK detection: a column is a
-    //    PK iff its attnum is a member of the primary-key index's indkey.
-    let relations = catalog_relations(&sql, publication).await?;
+    // 3. Resolve publication tables + per-table column metadata via the SAME
+    //    catalog query `pg.rs::bootstrap_relations_from_catalog` uses (one
+    //    query, one grouping — see `pg::catalog_relations`'s docs) so the
+    //    JSON payload column order AND type-OID mapping match the streaming
+    //    path exactly.
+    let relations = catalog_relations(&sql, publication)
+        .await
+        .map_err(|e| SnapshotError::Catalog(e.to_string()))?;
 
     // 4. Per table: COPY each column AS text, one row per line, tab-separated.
     //    We build the JSON payload with the SAME escape the streaming path uses
@@ -157,71 +159,6 @@ fn quote_ident(name: &str) -> String {
     out
 }
 
-/// Read publication table column metadata (oid, qualified name, column names in
-/// publication order, PK indices). Same shape as `pg.rs`'s `RelationMeta`, built
-/// with the same catalog query so snapshot rows and streamed rows decode
-/// identically.
-async fn catalog_relations(
-    sql: &tokio_postgres::Client,
-    publication: &str,
-) -> Result<BTreeMap<i32, RelationMeta>, SnapshotError> {
-    let rows = sql
-        .query(
-            "SELECT c.oid::int, n.nspname, c.relname, a.attname, \
-                    (a.attnum = ANY (coalesce(i.indkey::int2[], ARRAY[]::int2[]))) AS is_pk \
-             FROM pg_publication_tables pt \
-             JOIN pg_class c ON c.relname = pt.tablename \
-             JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = pt.schemaname \
-             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
-             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
-             WHERE pt.pubname = $1 \
-             ORDER BY c.oid, a.attnum",
-            &[&publication],
-        )
-        .await
-        .map_err(|e| SnapshotError::Catalog(e.to_string()))?;
-
-    let mut by_oid: BTreeMap<i32, (String, Vec<(String, bool)>)> = BTreeMap::new();
-    for row in rows {
-        let oid: i32 = row.get(0);
-        let nsp: String = row.get(1);
-        let rel: String = row.get(2);
-        let attname: String = row.get(3);
-        let is_pk: bool = row.get(4);
-        let qualified = if nsp == "public" || nsp.is_empty() {
-            rel
-        } else {
-            format!("{nsp}.{rel}")
-        };
-        let entry = by_oid.entry(oid).or_insert_with(|| (qualified, Vec::new()));
-        entry.1.push((attname, is_pk));
-    }
-
-    let mut out = BTreeMap::new();
-    for (oid, (qualified, cols)) in by_oid {
-        let columns: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
-        let mut pk_indices: Vec<usize> = cols
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, is_pk))| *is_pk)
-            .map(|(i, _)| i)
-            .collect();
-        if pk_indices.is_empty() {
-            // Defensive default matching pg.rs: if no PK is flagged, use col 0.
-            pk_indices = vec![0];
-        }
-        out.insert(
-            oid,
-            RelationMeta {
-                qualified_name: qualified,
-                pk_indices,
-                columns,
-            },
-        );
-    }
-    Ok(out)
-}
-
 /// COPY one table's rows (each column cast to `text`) and append an `Insert`
 /// event per row, stamped at `consistent_point`. The payload is built with the
 /// streaming path's `tuple_to_json_payload` so a snapshot row is byte-for-byte
@@ -241,15 +178,17 @@ async fn copy_table_rows(
     let cols: Vec<String> = meta
         .columns
         .iter()
-        .map(|c| format!("t.{}", quote_ident(c)))
+        .map(|(c, _)| format!("t.{}", quote_ident(c)))
         .collect();
     let select_list = cols.join(", ");
     let copy_stmt = format!("COPY (SELECT {select_list} FROM {table_ident} t) TO STDOUT");
 
-    // Empty-string values that coincide with COPY's text format: COPY renders
-    // NULL as `\N` and an actual empty string as an empty field; it also
-    // backslash-escapes `\` and `\t` within values. The streaming path renders
-    // a NULL column as an empty string in the payload, so we map `\N` → "".
+    // COPY renders SQL NULL as the literal `\N` and an actual empty string as
+    // an empty field; it also backslash-escapes `\` and `\t` within values.
+    // `unescape_copy_field` returns `None` for `\N` so NULL survives as a
+    // distinct value all the way to `typed::append_typed_value`, which is
+    // what lets it render as JSON `null` (not a fabricated `""`/`false`/`0`)
+    // — matching the streaming path's `TupleDataColumn::PGNull` handling.
     let stream = sql
         .copy_out(&copy_stmt)
         .await
@@ -288,7 +227,7 @@ fn row_line_to_event(meta: &RelationMeta, line: &str, lsn: Lsn) -> ReplicationEv
     // field. COPY escapes: `\N` (whole field) = NULL, `\\` → `\`, `\t` → tab,
     // `\b` → backspace, `\f` → formfeed, `\r`, `\n`. We only need `\\`, `\t`,
     // `\n`, `\r` for JSON; the rest pass through as-is (rare in these columns).
-    let fields: Vec<String> = line.split('\t').map(unescape_copy_field).collect();
+    let fields: Vec<Option<String>> = line.split('\t').map(unescape_copy_field).collect();
     let payload = build_json_payload(meta, &fields);
     let pk = build_pk_string(meta, &fields);
     ReplicationEvent::new(
@@ -301,14 +240,14 @@ fn row_line_to_event(meta: &RelationMeta, line: &str, lsn: Lsn) -> ReplicationEv
     )
 }
 
-/// Unescape a single COPY text-format field. `\N` → a sentinel NULL marker
-/// (returned as empty string to match the streaming path's null handling);
-/// other escapes decoded per the COPY spec.
-fn unescape_copy_field(field: &str) -> String {
+/// Unescape a single COPY text-format field. `\N` → `None` (SQL NULL — kept
+/// distinct from an actual empty string, and distinct through to
+/// `typed::append_typed_value`, which is what lets NULL render as JSON `null`
+/// rather than a fabricated `""`/`false`/`0`); other escapes decoded per the
+/// COPY spec.
+fn unescape_copy_field(field: &str) -> Option<String> {
     if field == "\\N" {
-        // NULL: streaming path renders TupleDataColumn::PGNull as "" (the
-        // `if let Some(Value)` falls through, leaving an empty string).
-        return String::new();
+        return None;
     }
     let mut out = String::with_capacity(field.len());
     let bytes = field.as_bytes();
@@ -334,37 +273,41 @@ fn unescape_copy_field(field: &str) -> String {
             i += 1;
         }
     }
-    out
+    Some(out)
 }
 
 /// Build the JSON payload, byte-identical to `pg.rs::tuple_to_json_payload`:
-/// `{"col":"val","col2":"val2",...}`, every value a JSON string. Missing/NULL
-/// fields render as the empty string (matching the streaming path).
-fn build_json_payload(meta: &RelationMeta, fields: &[String]) -> Vec<u8> {
+/// every column goes through the SAME `typed::append_typed_value`, keyed by
+/// the column's type OID — a `None` field (SQL NULL) renders as `null`; a
+/// `Some(text)` field is mapped per its OID exactly like the streaming path.
+fn build_json_payload(meta: &RelationMeta, fields: &[Option<String>]) -> Vec<u8> {
     let mut out = String::from('{');
-    for (i, col) in meta.columns.iter().enumerate() {
+    for (i, (col, type_oid)) in meta.columns.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
         out.push('"');
         json_escape_into(&mut out, col);
-        out.push_str("\":\"");
-        if let Some(v) = fields.get(i) {
-            json_escape_into(&mut out, v);
-        }
-        out.push('"');
+        out.push_str("\":");
+        let cell = fields.get(i).and_then(Option::as_deref);
+        append_typed_value(&mut out, *type_oid, cell);
     }
     out.push('}');
     out.into_bytes()
 }
 
 /// Build the PK string the way the streaming path's `pk_string` does: join the
-/// PK column values with `,` (single column for our fixture schema).
-fn build_pk_string(meta: &RelationMeta, fields: &[String]) -> String {
+/// PK column values with `,` (single column for our fixture schema). A NULL
+/// PK renders as the literal `"null"`, matching `pg.rs::pk_string`'s
+/// `TupleDataColumn::PGNull` arm (PKs are practically always `NOT NULL`, but
+/// this keeps the two paths's edge-case handling identical rather than
+/// diverging silently).
+fn build_pk_string(meta: &RelationMeta, fields: &[Option<String>]) -> String {
     let parts: Vec<String> = meta
         .pk_indices
         .iter()
-        .filter_map(|&i| fields.get(i).cloned())
+        .filter_map(|&i| fields.get(i))
+        .map(|v| v.clone().unwrap_or_else(|| "null".to_string()))
         .collect();
     if parts.is_empty() {
         "0".to_string()

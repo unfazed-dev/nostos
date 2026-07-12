@@ -1,0 +1,34 @@
+[package]
+name = "nostos_flutter_rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+# Standalone workspace: detaches this crate from the root nostos Cargo.toml
+# workspace (it is NOT a member there — sdk/nostos_flutter is a separate,
+# independently-versioned Flutter package with its own Rust glue). Without
+# this empty table, cargo would walk up looking for an enclosing workspace
+# and, if it ever found one that claimed this path, silently pull the crate
+# under different resolver/lint settings.
+[workspace]
+
+[dependencies]
+flutter_rust_bridge = "=2.13.0-beta.5"
+
+# The client apply engine + sync loop this SDK wraps. Path deps (relative to
+# this crate, which lives at sdk/nostos_flutter/rust/) — not workspace deps,
+# since this crate has its own empty [workspace] above. nostos-core is not in
+# the task's original crate list but is required transitively: PendingWrite /
+# WriteOp / Outbox / InMemoryStorage live there, and nostos-client re-exports
+# neither.
+nostos-client = { path = "../../../crates/nostos-client" }
+nostos-core = { path = "../../../crates/nostos-core" }
+nostos-domain = { path = "../../../crates/nostos-domain" }
+
+tokio = { version = "1.39", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde_json = "1.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

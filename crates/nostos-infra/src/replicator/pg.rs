@@ -72,6 +72,8 @@ use tracing::{debug, error, info, warn};
 use nostos_application::ports::ReplicatorStream;
 use nostos_domain::{Lsn, ReplicationEvent as NostosEvent, RowOp};
 
+use super::typed;
+
 /// The concrete pgoutput monomorphization we use everywhere in this module:
 /// text values (no binary), no streaming large txns.
 type Event = PgEvent<BinaryValueTraitOff, StreamingValueTraitOff>;
@@ -93,8 +95,10 @@ pub(crate) struct RelationMeta {
     /// Indices of columns flagged as part of the replica identity / primary key.
     /// Used to extract a string pk for the `RowOp`.
     pub(crate) pk_indices: Vec<usize>,
-    /// Column names in tuple order — used to build the JSON-ish payload.
-    pub(crate) columns: Vec<String>,
+    /// `(column name, Postgres type OID)` in tuple order (ADR-0019) — used to
+    /// build the typed JSON payload. The OID drives `typed::append_typed_value`
+    /// so e.g. a `bool` column renders as a JSON bool, not a quoted string.
+    pub(crate) columns: Vec<(String, i32)>,
 }
 
 /// Configuration for [`PgReplicator`].
@@ -291,80 +295,21 @@ impl PgReplicator {
     /// without waiting for (or relying on) a stream Relation message.
     ///
     /// For each table in the publication we capture: oid, namespace-qualified
-    /// name, column names in order, and the PK column indices. Stream Relation
-    /// messages later just refresh this — but having it up-front means a fresh
-    /// replication connection to an existing slot decodes rows immediately.
+    /// name, `(column name, type OID)` in order, and the PK column indices.
+    /// Stream Relation messages later just refresh this — but having it
+    /// up-front means a fresh replication connection to an existing slot
+    /// decodes rows immediately.
     async fn bootstrap_relations_from_catalog(&mut self, sql: &tokio_postgres::Client) {
-        // All columns in publication order, with attnum + PK flag.
-        // PK detection: pg_index.indkey is an int2vector; we test membership of
-        // each column's attnum against the primary-key index's indkey via = ANY.
-        // Cast oid::int so tokio-postgres deserializes it as a plain i32.
-        let rows = match sql
-            .query(
-                "SELECT c.oid::int, n.nspname, c.relname, a.attname, \
-                        (a.attnum = ANY (coalesce(i.indkey::int2[], ARRAY[]::int2[]))) AS is_pk \
-                 FROM pg_publication_tables pt \
-                 JOIN pg_class c ON c.relname = pt.tablename \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = pt.schemaname \
-                 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
-                 LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
-                 WHERE pt.pubname = $1 \
-                 ORDER BY c.oid, a.attnum",
-                &[&self.cfg.publication],
-            )
-            .await
-        {
-            Ok(r) => r,
+        match catalog_relations(sql, &self.cfg.publication).await {
+            Ok(relations) => {
+                let count = relations.len();
+                self.relations.extend(relations);
+                debug!(relations = count, "bootstrapped relations from catalog");
+            }
             Err(e) => {
                 warn!(error = %e, "could not bootstrap relations from catalog; relying on stream Relation messages");
-                return;
             }
-        };
-
-        // Group rows by oid (sorted by oid, then attnum).
-        let mut by_oid: std::collections::BTreeMap<i32, (String, Vec<(String, bool)>)> =
-            std::collections::BTreeMap::new();
-        for row in rows {
-            let oid: i32 = row.get(0);
-            let nsp: String = row.get(1);
-            let rel: String = row.get(2);
-            let attname: String = row.get(3);
-            let is_pk: bool = row.get(4);
-            let qualified = if nsp == "public" || nsp.is_empty() {
-                rel
-            } else {
-                format!("{nsp}.{rel}")
-            };
-            let entry = by_oid.entry(oid).or_insert_with(|| (qualified, Vec::new()));
-            entry.1.push((attname, is_pk));
         }
-
-        for (oid, (qualified, cols)) in by_oid {
-            let columns: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
-            let pk_indices: Vec<usize> = cols
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, is_pk))| *is_pk)
-                .map(|(i, _)| i)
-                .collect();
-            let pk_indices = if pk_indices.is_empty() {
-                vec![0]
-            } else {
-                pk_indices
-            };
-            self.relations.insert(
-                oid,
-                RelationMeta {
-                    qualified_name: qualified,
-                    pk_indices,
-                    columns,
-                },
-            );
-        }
-        debug!(
-            relations = self.relations.len(),
-            "bootstrapped relations from catalog"
-        );
     }
 
     /// Create publication + slot if absent, resolve the start LSN. On a FRESH
@@ -741,7 +686,14 @@ impl PgReplicator {
     fn cache_relation(&mut self, rel: &RelationWithoutStreamingEnabled) {
         // PK = columns whose flags bit 0 (REPLICA_IDENTITY) is set, OR the first
         // column if none are flagged (defensive default).
-        let columns: Vec<String> = rel.columns.iter().map(|c| c.name.clone()).collect();
+        // `c.oid` here is pgoutput's field name for the column's *type* OID
+        // (the wire protocol's "data type ID"), not a table/object oid —
+        // verified against pgoutput 0.0.7's `RelationColumn` source.
+        let columns: Vec<(String, i32)> = rel
+            .columns
+            .iter()
+            .map(|c| (c.name.clone(), c.oid))
+            .collect();
         let pk_indices: Vec<usize> = rel
             .columns
             .iter()
@@ -817,6 +769,91 @@ impl PgReplicator {
     }
 }
 
+/// `(col name, type oid, is_pk)` per column — the intermediate shape
+/// `catalog_relations` groups rows into before building `RelationMeta`.
+type RawColumn = (String, i32, bool);
+
+/// Read publication table column metadata (oid, namespace-qualified name,
+/// `(column name, type OID)` in publication order, PK indices) from
+/// `pg_publication_tables`/`pg_attribute`/`pg_index`. Shared by the streaming
+/// bootstrap ([`PgReplicator::bootstrap_relations_from_catalog`]) and the
+/// initial-snapshot catalog read (`snapshot::snapshot_events`) — ONE query,
+/// ONE grouping, so both build [`RelationMeta`] (and therefore render JSON
+/// payloads) identically. `pub(crate)` so `snapshot.rs` can call it directly.
+///
+/// # Errors
+/// Bubbles up the underlying `tokio_postgres` query error. Callers decide
+/// how to handle it: the streaming bootstrap treats it as non-fatal (falls
+/// back to stream `Relation` messages); the snapshot path treats it as fatal
+/// (there is no fallback for decoding a `COPY` without column metadata).
+pub(crate) async fn catalog_relations(
+    sql: &tokio_postgres::Client,
+    publication: &str,
+) -> Result<std::collections::BTreeMap<i32, RelationMeta>, tokio_postgres::Error> {
+    // All columns in publication order, with attnum + type oid + PK flag.
+    // PK detection: pg_index.indkey is an int2vector; we test membership of
+    // each column's attnum against the primary-key index's indkey via = ANY.
+    // Cast oid/atttypid::int so tokio-postgres deserializes them as plain i32.
+    let rows = sql
+        .query(
+            "SELECT c.oid::int, n.nspname, c.relname, a.attname, a.atttypid::int, \
+                    (a.attnum = ANY (coalesce(i.indkey::int2[], ARRAY[]::int2[]))) AS is_pk \
+             FROM pg_publication_tables pt \
+             JOIN pg_class c ON c.relname = pt.tablename \
+             JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = pt.schemaname \
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
+             WHERE pt.pubname = $1 \
+             ORDER BY c.oid, a.attnum",
+            &[&publication],
+        )
+        .await?;
+
+    // Group rows by oid (sorted by oid, then attnum).
+    let mut by_oid: std::collections::BTreeMap<i32, (String, Vec<RawColumn>)> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let oid: i32 = row.get(0);
+        let nsp: String = row.get(1);
+        let rel: String = row.get(2);
+        let attname: String = row.get(3);
+        let atttypid: i32 = row.get(4);
+        let is_pk: bool = row.get(5);
+        let qualified = if nsp == "public" || nsp.is_empty() {
+            rel
+        } else {
+            format!("{nsp}.{rel}")
+        };
+        let entry = by_oid.entry(oid).or_insert_with(|| (qualified, Vec::new()));
+        entry.1.push((attname, atttypid, is_pk));
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    for (oid, (qualified, cols)) in by_oid {
+        let columns: Vec<(String, i32)> = cols.iter().map(|(n, t, _)| (n.clone(), *t)).collect();
+        let mut pk_indices: Vec<usize> = cols
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, is_pk))| *is_pk)
+            .map(|(i, _)| i)
+            .collect();
+        if pk_indices.is_empty() {
+            // Defensive default: no PK flagged (e.g. no replica identity) —
+            // fall back to column 0, matching the streaming path's default.
+            pk_indices = vec![0];
+        }
+        out.insert(
+            oid,
+            RelationMeta {
+                qualified_name: qualified,
+                pk_indices,
+                columns,
+            },
+        );
+    }
+    Ok(out)
+}
+
 /// Extract the PK value(s) as a single string (comma-joined if composite).
 fn pk_string(meta: &RelationMeta, data: &TupleData<BinaryValueTraitOff>) -> String {
     let parts: Vec<String> = meta
@@ -836,24 +873,36 @@ fn pk_string(meta: &RelationMeta, data: &TupleData<BinaryValueTraitOff>) -> Stri
     }
 }
 
-/// Render a tuple as a small JSON object `{ "col": "value", ... }` for the
-/// payload. This keeps the payload debuggable and (later) lets the wire codec
-/// and predicate extractor pull named columns out without re-parsing pgoutput.
+/// Render a tuple as a typed JSON object `{ "col": <typed value>, ... }` for
+/// the payload (ADR-0019). Every column goes through
+/// `typed::append_typed_value`, keyed by its Postgres type OID — the same
+/// function `snapshot::build_json_payload` uses, so a streamed row and a
+/// snapshot row of identical data render byte-identically.
 fn tuple_to_json_payload(meta: &RelationMeta, data: &TupleData<BinaryValueTraitOff>) -> Vec<u8> {
     // Manual JSON build to avoid a serde_json dependency in this hot path;
     // tuples are small (a handful of columns).
     let mut out = String::from('{');
-    for (i, col) in meta.columns.iter().enumerate() {
+    for (i, (col, type_oid)) in meta.columns.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
         out.push('"');
         json_escape_into(&mut out, col);
-        out.push_str("\":\"");
-        if let Some(TupleDataColumn::Value(v)) = data.get(i) {
-            json_escape_into(&mut out, v);
-        }
-        out.push('"');
+        out.push_str("\":");
+        let cell: Option<&str> = match data.get(i) {
+            Some(TupleDataColumn::Value(v)) => Some(v.as_str()),
+            // ponytail: a toasted-unchanged column has no resent value in
+            // this tuple image. Every toastable builtin OID (bytea/json/
+            // jsonb/numeric/text) maps to `typed`'s quoted-string branch, so
+            // "" is a type-safe (if ambiguous with a real empty value)
+            // placeholder — matches the pre-typed-mapping behavior. Upgrade
+            // path: `REPLICA IDENTITY FULL` (forces PG to always resend), or
+            // a distinct wire sentinel the client can recognize as
+            // "unchanged, keep the prior value" instead of "empty".
+            Some(TupleDataColumn::PGUnchangedToastedValue) => Some(""),
+            Some(TupleDataColumn::PGNull) | None => None,
+        };
+        typed::append_typed_value(&mut out, *type_oid, cell);
     }
     out.push('}');
     out.into_bytes()
@@ -991,18 +1040,46 @@ mod tests {
     }
 
     #[test]
-    fn tuple_renders_to_json_payload() {
+    fn tuple_renders_to_typed_json_payload() {
         use pgoutput::events::base::tuple_data::TupleDataColumn;
         let meta = RelationMeta {
             qualified_name: "tasks".into(),
             pk_indices: vec![0],
-            columns: vec!["id".into(), "title".into()],
+            columns: vec![
+                ("id".into(), 2950),     // uuid -> string
+                ("title".into(), 25),    // text -> string (passthrough)
+                ("priority".into(), 23), // int4 -> number
+                ("done".into(), 16),     // bool -> bool
+            ],
         };
         let data: TupleData<BinaryValueTraitOff> = vec![
-            TupleDataColumn::Value("abc".to_string()),
+            TupleDataColumn::Value("123e4567-e89b-12d3-a456-426614174000".to_string()),
             TupleDataColumn::Value("hello".to_string()),
+            TupleDataColumn::Value("7".to_string()),
+            TupleDataColumn::Value("t".to_string()),
         ];
         let payload = String::from_utf8(tuple_to_json_payload(&meta, &data)).unwrap();
-        assert_eq!(payload, "{\"id\":\"abc\",\"title\":\"hello\"}");
+        assert_eq!(
+            payload,
+            "{\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"title\":\"hello\",\"priority\":7,\"done\":true}"
+        );
+    }
+
+    #[test]
+    fn tuple_renders_null_and_toasted_placeholder() {
+        use pgoutput::events::base::tuple_data::TupleDataColumn;
+        let meta = RelationMeta {
+            qualified_name: "tasks".into(),
+            pk_indices: vec![0],
+            columns: vec![("id".into(), 25), ("body".into(), 25)],
+        };
+        // PGNull -> JSON null (never a fabricated value); toasted-unchanged ->
+        // the "" placeholder (see the ponytail on `tuple_to_json_payload`).
+        let data: TupleData<BinaryValueTraitOff> = vec![
+            TupleDataColumn::PGNull,
+            TupleDataColumn::PGUnchangedToastedValue,
+        ];
+        let payload = String::from_utf8(tuple_to_json_payload(&meta, &data)).unwrap();
+        assert_eq!(payload, "{\"id\":null,\"body\":\"\"}");
     }
 }

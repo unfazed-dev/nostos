@@ -1,0 +1,20 @@
+# =============================================================================
+# uniffi-bindgen-cs configuration for nostos-dotnet.
+# -----------------------------------------------------------------------------
+# nostos_swift and nostos_kotlin do NOT ship a uniffi.toml — the proc-macro path
+# (`setup_scaffolding!`) sets the namespace inline and the official
+# `uniffi-bindgen-cli` needs no extra config for Swift/Kotlin output. nostos_dotnet
+# ships one because the Nord `uniffi-bindgen-cs` reads this file for output
+# configuration. The namespace here is advisory: the Nord bindgen prefixes the
+# crate namespace (set by `setup_scaffolding!("nostos")` in src/lib.rs) with
+# `uniffi.`, producing the final C# namespace `uniffi.nostos`. The committed
+# output lands in dotnet/generated/nostos.cs (filename matches the namespace).
+# =============================================================================
+[bindings.cs]
+# C# namespace — the Nord bindgen wraps this as `uniffi.<namespace>`, so the
+# final emitted namespace is `uniffi.nostos`. (The value here matches the
+# `setup_scaffolding!("nostos")` arg in src/lib.rs; they MUST agree.)
+namespace = "nostos"
+# Width of the generated C# — keep it readable for reviewers (the committed
+# dotnet/generated/nostos.cs is the visible artifact).
+width = 100

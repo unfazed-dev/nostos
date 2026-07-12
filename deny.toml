@@ -9,6 +9,26 @@ allow = [
 
 [advisories]
 yanked = "deny"
+ignore = [
+  # RUSTSEC-2023-0071 (Marvin Attack): non-constant-time RSA PRIVATE-key
+  # operations (decrypt/sign) can leak the private key via timing. Pulled in
+  # by `rsa` v0.9, reachable two ways:
+  #   - jsonwebtoken's `rust_crypto` backend (crates/nostos-infra, ADR-0010
+  #     JWKS addendum) — used ONLY for RS256 verification against a public
+  #     key fetched from a Supabase JWKS. Verification is a public-key
+  #     operation; there is no private key in this process for the timing
+  #     leak to expose. The advisory's own workaround ("local use on a
+  #     non-compromised computer is fine") describes exactly this shape —
+  #     no network-observable private-key operation exists in our runtime.
+  #   - nostos-infra's `rsa`/`p256` dev-dependencies, used only to mint
+  #     ephemeral RSA/EC test keys for the JWKS fixture-server test suite
+  #     (ephemeral private keys, generated and discarded per test run,
+  #     never reachable over a network).
+  # No safe upgrade exists (RustCrypto tracking issue is still open as of
+  # this writing). Revisit if jsonwebtoken/rsa ship a constant-time fix, or
+  # if any production code path ever performs an RSA private-key operation.
+  "RUSTSEC-2023-0071",
+]
 
 [bans]
 multiple-versions = "warn"

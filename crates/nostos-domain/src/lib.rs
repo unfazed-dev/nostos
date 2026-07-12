@@ -24,7 +24,7 @@ pub use events::{Operation, ReplicationEvent, RowOp};
 pub use lsn::Lsn;
 pub use predicate::{ColumnValue, Predicate, PredicateExpr, PredicateFilter};
 pub use predicate_compile::{parse_predicate_expr, ParseError};
-pub use principal::Principal;
+pub use principal::{Principal, TenantScope};
 pub use session::{SessionId, SyncSession};
 pub use tier::Tier;
 

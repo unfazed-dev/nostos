@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nostos Capacitor E2E</title>
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <!--
+      CSP for the Capacitor webview shape. iOS WKWebView origin is
+      capacitor://localhost; Android is http://localhost. Both load the page
+      over a normal browser engine, so wasm-unsafe-eval is required for the
+      NostosEngine wasm instantiation. ws://127.0.0.1:* covers the spine in
+      tests; wss: covers production sync. http://127.0.0.1:* is for the
+      Playwright-driven POST /push.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' 'unsafe-inline' blob: data:; connect-src ws://127.0.0.1:* wss: http://127.0.0.1:*; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval';"
+    />
+    <!--
+      Import map: lets the compiled plugin's dist/index.js and dist/web.js
+      resolve the @capacitor/core bare specifier to a URL the static server
+      can serve. In a real Capacitor app the bundler handles this.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@capacitor/core": "/node_modules/@capacitor/core/dist/index.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <h1>Nostos Capacitor live-replication E2E</h1>
+    <p id="status">Loading plugin + wasm…</p>
+    <pre id="log"></pre>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

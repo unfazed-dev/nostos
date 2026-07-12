@@ -48,6 +48,7 @@ members = [
     "crates/nostos-core",
     "crates/nostos-client",
     "crates/nostos-ffi-wasm",
+    "crates/nostos-cli",
 ]
 
 [workspace.package]
@@ -110,6 +111,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # --- config / error / cli ---
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
+# nostos.toml (de)serialization for nostos-cli.
+toml = "0.8"
+# TLS for nostos-cli's control-plane connections to managed Postgres (Supabase
+# requires TLS on its direct/pooler connections). Kept OUT of nostos-infra: the
+# server's PgReplicator control-plane + replication connections still use
+# NoTls (see crates/nostos-infra/src/replicator/pg.rs) — that gap is unchanged
+# by this crate. rustls (not native-tls) to reuse the crypto provider already
+# pulled in by reqwest's rustls-tls feature below.
+rustls = "0.23"
+tokio-postgres-rustls = "0.13"
+webpki-roots = "0.26"
 
 # --- nostos-cloud (control plane: auth, billing, projects) ---
 # rusqlite = embedded sqlite for the cloud store (zero external deps to run).
@@ -126,6 +138,21 @@ time = { version = "0.3", features = ["serde", "serde-human-readable"] }
 tower-cookies = "0.10"
 # Random token generation (API keys, session ids, license keys).
 rand = "0.8"
+
+# --- Supabase JWKS auth (nostos-infra, ADR-0010 addendum) ---
+# RS256/ES256 JWT verification against a Supabase JWKS. Handles JWK -> DecodingKey
+# parsing and strict algorithm pinning so we don't hand-roll RSA/ECDSA verification.
+# jsonwebtoken 10 requires picking a crypto backend explicitly; "rust_crypto"
+# (pure Rust, MIT/Apache) matches the RustCrypto family we already pull in via
+# rsa/p256 for tests, rather than adding a second crypto stack (aws-lc-rs).
+jsonwebtoken = { version = "10", default-features = false, features = [
+  "rust_crypto",
+] }
+# Test-only: mint RSA/EC/Ed25519 keypairs + JWKs for the JWKS fixture-server
+# tests (nostos-infra dev-dependencies only — never a runtime dependency).
+rsa = "0.9"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
 
 # internal crates (so members can reference each other via the workspace)
 nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
