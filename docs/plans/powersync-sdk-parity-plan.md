@@ -165,7 +165,7 @@ Rust `nostos-client`):
 | React Native | ✅ GA `@powersync/react-native` 1.35.9 | ❌ ROADMAP Phase 3 (ADR-0015 UniFFI) |
 | Node | 🟡 Beta `@powersync/node` 0.19.4 | 🟡 `sdk/nostos_node` (napi-rs) — **loads in node, async query round-trips `EXIT=0` (verified independently)**; offline-only (no live `subscribe`/replicator path yet) |
 | Kotlin (KMP) | ✅ GA `com.powersync:core` 1.12.0 | ❌ |
-| Swift (iOS/macOS) | ✅ GA `powersync-swift` | ❌ |
+| Swift (iOS/macOS) | ✅ GA `powersync-swift` | 🟡 `sdk/nostos_swift` (UniFFI) — Rust compiles (host + `aarch64-apple-ios`) + 2 integration tests + clippy clean; UniFFI generates Swift bindings (`swiftc -typecheck` OK); SPM `.binaryTarget`/xcframework is the next increment; `forbid(unsafe)` |
 | Capacitor | 🟡 Beta | ❌ |
 | Tauri | 🔴 Alpha | 🟡 `sdk/nostos_tauri` plugin (tauri 2) — compiles + 2 integration tests green (offline connect/query round-trip; write-before-connect contract); `forbid(unsafe)`; `subscribe` run-loop + JS bindings deferred |
 | .NET | 🟡 Beta | ❌ |
@@ -241,7 +241,7 @@ reachable end-to-end.
    thesis** (the Flutter `Runtime::new()` + `SyncClient` FFI pattern ported
    straight to napi). Honest scope: offline-only (no live `subscribe`/replicator
    path verified yet) + a `u64→f64` id-precision `ponytail:`. Nostos is now
-   **6/10 platforms** (Flutter + WASM + Node + Rust + Web-JS + Tauri — see items 5–7).
+   **7/10 platforms** (Flutter + WASM + Node + Rust + Web-JS + Tauri + Swift — see items 5–8).
 4. P5 Sync Streams — biggest remaining *feature* gap for the "equivalent SDK"
    claim.
 5. ✅ **DONE** — `nostos-client` documented as the Rust SDK (README + public-API
@@ -262,6 +262,14 @@ reachable end-to-end.
    inside the test runtime, a wrong `SELECT 1` assertion) — the PROCESS LESSON
    in action. `subscribe` run-loop + JS bindings deferred (`ponytail:`-marked).
    **6/10.**
+8. ✅ **DONE** — **Swift SDK** (`sdk/nostos_swift`, UniFFI 0.28). Rust compiles
+   for host **and** `cargo build --target aarch64-apple-ios`; `cargo test --lib`
+   2/2 (offline connect+query; write-before-connect); `cargo clippy
+   --all-targets -D warnings` clean; UniFFI emits Swift bindings; `swiftc
+   -typecheck` passes against the FFI header. `forbid(unsafe)`. Unlike Tauri,
+   the agent's build FINISHED and reported accurately — every gate reproduced
+   on my independent re-run. SPM `.binaryTarget`/xcframework wrapping the `.a`
+   is the next increment (`ponytail:`-marked). **7/10.**
 
 ### Path to 10/10 (honest roadmap)
 
@@ -279,7 +287,7 @@ this-session verifiability noted:
 | ✅ Web JS SDK | `sdk/nostos_web` (`@nostos-sync/web`) over `nostos-ffi-wasm` | yes (node smoke `SMOKE_OK`) | scaffold shipped (5/10) |
 | React Native | reuse the JS core (RN shares it, like `@powersync/web`↔RN) | partial (Jest; full E2E needs device) | medium |
 | Kotlin/KMP | UniFFI; android cross-targets present, JDK present | compile yes; E2E needs Android SDK/gradle | medium-large |
-| Swift/iOS | cbindgen + Swift PM (`swift-bridge`); Xcode + iOS targets present | compile yes; E2E needs simulator | medium-large |
+| ✅ Swift/iOS | `sdk/nostos_swift` (UniFFI) over `nostos-client` | yes (`cargo test` 2/2 + `swiftc -typecheck`) | scaffold shipped (7/10) |
 | .NET | uniffi-cs / cbindgen + DllImport | needs .NET SDK (not probed) | medium-large |
 | Capacitor | JS facade over the web JS core | partial | small-medium |
 

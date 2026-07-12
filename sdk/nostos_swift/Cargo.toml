@@ -1,0 +1,73 @@
+# =============================================================================
+# nostos-swift — UniFFI bridge exposing nostos-client's SyncClient<SqliteStorage>
+# to Swift (iOS / macOS). Mirrors sdk/nostos_tauri/Cargo.toml and
+# sdk/nostos_node/Cargo.toml.
+# -----------------------------------------------------------------------------
+# Standalone workspace (mirrors sdk/nostos_flutter/rust/Cargo.toml +
+# sdk/nostos_node/Cargo.toml + sdk/nostos_tauri/Cargo.toml): detaches this crate
+# from the root nostos Cargo.toml so the root `make ci` gate is not entangled
+# with an experimental Swift scaffold. The root workspace already forbids
+# hand-written `unsafe` workspace-wide; this crate keeps `#![forbid(unsafe_code)]`
+# — the forbid applies to THIS crate's source, not its dependencies', so
+# UniFFI's macro-generated FFI glue (the ADR-0015 addendum machine-generated
+# exception) is unaffected.
+# -----------------------------------------------------------------------------
+# Path deps — same shape as sdk/nostos_tauri/Cargo.toml (this crate lives at
+# sdk/nostos_swift/, so the crates are three levels up). nostos-core is required
+# transitively: PendingWrite / WriteOp live there, and nostos-client re-exports
+# neither. nostos-domain is required for the Lsn accessor in checkpoint().
+# =============================================================================
+
+[package]
+name = "nostos-swift"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "UniFFI bridge exposing nostos-client's SyncClient<SqliteStorage> to Swift (iOS/macOS) — feasibility scaffold."
+license = "Apache-2.0"
+
+# Standalone workspace root — detaches from the parent nostos workspace (mirrors
+# sdk/nostos_tauri/Cargo.toml + sdk/nostos_node/Cargo.toml +
+# sdk/nostos_flutter/rust/Cargo.toml). Required: without this, cargo walks up
+# and tries to enroll nostos-swift as a member of /Volumes/.../nostos/Cargo.toml,
+# which would entangle the root `make ci` gate with this scaffold.
+[workspace]
+
+[lib]
+# staticlib: iOS/macOS Xcode links the .a; cdylib: uniffi-bindgen reads the
+# .dylib to emit Swift bindings; lib: cargo test / rust-analyzer.
+name = "nostos_swift"
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[dependencies]
+nostos-client = { path = "../../crates/nostos-client" }
+nostos-core = { path = "../../crates/nostos-core" }
+nostos-domain = { path = "../../crates/nostos-domain" }
+
+# UniFFI 0.28 — proc-macro path (setup_scaffolding! + #[derive(uniffi::Object)]
+# + #[uniffi::export]). The bindgen CLI version MUST match this major.minor:
+# `cargo install uniffi-bindgen-cli --version 0.28`.
+uniffi = { version = "0.28", features = ["cli"] }
+
+# Sync surface: each UniFFI method blocks_on the owned multi-thread runtime.
+# rt-multi-thread so block_on from the foreign (Swift) thread doesn't starve
+# the single-threaded current-thread runtime under concurrent Swift calls.
+tokio = { version = "1.39", features = ["rt-multi-thread", "sync"] }
+serde_json = "1.0"
+# UniFFI 0.28 requires Result error types to be enum/struct derived via
+# `#[derive(uniffi::Error)]`; bare `String` panics in bindgen ("unknown throw
+# type: Some(String)"). `thiserror` supplies the Display + std::error::Error
+# impls that UniFFI's error trait requires — nostos-client uses the same crate.
+thiserror = "1.0"
+
+[build-dependencies]
+# ponytail: no build.rs today — the proc-macro path via setup_scaffolding!
+# emits the FFI scaffolding at compile time, no UDL file, no build.rs. If a
+# future UniFFI version reintroduces a build.rs requirement for proc-macros,
+# this [build-dependencies] uniffi = { version = "0.28", features = ["build"] }
+# is the one-line fix point (mirrors nostos_tauri's tauri-plugin build dep).
+
+[profile.release]
+# Smaller artifacts for the .a / .dylib; lto is off by default to keep the
+# scaffolding link fast (this is a feasibility build, not a shipped binary).
+opt-level = 2

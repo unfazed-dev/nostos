@@ -1,0 +1,13 @@
+/target/
+
+# UniFFI-generated Swift bindings — emitted by `uniffi-bindgen generate` into
+# swift-sources/. Regenerated from the cdylib on demand; not committed (the
+# source of truth is src/lib.rs, same as nostos_tauri's generated JS).
+/swift-sources/
+
+# SwiftPM build artifacts (`.build` is the actual SwiftPM dir name).
+/swift/.build/
+
+# Built artifacts produced when wrapping the staticlib into an .xcframework
+# (the next increment past the swiftc -typecheck gate).
+/xcframework/
