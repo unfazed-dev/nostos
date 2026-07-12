@@ -1,12 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Test-app-only manifest overlay. Forces `extractNativeLibs="true"` on the
-     auto-generated test app: JNA's `System.loadLibrary("jnidispatch")` lookup
-     needs the .so files extracted to `/data/app/.../lib/arm64/` rather than
-     page-mapped from the apk (AGP 8.x's default for `extractNativeLibs=false`
-     breaks JNA's loader on the test app's process). The library's
-     `useLegacyPackaging = true` in build.gradle.kts is the same intent for the
-     shipped .aar; this manifest overlay applies the same flag to the test app
-     that AGP spins up for `connectedDebugAndroidTest`. -->
+<!-- Test-app-only manifest overlay.
+     - `extractNativeLibs="true"`: JNA's `System.loadLibrary("jnidispatch")`
+       lookup needs the .so files extracted to `/data/app/.../lib/arm64/`
+       rather than page-mapped from the apk (AGP 8.x's default for
+       `extractNativeLibs=false` breaks JNA's loader on the test app's
+       process). The library's `useLegacyPackaging = true` in build.gradle.kts
+       is the same intent for the shipped .aar; this manifest overlay applies
+       the same flag to the test app that AGP spins up for
+       `connectedDebugAndroidTest`.
+     - `INTERNET` permission + `usesCleartextTraffic="true"`: the live-E2E
+       test (`live_connect_push_echo_roundTrip`) reaches the host-side spine
+       at `ws://10.0.2.2:<port>/sync` and `http://10.0.2.2:<port>/push`.
+       Android 9+ (API 28+) blocks cleartext by default; the test app must
+       opt in. Both are test-only — the shipped library manifest stays empty. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application android:extractNativeLibs="true" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application
+        android:extractNativeLibs="true"
+        android:usesCleartextTraffic="true" />
 </manifest>

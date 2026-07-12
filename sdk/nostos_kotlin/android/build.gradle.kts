@@ -21,6 +21,17 @@ android {
 
         // instrumented-test runner — needed for Tier-2 connectedDebugAndroidTest.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Live-E2E port plumbing: the on-device `live_connect_push_echo_roundTrip`
+        // test needs to know which port the host-side spine
+        // (`target/debug/examples/e2e_server`) bound. The orchestrator
+        // (`scripts/run-live-e2e.sh`) spawns the spine, captures its
+        // `NOSTOS_E2E_PORT=`, and passes the value here via
+        // `./gradlew connectedDebugAndroidTest -PnostosPort=<port>`. The test
+        // reads it back via `InstrumentationRegistry.getArguments().getString("nostosPort")`.
+        // "0" = unset → the live test self-skips (the offline test still runs).
+        testInstrumentationRunnerArguments["nostosPort"] =
+            (project.findProperty("nostosPort") ?: "0").toString()
     }
 
     sourceSets {

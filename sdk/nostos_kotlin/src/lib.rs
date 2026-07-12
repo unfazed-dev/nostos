@@ -35,12 +35,19 @@
 //! addendum: machine-generated FFI glue is the one workspace-wide exception.
 //!
 //! # ponytail: deferred surfaces (upgrade path)
-//! - **`subscribe(table, where_sql)` + the run loop**: not wired. The owned
-//!   `rt` is retained precisely so a future `subscribe` method can
-//!   `rt.spawn(client.run_with_reconnect())` (mirroring `nostos_node`'s
-//!   `subscribe`). Ceiling: no row-tick callback / live sync yet; callers are
-//!   offline-only. Upgrade path: add `subscribe` + a UniFFI callback interface
-//!   for row-ticks, same shape as the Flutter `rows_sink`.
+//! - **`subscribe(table)` run loop + poll**: WIRED. `subscribe()` spawns
+//!   `client.run_with_reconnect()` on the owned runtime; the loop drives the
+//!   WS session (subscribe-ack + drain + flush) and applies incoming rows to
+//!   the on-device SQLite store via the engine. Kotlin polls `query()` until
+//!   the expected row appears — the SAME shape the Rust E2E template
+//!   (`crates/nostos-client/tests/e2e_live_replication.rs`) uses, and the exact
+//!   shape `sdk/nostos_swift` shipped. Ceiling: no row-tick callback / push
+//!   notification to Kotlin yet — callers discover new rows by polling.
+//!   Upgrade path: a UniFFI callback interface for row-ticks (same shape as
+//!   the Flutter `rows_sink`), or a `poll_new_rows()` drain over
+//!   `SyncClient::subscribe_changes()`'s broadcast channel. UniFFI 0.28's
+//!   async-callback path is the reason the poll design is the floor (per
+//!   ADR-0013 + the live-E2E consolidation plan).
 //! - **ABI matrix**: `aarch64-linux-android` (arm64-v8a) is the proof target
 //!   here — the running emulator is API 37 / arm64. `armv7-linux-androideabi`
 //!   + `x86_64-linux-android` targets are mechanical follow-ons (add the
@@ -124,11 +131,22 @@ pub struct NostosClient {
 }
 
 /// The active session. Dropping this — including via a second `connect()`
-/// replacing it — releases the `Arc<SyncClient<SqliteStorage>>`. (No
-/// `run_task` to abort today — `subscribe()` is the ponytail.)
+/// replacing it — releases the `Arc<SyncClient<SqliteStorage>>` AND aborts the
+/// background run loop (`run_task`) so a superseded session's WebSocket +
+/// reconnect loop actually stops instead of leaking. Mirrors `nostos_swift`'s
+/// and `nostos_node`'s `Session` shape verbatim.
 struct Session {
     client: Arc<SyncClient<SqliteStorage>>,
     table: String,
+    run_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(task) = self.run_task.take() {
+            task.abort();
+        }
+    }
 }
 
 #[uniffi::export]
@@ -160,9 +178,9 @@ impl NostosClient {
     }
 
     /// Open the local SQLite store at `db_path` and build a `SyncClient`
-    /// against `url`. No network I/O — the subscribe/run loop is a separate
-    /// (not-yet-wired) method. Idempotent: a second call while a session is
-    /// live is a no-op. The default table is `tasks` (matches `nostos_node`,
+    /// against `url`. No network I/O — `subscribe()` is what starts the live
+    /// replication loop. Idempotent: a second call while a session is live is
+    /// a no-op. The default table is `tasks` (matches `nostos_node`,
     /// `nostos_tauri`, and `nostos_swift`).
     ///
     /// # Errors
@@ -184,7 +202,70 @@ impl NostosClient {
             *guard = Some(Session {
                 client,
                 table: "tasks".to_owned(),
+                run_task: None,
             });
+            Ok(())
+        })
+    }
+
+    /// Start the live replication loop on the owned runtime. Spawns
+    /// `client.run_with_reconnect()` — the loop opens the WS session
+    /// (subscribe-ack + drain + flush) and applies incoming rows to the
+    /// on-device SQLite store via the engine, exactly as the Rust E2E
+    /// template (`crates/nostos-client/tests/e2e_live_replication.rs`) drives
+    /// it, and exactly as `sdk/nostos_swift`'s `subscribe()` does. Returns
+    /// immediately; the loop runs until the session is dropped (Drop aborts
+    /// the task) or the process exits.
+    ///
+    /// `table` is accepted for API symmetry with `nostos_node::subscribe(table,
+    /// _)` and the upcoming per-table session floor. Today the session's
+    /// table is fixed at `connect()` time (default `"tasks"`); a mismatched
+    /// `table` here is a programming error.
+    ///
+    /// # ponytail: poll-only
+    /// UniFFI 0.28's async-callback path (the natural fit for a row-tick
+    /// callback into Kotlin) is fiddly enough to defer; the run loop applies
+    /// rows to storage as they arrive, and Kotlin polls `query()` until the
+    /// expected row appears (same shape as the Rust E2E template and the
+    /// Swift SDK). A future `poll_new_rows()` draining
+    /// `SyncClient::subscribe_changes()`'s broadcast channel is the upgrade
+    /// path if `query()` polling proves too coarse.
+    ///
+    /// # Errors
+    /// `NostosError` if no session is active (call `connect()` first) or the
+    /// requested `table` does not match the session fixed at `connect()` time.
+    pub fn subscribe(&self, table: String) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let mut guard = self.session.lock().await;
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| NostosError::Message {
+                    description: "subscribe() called before connect()".to_string(),
+                })?;
+            if session.table != table {
+                return Err(NostosError::Message {
+                    description: format!(
+                        "subscribe() table {table:?} does not match active session table {:?} — v1 supports one table per NostosClient",
+                        session.table
+                    ),
+                });
+            }
+            // Idempotent: a second subscribe() while a run loop is live is a
+            // no-op (mirrors `connect()`'s idempotency).
+            if session.run_task.is_some() {
+                return Ok(());
+            }
+            let client = Arc::clone(&session.client);
+            // Spawn on OUR runtime (not UniFFI's) so the loop outlives this
+            // call. `run_with_reconnect` retries forever on transport errors;
+            // the task only completes on a terminal error, which we swallow
+            // (auto-reconnect is the contract — a real write surfaces its own
+            // error). Session::Drop aborts this handle on replacement / client
+            // drop.
+            let run_task = self.rt.spawn(async move {
+                let _ = client.run_with_reconnect().await;
+            });
+            session.run_task = Some(run_task);
             Ok(())
         })
     }
@@ -351,5 +432,71 @@ mod tests {
             msg.contains("before connect"),
             "expected a before-connect error, got: {msg}"
         );
+    }
+
+    /// `subscribe()` before `connect()` surfaces a clear error — the same
+    /// before-connect contract `write()` enforces. Mirrors `nostos_swift`'s
+    /// `subscribe_before_connect_is_an_error`.
+    #[test]
+    fn subscribe_before_connect_is_an_error() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+
+        let err = client
+            .subscribe("tasks".into())
+            .expect_err("subscribe before connect should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("before connect"),
+            "expected a before-connect error, got: {msg}"
+        );
+    }
+
+    /// `subscribe()` with a table that doesn't match the session fixed at
+    /// `connect()` time surfaces a clear error — the same one-table-per-client
+    /// guard `write()` enforces. Mirrors `nostos_swift`'s
+    /// `subscribe_table_mismatch_is_an_error`.
+    #[test]
+    fn subscribe_table_mismatch_is_an_error() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.connect().expect("connect");
+
+        let err = client
+            .subscribe("not-tasks".into())
+            .expect_err("mismatched-table subscribe should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not match"),
+            "expected a table-mismatch error, got: {msg}"
+        );
+    }
+
+    /// `subscribe()` after `connect()` spawns the run loop and returns Ok.
+    /// The loop tries to reach `ws://localhost:0` and fails forever; we
+    /// swallow the error inside the spawned task (auto-reconnect contract).
+    /// What we ARE proving here: (1) the call returns Ok, (2) it's idempotent
+    /// (a second call is a no-op), (3) Drop cleans up the spawned task
+    /// (Session::Drop aborts it; the test passing without hanging on runtime
+    /// shutdown is the proof). Mirrors `nostos_swift`'s
+    /// `subscribe_after_connect_spawns_run_loop`.
+    #[test]
+    fn subscribe_after_connect_spawns_run_loop() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.connect().expect("connect");
+
+        client.subscribe("tasks".into()).expect("subscribe");
+        // Idempotent: a second subscribe is a no-op (the run_task is already
+        // Some). If this re-spawned, we'd leak a second loop and the session
+        // Drop would only abort the latest.
+        client
+            .subscribe("tasks".into())
+            .expect("subscribe idempotent");
+
+        // Drop the client: the runtime shuts down, Session::Drop aborts the
+        // spawned run_with_reconnect task. If abort is broken, this test
+        // hangs on runtime shutdown.
+        drop(client);
     }
 }
