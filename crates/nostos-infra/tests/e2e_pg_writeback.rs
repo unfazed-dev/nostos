@@ -853,3 +853,196 @@ async fn own_tenant_writes_flow_normally() {
         "the row must be gone after the own-tenant delete"
     );
 }
+
+// ===========================================================================
+// P3 — PATCH (column-level UPDATE), PowerSync PATCH parity. A patch updates
+// only the columns present in its payload of an EXISTING row; never inserts;
+// idempotent on an absent row; cross-tenant patch is Forbidden (ADR-0018).
+// ===========================================================================
+
+/// Fetch `(title, completed)` for a row — used by the patch tests to verify
+/// that a patch updates ONLY the columns present in its payload (the other
+/// columns are untouched).
+async fn fetch_row_title_completed(
+    sql: &tokio_postgres::Client,
+    id: uuid::Uuid,
+) -> Option<(String, bool)> {
+    sql.query_opt("SELECT title, completed FROM tasks WHERE id = $1", &[&id])
+        .await
+        .expect("query tasks")
+        .map(|row| (row.get(0), row.get(1)))
+}
+
+/// Build a patch write frame whose payload carries ONLY `title` — the
+/// canonical partial-column case. Mirrors `upsert_frame`'s shape but with
+/// `op:"patch"` and a single column.
+fn patch_frame(id: uuid::Uuid, title: &str, client_write_id: &str) -> String {
+    format!(
+        "{{\"type\":\"write\",\"table\":\"tasks\",\"op\":\"patch\",\
+         \"pk\":\"{id}\",\
+         \"payload\":{{\"title\":\"{title}\"}},\
+         \"client_write_id\":\"{client_write_id}\"}}"
+    )
+}
+
+/// A patch updates ONLY the columns present in its payload; other columns are
+/// untouched (P3 PowerSync PATCH parity).
+#[tokio::test]
+async fn patch_updates_only_specified_columns() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    let slot = format!("e2e_wb_patch_{}", std::process::id());
+    let publication = "cairn_pub";
+    let sql = sql_client().await;
+    let _ = sql
+        .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
+        .await;
+
+    let (addr, shutdown, server, driver) = spawn_server(&slot, publication).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Create a row with title="original" via upsert. `org_id` is NOT NULL on
+    // the tasks schema, so the upsert payload must carry one even though this
+    // test runs without tenant enforcement.
+    let row_id = uuid::Uuid::new_v4();
+    let org = uuid::Uuid::new_v4();
+    let create = upsert_frame(row_id, &org.to_string(), "original", "p1");
+    let create_ack = write_and_await_ack(addr, "anon", create)
+        .await
+        .expect("create ack");
+    assert_eq!(create_ack["ok"], true, "create must succeed");
+
+    // Patch ONLY the title. `completed` (default FALSE) is absent from the
+    // patch payload — it must be left untouched.
+    let patch = patch_frame(row_id, "patched", "p2");
+    let patch_ack = write_and_await_ack(addr, "anon", patch)
+        .await
+        .expect("patch ack");
+    let after = fetch_row_title_completed(&sql, row_id).await;
+    shutdown_server(shutdown, server, driver, &slot).await;
+    let _ = sql
+        .execute("DELETE FROM tasks WHERE id = $1", &[&row_id])
+        .await;
+    let _ = sql
+        .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
+        .await;
+
+    assert_eq!(
+        patch_ack["ok"], true,
+        "patch of an existing row must succeed"
+    );
+    let (title, completed) = after.expect("row must still exist after patch");
+    assert_eq!(title, "patched", "patch must update the title column");
+    assert!(
+        !completed,
+        "patch must NOT touch columns absent from its payload"
+    );
+}
+
+/// A patch of a row that does not exist is success (idempotent) — mirrors
+/// `delete_of_missing_row_is_success`. A redelivered patch after the row is
+/// gone must not surface an error to the client.
+#[tokio::test]
+async fn patch_on_absent_row_is_ok() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    let slot = format!("e2e_wb_patch_absent_{}", std::process::id());
+    let publication = "cairn_pub";
+    let sql = sql_client().await;
+    let _ = sql
+        .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
+        .await;
+
+    let (addr, shutdown, server, driver) = spawn_server(&slot, publication).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // A fresh UUID that does NOT exist in tasks.
+    let ghost = uuid::Uuid::new_v4();
+    let patch = patch_frame(ghost, "ghost", "pa1");
+    let ack = write_and_await_ack(addr, "anon", patch).await;
+    shutdown_server(shutdown, server, driver, &slot).await;
+    let _ = sql
+        .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
+        .await;
+
+    let ack = ack.expect("expected a WriteResult frame");
+    assert_eq!(
+        ack["ok"], true,
+        "patch of an absent row must be ok (idempotent)"
+    );
+}
+
+/// A patch of a pk that exists under a DIFFERENT tenant is rejected
+/// (`Forbidden`) and the row is left unchanged — the patch must not silently
+/// mutate another tenant's row (ADR-0018).
+#[tokio::test]
+async fn cross_tenant_patch_is_rejected_row_unchanged() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    let slot = tenant_test_slot("patch");
+    let publication = "cairn_pub";
+    let sql = sql_client().await;
+    let _ = sql
+        .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
+        .await;
+
+    let acme_org = uuid::Uuid::new_v4().to_string();
+    let other_org = uuid::Uuid::new_v4().to_string();
+    let auth = Arc::new(TwoTenantAuth::new(&acme_org, &other_org));
+    let (addr, shutdown, server, driver) =
+        spawn_server_with(&slot, publication, auth, Some("org_id")).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // acme creates a row.
+    let row_id = uuid::Uuid::new_v4();
+    let create = upsert_frame(row_id, &acme_org, "acme-owned", "cp1");
+    let create_ack = write_and_await_ack(addr, "acme", create)
+        .await
+        .expect("create ack");
+    assert_eq!(
+        create_ack["ok"], true,
+        "acme's own-tenant create must succeed"
+    );
+
+    // other attempts to patch acme's row. The server force-stamps org_id to
+    // other_org (the attacker's own tenant), so the tenant-guarded WHERE
+    // can never match acme's row — a cross-tenant probe, rejected as Forbidden.
+    let attack = patch_frame(row_id, "hijacked", "cp2");
+    let attack_ack = write_and_await_ack(addr, "other", attack).await;
+
+    let stored = fetch_row(&sql, row_id).await;
+    shutdown_server(shutdown, server, driver, &slot).await;
+    let _ = sql
+        .execute("DELETE FROM tasks WHERE id = $1", &[&row_id])
+        .await;
+    let _ = sql
+        .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
+        .await;
+
+    let attack_ack = attack_ack.expect("expected a WriteResult frame");
+    assert_eq!(
+        attack_ack["ok"], false,
+        "a cross-tenant patch must be rejected, not silently applied"
+    );
+    let err = attack_ack["error"].as_str().expect("error string present");
+    assert!(
+        err.contains("forbidden"),
+        "error must be a Forbidden rejection, got: {err}"
+    );
+    let (stored_org, stored_title) = stored.expect("row must still exist");
+    assert_eq!(
+        stored_org.to_string(),
+        acme_org,
+        "ownership must NOT have changed"
+    );
+    assert_eq!(
+        stored_title, "acme-owned",
+        "the row's content must be UNCHANGED by the rejected patch"
+    );
+}

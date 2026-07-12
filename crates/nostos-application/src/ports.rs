@@ -229,7 +229,10 @@ pub trait SyncAuth: Send + Sync {
 /// value; (2) refuse to let an upsert change ownership of a row that already
 /// belongs to a different tenant (reject, don't silently no-op — see
 /// `PgWriteBack`); (3) scope a delete to `tenant.value` so a client can never
-/// delete another tenant's row. `None` means no tenant enforcement is active
+/// delete another tenant's row; (4) scope a patch to `tenant.value` AND
+/// force-stamp the tenant column in the patched payload, so a client can
+/// neither target another tenant's row nor mutate its own row's tenant
+/// ownership. `None` means no tenant enforcement is active
 /// (anonymous/single-tenant deploys) — behavior is unchanged from pre-ADR-0018.
 #[async_trait]
 pub trait WriteBack: Send + Sync {
@@ -270,6 +273,36 @@ pub trait WriteBack: Send + Sync {
         &self,
         table: &str,
         pk: &str,
+        tenant: Option<TenantScope<'_>>,
+    ) -> Result<(), WriteBackError>;
+
+    /// Patch (column-level UPDATE) one existing row: `payload_json` is a JSON
+    /// object of only the columns to change. Columns absent from the payload
+    /// are left untouched — unlike an upsert, a patch NEVER inserts. Matches
+    /// PowerSync's PATCH op-type (P3 parity). The `pk` identifies the row
+    /// (v1 convention: pk column is `id`).
+    ///
+    /// A patch of a row that does not exist is a success (idempotent) — so a
+    /// redelivered patch after the row is gone does not surface an error. A
+    /// row that DOES exist but under a different tenant is a
+    /// [`WriteBackError::Forbidden`] rejection, not a silent no-op (same
+    /// existence-disclosure trade-off as [`Self::delete`]). "Deletes always
+    /// win": a delete that races ahead of a patch on the same pk makes the
+    /// patch's 0-rows-affected result an idempotent success.
+    ///
+    /// # Errors
+    /// - [`WriteBackError::TableNotAllowed`] if `table` is not in the allowlist.
+    /// - [`WriteBackError::InvalidPayload`] if `payload_json` is not a JSON
+    ///   object, contains a column name that fails identifier validation, or
+    ///   carries no columns to set.
+    /// - [`WriteBackError::Forbidden`] if `tenant` is `Some` and the row exists
+    ///   under a different tenant (ADR-0018).
+    /// - [`WriteBackError::Backend`] for any underlying database error.
+    async fn patch(
+        &self,
+        table: &str,
+        pk: &str,
+        payload_json: &str,
         tenant: Option<TenantScope<'_>>,
     ) -> Result<(), WriteBackError>;
 }

@@ -107,6 +107,18 @@ impl WriteBack for NoWriteBack {
             "write-back requires pg replicator".to_string(),
         ))
     }
+
+    async fn patch(
+        &self,
+        _table: &str,
+        _pk: &str,
+        _payload_json: &str,
+        _tenant: Option<TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
+        Err(WriteBackError::Backend(
+            "write-back requires pg replicator".to_string(),
+        ))
+    }
 }
 
 // ===========================================================================
@@ -516,6 +528,174 @@ mod pg {
                 }
             }
         }
+
+        /// Patch (column-level UPDATE) — P3 PowerSync parity. Mirrors the
+        /// upsert builder's trust-boundary discipline (allowlist → ident regex
+        /// → parameterized values) but emits `UPDATE … SET … WHERE pk=$pk`
+        /// instead of `INSERT … ON CONFLICT`. A patch NEVER inserts.
+        async fn patch(
+            &self,
+            table: &str,
+            pk: &str,
+            payload_json: &str,
+            tenant: Option<TenantScope<'_>>,
+        ) -> Result<(), WriteBackError> {
+            // 1. ALLOWLIST FIRST.
+            if !self.allowlist.contains(table) {
+                return Err(WriteBackError::TableNotAllowed(table.to_string()));
+            }
+            // 2. Validate the table identifier (belt-and-braces).
+            if let Err(bad) = validate_ident(table) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad table identifier: {bad}"
+                )));
+            }
+
+            // 3. Parse + validate the payload (same path as upsert). Must be a
+            //    JSON object; every key (a column name) passes the identifier
+            //    regex before any SQL is built.
+            let mut payload: serde_json::Value = serde_json::from_str(payload_json)
+                .map_err(|e| WriteBackError::InvalidPayload(format!("not JSON: {e}")))?;
+            let obj = payload.as_object_mut().ok_or_else(|| {
+                WriteBackError::InvalidPayload("payload must be a JSON object".to_string())
+            })?;
+
+            // 3b. ADR-0018 force-stamp. CRITICAL for Patch: the WHERE in an
+            //     UPDATE evaluates against the PRE-update row, so without this
+            //     stamp a client payload containing `"org_id":"attacker"` would
+            //     get applied by the SET clause and mutate the row's tenant
+            //     ownership. Force-stamping overwrites any client value with
+            //     the principal's real tenant; the tenant-guarded WHERE then
+            //     constrains the update to rows already in this tenant, so the
+            //     tenant column is set to the value it already had (a no-op on
+            //     ownership). The client cannot mutate tenant ownership OR
+            //     reach another tenant's row.
+            stamp_tenant_column(obj, tenant);
+
+            // Collect non-pk columns, sorted for deterministic SQL. The pk
+            // column ("id") is bound separately in the WHERE and is NEVER in
+            // the SET clause (mutating a pk is out of scope; v1 convention).
+            let mut columns: Vec<&String> =
+                obj.keys().filter(|k| k.as_str() != PK_COLUMN).collect();
+            columns.sort_unstable();
+            for col in &columns {
+                if let Err(bad) = validate_ident(col) {
+                    return Err(WriteBackError::InvalidPayload(format!(
+                        "bad column identifier: {bad}"
+                    )));
+                }
+            }
+            // A patch with nothing to set is meaningless — reject it rather
+            // than emit invalid SQL. Under tenant scoping the stamp above
+            // guarantees the tenant column is present, so this fires only for
+            // a genuinely empty payload (or a payload that carried only the pk).
+            if columns.is_empty() {
+                return Err(WriteBackError::InvalidPayload(
+                    "patch payload has no columns to set".to_string(),
+                ));
+            }
+
+            let quoted_table = quote_ident(table);
+            let quoted_pk = quote_ident(PK_COLUMN);
+
+            // Build the SET clause: `"col"=$1, "col"=$2, ...` (sorted). Column
+            // NAMES are validated + quoted; VALUES are bound as $1…$n — NEVER
+            // interpolated (same safety property as upsert).
+            let mut set_clause = String::with_capacity(64);
+            let mut col_values: Vec<SqlValue> = Vec::with_capacity(columns.len());
+            for (i, col) in columns.iter().enumerate() {
+                let value = obj.get(*col).map_or(SqlValue::Null, json_value_to_sql);
+                col_values.push(value);
+                let q = quote_ident(col);
+                if i > 0 {
+                    set_clause.push_str(", ");
+                }
+                // $1..$n for the columns; the +1 makes the first column $1.
+                let _ = write!(set_clause, "{q}=${}", i + 1);
+            }
+
+            let pk_value = SqlValue::from_pk(pk);
+
+            // 4a. No tenant scoping: plain UPDATE, 0 rows = absent = idempotent
+            //     success (mirrors delete-of-missing). pk binds after the
+            //     column values ($n+1).
+            let Some(scope) = tenant else {
+                let pk_param = columns.len() + 1;
+                let sql = format!(
+                    "UPDATE {quoted_table} SET {set_clause} WHERE {quoted_pk} = ${pk_param}"
+                );
+                let client = self.client().await?;
+                let mut all_values: Vec<SqlValue> = Vec::with_capacity(col_values.len() + 1);
+                all_values.extend(col_values);
+                all_values.push(pk_value);
+                let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                    all_values.iter().map(SqlValue::as_tosql).collect();
+                return match client.execute(&sql, &params).await {
+                    Ok(_) => {
+                        self.return_client(client).await;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.drop_client().await;
+                        Err(WriteBackError::Backend(e.to_string()))
+                    }
+                };
+            };
+
+            // 4b. ADR-0018 tenant-scoped patch: the same data-modifying-CTE +
+            //     EXISTS probe the tenant-scoped delete uses. The UPDATE is
+            //     constrained to `pk=$pk AND tenant_col=$tenant`, so it can
+            //     never touch another tenant's row; the EXISTS check
+            //     disambiguates a 0-rows result into absent (idempotent
+            //     success) vs. exists-under-different-tenant (Forbidden). Same
+            //     existence-disclosure trade-off as delete — documented, not
+            //     hidden.
+            if let Err(bad) = validate_ident(scope.column) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad tenant column identifier: {bad}"
+                )));
+            }
+            let quoted_tenant_col = quote_ident(scope.column);
+            let tenant_value = SqlValue::from_scalar(scope.value);
+            let pk_param = columns.len() + 1;
+            let tenant_param = columns.len() + 2;
+            let sql = format!(
+                "WITH updated AS (\
+                     UPDATE {quoted_table} SET {set_clause} \
+                     WHERE {quoted_pk} = ${pk_param} AND {quoted_tenant_col} = ${tenant_param} \
+                     RETURNING 1\
+                 ) \
+                 SELECT (SELECT count(*) FROM updated)::bigint AS updated_count, \
+                        EXISTS(SELECT 1 FROM {quoted_table} WHERE {quoted_pk} = ${pk_param}) AS still_exists"
+            );
+            let client = self.client().await?;
+            let mut all_values: Vec<SqlValue> = Vec::with_capacity(col_values.len() + 2);
+            all_values.extend(col_values);
+            all_values.push(pk_value);
+            all_values.push(tenant_value);
+            let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                all_values.iter().map(SqlValue::as_tosql).collect();
+            match client.query_one(&sql, &params).await {
+                Ok(row) => {
+                    self.return_client(client).await;
+                    let updated_count: i64 = row.get(0);
+                    if updated_count > 0 {
+                        return Ok(());
+                    }
+                    let still_exists: bool = row.get(1);
+                    if still_exists {
+                        return Err(WriteBackError::Forbidden(format!(
+                            "row {pk} in {table} belongs to a different tenant"
+                        )));
+                    }
+                    Ok(()) // idempotent: the row never existed
+                }
+                Err(e) => {
+                    self.drop_client().await;
+                    Err(WriteBackError::Backend(e.to_string()))
+                }
+            }
+        }
     }
 
     /// A typed SQL bind value. Infers the Rust type from the JSON value's
@@ -741,6 +921,13 @@ mod tests {
                 assert!(msg.contains("write-back requires pg replicator"));
             }
             other => panic!("delete should error Backend, got {other:?}"),
+        }
+        let patch_err = wb.patch("tasks", "1", "{}", None).await;
+        match patch_err {
+            Err(WriteBackError::Backend(msg)) => {
+                assert!(msg.contains("write-back requires pg replicator"));
+            }
+            other => panic!("patch should error Backend, got {other:?}"),
         }
     }
 }

@@ -25,11 +25,11 @@
 //! After each subscribe-ack, the connected loop flushes `pending()` in order:
 //! each queued write goes out as a `Write` frame; the matching `WriteResult`
 //! frame (correlated by `client_write_id == outbox id`) drives `mark_done` on
-//! `ok:true`. On `ok:false` the write stays queued and the error surfaces via
-//! the client's log channel.
-//!
-//! ponytail: failed writes retry forever and block the queue head; add a
-//! dead-letter policy when a design partner hits a permanent rejection.
+//! `ok:true`. On `ok:false` the write's retry counter is bumped; once it
+//! reaches `dead_letter_max_attempts` (ADR-0013 v2) the write is quarantined
+//! (removed from the pending queue but NOT deleted) so the queue head advances
+//! past a permanently-failing write. The error surfaces via the client's log
+//! channel on every rejection; the user-facing surface is a Phase-2 concern.
 //!
 //! The flush and the apply both reach the storage through the same engine
 //! mutex, so they're serialized by construction (single-threaded, per the
@@ -128,6 +128,22 @@ pub struct SyncClientConfig {
     /// Server-enforced: the principal's tenant scoping always wraps this, so a
     /// `where_sql` can never widen scope past its tenant.
     pub where_sql: Option<String>,
+    /// Maximum number of `WriteResult{ok:false}` rejections before a write is
+    /// dead-lettered (quarantined). Once a write's attempt count (bumped on
+    /// every rejection) reaches this threshold, the flush loop calls
+    /// `Outbox::mark_dead_letter` to remove it from the pending queue so the
+    /// head advances past a permanently-failing write; the row stays in the
+    /// backing store for inspection (e.g. `SqliteStorage::dead_letter_entries`)
+    /// — it is NOT silently deleted. ADR-0013 v2 dead-letter policy.
+    ///
+    /// The default (50) is a deliberately generous ceiling: a transient
+    /// rejection (a constraint violation racing with a concurrent write, a
+    /// momentarily-unwritable table) should resolve within a handful of
+    /// retries, and only a genuinely permanent failure (server bug, schema
+    /// drift, an unauthorized row) hits the cap. Set to a small value for
+    /// faster failover in test environments; set to `u32::MAX` to effectively
+    /// disable dead-lettering (the pre-v2 retry-forever behavior).
+    pub dead_letter_max_attempts: u32,
 }
 
 impl Default for SyncClientConfig {
@@ -141,6 +157,7 @@ impl Default for SyncClientConfig {
             idle_timeout: None,
             flush_quiesce: Some(DEFAULT_FLUSH_QUIESCE),
             where_sql: None,
+            dead_letter_max_attempts: DEFAULT_DEAD_LETTER_MAX_ATTEMPTS,
         }
     }
 }
@@ -148,6 +165,10 @@ impl Default for SyncClientConfig {
 /// Default [`SyncClientConfig::flush_quiesce`] — see that field's doc for the
 /// tradeoff this window encodes.
 pub const DEFAULT_FLUSH_QUIESCE: Duration = Duration::from_millis(50);
+
+/// Default [`SyncClientConfig::dead_letter_max_attempts`] — see that field's
+/// doc for the rationale (generous ceiling; only permanent failures hit it).
+pub const DEFAULT_DEAD_LETTER_MAX_ATTEMPTS: u32 = 50;
 
 /// The outcome of one session: how many frames were received + the final
 /// durable checkpoint. Returned when the stream ends cleanly OR the client gives
@@ -320,6 +341,43 @@ where
         .await
         .map_err(|e| ClientError::Join(e.to_string()))??;
         Ok(())
+    }
+
+    /// Bump the retry counter for a rejected write (`WriteResult{ok:false}`)
+    /// and, if the count has reached the configured `dead_letter_max_attempts`,
+    /// quarantine it via `Outbox::mark_dead_letter`. Returns `(attempts, dld)`
+    /// where `attempts` is the post-bump count and `dld` is true iff the write
+    /// was just dead-lettered. ADR-0013 v2 dead-letter policy.
+    ///
+    /// Both `Outbox` calls are `&self` (the `SqliteStorage` backend uses
+    /// `Mutex<Connection>` for interior mutability), so they share one engine
+    /// lock acquisition inside a single `spawn_blocking` task — the bump and
+    /// the quarantine land atomically from the flush loop's perspective (no
+    /// intermediate flush can observe a "bumped but not yet dead-lettered"
+    /// row, which would otherwise double-count on a fast retry).
+    ///
+    /// A backend whose `Outbox` impl uses the trait's default no-op methods
+    /// (e.g. `InMemoryStorage`) gets `bump_attempts → 0` back, so
+    /// `0 >= max` is false for any positive max — the write is never
+    /// dead-lettered, matching the pre-v2 retry-forever behavior for test
+    /// doubles that don't model DLQ state.
+    async fn bump_and_maybe_dead_letter(&self, id: u64) -> Result<(u32, bool), ClientError> {
+        let max = self.config.dead_letter_max_attempts;
+        let engine = Arc::clone(&self.engine);
+        let (attempts, dld) =
+            tokio::task::spawn_blocking(move || -> nostos_core::Result<(u32, bool)> {
+                let engine = engine.blocking_lock();
+                let count = engine.storage().bump_attempts(id)?;
+                if count >= max {
+                    engine.storage().mark_dead_letter(id)?;
+                    Ok((count, true))
+                } else {
+                    Ok((count, false))
+                }
+            })
+            .await
+            .map_err(|e| ClientError::Join(e.to_string()))??;
+        Ok((attempts, dld))
     }
 
     /// The WS URL to connect to, with `?token=` appended if a token is set.
@@ -527,19 +585,37 @@ where
                                 debug!(write_id = id, "write ack'd — removed from outbox");
                             }
                         } else {
-                            // ok:false — the write is NOT removed. It stays at the queue
-                            // head and is retried on the next flush. The error surfaces
-                            // here so an operator sees it; the user-facing surface is a
-                            // Phase-2 concern.
-                            //
-                            // ponytail: failed writes retry forever and block the queue
-                            // head; add a dead-letter policy when a design partner hits
-                            // a permanent rejection.
-                            warn!(
-                                write_id = id,
-                                error = result.error.as_deref().unwrap_or("(no detail)"),
-                                "write rejected by server; stays queued, will retry"
-                            );
+                            // ok:false — the write is NOT removed. Bump its retry
+                            // counter; once the count reaches `dead_letter_max_attempts`,
+                            // quarantine it via `mark_dead_letter` so the queue head can
+                            // advance past a permanently-failing write (ADR-0013 v2).
+                            // The write is NOT deleted — it stays in the backing store
+                            // for inspection (e.g. `SqliteStorage::dead_letter_entries`)
+                            // and is excluded from subsequent `pending()` calls. The
+                            // user-facing surface for a dead-letter is a Phase-2 concern.
+                            match self.bump_and_maybe_dead_letter(id).await {
+                                Ok((attempts, true)) => warn!(
+                                    write_id = id,
+                                    attempts,
+                                    max = self.config.dead_letter_max_attempts,
+                                    server_error = result.error.as_deref().unwrap_or("(no detail)"),
+                                    "write dead-lettered after {attempts} rejections; \
+                                     removed from pending queue (inspectable, NOT deleted)"
+                                ),
+                                Ok((attempts, false)) => warn!(
+                                    write_id = id,
+                                    attempts,
+                                    max = self.config.dead_letter_max_attempts,
+                                    server_error = result.error.as_deref().unwrap_or("(no detail)"),
+                                    "write rejected by server; stays queued, will retry"
+                                ),
+                                Err(e) => warn!(
+                                    write_id = id,
+                                    error = %e,
+                                    "failed to bump/dead-letter the rejected write; \
+                                     stays queued (head not advanced this cycle)"
+                                ),
+                            }
                         }
                         continue;
                     }

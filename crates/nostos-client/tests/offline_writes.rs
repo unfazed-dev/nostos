@@ -116,6 +116,32 @@ impl WriteBack for RecordingWriteBack {
         self.captured.lock().await.push(ev);
         Ok(())
     }
+
+    async fn patch(
+        &self,
+        table: &str,
+        pk: &str,
+        payload_json: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
+        // P3 PowerSync PATCH parity: a patch is a column-level UPDATE; record
+        // it as an Update carrying the partial tuple image (the columns present
+        // in the payload — absent columns are untouched, same as the real
+        // PgWriteBack).
+        let lsn = self
+            .next_lsn
+            .fetch_add(10, std::sync::atomic::Ordering::Relaxed);
+        let ev = ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Update {
+                table: table.to_string(),
+                pk: pk.to_string(),
+                payload: Bytes::copy_from_slice(payload_json.as_bytes()),
+            },
+        );
+        self.captured.lock().await.push(ev);
+        Ok(())
+    }
 }
 
 /// Spawn the in-process server wired with the recording write-back + the

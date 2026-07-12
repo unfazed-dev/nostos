@@ -116,6 +116,29 @@ impl WriteBack for RecordingWriteBack {
         self.captured.lock().await.push(ev);
         Ok(())
     }
+
+    async fn patch(
+        &self,
+        table: &str,
+        pk: &str,
+        payload_json: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
+        // P3 PowerSync PATCH parity: record the patch as an Update carrying the
+        // partial tuple image (the real PgWriteBack applies a column-level
+        // UPDATE — absent columns untouched).
+        let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
+        let ev = ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Update {
+                table: table.to_string(),
+                pk: pk.to_string(),
+                payload: Bytes::copy_from_slice(payload_json.as_bytes()),
+            },
+        );
+        self.captured.lock().await.push(ev);
+        Ok(())
+    }
 }
 
 // ===========================================================================

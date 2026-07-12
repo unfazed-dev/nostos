@@ -456,11 +456,12 @@ async fn handle_client_message(
 }
 
 /// Translate a `Write` client message into a `WriteBack` port call. The op
-/// string is `"upsert" | "delete"`; anything else is an `InvalidPayload`. The
-/// payload (a `serde_json::Value`) is rendered back to JSON text for the
-/// upsert path (the port takes `&str`). `tenant` (ADR-0018) is forwarded
-/// verbatim to the adapter — `dispatch_write` doesn't interpret it, just
-/// relays the scope the caller already computed from the principal.
+/// string is `"upsert" | "delete" | "patch"`; anything else is an
+/// `InvalidPayload`. The payload (a `serde_json::Value`) is rendered back to
+/// JSON text for the upsert/patch paths (the port takes `&str`). `tenant`
+/// (ADR-0018) is forwarded verbatim to the adapter — `dispatch_write` doesn't
+/// interpret it, just relays the scope the caller already computed from the
+/// principal.
 async fn dispatch_write(
     write_back: &Arc<dyn WriteBack>,
     table: &str,
@@ -486,9 +487,24 @@ async fn dispatch_write(
             let json = value.to_string();
             write_back.upsert(table, pk, &json, tenant).await
         }
+        "patch" => {
+            // A patch carries the partial column set (same object shape as an
+            // upsert payload). Same object-ness guard as upsert — the adapter
+            // re-validates too.
+            let value = payload.ok_or_else(|| {
+                WriteBackError::InvalidPayload("payload required for patch".into())
+            })?;
+            if !value.is_object() {
+                return Err(WriteBackError::InvalidPayload(
+                    "payload must be a JSON object".into(),
+                ));
+            }
+            let json = value.to_string();
+            write_back.patch(table, pk, &json, tenant).await
+        }
         "delete" => write_back.delete(table, pk, tenant).await,
         other => Err(WriteBackError::InvalidPayload(format!(
-            "unknown op: {other} (expected 'upsert' or 'delete')"
+            "unknown op: {other} (expected 'upsert', 'delete', or 'patch')"
         ))),
     }
 }

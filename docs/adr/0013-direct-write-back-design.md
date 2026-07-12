@@ -95,3 +95,34 @@ interpolated. The upgrade path is binding by *column* type (read from
 necessary only when a column type has no JSON-shape signal (e.g. `timestamptz`
 stored as a numeric epoch). Code doc: `crates/nostos-infra/src/write_back.rs`
 (`SqlValue` enum + `json_value_to_sql`).
+
+## Addendum (2026-07): v2 — outbox dead-letter policy
+
+The v1 outbox contract above let a permanently-failing write block the queue
+head forever (flagged `ponytail:` in `nostos-client/src/client.rs`). v2 bounds
+it (parity workstream P2, `docs/plans/powersync-sdk-parity-plan.md`):
+
+- `cairn_outbox` gains `attempts` + `dlq` columns (legacy DBs migrated on open
+  by probing `PRAGMA table_info`). `pending()` filters `WHERE dlq = 0`.
+- The flush loop bumps `attempts` on every `WriteResult{ok:false}`; at
+  `dead_letter_max_attempts` (default 50, `SyncClientConfig`) the write is
+  **quarantined** via `Outbox::mark_dead_letter` — removed from the pending
+  queue but **NOT deleted**, so the head advances past a permanent rejection
+  without losing the write. `dead_letter_entries()` inspects the DLQ.
+- The `Outbox` trait adds `bump_attempts`/`mark_dead_letter` with no-op
+  defaults so the `InMemoryStorage` test double stays non-breaking.
+
+Decision: quarantine-not-delete. PowerSync's contract is that the backend
+returns 2xx for validation conflicts and the queue must not silently drop;
+deleting would lose user intent irrecoverably. Replay/inspection is the
+operator surface; auto-retry-from-DLQ is deferred.
+
+### On-device SQL read surface (read-side, same client)
+
+`SqliteStorage::query(sql)` (parity P1) runs arbitrary `SELECT` against
+`cairn_data` — the dev projects the opaque payload via `json_extract` (JSON1
+ships in the bundled SQLite). It is deliberately on the **concrete
+`SqliteStorage`**, NOT the `Storage` trait: the trait stays WASM-clean
+(`checkpoint` + `apply_batch` only), so `nostos-ffi-wasm` is unaffected. This
+is the foundation for the Flutter `watchQuery(sql)` reactive query (PowerSync
+parity feature #1). See `docs/plans/powersync-sdk-parity-plan.md` P1.
