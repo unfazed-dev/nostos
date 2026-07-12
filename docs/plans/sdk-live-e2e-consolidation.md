@@ -90,14 +90,27 @@ round-trip → capture proof.
 
 ## Sequencing
 
-1. **Spine binary** (blocking) — build + independently verify. ← starts now
-2. Usage check (`npx ccusage@latest blocks --active --json`), then:
-3. **Wave 1** — Node + Tauri + Rust-live-test (3 parallel agents).
-4. **Wave 2** — Swift + Kotlin (2 parallel agents; mobile, slower iteration).
-5. **Wave 3** — Web (1 agent; longest — web-sys WS + Playwright).
-6. Fold Flutter (`nostos_live_test`) into the runner.
-7. `make sdk-e2e` runner + consolidated parity table; verify every slice
+1. ✅ **Spine binary** — built + independently verified (`[spine] PUSH_OK`/`ECHO_OK`,
+   both replication directions). Commit `a03e992`.
+2. ✅ **Rust SDK live-E2E** (reference template) —
+   `crates/nostos-client/tests/e2e_live_replication.rs` green vs the spine in
+   0.98s; PUSH + ECHO both directions proven via the SDK's real public API.
+   Commit `dc19595`. **This is the shape the 5 FFI SDKs copy.**
+3. ✅ **Flutter** — already live (`sdk/nostos_flutter/.../nostos_live_test.dart`:
+   two clients × real nostos-server + docker Postgres + HS256 JWTs, the W5
+   acceptance proof). Fold-into-runner is mechanical, part of step 7.
+4. ⏳ **Wave 1** (needs fresh window) — Node + Tauri (both Rust-native; copy the
+   reference template; wire `subscribe`).
+5. ⏳ **Wave 2** — Swift + Kotlin (mobile; poll-based `subscribe`; slower
+   iteration on sim/emu).
+6. ⏳ **Wave 3** — Web (longest — `web-sys` WS into the apply path + Playwright).
+7. ⏳ `make sdk-e2e` runner + consolidated parity table; verify every slice
    independently; commit per verified increment.
+
+**Window note (2026-07-12):** paused the fan-out at 83% of the 5h window after a
+spine-build agent 429'd; the spine + Rust slice were finished in-context
+(main-loop, no agent) instead. The 5 FFI slices resume as a parallel fan-out in
+the next window. 3/7 SDKs done; 5 remain.
 
 ## Verification discipline (process lesson, reaffirmed)
 
