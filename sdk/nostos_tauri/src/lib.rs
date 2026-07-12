@@ -13,11 +13,12 @@
 //! The four `#[tauri::command]` handlers (`connect` / `write` / `query` /
 //! `checkpoint`) are thin wrappers over `impl NostosState` async methods, which
 //! `.await` on the host runtime Tauri runs the command on (or, in tests, the
-//! `#[tokio::test]` runtime) — so `NostosState` does **not** own a
-//! `tokio::runtime::Runtime` today. An owned runtime returns when `subscribe()`
-//! lands (see the struct `ponytail:`), to spawn the long-lived run loop; owning
-//! one now would be dead weight AND would panic on drop inside an async
-//! context.
+//! `#[tokio::test]` runtime). `NostosState` ALSO owns a
+//! `tokio::runtime::Runtime` — the home of the long-lived `subscribe()` run
+//! loop (`client.run_once()`), so live replication continues independent of
+//! command-handler scheduling. Constructed in `new()` (NOT inside an async
+//! context — `Runtime::new()` would be unsound there; `new()` is called from
+//! Tauri's sync `setup` hook or a test's plain `NostosState::new()` call).
 //!
 //! # ponytail: `unsafe` policy
 //! Hand-written `unsafe` is forbidden in this crate (`#![forbid(unsafe_code)]`).
@@ -25,12 +26,17 @@
 //! crate's source, so the forbid does not interact with it.
 //!
 //! # ponytail: deferred surfaces (upgrade path)
-//! - **`subscribe(table, where_sql)` + the run loop**: not wired. The owned
-//!   `rt` is retained precisely so a future `subscribe` command can
-//!   `rt.spawn(client.run_with_reconnect())` (mirroring `nostos_node`'s
-//!   `subscribe`). Ceiling: no row-tick callback / live sync yet — callers are
-//!   offline-only. Upgrade path: add `subscribe` + a `tauri::ipc::Channel` for
-//!   row-ticks, same shape as the Flutter `rows_sink`.
+//! - **`subscribe` row-tick callback**: the run loop IS wired
+//!   (`NostosState::subscribe` spawns `client.run_once()` on the owned runtime),
+//!   so live replication works end-to-end — but received rows land in the
+//!   on-device SQLite store only; no `tauri::ipc::Channel` fans row-tick
+//!   events to the JS layer yet. Ceiling: JS callers must `query()` to observe
+//!   changes. Upgrade path: add a `Channel<NostosRowEvent>` sink threaded
+//!   through `subscribe`, same shape as the Flutter `rows_sink`.
+//! - **`subscribe` where_sql / resume_lsn**: the `table` arg is accepted for
+//!   API parity; v1 asserts it matches the session's single table (one table
+//!   per `NostosState`, matching the sibling SDKs). Per-call predicate filters
+//!   + `resume_lsn` arrive with the multi-table lift.
 //! - **Permissions**: only the four default command permissions are listed in
 //!   `permissions/default.toml`. A shipped plugin would also publish scoped
 //!   permission sets per table.
@@ -61,34 +67,53 @@ use tokio::sync::Mutex as AsyncMutex;
 /// reconnect, not a per-write latency mechanism.
 const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(120);
 
-/// Plugin state, managed by Tauri. Owns the tokio runtime (for a future
-/// `subscribe` run loop — see the module ponytail) plus at most one active
-/// session (v1: one table per client, matching `nostos-client`'s Phase-0
-/// predicate floor and the sibling SDKs).
+/// Plugin state, managed by Tauri. Owns a `tokio::runtime::Runtime` (home of
+/// the `subscribe()` run loop) plus at most one active session (v1: one table
+/// per client, matching `nostos-client`'s Phase-0 predicate floor and the
+/// sibling SDKs).
 ///
 /// Construct via `NostosState::new()` (the plugin's `setup` hook does this and
-/// registers it with `app.manage(...)`); drive with `connect` / `write` /
-/// `query` / `checkpoint`.
+/// registers it with `app.manage(...)`); drive with `connect` / `subscribe` /
+/// `write` / `query` / `checkpoint`.
 pub struct NostosState {
-    // ponytail: no owned `tokio::runtime::Runtime` today. connect/write/query/
-    // checkpoint `.await` on the host runtime (Tauri's, or #[tokio::test]'s);
-    // an owned runtime would be dead weight AND panics on drop inside an async
-    // context. It returns when `subscribe()` lands to spawn the long-lived
-    // `run_with_reconnect` loop (mirrors sdk/nostos_node's `rt`).
+    // The run loop (`client.run_once()`) lives here, NOT on the host runtime,
+    // so live replication continues independent of command-handler scheduling
+    // (mirrors sdk/nostos_node's owned `rt`). Constructed synchronously in
+    // `new()` — `Runtime::new()` panics inside an async context, and `new()`
+    // is called from Tauri's sync `setup` hook (or a test's sync call site).
+    //
+    // `Option` so `Drop` can move the runtime out: dropping a multi-thread
+    // `Runtime` from inside an async context panics ("Cannot drop a runtime in
+    // a context where blocking is not allowed") — the exact footgun `#[tokio
+    // ::test]` hits. `Drop` off-loads the blocking shutdown to a std thread
+    // when a runtime context is ambient; production (Tauri's sync `setup`)
+    // drops outside async and pays no such cost.
+    rt: Option<tokio::runtime::Runtime>,
     session: AsyncMutex<Option<Session>>,
 }
 
 struct Session {
     client: Arc<SyncClient<SqliteStorage>>,
     table: String,
+    // `JoinHandle` for the background `run_once()` task spawned by
+    // `subscribe()`. `None` until subscribe() is called; aborted on
+    // `abort_subscribe()` or session drop. Tied to `NostosState.rt`'s runtime.
+    run_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl NostosState {
-    /// Construct the state — starts with no active session; `connect()` opens
-    /// one. Infallible: nothing is allocated up front (no owned runtime yet —
-    /// see the struct `ponytail:` for when one returns).
+    /// Construct the state — starts the owned multi-thread tokio runtime (home
+    /// of the `subscribe()` run loop) with no active session; `connect()`
+    /// opens one. Synchronous — MUST NOT be called from inside an async
+    /// context (tokio forbids `Runtime::new()` there); Tauri's `setup` hook
+    /// and tests' `NostosState::new()` both call it sync.
+    ///
+    /// # Panics
+    /// Panics if the tokio runtime can't be constructed (OS resource
+    /// exhaustion) or if invoked from inside an async context.
     pub fn new() -> Self {
         Self {
+            rt: Some(tokio::runtime::Runtime::new().expect("construct nostos-tauri runtime")),
             session: AsyncMutex::new(None),
         }
     }
@@ -122,8 +147,71 @@ impl NostosState {
         *guard = Some(Session {
             client,
             table: "tasks".to_owned(),
+            run_handle: None,
         });
         Ok(())
+    }
+
+    /// Start the live-replication run loop on the owned runtime. The session's
+    /// `SyncClient::run_once()` drives the real WS subscribe → apply pipeline:
+    /// server-pushed rows land in the on-device SQLite store, and the server's
+    /// echo `WriteBack` re-emits this client's own `write()`s back through the
+    /// same path. Received rows are observed via `query()` (a JS-layer row-tick
+    /// `Channel` is the ponytail upgrade). `table` MUST match the active
+    /// session's table (v1: one table per `NostosState`). Idempotent in the
+    /// sense that a second call replaces + aborts a prior run loop for the same
+    /// session.
+    ///
+    /// # Errors
+    /// `String` if no session is active or the table mismatches.
+    pub async fn subscribe(&self, table: String) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        let client = match guard.as_ref() {
+            None => {
+                return Err("subscribe() called before connect()".to_string());
+            }
+            Some(s) if s.table != table => {
+                return Err(format!(
+                    "subscribe() table {table:?} does not match active session table {:?} — v1 supports one table per NostosState",
+                    s.table
+                ));
+            }
+            Some(s) => Arc::clone(&s.client),
+        };
+        // Spawn on the owned runtime (NOT the caller's): the run loop must keep
+        // driving replication independent of the command-handler runtime.
+        // `run_once` returns when idle_timeout fires; the test/caller aborts
+        // the handle long before then. `run_with_reconnect` is the production
+        // choice once reconnection policy is wired through config.
+        let rt = self
+            .rt
+            .as_ref()
+            .expect("runtime present until NostosState drops");
+        let handle = rt.spawn(async move {
+            let _ = client.run_once().await;
+        });
+        // Re-borrow mutably (the `&` borrow above is dead at this point) and
+        // store the handle, aborting any prior handle defensively.
+        if let Some(session) = guard.as_mut() {
+            if let Some(prev) = session.run_handle.take() {
+                prev.abort();
+            }
+            session.run_handle = Some(handle);
+        }
+        Ok(())
+    }
+
+    /// Abort the background run loop spawned by `subscribe()`, if any. No-op if
+    /// `subscribe()` was never called or has already been aborted. The session
+    /// itself stays open — `query()` / `checkpoint()` keep working against the
+    /// on-device store; only live replication pauses.
+    pub async fn abort_subscribe(&self) {
+        let mut guard = self.session.lock().await;
+        if let Some(session) = guard.as_mut() {
+            if let Some(handle) = session.run_handle.take() {
+                handle.abort();
+            }
+        }
     }
 
     /// Enqueue a durable write against the active session's table. Resolves
@@ -224,6 +312,26 @@ impl NostosState {
 impl Default for NostosState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for NostosState {
+    fn drop(&mut self) {
+        // Move the runtime out so its blocking shutdown doesn't run inline.
+        // Dropping a multi-thread `tokio::runtime::Runtime` panics inside an
+        // async context ("Cannot drop a runtime in a context where blocking is
+        // not allowed") — the `#[tokio::test]` case. When a runtime context is
+        // ambient, off-load the drop to a std thread (clean shutdown happens
+        // off the async worker; the test process reclaims resources on exit).
+        // In production (Tauri's sync `setup` hook) `NostosState` drops outside
+        // any async context, so the inline branch runs — no extra thread hop.
+        if let Some(rt) = self.rt.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::spawn(move || drop(rt));
+            } else {
+                drop(rt);
+            }
+        }
     }
 }
 
@@ -348,5 +456,220 @@ mod tests {
             err.contains("before connect"),
             "expected a before-connect error, got: {err}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Live-replication E2E — copies the Rust reference template
+    // (`crates/nostos-client/tests/e2e_live_replication.rs`) against the same
+    // shared spine binary (`nostos-infra/examples/e2e_server`). Proves a full
+    // server→client→server round-trip through `NostosState`'s REAL public API
+    // (connect / subscribe / write / query), with no Tauri `AppHandle`, no
+    // Postgres, no docker.
+    // -------------------------------------------------------------------------
+
+    /// Body the spine injects on `POST /push` — matches the reference template
+    /// shape (PK only differs so the assertion is unambiguous).
+    const PUSH_BODY: &str = r#"{"pk":"tauri-push","payload":{"title":"from-server","status":"open","priority":"5"}}"#;
+
+    /// Live-replication E2E against the shared spine server. Drives the SAME
+    /// two-direction round-trip the Rust reference template proves, entirely
+    /// through `NostosState`'s public API: connect → subscribe → server PUSH
+    /// arrives on-device → `query()` sees it → `write()` → server echoes →
+    /// `query()` sees the write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nostos_state_live_round_trip_against_spine() {
+        let (port, mut child) = spawn_spine().await;
+
+        // PID-unique DB path so a stale file from a prior run can't yield a
+        // false positive (mirrors the reference template).
+        let db_path = std::env::temp_dir()
+            .join(format!("nostos-tauri-e2e-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+
+        let state = NostosState::new();
+        let url = format!("ws://127.0.0.1:{port}/sync");
+        state
+            .connect(url, None, db_path.to_str().expect("utf8 db path").to_owned())
+            .await
+            .expect("connect");
+
+        // Start the live replication run loop on the owned runtime.
+        state.subscribe("tasks".into()).await.expect("subscribe");
+        // Let the subscribe land + the session register with the fan-out
+        // service (the spine only delivers to sessions registered at fan-out
+        // time, per the reference template).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // ---- direction 1: server PUSH → on-device query ----
+        http_push(port, PUSH_BODY).await;
+        poll_query_pk(&state, "tauri-push", Duration::from_secs(8))
+            .await
+            .expect("pushed row never became queryable");
+        println!("[tauri-e2e] PUSH_OK");
+
+        // ---- direction 2: client WRITE → server echo → on-device query ----
+        state
+            .write(
+                "tasks".into(),
+                "upsert".into(),
+                "tauri-echo".into(),
+                Some(
+                    r#"{"title":"from-client","status":"open","priority":"5"}"#.into(),
+                ),
+            )
+            .await
+            .expect("write");
+        poll_query_pk(&state, "tauri-echo", Duration::from_secs(8))
+            .await
+            .expect("echoed write never became queryable");
+        println!("[tauri-e2e] ECHO_OK");
+
+        // Cleanup: abort the run loop, kill the spine, remove the temp DB.
+        state.abort_subscribe().await;
+        let _ = child.kill().await;
+        let _ = std::fs::remove_file(&db_path);
+        println!("[tauri-e2e] DONE");
+    }
+
+    /// Poll the on-device store via `query()` until a row for `pk` appears in
+    /// `cairn_data` (the apply engine's target table) or `deadline` elapses.
+    /// Returns `Some(())` once the row is queryable.
+    async fn poll_query_pk(state: &NostosState, pk: &str, deadline: Duration) -> Option<()> {
+        let sql = format!(
+            "SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = '{pk}'"
+        );
+        let end = tokio::time::Instant::now() + deadline;
+        loop {
+            let rows_json = state.query(sql.clone()).await.expect("query");
+            // query() returns a JSON array-of-objects string; parse + check
+            // non-empty (the apply engine writes the row once it arrives).
+            let rows: serde_json::Value =
+                serde_json::from_str(&rows_json).expect("parse rows json");
+            if rows.as_array().is_some_and(|a| !a.is_empty()) {
+                return Some(());
+            }
+            if tokio::time::Instant::now() >= end {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Minimal HTTP/1.1 POST /push over a raw TCP stream — no HTTP dep (the
+    /// spine's control endpoint is localhost-only). Mirrors the reference
+    /// template's `http_push`.
+    async fn http_push(port: u16, body: &str) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .expect("connect spine");
+        let req = format!(
+            "POST /push HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(req.as_bytes()).await.expect("write");
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await;
+        let head = String::from_utf8_lossy(&buf[..buf.len().min(40)]);
+        assert!(head.contains("200"), "POST /push non-200: {head}");
+    }
+
+    /// Spawn the spine binary, discover its port via the `NOSTOS_E2E_PORT`
+    /// stdout line. Mirrors the reference template's spawn + ancestor-walking
+    /// path lookup.
+    async fn spawn_spine() -> (u16, tokio::process::Child) {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::process::Command;
+
+        let exe = spine_binary_path();
+        if !exe.exists() {
+            // This crate is a SEPARATE workspace from the root, so build the
+            // spine against the ROOT workspace's Cargo.toml (where
+            // `nostos-infra` lives). `cargo build -p nostos-infra` from
+            // sdk/nostos_tauri would fail to resolve the package.
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let root = manifest
+                .parent()
+                .and_then(|p| p.parent())
+                .expect("resolve root workspace from sdk/nostos_tauri");
+            let status = std::process::Command::new("cargo")
+                .args(["build", "-p", "nostos-infra", "--example", "e2e_server"])
+                .arg("--manifest-path")
+                .arg(root.join("Cargo.toml"))
+                .status()
+                .expect("cargo build spine");
+            assert!(status.success(), "build spine failed");
+        }
+        let exe = spine_binary_path();
+        assert!(exe.exists(), "spine binary not found at {}", exe.display());
+
+        let mut child = Command::new(&exe)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn spine {}: {e}", exe.display()));
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut lines = BufReader::new(stdout).lines();
+        let mut port: Option<u16> = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while tokio::time::Instant::now() < deadline {
+            let line = match tokio::time::timeout(Duration::from_secs(2), lines.next_line()).await {
+                Ok(Ok(Some(l))) => l,
+                Ok(Ok(None) | Err(_)) => break,
+                Err(_) => continue,
+            };
+            if let Some(rest) = line.strip_prefix("NOSTOS_E2E_PORT=") {
+                port = rest.trim().parse::<u16>().ok();
+            }
+            if line.trim() == "NOSTOS_E2E_READY" {
+                break;
+            }
+        }
+        // Keep the stdout pipe drained in the background so the child isn't
+        // SIGPIPE'd once its pipe buffer fills.
+        tokio::spawn(async move {
+            while let Ok(Ok(Some(_))) =
+                tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await
+            {}
+        });
+        let port = port.expect("never saw NOSTOS_E2E_PORT");
+        eprintln!("[tauri-e2e] spine on port {port}");
+        (port, child)
+    }
+
+    /// Resolve the built spine binary. The root workspace's `target/` is
+    /// shared across all root members, so walk up from `CARGO_MANIFEST_DIR`
+    /// (sdk/nostos_tauri) to find it.
+    fn spine_binary_path() -> std::path::PathBuf {
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let rel = std::path::Path::new("target")
+            .join(profile)
+            .join("examples")
+            .join("e2e_server");
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut dir: Option<&std::path::Path> = Some(manifest);
+        while let Some(d) = dir {
+            let candidate = d.join(&rel);
+            if candidate.exists() {
+                return candidate;
+            }
+            dir = d.parent();
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            let candidate = cwd.join(&rel);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        manifest.join(&rel)
     }
 }

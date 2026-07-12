@@ -41,7 +41,10 @@ tokio = { version = "1.39", features = ["rt-multi-thread", "sync", "macros"] }
 tauri-plugin = { version = "2", features = ["build"] }
 
 [dev-dependencies]
-tokio = { version = "1.39", features = ["rt-multi-thread", "sync", "macros", "test-util"] }
+# `process` (spawning the spine binary), `io-util` (TCP read_to_end/write_all),
+# `net` (TcpStream for the raw HTTP/1.1 /push), `time` (poll deadline) — the
+# live-E2E test's harness needs these beyond the runtime features the lib uses.
+tokio = { version = "1.39", features = ["rt-multi-thread", "sync", "macros", "test-util", "process", "io-util", "net", "time"] }
 
 [profile.release]
 # Smaller artifacts for the plugin .so/.dll; lto is off by default to keep the
