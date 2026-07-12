@@ -1,1 +1,5 @@
 node_modules/
+# Playwright artifacts (test-run output; regenerated each run).
+test-results/
+playwright-report/
+playwright/.cache/

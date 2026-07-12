@@ -1,17 +1,24 @@
 {
   "name": "@nostos-sync/web",
   "version": "0.0.0",
-  "description": "PowerSync-style JS facade over nostos-ffi-wasm (reduced-scope feasibility proof — apply engine only, no live WS transport in node; not a polished SDK)",
+  "description": "PowerSync-style JS facade over nostos-ffi-wasm (browser: live WS via web-sys; node: apply engine only)",
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
     "build": "wasm-pack build ../../crates/nostos-ffi-wasm --target nodejs --out-dir pkg-node",
-    "smoke": "node smoke.cjs"
+    "build:web": "wasm-pack build ../../crates/nostos-ffi-wasm --target web --out-dir pkg-web",
+    "build:all": "npm run build && npm run build:web",
+    "smoke": "node smoke.cjs",
+    "test:e2e": "npx playwright test --config=playwright.config.cjs",
+    "test": "npm run smoke && npm run test:e2e"
   },
   "license": "Apache-2.0",
   "files": [
     "index.js",
     "index.d.ts",
     "README.md"
-  ]
+  ],
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  }
 }

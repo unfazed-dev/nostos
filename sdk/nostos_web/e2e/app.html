@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nostos Web E2E</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+  </head>
+  <body>
+    <h1>Nostos Web live-replication E2E</h1>
+    <p id="status">Loading WASM…</p>
+    <!--
+      The Playwright test (`browser_live.spec.cjs`) serves this page from a
+      tiny static HTTP server rooted at `sdk/nostos_web/`, with `/pkg-web/*`
+      mapped to `crates/nostos-ffi-wasm/pkg-web/`. The ES module init loads
+      the sibling `_bg.wasm` via `import.meta.url` — no bundler needed.
+    -->
+    <script type="module">
+      import init, { NostosSocket } from "../pkg-web/nostos_ffi_wasm.js";
+      try {
+        await init();
+        window.NostosSocket = NostosSocket;
+        document.getElementById("status").textContent = "WASM ready.";
+        console.log("[web-e2e] WASM_READY");
+      } catch (e) {
+        document.getElementById("status").textContent = "WASM init FAILED.";
+        console.log(
+          "[web-e2e] WASM_INIT_FAILED: " + ((e && e.message) || String(e)),
+        );
+      }
+    </script>
+  </body>
+</html>
