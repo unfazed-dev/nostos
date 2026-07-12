@@ -153,6 +153,12 @@ source (file:line). **This section supersedes the 5-feature frame above for the
 parity question** — that frame was a Flutter-only lens and undercounted both
 the SDK surface and the feature catalog.
 
+> **Update (2026-07-12): all 7 shipped SDKs are now LIVE-replication-E2E-verified**
+> (PUSH server→client + ECHO client→server→client, through each SDK's real public
+> API, against the shared no-docker spine). Flutter (docker PG) + Rust (in-process)
+> were already live; Node/Tauri/Swift/Kotlin/Web were wired + verified this session.
+> Run them: `make sdk-e2e`. Full record: `docs/plans/sdk-live-e2e-consolidation.md`.
+
 ### SDK platform coverage (the dimension the original plan never scored)
 
 PowerSync ships **10** client SDKs; Nostos ships **2** (3 counting the native
