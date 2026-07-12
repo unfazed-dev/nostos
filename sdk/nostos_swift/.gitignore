@@ -11,3 +11,8 @@
 # Built artifacts produced when wrapping the staticlib into an .xcframework
 # (the next increment past the swiftc -typecheck gate).
 /xcframework/
+
+# Tier 2 iOS-sim smoke harness artifacts (sdk/nostos_swift/ios-test/)
+/ios-test/NostosSmoke.xcodeproj/
+/ios-test/build/
+/ios-test/DerivedData/

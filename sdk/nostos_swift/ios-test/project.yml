@@ -1,0 +1,43 @@
+name: NostosSmoke
+options:
+  bundleIdPrefix: run.nostos
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    ENABLE_BITCODE: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_ALLOWED: NO
+targets:
+  NostosSmoke:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Sources/NostosSmoke/main.swift
+      - path: ../swift-sources/nostos_swift.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: run.nostos.smoke
+        PRODUCT_NAME: NostosSmoke
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/NostosSmoke/NostosSmoke-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../swift-sources
+        OTHER_LDFLAGS:
+          - -lnostos_swift
+          - -lresolv
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../target/aarch64-apple-ios-sim/debug
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
+    dependencies:
+      - sdk: Security.framework
+      - sdk: CoreFoundation.framework
+      - sdk: Foundation.framework
+      - sdk: UIKit.framework
