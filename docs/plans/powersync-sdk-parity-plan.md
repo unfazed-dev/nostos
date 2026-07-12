@@ -161,7 +161,7 @@ Rust `nostos-client`):
 | Platform | PowerSync | Nostos today |
 |---|---|---|
 | Flutter (Dart) | ✅ GA `powersync` 2.3.1 | ✅ `sdk/nostos_flutter` (frb) |
-| Web / WASM | ✅ GA `@powersync/web` 1.39.0 | ✅ `crates/nostos-ffi-wasm` (OPFS deferred — ADR-0015) |
+| Web / WASM | ✅ GA `@powersync/web` 1.39.0 | ✅ `crates/nostos-ffi-wasm` + `sdk/nostos_web` (`@nostos-sync/web`, PowerSync-style API; node smoke `SMOKE_OK`; browser WS via web-sys — OPFS deferred) |
 | React Native | ✅ GA `@powersync/react-native` 1.35.9 | ❌ ROADMAP Phase 3 (ADR-0015 UniFFI) |
 | Node | 🟡 Beta `@powersync/node` 0.19.4 | 🟡 `sdk/nostos_node` (napi-rs) — **loads in node, async query round-trips `EXIT=0` (verified independently)**; offline-only (no live `subscribe`/replicator path yet) |
 | Kotlin (KMP) | ✅ GA `com.powersync:core` 1.12.0 | ❌ |
@@ -241,12 +241,17 @@ reachable end-to-end.
    thesis** (the Flutter `Runtime::new()` + `SyncClient` FFI pattern ported
    straight to napi). Honest scope: offline-only (no live `subscribe`/replicator
    path verified yet) + a `u64→f64` id-precision `ponytail:`. Nostos is now
-   **4/10 platforms** (Flutter + WASM + Node + Rust — `nostos-client` is the
-   Rust SDK, README + shipped; not yet on crates.io).
+   **5/10 platforms** (Flutter + WASM + Node + Rust + Web-JS — see items 5–6).
 4. P5 Sync Streams — biggest remaining *feature* gap for the "equivalent SDK"
    claim.
 5. ✅ **DONE** — `nostos-client` documented as the Rust SDK (README + public-API
    surface); 4/10. crates.io publish is a release-op, not a code gap.
+6. ✅ **DONE** — **Web JS SDK** (`sdk/nostos_web`, `@nostos-sync/web`). `wasm-pack
+   --target nodejs` builds; node smoke `SMOKE_OK` / `EXIT=0` — 11 checks
+   (require + write + query + watch snapshot + rowCount) against the apply
+   engine; API is PowerSync-shaped. Browser live-WS rides the wasm's existing
+   `NostosSocket` (web-sys); an automated browser-test of that path + a node WS
+   adapter are the next increments (`ponytail:`-marked). **5/10.**
 
 ### Path to 10/10 (honest roadmap)
 
@@ -261,7 +266,7 @@ this-session verifiability noted:
 | ✅ Node | napi-rs | **yes (`node smoke` EXIT=0)** | scaffold shipped |
 | ✅ Rust SDK | `nostos-client` + README (native, `forbid(unsafe)`, live-tested) | yes (`cargo test`) | shipped (4/10) |
 | Tauri | tauri-plugin over `nostos-client` (Rust-native — most natural next) | yes (`cargo build`) | small-medium |
-| Web JS SDK | package `nostos-ffi-wasm` as `@nostos-sync/web` w/ PS-style API | yes (vitest) | small-medium |
+| ✅ Web JS SDK | `sdk/nostos_web` (`@nostos-sync/web`) over `nostos-ffi-wasm` | yes (node smoke `SMOKE_OK`) | scaffold shipped (5/10) |
 | React Native | reuse the JS core (RN shares it, like `@powersync/web`↔RN) | partial (Jest; full E2E needs device) | medium |
 | Kotlin/KMP | UniFFI; android cross-targets present, JDK present | compile yes; E2E needs Android SDK/gradle | medium-large |
 | Swift/iOS | cbindgen + Swift PM (`swift-bridge`); Xcode + iOS targets present | compile yes; E2E needs simulator | medium-large |

@@ -1,3 +1,5 @@
 # wasm-pack output — generated from source by `wasm-pack build`. The smoke
 # test rebuilds it; committing it would drift on every code change.
 pkg/
+# `--target nodejs` output consumed by sdk/nostos_web (same rationale).
+pkg-node/
