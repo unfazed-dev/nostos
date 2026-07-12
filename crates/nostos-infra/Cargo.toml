@@ -58,6 +58,10 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 serde_json = { workspace = true }
+# tracing-subscriber: used by the e2e_server spine example (and only there) to
+# init log output. The lib itself relies on the host binary to install a
+# subscriber, so this stays out of [dependencies].
+tracing-subscriber = { workspace = true }
 # Used by the pg-feature e2e test to mint unique row titles.
 uuid = { workspace = true }
 # JWKS fixture-server tests: mint RSA/EC/Ed25519 keypairs + JWKs, serve them
