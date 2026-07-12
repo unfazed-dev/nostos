@@ -77,12 +77,19 @@ if want dotnet; then
   fi
 fi
 
-# Flutter — needs docker Postgres (the W5 nostos_live_test harness).
+# Flutter — packaging + live-sync E2E. nostos_server_test.dart spins up a REAL
+# `cargo run -p nostos-server` (NOSTOS_REPLICATOR=fake, NOSTOS_SYNC_AUTH=none — no
+# Postgres, no docker, no cloud; the same no-DB spine pattern the rust/node/web
+# slices use) and drives the Flutter SDK's connect/subscribe/watch loop inside a
+# genuine app bundle. `-d macos` because the test binds the server on 127.0.0.1
+# (host loopback) — only a host/desktop target reaches it directly (an emulator
+# would need 10.0.2.2). A real Supabase-CLOUD-backed live test is a separate
+# follow-up (needs the cloud project ref — see docs/plans/flutter-supabase-plug-and-play-launch.md).
 if want flutter; then
-  if docker ps >/dev/null 2>&1; then
-    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_live_test.dart"
+  if command -v flutter >/dev/null 2>&1; then
+    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
   else
-    skip_slice flutter "(docker not running — nostos_live_test needs docker PG)"
+    skip_slice flutter "(flutter not on PATH)"
   fi
 fi
 
