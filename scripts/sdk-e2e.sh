@@ -33,19 +33,26 @@ fi
 declare -a RESULTS=()
 
 run_slice() { # <name> <command-string>
-  local name="$1"; local cmd="$2"
+  local name="$1"; local cmd="$2"; local start=$SECONDS; local st
   if bash -c "$cmd" > "/tmp/sdk-e2e-$name.log" 2>&1; then
-    printf "  ${GREEN}%-8s PASS${RESET}\n" "$name"
-    RESULTS+=("$name|PASS")
+    st="PASS"
+    printf "  ${GREEN}%-13s PASS${RESET}\n" "$name"
   else
-    printf "  ${RED}%-8s FAIL${RESET}  (log: /tmp/sdk-e2e-$name.log)\n" "$name"
-    RESULTS+=("$name|FAIL")
+    st="FAIL"
+    printf "  ${RED}%-13s FAIL${RESET}  (log: /tmp/sdk-e2e-$name.log)\n" "$name"
   fi
+  local dur=$((SECONDS - start))
+  # One meaningful proof line per slice (varies: PUSH_OK/ECHO_OK for device
+  # slices, "All tests passed"/"test result: ok" for host slices). bash-3.2
+  # safe (no assoc arrays) — record "name|status|dur|proof" in RESULTS.
+  local proof
+  proof="$(grep -hoEi '(\[-e2e\]|\[kt-e2e\]|\[rn-e2e\]|\[node-e2e\]|\[cap-e2e\]|\[dotnet-e2e\]) (PUSH_OK|ECHO_OK)|All tests passed!|VERDICT: PUSH_OK=[01] ECHO_OK=[01]|test result: ok\.|PUSH_OK: |ECHO_OK: ' "/tmp/sdk-e2e-$name.log" 2>/dev/null | tail -2 | tr '\n' ' ' | cut -c1-60)"
+  RESULTS+=("$name|$st|${dur}s|$proof")
 }
 
 skip_slice() { # <name> <reason>
-  printf "  ${YELLOW}%-8s SKIP${RESET}  %s\n" "$1" "$2"
-  RESULTS+=("$1|SKIP")
+  printf "  ${YELLOW}%-13s SKIP${RESET}  %s\n" "$1" "$2"
+  RESULTS+=("$1|SKIP|-|$2")
 }
 
 want() { # <name> — 0 if this slice is selected
@@ -125,17 +132,29 @@ if want reactnative; then
   fi
 fi
 
-# ---- summary ----
-echo -e "\n${BOLD}Summary:${RESET}"
+# ---- per-SDK summary table (one row per SDK, not one collapsed line) ----
+echo -e "\n${BOLD}Per-SDK results:${RESET}"
+printf "  ${BOLD}%-13s  %-6s  %-6s  %s${RESET}\n" "SDK" "result" "dur" "proof/detail"
+for s in "${SLICES[@]}"; do
+  st=""; dur=""; proof=""
+  for r in "${RESULTS[@]}"; do
+    [ "${r%%|*}" = "$s" ] || continue
+    rest=${r#*|}; st=${rest%%|*}; rest2=${rest#*|}; dur=${rest2%%|*}; proof=${rest2#*|}
+    break
+  done
+  case "$st" in PASS) col=$GREEN;; FAIL) col=$RED;; *) col=$YELLOW;; esac
+  printf "  %-13s  ${col}%-6s${RESET}  %-6s  %s\n" "$s" "${st:--}" "$dur" "$proof"
+done
 pass=0; fail=0; skip=0
 for r in "${RESULTS[@]}"; do
-  case "${r##*|}" in
+  rest=${r#*|}; st=${rest%%|*}
+  case "$st" in
     PASS) pass=$((pass+1));;
     FAIL) fail=$((fail+1));;
     SKIP) skip=$((skip+1));;
   esac
 done
-ran=${#RESULTS[@]}
-printf "  ${GREEN}%d passed${RESET}, %d failed, ${YELLOW}%d skipped${RESET} / %d slices\n" \
-  "$pass" "$fail" "$skip" "$ran"
+echo ""
+printf "  ${GREEN}%d passed${RESET}, ${RED}%d failed${RESET}, ${YELLOW}%d skipped${RESET} / %d slices\n" \
+  "$pass" "$fail" "$skip" "${#RESULTS[@]}"
 exit "$fail"
