@@ -21,10 +21,10 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tower_cookies::{Cookie, Cookies};
 
-use crate::license::{LicenseClaims, Tier};
 use crate::store::{CloudStore, Role};
 use crate::stripe::{self, CreateCheckout, DEFAULT_TOLERANCE_SECS};
 use crate::{hash_password, verify_password};
+use nostos_license::{LicenseClaims, Tier};
 
 /// Shared state injected into the router.
 #[derive(Clone)]
@@ -452,8 +452,8 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-impl From<crate::license::LicenseError> for ApiError {
-    fn from(e: crate::license::LicenseError) -> Self {
+impl From<nostos_license::LicenseError> for ApiError {
+    fn from(e: nostos_license::LicenseError) -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     }
 }

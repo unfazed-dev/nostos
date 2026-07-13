@@ -45,6 +45,7 @@ members = [
     "crates/nostos-server",
     "crates/nostos-bench",
     "crates/nostos-cloud",
+    "crates/nostos-license",
     "crates/nostos-core",
     "crates/nostos-client",
     "crates/nostos-ffi-wasm",
@@ -159,6 +160,7 @@ nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
 nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
 nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
 nostos-cloud = { path = "crates/nostos-cloud", version = "0.1.0" }
+nostos-license = { path = "crates/nostos-license", version = "0.1.0" }
 nostos-core = { path = "crates/nostos-core", version = "0.1.0" }
 nostos-client = { path = "crates/nostos-client", version = "0.1.0" }
 nostos-server = { path = "crates/nostos-server", version = "0.1.0" }

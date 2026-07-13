@@ -82,11 +82,21 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_LOG", default_value = "info,nostos=debug")]
     log: String,
 
-    /// Licensed tier for the concurrent-device cap. OSS self-host defaults to
-    /// `enterprise` (unlimited); a managed Cloud deploy stamps the licensed
-    /// tier here. One of: hobby, pro, scale, enterprise.
+    /// Licensed tier for the concurrent-device cap (the OSS / fallback path).
+    /// OSS self-host defaults to `enterprise` (unlimited); a managed Cloud deploy
+    /// usually presents a signed `NOSTOS_LICENSE` instead (see below), in which
+    /// case this value is ignored. One of: hobby, pro, scale, enterprise.
     #[arg(long, env = "NOSTOS_TIER", default_value = "enterprise")]
     tier: String,
+
+    /// Signed license token from Nostos Cloud (`<payload>.<sig>`). When present,
+    /// the server verifies it with `NOSTOS_LICENSE_SECRET`; the token's tier +
+    /// `device_cap` then become authoritative (managed mode). Empty (default) =
+    /// OSS self-host, and `NOSTOS_TIER` is used instead. A presented-but-invalid
+    /// license is fatal — the server refuses to start rather than silently
+    /// downgrading to the unlimited OSS default (ADR-0006 trust boundary).
+    #[arg(long, env = "NOSTOS_LICENSE", default_value = "", hide = true)]
+    license: String,
 
     /// /sync authentication mode: "none" (anonymous — OSS dev default) or
     /// "supabase-jwt" (HS256-verify a Supabase JWT). A managed multi-tenant
@@ -165,14 +175,35 @@ async fn main() -> anyhow::Result<()> {
     // ---- inject into the application use-cases ----
     // The licensed tier gates the concurrent-device cap. OSS self-host defaults
     // to Enterprise (unlimited); a managed deploy sets NOSTOS_TIER=hobby|pro|scale.
-    let tier = match cfg.tier.as_str() {
+    // ---- resolve the licensed tier (ADR-0006 trust boundary) ----
+    // OSS self-host: no NOSTOS_LICENSE → fall back to NOSTOS_TIER (default
+    // `enterprise` = unlimited). Managed deploy: presents a signed
+    // NOSTOS_LICENSE; the token's tier + device_cap are authoritative, and a
+    // presented-but-invalid token is FATAL (no silent downgrade to OSS default).
+    let fallback_tier = match cfg.tier.as_str() {
         "hobby" => nostos_domain::Tier::Hobby,
         "pro" => nostos_domain::Tier::Pro,
         "scale" => nostos_domain::Tier::Scale,
         _ => nostos_domain::Tier::Enterprise,
     };
-    info!(?tier, devices_cap = tier.device_cap(), "licensed tier");
-    let manager = Arc::new(SessionManager::new(Arc::clone(&store), tier));
+    // NOSTOS_LICENSE_SECRET is env-only by design (NOT a clap flag): it signs
+    // every license a cloud deploy mints, so it must never land on argv / `ps`.
+    let license_secret = std::env::var("NOSTOS_LICENSE_SECRET").unwrap_or_default();
+    let entitlement =
+        nostos_license::resolve_entitlement(&cfg.license, license_secret.as_bytes(), fallback_tier)
+            .context("NOSTOS_LICENSE verification failed — refusing to start")?;
+    info!(
+        tier = ?entitlement.tier,
+        devices_cap = entitlement.device_cap,
+        project_id = %entitlement.project_id,
+        licensed = !cfg.license.is_empty(),
+        "entitlement resolved"
+    );
+    let manager = Arc::new(SessionManager::with_device_cap(
+        Arc::clone(&store),
+        entitlement.tier,
+        entitlement.device_cap,
+    ));
 
     // ---- /sync authentication (ADR-0010) ----
     // The OSS self-host default is `none` (anonymous — single-tenant dev). A

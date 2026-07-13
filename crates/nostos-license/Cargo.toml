@@ -1,0 +1,26 @@
+[package]
+name = "nostos-license"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nostos offline license claims — HMAC-signed entitlement tokens shared by nostos-cloud (mint) and nostos-server (verify). The trust seam between the control plane and a managed sync server; keeps HMAC/crypto deps out of nostos-domain and nostos-cloud's other modules."
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+nostos-domain = { workspace = true }
+# HMAC-SHA256 license signing/verification (the one operation this crate owns).
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+# License expiry timestamps.
+time = { workspace = true }
+# LicenseClaims payload (de)serialization.
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

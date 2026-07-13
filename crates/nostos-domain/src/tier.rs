@@ -3,7 +3,7 @@
 //! which enforces concurrent-device caps per session).
 //!
 //! Lives in the pure domain ring so neither sibling crate has to depend on the
-//! other. The license *machinery* (signing, claims, HMAC) stays in nostos-cloud;
+//! other. The license *machinery* (signing, claims, HMAC) stays in `nostos-license`;
 //! only the tier taxonomy + its concurrent-device ceiling live here.
 
 /// Subscription tier. `Hobby` is the free tier; the rest are paid.

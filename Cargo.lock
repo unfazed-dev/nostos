@@ -1390,6 +1390,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body-util",
  "nostos-domain",
+ "nostos-license",
  "rand 0.8.6",
  "reqwest",
  "rusqlite",
@@ -1476,6 +1477,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostos-license"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.12.1",
+ "nostos-domain",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "time",
+]
+
+[[package]]
 name = "nostos-server"
 version = "0.1.0"
 dependencies = [
@@ -1485,6 +1500,7 @@ dependencies = [
  "nostos-application",
  "nostos-domain",
  "nostos-infra",
+ "nostos-license",
  "serde_json",
  "tokio",
  "tower-http 0.5.2",

@@ -18,7 +18,6 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
-pub mod license;
 pub mod routes;
 pub mod store;
 pub mod stripe;
