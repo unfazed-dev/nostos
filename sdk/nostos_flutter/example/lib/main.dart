@@ -23,6 +23,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +39,18 @@ const _kUrl = String.fromEnvironment(
 /// Nostos instance) resumes the SAME durable store — pending writes survive.
 String get _sqlitePath =>
     '${Directory.systemTemp.path}/nostos-demo-tasks.sqlite';
+
+// RFC 4122 v4 UUID for the `tasks.id` column (uuid PK). Hand-rolled from
+// dart:math so the demo adds no dependency; the write-back binds pk as $1 → id.
+final _rng = Random();
+String _uuidV4() {
+  final b = List<int>.generate(16, (_) => _rng.nextInt(256));
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+  final h = b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+  return '${h.substring(0, 8)}-${h.substring(8, 12)}-${h.substring(12, 16)}-'
+      '${h.substring(16, 20)}-${h.substring(20)}';
+}
 
 void main() => runApp(const NostosDemoApp());
 
@@ -66,7 +79,6 @@ class _TasksPageState extends State<TasksPage> {
   StreamSubscription? _stateSub;
   final TextEditingController _title = TextEditingController();
   int _writesQueuedWhileOffline = 0;
-  int _counter = 0;
 
   bool get _isLive => _nostos != null;
   bool get _isOffline => _state == NostosConnectionState.disconnected ||
@@ -135,7 +147,7 @@ class _TasksPageState extends State<TasksPage> {
     final title = _title.text.trim();
     if (title.isEmpty || _nostos == null) return;
     _title.clear();
-    final pk = 'task-${DateTime.now().microsecondsSinceEpoch}-${_counter++}';
+    final pk = _uuidV4();
     setState(() {
       if (_isOffline) _writesQueuedWhileOffline++;
     });
