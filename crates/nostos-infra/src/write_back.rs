@@ -716,6 +716,10 @@ mod pg {
         Float(f64),
         Text(String),
         Uuid(uuid::Uuid),
+        /// RFC3339 timestamp — bound as `chrono::DateTime<Utc>` so a
+        /// `timestamptz`/`timestamp` column accepts it (a bare `String` is
+        /// rejected client-side by tokio-postgres's extended-query bind).
+        Timestamp(chrono::DateTime<chrono::Utc>),
         Json(serde_json::Value),
     }
 
@@ -753,6 +757,7 @@ mod pg {
                 SqlValue::Float(f) => f,
                 SqlValue::Text(s) => s,
                 SqlValue::Uuid(u) => u,
+                SqlValue::Timestamp(dt) => dt,
                 // serde_json::Value impls ToSql → jsonb (via with-serde_json-1).
                 SqlValue::Json(v) => v,
             }
@@ -781,16 +786,37 @@ mod pg {
                 }
             }
             serde_json::Value::String(s) => {
-                // Try uuid first (the most common typed column in the demo
-                // schema). A string that isn't a uuid stays text.
-                match uuid::Uuid::parse_str(s) {
-                    Ok(u) => SqlValue::Uuid(u),
-                    Err(_) => SqlValue::Text(s.clone()),
+                // Try uuid first (the common typed pk column), then an RFC3339
+                // timestamp (created_at / timestamptz). tokio-postgres resolves
+                // each parameter's type from the server (extended-query) and
+                // rejects a `String` against TIMESTAMPTZ client-side, so a
+                // timestamp-shaped value MUST bind as `DateTime<Utc>` or the
+                // write returns ok:false ("error serializing parameter N").
+                // Anything else stays text. Same shape-inference risk profile
+                // as the uuid heuristic (a TEXT column holding an RFC3339
+                // string would misbind); the schema-registry upgrade noted
+                // below (OID-driven bind via the catalog) removes the guess.
+                if let Ok(u) = uuid::Uuid::parse_str(s) {
+                    SqlValue::Uuid(u)
+                } else if let Some(dt) = parse_timestamp(s) {
+                    SqlValue::Timestamp(dt)
+                } else {
+                    SqlValue::Text(s.clone())
                 }
             }
             // object / array → jsonb.
             other => SqlValue::Json(other.clone()),
         }
+    }
+
+    /// Parse a strict RFC3339 / ISO8601 string into a UTC timestamp for typed
+    /// binding to a `timestamptz` / `timestamp` column. `None` for anything
+    /// that isn't RFC3339 — leaves text/uuid/other strings to their arms and
+    /// avoids false positives on prose that happens to contain a date.
+    fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
     }
 
     /// ADR-0018: force-stamp the tenant column into an upsert payload with the

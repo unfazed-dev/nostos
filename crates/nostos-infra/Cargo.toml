@@ -14,7 +14,7 @@ default = []
 # The real Postgres logical-replication adapter. OFF by default — the benchmark
 # uses FakeReplicator and pulls none of the pg crates. Turn on with
 # `--features nostos-infra/pg` (Phase 1+).
-pg = ["dep:tokio-postgres", "dep:pgoutput", "dep:pgwire-replication"]
+pg = ["dep:tokio-postgres", "dep:pgoutput", "dep:pgwire-replication", "dep:chrono"]
 
 [dependencies]
 nostos-domain = { workspace = true }
@@ -30,6 +30,9 @@ dashmap = { workspace = true }
 tokio-postgres = { workspace = true, optional = true }
 pgoutput = { workspace = true, optional = true }
 pgwire-replication = { workspace = true, optional = true }
+# chrono: typed `DateTime<Utc>` binding for timestamptz/timestamp columns in
+# PgWriteBack (ADR-0019 follow-on; tokio-postgres carries with-chrono-0_4).
+chrono = { workspace = true, optional = true }
 
 async-trait = { workspace = true }
 tracing = { workspace = true }

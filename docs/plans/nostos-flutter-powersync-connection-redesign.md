@@ -136,8 +136,9 @@ token, refresh; optional `uploadData` for custom resolution) and call
 - **WS4 — `SupabaseConnector` + `NostosDatabase.supabase(…)` factory**
   (`supabase_flutter` session auth).
 - **WS5 — migrate the demo app** (`sdk/nostos_flutter/example/lib/main.dart`) to
-  the new API. **Dissolves** the created_at bug, adds per-row delete/edit, and
-  makes Disconnect / Stop / Airplane **distinct** (see below).
+  the new API. Adds per-row delete/edit and makes Disconnect / Stop / Airplane
+  **distinct** (see below). (The `created_at` bug is now fixed independently of
+  WS5 — see "What this fixes" below.)
 - **WS6 — optional typed-record codegen** (opt-in; from the auto/explicit schema).
 
 Deferred: `UploadConnector` custom-resolution hook (P4); CRDTs; nostos-server URL
@@ -171,7 +172,16 @@ Resolved by the migration (WS5) on top of `NostosDatabase`:
 
 ## What this fixes (demo), as a consequence
 
-- `created_at` write bug → gone (typed SQL writes; no TEXT-bound payload-Map).
+- `created_at` write bug → **fixed by a surgical `chrono` typed bind in
+  `PgWriteBack`** (ADR-0019 follow-on, 2026-07-13) — NOT by WS2/WS5. Verified root
+  cause: `json_value_to_sql` mapped the ISO8601 string to `Text`; tokio-postgres
+  extended-query resolves the column type server-side and rejects a `String`
+  against `TIMESTAMPTZ` client-side → `WriteResult{ok:false}` → dead-letter →
+  "add does nothing." The "5 in Postgres, only 1 shows" READ symptom is a
+  SEPARATE config bug: the fixture ran without `NOSTOS_REPLICATOR=pg` so the
+  ADR-0014 `PgSnapshotter` stayed `None` (proven: with it wired, late subscribers
+  get 5/5). Fixed by a startup guard in `main.rs` + the fixture `.env`.
+  WS2 typed materialization remains valuable for DX, but fixes neither symptom.
 - Per-row delete/edit → `db.execute('DELETE|UPDATE tasks WHERE id = ?')`.
 - Disconnect / Stop / Airplane → distinct real behaviors (above).
 
