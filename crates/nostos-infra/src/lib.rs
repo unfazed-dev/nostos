@@ -20,6 +20,10 @@ pub mod auth;
 mod jwks;
 pub mod replicator;
 pub mod router;
+/// `#[cfg(feature = "pg")]` — the snapshot-on-subscribe adapter. Absent
+/// without the `pg` feature (the transport leaves `snapshotter = None` then).
+#[cfg(feature = "pg")]
+pub mod snapshot_source;
 pub mod store;
 pub mod transport;
 pub mod wire;
@@ -38,6 +42,9 @@ pub use write_back::{parse_allowlist, NoWriteBack};
 
 #[cfg(feature = "pg")]
 pub use replicator::{PgReplicator, PgReplicatorConfig, PgReplicatorError};
+
+#[cfg(feature = "pg")]
+pub use snapshot_source::PgSnapshotter;
 
 #[cfg(feature = "pg")]
 pub use write_back::PgWriteBack;

@@ -32,7 +32,7 @@ use serde::Deserialize;
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
-use nostos_application::ports::{SyncAuth, WriteBack, WriteBackError};
+use nostos_application::ports::{EventSink, SnapshotSource, SyncAuth, WriteBack, WriteBackError};
 use nostos_application::SessionManager;
 use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SyncSession};
 
@@ -74,6 +74,13 @@ pub struct SyncRouterState {
     /// injected (the `PgWriteBack` adapter re-validates it as
     /// defense-in-depth). Empty = no tables writable. Defaults empty.
     pub write_tables: Arc<HashSet<String>>,
+    /// The snapshot-on-subscribe port (ADR-0014). When set, a freshly-
+    /// subscribing session receives the table's pre-existing rows as `Insert`
+    /// events BEFORE live fan-out. `None` means snapshot-on-subscribe is off
+    /// (the `FakeReplicator` path, or a binary built without feature `pg`).
+    /// The composition root injects `PgSnapshotter` under
+    /// `NOSTOS_REPLICATOR=pg`.
+    pub snapshotter: Option<Arc<dyn SnapshotSource>>,
 }
 
 impl SyncRouterState {
@@ -86,6 +93,7 @@ impl SyncRouterState {
             tenant_column: None,
             write_back: Arc::new(crate::write_back::NoWriteBack::new()),
             write_tables: Arc::new(HashSet::new()),
+            snapshotter: None,
         }
     }
 
@@ -119,6 +127,16 @@ impl SyncRouterState {
     #[must_use]
     pub fn with_write_tables(mut self, tables: HashSet<String>) -> Self {
         self.write_tables = Arc::new(tables);
+        self
+    }
+
+    /// Inject the snapshot-on-subscribe adapter (ADR-0014). Call under
+    /// `NOSTOS_REPLICATOR=pg` with a `PgSnapshotter`; otherwise leave it `None`
+    /// (the default) so subscribe-time snapshots are skipped and clients rely
+    /// on live fan-out alone.
+    #[must_use]
+    pub fn with_snapshotter(mut self, snap: Arc<dyn SnapshotSource>) -> Self {
+        self.snapshotter = Some(snap);
         self
     }
 }
@@ -243,6 +261,50 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
             return;
         }
     };
+
+    // 5b. Snapshot-on-subscribe (ADR-0014). If a SnapshotSource is wired in,
+    //     deliver the table's pre-existing rows to THIS session as Insert
+    //     events before the writer task is spawned, so they are the first
+    //     thing the client receives (PowerSync parity). The events are stamped
+    //     with LSNs strictly above the session's seeded acked LSN so the sink's
+    //     LSN gate (TokioEventSink::deliver) does not drop them. A failed
+    //     snapshot is non-fatal: log and continue — the client still receives
+    //     live fan-out. Deliveries are best-effort against the bounded buffer:
+    //     if the table has more rows than `session_buffer`, the overflow drops
+    //     (the existing backpressure discipline) — ponytail in PgSnapshotter.
+    //     ponytail: no tenant-predicate scoping in v1; the snapshot SELECT is
+    //     unfiltered, so multi-tenant deploys must NOT wire a SnapshotSource
+    //     until the port takes the server-injected TenantScope (ADR-0011).
+    let snapshot_base = subscribe.resume_lsn.unwrap_or(0);
+    if let Some(snap) = &state.snapshotter {
+        match snap
+            .snapshot(&subscribe.table, nostos_domain::Lsn::new(snapshot_base))
+            .await
+        {
+            Ok(events) => {
+                let count = events.len();
+                for ev in events {
+                    // Deliver directly to THIS session's sink only — not via
+                    // the store/fan-out (those are post-subscribe WAL path).
+                    // `deliver` applies the LSN gate + backpressure; our LSN
+                    // assignment is constructed to pass the gate.
+                    let _ = sink_concrete.deliver(ev).await;
+                }
+                debug!(
+                    table = %subscribe.table,
+                    count,
+                    "snapshot-on-subscribe delivered to new session"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    table = %subscribe.table,
+                    error = %e,
+                    "snapshot-on-subscribe failed; continuing with live fan-out"
+                );
+            }
+        }
+    }
 
     // 6. Split the socket: writer drains the sink, reader parses ACKs + writes.
     //    axum's `WebSocket` is `Stream + Sink`; `StreamExt::split` yields

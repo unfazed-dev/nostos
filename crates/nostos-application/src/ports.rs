@@ -341,6 +341,79 @@ pub enum WriteBackError {
     Backend(String),
 }
 
+/// Reads a table's current rows as a one-shot snapshot, delivered to a
+/// freshly-subscribing session as `Insert` events BEFORE live fan-out — so a
+/// client that connects to an already-populated table sees pre-existing rows
+/// immediately (PowerSync parity), not nothing-until-the-first-mutation.
+///
+/// The transport calls this once per subscribe (after registering the session,
+/// before spawning the writer task) and delivers each returned event to THAT
+/// session's sink only. A failed snapshot is non-fatal: the transport logs it
+/// and continues with live fan-out, so the client still receives subsequent
+/// mutations (it just may not see rows that already existed).
+///
+/// `base_lsn` is the LSN floor the snapshot events MUST exceed. The caller
+/// passes the session's seeded acked LSN (from `subscribe.resume_lsn`, or 0 for
+/// a fresh client) so the per-session sink's LSN gate
+/// (`TokioEventSink::deliver` drops events with `lsn <= acked_lsn` when
+/// `acked != 0`, plus a dedup ring that drops exact LSN duplicates) does NOT
+/// swallow the snapshot. Implementations MUST stamp each returned event with a
+/// UNIQUE LSN strictly greater than `base_lsn`.
+///
+/// # Trust boundary
+/// `table` is CLIENT-CONTROLLED (it arrives in the subscribe frame).
+/// Implementations MUST validate it against a strict identifier regex BEFORE
+/// any SQL is built, and MUST only ever interpolate it as a quoted identifier —
+/// same discipline as [`WriteBack`]. Snapshot reads values (never writes them),
+/// so there is no value-binding injection surface here; the table name is the
+/// only client-controlled string that reaches SQL.
+///
+/// ponytail: no tenant-predicate scoping in v1 — anonymous / single-tenant
+/// only. The snapshot SELECT is unfiltered, so a multi-tenant deploy must NOT
+/// wire a `SnapshotSource` until this is upgraded to take the server-injected
+/// [`TenantScope`] (mirrors the read-path predicate injection — ADR-0011). The
+/// upgrade is: pass `Option<TenantScope>` through `snapshot`, append a
+/// `WHERE "<tenant_col>" = $1` clause, bind the principal's tenant value.
+#[async_trait]
+pub trait SnapshotSource: Send + Sync {
+    /// Read every row of `table` as an `Insert` event, each stamped with a
+    /// unique LSN strictly greater than `base_lsn`. The payload of each event
+    /// MUST match the streaming path's tuple-image shape (ADR-0019) so the
+    /// client's idempotent apply (`upsert by pk`) treats a snapshot row exactly
+    /// like a streamed insert.
+    ///
+    /// # Errors
+    /// - [`SnapshotError::InvalidTable`] if `table` fails the identifier regex.
+    /// - [`SnapshotError::Backend`] for any underlying database error
+    ///   (connection, prepare, query). The transport logs and continues.
+    async fn snapshot(
+        &self,
+        table: &str,
+        base_lsn: Lsn,
+    ) -> Result<Vec<ReplicationEvent>, SnapshotError>;
+}
+
+/// Why a [`SnapshotSource::snapshot`] call failed. Surfaced to the transport,
+/// which logs the error and continues with live fan-out (a failed snapshot is
+/// NOT fatal — the client still receives subsequent mutations). Variants mirror
+/// [`WriteBackError`]'s categories: the table name was invalid, or the database
+/// errored. There is no payload/validation variant because snapshot reads
+/// values (never writes them) — there is no client-supplied payload to reject.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    /// The table name failed the strict identifier regex
+    /// (`^[a-z_][a-z0-9_]*$`). The name is client-controlled (from the
+    /// subscribe frame), so it is validated before any SQL is built.
+    #[error("invalid snapshot table identifier: {0}")]
+    InvalidTable(String),
+    /// The underlying database errored (connection, prepare, query). The
+    /// wrapped string is the backend's message; adapters MUST scrub it of
+    /// secrets (connection strings) before returning — same discipline as
+    /// [`WriteBackError::Backend`].
+    #[error("snapshot backend: {0}")]
+    Backend(String),
+}
+
 /// Aggregate throughput/accounting counters, updated by the fan-out loop and
 /// read by the `/metrics` endpoint. Lock-free (atomics); rendered to
 /// Prometheus text by the server.
