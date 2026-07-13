@@ -425,6 +425,21 @@ async fn main() -> anyhow::Result<()> {
         info!("snapshot-on-subscribe: PgSnapshotter (real source)");
     }
 
+    // Guard (Fix A): NOSTOS_PG_URL set while replicator != "pg" is almost always
+    // a misconfiguration — snapshot-on-subscribe (ADR-0014) stays OFF and a
+    // freshly-subscribing client silently receives NONE of the table's
+    // pre-existing rows (the "5 in Postgres, only 1 shows in the app" symptom).
+    // The common cause is a fixture/.env that sets NOSTOS_PG_URL but omits
+    // NOSTOS_REPLICATOR=pg. Fail loudly at startup instead of degrading silently.
+    if cfg.replicator != "pg" && !cfg.pg_url.trim().is_empty() {
+        warn!(
+            replicator = %cfg.replicator,
+            "NOSTOS_PG_URL is set but NOSTOS_REPLICATOR is not 'pg' — \
+             snapshot-on-subscribe is OFF; clients will not receive pre-existing \
+             rows on connect. Set NOSTOS_REPLICATOR=pg to enable it."
+        );
+    }
+
     // ---- typed-schema endpoint adapter (WS1) ----
     // Under `NOSTOS_REPLICATOR=pg` inject a `PgSchemaSource` so `GET /schema`
     // can serve the publication's tables/columns/affinities for the Flutter
