@@ -24,7 +24,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 /// A row the spine injects on `POST /push` (matches e2e_server_selftest's shape).
-const PUSH_BODY: &str = r#"{"pk":"rust-push","payload":{"title":"from-server","status":"open","priority":"5"}}"#;
+const PUSH_BODY: &str =
+    r#"{"pk":"rust-push","payload":{"title":"from-server","status":"open","priority":"5"}}"#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sdk_live_round_trip_against_spine() {
@@ -32,7 +33,8 @@ async fn sdk_live_round_trip_against_spine() {
 
     // Build the SDK client against the spine's WS endpoint. PID-unique DB path
     // so a stale file from a prior run can't yield a false positive.
-    let db_path = std::env::temp_dir().join(format!("nostos-rust-e2e-{}.sqlite", std::process::id()));
+    let db_path =
+        std::env::temp_dir().join(format!("nostos-rust-e2e-{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
     let storage =
         SqliteStorage::open(db_path.to_str().expect("utf8 db path")).expect("open sqlite");
@@ -73,9 +75,7 @@ async fn sdk_live_round_trip_against_spine() {
             table: "tasks".into(),
             op: WriteOp::Upsert,
             pk: "rust-echo".into(),
-            payload_json: Some(
-                r#"{"title":"from-client","status":"open","priority":"5"}"#.into(),
-            ),
+            payload_json: Some(r#"{"title":"from-client","status":"open","priority":"5"}"#.into()),
         })
         .await
         .expect("write");
@@ -97,9 +97,7 @@ async fn poll_row(
     pk: &str,
     deadline: Duration,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let sql = format!(
-        "SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = '{pk}'"
-    );
+    let sql = format!("SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = '{pk}'");
     let end = tokio::time::Instant::now() + deadline;
     loop {
         let sql = sql.clone();

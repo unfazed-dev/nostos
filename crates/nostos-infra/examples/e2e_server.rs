@@ -286,8 +286,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- serve with graceful shutdown on Ctrl-C / SIGTERM ----
     let shutdown = async {
         let ctrl_c = tokio::signal::ctrl_c();
-        let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
+        let mut sig_term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => info!("ctrl-c received, shutting down"),
             _ = sig_term.recv() => info!("SIGTERM received, shutting down"),

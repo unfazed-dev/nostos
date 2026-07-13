@@ -501,13 +501,8 @@ impl NostosSocket {
         payload_json: Option<String>,
         client_write_id: &str,
     ) -> Result<(), JsValue> {
-        let frame = transport::build_write_frame(
-            table,
-            op,
-            pk,
-            payload_json.as_deref(),
-            client_write_id,
-        )?;
+        let frame =
+            transport::build_write_frame(table, op, pk, payload_json.as_deref(), client_write_id)?;
         self.inner
             .ws
             .send_with_str(&frame)

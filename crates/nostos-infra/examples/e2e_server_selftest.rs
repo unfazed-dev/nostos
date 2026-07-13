@@ -34,13 +34,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (the build lands at the workspace-root target, found on the second pass).
     let mut exe = example_binary_path("e2e_server");
     if !exe.exists() {
-        eprintln!("[spine] e2e_server not found at {}; building…", exe.display());
+        eprintln!(
+            "[spine] e2e_server not found at {}; building…",
+            exe.display()
+        );
         let status = std::process::Command::new("cargo")
             .args(["build", "-p", "nostos-infra", "--example", "e2e_server"])
             .status()
             .map_err(|e| format!("cargo build failed to start: {e}"))?;
         if !status.success() {
-            return Err(format!("cargo build -p nostos-infra --example e2e_server failed (status {status})").into());
+            return Err(format!(
+                "cargo build -p nostos-infra --example e2e_server failed (status {status})"
+            )
+            .into());
         }
         exe = example_binary_path("e2e_server");
     }
@@ -67,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let line = match tokio::time::timeout(Duration::from_secs(2), lines.next_line()).await {
             Ok(Ok(Some(line))) => line,
             Ok(Ok(None) | Err(_)) => break, // EOF or io error
-            Err(_) => continue,                 // per-line timeout — keep waiting
+            Err(_) => continue,             // per-line timeout — keep waiting
         };
         if let Some(rest) = line.strip_prefix("NOSTOS_E2E_PORT=") {
             port = rest.trim().parse::<u16>().ok();
@@ -88,8 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // practice; the task exists to keep the pipe open).
         while let Ok(Ok(Some(_))) =
             tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await
-        {
-        }
+        {}
     });
 
     // ---- connect WS to /sync (AllowAnonymous → no token needed) ----
@@ -122,11 +127,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("POST /push failed: {status} {body}").into());
     }
 
-    let Some(pushed) = wait_for_frame(&mut read, "push-1", Duration::from_secs(5)).await?
-    else {
+    let Some(pushed) = wait_for_frame(&mut read, "push-1", Duration::from_secs(5)).await? else {
         return Err("never received the pushed row (push-1)".into());
     };
-    eprintln!("[spine] pushed row received: lsn={} op={:?} pk={}", pushed.lsn, pushed.op, pushed.pk);
+    eprintln!(
+        "[spine] pushed row received: lsn={} op={:?} pk={}",
+        pushed.lsn, pushed.op, pushed.pk
+    );
     println!("[spine] PUSH_OK");
 
     // ---- ECHO: send a write frame, assert the echoed insert arrives ----
@@ -141,8 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .to_string();
     write.send(Message::Text(write_frame)).await?;
 
-    let Some(echoed) = wait_for_frame(&mut read, "echo-1", Duration::from_secs(5)).await?
-    else {
+    let Some(echoed) = wait_for_frame(&mut read, "echo-1", Duration::from_secs(5)).await? else {
         return Err("never received the echoed write (echo-1)".into());
     };
     eprintln!(
@@ -204,8 +210,9 @@ async fn retry_connect(
     url: &str,
     attempts: u32,
     backoff: Duration,
-) -> Option<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>
-{
+) -> Option<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
     for _ in 0..attempts {
         if let Ok((stream, _)) = tokio_tungstenite::connect_async(url).await {
             return Some(stream);
