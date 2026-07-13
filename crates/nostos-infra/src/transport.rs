@@ -32,7 +32,9 @@ use serde::Deserialize;
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
-use nostos_application::ports::{EventSink, SnapshotSource, SyncAuth, WriteBack, WriteBackError};
+use nostos_application::ports::{
+    EventSink, SchemaSource, SnapshotSource, SyncAuth, WriteBack, WriteBackError,
+};
 use nostos_application::SessionManager;
 use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SyncSession};
 
@@ -81,6 +83,11 @@ pub struct SyncRouterState {
     /// The composition root injects `PgSnapshotter` under
     /// `NOSTOS_REPLICATOR=pg`.
     pub snapshotter: Option<Arc<dyn SnapshotSource>>,
+    /// The typed-schema port (WS1). When set, `GET /schema` serves the
+    /// publication's tables/columns/affinities for client auto-schema. `None`
+    /// means the endpoint returns 404 (the `FakeReplicator` path, or a binary
+    /// built without feature `pg`). Injected under `NOSTOS_REPLICATOR=pg`.
+    pub schema_source: Option<Arc<dyn SchemaSource>>,
 }
 
 impl SyncRouterState {
@@ -94,6 +101,7 @@ impl SyncRouterState {
             write_back: Arc::new(crate::write_back::NoWriteBack::new()),
             write_tables: Arc::new(HashSet::new()),
             snapshotter: None,
+            schema_source: None,
         }
     }
 
@@ -137,6 +145,15 @@ impl SyncRouterState {
     #[must_use]
     pub fn with_snapshotter(mut self, snap: Arc<dyn SnapshotSource>) -> Self {
         self.snapshotter = Some(snap);
+        self
+    }
+
+    /// Inject the typed-schema adapter (WS1). Call under `NOSTOS_REPLICATOR=pg`
+    /// with a `PgSchemaSource`; otherwise leave it `None` (the default) so
+    /// `GET /schema` returns 404.
+    #[must_use]
+    pub fn with_schema_source(mut self, src: Arc<dyn SchemaSource>) -> Self {
+        self.schema_source = Some(src);
         self
     }
 }

@@ -20,6 +20,10 @@ pub mod auth;
 mod jwks;
 pub mod replicator;
 pub mod router;
+/// `#[cfg(feature = "pg")]` — the typed-schema endpoint adapter (WS1). Absent
+/// without the `pg` feature (the server leaves `schema_source = None` then).
+#[cfg(feature = "pg")]
+pub mod schema_source;
 /// `#[cfg(feature = "pg")]` — the snapshot-on-subscribe adapter. Absent
 /// without the `pg` feature (the transport leaves `snapshotter = None` then).
 #[cfg(feature = "pg")]
@@ -45,6 +49,9 @@ pub use replicator::{PgReplicator, PgReplicatorConfig, PgReplicatorError};
 
 #[cfg(feature = "pg")]
 pub use snapshot_source::PgSnapshotter;
+
+#[cfg(feature = "pg")]
+pub use schema_source::PgSchemaSource;
 
 #[cfg(feature = "pg")]
 pub use write_back::PgWriteBack;

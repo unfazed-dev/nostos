@@ -103,6 +103,88 @@ pub(crate) fn append_typed_value(out: &mut String, type_oid: i32, cell: Option<&
     }
 }
 
+/// Map a Postgres column type OID to the SQLite column affinity a client
+/// should use when materializing the typed table for that column. WS1's
+/// `GET /schema` endpoint ships this so the Flutter SDK can auto-build typed
+/// tables without a hand-written `Schema`.
+///
+/// The affinity mirrors the JSON token shape [`append_typed_value`] emits, so
+/// the wire value stores in the client's SQLite column without coercion: types
+/// rendered as a bare JSON number → `INTEGER`/`REAL`; everything nostos renders
+/// as a quoted string → `TEXT`. Notably `int8`/`oid`/`numeric`/`money` map to
+/// `TEXT` because ADR-0019 deliberately renders them as strings to preserve
+/// precision — a typed-record layer (WS6) can parse them back to numbers.
+///
+/// This is the upgrade ADR-0019 names as deferred ("relation-metadata wire
+/// frame so the client stops guessing") — the `/schema` endpoint + this fn.
+// ponytail: affinity mirrors wire reality, not PG semantic type. A future
+// typed-record layer (WS6) can surface richer Dart types (boolean, DateTime,
+// int64) above a TEXT-affinity store.
+pub(crate) fn oid_to_sqlite_affinity(type_oid: i32) -> &'static str {
+    match type_oid {
+        oid::BOOL | oid::INT2 | oid::INT4 => "INTEGER",
+        oid::FLOAT4 | oid::FLOAT8 => "REAL",
+        // int8/oid/numeric/money are rendered as STRINGS (ADR-0019
+        // precision-preserving decision) → TEXT keeps the exact value.
+        // BYTEA (base64 text), timestamps, uuid, json(b), and all unrecognized
+        // OIDs (enums/arrays/domains) are likewise string-rendered → TEXT.
+        _ => "TEXT",
+    }
+}
+
+#[cfg(test)]
+mod oid_affinity_tests {
+    //! The affinity contract the `/schema` endpoint hands the client (WS1).
+    use super::oid;
+    use super::oid_to_sqlite_affinity;
+
+    #[test]
+    fn bare_number_types_are_integer_or_real() {
+        // Rendered as a bare JSON token by `append_typed_value` → numeric affinity.
+        assert_eq!(oid_to_sqlite_affinity(oid::BOOL), "INTEGER");
+        assert_eq!(oid_to_sqlite_affinity(oid::INT2), "INTEGER");
+        assert_eq!(oid_to_sqlite_affinity(oid::INT4), "INTEGER");
+        assert_eq!(oid_to_sqlite_affinity(oid::FLOAT4), "REAL");
+        assert_eq!(oid_to_sqlite_affinity(oid::FLOAT8), "REAL");
+    }
+
+    #[test]
+    fn string_rendered_types_are_text() {
+        // ADR-0019 renders these as quoted strings (precision / fidelity), so
+        // the affinity is TEXT — an INTEGER column would coerce / lose precision.
+        for &oid_val in &[
+            oid::INT8,
+            oid::OID,
+            oid::NUMERIC,
+            oid::MONEY,
+            oid::DATE,
+            oid::TIME,
+            oid::TIMESTAMP,
+            oid::TIMESTAMPTZ,
+            oid::TIMETZ,
+            oid::UUID,
+            oid::JSON,
+            oid::JSONB,
+            oid::BYTEA,
+        ] {
+            assert_eq!(
+                oid_to_sqlite_affinity(oid_val),
+                "TEXT",
+                "OID {oid_val} is string-rendered → TEXT affinity"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_oid_is_text_and_never_panics() {
+        // Enums / arrays / domains (unrecognized OIDs): string passthrough →
+        // TEXT. A negative OID is nostos's u32→i32 convert-failure sentinel
+        // (snapshot_source.rs:177) — also TEXT, never a panic.
+        assert_eq!(oid_to_sqlite_affinity(1_000_000), "TEXT");
+        assert_eq!(oid_to_sqlite_affinity(-1), "TEXT");
+    }
+}
+
 fn append_quoted(out: &mut String, s: &str) {
     out.push('"');
     json_escape_into(out, s);

@@ -15,9 +15,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::get;
-use nostos_application::ports::{Metrics, SessionStore};
+use nostos_application::ports::{Metrics, SchemaDescriptor, SchemaSource, SessionStore};
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, ReplicationEvent};
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
@@ -423,6 +424,21 @@ async fn main() -> anyhow::Result<()> {
         state_builder = state_builder.with_snapshotter(snapshotter);
         info!("snapshot-on-subscribe: PgSnapshotter (real source)");
     }
+
+    // ---- typed-schema endpoint adapter (WS1) ----
+    // Under `NOSTOS_REPLICATOR=pg` inject a `PgSchemaSource` so `GET /schema`
+    // can serve the publication's tables/columns/affinities for the Flutter
+    // SDK's auto-schema (PowerSync-style redesign, Option-C). Otherwise
+    // `schema_source` stays `None` and `GET /schema` returns 404.
+    #[cfg(feature = "pg")]
+    if cfg.replicator == "pg" {
+        let schema_source: Arc<dyn SchemaSource> = Arc::new(nostos_infra::PgSchemaSource::new(
+            &cfg.pg_url,
+            &cfg.pg_publication,
+        ));
+        state_builder = state_builder.with_schema_source(schema_source);
+        info!(publication = %cfg.pg_publication, "schema endpoint: PgSchemaSource");
+    }
     let state = state_builder;
 
     // CORS: explicit origins in production, permissive for local dev (the
@@ -450,6 +466,9 @@ async fn main() -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route(&cfg.ws_path, get(sync_handler))
         .route("/healthz", get(healthz))
+        // WS1: typed schema for client auto-schema. v2: add auth here if a
+        // managed deploy wants to hide publication metadata.
+        .route("/schema", get(schema))
         .route(
             "/metrics",
             get({
@@ -501,6 +520,22 @@ async fn healthz(State(state): State<SyncRouterState>) -> Json<serde_json::Value
         "status": "ok",
         "sessions": sessions,
     }))
+}
+
+/// `GET /schema` — the publication's typed schema (WS1): tables, columns, and
+/// SQLite affinities, so the Flutter SDK can auto-build typed tables without a
+/// hand-written `Schema`. v1 is unauthenticated (schema is publication-wide
+/// metadata, not tenant-scoped rows; row isolation is the read-path predicate's
+/// job — ADR-0011/0018). Returns 404 when no `SchemaSource` is wired (the fake
+/// / no-`pg` path) and 503 on a transient backend error.
+async fn schema(
+    State(state): State<SyncRouterState>,
+) -> Result<Json<SchemaDescriptor>, StatusCode> {
+    let src = state.schema_source.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    src.fetch().await.map(Json).map_err(|e| {
+        warn!(error = %e, "schema fetch failed");
+        StatusCode::SERVICE_UNAVAILABLE
+    })
 }
 
 /// `GET /metrics` — Prometheus text exposition format, hand-rolled (the

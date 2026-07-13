@@ -414,6 +414,83 @@ pub enum SnapshotError {
     Backend(String),
 }
 
+// ---------------------------------------------------------------------------
+// Schema discovery (WS1 — Flutter PowerSync-style redesign, Option-C).
+// ---------------------------------------------------------------------------
+
+/// One column in a synced table's schema, reported by [`SchemaSource`] so the
+/// client can auto-build its typed tables. Transport DTO, not a domain
+/// invariant (it exists to be serialized to the client) — lives here next to
+/// the port, mirroring [`SnapshotError`]'s placement.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaColumn {
+    /// Column name (`pg_attribute.attname`).
+    pub name: String,
+    /// Postgres type OID (`atttypid`), as `i32` to match nostos's wire
+    /// convention (OIDs are always < 2^31; see `snapshot_source.rs`).
+    pub pg_oid: i32,
+    /// SQLite column affinity (`"TEXT"` | `"INTEGER"` | `"REAL"`) for the
+    /// client's typed table. Mirrors the JSON token shape nostos emits so the
+    /// wire value stores without coercion.
+    pub affinity: String,
+}
+
+/// One synced table's schema.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaTable {
+    /// nostos's canonical table identifier — bare name for `public` (e.g.
+    /// `tasks`), else `schema.name`. Matches subscribe-frame / `WireFrame`
+    /// `table` so the client keys its typed table correctly.
+    pub name: String,
+    /// Real primary-key column names (`pg_index.indisprimary`), NOT a hardcoded
+    /// `"id"`. May be empty if the table has no replica identity.
+    pub primary_key: Vec<String>,
+    pub columns: Vec<SchemaColumn>,
+}
+
+/// The full schema of a publication, returned by [`SchemaSource::fetch`] and
+/// served by nostos-server's `GET /schema`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaDescriptor {
+    /// The publication name (`PgReplicatorConfig::publication`).
+    pub publication: String,
+    pub tables: Vec<SchemaTable>,
+}
+
+/// Why a [`SchemaSource::fetch`] call failed. Mirrors [`SnapshotError`] minus
+/// the `InvalidTable` variant — there is no client-controlled table name on
+/// this path (the publication name is server config, not a frame), so there is
+/// no identifier to validate.
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaError {
+    /// The underlying database errored (connection, catalog query). Adapters
+    /// MUST scrub the wrapped string of secrets (connection strings) — same
+    /// discipline as [`SnapshotError::Backend`].
+    #[error("schema backend: {0}")]
+    Backend(String),
+}
+
+/// Read the publication's typed schema (tables/columns/SQLite-affinity) so a
+/// client can auto-build its typed tables (WS1). The Flutter SDK's default is
+/// to fetch this on connect rather than hand-write a `Schema` (the headline DX
+/// win over PowerSync).
+///
+/// The schema-side sibling of [`SnapshotSource`]: same port/adapter shape,
+/// backed by `PgSchemaSource` under `NOSTOS_REPLICATOR=pg`. ponytail: no tenant
+/// scoping in v1 — the schema is publication-wide metadata (the SET of synced
+/// tables), not tenant-specific rows; row isolation is the read-path
+/// predicate's job (ADR-0011/0018). `GET /schema` is v1-unauthenticated for the
+/// same reason — v2: add auth at the route layer if a managed deploy wants it.
+#[async_trait]
+pub trait SchemaSource: Send + Sync {
+    /// Fetch the full publication schema.
+    ///
+    /// # Errors
+    /// [`SchemaError::Backend`] for any underlying database error (connection,
+    /// catalog query). The server logs and returns 503.
+    async fn fetch(&self) -> Result<SchemaDescriptor, SchemaError>;
+}
+
 /// Aggregate throughput/accounting counters, updated by the fan-out loop and
 /// read by the `/metrics` endpoint. Lock-free (atomics); rendered to
 /// Prometheus text by the server.
