@@ -8,8 +8,10 @@
 # subdirs) are ignored here. Regenerate from the cdylib on demand.
 /dotnet/generated/*.csproj
 /dotnet/generated/cs/
-/dotnet/bin/
-/dotnet/obj/
+# dotnet convention: cover the MAUI shell (dotnet/) AND the smoke leaf
+# (dotnet/smoke/) so `dotnet run`/`dotnet build` artifacts never get staged.
+**/bin/
+**/obj/
 
 # .NET build output (if a reviewer does install dotnet and builds the .csproj)
 /dotnet/.bin/

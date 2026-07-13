@@ -20,10 +20,14 @@ pub mod pg;
 #[cfg(feature = "pg")]
 mod snapshot;
 
-/// OID-keyed JSON value mapping (ADR-0019), shared by `pg` and `snapshot` so
-/// a row renders byte-identically regardless of which path produced it.
+/// OID-keyed JSON value mapping (ADR-0019), shared by `pg`, `snapshot`, and
+/// the subscribe-time `PgSnapshotter` so a row renders byte-identically
+/// regardless of which path produced it. `pub(crate)` so the snapshot-on-
+/// subscribe adapter (`snapshot_source.rs`) can reuse it without re-implementing
+/// the type table (divergence would make a snapshot row subtly different from a
+/// streamed row — the exact bug ADR-0019 exists to prevent).
 #[cfg(feature = "pg")]
-mod typed;
+pub(crate) mod typed;
 
 /// Column extraction for the predicate `matches` seam (ADR-0012 slice 2).
 /// Always available — pure JSON parsing, no `pg` feature required.

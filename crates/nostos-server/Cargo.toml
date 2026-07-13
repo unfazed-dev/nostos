@@ -25,6 +25,7 @@ pg = ["nostos-infra/pg"]
 nostos-domain = { workspace = true }
 nostos-application = { workspace = true }
 nostos-infra = { workspace = true }
+nostos-license = { workspace = true }
 
 tokio = { workspace = true }
 axum = { workspace = true }

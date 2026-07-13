@@ -12,7 +12,7 @@
 //! (Supabase projects default to HS256 with a shared secret; RS256 is a later
 //! upgrade behind this same trait).
 
-use crate::license::base64url_decode;
+use nostos_license::base64url_decode;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
@@ -85,7 +85,7 @@ struct SupabaseClaims {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::license::{base64url_decode, base64url_encode};
+    use nostos_license::{base64url_decode, base64url_encode};
 
     #[allow(dead_code)]
     fn _ensure_decode_linked() {

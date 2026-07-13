@@ -15,9 +15,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::get;
-use nostos_application::ports::{Metrics, SessionStore};
+use nostos_application::ports::{Metrics, SchemaDescriptor, SchemaSource, SessionStore};
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, ReplicationEvent};
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
@@ -82,11 +83,21 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_LOG", default_value = "info,nostos=debug")]
     log: String,
 
-    /// Licensed tier for the concurrent-device cap. OSS self-host defaults to
-    /// `enterprise` (unlimited); a managed Cloud deploy stamps the licensed
-    /// tier here. One of: hobby, pro, scale, enterprise.
+    /// Licensed tier for the concurrent-device cap (the OSS / fallback path).
+    /// OSS self-host defaults to `enterprise` (unlimited); a managed Cloud deploy
+    /// usually presents a signed `NOSTOS_LICENSE` instead (see below), in which
+    /// case this value is ignored. One of: hobby, pro, scale, enterprise.
     #[arg(long, env = "NOSTOS_TIER", default_value = "enterprise")]
     tier: String,
+
+    /// Signed license token from Nostos Cloud (`<payload>.<sig>`). When present,
+    /// the server verifies it with `NOSTOS_LICENSE_SECRET`; the token's tier +
+    /// `device_cap` then become authoritative (managed mode). Empty (default) =
+    /// OSS self-host, and `NOSTOS_TIER` is used instead. A presented-but-invalid
+    /// license is fatal — the server refuses to start rather than silently
+    /// downgrading to the unlimited OSS default (ADR-0006 trust boundary).
+    #[arg(long, env = "NOSTOS_LICENSE", default_value = "", hide = true)]
+    license: String,
 
     /// /sync authentication mode: "none" (anonymous — OSS dev default) or
     /// "supabase-jwt" (HS256-verify a Supabase JWT). A managed multi-tenant
@@ -165,14 +176,35 @@ async fn main() -> anyhow::Result<()> {
     // ---- inject into the application use-cases ----
     // The licensed tier gates the concurrent-device cap. OSS self-host defaults
     // to Enterprise (unlimited); a managed deploy sets NOSTOS_TIER=hobby|pro|scale.
-    let tier = match cfg.tier.as_str() {
+    // ---- resolve the licensed tier (ADR-0006 trust boundary) ----
+    // OSS self-host: no NOSTOS_LICENSE → fall back to NOSTOS_TIER (default
+    // `enterprise` = unlimited). Managed deploy: presents a signed
+    // NOSTOS_LICENSE; the token's tier + device_cap are authoritative, and a
+    // presented-but-invalid token is FATAL (no silent downgrade to OSS default).
+    let fallback_tier = match cfg.tier.as_str() {
         "hobby" => nostos_domain::Tier::Hobby,
         "pro" => nostos_domain::Tier::Pro,
         "scale" => nostos_domain::Tier::Scale,
         _ => nostos_domain::Tier::Enterprise,
     };
-    info!(?tier, devices_cap = tier.device_cap(), "licensed tier");
-    let manager = Arc::new(SessionManager::new(Arc::clone(&store), tier));
+    // NOSTOS_LICENSE_SECRET is env-only by design (NOT a clap flag): it signs
+    // every license a cloud deploy mints, so it must never land on argv / `ps`.
+    let license_secret = std::env::var("NOSTOS_LICENSE_SECRET").unwrap_or_default();
+    let entitlement =
+        nostos_license::resolve_entitlement(&cfg.license, license_secret.as_bytes(), fallback_tier)
+            .context("NOSTOS_LICENSE verification failed — refusing to start")?;
+    info!(
+        tier = ?entitlement.tier,
+        devices_cap = entitlement.device_cap,
+        project_id = %entitlement.project_id,
+        licensed = !cfg.license.is_empty(),
+        "entitlement resolved"
+    );
+    let manager = Arc::new(SessionManager::with_device_cap(
+        Arc::clone(&store),
+        entitlement.tier,
+        entitlement.device_cap,
+    ));
 
     // ---- /sync authentication (ADR-0010) ----
     // The OSS self-host default is `none` (anonymous — single-tenant dev). A
@@ -376,6 +408,52 @@ async fn main() -> anyhow::Result<()> {
     state_builder = state_builder
         .with_write_back(Arc::clone(&write_back))
         .with_write_tables(write_tables);
+
+    // ---- snapshot-on-subscribe adapter (ADR-0014) ----
+    // Under `NOSTOS_REPLICATOR=pg` (feature `pg`) inject a real `PgSnapshotter`
+    // so a freshly-subscribing client receives the table's pre-existing rows
+    // before live fan-out (PowerSync parity — closes the "Flutter app shows 1
+    // of 5 rows" gap). Otherwise `snapshotter` stays `None` (the default set in
+    // `SyncRouterState::new`) and subscribe-time snapshots are skipped.
+    #[cfg(feature = "pg")]
+    if cfg.replicator == "pg" {
+        // pg_url is already known non-empty here — the write-back block above
+        // bailed on an empty NOSTOS_PG_URL under the same `replicator == "pg"`.
+        let snapshotter: Arc<dyn nostos_application::ports::SnapshotSource> =
+            Arc::new(nostos_infra::PgSnapshotter::new(&cfg.pg_url));
+        state_builder = state_builder.with_snapshotter(snapshotter);
+        info!("snapshot-on-subscribe: PgSnapshotter (real source)");
+    }
+
+    // Guard (Fix A): NOSTOS_PG_URL set while replicator != "pg" is almost always
+    // a misconfiguration — snapshot-on-subscribe (ADR-0014) stays OFF and a
+    // freshly-subscribing client silently receives NONE of the table's
+    // pre-existing rows (the "5 in Postgres, only 1 shows in the app" symptom).
+    // The common cause is a fixture/.env that sets NOSTOS_PG_URL but omits
+    // NOSTOS_REPLICATOR=pg. Fail loudly at startup instead of degrading silently.
+    if cfg.replicator != "pg" && !cfg.pg_url.trim().is_empty() {
+        warn!(
+            replicator = %cfg.replicator,
+            "NOSTOS_PG_URL is set but NOSTOS_REPLICATOR is not 'pg' — \
+             snapshot-on-subscribe is OFF; clients will not receive pre-existing \
+             rows on connect. Set NOSTOS_REPLICATOR=pg to enable it."
+        );
+    }
+
+    // ---- typed-schema endpoint adapter (WS1) ----
+    // Under `NOSTOS_REPLICATOR=pg` inject a `PgSchemaSource` so `GET /schema`
+    // can serve the publication's tables/columns/affinities for the Flutter
+    // SDK's auto-schema (PowerSync-style redesign, Option-C). Otherwise
+    // `schema_source` stays `None` and `GET /schema` returns 404.
+    #[cfg(feature = "pg")]
+    if cfg.replicator == "pg" {
+        let schema_source: Arc<dyn SchemaSource> = Arc::new(nostos_infra::PgSchemaSource::new(
+            &cfg.pg_url,
+            &cfg.pg_publication,
+        ));
+        state_builder = state_builder.with_schema_source(schema_source);
+        info!(publication = %cfg.pg_publication, "schema endpoint: PgSchemaSource");
+    }
     let state = state_builder;
 
     // CORS: explicit origins in production, permissive for local dev (the
@@ -403,6 +481,9 @@ async fn main() -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route(&cfg.ws_path, get(sync_handler))
         .route("/healthz", get(healthz))
+        // WS1: typed schema for client auto-schema. v2: add auth here if a
+        // managed deploy wants to hide publication metadata.
+        .route("/schema", get(schema))
         .route(
             "/metrics",
             get({
@@ -454,6 +535,22 @@ async fn healthz(State(state): State<SyncRouterState>) -> Json<serde_json::Value
         "status": "ok",
         "sessions": sessions,
     }))
+}
+
+/// `GET /schema` — the publication's typed schema (WS1): tables, columns, and
+/// SQLite affinities, so the Flutter SDK can auto-build typed tables without a
+/// hand-written `Schema`. v1 is unauthenticated (schema is publication-wide
+/// metadata, not tenant-scoped rows; row isolation is the read-path predicate's
+/// job — ADR-0011/0018). Returns 404 when no `SchemaSource` is wired (the fake
+/// / no-`pg` path) and 503 on a transient backend error.
+async fn schema(
+    State(state): State<SyncRouterState>,
+) -> Result<Json<SchemaDescriptor>, StatusCode> {
+    let src = state.schema_source.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    src.fetch().await.map(Json).map_err(|e| {
+        warn!(error = %e, "schema fetch failed");
+        StatusCode::SERVICE_UNAVAILABLE
+    })
 }
 
 /// `GET /metrics` — Prometheus text exposition format, hand-rolled (the

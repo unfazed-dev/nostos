@@ -30,8 +30,12 @@ pub enum ConnectError {
 /// disconnect.
 pub struct SessionManager {
     store: Arc<dyn SessionStore>,
-    /// The tier this instance is licensed for; gates the concurrent-device cap.
+    /// The tier this instance is licensed for; reported on `DeviceCapReached`.
     tier: nostos_domain::Tier,
+    /// The concurrent-session ceiling enforced on every `connect`. Defaults to
+    /// `tier.device_cap()`; a managed server overrides it with the cap carried
+    /// by a verified license (`nostos_license::ResolvedEntitlement::device_cap`).
+    device_cap: u64,
 }
 
 impl SessionManager {
@@ -40,7 +44,28 @@ impl SessionManager {
     #[inline]
     #[must_use]
     pub fn new(store: Arc<dyn SessionStore>, tier: nostos_domain::Tier) -> Self {
-        Self { store, tier }
+        Self {
+            store,
+            tier,
+            device_cap: tier.device_cap(),
+        }
+    }
+
+    /// Construct with an explicit concurrent-device cap that overrides the tier
+    /// default. Used by a managed `nostos-server` when a verified license carries
+    /// a negotiated `device_cap` (see `nostos_license::resolve_entitlement`).
+    #[inline]
+    #[must_use]
+    pub fn with_device_cap(
+        store: Arc<dyn SessionStore>,
+        tier: nostos_domain::Tier,
+        device_cap: u64,
+    ) -> Self {
+        Self {
+            store,
+            tier,
+            device_cap,
+        }
     }
 
     /// Register a new session. Called by the transport when a client subscribes.
@@ -57,7 +82,7 @@ impl SessionManager {
         session: SyncSession,
         sink: Arc<dyn EventSink>,
     ) -> Result<SessionId, ConnectError> {
-        let cap = self.tier.device_cap();
+        let cap = self.device_cap;
         // Enterprise's cap is u64::MAX, so try_add_below_cap never rejects it.
         self.store
             .try_add_below_cap(session, sink, cap)
@@ -184,6 +209,28 @@ mod tests {
             ConnectError::DeviceCapReached {
                 tier: nostos_domain::Tier::Hobby,
                 cap: 100
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn with_device_cap_enforces_explicit_override() {
+        // A managed license with a negotiated cap overrides the tier default.
+        // The 3rd connect is rejected at cap=2 — proving the license-derived cap
+        // (not the tier default of 1_000) is what a managed server enforces.
+        let store = Arc::new(MapStore(Mutex::new(HashMap::new())));
+        let mgr = SessionManager::with_device_cap(store, nostos_domain::Tier::Pro, 2);
+        for _ in 0..2 {
+            let s = SyncSession::new(Predicate::all("tasks"));
+            mgr.connect(s, Arc::new(NoopSink)).await.unwrap();
+        }
+        let over = SyncSession::new(Predicate::all("tasks"));
+        let err = mgr.connect(over, Arc::new(NoopSink)).await.unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectError::DeviceCapReached {
+                tier: nostos_domain::Tier::Pro,
+                cap: 2
             }
         ));
     }

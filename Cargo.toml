@@ -45,6 +45,7 @@ members = [
     "crates/nostos-server",
     "crates/nostos-bench",
     "crates/nostos-cloud",
+    "crates/nostos-license",
     "crates/nostos-core",
     "crates/nostos-client",
     "crates/nostos-ffi-wasm",
@@ -95,7 +96,11 @@ tower-http = { version = "0.5", features = ["trace", "cors"] }
 # --- postgres logical replication (the core capability) ---
 # Used by the real PgReplicator (Phase 1). Week-1 benchmark uses a FakeReplicator
 # and needs none of these — they're marked optional in nostos-infra.
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
+# chrono: typed ToSql binding for timestamptz/timestamp columns in PgWriteBack
+# (the matching `with-chrono-0_4` tokio-postgres feature above gives
+# `DateTime<Utc>` its `ToSql` impl). pg-only (nostos-infra, behind `pg`).
+chrono = "0.4"
 # pgoutput logical-decoding parser (consumes the pgoutput replication stream).
 # Verified 0.0.7: trait-selected generic Event<Binary,Streaming> API; we use the
 # `BinaryValueTraitOff` (text values) + `StreamingValueTraitOff` (no streaming) monomorphization.
@@ -159,6 +164,7 @@ nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
 nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
 nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
 nostos-cloud = { path = "crates/nostos-cloud", version = "0.1.0" }
+nostos-license = { path = "crates/nostos-license", version = "0.1.0" }
 nostos-core = { path = "crates/nostos-core", version = "0.1.0" }
 nostos-client = { path = "crates/nostos-client", version = "0.1.0" }
 nostos-server = { path = "crates/nostos-server", version = "0.1.0" }

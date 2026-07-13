@@ -34,7 +34,8 @@ pub use eviction::EvictionPolicy;
 pub use fanout::{FanOutOutcome, FanOutService};
 pub use ports::{
     DeliveryDecision, EventSink, Metrics, MetricsSnapshot, ReplicatorStream, SessionCandidate,
-    SessionStore, StoreRejection, SyncAuth, WriteBack, WriteBackError,
+    SessionStore, SnapshotError, SnapshotSource, StoreRejection, SyncAuth, WriteBack,
+    WriteBackError,
 };
 pub use session::SessionManager;
 

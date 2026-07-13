@@ -414,11 +414,15 @@ async fn chaos_offline_writes_survive_mid_stream_restart_no_loss_no_dup() {
         OFFLINE_WRITES,
         "both offline writes are durable in the outbox while the server is down"
     );
-    // Row count unchanged — the writes haven't round-tripped yet (no server).
+    // WS2 instant-local: the offline writes are ALREADY applied to cairn_data
+    // (visible before any round-trip — offline-first) AND still durable in the
+    // outbox (proven by the pending() assertion above). The server's echo later
+    // UPSERTs the authoritative image on top (reconcile); the no-loss / no-dup
+    // round-trip invariants below still hold — the echo overwrites the same pks.
     assert_eq!(
         mid.row_count_for_test(),
-        usize::try_from(WAVE1).unwrap(),
-        "offline writes are queued, NOT applied, until the round-trip"
+        usize::try_from(WAVE1).unwrap() + OFFLINE_WRITES,
+        "instant-local: offline writes applied immediately AND queued durably"
     );
 
     // -----------------------------------------------------------------------

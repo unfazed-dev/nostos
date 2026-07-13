@@ -341,6 +341,156 @@ pub enum WriteBackError {
     Backend(String),
 }
 
+/// Reads a table's current rows as a one-shot snapshot, delivered to a
+/// freshly-subscribing session as `Insert` events BEFORE live fan-out — so a
+/// client that connects to an already-populated table sees pre-existing rows
+/// immediately (PowerSync parity), not nothing-until-the-first-mutation.
+///
+/// The transport calls this once per subscribe (after registering the session,
+/// before spawning the writer task) and delivers each returned event to THAT
+/// session's sink only. A failed snapshot is non-fatal: the transport logs it
+/// and continues with live fan-out, so the client still receives subsequent
+/// mutations (it just may not see rows that already existed).
+///
+/// `base_lsn` is the LSN floor the snapshot events MUST exceed. The caller
+/// passes the session's seeded acked LSN (from `subscribe.resume_lsn`, or 0 for
+/// a fresh client) so the per-session sink's LSN gate
+/// (`TokioEventSink::deliver` drops events with `lsn <= acked_lsn` when
+/// `acked != 0`, plus a dedup ring that drops exact LSN duplicates) does NOT
+/// swallow the snapshot. Implementations MUST stamp each returned event with a
+/// UNIQUE LSN strictly greater than `base_lsn`.
+///
+/// # Trust boundary
+/// `table` is CLIENT-CONTROLLED (it arrives in the subscribe frame).
+/// Implementations MUST validate it against a strict identifier regex BEFORE
+/// any SQL is built, and MUST only ever interpolate it as a quoted identifier —
+/// same discipline as [`WriteBack`]. Snapshot reads values (never writes them),
+/// so there is no value-binding injection surface here; the table name is the
+/// only client-controlled string that reaches SQL.
+///
+/// ponytail: no tenant-predicate scoping in v1 — anonymous / single-tenant
+/// only. The snapshot SELECT is unfiltered, so a multi-tenant deploy must NOT
+/// wire a `SnapshotSource` until this is upgraded to take the server-injected
+/// [`TenantScope`] (mirrors the read-path predicate injection — ADR-0011). The
+/// upgrade is: pass `Option<TenantScope>` through `snapshot`, append a
+/// `WHERE "<tenant_col>" = $1` clause, bind the principal's tenant value.
+#[async_trait]
+pub trait SnapshotSource: Send + Sync {
+    /// Read every row of `table` as an `Insert` event, each stamped with a
+    /// unique LSN strictly greater than `base_lsn`. The payload of each event
+    /// MUST match the streaming path's tuple-image shape (ADR-0019) so the
+    /// client's idempotent apply (`upsert by pk`) treats a snapshot row exactly
+    /// like a streamed insert.
+    ///
+    /// # Errors
+    /// - [`SnapshotError::InvalidTable`] if `table` fails the identifier regex.
+    /// - [`SnapshotError::Backend`] for any underlying database error
+    ///   (connection, prepare, query). The transport logs and continues.
+    async fn snapshot(
+        &self,
+        table: &str,
+        base_lsn: Lsn,
+    ) -> Result<Vec<ReplicationEvent>, SnapshotError>;
+}
+
+/// Why a [`SnapshotSource::snapshot`] call failed. Surfaced to the transport,
+/// which logs the error and continues with live fan-out (a failed snapshot is
+/// NOT fatal — the client still receives subsequent mutations). Variants mirror
+/// [`WriteBackError`]'s categories: the table name was invalid, or the database
+/// errored. There is no payload/validation variant because snapshot reads
+/// values (never writes them) — there is no client-supplied payload to reject.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    /// The table name failed the strict identifier regex
+    /// (`^[a-z_][a-z0-9_]*$`). The name is client-controlled (from the
+    /// subscribe frame), so it is validated before any SQL is built.
+    #[error("invalid snapshot table identifier: {0}")]
+    InvalidTable(String),
+    /// The underlying database errored (connection, prepare, query). The
+    /// wrapped string is the backend's message; adapters MUST scrub it of
+    /// secrets (connection strings) before returning — same discipline as
+    /// [`WriteBackError::Backend`].
+    #[error("snapshot backend: {0}")]
+    Backend(String),
+}
+
+// ---------------------------------------------------------------------------
+// Schema discovery (WS1 — Flutter PowerSync-style redesign, Option-C).
+// ---------------------------------------------------------------------------
+
+/// One column in a synced table's schema, reported by [`SchemaSource`] so the
+/// client can auto-build its typed tables. Transport DTO, not a domain
+/// invariant (it exists to be serialized to the client) — lives here next to
+/// the port, mirroring [`SnapshotError`]'s placement.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaColumn {
+    /// Column name (`pg_attribute.attname`).
+    pub name: String,
+    /// Postgres type OID (`atttypid`), as `i32` to match nostos's wire
+    /// convention (OIDs are always < 2^31; see `snapshot_source.rs`).
+    pub pg_oid: i32,
+    /// SQLite column affinity (`"TEXT"` | `"INTEGER"` | `"REAL"`) for the
+    /// client's typed table. Mirrors the JSON token shape nostos emits so the
+    /// wire value stores without coercion.
+    pub affinity: String,
+}
+
+/// One synced table's schema.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaTable {
+    /// nostos's canonical table identifier — bare name for `public` (e.g.
+    /// `tasks`), else `schema.name`. Matches subscribe-frame / `WireFrame`
+    /// `table` so the client keys its typed table correctly.
+    pub name: String,
+    /// Real primary-key column names (`pg_index.indisprimary`), NOT a hardcoded
+    /// `"id"`. May be empty if the table has no replica identity.
+    pub primary_key: Vec<String>,
+    pub columns: Vec<SchemaColumn>,
+}
+
+/// The full schema of a publication, returned by [`SchemaSource::fetch`] and
+/// served by nostos-server's `GET /schema`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SchemaDescriptor {
+    /// The publication name (`PgReplicatorConfig::publication`).
+    pub publication: String,
+    pub tables: Vec<SchemaTable>,
+}
+
+/// Why a [`SchemaSource::fetch`] call failed. Mirrors [`SnapshotError`] minus
+/// the `InvalidTable` variant — there is no client-controlled table name on
+/// this path (the publication name is server config, not a frame), so there is
+/// no identifier to validate.
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaError {
+    /// The underlying database errored (connection, catalog query). Adapters
+    /// MUST scrub the wrapped string of secrets (connection strings) — same
+    /// discipline as [`SnapshotError::Backend`].
+    #[error("schema backend: {0}")]
+    Backend(String),
+}
+
+/// Read the publication's typed schema (tables/columns/SQLite-affinity) so a
+/// client can auto-build its typed tables (WS1). The Flutter SDK's default is
+/// to fetch this on connect rather than hand-write a `Schema` (the headline DX
+/// win over PowerSync).
+///
+/// The schema-side sibling of [`SnapshotSource`]: same port/adapter shape,
+/// backed by `PgSchemaSource` under `NOSTOS_REPLICATOR=pg`. ponytail: no tenant
+/// scoping in v1 — the schema is publication-wide metadata (the SET of synced
+/// tables), not tenant-specific rows; row isolation is the read-path
+/// predicate's job (ADR-0011/0018). `GET /schema` is v1-unauthenticated for the
+/// same reason — v2: add auth at the route layer if a managed deploy wants it.
+#[async_trait]
+pub trait SchemaSource: Send + Sync {
+    /// Fetch the full publication schema.
+    ///
+    /// # Errors
+    /// [`SchemaError::Backend`] for any underlying database error (connection,
+    /// catalog query). The server logs and returns 503.
+    async fn fetch(&self) -> Result<SchemaDescriptor, SchemaError>;
+}
+
 /// Aggregate throughput/accounting counters, updated by the fan-out loop and
 /// read by the `/metrics` endpoint. Lock-free (atomics); rendered to
 /// Prometheus text by the server.

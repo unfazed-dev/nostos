@@ -274,7 +274,20 @@ where
         let engine = Arc::clone(&self.engine);
         let id = tokio::task::spawn_blocking(move || -> nostos_core::Result<u64> {
             let mut engine = engine.blocking_lock();
-            engine.storage_mut().enqueue(write)
+            // Enqueue FIRST (durable) — WS2 slice-2 instant-local write. If the
+            // local apply below fails (or we crash between), the write is still
+            // queued and will appear on the server's echo. No data loss either way.
+            let id = engine.storage_mut().enqueue(write.clone())?;
+            // Optimistic local apply: render the row in the data store NOW so
+            // the UI is instant (offline-first), WITHOUT advancing the
+            // replication checkpoint (the row isn't server-confirmed yet). The
+            // server's echo later UPSERTs the authoritative image (reconcile,
+            // last-writer-wins). Best-effort: a failure here only delays
+            // visibility to echo-time — the write is already durable in the outbox.
+            if let Err(e) = engine.storage_mut().apply_local(&write) {
+                warn!(write_id = id, error = %e, "instant-local apply failed; write still queued");
+            }
+            Ok(id)
         })
         .await
         .map_err(|e| ClientError::Join(e.to_string()))??;

@@ -104,7 +104,13 @@ echo "[rn-harness]   spine on port $SPINE_PORT (pid $SPINE_PID)"
 # -------- 3. gradlew connectedDebugAndroidTest -----------------------------
 echo "[rn-harness] 3/5 gradlew connectedDebugAndroidTest -PnostosPort=$SPINE_PORT (on $EMU_SERIAL)"
 # Spool logcat across the run so the verdict grep can find the [rn-e2e] lines
-# even if gradle's own stdout truncates them.
+# even if gradle's own stdout truncates them. Enlarge the ring buffer first: a
+# flaky "PUSH_OK=0 ECHO_OK=1" split was traced to the small default buffer
+# dropping the EARLIER [rn-e2e] PUSH_OK line (logged before ECHO_OK) on a busy
+# emu — the instrumented test itself PASSED (XML failures=0); only the
+# proof-line capture flaked. `-G 8M` + a full `-d` dump (no `-t` tail window)
+# makes capture deterministic. See docs/plans/sdk-parity-final-three.md.
+"$ADB" -s "$EMU_SERIAL" logcat -G 8M 2>/dev/null || true
 "$ADB" -s "$EMU_SERIAL" logcat -c 2>/dev/null || true
 cd "$NOSTOS_RN/android"
 # shellcheck disable=SC2086
@@ -114,7 +120,7 @@ ANDROID_SERIAL="$EMU_SERIAL" ./gradlew connectedDebugAndroidTest -PnostosPort="$
 
 # -------- 4. capture [rn-e2e] proof lines + test XML -----------------------
 echo "[rn-harness] 4/5 capture [rn-e2e] proof lines + test XML"
-LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d -t 2000 2>/dev/null || true)
+LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d 2>/dev/null || true)
 PUSH_OK=0; ECHO_OK=0
 echo "$LOGCAT_DUMP" | grep -q '\[rn-e2e\] PUSH_OK' && PUSH_OK=1
 echo "$LOGCAT_DUMP" | grep -q '\[rn-e2e\] ECHO_OK' && ECHO_OK=1

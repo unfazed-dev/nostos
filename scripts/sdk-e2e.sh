@@ -33,19 +33,26 @@ fi
 declare -a RESULTS=()
 
 run_slice() { # <name> <command-string>
-  local name="$1"; local cmd="$2"
+  local name="$1"; local cmd="$2"; local start=$SECONDS; local st
   if bash -c "$cmd" > "/tmp/sdk-e2e-$name.log" 2>&1; then
-    printf "  ${GREEN}%-8s PASS${RESET}\n" "$name"
-    RESULTS+=("$name|PASS")
+    st="PASS"
+    printf "  ${GREEN}%-13s PASS${RESET}\n" "$name"
   else
-    printf "  ${RED}%-8s FAIL${RESET}  (log: /tmp/sdk-e2e-$name.log)\n" "$name"
-    RESULTS+=("$name|FAIL")
+    st="FAIL"
+    printf "  ${RED}%-13s FAIL${RESET}  (log: /tmp/sdk-e2e-$name.log)\n" "$name"
   fi
+  local dur=$((SECONDS - start))
+  # One meaningful proof line per slice (varies: PUSH_OK/ECHO_OK for device
+  # slices, "All tests passed"/"test result: ok" for host slices). bash-3.2
+  # safe (no assoc arrays) — record "name|status|dur|proof" in RESULTS.
+  local proof
+  proof="$(grep -hoEi '(\[-e2e\]|\[kt-e2e\]|\[rn-e2e\]|\[node-e2e\]|\[cap-e2e\]|\[dotnet-e2e\]) (PUSH_OK|ECHO_OK)|All tests passed!|VERDICT: PUSH_OK=[01] ECHO_OK=[01]|test result: ok\.|PUSH_OK: |ECHO_OK: ' "/tmp/sdk-e2e-$name.log" 2>/dev/null | tail -2 | tr '\n' ' ' | cut -c1-60)"
+  RESULTS+=("$name|$st|${dur}s|$proof")
 }
 
 skip_slice() { # <name> <reason>
-  printf "  ${YELLOW}%-8s SKIP${RESET}  %s\n" "$1" "$2"
-  RESULTS+=("$1|SKIP")
+  printf "  ${YELLOW}%-13s SKIP${RESET}  %s\n" "$1" "$2"
+  RESULTS+=("$1|SKIP|-|$2")
 }
 
 want() { # <name> — 0 if this slice is selected
@@ -65,18 +72,31 @@ want node      && run_slice node      "cd sdk/nostos_node && cargo build --relea
 want tauri     && run_slice tauri     "cd sdk/nostos_tauri && cargo test -- --nocapture"
 want web       && run_slice web       "cd sdk/nostos_web && npx playwright test --config=playwright.config.cjs"
 want capacitor && run_slice capacitor "cd sdk/nostos_capacitor && npm install --no-audit --no-fund && npm run build && cd example-app && npm install --no-audit --no-fund && npx playwright test --config=playwright.config.cjs"
-# dotnet — the Rust surface (the SDK's compiled core + unit tests). The C# runtime
-# live-E2E is SKIP everywhere: no dotnet on this host (the scaffold ships generated
-# C# for review; cross-compile of iOS/Android verified separately). PASS here =
-# the FFI core compiles + its 5 unit tests pass.
-want dotnet    && run_slice dotnet    "cd sdk/nostos_dotnet && cargo test --quiet && cargo build --release --quiet"
-
-# Flutter — needs docker Postgres (the W5 nostos_live_test harness).
-if want flutter; then
-  if docker ps >/dev/null 2>&1; then
-    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_live_test.dart"
+# dotnet — C# binding live-E2E against the shared spine (PUSH+ECHO). Loads the
+# host libnostos_dotnet.dylib over the UniFFI-CS surface via the dotnet/smoke
+# console app (the C# mirror of sdk/nostos_node/smoke_live.cjs). Requires `dotnet`
+# (brew install --cask dotnet-sdk); SKIPs honestly when absent.
+if want dotnet; then
+  if command -v dotnet >/dev/null 2>&1 || [ -x "$HOME/.dotnet/dotnet" ]; then
+    run_slice dotnet "cd sdk/nostos_dotnet && ./scripts/run-dotnet-e2e.sh"
   else
-    skip_slice flutter "(docker not running — nostos_live_test needs docker PG)"
+    skip_slice dotnet "(dotnet not installed — dot.net/v1/dotnet-install.sh | bash, or brew install --cask dotnet-sdk)"
+  fi
+fi
+
+# Flutter — packaging + live-sync E2E. nostos_server_test.dart spins up a REAL
+# `cargo run -p nostos-server` (NOSTOS_REPLICATOR=fake, NOSTOS_SYNC_AUTH=none — no
+# Postgres, no docker, no cloud; the same no-DB spine pattern the rust/node/web
+# slices use) and drives the Flutter SDK's connect/subscribe/watch loop inside a
+# genuine app bundle. `-d macos` because the test binds the server on 127.0.0.1
+# (host loopback) — only a host/desktop target reaches it directly (an emulator
+# would need 10.0.2.2). A real Supabase-CLOUD-backed live test is a separate
+# follow-up (needs the cloud project ref — see docs/plans/flutter-supabase-plug-and-play-launch.md).
+if want flutter; then
+  if command -v flutter >/dev/null 2>&1; then
+    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
+  else
+    skip_slice flutter "(flutter not on PATH)"
   fi
 fi
 
@@ -112,17 +132,29 @@ if want reactnative; then
   fi
 fi
 
-# ---- summary ----
-echo -e "\n${BOLD}Summary:${RESET}"
+# ---- per-SDK summary table (one row per SDK, not one collapsed line) ----
+echo -e "\n${BOLD}Per-SDK results:${RESET}"
+printf "  ${BOLD}%-13s  %-6s  %-6s  %s${RESET}\n" "SDK" "result" "dur" "proof/detail"
+for s in "${SLICES[@]}"; do
+  st=""; dur=""; proof=""
+  for r in "${RESULTS[@]}"; do
+    [ "${r%%|*}" = "$s" ] || continue
+    rest=${r#*|}; st=${rest%%|*}; rest2=${rest#*|}; dur=${rest2%%|*}; proof=${rest2#*|}
+    break
+  done
+  case "$st" in PASS) col=$GREEN;; FAIL) col=$RED;; *) col=$YELLOW;; esac
+  printf "  %-13s  ${col}%-6s${RESET}  %-6s  %s\n" "$s" "${st:--}" "$dur" "$proof"
+done
 pass=0; fail=0; skip=0
 for r in "${RESULTS[@]}"; do
-  case "${r##*|}" in
+  rest=${r#*|}; st=${rest%%|*}
+  case "$st" in
     PASS) pass=$((pass+1));;
     FAIL) fail=$((fail+1));;
     SKIP) skip=$((skip+1));;
   esac
 done
-ran=${#RESULTS[@]}
-printf "  ${GREEN}%d passed${RESET}, %d failed, ${YELLOW}%d skipped${RESET} / %d slices\n" \
-  "$pass" "$fail" "$skip" "$ran"
+echo ""
+printf "  ${GREEN}%d passed${RESET}, ${RED}%d failed${RESET}, ${YELLOW}%d skipped${RESET} / %d slices\n" \
+  "$pass" "$fail" "$skip" "${#RESULTS[@]}"
 exit "$fail"

@@ -26,8 +26,8 @@ type HmacSha256 = Hmac<Sha256>;
 
 // Tier is defined in nostos-domain (the pure ring) so both the control plane
 // (here) and the sync engine (nostos-server) can share one taxonomy + device-cap
-// without either sibling depending on the other. Re-exported here so existing
-// `crate::license::Tier` references keep resolving.
+// without either sibling depending on the other. Re-exported here so callers
+// importing `Tier` from the license module keep resolving.
 pub use nostos_domain::Tier;
 
 /// The decoded payload of a license token.
@@ -80,7 +80,7 @@ impl LicenseClaims {
 
 /// URL-safe base64 encode (no padding) — keeps license tokens short & URL-safe.
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn base64url_encode(bytes: &[u8]) -> String {
+pub fn base64url_encode(bytes: &[u8]) -> String {
     const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
     let mut i = 0;
@@ -107,10 +107,10 @@ pub(crate) fn base64url_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// URL-safe base64 decode (no padding). `pub(crate)` so the auth module can
+/// URL-safe base64 decode (no padding). `pub` so nostos-cloud's auth module can
 /// reuse it for JWT decoding — no base64 dependency needed.
 #[allow(clippy::cast_possible_truncation)] // ponytail: masked value is always 0..=255
-pub(crate) fn base64url_decode(s: &str) -> Result<Vec<u8>, LicenseError> {
+pub fn base64url_decode(s: &str) -> Result<Vec<u8>, LicenseError> {
     fn val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
@@ -152,6 +152,138 @@ pub enum LicenseError {
     Serde(#[from] serde_json::Error),
     #[error("hex decode error: {0}")]
     Hex(#[from] hex::FromHexError),
+}
+
+/// The startup entitlement a managed `nostos-server` reaches from a license
+/// token (or the OSS fallback). Produced by [`resolve_entitlement`]; the server
+/// feeds `device_cap` into `SessionManager::with_device_cap` and uses `tier`
+/// for tier-gated paths.
+#[derive(Debug, Clone)]
+pub struct ResolvedEntitlement {
+    /// The authoritative tier (from the token when presented, else the fallback).
+    pub tier: Tier,
+    /// Effective concurrent-device cap: the token's explicit `device_cap` if
+    /// set, else the tier default (`Tier::device_cap()`).
+    pub device_cap: u64,
+    /// The project the license was minted for (empty string when no token was
+    /// presented — the OSS self-host path).
+    pub project_id: String,
+}
+
+/// Resolve the startup entitlement from a signed license token.
+///
+/// - `license_token` — the `<payload>.<sig>` string from `NOSTOS_LICENSE`
+///   (empty means no license presented).
+/// - `secret` — the HMAC secret from `NOSTOS_LICENSE_SECRET`.
+/// - `fallback_tier` — the tier `NOSTOS_TIER` resolves to (OSS self-host keeps
+///   its free, unlimited `enterprise` default).
+///
+/// **Trust rule — the managed-server boundary:** an *absent* license falls back
+/// to `fallback_tier`; a *presented-but-invalid* license (bad signature,
+/// malformed, or expired) is a **hard error**. A managed deploy that presents a
+/// license is asserting "enforce my entitlement," so an invalid token must
+/// never silently downgrade to the unlimited OSS default. The caller treats the
+/// `Err` as fatal — `nostos-server` refuses to start. This makes the open-core
+/// trust model (ADR-0006) auditable: OSS stays free + unlimited, while a
+/// managed instance cannot fake or ignore its licensed cap.
+///
+/// # Errors
+/// [`LicenseError`] from [`LicenseClaims::verify`], but only when a token is
+/// actually *presented*. An empty token never errors — it returns the fallback.
+pub fn resolve_entitlement(
+    license_token: &str,
+    secret: &[u8],
+    fallback_tier: Tier,
+) -> Result<ResolvedEntitlement, LicenseError> {
+    if license_token.is_empty() {
+        return Ok(ResolvedEntitlement {
+            tier: fallback_tier,
+            device_cap: fallback_tier.device_cap(),
+            project_id: String::new(),
+        });
+    }
+    let claims = LicenseClaims::verify(license_token, secret)?;
+    let device_cap = claims
+        .device_cap
+        .unwrap_or_else(|| claims.tier.device_cap());
+    Ok(ResolvedEntitlement {
+        tier: claims.tier,
+        device_cap,
+        project_id: claims.project_id,
+    })
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    //! Trust-boundary tests for the entitlement resolution the managed
+    //! `nostos-server` performs at startup. These cover the NEW wiring (token
+    //! → tier + effective cap) without spinning the binary —
+    //! [`resolve_entitlement`] is the exact function nostos-server calls, so
+    //! this is the server's consumption path under test.
+    use super::*;
+
+    const SECRET: &[u8] = b"test-license-secret";
+
+    fn signed(tier: Tier, device_cap: Option<u64>, expires_in_secs: i64) -> String {
+        LicenseClaims {
+            project_id: "proj_abc".into(),
+            tier,
+            expires_at: OffsetDateTime::now_utc().unix_timestamp() + expires_in_secs,
+            device_cap,
+        }
+        .sign(SECRET)
+        .unwrap()
+    }
+
+    #[test]
+    fn absent_license_falls_back_to_env_tier() {
+        // OSS self-host: no token → fallback tier + its default cap.
+        let ent = resolve_entitlement("", SECRET, Tier::Enterprise).unwrap();
+        assert_eq!(ent.tier, Tier::Enterprise);
+        assert_eq!(ent.device_cap, Tier::Enterprise.device_cap());
+        assert!(ent.project_id.is_empty());
+    }
+
+    #[test]
+    fn valid_license_yields_claimed_tier_and_default_cap() {
+        let token = signed(Tier::Pro, None, 3_600);
+        let ent = resolve_entitlement(&token, SECRET, Tier::Enterprise).unwrap();
+        assert_eq!(ent.tier, Tier::Pro);
+        assert_eq!(ent.device_cap, Tier::Pro.device_cap()); // 1_000
+        assert_eq!(ent.project_id, "proj_abc");
+    }
+
+    #[test]
+    fn license_device_cap_overrides_tier_default() {
+        // A negotiated cap wins over the tier's built-in cap. This is the knob
+        // that lets managed-server enforcement tests reject the Nth device
+        // cheaply (cap=2 → 3rd connect rejected) without spinning 100+.
+        let token = signed(Tier::Pro, Some(2), 3_600);
+        let ent = resolve_entitlement(&token, SECRET, Tier::Enterprise).unwrap();
+        assert_eq!(ent.tier, Tier::Pro);
+        assert_eq!(ent.device_cap, 2);
+    }
+
+    #[test]
+    fn tampered_signature_is_fatal() {
+        let mut token = signed(Tier::Pro, None, 3_600);
+        let last = token.pop().unwrap();
+        token.push(if last == 'a' { 'b' } else { 'a' });
+        assert!(resolve_entitlement(&token, SECRET, Tier::Enterprise).is_err());
+    }
+
+    #[test]
+    fn wrong_secret_is_fatal() {
+        let token = signed(Tier::Pro, None, 3_600);
+        assert!(resolve_entitlement(&token, b"wrong-secret", Tier::Enterprise).is_err());
+    }
+
+    #[test]
+    fn expired_license_is_fatal() {
+        let token = signed(Tier::Pro, None, -1);
+        let err = resolve_entitlement(&token, SECRET, Tier::Enterprise).unwrap_err();
+        assert!(matches!(err, LicenseError::Expired));
+    }
 }
 
 #[cfg(test)]

@@ -225,9 +225,8 @@ pub fn build_write_frame(
             })?;
             if !v.is_object() {
                 return Err(JsValue::from_str(&format!(
-                    "nostos write: payload must be a JSON object (got {})"
-                    // Cheap summary: array / scalar / null — no PII.
-                    , match v {
+                    "nostos write: payload must be a JSON object (got {})", // Cheap summary: array / scalar / null — no PII.
+                    match v {
                         serde_json::Value::Array(_) => "array",
                         serde_json::Value::Null => "null",
                         _ => "scalar",

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
-use crate::license::Tier;
+use nostos_license::Tier;
 
 /// One account (a founder / customer). Email + password-hash + role.
 #[derive(Debug, Clone, Serialize, Deserialize)]

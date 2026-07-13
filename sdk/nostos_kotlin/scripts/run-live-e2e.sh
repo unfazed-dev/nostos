@@ -125,6 +125,13 @@ cd android
 # without it, AGP fans out across EVERY connected device and the build fails if
 # any sibling emulator (e.g. probe_arm64 @ API 37 / 16KB pages) trips a
 # device-specific JNA wall unrelated to this slice.
+# Enlarge + clear the logcat ring buffer so the run's proof lines (PUSH_OK is
+# logged before ECHO_OK) can't scroll out the small default buffer on a busy
+# emu — the same capture flake that intermittently returned PUSH_OK=0/ECHO_OK=1
+# in the RN harness while the instrumented test itself passed (XML failures=0).
+# Fix verified there 2026-07-13; the verdict dump below uses a full -d (no -t).
+"$ADB" -s "$EMU_SERIAL" logcat -G 8M 2>/dev/null || true
+"$ADB" -s "$EMU_SERIAL" logcat -c 2>/dev/null || true
 ANDROID_SERIAL="$EMU_SERIAL" ./gradlew connectedDebugAndroidTest -PnostosPort="$SPINE_PORT" --console=plain > "$GRADLE_LOG" 2>&1 || {
     echo "[harness] GRADLE FAILED — tail of $GRADLE_LOG:"; tail -60 "$GRADLE_LOG"; exit 1
 }
@@ -146,7 +153,7 @@ for f in files:
 PY
 
 # Verdict: PUSH_OK + ECHO_OK must both be in logcat, AND failures=0 in XML.
-LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d -t 2000 2>/dev/null || true)
+LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d 2>/dev/null || true)
 PUSH_OK=0; ECHO_OK=0
 echo "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] PUSH_OK' && PUSH_OK=1
 echo "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] ECHO_OK' && ECHO_OK=1

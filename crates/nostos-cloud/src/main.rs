@@ -20,9 +20,9 @@ use anyhow::Context;
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
-use nostos_cloud::license::Tier;
 use nostos_cloud::routes::{checkout_ok, router, CloudState};
 use nostos_cloud::store::CloudStore;
+use nostos_license::Tier;
 use clap::Parser;
 use tracing::info;
 
