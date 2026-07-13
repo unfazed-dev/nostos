@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use nostos_domain::{Lsn, RowOp};
 
-use crate::{Outbox, PendingWrite, Storage, StorageError};
+use crate::{Outbox, PendingWrite, Storage, StorageError, WriteOp};
 
 /// An in-memory store: rows keyed by `(table, pk)`, plus the durable checkpoint
 /// and a write outbox.
@@ -136,6 +136,33 @@ impl Outbox for InMemoryStorage {
         // Idempotent: removing an unknown id is a no-op (BTreeMap::remove
         // returns Option, not an error).
         self.outbox.remove(&id);
+        Ok(())
+    }
+
+    fn apply_local(&mut self, write: &PendingWrite) -> crate::Result<()> {
+        // WS2 slice-2: render the row into the data map now (optimistic), with
+        // NO checkpoint advance — the row is the user's intent, not yet a
+        // server-confirmed replication event. The echo's apply_batch reconciles.
+        match write.op {
+            WriteOp::Upsert => {
+                let payload = write
+                    .payload_json
+                    .as_deref()
+                    .unwrap_or("null")
+                    .as_bytes()
+                    .to_vec();
+                self.rows
+                    .insert((write.table.clone(), write.pk.clone()), payload);
+            }
+            WriteOp::Delete => {
+                self.rows.remove(&(write.table.clone(), write.pk.clone()));
+            }
+            WriteOp::Patch => {
+                // Partial-column; the server PATCH path (P3) is source of truth.
+                // ponytail: instant-local patch needs a read-merge-write; defer
+                // until a client issues one (demo + Supabase use upsert/delete).
+            }
+        }
         Ok(())
     }
 }

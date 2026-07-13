@@ -75,6 +75,24 @@ CREATE TABLE IF NOT EXISTS cairn_outbox (\
 /// The single meta key holding the last-applied LSN (`u64` decimal).
 const CHECKPOINT_KEY: &str = "checkpoint";
 
+/// A synced table's schema as the client sees it — the minimal projection of
+/// the server's `SchemaDescriptor` (nostos-application) that the view layer
+/// needs. Defined here (not reusing `SchemaDescriptor`) because nostos-client
+/// may NOT depend on nostos-application (hexagonal dependency direction).
+/// ponytail: `Deserialize` + `pg_oid`/`affinity` arrive when the `GET /schema`
+/// fetch wiring (WS3) lands — a view over `json_extract` only needs names.
+#[derive(Debug, Clone)]
+pub struct ClientTable {
+    /// Canonical table id — matches the wire `table` field / `cairn_data.table_name`.
+    pub name: String,
+    /// Primary-key column names. Informational for the view (the PK value is
+    /// extracted from the JSON payload like any other column); carried for the
+    /// future materialized-table path.
+    pub primary_key: Vec<String>,
+    /// Column names in tuple order.
+    pub columns: Vec<String>,
+}
+
 /// A durable SQLite-backed store. Owns one connection; the client apply loop is
 /// single-threaded by construction, so the `Mutex` is uncontended in practice —
 /// it exists so `Storage` (which takes `&mut self`) is satisfiable and so a
@@ -343,6 +361,61 @@ impl SqliteStorage {
         }
         Ok(out)
     }
+
+    /// Materialize one SQLite `VIEW` per synced table, projected over the opaque
+    /// `cairn_data` BLOB via JSON1 (WS2 read foundation). After this, the dev
+    /// writes natural PowerSync-style SQL — `SELECT title FROM tasks` — and it
+    /// resolves against the view, which `json_extract`s each column out of the
+    /// replication payload. The Pg path emits a column-named JSON object (see
+    /// `tuple_to_json_payload` in nostos-infra), so column identity is IN the
+    /// payload — no decoder, no inference, no apply-path change.
+    ///
+    /// `cairn_data` stays the single source of truth; the apply path is
+    /// UNCHANGED. This is the lazy cousin of "materialized typed tables": zero
+    /// new storage, zero migration, reversible (`DROP VIEW`). Ceiling: no non-PK
+    /// column indexes (a view computes `json_extract` per row → full scan on
+    /// `WHERE col = ?`). ponytail: fast-follow to real typed tables + indexes
+    /// when a query needs them. FakeReplicator's non-JSON bytes degrade to NULL
+    /// (dev fixture, not production).
+    ///
+    /// `CREATE VIEW IF NOT EXISTS` does NOT replace an existing view on a column
+    /// change — a schema refresh that needs to evolve a view must `DROP VIEW`
+    /// first. ponytail: schema-evolution handling is a fast-follow; today's
+    /// consumer re-creates the store on schema change (the demo does).
+    ///
+    /// Idempotent for an unchanged schema. An inherent method (not on `Storage`,
+    /// which stays minimal), like `query()` / `rows_for()`.
+    ///
+    /// # Errors
+    /// [`StorageError::Backend`] if any DDL fails.
+    pub fn apply_schema(&self, tables: &[ClientTable]) -> Result<(), StorageError> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("apply_schema: storage mutex poisoned");
+        for t in tables {
+            // ponytail: the catalog always has ≥1 column; we don't special-case
+            // an empty list (it would yield invalid `SELECT FROM`).
+            let cols: Vec<String> = t
+                .columns
+                .iter()
+                .map(|c| format!("json_extract(payload, '$.{c}') AS {}", quote_ident(c)))
+                .collect();
+            // SQLite views are static schema objects — bind params are NOT
+            // allowed in a view definition, so the table filter is an inlined,
+            // escaped string literal (the name is trusted catalog data, but the
+            // escape is cheap defense-in-depth).
+            let ddl = format!(
+                "CREATE VIEW IF NOT EXISTS {view} AS SELECT {cols} \
+                 FROM cairn_data WHERE table_name = {tbl}",
+                view = quote_ident(&view_name(&t.name)),
+                cols = cols.join(", "),
+                tbl = quote_string(&t.name),
+            );
+            conn.execute(&ddl, []).map_err(rusqlite_err)?;
+        }
+        Ok(())
+    }
 }
 
 impl Storage for SqliteStorage {
@@ -568,6 +641,44 @@ impl Outbox for SqliteStorage {
         tx.commit().map_err(rusqlite_err)?;
         Ok(())
     }
+
+    /// Instant-local write (WS2 slice-2): render the row into `cairn_data` NOW
+    /// so the view reflects the user's write before any server round-trip,
+    /// WITHOUT advancing the checkpoint (the row isn't server-confirmed). The
+    /// server's echo later UPSERTs the authoritative image (reconcile).
+    fn apply_local(&mut self, write: &PendingWrite) -> nostos_core::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("apply_local: storage mutex poisoned");
+        match write.op {
+            WriteOp::Upsert => {
+                // payload_json is the column-named JSON object the Pg path
+                // emits — store its UTF-8 bytes as the BLOB so the view's
+                // json_extract resolves it identically to a server echo.
+                let payload = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                conn.execute(
+                    "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload) \
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![write.table, write.pk, payload],
+                )
+                .map_err(rusqlite_err)?;
+            }
+            WriteOp::Delete => {
+                conn.execute(
+                    "DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+                    rusqlite::params![write.table, write.pk],
+                )
+                .map_err(rusqlite_err)?;
+            }
+            WriteOp::Patch => {
+                // Partial-column; the server PATCH path (P3) is source of truth.
+                // ponytail: instant-local patch needs a read-merge-write; defer
+                // until a client issues one (demo + Supabase use upsert/delete).
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Map a `rusqlite::Error` into the backend error variant, stringifying so the
@@ -580,6 +691,30 @@ impl Outbox for SqliteStorage {
 #[allow(clippy::needless_pass_by_value)]
 fn rusqlite_err(e: rusqlite::Error) -> StorageError {
     StorageError::Backend(e.to_string())
+}
+
+/// Map a wire table name to a safe SQLite view name. Bare `public` names pass
+/// through; schema-qualified names (`myschema.tasks`) collapse to
+/// `myschema_tasks` (SQLite has no schema-qualified local table here). ponytail:
+/// collision risk if two schemas share a table name — add a schema-aware
+/// namespace when that's observed.
+fn view_name(table: &str) -> String {
+    table.replace('.', "_")
+}
+
+/// Quote a SQLite identifier (double-quote, doubling embedded quotes) so a
+/// catalog name can't break DDL. Names come from PG's catalog (trusted), but
+/// this is cheap defense-in-depth against an odd identifier.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Quote a SQL string literal (single-quote, doubling embedded single-quotes).
+/// Used to inline a table name into a view definition (SQLite views can't take
+/// bind params). Same trusted-catalog + defense-in-depth stance as
+/// [`quote_ident`].
+fn quote_string(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Does `cairn_outbox` currently have a column named `needle`? Used by the v1
@@ -1000,5 +1135,138 @@ mod tests {
             Some("hello")
         );
         assert_eq!(row.get("n").and_then(serde_json::Value::as_i64), Some(42));
+    }
+
+    /// WS2 read foundation: `apply_schema` materializes a `VIEW` per table over
+    /// the opaque `cairn_data` BLOB, so `SELECT col FROM <table>` returns typed
+    /// values — PowerSync-style read DX WITHOUT materialized typed tables. This
+    /// is the load-bearing claim of slice-1, asserted end-to-end.
+    #[test]
+    fn apply_schema_creates_queryable_view_over_opaque_payload() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_schema(&[ClientTable {
+            name: "tasks".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "title".into(), "completed".into()],
+        }])
+        .unwrap();
+        // Payload is the column-named JSON object the Pg path emits
+        // (tuple_to_json_payload keyed by column name).
+        s.apply_batch(
+            &[RowOp::Insert {
+                table: "tasks".into(),
+                pk: "t1".into(),
+                payload: Bytes::copy_from_slice(
+                    br#"{"id":"t1","title":"buy milk","completed":false}"#,
+                ),
+            }],
+            Lsn::new(1),
+        )
+        .unwrap();
+
+        // The dev's natural SQL resolves against the `tasks` VIEW, not the raw
+        // `cairn_data` BLOB — and the values come back typed (str/bool), not as
+        // opaque bytes.
+        let rows = s.query("SELECT id, title, completed FROM tasks").unwrap();
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.get("id").and_then(serde_json::Value::as_str), Some("t1"));
+        assert_eq!(
+            r.get("title").and_then(serde_json::Value::as_str),
+            Some("buy milk")
+        );
+        // SQLite models JSON booleans as INTEGER 0/1 (no native bool type —
+        // same as PowerSync's SQLite layer). The Dart API (WS3) maps 0/1 ↔ bool.
+        assert_eq!(
+            r.get("completed").and_then(serde_json::Value::as_i64),
+            Some(0)
+        );
+
+        // Idempotent: re-applying the SAME schema must not error. (Column-change
+        // evolution needs DROP first — documented fast-follow, not tested here.)
+        s.apply_schema(&[ClientTable {
+            name: "tasks".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "title".into(), "completed".into()],
+        }])
+        .unwrap();
+        let rows = s.query("SELECT title FROM tasks").unwrap();
+        assert_eq!(
+            rows[0].get("title").and_then(serde_json::Value::as_str),
+            Some("buy milk")
+        );
+
+        // A DELETE on cairn_data propagates through the view (the view is live,
+        // not a snapshot).
+        s.apply_batch(
+            &[RowOp::Delete {
+                table: "tasks".into(),
+                pk: "t1".into(),
+            }],
+            Lsn::new(2),
+        )
+        .unwrap();
+        assert!(s.query("SELECT id FROM tasks").unwrap().is_empty());
+    }
+
+    /// WS2 slice-2: an instant-local write (`Outbox::apply_local`) renders the
+    /// row in the view IMMEDIATELY — before any server round-trip — and the
+    /// checkpoint does NOT advance (the row isn't server-confirmed). The
+    /// server's echo (`apply_batch`) then UPSERTs the authoritative image
+    /// (reconcile, last-writer-wins). This is the load-bearing claim of slice-2.
+    #[test]
+    fn apply_local_renders_instantly_and_echo_reconciles() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_schema(&[ClientTable {
+            name: "tasks".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "title".into()],
+        }])
+        .unwrap();
+        let checkpoint_before = s.checkpoint().unwrap();
+
+        // The user writes — instant-local: visible in the view NOW, offline.
+        s.apply_local(&PendingWrite {
+            table: "tasks".into(),
+            op: WriteOp::Upsert,
+            pk: "t1".into(),
+            payload_json: Some(r#"{"id":"t1","title":"optimistic"}"#.into()),
+        })
+        .unwrap();
+        let rows = s.query("SELECT title FROM tasks").unwrap();
+        assert_eq!(
+            rows[0].get("title").and_then(serde_json::Value::as_str),
+            Some("optimistic")
+        );
+        // The checkpoint did NOT move — the row is the user's intent, not a
+        // server-confirmed replication event (moving it here would break resume).
+        assert_eq!(s.checkpoint().unwrap(), checkpoint_before);
+
+        // The server's echo arrives with the authoritative image — UPSERT wins.
+        s.apply_batch(
+            &[RowOp::Insert {
+                table: "tasks".into(),
+                pk: "t1".into(),
+                payload: Bytes::copy_from_slice(br#"{"id":"t1","title":"authoritative"}"#),
+            }],
+            Lsn::new(100),
+        )
+        .unwrap();
+        let rows = s.query("SELECT title FROM tasks").unwrap();
+        assert_eq!(
+            rows[0].get("title").and_then(serde_json::Value::as_str),
+            Some("authoritative")
+        );
+        assert_eq!(s.checkpoint().unwrap(), Lsn::new(100));
+
+        // An instant-local DELETE removes it from the view before the echo too.
+        s.apply_local(&PendingWrite {
+            table: "tasks".into(),
+            op: WriteOp::Delete,
+            pk: "t1".into(),
+            payload_json: None,
+        })
+        .unwrap();
+        assert!(s.query("SELECT id FROM tasks").unwrap().is_empty());
     }
 }

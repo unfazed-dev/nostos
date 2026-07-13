@@ -117,6 +117,30 @@ pub trait Outbox {
     fn mark_dead_letter(&self, _id: u64) -> crate::Result<()> {
         Ok(())
     }
+
+    /// Apply `write` to the local data store IMMEDIATELY (optimistic), WITHOUT
+    /// advancing the replication checkpoint. This is the "instant-local write"
+    /// that gives the offline-first feel: the user's write renders locally
+    /// before any server round-trip. The server's echo later UPSERTs the
+    /// authoritative image on top (last-writer-wins reconcile).
+    ///
+    /// Distinct from [`crate::Storage::apply_batch`], which advances the
+    /// checkpoint and is reserved for server-confirmed replication events.
+    /// `apply_local` writes the same row but leaves the cursor untouched — the
+    /// row is the user's intent, not yet a confirmed fact.
+    ///
+    /// **Default:** no-op. Instant-local is an optimization, not a correctness
+    /// requirement: a backend that doesn't override it simply shows the row on
+    /// the server's echo instead of instantly (the write is still queued by
+    /// [`Self::enqueue`], so nothing is lost). Backends with a data store
+    /// (`SqliteStorage`, `InMemoryStorage`) override it to write the row now.
+    ///
+    /// **Best-effort by contract:** the client `write` path enqueues FIRST and
+    /// treats an `Err` here as "visibility delayed to echo," not as a write
+    /// failure — the outbox entry is already durable before this runs.
+    fn apply_local(&mut self, _write: &PendingWrite) -> crate::Result<()> {
+        Ok(())
+    }
 }
 
 /// One local write awaiting server ack. The client's *write intent* — distinct
