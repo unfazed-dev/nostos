@@ -63,19 +63,56 @@ surface, and the durable outbox holds writes until reconnect.
   (`SUPABASE_PASSWORD` + `NOSTOS_PG_URL_CLOUD`); `.env.example` carries placeholders
   only. Never commit the password.
 
-### IPv6-only reachability block (verified 2026-07-13)
+### IPv6-only reachability — RESOLVED via a WARP relay (2026-07-13)
 
 `db.ltamqsxxumtusyxswezi.supabase.co` resolves **IPv6-only** (`2406:da1c:…`), and
-this dev host has **no IPv6 route** (`No route to host` to the AAAA and even to
-`ipv6.google.com`). So nostos-server's `PgReplicator` cannot reach the cloud from
-here — the cloud-backed demo is **blocked by network**, not code. This is the
-exact scenario `nostos doctor`'s IPv6-only hint flags. Unblock options for the
-operator: (a) enable IPv6 on the dev network, (b) add the Supabase **IPv4 add-on**
-to the project (gives `db.<ref>.supabase.co` an A record), or (c) run the demo
-from a host with IPv6. The moment one of those is true, the launch command above
-works as-is. **Until then, the visual demo runs against the local e2e spine**
-(real JSON task payloads, write+echo, full offline-first proof — the same backend
-the other SDK slices use).
+this dev host's VPN stack (ProtonVPN + Tailscale) tunnels IPv4 but **drops IPv6**
+egress — so nostos-server's `PgReplicator` cannot reach the direct host. The launch
+plan's three documented fixes: host IPv6 / Supabase IPv4 add-on / **a relay**.
+
+**The relay (in use, verified end-to-end):** a `wireproxy` userspace WireGuard
+client tunnels to **Cloudflare WARP** (which has full IPv6) and exposes a local
+**TCPClientTunnel `127.0.0.1:15433` → `[Supabase-IPv6]:5432`**. nostos-server
+connects to plain IPv4 `127.0.0.1:15433`; wireproxy relays each byte over WARP to
+Supabase. Supabase accepts **non-SSL** on the direct port + authenticates with
+**SCRAM-SHA-256** — both compatible with nostos's `NoTls` connector (no TLS change
+needed). Verified: a correct PG StartupMessage through the tunnel returns
+`AuthenticationRequest code=10 (SCRAM-SHA-256)`; nostos-server then connects,
+creates `cairn_slot`, and streams the `cairn_pub` publication.
+
+**nostos-server launch (cloud-backed, via the relay):**
+```
+NOSTOS_BIND=127.0.0.1:8800 \
+NOSTOS_REPLICATOR=pg \
+NOSTOS_PG_URL='postgresql://postgres:<pw>@127.0.0.1:15433/postgres?sslmode=disable' \
+NOSTOS_PG_SLOT=cairn_slot NOSTOS_PG_PUBLICATION=cairn_pub NOSTOS_SYNC_AUTH=none \
+RUST_LOG=info ./target/debug/nostos-server
+```
+(the binary must be built with `--features pg`; `target/debug/nostos-server` is.)
+
+**Reproducing the relay** (the WARP private key is a regenerable Cloudflare free-tier
+secret — keep it out of git; the live conf lives at `/private/tmp/.../scratchpad/nostos-warp.conf`):
+register a WARP device at `engage.cloudflareclient.com`, then run
+`wireproxy -c nostos-warp.conf` with a `[TCPClientTunnel] BindAddress=127.0.0.1:15433`
+`Target=[<supabase-ipv6>]:5432`. For a production deploy, prefer native host IPv6 or
+the Supabase IPv4 add-on over a WARP relay; the relay is a dev-box workaround for the
+VPN-broken-IPv6 case (it mirrors how PowerSync "just works" — PowerSync's *client* is
+IPv4/443 to a sync service; the Postgres link is server-side, where nostos-server now
+also sits, just tunneled through WARP).
+
+**Verified demo (2026-07-13):** schema applied (`docker/pg-init/01-sources.sql` →
+`tasks` + `cairn_pub`); nostos-server connected to Supabase via the relay; a Flutter
+app on macOS connected to nostos-server, and a row INSERTed into the **Supabase cloud
+`tasks`** table appeared in the app in real time (server→client logical replication).
+
+**Known nostos-server gap surfaced by this demo (separate from IPv6):** a *fresh*
+subscriber does **not** receive the table's pre-existing rows — only events that
+arrive *after* subscribe. Rows INSERTed before the app connects are missed; rows
+INSERTed while connected stream live. PowerSync sends the existing snapshot on first
+sync ("open the app, see your data"); nostos-server's fan-out currently forwards from
+subscribe-time only. This is a real PowerSync-parity gap to address in the
+`FanOutService`/session path — not blocking the IPv6 fix, but blocking the "fresh
+install sees existing data" UX.
 
 ## Operator controls (the same five on every SDK)
 
