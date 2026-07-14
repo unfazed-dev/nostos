@@ -263,3 +263,20 @@ fixture-todo-nostos-live-down:
 .PHONY: fixture-todo-nostos-live-proof
 fixture-todo-nostos-live-proof:
 	cd fixtures/flutter/todo && flutter test integration_test/nostos_live_test.dart -d macos
+
+# ----------------------------------------------------------------------------
+# Playbook (agent-native visual-plan MDX -> standalone HTML).
+# Edit plan.mdx, then `make playbook` regenerates playbook.html and opens it.
+# Self-contained: Mermaid via CDN, real tables/callouts — no Plan UI bridge,
+# no auth, no Chrome PNA gate. Override the plan dir: PLAYBOOK_DIR=plans/<slug>.
+# render-playbook.py is a GENERIC agent-native plan.mdx renderer (stdlib-only;
+# kept byte-identical with applications/p2/scripts/render-playbook.py): Mermaid,
+# Code, Table, Callout, Checklist, QuestionForm, FileTree, TabsBlock,
+# AnnotatedCode, Diagram, Columns + markdown. See its header docstring for limits.
+# ----------------------------------------------------------------------------
+PLAYBOOK_DIR ?= plans/nostos-supabase-realtime
+
+.PHONY: playbook
+playbook: ## Render the playbook (plan.mdx -> playbook.html) and open it in the browser.
+	python3 scripts/render-playbook.py $(PLAYBOOK_DIR)/plan.mdx
+	open $(PLAYBOOK_DIR)/playbook.html

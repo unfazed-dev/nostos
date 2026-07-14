@@ -46,3 +46,9 @@ perf.data*
 
 .claude/
 .claude-flow/
+
+# --- Agent-Native local plan bridge (machine-local token/state, never commit) ---
+plans/*/.plan-url
+plans/**/.plan-url
+plans/*/.plan-state.json
+plans/**/.plan-state.json
