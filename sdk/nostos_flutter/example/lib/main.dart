@@ -2,22 +2,23 @@
 //
 // Demonstrates EVERY nostos capability through one screen:
 //   - live replication        → the list updates as rows arrive over /sync
-//   - reactive watch          → watch('tasks') drives the ListView
+//   - reactive watch          → watch(<SQL>) drives the ListView
 //   - durable offline writes  → add a task while OFFLINE; it queues in the local
 //                               SQLite outbox + flushes on RECONNECT (ADR-0013)
 //   - client↔server echo      → your own write round-trips back into the list
+//   - per-row delete / edit   → trailing delete + tap-to-edit (upsert by pk)
 //   - connection state        → the badge tracks connecting/connected/reconnecting/disconnected
-//   - operator controls       → Connect / Disconnect / Stop / Airplane
+//   - operator controls       → Connect/Resume · Disconnect · Stop · Airplane (each distinct)
 //
 // nostos operates as a LOCAL offline-first store: reads + writes hit the on-device
 // SQLite immediately; the server is just a sync peer. Pull the connection
-// (Disconnect/Airplane) and the app keeps working — writes land locally and
-// sync the moment the link is back. That is the PowerSync-equivalent contract.
+// (Disconnect/Stop) and the app keeps working — writes land locally and sync
+// the moment the link is back. That is the PowerSync-equivalent contract.
 //
 // Backend: point NOSTOS_URL at a `nostos-server` (fake/pg replicator) or the shared
 // e2e spine (`ws://127.0.0.1:<port>/sync`). The spine + the pg replicator deliver
 // real JSON payloads (title/completed render); the fake replicator delivers
-// opaque filler (rows still arrive + queue, but render as raw bytes).
+// opaque filler (rows still arrive + queue, but render as raw keys).
 //
 // Run: see docs/plans/nostos-reference-demo-app.md.
 
@@ -35,10 +36,21 @@ const _kUrl = String.fromEnvironment(
   defaultValue: 'ws://127.0.0.1:8800/sync',
 );
 
-/// A stable on-device SQLite path so Disconnect→Reconnect (which creates a new
-/// Nostos instance) resumes the SAME durable store — pending writes survive.
+/// A stable on-device SQLite path so Disconnect→Resume (and Stop→Connect)
+/// re-open the SAME durable store — pending writes + already-synced rows
+/// survive across object lifecycles.
 String get _sqlitePath =>
     '${Directory.systemTemp.path}/nostos-demo-tasks.sqlite';
+
+// Reactive SELECT for the list. The WS2 `tasks` view (materialized by
+// `apply_schema`) projects the row key as `_pk` plus the typed payload
+// columns, so the PowerSync-idiomatic `SELECT * FROM tasks` carries everything
+// the list + toggle/edit/delete need (keyed on `_pk`).
+//
+// For the fake replicator the payload is opaque filler bytes, so the
+// json_extract'd columns come back NULL — the row still carries `_pk` and the
+// list falls back to rendering the raw key (see _list).
+const _kWatchSql = 'SELECT * FROM tasks';
 
 // RFC 4122 v4 UUID for the `tasks.id` column (uuid PK). Hand-rolled from
 // dart:math so the demo adds no dependency; the write-back binds pk as $1 → id.
@@ -72,7 +84,28 @@ class TasksPage extends StatefulWidget {
 }
 
 class _TasksPageState extends State<TasksPage> {
-  Nostos? _nostos;
+  // The NostosDatabase handle. Null after Stop (or before first Connect);
+  // non-null but `_held` after Disconnect (object retained, session closed —
+  // see _disconnect/_stop for why that distinction is visible to the user).
+  NostosDatabase? _db;
+  // `_held` = a Disconnect closed the session but we KEPT the NostosDatabase
+  // reference (and the local SQLite file). Visibly distinct from Stop (which
+  // nulls _db) at the object-lifecycle level: Resume re-runs
+  // NostosDatabase.connect on the same _sqlitePath and picks up the durable
+  // store + WS2 views without a cold start.
+  bool _held = false;
+  // Airplane: a CLIENT-SIDE offline toggle (no FFI call). The UI badge
+  // reflects it; the underlying reconnect loop (connectionState emits
+  // 'reconnecting') demonstrates real server-side retry. To observe a TRUE
+  // network cut, stop nostos-server — the app shows 'reconnecting' and any
+  // queued writes flush on restore.
+  //
+  // ponytail: a TRUE pause (stop the sync loop but keep accepting local
+  // writes) and a real network offline-toggle need an FFI extension —
+  // pause()/resume()/setOffline() on the underlying Nostos handle. Deferred
+  // (do NOT add FFI surface in WS5). Today Airplane is a UI hint + badge,
+  // not a wire cut.
+  bool _offline = false;
   NostosConnectionState _state = NostosConnectionState.disconnected;
   final List<Map<String, dynamic>> _rows = [];
   StreamSubscription? _rowsSub;
@@ -80,8 +113,9 @@ class _TasksPageState extends State<TasksPage> {
   final TextEditingController _title = TextEditingController();
   int _writesQueuedWhileOffline = 0;
 
-  bool get _isLive => _nostos != null;
-  bool get _isOffline => _state == NostosConnectionState.disconnected ||
+  bool get _isLive => _db != null && !_held;
+  bool get _isBadLink =>
+      _state == NostosConnectionState.disconnected ||
       _state == NostosConnectionState.reconnecting;
 
   @override
@@ -94,27 +128,35 @@ class _TasksPageState extends State<TasksPage> {
   void dispose() {
     _rowsSub?.cancel();
     _stateSub?.cancel();
-    _nostos?.close();
+    _db?.close();
     _title.dispose();
     super.dispose();
   }
 
   // --- connection lifecycle --------------------------------------------------
 
+  // Connect (cold start, _db == null) OR Resume (fast re-subscribe, _held).
+  // Both routes call this; NostosDatabase.connect re-opens the handle on the
+  // SAME _sqlitePath, so the durable store + WS2 views survive across
+  // close() and queued writes flush on the next connected tick. Idempotent
+  // while live.
   Future<void> _connect() async {
     if (_isLive) return;
-    final c = await Nostos.connect(url: _kUrl, sqlitePath: _sqlitePath);
+    final db = await NostosDatabase.connect(
+      url: _kUrl,
+      sqlitePath: _sqlitePath,
+    );
     _stateSub?.cancel();
-    _stateSub = c.connectionState.listen((s) {
+    _stateSub = db.connectionState.listen((s) {
       if (!mounted) return;
       setState(() {
         _state = s;
         if (s == NostosConnectionState.connected) _writesQueuedWhileOffline = 0;
       });
     });
-    await c.subscribe('tasks');
+    await db.subscribe('tasks');
     _rowsSub?.cancel();
-    _rowsSub = c.watch('tasks').listen((rows) {
+    _rowsSub = db.watch(_kWatchSql).listen((rows) {
       if (!mounted) return;
       setState(() => _rows
         ..clear()
@@ -122,38 +164,50 @@ class _TasksPageState extends State<TasksPage> {
     });
     if (!mounted) return;
     setState(() {
-      _nostos = c;
+      _db = db;
+      _held = false;
       _state = NostosConnectionState.connecting;
     });
   }
 
-  // Disconnect = close() + drop the handle. The SQLite store (incl. the pending
-  // outbox) persists at _sqlitePath; a fresh Nostos.connect on the same path
-  // resumes it and flushes queued writes on reconnect.
-  Future<void> _disconnect() async {
+  // Shared teardown: cancel the watch + state subs and close the session.
+  // `keep = true` = Disconnect (retain `_db` + the local SQLite file so the
+  // primary button re-labels to "Resume" and the next `_connect` re-opens the
+  // persisted store fast). `keep = false` = Stop (null `_db` — full teardown,
+  // cold-start next "Connect"; the local SQLite file still survives).
+  Future<void> _tearDown({required bool keep}) async {
     await _rowsSub?.cancel();
     await _stateSub?.cancel();
-    await _nostos?.close();
+    await _db?.close();
     if (!mounted) return;
     setState(() {
-      _nostos = null;
+      _held = keep;
+      if (!keep) _db = null;
       _state = NostosConnectionState.disconnected;
     });
   }
+
+  Future<void> _disconnect() => _tearDown(keep: true);
+
+  Future<void> _stop() => _tearDown(keep: false);
+
+  // Airplane toggle — flips the client-side `_offline` flag only. See its
+  // ponytail above: no FFI surface for a real wire cut in WS5.
+  void _toggleAirplane() => setState(() => _offline = !_offline);
 
   // --- writes ----------------------------------------------------------------
 
   Future<void> _addTask() async {
     final title = _title.text.trim();
-    if (title.isEmpty || _nostos == null) return;
+    if (title.isEmpty || _db == null || _held) return;
     _title.clear();
     final pk = _uuidV4();
     setState(() {
-      if (_isOffline) _writesQueuedWhileOffline++;
+      if (_offline || _isBadLink) _writesQueuedWhileOffline++;
     });
     try {
-      await _nostos!.write(
-        'tasks',
+      await _db!.write(
+        table: 'tasks',
         op: 'upsert',
         pk: pk,
         payload: {
@@ -172,11 +226,11 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   Future<void> _toggle(Map<String, dynamic> row, bool done) async {
-    if (_nostos == null) return;
-    final pk = row['_pk']?.toString() ?? row['pk']?.toString();
+    if (_db == null || _held) return;
+    final pk = row['_pk']?.toString();
     if (pk == null) return;
-    await _nostos!.write(
-      'tasks',
+    await _db!.write(
+      table: 'tasks',
       op: 'upsert',
       pk: pk,
       payload: {
@@ -187,13 +241,68 @@ class _TasksPageState extends State<TasksPage> {
     );
   }
 
+  // Tap a row → edit-title dialog → upsert by pk (carries current completed
+  // + org_id so the partial write doesn't blank them server-side).
+  Future<void> _editRow(Map<String, dynamic> row) async {
+    if (_db == null || _held) return;
+    final pk = row['_pk']?.toString();
+    if (pk == null) return;
+    final controller =
+        TextEditingController(text: row['title']?.toString() ?? '');
+    final next = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit task'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Title'),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || next == null || next.isEmpty) return;
+    await _db!.write(
+      table: 'tasks',
+      op: 'upsert',
+      pk: pk,
+      payload: {
+        'title': next,
+        'completed': row['completed'] == true,
+        'org_id': row['org_id'] ?? '00000000-0000-0000-0000-000000000000',
+      },
+    );
+  }
+
+  // Per-row delete (trailing IconButton). `op: 'delete'` enqueues a
+  // delete-by-pk in the durable outbox; the row round-trips out of `watch`
+  // like any replicated change.
+  Future<void> _deleteRow(Map<String, dynamic> row) async {
+    if (_db == null || _held) return;
+    final pk = row['_pk']?.toString();
+    if (pk == null) return;
+    await _db!.write(table: 'tasks', op: 'delete', pk: pk);
+  }
+
   // --- UI --------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
           title: const Text('Nostos Tasks'),
-          actions: [_StateBadge(state: _state)],
+          actions: [
+            _StateBadge(state: _state, airplane: _offline),
+          ],
         ),
         body: Column(
           children: [
@@ -210,6 +319,19 @@ class _TasksPageState extends State<TasksPage> {
                   ),
                 ),
               ),
+            if (_offline)
+              Material(
+                color: Colors.blue.shade50,
+                child: ListTile(
+                  leading: const Icon(Icons.airplanemode_active, size: 20),
+                  title: const Text(
+                    'Airplane mode (client-side). Stop nostos-server to see a '
+                    'real network cut — the app will show reconnecting and '
+                    'queued writes flush on restore.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
             Expanded(child: _list()),
             _addBar(),
           ],
@@ -220,32 +342,40 @@ class _TasksPageState extends State<TasksPage> {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         child: Wrap(
           spacing: 8,
+          runSpacing: 4,
           children: [
+            // Primary lifecycle button: Connect (cold start) or Resume (fast
+            // re-subscribe after Disconnect) while not live; Disconnect while
+            // live. The label flips between Connect/Resume based on whether
+            // _db was retained (_held) — the visible signal that Disconnect
+            // and Stop differ at the object level.
             if (!_isLive)
               FilledButton.icon(
                 icon: const Icon(Icons.power, size: 18),
-                label: const Text('Connect'),
+                label: Text(_db == null ? 'Connect' : 'Resume'),
                 onPressed: _connect,
               )
             else
               FilledButton.tonalIcon(
-                icon: Icon(_isOffline ? Icons.cloud_off : Icons.cloud_done,
-                    size: 18),
+                icon: const Icon(Icons.cloud_off, size: 18),
                 label: const Text('Disconnect'),
                 onPressed: _disconnect,
               ),
-            FilledButton.tonalIcon(
-              icon: Icon(_isOffline ? Icons.wifi : Icons.airplanemode_active,
-                  size: 18),
-              label: Text(_isOffline ? 'Airplane (resume)' : 'Airplane'),
-              onPressed: _isLive
-                  ? (_isOffline ? _connect : _disconnect)
-                  : null,
-            ),
+            // Stop: full teardown (close + null _db). Enabled whenever a
+            // handle exists (live OR held) so a Disconnect can be promoted to
+            // a Stop. Disabled only when no handle exists at all.
             OutlinedButton.icon(
               icon: const Icon(Icons.stop_circle_outlined, size: 18),
               label: const Text('Stop'),
-              onPressed: _isLive ? _disconnect : null,
+              onPressed: _db != null ? _stop : null,
+            ),
+            // Airplane: client-side toggle, always available. Selected state
+            // drives the badge + the offline banner above.
+            FilterChip(
+              avatar: const Icon(Icons.airplanemode_active, size: 18),
+              label: Text(_offline ? 'Airplane on' : 'Airplane'),
+              selected: _offline,
+              onSelected: (_) => _toggleAirplane(),
             ),
           ],
         ),
@@ -266,12 +396,14 @@ class _TasksPageState extends State<TasksPage> {
         final row = _rows[i];
         final title = row['title']?.toString();
         final completed = row['completed'] == true;
-        final key = row['_pk']?.toString() ?? row['pk']?.toString() ?? '$i';
+        final key = row['_pk']?.toString() ?? '$i';
+        final canMutate = _isLive;
         return ListTile(
           leading: Checkbox(
             value: completed,
-            onChanged: _isLive ? (v) => _toggle(row, v ?? false) : null,
+            onChanged: canMutate ? (v) => _toggle(row, v ?? false) : null,
           ),
+          onTap: canMutate ? () => _editRow(row) : null,
           title: title == null
               ? Text(key,
                   style: const TextStyle(
@@ -280,7 +412,16 @@ class _TasksPageState extends State<TasksPage> {
                   style: TextStyle(
                       decoration:
                           completed ? TextDecoration.lineThrough : null)),
-          subtitle: title == null ? Text(row.toString()) : Text('pk: $key'),
+          subtitle: title == null
+              ? Text(row.toString(),
+                  style: const TextStyle(
+                      fontFamily: 'monospace', fontSize: 11))
+              : Text('pk: $key'),
+          trailing: IconButton(
+            tooltip: 'Delete task',
+            icon: const Icon(Icons.delete_outline, size: 20),
+            onPressed: canMutate ? () => _deleteRow(row) : null,
+          ),
         );
       },
     );
@@ -325,11 +466,24 @@ class _TasksPageState extends State<TasksPage> {
 }
 
 class _StateBadge extends StatelessWidget {
-  const _StateBadge({required this.state});
+  const _StateBadge({required this.state, required this.airplane});
   final NostosConnectionState state;
+  final bool airplane;
 
   @override
   Widget build(BuildContext context) {
+    if (airplane) {
+      return Padding(
+        padding: const EdgeInsets.only(right: 12),
+        child: Chip(
+          avatar: const Icon(Icons.airplanemode_active,
+              color: Colors.blue, size: 18),
+          label: const Text('airplane — will retry',
+              style:
+                  TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+        ),
+      );
+    }
     final (color, icon) = switch (state) {
       NostosConnectionState.connected => (Colors.green, Icons.cloud_done),
       NostosConnectionState.connecting => (Colors.orange, Icons.sync),

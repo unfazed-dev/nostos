@@ -26,6 +26,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:nostos_flutter/nostos_flutter.dart';
+// `Table` is intentionally NOT re-exported from the package barrel (it would
+// shadow material's `Table` widget — see lib/nostos_flutter.dart). Reach it via
+// the src/ import when binding by name, as here.
+import 'package:nostos_flutter/src/schema.dart' show Table;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -83,21 +87,38 @@ void main() {
     final dbDir = await Directory.systemTemp.createTemp('nostos_flutter_it_');
     addTearDown(() => dbDir.delete(recursive: true));
 
-    final nostos = await Nostos.connect(
+    // The fake replicator has NO SchemaSource → GET /schema returns 404, so
+    // NostosDatabase.connect's auto-fetch would throw. Pass an explicit
+    // schema so applySchema runs locally (creating the WS2 `tasks` view)
+    // without the HTTP round-trip.
+    final schema = Schema(tables: [
+      Table(
+        name: 'tasks',
+        primaryKey: const ['id'],
+        columns: const ['title', 'completed'],
+      ),
+    ]);
+
+    final db = await NostosDatabase.connect(
       url: _syncUrl,
+      schema: schema,
       sqlitePath: '${dbDir.path}/it.sqlite',
     );
 
-    final connected = nostos.connectionState
+    final connected = db.connectionState
         .firstWhere((s) => s == NostosConnectionState.connected)
         .timeout(const Duration(seconds: 15));
 
-    await nostos.subscribe('tasks');
+    await db.subscribe('tasks');
 
     await expectLater(connected, completes);
 
-    final rows = await nostos
-        .watch('tasks')
+    // Read cairn_data directly (not the WS2 view) so each row carries `_pk`:
+    // The fake replicator's payload is opaque bytes (not JSON), so the typed
+    // columns come back NULL — but the WS2 `tasks` view projects `pk AS _pk`,
+    // so `SELECT * FROM tasks` carries the row key (the assertion target).
+    final rows = await db
+        .watch('SELECT * FROM tasks')
         .firstWhere((rows) => rows.isNotEmpty)
         .timeout(const Duration(seconds: 15));
 
@@ -105,7 +126,7 @@ void main() {
     expect(
       rows.first,
       contains('_pk'),
-      reason: 'every decoded row is stamped with its primary key',
+      reason: 'every decoded row carries its primary key (pk AS _pk)',
     );
   });
 }

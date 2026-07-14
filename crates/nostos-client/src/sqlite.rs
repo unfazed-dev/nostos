@@ -396,10 +396,17 @@ impl SqliteStorage {
         for t in tables {
             // ponytail: the catalog always has ≥1 column; we don't special-case
             // an empty list (it would yield invalid `SELECT FROM`).
-            let cols: Vec<String> = t
-                .columns
-                .iter()
-                .map(|c| format!("json_extract(payload, '$.{c}') AS {}", quote_ident(c)))
+            // Lead with `pk AS _pk` so the view carries the row's replication
+            // key — the same `_pk` the subscribe row-stream stamps
+            // (`row_to_json_object` in nostos_flutter). Without it, a PowerSync-
+            // style `SELECT * FROM <table>` returns no key, making write-back
+            // (delete/edit, which key on `_pk`) impossible through the clean DX.
+            let cols: Vec<String> = std::iter::once("pk AS _pk".to_string())
+                .chain(
+                    t.columns
+                        .iter()
+                        .map(|c| format!("json_extract(payload, '$.{c}') AS {}", quote_ident(c))),
+                )
                 .collect();
             // SQLite views are static schema objects — bind params are NOT
             // allowed in a view definition, so the table filter is an inlined,
@@ -1180,6 +1187,20 @@ mod tests {
         assert_eq!(
             r.get("completed").and_then(serde_json::Value::as_i64),
             Some(0)
+        );
+
+        // The view carries the replication key as `_pk` (matches the subscribe
+        // row-stream's convention) ÔÇö write-back (delete/edit) keys on it, and
+        // `SELECT * FROM tasks` exposes it for the PowerSync-style DX.
+        let pk_rows = s.query("SELECT _pk FROM tasks").unwrap();
+        assert_eq!(
+            pk_rows[0].get("_pk").and_then(serde_json::Value::as_str),
+            Some("t1")
+        );
+        let star = s.query("SELECT * FROM tasks").unwrap();
+        assert!(
+            star[0].get("_pk").is_some(),
+            "SELECT * FROM <view> must carry _pk for write-back"
         );
 
         // Idempotent: re-applying the SAME schema must not error. (Column-change

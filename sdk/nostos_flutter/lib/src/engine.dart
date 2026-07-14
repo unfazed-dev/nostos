@@ -18,6 +18,12 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'rust/api/nostos.dart' as rust;
 
+// Re-exported so the public API in `nostos.dart` (`Nostos.applySchema`) and
+// `schema.dart` (`Schema.toClientTables`) can name [ClientTableFfi] without
+// each importing `rust/api/nostos.dart` directly — keeping this file the sole
+// importer of the generated bindings (see the library doc above).
+export 'rust/api/nostos.dart' show ClientTableFfi;
+
 /// Connection-state transitions, decoupled from the generated
 /// `rust.NostosConnectionState` so consumers never need to import generated
 /// code. See `rust/src/api/nostos.rs`'s `NostosConnectionState` doc for the
@@ -57,6 +63,15 @@ abstract class NostosEngine {
   /// string (same shape as [NostosSubscriptionStreams.rows]); decode with
   /// jsonDecode. Requires an active subscription.
   Future<String> query({required String sql});
+
+  /// Materialize the WS2 read-views for [tables] in the on-device SQLite
+  /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...)
+  /// ... FROM cairn_data WHERE table_name='<table>'` — see
+  /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema;
+  /// the views persist in the SQLite file, so this only needs to run once
+  /// after connect. Synchronous: the FFI is `Result<(), String>` and throws
+  /// on error. Wraps the generated `NostosHandle.applySchema`.
+  void applySchema(List<rust.ClientTableFfi> tables);
 
   /// Tear down the active subscription's background work (the sync loop and
   /// the watch-stream pump). Safe to call with no active subscription and
@@ -118,6 +133,10 @@ class RustNostosEngine implements NostosEngine {
   @override
   Future<String> query({required String sql}) =>
       _handle.query(sql: sql);
+
+  @override
+  void applySchema(List<rust.ClientTableFfi> tables) =>
+      _handle.applySchema(tables: tables);
 
   @override
   Future<void> close() => _handle.close();
