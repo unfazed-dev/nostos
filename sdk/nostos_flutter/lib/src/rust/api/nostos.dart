@@ -8,10 +8,34 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `emit_snapshot`, `hex_encode`, `row_to_json_object`, `run_connection_loop`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Session`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `drop`, `eq`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `drop`, `eq`, `fmt`, `fmt`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NostosHandle>>
 abstract class NostosHandle implements RustOpaqueInterface {
+  /// Materialize the WS2 read-views for `tables` in the on-device SQLite
+  /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...) AS
+  /// col, ... FROM cairn_data WHERE table_name = '<table>'` — see
+  /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema; the
+  /// views persist in the SQLite file, so this is called ONCE after `connect`
+  /// (and before the first `query()` / Dart `db.execute(SELECT ...)` that
+  /// names a table).
+  ///
+  /// Opens a TRANSIENT storage connection at `db_path` (separate from the
+  /// `subscribe` session's) purely to run the DDL, then drops it.
+  /// ponytail: the transient double-open is a one-time setup cost (cheap);
+  /// the upgrade path is to stash the schema on the handle and apply it
+  /// inside `subscribe` on the session's own connection — deferred because
+  /// this is not on any hot path.
+  ///
+  /// The Dart side owns the `GET /schema` fetch + `SchemaDescriptor` →
+  /// `ClientTableFfi` mapping, keeping the Rust FFI crate HTTP-free
+  /// (ADR-0015: no `reqwest` dep in `nostos_flutter_rust`).
+  ///
+  /// # Errors
+  /// Returns an error string if the SQLite file can't be opened/migrated or
+  /// any view DDL fails (`StorageError::Backend`).
+  void applySchema({required List<ClientTableFfi> tables});
+
   /// Tear down the active subscription's background work — the
   /// connect/apply/reconnect loop and the watch-stream pump (see
   /// [`Session`]'s `Drop` impl, which aborts both tasks). Safe to call with
@@ -104,13 +128,16 @@ abstract class NostosHandle implements RustOpaqueInterface {
   /// through `subscribe`'s `rows_sink` once applied, same as any other
   /// replicated change, per `nostos-client`'s ADR-0013 outbox contract).
   ///
-  /// `op` is `"upsert"` (insert-or-update) or `"delete"`.
+  /// `op` is `"upsert"` (insert-or-update), `"delete"`, or `"patch"`
+  /// (column-level UPDATE of an existing row — `payload` carries only the
+  /// columns to change; P3 PowerSync PATCH parity).
   ///
   /// # Errors
   /// Returns an error string if `subscribe()` hasn't been called yet, `op`
-  /// is neither `"upsert"` nor `"delete"`, `table` doesn't match the active
-  /// subscription (v1 is one table per handle — see module docs), or the
-  /// local durable enqueue itself failed (disk full, SQLite busy).
+  /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` doesn't
+  /// match the active subscription (v1 is one table per handle — see module
+  /// docs), or the local durable enqueue itself failed (disk full, SQLite
+  /// busy).
   Future<BigInt> write({
     required String table,
     required String op,
@@ -136,3 +163,39 @@ abstract class NostosHandle implements RustOpaqueInterface {
 /// `Disconnected`; acceptable for a v1 UI-facing signal. Upgrade path: add a
 /// `connected`/`subscribed` broadcast to `SyncClient` alongside `changes`.
 enum NostosConnectionState { connecting, connected, reconnecting, disconnected }
+
+/// frb-friendly mirror of `nostos_client`'s `ClientTable` — the client-side
+/// schema projection the WS2 view layer consumes. frb generates Dart bindings
+/// for structs declared in THIS crate, so we mirror (rather than configuring
+/// frb to reflect an external crate's type). The Dart side builds these from
+/// the server's `GET /schema` `SchemaDescriptor` (drop per-column affinity down
+/// to names) and hands them to [`NostosHandle::apply_schema`].
+class ClientTableFfi {
+  /// Canonical table id (matches `cairn_data.table_name` / the wire `table`).
+  final String name;
+
+  /// Primary-key column names (informational for the view; carried for the
+  /// future materialized-table path).
+  final List<String> primaryKey;
+
+  /// Column names in tuple order.
+  final List<String> columns;
+
+  const ClientTableFfi({
+    required this.name,
+    required this.primaryKey,
+    required this.columns,
+  });
+
+  @override
+  int get hashCode => name.hashCode ^ primaryKey.hashCode ^ columns.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ClientTableFfi &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          primaryKey == other.primaryKey &&
+          columns == other.columns;
+}

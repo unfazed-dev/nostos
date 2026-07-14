@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0-beta.5';
 
   @override
-  int get rustContentHash => 1770137513;
+  int get rustContentHash => -923275136;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -78,6 +78,11 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  void crateApiNostosNostosHandleApplySchema({
+    required NostosHandle that,
+    required List<ClientTableFfi> tables,
+  });
+
   Future<void> crateApiNostosNostosHandleClose({required NostosHandle that});
 
   NostosHandle crateApiNostosNostosHandleConnect({
@@ -127,6 +132,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  void crateApiNostosNostosHandleApplySchema({
+    required NostosHandle that,
+    required List<ClientTableFfi> tables,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_list_client_table_ffi(tables, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleApplySchemaConstMeta,
+        argValues: [that, tables],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleApplySchemaConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_apply_schema",
+        argNames: ["that", "tables"],
+      );
+
+  @override
   Future<void> crateApiNostosNostosHandleClose({required NostosHandle that}) {
     return handler.executeNormal(
       NormalTask(
@@ -139,7 +177,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 1,
+            funcId: 2,
             port: port_,
           );
         },
@@ -170,7 +208,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(url, serializer);
           sse_encode_opt_String(token, serializer);
           sse_encode_String(dbPath, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
           decodeSuccessData:
@@ -207,7 +245,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 4,
             port: port_,
           );
         },
@@ -254,7 +292,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -298,7 +336,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },
@@ -328,7 +366,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 7,
             port: port_,
           );
         },
@@ -413,9 +451,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ClientTableFfi dco_decode_client_table_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return ClientTableFfi(
+      name: dco_decode_String(arr[0]),
+      primaryKey: dco_decode_list_String(arr[1]),
+      columns: dco_decode_list_String(arr[2]),
+    );
+  }
+
+  @protected
   int dco_decode_i_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
+  }
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
+  List<ClientTableFfi> dco_decode_list_client_table_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_client_table_ffi).toList();
   }
 
   @protected
@@ -531,9 +594,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ClientTableFfi sse_decode_client_table_ffi(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_name = sse_decode_String(deserializer);
+    var var_primaryKey = sse_decode_list_String(deserializer);
+    var var_columns = sse_decode_list_String(deserializer);
+    return ClientTableFfi(
+      name: var_name,
+      primaryKey: var_primaryKey,
+      columns: var_columns,
+    );
+  }
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <String>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_String(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ClientTableFfi> sse_decode_list_client_table_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ClientTableFfi>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_client_table_ffi(deserializer));
+    }
+    return ans_;
   }
 
   @protected
@@ -681,9 +783,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_client_table_ffi(
+    ClientTableFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.name, serializer);
+    sse_encode_list_String(self.primaryKey, serializer);
+    sse_encode_list_String(self.columns, serializer);
+  }
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putInt32(self);
+  }
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_String(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_client_table_ffi(
+    List<ClientTableFfi> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_client_table_ffi(item, serializer);
+    }
   }
 
   @protected
@@ -754,6 +888,33 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
     rustArcDecrementStrongCountPtr:
         RustLib.instance.api.rust_arc_decrement_strong_count_NostosHandlePtr,
   );
+
+  /// Materialize the WS2 read-views for `tables` in the on-device SQLite
+  /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...) AS
+  /// col, ... FROM cairn_data WHERE table_name = '<table>'` — see
+  /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema; the
+  /// views persist in the SQLite file, so this is called ONCE after `connect`
+  /// (and before the first `query()` / Dart `db.execute(SELECT ...)` that
+  /// names a table).
+  ///
+  /// Opens a TRANSIENT storage connection at `db_path` (separate from the
+  /// `subscribe` session's) purely to run the DDL, then drops it.
+  /// ponytail: the transient double-open is a one-time setup cost (cheap);
+  /// the upgrade path is to stash the schema on the handle and apply it
+  /// inside `subscribe` on the session's own connection — deferred because
+  /// this is not on any hot path.
+  ///
+  /// The Dart side owns the `GET /schema` fetch + `SchemaDescriptor` →
+  /// `ClientTableFfi` mapping, keeping the Rust FFI crate HTTP-free
+  /// (ADR-0015: no `reqwest` dep in `nostos_flutter_rust`).
+  ///
+  /// # Errors
+  /// Returns an error string if the SQLite file can't be opened/migrated or
+  /// any view DDL fails (`StorageError::Backend`).
+  void applySchema({required List<ClientTableFfi> tables}) => RustLib
+      .instance
+      .api
+      .crateApiNostosNostosHandleApplySchema(that: this, tables: tables);
 
   /// Tear down the active subscription's background work — the
   /// connect/apply/reconnect loop and the watch-stream pump (see
@@ -840,13 +1001,16 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// through `subscribe`'s `rows_sink` once applied, same as any other
   /// replicated change, per `nostos-client`'s ADR-0013 outbox contract).
   ///
-  /// `op` is `"upsert"` (insert-or-update) or `"delete"`.
+  /// `op` is `"upsert"` (insert-or-update), `"delete"`, or `"patch"`
+  /// (column-level UPDATE of an existing row — `payload` carries only the
+  /// columns to change; P3 PowerSync PATCH parity).
   ///
   /// # Errors
   /// Returns an error string if `subscribe()` hasn't been called yet, `op`
-  /// is neither `"upsert"` nor `"delete"`, `table` doesn't match the active
-  /// subscription (v1 is one table per handle — see module docs), or the
-  /// local durable enqueue itself failed (disk full, SQLite busy).
+  /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` doesn't
+  /// match the active subscription (v1 is one table per handle — see module
+  /// docs), or the local durable enqueue itself failed (disk full, SQLite
+  /// busy).
   Future<BigInt> write({
     required String table,
     required String op,

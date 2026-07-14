@@ -25,6 +25,14 @@ dependencies:
   # platform channels.
   path_provider: ^2.1.0
   meta: ^1.9.0
+  # Used by NostosDatabase.connect to fetch `GET {base}/schema` when no Schema
+  # is passed explicitly. Lightweight, Dart-native, no extra native deps.
+  http: ^1.2.0
+  # Used by NostosDatabase.supabase to read the live Supabase session token
+  # (`Supabase.instance.client.auth.currentSession`). Caller pre-inits
+  # Supabase at app start; this package only reads the session here. Brings
+  # `http` transitively (harmless dup of the explicit dep above).
+  supabase_flutter: ^2.8.0
   # Used directly by hook/build.dart (the prebuilt/cargo-fallback build hook)
   # — already pulled in transitively by flutter_rust_bridge_hooks /
   # native_toolchain_rust; declared directly here only to satisfy

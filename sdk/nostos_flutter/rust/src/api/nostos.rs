@@ -24,6 +24,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use nostos_client::sqlite::ClientTable;
 use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig};
 use nostos_core::{PendingWrite, WriteOp};
 use flutter_rust_bridge::frb;
@@ -59,6 +60,33 @@ pub enum NostosConnectionState {
     Connected,
     Reconnecting,
     Disconnected,
+}
+
+/// frb-friendly mirror of `nostos_client`'s `ClientTable` — the client-side
+/// schema projection the WS2 view layer consumes. frb generates Dart bindings
+/// for structs declared in THIS crate, so we mirror (rather than configuring
+/// frb to reflect an external crate's type). The Dart side builds these from
+/// the server's `GET /schema` `SchemaDescriptor` (drop per-column affinity down
+/// to names) and hands them to [`NostosHandle::apply_schema`].
+#[derive(Debug, Clone)]
+pub struct ClientTableFfi {
+    /// Canonical table id (matches `cairn_data.table_name` / the wire `table`).
+    pub name: String,
+    /// Primary-key column names (informational for the view; carried for the
+    /// future materialized-table path).
+    pub primary_key: Vec<String>,
+    /// Column names in tuple order.
+    pub columns: Vec<String>,
+}
+
+impl From<ClientTableFfi> for ClientTable {
+    fn from(t: ClientTableFfi) -> Self {
+        Self {
+            name: t.name,
+            primary_key: t.primary_key,
+            columns: t.columns,
+        }
+    }
 }
 
 const CONNECT_GRACE: Duration = Duration::from_millis(250);
@@ -117,6 +145,35 @@ impl NostosHandle {
             db_path,
             session: AsyncMutex::new(None),
         }
+    }
+
+    /// Materialize the WS2 read-views for `tables` in the on-device SQLite
+    /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...) AS
+    /// col, ... FROM cairn_data WHERE table_name = '<table>'` — see
+    /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema; the
+    /// views persist in the SQLite file, so this is called ONCE after `connect`
+    /// (and before the first `query()` / Dart `db.execute(SELECT ...)` that
+    /// names a table).
+    ///
+    /// Opens a TRANSIENT storage connection at `db_path` (separate from the
+    /// `subscribe` session's) purely to run the DDL, then drops it.
+    /// ponytail: the transient double-open is a one-time setup cost (cheap);
+    /// the upgrade path is to stash the schema on the handle and apply it
+    /// inside `subscribe` on the session's own connection — deferred because
+    /// this is not on any hot path.
+    ///
+    /// The Dart side owns the `GET /schema` fetch + `SchemaDescriptor` →
+    /// `ClientTableFfi` mapping, keeping the Rust FFI crate HTTP-free
+    /// (ADR-0015: no `reqwest` dep in `nostos_flutter_rust`).
+    ///
+    /// # Errors
+    /// Returns an error string if the SQLite file can't be opened/migrated or
+    /// any view DDL fails (`StorageError::Backend`).
+    #[frb(sync)]
+    pub fn apply_schema(&self, tables: Vec<ClientTableFfi>) -> Result<(), String> {
+        let storage = SqliteStorage::open(&self.db_path).map_err(|e| e.to_string())?;
+        let mapped: Vec<ClientTable> = tables.into_iter().map(ClientTable::from).collect();
+        storage.apply_schema(&mapped).map_err(|e| e.to_string())
     }
 
     /// Subscribe to `table` (optionally filtered by `where_sql`, the safe-SQL

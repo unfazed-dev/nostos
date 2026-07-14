@@ -69,6 +69,18 @@ class Nostos {
   /// subscription. Empty until [subscribe] has been called at least once.
   Stream<NostosConnectionState> get connectionState => _stateController.stream;
 
+  /// Materialize the WS2 read-views for [tables] in the on-device SQLite
+  /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...)
+  /// AS col, ... FROM cairn_data WHERE table_name='<table>'` — see
+  /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema;
+  /// the views persist in the SQLite file, so this only needs to run once
+  /// after [connect] and before the first [watch] / [watchQuery] / [getAll]
+  /// against a projected `<table>`. Synchronous (the FFI is `Result<(),
+  /// String>` and throws on error). Most apps won't call this directly —
+  /// `NostosDatabase.connect` wires it from a resolved `Schema`.
+  void applySchema(List<ClientTableFfi> tables) =>
+      _engine.applySchema(tables);
+
   /// Subscribe to [table], optionally filtered by [where] — a safe-SQL subset
   /// predicate (ADR-0012), e.g. `"status = 'open' AND priority >= 3"`. The
   /// server compiles and ANDs it into the session; a parse failure closes the
@@ -102,6 +114,14 @@ class Nostos {
     }
     return rows;
   }
+
+  /// Run an arbitrary SELECT against on-device SQLite once (non-reactive).
+  /// Returns the raw JSON-array-of-objects string straight from the engine;
+  /// decode with `jsonDecode`. Requires an active subscription (the engine
+  /// enforces this — same contract as [watchQuery]). This is the one-shot
+  /// counterpart to [watchQuery]'s reactive stream; `NostosDatabase.getAll`
+  /// routes through here.
+  Future<String> query(String sql) => _engine.query(sql: sql);
 
   /// Reactive SQL watch (PowerSync parity P1). Re-runs [sql] whenever the
   /// synced data changes (the same change-tick [watch] pumps) and emits the
