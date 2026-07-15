@@ -29,14 +29,14 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::stream::StreamExt as _;
 use serde::Deserialize;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tracing::{debug, warn};
 
 use nostos_application::ports::{
     EventSink, SchemaSource, SnapshotSource, SyncAuth, WriteBack, WriteBackError,
 };
 use nostos_application::SessionManager;
-use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SyncSession};
+use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncSession};
 
 use crate::router::TokioEventSink;
 use crate::wire::{
@@ -55,6 +55,15 @@ const DEFAULT_SESSION_BUFFER: usize = 1024;
 /// receiver decodes both the batched array and the legacy single-object form,
 /// so no wire-version bump is needed.
 const MAX_BATCH_FRAMES: usize = 64;
+
+/// Per-socket table-subscription cap (D1/ADR-0022). Bounds snapshot-on-
+/// subscribe cost (each subscribe triggers a full-table SELECT in
+/// `PgSnapshotter`) so one client cannot DoS the snapshotter by subscribing to
+/// thousands of tables on one socket. A `Subscribe` beyond this cap is
+/// rejected (non-fatal — the socket keeps serving its existing subscriptions);
+/// 32 is generous for real apps (the provider dashboard uses 5) and small
+/// enough that 32 × device_cap snapshots is a bounded worst case.
+const MAX_TABLES_PER_SOCKET: usize = 32;
 
 /// Shared state injected into the axum router.
 #[derive(Clone)]
@@ -219,37 +228,19 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         return; // client disconnected without subscribing
     };
 
-    // 2. Build the predicate: the client's filters + optional safe-SQL
-    //    `where_sql` (ADR-0012), intersected with the server-injected tenant
-    //    filter (never client-attested). A where_sql parse failure closes the
-    //    socket with a reason before any event flows (no session is registered,
-    //    so nothing can leak).
-    let predicate = match build_predicate(&subscribe, &principal, state.tenant_column.as_deref()) {
-        Ok(p) => p,
-        Err(reason) => {
-            debug!(%reason, "closing socket: where_sql rejected");
-            // Send an explicit close frame so the client sees the reason
-            // (axum's `WebSocket::close()` would drop it). The reason already
-            // contains the canonical "invalid where_sql: " prefix.
-            let frame = axum::extract::ws::CloseFrame {
-                code: axum::extract::ws::close_code::INVALID,
-                reason: reason.into(),
-            };
-            let _ = socket
-                .send(axum::extract::ws::Message::Close(Some(frame)))
-                .await;
-            return;
-        }
-    };
-
-    // 3. Allocate the bounded sink. We keep the *concrete* `Arc<TokioEventSink>`
-    //    for close()/record_ack(), and a type-erased clone for the store.
+    // 2. Allocate the ONE shared sink for this socket. N tables deliver into
+    //    this one bounded channel; a single writer task drains it onto the wire.
+    //    We keep the *concrete* `Arc<TokioEventSink>` for close()/record_ack()
+    //    + snapshot delivery; `register_subscribe` derives the type-erased
+    //    `Arc<dyn EventSink>` clone the store holds per registered session.
     let (sink, mut rx) = TokioEventSink::channel(state.session_buffer);
     let sink_concrete = Arc::new(sink);
-    let sink_dyn: Arc<dyn nostos_application::ports::EventSink> =
-        Arc::clone(&sink_concrete) as Arc<dyn nostos_application::ports::EventSink>;
 
-    // 4. Seed the resume cursor if the client sent one.
+    // 3. Seed the resume cursor ONCE from the first subscribe (the client's
+    //    global checkpoint). The socket's `synthetic_cursor` (the snapshot LSN
+    //    allocator) derives from the same value; per-frame resume_lsn on later
+    //    subscribes is ignored, so a mid-stream snapshot can't be dropped past
+    //    an already-advanced checkpoint.
     if let Some(resume) = subscribe.resume_lsn {
         sink_concrete.seed_acked_lsn(nostos_domain::Lsn::new(resume));
         debug!(
@@ -258,77 +249,67 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         );
     }
 
-    // Clone the principal for the write path (ADR-0018) BEFORE it's moved into
-    // the session below — the read path (predicate injection) and the write
-    // path (tenant-scoped stamping/guards) both need it, from the same
-    // authenticated identity.
+    // Clone the principal + tenant for BOTH the write path and the read-side
+    // subscribe path (ADR-0018): the read path (predicate injection) and the
+    // write path (tenant-scoped stamping/guards) share one authenticated
+    // identity. `principal` is borrowed for the first register_subscribe
+    // below; the clones live on in the reader task.
     let write_principal = principal.clone();
     let tenant_column_for_writes = state.tenant_column.clone();
 
-    let session = SyncSession::new_authenticated(predicate, principal);
-
-    // 5. Register with the store via the manager.
     let manager = Arc::clone(&state.manager);
-    let id = match manager.connect(session, sink_dyn).await {
-        Ok(id) => id,
-        Err(_e) => {
-            // Concurrent-device cap reached (or another connect failure). Close
-            // the socket so the client sees a clean end rather than a hang.
-            let _ = socket.close().await;
-            return;
-        }
-    };
+    let snapshotter = state.snapshotter.clone();
 
-    // 5b. Snapshot-on-subscribe (ADR-0014). If a SnapshotSource is wired in,
-    //     deliver the table's pre-existing rows to THIS session as Insert
-    //     events before the writer task is spawned, so they are the first
-    //     thing the client receives (PowerSync parity). The events are stamped
-    //     with LSNs strictly above the session's seeded acked LSN so the sink's
-    //     LSN gate (TokioEventSink::deliver) does not drop them. A failed
-    //     snapshot is non-fatal: log and continue — the client still receives
-    //     live fan-out. Deliveries are best-effort against the bounded buffer:
-    //     if the table has more rows than `session_buffer`, the overflow drops
-    //     (the existing backpressure discipline) — ponytail in PgSnapshotter.
-    //     ponytail: no tenant-predicate scoping in v1; the snapshot SELECT is
-    //     unfiltered, so multi-tenant deploys must NOT wire a SnapshotSource
-    //     until the port takes the server-injected TenantScope (ADR-0011).
-    let snapshot_base = subscribe.resume_lsn.unwrap_or(0);
-    if let Some(snap) = &state.snapshotter {
-        match snap
-            .snapshot(&subscribe.table, nostos_domain::Lsn::new(snapshot_base))
-            .await
-        {
-            Ok(events) => {
-                let count = events.len();
-                for ev in events {
-                    // Deliver directly to THIS session's sink only — not via
-                    // the store/fan-out (those are post-subscribe WAL path).
-                    // `deliver` applies the LSN gate + backpressure; our LSN
-                    // assignment is constructed to pass the gate.
-                    let _ = sink_concrete.deliver(ev).await;
-                }
-                debug!(
-                    table = %subscribe.table,
-                    count,
-                    "snapshot-on-subscribe delivered to new session"
-                );
+    // 4. Per-socket multi-table state. `synthetic_cursor` is seeded from the
+    //    first subscribe's resume_lsn (0 for a fresh client) and advanced by
+    //    each snapshot's row count — the load-bearing fix that keeps multi-
+    //    table snapshot-on-subscribe correct on a shared sink (see
+    //    `register_subscribe` + ADR-0022).
+    let subs = Arc::new(Mutex::new(SocketSubs {
+        ids: Vec::new(),
+        tables: HashSet::new(),
+        synthetic_cursor: subscribe.resume_lsn.unwrap_or(0),
+    }));
+
+    // 5. Register the FIRST table. A where_sql rejection or the global device
+    //    cap is FATAL here (close the socket with a reason before any event
+    //    flows, same as the single-table path); subsequent rejects are
+    //    non-fatal (the reader logs + keeps serving existing subscriptions).
+    if let Err(reject) = register_subscribe(
+        &subscribe,
+        &subs,
+        &manager,
+        snapshotter.as_ref(),
+        &sink_concrete,
+        &principal,
+        state.tenant_column.as_deref(),
+    )
+    .await
+    {
+        match reject {
+            SubscribeReject::WhereSqlRejected(reason) => {
+                debug!(%reason, "closing socket: first subscribe where_sql rejected");
+                let frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::INVALID,
+                    reason: reason.into(),
+                };
+                let _ = socket
+                    .send(axum::extract::ws::Message::Close(Some(frame)))
+                    .await;
+                return;
             }
-            Err(e) => {
-                warn!(
-                    table = %subscribe.table,
-                    error = %e,
-                    "snapshot-on-subscribe failed; continuing with live fan-out"
-                );
+            // Device cap or (impossible here) per-socket cap: close cleanly.
+            SubscribeReject::DeviceCapReached | SubscribeReject::CapExceeded => {
+                let _ = socket.close().await;
+                return;
             }
         }
     }
 
-    // 6. Split the socket: writer drains the sink, reader parses ACKs + writes.
-    //    axum's `WebSocket` is `Stream + Sink`; `StreamExt::split` yields
-    //    independent halves so ACK/Write reads don't block frame writes.
-    //    The reader sends `WriteResult` frames back through a small channel so
-    //    the single writer task serializes all outbound wire writes (replication
-    //    events AND write acks share one socket sink — no interleaving race).
+    // 6. Split the socket: writer drains the shared sink, reader parses ACK/
+    //    Write frames AND handles additional Subscribe frames (registering more
+    //    tables on the SAME sink). Same single-writer serialization as before:
+    //    events AND write-acks share one socket sink, no interleaving race.
     let (writer, mut reader) = socket.split();
     let (server_frames_tx, mut server_frames_rx) =
         tokio::sync::mpsc::channel::<Vec<u8>>(DEFAULT_SESSION_BUFFER);
@@ -401,69 +382,217 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         closed_tx.notify_waiters();
     });
 
-    // Reader: parse inbound ACK/Write frames. ACKs stamp the sink's ack cursor;
-    // Write frames enforce the allowlist, then call the injected write-back
-    // port and queue a `WriteResult` ack frame to the writer. Exits when the
-    // socket closes (returns None) — that also ends the write loop indirectly
-    // via the closed notify on the next rx exhaustion.
+    // Reader: decode each inbound frame ONCE, then route:
+    //   Subscribe → register_subscribe (register another table on the shared
+    //     sink — multi-table-per-handle, D1/ADR-0022).
+    //   Ack/Write → handle_decoded_message (ack cursor / allowlist + write-back).
+    // A rejected mid-session subscribe (per-socket cap, where_sql, or global
+    // device cap) is NON-fatal: warn and keep serving existing subscriptions.
+    // The reader cannot cleanly force-close the writer half after split, and
+    // reject-and-continue is already bounded — `register_subscribe` returns
+    // before `connect` on cap-exceed, so no session registers past
+    // MAX_TABLES_PER_SOCKET (≤32 × device_cap worst case). Architecture advisor
+    // (HIGH, 2026-07-15) recommended close-on-cap; this deviates because the
+    // no-leak property makes close's teardown wiring unjustified — ADR-0022.
     let write_back = Arc::clone(&state.write_back);
     let write_tables = Arc::clone(&state.write_tables);
+    let subs_reader = Arc::clone(&subs);
+    let manager_reader = Arc::clone(&manager);
     let read_loop = tokio::spawn(async move {
         while let Some(Ok(msg)) = reader.next().await {
-            match msg {
-                Message::Text(t) => {
-                    handle_client_message(
-                        t.as_bytes(),
-                        &ack_sink,
-                        &write_back,
-                        &write_tables,
-                        &write_principal,
-                        tenant_column_for_writes.as_deref(),
-                        &server_frames_tx,
-                    )
-                    .await;
-                }
-                Message::Binary(b) => {
-                    handle_client_message(
-                        &b,
-                        &ack_sink,
-                        &write_back,
-                        &write_tables,
-                        &write_principal,
-                        tenant_column_for_writes.as_deref(),
-                        &server_frames_tx,
-                    )
-                    .await;
-                }
+            let data: Option<Vec<u8>> = match msg {
+                Message::Text(t) => Some(t.into_bytes()),
+                Message::Binary(b) => Some(b),
                 Message::Close(_) => break,
-                _ => {} // ping/pong
+                _ => None, // ping/pong
+            };
+            let Some(data) = data else { continue };
+            match decode_client_message(&data) {
+                Some(ClientMessage::Subscribe {
+                    table,
+                    filters,
+                    where_sql,
+                    resume_lsn,
+                }) => {
+                    let req = SubscribeRequest {
+                        table,
+                        filters,
+                        where_sql,
+                        resume_lsn,
+                    };
+                    if let Err(e) = register_subscribe(
+                        &req,
+                        &subs_reader,
+                        &manager_reader,
+                        snapshotter.as_ref(),
+                        &ack_sink,
+                        &write_principal,
+                        tenant_column_for_writes.as_deref(),
+                    )
+                    .await
+                    {
+                        warn!(reject = ?e, table = %req.table, "mid-session subscribe rejected; socket continues");
+                    }
+                }
+                Some(other) => {
+                    handle_decoded_message(
+                        other,
+                        &ack_sink,
+                        &write_back,
+                        &write_tables,
+                        &write_principal,
+                        tenant_column_for_writes.as_deref(),
+                        &server_frames_tx,
+                    )
+                    .await;
+                }
+                None => warn!("dropping malformed client message"),
             }
         }
     });
 
-    // Keep the session alive until the writer ends, then clean up.
+    // Keep the socket alive until the writer ends, then disconnect ALL sessions
+    // registered on the shared sink (one per subscribed table) + close it.
     closed.notified().await;
     sink_concrete.close();
-    manager.disconnect(id).await;
+    let ids: Vec<SessionId> = {
+        let mut s = subs.lock().await;
+        std::mem::take(&mut s.ids)
+    };
+    for id in ids {
+        manager.disconnect(id).await;
+    }
     let _ = write_loop.await;
     // The reader may still be blocked on recv; abort it so the task reaps.
     read_loop.abort();
 }
 
-/// Parse an inbound client message and apply it:
-/// - `Ack` → stamp the sink's ack cursor (drives ack-driven slot advance).
-/// - `Write` → enforce the table allowlist FIRST, then call the injected
-///   write-back port and queue a `WriteResult` ack frame to the writer task
-///   (ADR-0013). The write-back call is tenant-scoped exactly like the read
-///   path (ADR-0018): `principal.tenant_scope(tenant_column)` is the same
-///   seam `build_predicate` uses, so the two enforcement points can't drift.
+/// Why a subscribe was rejected. Non-fatal for mid-session subscribes (the
+/// socket keeps serving its existing tables); FATAL for the first subscribe
+/// (the socket is closed — see `run_session`).
+#[derive(Debug)]
+enum SubscribeReject {
+    /// `where_sql` failed to compile (ADR-0012). Carries the reason string.
+    WhereSqlRejected(String),
+    /// Per-socket table cap exceeded (`MAX_TABLES_PER_SOCKET`) — DoS guard.
+    CapExceeded,
+    /// Global concurrent-device cap reached (`SessionManager`).
+    DeviceCapReached,
+}
+
+/// Per-socket multi-table subscription state (D1/ADR-0022). One socket owns
+/// ONE shared `TokioEventSink` (one channel, one `acked_lsn`, one writer task —
+/// ADR-0009's single global checkpoint) and N single-predicate `SyncSession`s
+/// registered against it. `candidates_for` is table-indexed, so each session
+/// receives only its own table's events; `min_acked_lsn` folds the shared
+/// sink's single `last_acked_lsn` across the N sessions (= the same value N
+/// times = the socket's checkpoint).
 ///
-/// Anything else (a stray second subscribe, malformed) is ignored — the
-/// session is already subscribed. `Write`-before-`Subscribe` is impossible
-/// here: the handshake (`read_subscribe`) rejects a leading `Write` before
-/// the session is registered, so this handler only runs POST-subscribe.
-async fn handle_client_message(
-    data: &[u8],
+/// `synthetic_cursor` is the load-bearing correctness fix for multi-table
+/// snapshot-on-subscribe: `PgSnapshotter` stamps snapshot LSNs as `base+1+i`
+/// PER TABLE (snapshot_source.rs), so on a shared sink table B's snapshot LSN
+/// range collides with table A's and the sink's dedup ring (router.rs) drops it
+/// as duplicates. The cursor is seeded from `resume_lsn` and advanced by each
+/// snapshot's row count, so every event across all tables gets a distinct LSN.
+struct SocketSubs {
+    /// Every registered session id (one per subscribed table) — disconnected
+    /// en masse when the socket closes.
+    ids: Vec<SessionId>,
+    /// Subscribed table names — drives the per-socket cap + idempotent repeat.
+    tables: HashSet<String>,
+    /// Monotonic snapshot-LSN allocator; passed as `base_lsn` to each snapshot.
+    synthetic_cursor: u64,
+}
+
+/// Register one table subscription on the socket's shared sink: predicate
+/// build, per-socket cap + idempotency checks, `SessionManager::connect`, and
+/// snapshot-on-subscribe. Called for the first subscribe (pre-split, in
+/// `run_session`) and every subsequent one (post-split, in the reader task).
+/// Returns `Err` WITHOUT registering on any rejection. Critical sections on
+/// `subs` are short and never span an `.await`; access is serialized anyway
+/// (one reader task; the first subscribe runs before the reader is spawned).
+async fn register_subscribe(
+    req: &SubscribeRequest,
+    subs: &Arc<Mutex<SocketSubs>>,
+    manager: &Arc<SessionManager>,
+    snapshotter: Option<&Arc<dyn SnapshotSource>>,
+    sink_concrete: &Arc<TokioEventSink>,
+    principal: &Principal,
+    tenant_column: Option<&str>,
+) -> Result<(), SubscribeReject> {
+    // Cap + idempotent-repeat check (short lock, no await).
+    {
+        let s = subs.lock().await;
+        if s.tables.contains(&req.table) {
+            debug!(table = %req.table, "subscribe for already-subscribed table: no-op");
+            return Ok(());
+        }
+        if s.tables.len() >= MAX_TABLES_PER_SOCKET {
+            return Err(SubscribeReject::CapExceeded);
+        }
+    }
+
+    let predicate = build_predicate(req, principal, tenant_column)
+        .map_err(SubscribeReject::WhereSqlRejected)?;
+    let session = SyncSession::new_authenticated(predicate, principal.clone());
+    // Derive the type-erased clone the store holds; `sink_concrete` stays the
+    // concrete handle for snapshot delivery below.
+    let sink_dyn: Arc<dyn EventSink> = Arc::clone(sink_concrete) as Arc<dyn EventSink>;
+    let id = manager
+        .connect(session, sink_dyn)
+        .await
+        .map_err(|_| SubscribeReject::DeviceCapReached)?;
+
+    // Snapshot-on-subscribe for THIS table only. base_lsn is the socket's
+    // monotonic synthetic cursor (NOT the frame's resume_lsn) so cross-table
+    // snapshot LSN ranges never collide on the shared sink's dedup ring. A
+    // failed snapshot is non-fatal: the client still gets live fan-out.
+    let snapshot_base = { subs.lock().await.synthetic_cursor };
+    let delivered = if let Some(snap) = snapshotter {
+        match snap
+            .snapshot(&req.table, nostos_domain::Lsn::new(snapshot_base))
+            .await
+        {
+            Ok(events) => {
+                let count = events.len();
+                for ev in events {
+                    let _ = sink_concrete.deliver(ev).await;
+                }
+                debug!(table = %req.table, count, "snapshot-on-subscribe delivered");
+                count
+            }
+            Err(e) => {
+                warn!(
+                    table = %req.table, error = %e,
+                    "snapshot-on-subscribe failed; continuing with live fan-out"
+                );
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    // Advance the cursor by the rows we just delivered + record the session.
+    {
+        let mut s = subs.lock().await;
+        s.synthetic_cursor = s.synthetic_cursor.saturating_add(delivered as u64);
+        s.ids.push(id);
+        s.tables.insert(req.table.clone());
+    }
+    Ok(())
+}
+
+/// Apply a decoded inbound Ack/Write client message. `Subscribe` is routed by
+/// the reader task to `register_subscribe` (this handler never sees it in the
+/// current flow, but stays defensive). The Write body is the ADR-0013 trust
+/// boundary: allowlist FIRST, then tenant-scoped dispatch to the write-back
+/// port, then a `WriteResult` ack queued to the writer task. The write call is
+/// tenant-scoped exactly like the read path (ADR-0018) —
+/// `principal.tenant_scope(tenant_column)` is the same seam `build_predicate`
+/// uses, so read/write enforcement can't drift.
+async fn handle_decoded_message(
+    msg: ClientMessage,
     sink: &TokioEventSink,
     write_back: &Arc<dyn WriteBack>,
     allowlist: &HashSet<String>,
@@ -471,28 +600,34 @@ async fn handle_client_message(
     tenant_column: Option<&str>,
     server_frames_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
 ) {
-    match decode_client_message(data) {
-        Some(ClientMessage::Ack { lsn }) => {
+    match msg {
+        ClientMessage::Ack { lsn } => {
             sink.record_ack(nostos_domain::Lsn::new(lsn));
             debug!(ack_lsn = lsn, "client acknowledged progress");
         }
-        Some(ClientMessage::Write {
+        ClientMessage::Write {
             table,
             op,
             pk,
             payload,
             client_write_id,
-        }) => {
+        } => {
             // ALLOWLIST FIRST (ADR-0013 trust boundary). The transport enforces
             // the table allowlist before the adapter is ever called, so this is
             // one uniform gate that holds regardless of adapter. The
             // `PgWriteBack` adapter re-validates it as defense-in-depth.
             if !allowlist.contains(&table) {
-                let frame = encode_write_result(
-                    &client_write_id,
-                    false,
-                    Some(&WriteBackError::TableNotAllowed(table.clone()).to_string()),
+                // Actionable rejection (ADR-0013). The empty-default (no tables
+                // writable) is deliberate — defense-in-depth at the SQL-injection
+                // trust boundary — so name the table + the exact env var that
+                // opens it, teaching the model instead of failing silently. The
+                // `"table not writable"` prefix is asserted by ws_contract.rs.
+                let msg = format!(
+                    "table not writable: '{table}' — add it to NOSTOS_WRITE_TABLES \
+                     (env, comma-separated; e.g. NOSTOS_WRITE_TABLES={table}). \
+                     Empty by default = no tables writable (ADR-0013)."
                 );
+                let frame = encode_write_result(&client_write_id, false, Some(&msg));
                 let _ = server_frames_tx.try_send(frame);
                 debug!(table = %table, "write rejected: table not writable");
                 return;
@@ -522,14 +657,10 @@ async fn handle_client_message(
                 "write applied (or rejected) — WriteResult queued"
             );
         }
-        Some(ClientMessage::Subscribe { .. }) => {
-            // A second subscribe after the initial one — ignore (resubscribe
-            // mid-session is a Phase-2 feature; for now one predicate per
-            // connection). Don't error; just don't act.
-            debug!("ignoring mid-session subscribe");
-        }
-        None => {
-            warn!("dropping malformed client message");
+        // Subscribe is routed by the reader to `register_subscribe`; reaching
+        // here is impossible in the current flow, but stay defensive.
+        ClientMessage::Subscribe { .. } => {
+            debug!("subscribe reached decoded-message handler");
         }
     }
 }

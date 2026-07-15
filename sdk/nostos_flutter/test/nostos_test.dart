@@ -14,9 +14,14 @@ class FakeNostosEngine implements NostosEngine {
   final rowsController = StreamController<String>.broadcast();
   final stateController = StreamController<NostosConnectionState>.broadcast();
 
-  String? lastSubscribedTable;
-  String? lastWhereSql;
+  List<NostosTableSub> lastTables = [];
   int subscribeCallCount = 0;
+
+  /// Convenience accessors preserving the single-table test shape.
+  String? get lastSubscribedTable =>
+      lastTables.isEmpty ? null : lastTables.first.name;
+  String? get lastWhereSql =>
+      lastTables.isEmpty ? null : lastTables.first.whereSql;
 
   final List<({String table, String op, String pk, String? payloadJson})>
   writes = [];
@@ -35,18 +40,14 @@ class FakeNostosEngine implements NostosEngine {
   }
 
   @override
-  Future<NostosSubscriptionStreams> subscribe({
-    required String table,
-    String? whereSql,
-  }) async {
+  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables}) {
     subscribeCallCount++;
-    lastSubscribedTable = table;
-    lastWhereSql = whereSql;
-    return NostosSubscriptionStreams(
-      rows: rowsController.stream,
-      state: stateController.stream,
-    );
+    lastTables = tables;
+    return stateController.stream;
   }
+
+  @override
+  Stream<String> watch({required String table}) => rowsController.stream;
 
   @override
   Future<int> write({
@@ -69,6 +70,12 @@ class FakeNostosEngine implements NostosEngine {
   Future<void> close() async {
     closeCallCount++;
   }
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  Stream<NostosConnectionState> resume() => stateController.stream;
 }
 
 void main() {

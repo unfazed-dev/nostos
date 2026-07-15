@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0-beta.5';
 
   @override
-  int get rustContentHash => -923275136;
+  int get rustContentHash => 1736867153;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -91,17 +91,25 @@ abstract class RustLibApi extends BaseApi {
     required String dbPath,
   });
 
+  Future<void> crateApiNostosNostosHandleDisconnect({required NostosHandle that});
+
   Future<String> crateApiNostosNostosHandleQuery({
     required NostosHandle that,
     required String sql,
   });
 
-  Future<void> crateApiNostosNostosHandleSubscribe({
+  Stream<NostosConnectionState> crateApiNostosNostosHandleResume({
+    required NostosHandle that,
+  });
+
+  Stream<NostosConnectionState> crateApiNostosNostosHandleSubscribe({
+    required NostosHandle that,
+    required List<TableSubFfi> tables,
+  });
+
+  Stream<String> crateApiNostosNostosHandleWatch({
     required NostosHandle that,
     required String table,
-    String? whereSql,
-    required RustStreamSink<String> rowsSink,
-    required RustStreamSink<NostosConnectionState> stateSink,
   });
 
   Future<BigInt> crateApiNostosNostosHandleWrite({
@@ -229,6 +237,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiNostosNostosHandleDisconnect({required NostosHandle that}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleDisconnectConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleDisconnectConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_disconnect",
+        argNames: ["that"],
+      );
+
+  @override
   Future<String> crateApiNostosNostosHandleQuery({
     required NostosHandle that,
     required String sql,
@@ -245,7 +287,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -267,50 +309,136 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiNostosNostosHandleSubscribe({
+  Stream<NostosConnectionState> crateApiNostosNostosHandleResume({
     required NostosHandle that,
-    required String table,
-    String? whereSql,
-    required RustStreamSink<String> rowsSink,
-    required RustStreamSink<NostosConnectionState> stateSink,
   }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
-            that,
-            serializer,
-          );
-          sse_encode_String(table, serializer);
-          sse_encode_opt_String(whereSql, serializer);
-          sse_encode_StreamSink_String_Sse(rowsSink, serializer);
-          sse_encode_StreamSink_nostos_connection_state_Sse(
-            stateSink,
-            serializer,
-          );
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 5,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: sse_decode_String,
+    final stateSink = RustStreamSink<NostosConnectionState>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+              that,
+              serializer,
+            );
+            sse_encode_StreamSink_nostos_connection_state_Sse(
+              stateSink,
+              serializer,
+            );
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 6,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiNostosNostosHandleResumeConstMeta,
+          argValues: [that, stateSink],
+          apiImpl: this,
         ),
-        constMeta: kCrateApiNostosNostosHandleSubscribeConstMeta,
-        argValues: [that, table, whereSql, rowsSink, stateSink],
-        apiImpl: this,
       ),
     );
+    return stateSink.stream;
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleResumeConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_resume",
+        argNames: ["that", "stateSink"],
+      );
+
+  @override
+  Stream<NostosConnectionState> crateApiNostosNostosHandleSubscribe({
+    required NostosHandle that,
+    required List<TableSubFfi> tables,
+  }) {
+    final stateSink = RustStreamSink<NostosConnectionState>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+              that,
+              serializer,
+            );
+            sse_encode_list_table_sub_ffi(tables, serializer);
+            sse_encode_StreamSink_nostos_connection_state_Sse(
+              stateSink,
+              serializer,
+            );
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 7,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiNostosNostosHandleSubscribeConstMeta,
+          argValues: [that, tables, stateSink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return stateSink.stream;
   }
 
   TaskConstMeta get kCrateApiNostosNostosHandleSubscribeConstMeta =>
       const TaskConstMeta(
         debugName: "NostosHandle_subscribe",
-        argNames: ["that", "table", "whereSql", "rowsSink", "stateSink"],
+        argNames: ["that", "tables", "stateSink"],
+      );
+
+  @override
+  Stream<String> crateApiNostosNostosHandleWatch({
+    required NostosHandle that,
+    required String table,
+  }) {
+    final rowsSink = RustStreamSink<String>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+              that,
+              serializer,
+            );
+            sse_encode_String(table, serializer);
+            sse_encode_StreamSink_String_Sse(rowsSink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 8,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiNostosNostosHandleWatchConstMeta,
+          argValues: [that, table, rowsSink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return rowsSink.stream;
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleWatchConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_watch",
+        argNames: ["that", "table", "rowsSink"],
       );
 
   @override
@@ -336,7 +464,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 9,
             port: port_,
           );
         },
@@ -366,7 +494,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 10,
             port: port_,
           );
         },
@@ -488,9 +616,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<TableSubFfi> dco_decode_list_table_sub_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_table_sub_ffi).toList();
+  }
+
+  @protected
   String? dco_decode_opt_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  TableSubFfi dco_decode_table_sub_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return TableSubFfi(
+      name: dco_decode_String(arr[0]),
+      whereSql: dco_decode_opt_String(arr[1]),
+    );
   }
 
   @protected
@@ -646,6 +792,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<TableSubFfi> sse_decode_list_table_sub_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <TableSubFfi>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_table_sub_ffi(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -654,6 +814,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     } else {
       return null;
     }
+  }
+
+  @protected
+  TableSubFfi sse_decode_table_sub_ffi(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_name = sse_decode_String(deserializer);
+    var var_whereSql = sse_decode_opt_String(deserializer);
+    return TableSubFfi(name: var_name, whereSql: var_whereSql);
   }
 
   @protected
@@ -831,6 +999,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_table_sub_ffi(
+    List<TableSubFfi> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_table_sub_ffi(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -838,6 +1018,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     if (self != null) {
       sse_encode_String(self, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_table_sub_ffi(TableSubFfi self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.name, serializer);
+    sse_encode_opt_String(self.whereSql, serializer);
   }
 
   @protected
@@ -917,9 +1104,9 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
       .crateApiNostosNostosHandleApplySchema(that: this, tables: tables);
 
   /// Tear down the active subscription's background work — the
-  /// connect/apply/reconnect loop and the watch-stream pump (see
-  /// [`Session`]'s `Drop` impl, which aborts both tasks). Safe to call with
-  /// no active subscription (a no-op) and safe to call more than once.
+  /// connect/apply/reconnect loop and every watch pump (see [`Session`]'s
+  /// `Drop` impl, which aborts all of them). Safe to call with no active
+  /// subscription (a no-op) and safe to call more than once.
   ///
   /// Named `close`, not `dispose`: every `#[frb(opaque)]` handle already
   /// implements `RustOpaqueInterface`, which declares its own synchronous
@@ -939,6 +1126,20 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// lifecycle callback, rather than waiting on GC.
   Future<void> close() =>
       RustLib.instance.api.crateApiNostosNostosHandleClose(that: this);
+
+  /// Pause syncing: abort ONLY the connect/apply/reconnect loop, keeping the
+  /// `SyncClient`, its `SqliteStorage`, and every `watch()` pump alive. Reads,
+  /// writes (which land in the durable outbox), and the UI keep working
+  /// offline. `resume()` restarts it. Idempotent: a no-op when already paused
+  /// or when there is no active subscription.
+  ///
+  /// Emits nothing on `state_sink` here (the aborted loop leaves it mid
+  /// `connecting`/`reconnecting`); the Dart wrapper surfaces `disconnected`
+  /// so the UI signal has one owner. Cancellation is task-abort: `run_once`
+  /// respects no stop token, and `tokio::sync::Mutex` (no poison) + `Arc`
+  /// client state mean the client stays usable for local work after the abort.
+  Future<void> disconnect() =>
+      RustLib.instance.api.crateApiNostosNostosHandleDisconnect(that: this);
 
   /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
   /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
@@ -967,33 +1168,54 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   Future<String> query({required String sql}) =>
       RustLib.instance.api.crateApiNostosNostosHandleQuery(that: this, sql: sql);
 
-  /// Subscribe to `table` (optionally filtered by `where_sql`, the safe-SQL
-  /// subset ADR-0012 documents). Replaces any prior subscription on this
-  /// handle. `rows_sink` receives one JSON-array string per tick — the
-  /// current full row set for `table`, emitted immediately (the durable
-  /// snapshot already on disk, so an offline watcher sees data right away)
-  /// and again after every applied batch. `state_sink` receives connection
-  /// state transitions for the life of the handle (not just this
-  /// subscription — see [`NostosConnectionState`]).
+  /// Resume syncing after [`disconnect`]: respawn the connect/apply/reconnect
+  /// loop on the SAME `SyncClient` (reusable across aborts — `run_once(&self)`,
+  /// all per-session state local, `tokio::sync::Mutex` carries no poison). The
+  /// durable outbox drains on the new session's startup flush; live updates
+  /// resume. `state_sink` receives the fresh run's transitions
+  /// (`connecting → connected → …`). Requires a prior `subscribe()`.
+  ///
+  /// Named `resume`, not `connect`: the `#[frb(sync)]` constructor is already
+  /// `NostosHandle::connect`, and Rust forbids two inherent items of the same
+  /// name; the Dart public API mirrors the pause/resume pair (WS5) for the
+  /// same reason — `connect` clashes with `Nostos.connect`/`NostosDatabase.connect`.
+  Stream<NostosConnectionState> resume() =>
+      RustLib.instance.api.crateApiNostosNostosHandleResume(that: this);
+
+  /// Subscribe to `tables` over ONE `/sync` WebSocket (D1/ADR-0022 multi-
+  /// table-per-handle). The first entry is the primary; the rest are extra
+  /// subscriptions on the same socket, all sharing one resume LSN, one
+  /// checkpoint, and one ack stream (ADR-0009). Replaces any prior
+  /// subscription on this handle. `state_sink` receives connection-state
+  /// transitions for the life of the handle.
+  ///
+  /// Does NOT emit rows — call [`Self::watch`] per table to receive its row
+  /// stream. (Snapshot pumps are attached separately so each table gets its
+  /// own Dart stream, matching the `db.watch(table)` surface.)
   ///
   /// # Errors
-  /// Returns an error string if opening the local SQLite store fails. Once
-  /// subscribed, network/session errors surface only as `state_sink`
-  /// transitions (reconnect is automatic and silent, matching
-  /// `SyncClient::run_with_reconnect`'s contract) — `write()` is what
-  /// surfaces a durable-outbox failure to the caller.
-  Future<void> subscribe({
-    required String table,
-    String? whereSql,
-    required RustStreamSink<String> rowsSink,
-    required RustStreamSink<NostosConnectionState> stateSink,
-  }) => RustLib.instance.api.crateApiNostosNostosHandleSubscribe(
-    that: this,
-    table: table,
-    whereSql: whereSql,
-    rowsSink: rowsSink,
-    stateSink: stateSink,
-  );
+  /// Returns an error string if `tables` is empty or opening the local
+  /// SQLite store fails. Once subscribed, network/session errors surface
+  /// only as `state_sink` transitions (reconnect is automatic and silent,
+  /// matching `SyncClient::run_with_reconnect`'s contract).
+  Stream<NostosConnectionState> subscribe({required List<TableSubFfi> tables}) =>
+      RustLib.instance.api.crateApiNostosNostosHandleSubscribe(
+        that: this,
+        tables: tables,
+      );
+
+  /// Attach a row stream for `table`: emits the current full row set
+  /// immediately (the durable snapshot already on disk — visible offline)
+  /// and again after every applied batch. One `watch` per table; `table`
+  /// must be among those passed to [`Self::subscribe`]. Dropping the
+  /// subscription (via `subscribe()` again or [`Self::close`]) aborts every
+  /// watch pump.
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called or `table`
+  /// is not in the subscribed set.
+  Stream<String> watch({required String table}) => RustLib.instance.api
+      .crateApiNostosNostosHandleWatch(that: this, table: table);
 
   /// Enqueue a durable write against the active subscription's table.
   /// Returns once the write is captured in the local outbox (NOT once the
@@ -1007,10 +1229,9 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   ///
   /// # Errors
   /// Returns an error string if `subscribe()` hasn't been called yet, `op`
-  /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` doesn't
-  /// match the active subscription (v1 is one table per handle — see module
-  /// docs), or the local durable enqueue itself failed (disk full, SQLite
-  /// busy).
+  /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` is not in
+  /// the subscribed set (see [`Self::subscribe`]), or the local durable
+  /// enqueue itself failed (disk full, SQLite busy).
   Future<BigInt> write({
     required String table,
     required String op,

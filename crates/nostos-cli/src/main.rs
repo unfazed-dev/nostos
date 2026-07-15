@@ -28,6 +28,12 @@ enum Commands {
     Doctor,
     /// Generate a self-host deploy config (fly/railway) from nostos.toml.
     Deploy(commands::deploy::DeployArgs),
+    /// App-side: scaffold `.nostos/` (config.json + gitignored local/).
+    Link(commands::link::LinkArgs),
+    /// App-side: fetch GET /schema → `.nostos/schema.json`.
+    Pull(commands::pull::PullArgs),
+    /// App-side: generate per-SDK source from `.nostos/`.
+    Gen(commands::gen::GenArgs),
 }
 
 #[tokio::main]
@@ -44,5 +50,8 @@ async fn main() -> Result<()> {
         Commands::Dev => commands::dev::run(&cwd).await,
         Commands::Doctor => commands::doctor::run(&cwd).await,
         Commands::Deploy(args) => commands::deploy::run(args, &cwd),
+        Commands::Link(args) => commands::link::run(args, &cwd).await,
+        Commands::Pull(args) => commands::pull::run(args, &cwd).await,
+        Commands::Gen(args) => commands::gen::run(args, &cwd).await,
     }
 }

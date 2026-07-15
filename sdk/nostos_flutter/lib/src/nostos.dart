@@ -7,7 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'engine.dart';
 import 'rust/frb_generated.dart';
 
-export 'engine.dart' show NostosConnectionState;
+export 'engine.dart' show NostosConnectionState, NostosTableSub;
 
 /// A live Nostos sync connection.
 ///
@@ -16,13 +16,13 @@ export 'engine.dart' show NostosConnectionState;
 /// delivers (or `PgReplicator` produces from Postgres). Rust owns SQLite and
 /// the sync loop; this class is a thin, reactive Dart wrapper.
 ///
-/// v1 supports **one active subscription per `Nostos` instance** — this
-/// mirrors `nostos-client`'s `SyncClient`, which binds one table at
-/// construction (see `rust/src/api/nostos.rs` module docs). Calling
-/// [subscribe] again replaces the previous subscription (its background
-/// connection is torn down). Multiple independent table subscriptions from
-/// one app means multiple `Nostos.connect()` instances for now — a ponytail
-/// for a future multi-table `nostos-client` session.
+/// Supports **multiple tables per `Nostos` instance** over one `/sync`
+/// WebSocket (D1/ADR-0022): one resume LSN, one checkpoint, one ack stream.
+/// Call [subscribeTables] once with the full table set, then [watch] per
+/// table to receive its row stream. Calling subscribe again replaces the
+/// previous subscription (its background connection + watch pumps are torn
+/// down). The single-table [subscribe] is a convenience that subscribes to
+/// exactly one table.
 class Nostos {
   Nostos._(this._engine);
 
@@ -60,8 +60,14 @@ class Nostos {
     return Nostos._(RustNostosEngine.connect(url: url, token: token, dbPath: path));
   }
 
-  String? _subscribedTable;
-  Stream<List<Map<String, dynamic>>>? _rowsStream;
+  /// The set of tables the active subscription covers (empty before the first
+  /// subscribe). Drives the [watch]/[write] membership checks.
+  final Set<String> _subscribedTables = {};
+
+  /// Lazy per-table decoded row streams. [watch] populates this on first call
+  /// per table; cleared on a new subscribe (which tears down the pumps).
+  final Map<String, Stream<List<Map<String, dynamic>>>> _watchCache = {};
+
   final StreamController<NostosConnectionState> _stateController =
       StreamController<NostosConnectionState>.broadcast();
 
@@ -77,42 +83,102 @@ class Nostos {
   /// after [connect] and before the first [watch] / [watchQuery] / [getAll]
   /// against a projected `<table>`. Synchronous (the FFI is `Result<(),
   /// String>` and throws on error). Most apps won't call this directly —
-  /// `NostosDatabase.connect` wires it from a resolved `Schema`.
+  /// `NostosDatabase.connect` wires it from a resolved `NostosSchema`.
   void applySchema(List<ClientTableFfi> tables) =>
       _engine.applySchema(tables);
 
-  /// Subscribe to [table], optionally filtered by [where] — a safe-SQL subset
-  /// predicate (ADR-0012), e.g. `"status = 'open' AND priority >= 3"`. The
-  /// server compiles and ANDs it into the session; a parse failure closes the
-  /// socket (surfaces as a [connectionState] flip, not an exception here —
-  /// see `SyncClientConfig.where_sql`'s doc in nostos-client).
-  ///
-  /// Replaces any previous subscription on this instance (v1: one table per
-  /// `Nostos` — see the class doc).
-  Future<void> subscribe(String table, {String? where}) async {
-    final streams = await _engine.subscribe(table: table, whereSql: where);
-    _subscribedTable = table;
-    _rowsStream = streams.rows.map(_decodeRows).asBroadcastStream();
-    streams.state.listen(_stateController.add);
+  /// Subscribe to [tables] over one `/sync` socket (D1/ADR-0022 multi-table).
+  /// Each entry may carry its own [NostosTableSub.whereSql] (a safe-SQL
+  /// predicate, ADR-0012). Replaces any previous subscription on this
+  /// instance (its background connection + watch pumps are torn down).
+  Future<void> subscribeTables(List<NostosTableSub> tables) async {
+    if (tables.isEmpty) {
+      throw ArgumentError('subscribeTables() requires at least one table');
+    }
+    _watchCache.clear();
+    _subscribedTables
+      ..clear()
+      ..addAll(tables.map((t) => t.name));
+    _engine.subscribe(tables: tables).listen(_stateController.add);
   }
 
-  /// The reactive row stream for [table]: the full current row set,
-  /// re-emitted immediately with the durable on-disk snapshot (visible
-  /// offline, before any network event) and again after every applied
-  /// change. [table] must match the table passed to the most recent
-  /// [subscribe] call.
+  /// Single-table convenience — equivalent to
+  /// `subscribeTables([NostosTableSub(name: table, whereSql: where)])`.
+  Future<void> subscribe(String table, {String? where}) =>
+      subscribeTables([NostosTableSub(name: table, whereSql: where)]);
+
+  /// The reactive row stream for [table]: the full current row set, re-emitted
+  /// immediately with the durable on-disk snapshot (visible offline, before
+  /// any network event) and again after every applied change. [table] must be
+  /// among those passed to [subscribeTables]. Lazily attaches a per-table
+  /// engine watch on first call (cached); subsequent calls share the stream.
   ///
-  /// Throws [StateError] if [subscribe] for [table] hasn't been called.
+  /// Throws [StateError] if [table] is not in the active subscription.
   Stream<List<Map<String, dynamic>>> watch(String table) {
-    final rows = _rowsStream;
-    if (_subscribedTable != table || rows == null) {
+    if (!_subscribedTables.contains(table)) {
       throw StateError(
-        'watch("$table") called without a matching subscribe("$table") '
-        'first. nostos_flutter v1 supports one active subscription per Nostos '
-        'instance (currently: ${_subscribedTable == null ? "none" : '"$_subscribedTable"'}).',
+        'watch("$table") called without that table in the active subscription. '
+        'Subscribed tables: '
+        '${_subscribedTables.isEmpty ? "(none — call subscribe first)" : _subscribedTables.toList()}.',
       );
     }
-    return rows;
+    return _watchCache.putIfAbsent(
+      table,
+      // Replay the latest row set to each new subscriber. A plain
+      // `.asBroadcastStream()` does NOT replay, so a StreamBuilder that mounts
+      // after the engine's initial snapshot tick (e.g. when a NavigationRail
+      // page is rebuilt on tab switch) sees `connectionState: waiting` with no
+      // data and renders empty — "No providers yet." while the rows are on
+      // disk. Caching + replaying the last emission fixes this: every later
+      // subscriber immediately gets the current rows, then live updates.
+      () => _replayLatest(_engine.watch(table: table).map(_decodeRows)),
+    );
+  }
+
+  /// Convert a single-subscription stream into a broadcast stream that REPLAYS
+  /// the most recent event to each new listener (a "BehaviorSubject"/
+  /// `publishValue` equivalent without a dep). Used by [watch] so pages rebuilt
+  /// on navigation still see the current row set. While at least one listener
+  /// is attached the upstream subscription stays live; the upstream is
+  /// cancelled only when the last listener cancels AND no cached value is held.
+  static Stream<List<Map<String, dynamic>>> _replayLatest(
+    Stream<List<Map<String, dynamic>>> source,
+  ) {
+    List<Map<String, dynamic>>? latest;
+    StreamSubscription<List<Map<String, dynamic>>>? sub;
+    final controller =
+        StreamController<List<Map<String, dynamic>>>.broadcast();
+    void ensureListening() {
+      if (sub != null) return;
+      sub = source.listen(
+        (event) {
+          latest = event;
+          controller.add(event);
+        },
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+    }
+
+    controller.onListen = () {
+      ensureListening();
+      // Replay the cached value (if any) the instant a new listener attaches.
+      if (latest != null) {
+        // Emit asynchronously so a listener added during build receives the
+        // event in the next microtask, not synchronously mid-subscribe.
+        scheduleMicrotask(() => controller.add(List.of(latest!)));
+      }
+    };
+    controller.onCancel = () {
+      // Keep `sub` alive as long as we hold a cached value: a future listener
+      // must receive `latest` on subscribe, and the upstream must keep feeding
+      // live updates. Only tear down when there is nothing to replay.
+      if (latest == null) {
+        sub?.cancel();
+        sub = null;
+      }
+    };
+    return controller.stream;
   }
 
   /// Run an arbitrary SELECT against on-device SQLite once (non-reactive).
@@ -152,46 +218,53 @@ class Nostos {
     List<String>? triggerOnTables,
     Duration? throttle,
   }) {
-    final rows = _rowsStream;
-    if (rows == null) {
+    if (_subscribedTables.isEmpty) {
       throw StateError(
-        'watchQuery("$sql") called without subscribe() first. nostos_flutter '
-        'v1 supports one active subscription per Nostos instance.',
+        'watchQuery("$sql") called without subscribe() first.',
       );
     }
-    // PowerSync `triggerOnTables` parity: validate the requested triggers
-    // against the active subscription. nostos_flutter v1 is one-table-per-
-    // handle, so the only legal entry is the subscribed table itself — a
-    // caller asking for any other table is requesting notifications this
-    // instance can never deliver, so fail loudly.
-    final activeTable = _subscribedTable!;
-    final triggers = triggerOnTables ?? [activeTable];
+    // PowerSync `triggerOnTables` parity: validate against the subscribed set.
+    // Multi-table (D1/ADR-0022): any subscribed table is a legal trigger
+    // (default = all subscribed). A name outside the set can never fire, so
+    // fail loudly.
+    final triggers = triggerOnTables ?? _subscribedTables.toList();
     for (final t in triggers) {
-      if (t != activeTable) {
+      if (!_subscribedTables.contains(t)) {
         throw ArgumentError(
-          'triggerOnTables contains "$t", but this Nostos instance is '
-          'subscribed to "$activeTable". nostos_flutter v1 supports one '
-          'active subscription per instance; every triggerOnTables entry '
-          'must match it.',
+          'triggerOnTables contains "$t", which is not in the subscribed set '
+          '(${_subscribedTables.toList()}). Every trigger must be subscribed.',
         );
       }
     }
-
-    // ponytail: with one-table-per-handle every tick on `rows` is already
-    // for `activeTable`, so `triggers` can't actually filter here yet.
-    // Once P5 (Sync Streams) lands multi-table sessions and ticks carry a
-    // source-table tag, re-derive this line into
-    // `rows.where((tick) => triggers.contains(tick.sourceTable))` and the
-    // filter becomes load-bearing. Until then `triggers` is purely an
-    // API-shape + validation check; `throttle` is the only knob here that
-    // changes runtime behavior.
+    // Tick source: merge each trigger table's (cached) watch stream — a change
+    // to ANY trigger table re-runs the SQL.
+    final merged = _mergeTriggers(triggers.map(watch).toList(growable: false));
     final Stream<List<Map<String, dynamic>>> ticks =
-        throttle == null ? rows : _debounceTicks(rows, throttle);
+        throttle == null ? merged : _debounceTicks(merged, throttle);
 
     return ticks.asyncMap((_) async =>
         (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
             .cast<Map<String, dynamic>>());
   }
+
+  /// Reactive typed-record watch (WS6, opt-in). Like [watchQuery] but decodes
+  /// each row into a typed record via [fromRow]. PowerSync parity: PowerSync
+  /// returns untyped `Map` rows and documents a user-written `fromRow`; this
+  /// folds the `.map(fromRow)` boilerplate into the call. Requires an active
+  /// subscription first (see [watchQuery]).
+  ///
+  /// [fromRow] is YOUR mapping function — typically a record's `fromRow`/
+  /// `fromJson` factory. It runs per row per tick, so keep it allocation-light.
+  /// The schema's column affinity (TEXT→String, INTEGER→int, REAL→double) is
+  /// the right cast guide when the schema was server-fetched.
+  Stream<List<T>> watchMapped<T>(
+    String sql,
+    T Function(Map<String, dynamic> row) fromRow, {
+    List<String>? triggerOnTables,
+    Duration? throttle,
+  }) =>
+      watchQuery(sql, triggerOnTables: triggerOnTables, throttle: throttle)
+          .map((rows) => rows.map(fromRow).toList(growable: false));
 
   /// Enqueue a durable write. Returns the local outbox id once the write is
   /// captured on disk — NOT once the server acks it; the applied row
@@ -203,18 +276,17 @@ class Nostos {
   ///   ONLY the columns to change, columns absent are untouched, and the row
   ///   is never inserted (P3 PowerSync PATCH parity).
   ///
-  /// [table] must match the active subscription (v1 constraint — see the
-  /// class doc).
+  /// [table] must be in the active subscription (see the class doc).
   Future<int> write(
     String table, {
     required String op,
     required String pk,
     Map<String, dynamic>? payload,
   }) {
-    if (_subscribedTable != table) {
+    if (!_subscribedTables.contains(table)) {
       throw StateError(
-        'write("$table", ...) does not match the active subscription '
-        '(${_subscribedTable == null ? "none — call subscribe() first" : '"$_subscribedTable"'}).',
+        'write("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
       );
     }
     return _engine.write(
@@ -241,9 +313,51 @@ class Nostos {
     await _stateController.close();
   }
 
+  /// Pause syncing: abort ONLY the background connect loop, keeping the client,
+  /// its on-device SQLite store, and every `watch()` pump alive. Reads, writes
+  /// (enqueued to the durable outbox), and the UI keep working offline. Emits
+  /// `disconnected` on [connectionState]. Idempotent (no-op if already paused or
+  /// never subscribed).
+  Future<void> disconnect() async {
+    await _engine.disconnect();
+    _stateController.add(NostosConnectionState.disconnected);
+  }
+
+  /// Resume syncing after [disconnect]: respawn the connect loop on the same
+  /// client; the durable outbox flushes on reconnect and live updates resume.
+  /// Emits `connecting → connected …` on [connectionState]. Requires a prior
+  /// [subscribe] (throws otherwise). Named `resume`, not `connect`, to avoid
+  /// clashing with the `static Nostos.connect` constructor.
+  void resume() {
+    _engine.resume().listen(_stateController.add);
+  }
+
   static List<Map<String, dynamic>> _decodeRows(String jsonArray) {
     final decoded = jsonDecode(jsonArray) as List<dynamic>;
     return decoded.cast<Map<String, dynamic>>();
+  }
+
+  /// Merge N row streams into one: emits on ANY upstream tick (forwarding
+  /// that tick's rows). Used by [watchQuery] to re-run SQL when any trigger
+  /// table changes. Each upstream is a broadcast stream (from [watch]), so
+  /// multiple watchQuery callers + direct watch() listeners all share the
+  /// same underlying pumps.
+  static Stream<List<Map<String, dynamic>>> _mergeTriggers(
+    List<Stream<List<Map<String, dynamic>>>> sources,
+  ) {
+    if (sources.length == 1) return sources.single;
+    final controller =
+        StreamController<List<Map<String, dynamic>>>.broadcast();
+    final subs = <StreamSubscription<List<Map<String, dynamic>>>>[];
+    for (final s in sources) {
+      subs.add(s.listen(controller.add, onError: controller.addError));
+    }
+    controller.onCancel = () {
+      for (final sub in subs) {
+        sub.cancel();
+      }
+    };
+    return controller.stream;
   }
 
   /// Trailing-edge debounce on the change-tick stream: each tick within

@@ -845,3 +845,71 @@ async fn batched_writes_deliver_every_frame() {
         "every fanned-out frame must reach the client across the batch boundary; got {lsns:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 9 (D1/ADR-0022 multi-table-per-socket): ONE WebSocket subscribes to
+// TWO tables, then fan-out fires one event per table. The client must receive
+// BOTH — proving a second `Subscribe` registers an additional session on the
+// shared sink (the old path ignored it) and that table-indexed candidates_for
+// routes each table's event onto the one socket. The synthetic-LSN snapshot
+// collision fix is PG-only and is exercised end-to-end later, not here.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn multi_table_one_socket_receives_both_tables() {
+    let (addr, _server, _mgr, store) = spawn_fake_server(64).await;
+
+    // One socket subscribes to two tables back-to-back.
+    let collect = tokio::spawn(async move {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+            .await
+            .expect("ws connect");
+        ws.send(Message::Text(common::subscribe_frame("tasks", &[])))
+            .await
+            .unwrap();
+        ws.send(Message::Text(common::subscribe_frame("providers", &[])))
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(Message::Binary(b)))) =
+                tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            {
+                for f in nostos_infra::wire::decode_frames(&b) {
+                    got.push(f);
+                }
+            }
+        }
+        got
+    });
+
+    // Let BOTH subscribes register.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Fan out one event per table.
+    let svc = Arc::new(FanOutService::new(store.clone()));
+    for (table, lsn) in [("tasks", 1_u64), ("providers", 2_u64)] {
+        let event = ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Insert {
+                table: table.into(),
+                pk: lsn.to_string(),
+                payload: Bytes::from_static(b"x"),
+            },
+        );
+        svc.fan_out(&event, |_, _| Some(ColumnValue::Any)).await;
+    }
+
+    let frames = collect.await.unwrap();
+    let tables: Vec<&str> = frames.iter().map(|f| f.table.as_str()).collect();
+    assert!(
+        tables.contains(&"tasks"),
+        "the tasks event must arrive on the shared socket; got tables {tables:?}"
+    );
+    assert!(
+        tables.contains(&"providers"),
+        "the providers event must arrive — a second Subscribe must register an additional session, \
+         not be ignored (D1/ADR-0022); got tables {tables:?}"
+    );
+}

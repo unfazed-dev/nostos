@@ -14,12 +14,10 @@
 /// `src/rust/api/nostos.dart`.
 library;
 
-import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
-
 import 'rust/api/nostos.dart' as rust;
 
 // Re-exported so the public API in `nostos.dart` (`Nostos.applySchema`) and
-// `schema.dart` (`Schema.toClientTables`) can name [ClientTableFfi] without
+// `schema.dart` (`NostosSchema.toClientTables`) can name [ClientTableFfi] without
 // each importing `rust/api/nostos.dart` directly — keeping this file the sole
 // importer of the generated bindings (see the library doc above).
 export 'rust/api/nostos.dart' show ClientTableFfi;
@@ -30,26 +28,33 @@ export 'rust/api/nostos.dart' show ClientTableFfi;
 /// precise (heuristic) semantics of `connected`.
 enum NostosConnectionState { connecting, connected, reconnecting, disconnected }
 
-/// The two streams a subscription produces.
-class NostosSubscriptionStreams {
-  const NostosSubscriptionStreams({required this.rows, required this.state});
+/// One table in a multi-table subscription: a name + an optional safe-SQL
+/// `where_sql` (ADR-0012). A connection subscribes to a list of these over
+/// one `/sync` socket (D1/ADR-0022 multi-table-per-handle). Plain Dart (not
+/// the generated `TableSubFfi`) so tests can build it without the native
+/// library.
+class NostosTableSub {
+  const NostosTableSub({required this.name, this.whereSql});
 
-  /// One JSON-array-of-objects string per tick — the full row set for the
-  /// subscribed table.
-  final Stream<String> rows;
+  /// NostosTable name to subscribe to.
+  final String name;
 
-  /// Connection-state transitions for this subscription's session.
-  final Stream<NostosConnectionState> state;
+  /// Optional safe-SQL predicate scoped to this table (ADR-0012).
+  final String? whereSql;
 }
 
-/// What [Nostos] needs from a backend: start a subscription, perform a
-/// durable write. Implemented for real by [RustNostosEngine]; implement it
-/// yourself in tests to avoid the native library entirely.
+/// What [Nostos] needs from a backend. Implemented for real by [RustNostosEngine];
+/// implement it yourself in tests to avoid the native library entirely.
 abstract class NostosEngine {
-  Future<NostosSubscriptionStreams> subscribe({
-    required String table,
-    String? whereSql,
-  });
+  /// Start a multi-table subscription over one `/sync` socket. Returns the
+  /// connection-state stream (the session's lifecycle). Call [watch] per
+  /// table to receive that table's rows.
+  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables});
+
+  /// Attach a row stream for one subscribed table: one JSON-array-of-objects
+  /// string per tick (the durable snapshot immediately, then after every
+  /// applied change). `table` must be among those passed to [subscribe].
+  Stream<String> watch({required String table});
 
   /// Returns the local outbox id.
   Future<int> write({
@@ -60,8 +65,8 @@ abstract class NostosEngine {
   });
 
   /// Run an arbitrary SELECT against on-device SQLite. Returns a JSON-array
-  /// string (same shape as [NostosSubscriptionStreams.rows]); decode with
-  /// jsonDecode. Requires an active subscription.
+  /// string (same shape as [watch]'s ticks); decode with jsonDecode. Requires
+  /// an active subscription.
   Future<String> query({required String sql});
 
   /// Materialize the WS2 read-views for [tables] in the on-device SQLite
@@ -73,9 +78,18 @@ abstract class NostosEngine {
   /// on error. Wraps the generated `NostosHandle.applySchema`.
   void applySchema(List<rust.ClientTableFfi> tables);
 
+  /// Pause syncing: abort only the connect loop; reads, writes (durable outbox),
+  /// and `watch` pumps keep working offline. Pair with [resume]. Idempotent.
+  Future<void> disconnect();
+
+  /// Resume syncing after [disconnect]: respawn the connect loop on the same
+  /// client (outbox flushes on reconnect). Returns the fresh connection-state
+  /// stream; `Nostos` pipes it into its public `connectionState`.
+  Stream<NostosConnectionState> resume();
+
   /// Tear down the active subscription's background work (the sync loop and
-  /// the watch-stream pump). Safe to call with no active subscription and
-  /// safe to call more than once.
+  /// every watch pump). Safe to call with no active subscription and safe to
+  /// call more than once.
   Future<void> close();
 }
 
@@ -96,23 +110,15 @@ class RustNostosEngine implements NostosEngine {
   final rust.NostosHandle _handle;
 
   @override
-  Future<NostosSubscriptionStreams> subscribe({
-    required String table,
-    String? whereSql,
-  }) async {
-    final rowsSink = RustStreamSink<String>();
-    final stateSink = RustStreamSink<rust.NostosConnectionState>();
-    await _handle.subscribe(
-      table: table,
-      whereSql: whereSql,
-      rowsSink: rowsSink,
-      stateSink: stateSink,
-    );
-    return NostosSubscriptionStreams(
-      rows: rowsSink.stream,
-      state: stateSink.stream.map(_mapState),
-    );
+  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables}) {
+    final ffiTables = tables
+        .map((t) => rust.TableSubFfi(name: t.name, whereSql: t.whereSql))
+        .toList(growable: false);
+    return _handle.subscribe(tables: ffiTables).map(_mapState);
   }
+
+  @override
+  Stream<String> watch({required String table}) => _handle.watch(table: table);
 
   @override
   Future<int> write({
@@ -140,6 +146,12 @@ class RustNostosEngine implements NostosEngine {
 
   @override
   Future<void> close() => _handle.close();
+
+  @override
+  Future<void> disconnect() => _handle.disconnect();
+
+  @override
+  Stream<NostosConnectionState> resume() => _handle.resume().map(_mapState);
 }
 
 NostosConnectionState _mapState(rust.NostosConnectionState s) => switch (s) {

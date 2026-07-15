@@ -1,4 +1,7 @@
 pub mod deploy;
 pub mod dev;
 pub mod doctor;
+pub mod gen;
 pub mod init;
+pub mod link;
+pub mod pull;

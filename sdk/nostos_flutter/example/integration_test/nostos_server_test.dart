@@ -26,10 +26,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:nostos_flutter/nostos_flutter.dart';
-// `Table` is intentionally NOT re-exported from the package barrel (it would
-// shadow material's `Table` widget — see lib/nostos_flutter.dart). Reach it via
-// the src/ import when binding by name, as here.
-import 'package:nostos_flutter/src/schema.dart' show Table;
+// `NostosTable`/`NostosColumn` are intentionally NOT re-exported from the package barrel
+// (they would shadow material's `NostosTable`/`NostosColumn` widgets — see
+// lib/nostos_flutter.dart). Reach them via the src/ import when binding by
+// name, as here.
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -90,12 +90,13 @@ void main() {
     // The fake replicator has NO SchemaSource → GET /schema returns 404, so
     // NostosDatabase.connect's auto-fetch would throw. Pass an explicit
     // schema so applySchema runs locally (creating the WS2 `tasks` view)
-    // without the HTTP round-trip.
-    final schema = Schema(tables: [
-      Table(
+    // without the HTTP round-trip. Columns carry no affinity here (hand-built,
+    // no /schema fetch) — affinity is nullable for exactly this case (WS6).
+    final schema = NostosSchema(tables: [
+      NostosTable(
         name: 'tasks',
         primaryKey: const ['id'],
-        columns: const ['title', 'completed'],
+        columns: const [NostosColumn(name: 'title'), NostosColumn(name: 'completed')],
       ),
     ]);
 
@@ -104,6 +105,10 @@ void main() {
       schema: schema,
       sqlitePath: '${dbDir.path}/it.sqlite',
     );
+    // addTearDown runs LIFO: this close (registered last) runs BEFORE the
+    // dbDir.delete (registered first), so the SQLite handle releases the file
+    // before we try to delete its directory (else errno 66 ENOTEMPTY).
+    addTearDown(db.close);
 
     final connected = db.connectionState
         .firstWhere((s) => s == NostosConnectionState.connected)
@@ -113,12 +118,18 @@ void main() {
 
     await expectLater(connected, completes);
 
-    // Read cairn_data directly (not the WS2 view) so each row carries `_pk`:
-    // The fake replicator's payload is opaque bytes (not JSON), so the typed
-    // columns come back NULL — but the WS2 `tasks` view projects `pk AS _pk`,
-    // so `SELECT * FROM tasks` carries the row key (the assertion target).
+    // Read just `_pk` from the WS2 `tasks` view. The fake replicator's payload
+    // is OPAQUE BYTES, not JSON (crates/nostos-server/src/main.rs:279-281 — only
+    // PgReplicator emits a JSON object), so SQLite's json_extract on it ERRORS
+    // with "malformed JSON" — it does NOT return NULL (that was the prior
+    // assumption; running this test live falsified it). `SELECT * FROM tasks`
+    // evaluates the json_extract'd title/completed columns and errors; `SELECT
+    // _pk` projects only the row key (SQLite prunes the unused json_extract
+    // columns) — the pipeline proof this test exists for. Typed-column
+    // rendering against valid-JSON pg payloads is proven by the demo +
+    // probe-runner; the view's `_pk` projection by the nostos-client unit test.
     final rows = await db
-        .watch('SELECT * FROM tasks')
+        .watch('SELECT _pk FROM tasks')
         .firstWhere((rows) => rows.isNotEmpty)
         .timeout(const Duration(seconds: 15));
 
@@ -128,5 +139,19 @@ void main() {
       contains('_pk'),
       reason: 'every decoded row carries its primary key (pk AS _pk)',
     );
+
+    // WS6 typed-record path: watchMapped decodes rows into typed records via a
+    // user fromRow, end-to-end against the real engine + FFI. `_pk` is the one
+    // value the fake replicator populates (the row key; payload columns are
+    // NULL), so map on it — the meaningful typed-field cast (title/completed)
+    // is covered by the pure-Dart unit test with canned real-shaped JSON.
+    final typed = await db
+        .watchMapped<String>(
+          'SELECT _pk FROM tasks',
+          (row) => row['_pk'].toString(),
+        )
+        .firstWhere((keys) => keys.isNotEmpty)
+        .timeout(const Duration(seconds: 15));
+    expect(typed, isNotEmpty);
   });
 }

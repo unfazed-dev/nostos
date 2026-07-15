@@ -16,7 +16,10 @@ BENCH_EVENTS  ?= 100000
 # Default Postgres URL for `make dev-stack` — mirrors docker/docker-compose.yml
 # (host port 5433 → container 5432, user/db/pass = nostos). Override by setting
 # this env var if you point dev-stack at a different Postgres.
-NOSTOS_PG_URL_DEFAULT ?= postgresql://cairn:cairn@localhost:5433/cairn
+# nostos-server connects as the least-privilege `cairn_writer` role (NOT the
+# `cairn` superuser) — see docker/pg-init/02-nostos-role.sql. A compromised
+# server can then only touch synced tables, not the whole DB (ADR-0013/0018).
+NOSTOS_PG_URL_DEFAULT ?= postgresql://cairn_writer:cairn_writer_dev_pw@localhost:5433/cairn
 
 CARGO := cargo
 
@@ -119,7 +122,7 @@ dev-stack: ## Real-Postgres quickstart: compose up + run server with PgReplicato
 	  psql -U cairn -d cairn -tAc \
 	  "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" | grep -q 1 \
 	  || { echo "Postgres did not become ready in 60s — try 'make pg-logs'"; exit 1; }
-	NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=$(NOSTOS_PG_URL_DEFAULT) $(CARGO) run -p nostos-server
+	NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=$(NOSTOS_PG_URL_DEFAULT) NOSTOS_WRITE_TABLES=tasks,providers,clients,availabilities,appointments,invoices $(CARGO) run -p nostos-server
 
 .PHONY: pg-down
 pg-down: ## Stop Postgres.
@@ -263,3 +266,20 @@ fixture-todo-nostos-live-down:
 .PHONY: fixture-todo-nostos-live-proof
 fixture-todo-nostos-live-proof:
 	cd fixtures/flutter/todo && flutter test integration_test/nostos_live_test.dart -d macos
+
+# ----------------------------------------------------------------------------
+# Playbook (agent-native visual-plan MDX -> standalone HTML).
+# Edit plan.mdx, then `make playbook` regenerates playbook.html and opens it.
+# Self-contained: Mermaid via CDN, real tables/callouts — no Plan UI bridge,
+# no auth, no Chrome PNA gate. Override the plan dir: PLAYBOOK_DIR=plans/<slug>.
+# render-playbook.py is a GENERIC agent-native plan.mdx renderer (stdlib-only;
+# kept byte-identical with applications/p2/scripts/render-playbook.py): Mermaid,
+# Code, Table, Callout, Checklist, QuestionForm, FileTree, TabsBlock,
+# AnnotatedCode, Diagram, Columns + markdown. See its header docstring for limits.
+# ----------------------------------------------------------------------------
+PLAYBOOK_DIR ?= plans/nostos-supabase-realtime
+
+.PHONY: playbook
+playbook: ## Render the playbook (plan.mdx -> playbook.html) and open it in the browser.
+	python3 scripts/render-playbook.py $(PLAYBOOK_DIR)/plan.mdx
+	open $(PLAYBOOK_DIR)/playbook.html
