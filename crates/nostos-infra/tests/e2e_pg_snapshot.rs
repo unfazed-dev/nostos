@@ -126,11 +126,19 @@ async fn fresh_slot_yields_snapshot_rows_then_live_stream() {
 
     // 3a. Collect the snapshot events. They should be exactly the 3 seeded
     //     rows, all at the SAME LSN (the snapshot's consistent point).
-    let snapshot_events = collect_events(&mut repl, 8, Duration::from_secs(5)).await;
+    // The publication (`cairn_pub`) now carries 5 dashboard tables alongside
+    // `tasks` (ADR-0022 / P1), so a fresh-slot snapshot emits ALL member tables'
+    // rows. Collect enough to capture the full snapshot, then filter to the
+    // `tasks` rows this test seeds and asserts on.
+    let all_snapshot = collect_events(&mut repl, 32, Duration::from_secs(5)).await;
     assert!(
-        !snapshot_events.is_empty(),
+        !all_snapshot.is_empty(),
         "snapshot yielded no events — fresh slot should deliver pre-existing rows"
     );
+    let snapshot_events: Vec<&ReplicationEvent> = all_snapshot
+        .iter()
+        .filter(|ev| ev.table() == "tasks")
+        .collect();
     let snapshot_lsns: std::collections::HashSet<Lsn> =
         snapshot_events.iter().map(|ev| ev.lsn).collect();
     assert_eq!(
@@ -142,7 +150,7 @@ async fn fresh_slot_yields_snapshot_rows_then_live_stream() {
     assert_eq!(
         snapshot_events.len(),
         3,
-        "snapshot should contain exactly the 3 seeded rows; got {}",
+        "snapshot should contain exactly the 3 seeded tasks rows; got {}",
         snapshot_events.len()
     );
     for t in &seeded_titles {

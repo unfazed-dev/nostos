@@ -1,9 +1,11 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:meta/meta.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'nostos.dart';
+import 'nostos_config.dart';
 import 'schema.dart';
 
 /// PowerSync-style entry point: open a [Nostos] sync connection AND resolve
@@ -23,16 +25,23 @@ import 'schema.dart';
 /// ```
 ///
 /// This class adds no sync logic of its own — it wires [Nostos] (the thin
-/// reactive wrapper over the Rust engine) to a resolved [Schema]. A
+/// reactive wrapper over the Rust engine) to a resolved [NostosSchema]. A
 /// Supabase-flavored factory is provided (see [NostosDatabase.supabase]).
 class NostosDatabase {
   NostosDatabase._(this._nostos, this.schema);
+
+  /// Test-only: wrap an injected [Nostos] (itself injectable via
+  /// `Nostos.withEngine`) to exercise the typed mappers ([watchMapped] /
+  /// [getAllMapped]) without the native library. See
+  /// `test/nostos_ws6_test.dart`.
+  @visibleForTesting
+  NostosDatabase.forTest(this._nostos, this.schema);
 
   final Nostos _nostos;
 
   /// The resolved server schema used to materialize the read-views.
   /// Exposed for inspection / codegen; not meant to be mutated.
-  final Schema schema;
+  final NostosSchema schema;
 
   /// Open a [Nostos] connection and resolve the schema.
   ///
@@ -43,7 +52,7 @@ class NostosDatabase {
   ///
   /// If [schema] is `null`, the HTTP base is derived from [url]
   /// (`wss`→`https`, `ws`→`http`, trailing path stripped) and `GET
-  /// {base}/schema` is fetched + parsed via [Schema.fromSchemaDescriptor].
+  /// {base}/schema` is fetched + parsed via [NostosSchema.fromSchemaDescriptor].
   /// Then `Nostos.applySchema` runs once to create the read-views. Returns a
   /// ready [NostosDatabase]; call [subscribe] next to start syncing.
   ///
@@ -52,10 +61,81 @@ class NostosDatabase {
   static Future<NostosDatabase> connect({
     required String url,
     String? token,
-    Schema? schema,
+    NostosSchema? schema,
     required String sqlitePath,
   }) =>
       _open(url: url, token: token, schema: schema, sqlitePath: sqlitePath);
+
+  /// Config-driven open: connect using a [NostosConfig] (normally loaded
+  /// from the app's bundled `assets/nostos.json` via [NostosConfig.load])
+  /// plus the app's declared [schema].
+  ///
+  /// This is the recommended app entry point:
+  ///
+  /// ```dart
+  /// final config = await NostosConfig.load();
+  /// final dir = await getApplicationSupportDirectory();
+  /// final db = await NostosDatabase.open(
+  ///   config: config,
+  ///   schema: appSchema,
+  ///   sqliteDir: dir.path,
+  /// );
+  /// ```
+  ///
+  /// Behavior:
+  /// - SQLite lands at `{sqliteDir}/{config.sqliteFilename}`.
+  /// - If [schema] is `null`, it is fetched from the server
+  ///   (`GET {base}/schema`) as in [connect]. Passing your declared schema
+  ///   is preferred — re-applying it at every connect IS the migration
+  ///   mechanism (views are dropped + recreated; see [NostosSchema]).
+  /// - If the config carries a `supabase` block, Supabase is initialized
+  ///   (skipped when the app already called `Supabase.initialize`) and the
+  ///   signed-in session's access token becomes the sync bearer token —
+  ///   throws [StateError] when nobody is signed in (same contract as
+  ///   [NostosDatabase.supabase]).
+  static Future<NostosDatabase> open({
+    required NostosConfig config,
+    NostosSchema? schema,
+    required String sqliteDir,
+  }) async {
+    final sqlitePath = '$sqliteDir/${config.sqliteFilename}';
+    String? token;
+    if (config.hasSupabase) {
+      final initialized = _supabaseInitialized();
+      if (!initialized) {
+        await Supabase.initialize(
+          url: config.supabaseUrl!,
+          publishableKey: config.supabaseAnonKey!,
+        );
+      }
+      final session = Supabase.instance.client.auth.currentSession;
+      if (session == null) {
+        throw StateError(
+          'nostos config has a "supabase" block but there is no live session '
+          '— sign in before calling NostosDatabase.open()',
+        );
+      }
+      token = session.accessToken;
+    }
+    return _open(
+      url: config.url,
+      token: token,
+      schema: schema,
+      sqlitePath: sqlitePath,
+    );
+  }
+
+  /// `Supabase.initialize` is process-global and once-only; probing
+  /// [Supabase.instance] is the only supported "is it initialized?" check
+  /// (it throws [AssertionError] before initialize).
+  static bool _supabaseInitialized() {
+    try {
+      Supabase.instance;
+      return true;
+    } on AssertionError {
+      return false;
+    }
+  }
 
   /// Open a [Nostos] connection for a Supabase-authenticated app.
   ///
@@ -85,7 +165,7 @@ class NostosDatabase {
   /// `NostosSupabase` for the token-swap primitive).
   static Future<NostosDatabase> supabase({
     required String nostosUrl,
-    Schema? schema,
+    NostosSchema? schema,
     required String sqlitePath,
   }) async {
     final session = Supabase.instance.client.auth.currentSession;
@@ -109,7 +189,7 @@ class NostosDatabase {
   static Future<NostosDatabase> _open({
     required String url,
     String? token,
-    Schema? schema,
+    NostosSchema? schema,
     required String sqlitePath,
   }) async {
     final nostos = await Nostos.connect(
@@ -127,11 +207,18 @@ class NostosDatabase {
       _nostos.connectionState;
 
   /// Subscribe to [table], optionally filtered by [where] (a safe-SQL
-  /// predicate — see `Nostos.subscribe`). One active subscription per
-  /// underlying [Nostos] instance (v1). Must be called before [watch] /
-  /// [getAll] / [write] for that table.
+  /// predicate — see `Nostos.subscribe`). Must be called before [watch] /
+  /// [getAll] / [write] for that table. For multiple tables on one
+  /// connection, use [subscribeTables].
   Future<void> subscribe(String table, {String? where}) =>
       _nostos.subscribe(table, where: where);
+
+  /// Subscribe to [tables] over one `/sync` socket (D1/ADR-0022 multi-table).
+  /// Each entry may carry its own `whereSql`. Replaces any prior subscription.
+  /// Call once with the full table set, then [watch] / [getAll] / [write] per
+  /// table.
+  Future<void> subscribeTables(List<NostosTableSub> tables) =>
+      _nostos.subscribeTables(tables);
 
   /// Reactive SQL watch: re-runs [sql] whenever the synced data changes and
   /// emits the decoded result set. Thin delegate over `Nostos.watchQuery`
@@ -157,6 +244,22 @@ class NostosDatabase {
   /// them into [write]; until then, [execute] is SELECT-only.
   Future<List<Map<String, dynamic>>> execute(String sql) => getAll(sql);
 
+  /// Reactive typed-record watch (WS6): like [watch] but maps each row to a
+  /// typed record via [fromRow]. Thin delegate over `Nostos.watchMapped`.
+  Stream<List<T>> watchMapped<T>(
+    String sql,
+    T Function(Map<String, dynamic> row) fromRow,
+  ) =>
+      _nostos.watchMapped(sql, fromRow);
+
+  /// One-shot typed-record query (WS6): like [getAll] but maps each row to a
+  /// typed record via [fromRow].
+  Future<List<T>> getAllMapped<T>(
+    String sql,
+    T Function(Map<String, dynamic> row) fromRow,
+  ) async =>
+      (await getAll(sql)).map(fromRow).toList(growable: false);
+
   /// Enqueue a durable write into the local outbox. Returns the local outbox
   /// id (NOT a server ack — the applied row round-trips back through [watch];
   /// see `Nostos.write`). [op] is one of `"upsert"`, `"delete"`, `"patch"`.
@@ -176,6 +279,13 @@ class NostosDatabase {
   /// Safe to call with no subscription and safe to call more than once.
   Future<void> close() => _nostos.close();
 
+  /// Pause syncing (delegate to [Nostos.disconnect]); reads/writes/UI keep
+  /// working offline. See `Nostos.disconnect`.
+  Future<void> disconnect() => _nostos.disconnect();
+
+  /// Resume syncing after [disconnect] (delegate to [Nostos.resume]).
+  void resume() => _nostos.resume();
+
   /// Derive the HTTP base for `GET /schema` from the WS `/sync` URL:
   /// `wss`→`https`, `ws`→`http`, host+port preserved, trailing path stripped.
   static String _deriveHttpBase(String wsUrl) {
@@ -189,9 +299,9 @@ class NostosDatabase {
     return '$scheme://${uri.host}$port';
   }
 
-  static Future<Schema> _fetchSchema(String httpBase) async {
+  static Future<NostosSchema> _fetchSchema(String httpBase) async {
     final response = await http.get(Uri.parse('$httpBase/schema'));
     final body = jsonDecode(response.body) as Map<String, dynamic>;
-    return Schema.fromSchemaDescriptor(body);
+    return NostosSchema.fromSchemaDescriptor(body);
   }
 }

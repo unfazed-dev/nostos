@@ -16,7 +16,10 @@ BENCH_EVENTS  ?= 100000
 # Default Postgres URL for `make dev-stack` — mirrors docker/docker-compose.yml
 # (host port 5433 → container 5432, user/db/pass = nostos). Override by setting
 # this env var if you point dev-stack at a different Postgres.
-NOSTOS_PG_URL_DEFAULT ?= postgresql://cairn:cairn@localhost:5433/cairn
+# nostos-server connects as the least-privilege `cairn_writer` role (NOT the
+# `cairn` superuser) — see docker/pg-init/02-nostos-role.sql. A compromised
+# server can then only touch synced tables, not the whole DB (ADR-0013/0018).
+NOSTOS_PG_URL_DEFAULT ?= postgresql://cairn_writer:cairn_writer_dev_pw@localhost:5433/cairn
 
 CARGO := cargo
 
@@ -119,7 +122,7 @@ dev-stack: ## Real-Postgres quickstart: compose up + run server with PgReplicato
 	  psql -U cairn -d cairn -tAc \
 	  "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" | grep -q 1 \
 	  || { echo "Postgres did not become ready in 60s — try 'make pg-logs'"; exit 1; }
-	NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=$(NOSTOS_PG_URL_DEFAULT) $(CARGO) run -p nostos-server
+	NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=$(NOSTOS_PG_URL_DEFAULT) NOSTOS_WRITE_TABLES=tasks,providers,clients,availabilities,appointments,invoices $(CARGO) run -p nostos-server
 
 .PHONY: pg-down
 pg-down: ## Stop Postgres.

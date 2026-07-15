@@ -37,9 +37,9 @@ abstract class NostosHandle implements RustOpaqueInterface {
   void applySchema({required List<ClientTableFfi> tables});
 
   /// Tear down the active subscription's background work — the
-  /// connect/apply/reconnect loop and the watch-stream pump (see
-  /// [`Session`]'s `Drop` impl, which aborts both tasks). Safe to call with
-  /// no active subscription (a no-op) and safe to call more than once.
+  /// connect/apply/reconnect loop and every watch pump (see [`Session`]'s
+  /// `Drop` impl, which aborts all of them). Safe to call with no active
+  /// subscription (a no-op) and safe to call more than once.
   ///
   /// Named `close`, not `dispose`: every `#[frb(opaque)]` handle already
   /// implements `RustOpaqueInterface`, which declares its own synchronous
@@ -74,6 +74,19 @@ abstract class NostosHandle implements RustOpaqueInterface {
     dbPath: dbPath,
   );
 
+  /// Pause syncing: abort ONLY the connect/apply/reconnect loop, keeping the
+  /// `SyncClient`, its `SqliteStorage`, and every `watch()` pump alive. Reads,
+  /// writes (which land in the durable outbox), and the UI keep working
+  /// offline. `resume()` restarts it. Idempotent: a no-op when already paused
+  /// or when there is no active subscription.
+  ///
+  /// Emits nothing on `state_sink` here (the aborted loop leaves it mid
+  /// `connecting`/`reconnecting`); the Dart wrapper surfaces `disconnected`
+  /// so the UI signal has one owner. Cancellation is task-abort: `run_once`
+  /// respects no stop token, and `tokio::sync::Mutex` (no poison) + `Arc`
+  /// client state mean the client stays usable for local work after the abort.
+  Future<void> disconnect();
+
   /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
   /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
   /// object per row, keyed by column name — which is the SAME shape the
@@ -100,27 +113,48 @@ abstract class NostosHandle implements RustOpaqueInterface {
   /// prepare / a row fails to decode (`StorageError::Backend`).
   Future<String> query({required String sql});
 
-  /// Subscribe to `table` (optionally filtered by `where_sql`, the safe-SQL
-  /// subset ADR-0012 documents). Replaces any prior subscription on this
-  /// handle. `rows_sink` receives one JSON-array string per tick — the
-  /// current full row set for `table`, emitted immediately (the durable
-  /// snapshot already on disk, so an offline watcher sees data right away)
-  /// and again after every applied batch. `state_sink` receives connection
-  /// state transitions for the life of the handle (not just this
-  /// subscription — see [`NostosConnectionState`]).
+  /// Resume syncing after [`disconnect`]: respawn the connect/apply/reconnect
+  /// loop on the SAME `SyncClient` (reusable across aborts — `run_once(&self)`,
+  /// all per-session state local, `tokio::sync::Mutex` carries no poison). The
+  /// durable outbox drains on the new session's startup flush; live updates
+  /// resume. `state_sink` receives the fresh run's transitions
+  /// (`connecting → connected → …`). Requires a prior `subscribe()`.
+  ///
+  /// Named `resume`, not `connect`: the `#[frb(sync)]` constructor is already
+  /// `NostosHandle::connect`, and Rust forbids two inherent items of the same
+  /// name; the Dart public API mirrors the pause/resume pair (WS5) for the
+  /// same reason — `connect` clashes with `Nostos.connect`/`NostosDatabase.connect`.
+  Stream<NostosConnectionState> resume();
+
+  /// Subscribe to `tables` over ONE `/sync` WebSocket (D1/ADR-0022 multi-
+  /// table-per-handle). The first entry is the primary; the rest are extra
+  /// subscriptions on the same socket, all sharing one resume LSN, one
+  /// checkpoint, and one ack stream (ADR-0009). Replaces any prior
+  /// subscription on this handle. `state_sink` receives connection-state
+  /// transitions for the life of the handle.
+  ///
+  /// Does NOT emit rows — call [`Self::watch`] per table to receive its row
+  /// stream. (Snapshot pumps are attached separately so each table gets its
+  /// own Dart stream, matching the `db.watch(table)` surface.)
   ///
   /// # Errors
-  /// Returns an error string if opening the local SQLite store fails. Once
-  /// subscribed, network/session errors surface only as `state_sink`
-  /// transitions (reconnect is automatic and silent, matching
-  /// `SyncClient::run_with_reconnect`'s contract) — `write()` is what
-  /// surfaces a durable-outbox failure to the caller.
-  Future<void> subscribe({
-    required String table,
-    String? whereSql,
-    required RustStreamSink<String> rowsSink,
-    required RustStreamSink<NostosConnectionState> stateSink,
-  });
+  /// Returns an error string if `tables` is empty or opening the local
+  /// SQLite store fails. Once subscribed, network/session errors surface
+  /// only as `state_sink` transitions (reconnect is automatic and silent,
+  /// matching `SyncClient::run_with_reconnect`'s contract).
+  Stream<NostosConnectionState> subscribe({required List<TableSubFfi> tables});
+
+  /// Attach a row stream for `table`: emits the current full row set
+  /// immediately (the durable snapshot already on disk — visible offline)
+  /// and again after every applied batch. One `watch` per table; `table`
+  /// must be among those passed to [`Self::subscribe`]. Dropping the
+  /// subscription (via `subscribe()` again or [`Self::close`]) aborts every
+  /// watch pump.
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called or `table`
+  /// is not in the subscribed set.
+  Stream<String> watch({required String table});
 
   /// Enqueue a durable write against the active subscription's table.
   /// Returns once the write is captured in the local outbox (NOT once the
@@ -134,10 +168,9 @@ abstract class NostosHandle implements RustOpaqueInterface {
   ///
   /// # Errors
   /// Returns an error string if `subscribe()` hasn't been called yet, `op`
-  /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` doesn't
-  /// match the active subscription (v1 is one table per handle — see module
-  /// docs), or the local durable enqueue itself failed (disk full, SQLite
-  /// busy).
+  /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` is not in
+  /// the subscribed set (see [`Self::subscribe`]), or the local durable
+  /// enqueue itself failed (disk full, SQLite busy).
   Future<BigInt> write({
     required String table,
     required String op,
@@ -198,4 +231,28 @@ class ClientTableFfi {
           name == other.name &&
           primaryKey == other.primaryKey &&
           columns == other.columns;
+}
+
+/// One subscription's table spec for [`NostosHandle::subscribe`]: a table name
+/// plus an optional safe-SQL `where_sql` (ADR-0012). A connection subscribes to a
+/// `Vec` of these over one `/sync` socket (D1/ADR-0022 multi-table-per-handle).
+class TableSubFfi {
+  /// Table name to subscribe to.
+  final String name;
+
+  /// Optional safe-SQL predicate scoped to this table (ADR-0012).
+  final String? whereSql;
+
+  const TableSubFfi({required this.name, this.whereSql});
+
+  @override
+  int get hashCode => name.hashCode ^ whereSql.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TableSubFfi &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          whereSql == other.whereSql;
 }

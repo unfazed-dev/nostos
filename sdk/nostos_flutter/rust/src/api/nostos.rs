@@ -9,12 +9,12 @@
 //!   shape — it decodes the opaque payload bytes to JSON here and hands Dart a
 //!   JSON array string per tick, which the Dart side `jsonDecode`s. No
 //!   client-side schema artifact, no generated Dart model classes.
-//! - One `SyncClient` binds one `table` at construction (`nostos-client`'s
-//!   Phase-0 predicate floor). `subscribe()` therefore represents ONE active
-//!   subscription per [`NostosHandle`] — calling it again tears down the
-//!   previous session and starts a fresh one. Independent concurrent
-//!   subscriptions to multiple tables are a ponytail for a future
-//!   `nostos-client` that supports multi-table sessions.
+//! - One `SyncClient` binds N `tables` at construction, all multiplexed over
+//!   ONE `/sync` WebSocket (D1/ADR-0022 multi-table-per-handle: one resume LSN,
+//!   one checkpoint, one ack stream). `subscribe(tables)` represents ONE active
+//!   subscription per [`NostosHandle`] — calling it again tears down the previous
+//!   session and starts a fresh one. `watch(table)` attaches a per-table row
+//!   stream to the active session; call it once per table you want to observe.
 //! - This crate owns its own `tokio::runtime::Runtime` (not frb's internal
 //!   executor) so the connect/apply/reconnect loop and the watch-stream pump
 //!   keep running in the background for the lifetime of the [`NostosHandle`],
@@ -24,8 +24,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::collections::HashSet;
+
 use nostos_client::sqlite::ClientTable;
-use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig};
+use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig, TableSub};
 use nostos_core::{PendingWrite, WriteOp};
 use flutter_rust_bridge::frb;
 use tokio::sync::broadcast::error::RecvError;
@@ -110,21 +112,45 @@ pub struct NostosHandle {
     session: AsyncMutex<Option<Session>>,
 }
 
-/// The one active subscription (v1: single-table, see module docs). Dropping
-/// this — including via `subscribe()` replacing it — aborts both background
-/// tasks, so a superseded subscription's connect loop and watch pump actually
-/// stop instead of leaking a live WebSocket + reconnect loop forever.
+/// One subscription's table spec for [`NostosHandle::subscribe`]: a table name
+/// plus an optional safe-SQL `where_sql` (ADR-0012). A connection subscribes to a
+/// `Vec` of these over one `/sync` socket (D1/ADR-0022 multi-table-per-handle).
+pub struct TableSubFfi {
+    /// Table name to subscribe to.
+    pub name: String,
+    /// Optional safe-SQL predicate scoped to this table (ADR-0012).
+    pub where_sql: Option<String>,
+}
+
+/// The one active subscription: ONE `SyncClient` bound to N tables over one
+/// `/sync` socket, plus a per-table watch pump per attached `watch()` call.
+/// Dropping this — including via `subscribe()` replacing it — aborts the
+/// connect loop AND every watch pump, so a superseded subscription's tasks
+/// actually stop instead of leaking a live WebSocket + pumps forever.
 struct Session {
     client: Arc<SyncClient<SqliteStorage>>,
-    table: String,
-    run_task: tokio::task::JoinHandle<()>,
-    pump_task: tokio::task::JoinHandle<()>,
+    /// Every subscribed table name (drives the `write`/`watch` membership check).
+    tables: HashSet<String>,
+    /// The connect/apply/reconnect loop. `None` while paused via `disconnect()`
+    /// (D2/ADR-0022): the client + storage + `watch_tasks` stay alive so reads,
+    /// writes (durable outbox), and the UI keep working offline; `resume()`
+    /// respawns it on the SAME client.
+    run_task: Option<tokio::task::JoinHandle<()>>,
+    /// Stashed at `subscribe()` so `resume()` can respawn the loop WITHOUT
+    /// rebuilding the client or reopening storage (the spawn moves the original).
+    config: SyncClientConfig,
+    /// One re-snapshot pump per `watch(table)` call.
+    watch_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.run_task.abort();
-        self.pump_task.abort();
+        if let Some(task) = self.run_task.take() {
+            task.abort();
+        }
+        for task in &self.watch_tasks {
+            task.abort();
+        }
     }
 }
 
@@ -176,70 +202,124 @@ impl NostosHandle {
         storage.apply_schema(&mapped).map_err(|e| e.to_string())
     }
 
-    /// Subscribe to `table` (optionally filtered by `where_sql`, the safe-SQL
-    /// subset ADR-0012 documents). Replaces any prior subscription on this
-    /// handle. `rows_sink` receives one JSON-array string per tick — the
-    /// current full row set for `table`, emitted immediately (the durable
-    /// snapshot already on disk, so an offline watcher sees data right away)
-    /// and again after every applied batch. `state_sink` receives connection
-    /// state transitions for the life of the handle (not just this
-    /// subscription — see [`NostosConnectionState`]).
+    /// Subscribe to `tables` over ONE `/sync` WebSocket (D1/ADR-0022 multi-
+    /// table-per-handle). The first entry is the primary; the rest are extra
+    /// subscriptions on the same socket, all sharing one resume LSN, one
+    /// checkpoint, and one ack stream (ADR-0009). Replaces any prior
+    /// subscription on this handle. `state_sink` receives connection-state
+    /// transitions for the life of the handle.
+    ///
+    /// Does NOT emit rows — call [`Self::watch`] per table to receive its row
+    /// stream. (Snapshot pumps are attached separately so each table gets its
+    /// own Dart stream, matching the `db.watch(table)` surface.)
     ///
     /// # Errors
-    /// Returns an error string if opening the local SQLite store fails. Once
-    /// subscribed, network/session errors surface only as `state_sink`
-    /// transitions (reconnect is automatic and silent, matching
-    /// `SyncClient::run_with_reconnect`'s contract) — `write()` is what
-    /// surfaces a durable-outbox failure to the caller.
+    /// Returns an error string if `tables` is empty or opening the local
+    /// SQLite store fails. Once subscribed, network/session errors surface
+    /// only as `state_sink` transitions (reconnect is automatic and silent,
+    /// matching `SyncClient::run_with_reconnect`'s contract).
     pub async fn subscribe(
         &self,
-        table: String,
-        where_sql: Option<String>,
-        rows_sink: StreamSink<String>,
+        tables: Vec<TableSubFfi>,
         state_sink: StreamSink<NostosConnectionState>,
     ) -> Result<(), String> {
+        if tables.is_empty() {
+            return Err("subscribe() requires at least one table".to_string());
+        }
         let mut guard = self.session.lock().await;
         *guard = None; // drop (and stop) any prior subscription first
 
+        let mut iter = tables.into_iter();
+        let primary = iter.next().expect("checked non-empty");
+        let extra: Vec<TableSub> = iter
+            .map(|t| TableSub {
+                name: t.name,
+                where_sql: t.where_sql,
+            })
+            .collect();
+        // The subscribed set (primary + extras) drives the write/watch checks.
+        let mut table_set: HashSet<String> = HashSet::new();
+        table_set.insert(primary.name.clone());
+        for t in &extra {
+            table_set.insert(t.name.clone());
+        }
+
         let storage = SqliteStorage::open(&self.db_path).map_err(|e| e.to_string())?;
         let config = SyncClientConfig {
-            table: table.clone(),
+            table: primary.name,
             token: self.token.clone(),
-            where_sql,
+            where_sql: primary.where_sql,
+            extra_tables: extra,
             // Long-lived by design: no PER-BATCH idle disconnect, unbounded
-            // retries. The bug this `None` used to paper over (a single
-            // write on an otherwise-idle table buffering forever) is now
-            // fixed precisely by `flush_quiesce` (left at its default —
-            // `SyncClientConfig::default()` below), which closes a batch on
-            // a short quiet gap WITHOUT tearing down the connection. This
-            // `idle_timeout` stays a much longer, session-level backstop:
-            // defense-in-depth in case `flush_quiesce` ever misses a case,
-            // paid for by a periodic reconnect (cheap: re-handshake,
-            // re-subscribe from the durable checkpoint, re-flush the
-            // outbox) rather than by disconnecting on every ordinary quiet
-            // period the way a short value would.
+            // retries. `flush_quiesce` (left at its default) closes a batch on
+            // a short quiet gap WITHOUT tearing down the connection; this
+            // `idle_timeout` is a much longer session-level backstop — paid for
+            // by a periodic reconnect (re-handshake, re-subscribe from the
+            // durable checkpoint, re-flush the outbox).
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
             ..SyncClientConfig::default()
         };
         let client = Arc::new(SyncClient::new(self.url.clone(), storage, config.clone()));
 
+        // Connect/apply/reconnect loop, run on OUR runtime (not frb's), so it
+        // outlives this async call and keeps going in the background.
+        let run_client = Arc::clone(&client);
+        let stashed_config = config.clone();
+        let run_task = self
+            .rt
+            .spawn(async move { run_connection_loop(&run_client, &config, state_sink).await });
+
+        *guard = Some(Session {
+            client,
+            tables: table_set,
+            run_task: Some(run_task),
+            config: stashed_config,
+            watch_tasks: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Attach a row stream for `table`: emits the current full row set
+    /// immediately (the durable snapshot already on disk — visible offline)
+    /// and again after every applied batch. One `watch` per table; `table`
+    /// must be among those passed to [`Self::subscribe`]. Dropping the
+    /// subscription (via `subscribe()` again or [`Self::close`]) aborts every
+    /// watch pump.
+    ///
+    /// # Errors
+    /// Returns an error string if `subscribe()` hasn't been called or `table`
+    /// is not in the subscribed set.
+    pub async fn watch(
+        &self,
+        table: String,
+        rows_sink: StreamSink<String>,
+    ) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| "watch() called before subscribe()".to_string())?;
+        if !session.tables.contains(&table) {
+            return Err(format!(
+                "watch() table {table:?} is not in the subscribed set — add it to subscribe()"
+            ));
+        }
+
         // Immediate snapshot BEFORE any network activity: durable rows from a
         // prior session must be visible offline, not only after the first
         // commit of a fresh one.
-        emit_snapshot(&client, &table, &rows_sink).await;
+        emit_snapshot(&session.client, &table, &rows_sink).await;
 
-        // Watch pump: re-snapshot on every applied batch.
-        let mut changes = client.subscribe_changes();
-        let pump_client = Arc::clone(&client);
-        let pump_table = table.clone();
-        let pump_sink = rows_sink.clone();
+        // Re-snapshot on every applied batch. Each watch gets its own broadcast
+        // receiver; a tick that didn't touch this table just re-queries
+        // cheaply (a full snapshot, not a diff — self-healing on lag).
+        let mut changes = session.client.subscribe_changes();
+        let pump_client = Arc::clone(&session.client);
+        let pump_table = table;
+        let pump_sink = rows_sink;
         let pump_task = self.rt.spawn(async move {
             loop {
                 match changes.recv().await {
                     Ok(_) => emit_snapshot(&pump_client, &pump_table, &pump_sink).await,
-                    // A slow Dart-side consumer lagged behind the broadcast
-                    // buffer; the next snapshot is a full re-query (not a
-                    // diff), so a missed tick is self-healing — just re-emit.
                     Err(RecvError::Lagged(_)) => {
                         emit_snapshot(&pump_client, &pump_table, &pump_sink).await;
                     }
@@ -247,20 +327,7 @@ impl NostosHandle {
                 }
             }
         });
-
-        // Connect/apply/reconnect loop, run on OUR runtime (not frb's), so it
-        // outlives this async call and keeps going in the background.
-        let run_client = Arc::clone(&client);
-        let run_task = self
-            .rt
-            .spawn(async move { run_connection_loop(&run_client, &config, state_sink).await });
-
-        *guard = Some(Session {
-            client,
-            table,
-            run_task,
-            pump_task,
-        });
+        session.watch_tasks.push(pump_task);
         Ok(())
     }
 
@@ -276,10 +343,9 @@ impl NostosHandle {
     ///
     /// # Errors
     /// Returns an error string if `subscribe()` hasn't been called yet, `op`
-    /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` doesn't
-    /// match the active subscription (v1 is one table per handle — see module
-    /// docs), or the local durable enqueue itself failed (disk full, SQLite
-    /// busy).
+    /// is not one of `"upsert"` / `"delete"` / `"patch"`, `table` is not in
+    /// the subscribed set (see [`Self::subscribe`]), or the local durable
+    /// enqueue itself failed (disk full, SQLite busy).
     pub async fn write(
         &self,
         table: String,
@@ -301,12 +367,9 @@ impl NostosHandle {
         let session = guard
             .as_ref()
             .ok_or_else(|| "write() called before subscribe()".to_string())?;
-        if session.table != table {
+        if !session.tables.contains(&table) {
             return Err(format!(
-                "write() table {table:?} does not match the active subscription \
-                 ({:?}) — v1 supports one table per Nostos instance; call \
-                 subscribe({table:?}, ...) first",
-                session.table
+                "write() table {table:?} is not in the subscribed set — add it to subscribe() first"
             ));
         }
         session
@@ -363,10 +426,67 @@ impl NostosHandle {
         serde_json::to_string(&rows).map_err(|e| e.to_string())
     }
 
+    /// Pause syncing: abort ONLY the connect/apply/reconnect loop, keeping the
+    /// `SyncClient`, its `SqliteStorage`, and every `watch()` pump alive. Reads,
+    /// writes (which land in the durable outbox), and the UI keep working
+    /// offline. `resume()` restarts it. Idempotent: a no-op when already paused
+    /// or when there is no active subscription.
+    ///
+    /// Emits nothing on `state_sink` here (the aborted loop leaves it mid
+    /// `connecting`/`reconnecting`); the Dart wrapper surfaces `disconnected`
+    /// so the UI signal has one owner. Cancellation is task-abort: `run_once`
+    /// respects no stop token, and `tokio::sync::Mutex` (no poison) + `Arc`
+    /// client state mean the client stays usable for local work after the abort.
+    pub async fn disconnect(&self) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        if let Some(session) = guard.as_mut() {
+            if let Some(task) = session.run_task.take() {
+                task.abort();
+                // Reap: the future drops on abort, so this resolves promptly
+                // (an in-flight `spawn_blocking` finishes independently — it
+                // never blocked this handle). A `JoinError` (Cancelled) is
+                // expected and discarded.
+                let _ = task.await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resume syncing after [`disconnect`]: respawn the connect/apply/reconnect
+    /// loop on the SAME `SyncClient` (reusable across aborts — `run_once(&self)`,
+    /// all per-session state local, `tokio::sync::Mutex` carries no poison). The
+    /// durable outbox drains on the new session's startup flush; live updates
+    /// resume. `state_sink` receives the fresh run's transitions
+    /// (`connecting → connected → …`). Requires a prior `subscribe()`.
+    ///
+    /// Named `resume`, not `connect`: the `#[frb(sync)]` constructor is already
+    /// `NostosHandle::connect`, and Rust forbids two inherent items of the same
+    /// name; the Dart public API mirrors the pause/resume pair (WS5) for the
+    /// same reason — `connect` clashes with `Nostos.connect`/`NostosDatabase.connect`.
+    pub async fn resume(&self, state_sink: StreamSink<NostosConnectionState>) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| "resume() requires a prior subscribe()".to_string())?;
+        // Abort any lingering loop first (idempotent — usually `None` after
+        // disconnect).
+        if let Some(old) = session.run_task.take() {
+            old.abort();
+            let _ = old.await;
+        }
+        let run_client = Arc::clone(&session.client);
+        let run_config = session.config.clone();
+        let run_task = self
+            .rt
+            .spawn(async move { run_connection_loop(&run_client, &run_config, state_sink).await });
+        session.run_task = Some(run_task);
+        Ok(())
+    }
+
     /// Tear down the active subscription's background work — the
-    /// connect/apply/reconnect loop and the watch-stream pump (see
-    /// [`Session`]'s `Drop` impl, which aborts both tasks). Safe to call with
-    /// no active subscription (a no-op) and safe to call more than once.
+    /// connect/apply/reconnect loop and every watch pump (see [`Session`]'s
+    /// `Drop` impl, which aborts all of them). Safe to call with no active
+    /// subscription (a no-op) and safe to call more than once.
     ///
     /// Named `close`, not `dispose`: every `#[frb(opaque)]` handle already
     /// implements `RustOpaqueInterface`, which declares its own synchronous
@@ -386,7 +506,7 @@ impl NostosHandle {
     /// lifecycle callback, rather than waiting on GC.
     pub async fn close(&self) {
         let mut guard = self.session.lock().await;
-        *guard = None; // Drop aborts run_task + pump_task.
+        *guard = None; // Drop aborts run_task + all watch pumps.
     }
 }
 

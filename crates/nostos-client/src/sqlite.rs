@@ -378,10 +378,12 @@ impl SqliteStorage {
     /// when a query needs them. FakeReplicator's non-JSON bytes degrade to NULL
     /// (dev fixture, not production).
     ///
-    /// `CREATE VIEW IF NOT EXISTS` does NOT replace an existing view on a column
-    /// change — a schema refresh that needs to evolve a view must `DROP VIEW`
-    /// first. ponytail: schema-evolution handling is a fast-follow; today's
-    /// consumer re-creates the store on schema change (the demo does).
+    /// Each view is `DROP VIEW IF EXISTS` + `CREATE VIEW`, so re-applying a
+    /// *changed* schema refreshes the projection in place — bumping the
+    /// declared schema IS the client migration (PowerSync model: the synced
+    /// `cairn_data` rows are schemaless; views are cheap, data is untouched).
+    /// Runs at connect time, before any watch() statement is armed, so no
+    /// cursor is open over the view mid-DDL.
     ///
     /// Idempotent for an unchanged schema. An inherent method (not on `Storage`,
     /// which stays minimal), like `query()` / `rows_for()`.
@@ -412,10 +414,12 @@ impl SqliteStorage {
             // allowed in a view definition, so the table filter is an inlined,
             // escaped string literal (the name is trusted catalog data, but the
             // escape is cheap defense-in-depth).
+            let view = quote_ident(&view_name(&t.name));
+            conn.execute(&format!("DROP VIEW IF EXISTS {view}"), [])
+                .map_err(rusqlite_err)?;
             let ddl = format!(
-                "CREATE VIEW IF NOT EXISTS {view} AS SELECT {cols} \
+                "CREATE VIEW {view} AS SELECT {cols} \
                  FROM cairn_data WHERE table_name = {tbl}",
-                view = quote_ident(&view_name(&t.name)),
                 cols = cols.join(", "),
                 tbl = quote_string(&t.name),
             );
@@ -1203,8 +1207,8 @@ mod tests {
             "SELECT * FROM <view> must carry _pk for write-back"
         );
 
-        // Idempotent: re-applying the SAME schema must not error. (Column-change
-        // evolution needs DROP first — documented fast-follow, not tested here.)
+        // Idempotent: re-applying the SAME schema must not error (views are
+        // dropped + recreated, so this is a no-op from the caller's view).
         s.apply_schema(&[ClientTable {
             name: "tasks".into(),
             primary_key: vec!["id".into()],
@@ -1228,6 +1232,66 @@ mod tests {
         )
         .unwrap();
         assert!(s.query("SELECT id FROM tasks").unwrap().is_empty());
+    }
+
+    /// Schema migration: re-applying a CHANGED schema (added column) must
+    /// refresh the view — `apply_schema` drops + recreates each table view, so
+    /// the Flutter app's simple migration path (bump schema, reconnect) works
+    /// without a manual DROP. This would fail with the old
+    /// `CREATE VIEW IF NOT EXISTS` behavior (stale column list kept).
+    #[test]
+    fn apply_schema_migration_refreshes_view_columns() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        // v1 schema: no `due` column.
+        s.apply_schema(&[ClientTable {
+            name: "tasks".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "title".into()],
+        }])
+        .unwrap();
+        s.apply_batch(
+            &[RowOp::Insert {
+                table: "tasks".into(),
+                pk: "t1".into(),
+                payload: Bytes::copy_from_slice(
+                    br#"{"id":"t1","title":"buy milk","due":"2026-03-01"}"#,
+                ),
+            }],
+            Lsn::new(1),
+        )
+        .unwrap();
+        // v1 view does not expose `due`.
+        assert!(s.query("SELECT due FROM tasks").is_err());
+
+        // v2 schema: `due` added. Same data, no re-sync needed — the payload
+        // already carried the column; only the view over it changes.
+        s.apply_schema(&[ClientTable {
+            name: "tasks".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "title".into(), "due".into()],
+        }])
+        .unwrap();
+        let rows = s.query("SELECT id, title, due FROM tasks").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("due").and_then(serde_json::Value::as_str),
+            Some("2026-03-01"),
+            "migrated view must expose the new column from existing payloads"
+        );
+
+        // v3 schema: column REMOVED. The view must drop it (not error, not
+        // keep serving the stale column).
+        s.apply_schema(&[ClientTable {
+            name: "tasks".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "title".into()],
+        }])
+        .unwrap();
+        assert!(
+            s.query("SELECT due FROM tasks").is_err(),
+            "removed column must disappear from the recreated view"
+        );
+        assert_eq!(s.query("SELECT id FROM tasks").unwrap().len(), 1);
     }
 
     /// WS2 slice-2: an instant-local write (`Outbox::apply_local`) renders the

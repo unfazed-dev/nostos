@@ -1,0 +1,158 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Nostos + Supabase: Realtime, Writes, and Why the Dashboard Looks Stale</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,securityLevel:'loose',theme:'neutral'});</script>
+<style>
+:root{--fg:#1b1b1b;--muted:#5b6770;--bg:#fff;--soft:#f5f7f9;--line:#dfe4e8;--accent:#4f46e5;--warn:#b45309;--ok:#15803d}
+*{box-sizing:border-box}body{font:15px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:var(--fg);margin:0;padding:0 0 80px}
+.wrap{max-width:880px;margin:0 auto;padding:32px 24px}
+h1{font-size:1.9rem;line-height:1.25;margin:0 0 6px}
+h2{font-size:1.35rem;margin:34px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+h3{font-size:1.08rem;margin:22px 0 8px}
+h4{font-size:.98rem;margin:16px 0 6px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--soft);padding:1px 5px;border-radius:4px}
+pre{background:#0f1115;color:#e7e9ee;padding:14px 16px;border-radius:8px;overflow:auto}
+pre code{background:none;color:inherit;padding:0}
+pre.mermaid{background:var(--soft);color:var(--fg);text-align:center}
+.callout{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--soft);padding:12px 16px;border-radius:6px;margin:14px 0}
+.callout.warn{border-left-color:var(--warn)} .callout.ok{border-left-color:var(--ok)}
+.callout .h{font-weight:700;display:block;margin-bottom:4px}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--soft)} tr:nth-child(even) td{background:#fbfcfd}
+ul.checklist{list-style:none;padding:0;margin:14px 0}
+ul.checklist li{padding:6px 0 6px 28px;position:relative}
+ul.checklist li:before{content:"☐";position:absolute;left:0;top:5px;font-size:16px;color:var(--accent)}
+ul.checklist li .n{color:var(--muted);font-size:12.5px;display:block}
+.qform{border:1px dashed var(--line);border-radius:8px;padding:14px 16px;margin:14px 0;background:#fbfcfd}
+.qform .q{font-weight:600;margin:10px 0 4px} .qform .q:first-child{margin-top:0}
+.qform .opts{margin:4px 0 8px 4px} .qform .opts label{display:block;padding:2px 0}
+.qform .qsub{color:var(--muted);font-size:13px;margin:0 0 6px}
+.lede{color:var(--muted);font-size:1.05rem}
+.meta{color:var(--muted);font-size:12.5px;margin:10px 0 0}
+.pill{display:inline-block;font-size:11px;font-weight:600;background:var(--accent);color:#fff;padding:2px 8px;border-radius:10px;margin-right:6px}
+.filetree{list-style:none;padding:0;margin:12px 0;font-size:13.5px}
+.filetree li{padding:4px 0;border-bottom:1px dashed var(--line)}
+.filetree li code{background:none;padding:0;color:var(--accent)}
+.ft-title{font-weight:700;margin:14px 0 4px}
+.ft-chg{font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:8px;margin-left:6px;text-transform:uppercase;color:#fff}
+.ft-added{background:var(--ok)} .ft-modified{background:var(--accent)} .ft-deleted{background:var(--warn)}
+.ft-note{color:var(--muted);display:block;padding-left:8px}
+.tabs{margin:14px 0}
+.tab{border:1px solid var(--line);border-radius:8px;padding:4px 16px 12px;margin:10px 0;background:#fbfcfd}
+.tab-h{font-size:1rem;margin:8px 0 4px;color:var(--accent);border-bottom:1px solid var(--line);padding-bottom:4px}
+.tab-block{margin:6px 0}
+.code-fn{font-size:12px;color:var(--muted);margin:10px 0 2px}
+.ann{margin:6px 0 14px;font-size:13px;padding-left:18px}
+.ann li{padding:2px 0} .ann .ann-l{font-size:11px;color:var(--muted)}
+/* Diagram (author-authored HTML: boxes + arrows) */
+.diagram-wrap{border:1px solid var(--line);border-radius:8px;background:var(--soft);padding:14px 16px;margin:14px 0;overflow:auto}
+.diag-cap{text-align:center;color:var(--muted);font-size:13px;margin:0 0 10px}
+.diagram-panel{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center}
+.diagram-card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fff;min-width:120px;text-align:center}
+.diagram-card.diagram-accent{border-color:var(--accent);box-shadow:0 0 0 2px rgba(79,70,229,.12)}
+.diagram-node{font-weight:700}
+.diagram-muted{color:var(--muted);font-size:12px}
+.diagram-arrow{color:var(--accent);font-size:20px;font-weight:700}
+.diagram-pill{display:inline-block;font-size:11px;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin:3px 4px 0 0}
+/* Columns */
+.columns{display:flex;gap:16px;margin:14px 0}
+.columns .col{flex:1;min-width:0}
+.col-h{font-size:.95rem;margin:0 0 6px;color:var(--accent);border-bottom:1px solid var(--line);padding-bottom:3px}
+@media(max-width:640px){.columns{flex-direction:column}}
+</style></head>
+<body><div class="wrap">
+<h1>Nostos + Supabase: Realtime, Writes, and Why the Dashboard Looks Stale</h1><p class="meta"><span class="pill">playbook</span> rendered from <code>plan.mdx</code> · regenerate with <code>render-playbook.py</code></p>
+<p>A playbook for adopters connecting a nostos Flutter app to Supabase. It captures what was verified against a live Supabase project on 2026-07-14 and explains the two things that trip people up: <strong>writes look like they "don't sync"</strong> and <strong>"enabling Realtime" changes nothing</strong>. Both have one cause — a mental-model mismatch, not a nostos bug.</p>
+<div class="callout ok"><span class="h">Verified outcome.</span><p>nostos writes <em>do</em> land in Supabase and <em>do</em> flip columns (e.g. <code>completed</code>). The Supabase <strong>Table Editor does not live-refresh</strong> — that is the entire "the row stays static" symptom. <strong>Enabling Supabase Realtime is orthogonal</strong>: it broadcasts row changes to API subscribers; it never writes rows and never feeds the dashboard UI. nostos is already the realtime layer for a nostos app.</p></div>
+<h2>The two real-time systems (one WAL, two consumers)</h2>
+<p>Both nostos and Supabase Realtime read the <strong>same Postgres write-ahead log</strong>. They are independent consumers with <strong>different publications and different slots</strong> — neither knows the other exists.</p>
+<pre class="mermaid">flowchart LR
+  PG[(&quot;Postgres\nSupabase db.postgres\n+ WAL&quot;)]
+  PUBC[&quot;cairn_pub\n+ slot cairn_slot&quot;]
+  PUBR[&quot;supabase_realtime\n+ Realtime slot&quot;]
+  NOSTOS[&quot;nostos-server\nlogical replication\nRust&quot;]
+  APP[&quot;Flutter app\nlocal SQLite\noffline-first + writes&quot;]
+  RT[&quot;Supabase Realtime\nElixir server&quot;]
+  SUB[&quot;websocket subscribers\nnon-nostos clients\nedge functions&quot;]
+  PG --&gt; PUBC --&gt; NOSTOS --&gt; APP
+  PG --&gt; PUBR --&gt; RT --&gt; SUB
+</pre><p style="text-align:center;color:var(--muted);font-size:13px;margin-top:4px">One Postgres WAL, two independent consumers. A nostos app listens to cairn_pub, NOT supabase_realtime.</p>
+<p>Implication: toggling a table on in <strong>Dashboard → Database → Publications → <code>supabase_realtime</code></strong> adds it to the Realtime broadcast. It has <strong>zero effect on a nostos app</strong>, because the nostos app subscribes to <code>cairn_pub</code> over <code>/sync</code>, not to the Realtime websocket. This is why "I enabled Realtime and nothing changed" is the expected result, not a failure.</p>
+<h2>The collapsed-write model (why there is no uploadData)</h2>
+<p>nostos's headline DX edge is <strong>zero-backend-write</strong>: the server's <code>PgWriteBack</code> applies client writes <em>directly</em> to the source Postgres. The app never talks to Postgres and never implements <code>uploadData</code>. The server itself runs the SQL, so it owns the trust boundary (table allowlist → column regex → bind parameters) on top of JWT auth and tenant scoping. See <code>docs/SECURITY.md</code>.</p>
+<pre class="mermaid">sequenceDiagram
+  participant App as Flutter app
+  participant Srv as nostos-server (PgWriteBack)
+  participant PG as Postgres (BYPASSRLS role)
+  App-&gt;&gt;Srv: write(table, op, pk, payload) over /sync
+  Srv-&gt;&gt;Srv: allowlist + column regex + bind params + tenant stamp
+  Srv-&gt;&gt;PG: INSERT / UPDATE / DELETE (auto-applied)
+  PG--&gt;&gt;Srv: WAL change on cairn_pub
+  Srv--&gt;&gt;App: replicated row echo over /sync
+</pre><p style="text-align:center;color:var(--muted);font-size:13px;margin-top:4px">A toggle: the app sends one write; the server applies it and the row echoes back through nostos&#x27;s own replication.</p>
+<p>Contrast with PowerSync: writes go through the developer's <code>uploadData()</code> → the backend → Postgres, gated by Supabase RLS. PowerSync has <strong>no server-side write gate</strong>; nostos's allowlist (<code>NOSTOS_WRITE_TABLES</code>) is the cost of applying writes server-side. It is a deliberate architectural choice, not a limitation.</p>
+<h2>Enabling writes</h2>
+<p>Writes are <strong>off by default</strong>. Because the server applies the SQL itself, it must allowlist which tables a client may write — empty default means no table is writable (defense-in-depth at the SQL-injection boundary, ADR-0013).</p>
+<p style="font-size:12px;color:var(--muted);margin:14px 0 2px"><code>terminal — local Docker stack</code></p><p style="font-size:12px;color:var(--muted);margin:2px 0 4px">Local dev: allowlist the demo table when starting the stack.</p><pre><code># Writes are allowlist-gated. Without this, add / check / delete are rejected with
+# &quot;table not writable: &#x27;tasks&#x27; — add it to NOSTOS_WRITE_TABLES&quot;.
+NOSTOS_WRITE_TABLES=tasks make dev-stack
+</code></pre>
+
+<p style="font-size:12px;color:var(--muted);margin:14px 0 2px"><code>terminal — nostos-server against Supabase</code></p><p style="font-size:12px;color:var(--muted);margin:2px 0 4px">Cloud: same env var; connect over the WARP relay or direct IPv6.</p><pre><code>NOSTOS_REPLICATOR=pg \\
+NOSTOS_PG_URL=&#x27;postgresql://cairn_writer:&lt;secret&gt;@127.0.0.1:15433/postgres&#x27; \\
+NOSTOS_PG_SLOT=cairn_slot NOSTOS_PG_PUBLICATION=cairn_pub \\
+NOSTOS_WRITE_TABLES=tasks \\
+./target/debug/nostos-server
+</code></pre>
+
+<div class="callout "><p>Connect as a <strong>least-privilege role</strong>, never the <code>postgres</code> superuser. The demo role (<code>docker/pg-init/02-nostos-role.sql</code>) is <code>REPLICATION + BYPASSRLS + GRANT</code> on synced tables only — it can INSERT/UPDATE/DELETE but cannot <code>DROP TABLE</code>. Full role + Supabase migration SQL: <code>docs/SECURITY.md</code>. nostos writes <strong>bypass Supabase RLS</strong> because it connects as <code>BYPASSRLS</code> and applies its own authz; read the RLS trade-off in <code>docs/STRATEGY.md</code> before adopting on an RLS-heavy project.</p></div>
+<h2>Why the dashboard looks stale (the actual evidence)</h2>
+<p>The Supabase <strong>Table Editor is a static admin page</strong> — it runs one query on load and on manual refresh, and it does <strong>not</strong> subscribe to Realtime. Realtime cannot make it live-update. This is the source of "the row stays static".</p>
+<p>This was caught live on 2026-07-14. The app had <strong>two</strong> rows; the dashboard showed <strong>one</strong> (and a stale <code>completed</code> value) — frozen several minutes behind:</p>
+<table><tr><th>Moment (UTC)</th><th>Action</th><th>Server log</th><th>Supabase direct read</th><th>Dashboard</th></tr><tr><td>10:15:56</td><td>created echo-test (completed=false)</td><td>write ok=true → 0/70005D78</td><td>f</td><td>—</td></tr><tr><td>10:37:31</td><td>toggled echo-test → completed</td><td>write ok=true → 0/7200006A</td><td>became TRUE</td><td>later shows TRUE</td></tr><tr><td>10:45:02</td><td>added "New task Test" (false)</td><td>write ok=true → 0/77001B03</td><td>present, f</td><td>MISSING</td></tr><tr><td>10:46:18</td><td>toggled echo-test → incomplete</td><td>write ok=true → 0/79000028</td><td>f (read 10:48:49)</td><td>still TRUE (stale)</td></tr></table>
+<p>The direct read and the app agreed at every step. Only the dashboard lagged. Each <code>advanced replication slot confirmed_lsn=…</code> line is a WAL mutation in Supabase — proof the write matched a row, not a no-op.</p>
+<h2>How to verify a write landed</h2>
+<p><strong>Do not trust the dashboard to confirm a write.</strong> Read Supabase directly. The ground truth is a query against the database itself; the dashboard is a stale convenience view.</p>
+<p style="font-size:12px;color:var(--muted);margin:14px 0 2px"><code>terminal — direct read via the WARP relay</code></p><p style="font-size:12px;color:var(--muted);margin:2px 0 4px">Direct libpq/psql read through the local WARP relay (127.0.0.1:15433 → Supabase IPv6:5432). Independent of the dashboard.</p><pre><code># psql not on your host? `brew install libpq` (client only) gives you /opt/homebrew/opt/libpq/bin/psql
+PGCONNECT_TIMEOUT=8 PGPASSWORD=&quot;$PW&quot; psql \\
+  -h 127.0.0.1 -p 15433 -U postgres -d postgres -P pager=off \\
+  -c &quot;SELECT title, completed, created_at FROM tasks ORDER BY created_at;&quot;
+</code></pre>
+<p>The correlating signals for any toggle — if all three agree, the write landed:</p>
+<table><tr><th>Signal</th><th>Where</th><th>What it proves</th></tr><tr><td>write applied op=… ok=true</td><td>nostos-server log</td><td>server ran the SQL without error</td></tr><tr><td>advanced replication slot confirmed_lsn</td><td>nostos-server log</td><td>a row actually mutated in Supabase (WAL entry)</td></tr><tr><td>completed column value</td><td>direct psql/libpq read</td><td>ground truth — the bytes in Postgres</td></tr><tr><td>checkbox state after echo</td><td>app UI (via /sync)</td><td>the end-user view, sourced from Supabase's WAL</td></tr><tr><td>Table Editor cell</td><td>Supabase dashboard</td><td>UNRELIABLE — refresh manually; never assume live</td></tr></table>
+
+<div class="callout warn"><p>Gotcha: the <code>updated_at</code> column may be <strong>frozen at creation time</strong> if the table has no <code>moddatetime</code> trigger. Do not use <code>updated_at</code> as a last-modified signal — read the column you actually changed (<code>completed</code>, etc.).</p></div>
+<h2>When you would actually use Supabase Realtime</h2>
+<p>Realtime is not pointless — it is just redundant for the data-sync job nostos already does. Use it for the <strong>other</strong> consumers of the same data:</p>
+<table><tr><th>Need</th><th>Right tool</th></tr><tr><td>Offline-first typed sync, local SQLite, conflict reconcile, writes</td><td>nostos (already realtime via /sync)</td></tr><tr><td>Push row changes to a non-nostos web client (React/Vue)</td><td>Supabase Realtime (postgres_changes)</td></tr><tr><td>React server-side to a row change (edge function / webhook)</td><td>Supabase Realtime or pg_net + triggers</td></tr><tr><td>Ephemeral messaging / who's-online (not DB-backed)</td><td>Realtime Broadcast / Presence</td></tr><tr><td>Live-update the Supabase Table Editor</td><td>Neither — click Refresh (it is a static admin page)</td></tr></table>
+<p>If you adopt nostos, you usually do <strong>not</strong> need to enable <code>supabase_realtime</code> on your synced tables at all. Enable it only when a second consumer (a dashboard, a worker) needs the push.</p>
+<h2>Adopter checklist</h2>
+<ul class="checklist">
+<li>CREATE PUBLICATION cairn_pub FOR TABLE <synced tables></li>
+<li>CREATE ROLE cairn_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser<span class="n">See docs/SECURITY.md for the Supabase SQL.</span></li>
+<li>Set NOSTOS_WRITE_TABLES to every table clients may write (empty default = none)</li>
+<li>Point nostos-server at Supabase (direct IPv6, or WARP relay for IPv4-only egress)<span class="n">The pooler cannot carry logical replication — use the direct connection.</span></li>
+<li>Verify writes with a DIRECT psql/libpq read, never the dashboard<span class="n">Refresh the Table Editor manually; it does not live-update.</span></li>
+<li>(Optional) Enable supabase_realtime only if a non-nostos consumer needs the push</li>
+</ul>
+<h2>Open questions</h2>
+<div class="qform">
+<div class="q">Should nostos expose a Realtime-equivalent broadcast API for non-nostos clients (web dashboards, workers)?</div>
+<div class="qsub">nostos already consumes the WAL; broadcasting to secondary subscribers could replace Supabase Realtime entirely for nostos-backed projects.</div>
+<div class="opts">
+<label>○ Yes — scope it for v0.2 <i>(recommended)</i> — Add a /broadcast or webhook fan-out so non-nostos clients don't need supabase_realtime.</label>
+<label>○ Defer — rely on Supabase Realtime for now — Keep nostos read+sync only; secondary consumers use supabase_realtime.</label>
+<label>○ No — out of scope — nostos is a sync engine, not a broadcast bus.</label>
+</div>
+<div class="q">Where should this playbook live long-term?</div>
+<div class="qsub">There is no MDX docs site yet (web/ is a Svelte demo). This plan.mdx is the source; pick the render target.</div>
+<div class="opts">
+<label>○ Checked-in MDX under docs/ (renders as Markdown on GitHub) <i>(recommended)</i> — Lowest friction; portable; ready for a future docs site.</label>
+<label>○ Stand up a Docusaurus/Mintlify site — More setup; gives a branded docs surface.</label>
+<label>○ Keep it only as an agent-native plan — Do not export to docs/; review via the Plan UI only.</label>
+</div>
+</div>
+
+</div></body></html>

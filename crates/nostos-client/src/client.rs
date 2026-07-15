@@ -63,10 +63,36 @@ use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
+/// One additional table subscription for a [`SyncClientConfig`]: a table name
+/// plus an optional safe-SQL `where_sql` predicate (ADR-0012). A connection
+/// subscribes to the primary `table` PLUS every entry in `extra_tables` over
+/// one `/sync` socket — multi-table-per-handle (D1/ADR-0022). All tables share
+/// one resume LSN, one checkpoint, and one ack stream (ADR-0009's single global
+/// checkpoint).
+#[derive(Debug, Clone)]
+pub struct TableSub {
+    /// Table name to subscribe to.
+    pub name: String,
+    /// Optional safe-SQL predicate scoped to THIS table (ADR-0012).
+    pub where_sql: Option<String>,
+}
+
+impl TableSub {
+    /// A match-all subscription to `name` (no `where_sql`).
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            where_sql: None,
+        }
+    }
+}
+
 /// Configuration for a [`SyncClient`].
 #[derive(Debug, Clone)]
 pub struct SyncClientConfig {
-    /// The table to subscribe to (Phase 0 predicate floor: one table).
+    /// The PRIMARY table to subscribe to (the N=1 default). For multi-table,
+    /// add more via [`Self::extra_tables`].
     pub table: String,
     /// Optional bearer token, sent as `?token=` on the WS URL.
     pub token: Option<String>,
@@ -128,6 +154,12 @@ pub struct SyncClientConfig {
     /// Server-enforced: the principal's tenant scoping always wraps this, so a
     /// `where_sql` can never widen scope past its tenant.
     pub where_sql: Option<String>,
+    /// Additional tables to subscribe to alongside the primary `table`, each
+    /// with its own optional `where_sql` (D1/ADR-0022 multi-table-per-handle).
+    /// All subscriptions share one resume LSN, one checkpoint, and one ack
+    /// stream over the single `/sync` socket. Empty (the default) = single-
+    /// table, the historical behavior. The server caps a socket at 32 tables.
+    pub extra_tables: Vec<TableSub>,
     /// Maximum number of `WriteResult{ok:false}` rejections before a write is
     /// dead-lettered (quarantined). Once a write's attempt count (bumped on
     /// every rejection) reaches this threshold, the flush loop calls
@@ -157,6 +189,7 @@ impl Default for SyncClientConfig {
             idle_timeout: None,
             flush_quiesce: Some(DEFAULT_FLUSH_QUIESCE),
             where_sql: None,
+            extra_tables: Vec::new(),
             dead_letter_max_attempts: DEFAULT_DEAD_LETTER_MAX_ATTEMPTS,
         }
     }
@@ -272,26 +305,51 @@ where
     /// caller MUST surface that to the user.
     pub async fn write(&self, write: PendingWrite) -> Result<u64, ClientError> {
         let engine = Arc::clone(&self.engine);
-        let id = tokio::task::spawn_blocking(move || -> nostos_core::Result<u64> {
-            let mut engine = engine.blocking_lock();
-            // Enqueue FIRST (durable) — WS2 slice-2 instant-local write. If the
-            // local apply below fails (or we crash between), the write is still
-            // queued and will appear on the server's echo. No data loss either way.
-            let id = engine.storage_mut().enqueue(write.clone())?;
-            // Optimistic local apply: render the row in the data store NOW so
-            // the UI is instant (offline-first), WITHOUT advancing the
-            // replication checkpoint (the row isn't server-confirmed yet). The
-            // server's echo later UPSERTs the authoritative image (reconcile,
-            // last-writer-wins). Best-effort: a failure here only delays
-            // visibility to echo-time — the write is already durable in the outbox.
-            if let Err(e) = engine.storage_mut().apply_local(&write) {
-                warn!(write_id = id, error = %e, "instant-local apply failed; write still queued");
-            }
-            Ok(id)
-        })
-        .await
-        .map_err(|e| ClientError::Join(e.to_string()))??;
+        let (id, local_tick) =
+            tokio::task::spawn_blocking(move || -> nostos_core::Result<(u64, Option<ApplyOutcome>)> {
+                let mut engine = engine.blocking_lock();
+                // Enqueue FIRST (durable) — WS2 slice-2 instant-local write. If the
+                // local apply below fails (or we crash between), the write is still
+                // queued and will appear on the server's echo. No data loss either way.
+                let id = engine.storage_mut().enqueue(write.clone())?;
+                // Optimistic local apply: render the row in the data store NOW so
+                // the UI is instant (offline-first), WITHOUT advancing the
+                // replication checkpoint (the row isn't server-confirmed yet). The
+                // server's echo later UPSERTs the authoritative image (reconcile,
+                // last-writer-wins). Best-effort: a failure here only delays
+                // visibility to echo-time — the write is already durable in the outbox.
+                let applied = match engine.storage_mut().apply_local(&write) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(write_id = id, error = %e, "instant-local apply failed; write still queued");
+                        false
+                    }
+                };
+                // On success, build a checkpoint-preserving change tick. The
+                // watch pumps re-snapshot on EVERY `changes` broadcast (no
+                // checkpoint dedup), so broadcasting here makes the optimistic
+                // row visible offline. We send on `changes` directly — never
+                // `ack_and_notify` — and read the checkpoint as-is, so neither
+                // the durable checkpoint nor the ack state moves for a row that
+                // isn't server-confirmed yet (the server's echo reconciles it).
+                let local_tick = if applied {
+                    engine
+                        .checkpoint()
+                        .ok()
+                        .map(|checkpoint| ApplyOutcome { checkpoint, rows_applied: 1 })
+                } else {
+                    None
+                };
+                Ok((id, local_tick))
+            })
+            .await
+            .map_err(|e| ClientError::Join(e.to_string()))??;
         debug!(write_id = id, "enqueued local write to outbox");
+        // Broadcast the local tick so live watch pumps re-query NOW and render
+        // the optimistic row (offline-first). Best-effort: no receivers is fine.
+        if let Some(tick) = local_tick {
+            let _ = self.changes.send(tick);
+        }
         // Wake a live `run_once` loop so it re-drains the outbox now, instead
         // of only at the next connect/reconnect. Harmless if nobody's running
         // yet (`Notify` stores the permit) or if the write already went out
@@ -512,7 +570,28 @@ where
             .send(Message::Text(sub_json))
             .await
             .map_err(|e| ClientError::Send(e.to_string()))?;
-        debug!(resume_lsn = resume_lsn.raw(), "subscribed");
+        // Additional tables (D1/ADR-0022): each gets its own Subscribe frame on
+        // the SAME socket, sharing this connection's resume_lsn (one global
+        // checkpoint, one ack stream — ADR-0009). The server registers each as
+        // a separate session against the shared sink.
+        for sub in &self.config.extra_tables {
+            let subscribe = ClientMessage::Subscribe {
+                table: sub.name.clone(),
+                filters: vec![],
+                where_sql: sub.where_sql.clone(),
+                resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
+            };
+            let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
+            write
+                .send(Message::Text(sub_json))
+                .await
+                .map_err(|e| ClientError::Send(e.to_string()))?;
+        }
+        debug!(
+            tables = 1 + self.config.extra_tables.len(),
+            resume_lsn = resume_lsn.raw(),
+            "subscribed"
+        );
 
         let mut frames_received: u64 = 0;
         let mut commits: u64 = 0;
@@ -966,6 +1045,95 @@ mod tests {
             rx.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn write_broadcasts_change_tick_so_offline_writes_are_visible() {
+        // WS2 slice-2 regression (offline-first): write() must broadcast a
+        // checkpoint-preserving change tick after the optimistic local apply,
+        // so a live watch pump re-queries and renders the row BEFORE the server
+        // echoes it. Before the fix, apply_local wrote the row into cairn_data
+        // but never notified `changes`, so an offline write was
+        // durable-but-invisible until the echo — the "offline-first broken"
+        // symptom. Checkpoint preservation is covered by the sqlite test
+        // `apply_local_renders_instantly_and_echo_reconciles`; this asserts the
+        // missing half: the broadcast.
+        let c = SyncClient::new(
+            "ws://localhost:9999/sync",
+            nostos_core::InMemoryStorage::new(),
+            SyncClientConfig::default(),
+        );
+        let mut rx = c.subscribe_changes();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        let _id = c
+            .write(nostos_core::PendingWrite {
+                table: "tasks".into(),
+                op: nostos_core::WriteOp::Upsert,
+                pk: "t1".into(),
+                payload_json: Some(r#"{"id":"t1","title":"optimistic"}"#.into()),
+            })
+            .await
+            .unwrap();
+
+        // The fix: a change tick arrives immediately — no server round-trip,
+        // no run_once loop needed. The watch pump re-snapshots on this tick.
+        let outcome = rx.try_recv().expect(
+            "write() must broadcast a change tick so the optimistic row is visible offline",
+        );
+        assert_eq!(outcome.rows_applied, 1);
+    }
+
+    // Regression for the "connected but lists render empty" bug. The FFI
+    // `watch()` (sdk/nostos_flutter/rust/src/api/nostos.rs) must create its
+    // `subscribe_changes()` receiver BEFORE its initial snapshot read, because
+    // this broadcast channel has NO replay buffer — a receiver created after a
+    // commit permanently misses it. This test encodes the invariant directly:
+    // receiver-before-apply sees the tick; receiver-after-apply does not.
+    #[tokio::test]
+    async fn subscribe_changes_must_precede_apply_to_avoid_missed_snapshot() {
+        let c = SyncClient::new(
+            "ws://localhost:9999/sync",
+            nostos_core::InMemoryStorage::new(),
+            SyncClientConfig::default(),
+        );
+
+        // The correct order (what the FFI now does): subscribe, then write.
+        let mut rx_before = c.subscribe_changes();
+        c.write(nostos_core::PendingWrite {
+            table: "tasks".into(),
+            op: nostos_core::WriteOp::Upsert,
+            pk: "late".into(),
+            payload_json: Some(r#"{"id":"late","title":"seen"}"#.into()),
+        })
+        .await
+        .unwrap();
+        assert!(
+            rx_before.try_recv().is_ok(),
+            "receiver created BEFORE write must catch the change tick"
+        );
+
+        // The buggy order (receiver-after-write): the tick is lost forever.
+        c.write(nostos_core::PendingWrite {
+            table: "tasks".into(),
+            op: nostos_core::WriteOp::Upsert,
+            pk: "lost".into(),
+            payload_json: Some(r#"{"id":"lost","title":"missed"}"#.into()),
+        })
+        .await
+        .unwrap();
+        let mut rx_after = c.subscribe_changes();
+        assert!(
+            matches!(
+                rx_after.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "receiver created AFTER write misses the tick (no replay buffer) — \
+             this is why watch() must subscribe before emit_snapshot"
+        );
     }
 
     // NOTE: the end-to-end client behavior (subscribe, apply, reconnect) is
