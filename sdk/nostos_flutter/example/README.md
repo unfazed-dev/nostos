@@ -74,6 +74,49 @@ nostos-server sits between the app and your Supabase Postgres: the app talks to
 the local server (`ws://127.0.0.1:8800/sync`); the server reads Supabase via
 logical replication. Three steps.
 
+### The full chain (cloud topology)
+
+```
+   Supabase cloud Postgres                         your machine
+   ┌──────────────────────────┐
+   │ db.<ref>.supabase.co     │  IPv6-only direct host (free tier has
+   │   tables + cairn_pub +   │  no IPv4 A record; pooler can't carry
+   │   cairn_slot (logical    │  logical replication — must be the
+   │   replication slot)      │  direct host)
+   └─────────────┬────────────┘
+                 │ TCP 5432, IPv6 only
+                 │
+        ┌────────▼─────────┐
+        │  WARP relay      │  wireproxy userspace tunnel — no sudo.
+        │  127.0.0.1:15433 │  `scripts/warp-ipv6-egress.sh up`
+        │  → [Supabase]:5432│  (skip on real IPv6 egress / paid IPv4 add-on)
+        └────────┬─────────┘
+                 │ TCP 5432, IPv4 localhost, sslmode=disable
+                 │
+   ┌─────────────▼──────────────────┐
+   │  nostos-server  (Rust binary)   │  `NOSTOS_REPLICATOR=pg
+   │  • logical-replication consumer│   NOSTOS_PG_URL=…@127.0.0.1:15433/…`
+   │    (slot cairn_slot → WAL)     │  Reads the WAL stream + pushes RowOps.
+   │  • snapshot-on-subscribe       │  Auto-applies writes server-side
+   │    (initial rows on connect)   │  (collapsed-write; gated by
+   │  • GET /schema (table catalog) │  NOSTOS_WRITE_TABLES).
+   └─────────────┬──────────────────┘
+                 │ WebSocket  ws://127.0.0.1:8800/sync
+                 │ (Subscribe → snapshot → live RowOps → Ack{lsn})
+                 │
+   ┌─────────────▼──────────────────┐
+   │  nostos_flutter app (this app)  │  `flutter run -d macos`
+   │  • SqliteStorage (cairn_data + │  One /sync socket, N subscribed tables
+   │    per-table read views)       │  demuxed by WireFrame.table.
+   │  • reactive watch() streams →  │  Durable outbox (offline writes flush
+   │    IndexedStack pages          │  on reconnect).
+   └────────────────────────────────┘
+```
+
+Writes flow the same path in reverse: app → local SQLite outbox → nostos-server
+(`PgWriteBack`, gated by `NOSTOS_WRITE_TABLES`) → Supabase Postgres → back out
+through logical replication as a normal RowOp → live echo through `watch()`.
+
 **1. Create the schema in Supabase (bring your own schema).** Paste
 [`supabase/schema.sql`](../../supabase/schema.sql) into the Supabase Dashboard
 → SQL Editor → Run. It creates the 6 tables + the `cairn_pub` publication + the
@@ -108,6 +151,51 @@ Verified 2026-07-12 against a real project: full snapshot + live + LSN-resume
 e2e green through this relay. (`scripts/warp-ipv6-egress.sh down` stops it. For
 least-privilege, create a dedicated `REPLICATION` role instead of `postgres` —
 see `docker/pg-init/02-nostos-role.sql` + `docs/SECURITY.md`.)
+
+## Troubleshooting — "snapshot works but live edits never arrive"
+
+Symptom: rows appear on first connect (the snapshot-on-subscribe path works),
+but edits made in the Supabase Dashboard never reach the app, and the
+nostos-server log loops on:
+
+```
+ERROR nostos_infra::replicator::pg: replication recv error; will attempt reconnect
+  error=server error: can no longer get changes from replication slot "cairn_slot" (SQLSTATE 55000)
+```
+
+**Root cause:** the logical replication slot has been *invalidated*. Postgres
+discards WAL a slot hasn't consumed once it exceeds `max_slot_wal_keep_size`
+(or the disk fills). This happens whenever nostos-server is **offline /
+disconnected / pointed at a different DB** for too long — the slot keeps
+demanding WAL that Supabase eventually reclaims. Once the WAL is gone, the
+slot's `wal_status` flips to `lost` and it can only stream the *initial*
+snapshot, not ongoing changes. SQLSTATE 55000
+(`object_not_in_prerequisite_state`) is Postgres signaling this.
+
+Confirm + recover (drop & recreate — an invalidated slot **cannot** resume):
+
+```sh
+# 1. confirm: wal_status should be 'lost'
+PGPASSWORD=<pw> psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -c \
+  "SELECT slot_name, active, wal_status FROM pg_replication_slots WHERE slot_name='cairn_slot';"
+
+# 2. STOP nostos-server first (a slot can't be dropped while a consumer holds it)
+
+# 3. drop + recreate (must use the 'pgoutput' plugin the server expects)
+PGPASSWORD=<pw> psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -c \
+  "SELECT pg_drop_replication_slot('cairn_slot');"
+PGPASSWORD=<pw> psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -c \
+  "SELECT pg_create_logical_replication_slot('cairn_slot', 'pgoutput');"
+
+# 4. relaunch nostos-server (the Step 3 command above) — it reconnects to the
+#    fresh slot and live replication resumes. wal_status should now be 'reserved'.
+```
+
+**Prevention:** keep nostos-server running (or at least reconnecting) against the
+Supabase project so the slot stays consumed. Don't leave it pointed at the local
+Docker PG while editing the Supabase cloud DB — the slot pins WAL on the *wrong*
+source and goes stale on Supabase. (Verified 2026-07-15: drop/recreate restored
+live replication; a fresh `UPDATE` reached the app in ~2s.)
 
 ## ⚠️ Do NOT use `make run` for this demo
 
