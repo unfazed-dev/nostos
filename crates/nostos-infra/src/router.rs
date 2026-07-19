@@ -43,6 +43,21 @@ use nostos_domain::{Lsn, ReplicationEvent};
 /// from any fan-out race (a 256-entry ring covers a full burst).
 const DEDUP_RING_CAPACITY: usize = 256;
 
+/// What the per-session sink channel carries: a replication event OR a
+/// pre-encoded control frame (snapshot boundary). Sharing ONE FIFO channel for
+/// both is what lets the writer preserve `snapshot_begin → rows → snapshot_end`
+/// ordering on the wire (ADR-0025 hole #2) — two separate channels let the
+/// writer's `select!` reorder them.
+#[derive(Debug, Clone)]
+pub enum SinkMsg {
+    /// A server-originated replication row (deduped + range-guarded by `deliver`).
+    Event(ReplicationEvent),
+    /// A pre-encoded control frame (snapshot boundary). NOT deduped — control
+    /// frames carry no LSN; they bracket a snapshot burst, ordering is all that
+    /// matters.
+    Control(Vec<u8>),
+}
+
 /// An `EventSink` backed by a bounded tokio channel.
 ///
 /// Cloning a `TokioEventSink` clones the `Sender` (cheap) so the store can hold
@@ -55,7 +70,7 @@ const DEDUP_RING_CAPACITY: usize = 256;
 /// - `delivered_lsn` + `dedup` — highest delivered LSN and a small ring of
 ///   recently-delivered LSNs (defense-in-depth against double-delivery).
 pub struct TokioEventSink {
-    tx: mpsc::Sender<ReplicationEvent>,
+    tx: mpsc::Sender<SinkMsg>,
     /// Lifetime open-flag, flipped to false when the transport task ends.
     open: AtomicBool,
     /// Highest LSN the client ACKed applying. 0 = no ack yet.
@@ -107,7 +122,7 @@ impl DedupRing {
 impl TokioEventSink {
     /// Create a sink and its draining receiver. `buffer` is the bounded depth.
     #[must_use]
-    pub fn channel(buffer: usize) -> (Self, mpsc::Receiver<ReplicationEvent>) {
+    pub fn channel(buffer: usize) -> (Self, mpsc::Receiver<SinkMsg>) {
         let (tx, rx) = mpsc::channel(buffer.max(1));
         let sink = Self {
             tx,
@@ -157,32 +172,82 @@ impl TokioEventSink {
             ring.record(raw);
         }
     }
+
+    /// Deliver a pre-encoded control frame (snapshot boundary) on the SAME FIFO
+    /// channel as events. NOT deduped — control frames carry no LSN; their only
+    /// invariant is ordering relative to the snapshot rows, which the shared
+    /// channel guarantees (ADR-0025 hole #2). Best-effort like `deliver`: a full
+    /// buffer drops the boundary (the client keeps stale rows; no partial
+    /// reconcile).
+    pub fn deliver_control(&self, bytes: Vec<u8>) -> DeliveryDecision {
+        if !self.open.load(Ordering::Acquire) {
+            return DeliveryDecision::Dropped;
+        }
+        match self.tx.try_send(SinkMsg::Control(bytes)) {
+            Ok(()) => DeliveryDecision::Delivered,
+            Err(mpsc::error::TrySendError::Full(_)) => DeliveryDecision::Dropped,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.open.store(false, Ordering::Release);
+                DeliveryDecision::Dropped
+            }
+        }
+    }
+
+    /// Shared admit gate for [`EventSink::deliver`] + [`Self::deliver_awaiting`]:
+    /// open check, acked-range guard, dedup ring. Returns the LSN to record on a
+    /// successful send, or `None` if the event is dropped (closed / already
+    /// acked / dedup hit). Factored so the two delivery paths can't drift on the
+    /// gate logic.
+    fn admit(&self, event: &ReplicationEvent) -> Option<u64> {
+        if !self.open.load(Ordering::Acquire) {
+            return None;
+        }
+        let lsn_raw = event.lsn.raw();
+        let acked = self.acked_lsn.load(Ordering::Acquire);
+        if lsn_raw <= acked && acked != 0 {
+            return None;
+        }
+        if let Ok(mut ring) = self.dedup.lock() {
+            if ring.record(lsn_raw) {
+                return None;
+            }
+        }
+        Some(lsn_raw)
+    }
+
+    /// Backpressure-aware delivery for the snapshot burst: AWAITS when the
+    /// buffer is full instead of dropping (ADR-0025 residual fix — a snapshot
+    /// truncated by sink backpressure corrupts the reconcile: `end` would reap
+    /// the dropped rows' pks even though the server still has them). Gate logic
+    /// identical to `deliver` via [`Self::admit`]; live fan-out keeps `deliver`
+    /// (a dropped live event is acceptable; a dropped snapshot row is not).
+    pub async fn deliver_awaiting(&self, event: ReplicationEvent) -> DeliveryDecision {
+        let Some(lsn_raw) = self.admit(&event) else {
+            return DeliveryDecision::Dropped;
+        };
+        if let Ok(()) = self.tx.send(SinkMsg::Event(event)).await {
+            self.delivered_lsn.store(lsn_raw, Ordering::Release);
+            DeliveryDecision::Delivered
+        } else {
+            // `send().await` only errors on a closed channel (writer exited /
+            // client gone) — never on a full buffer (it awaits).
+            self.open.store(false, Ordering::Release);
+            DeliveryDecision::Dropped
+        }
+    }
 }
 
 #[async_trait]
 impl EventSink for TokioEventSink {
     async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
-        if !self.open.load(Ordering::Acquire) {
+        let Some(lsn_raw) = self.admit(&event) else {
             return DeliveryDecision::Dropped;
-        }
-        let lsn_raw = event.lsn.raw();
-        // Resume / ack boundary: if the client already acked past this LSN
-        // (incl. on a reconnect that seeded the cursor), don't re-deliver. This
-        // is the range guard; the dedup ring below catches exact duplicates
-        // above the acked cursor (intra-connection double-delivery).
-        let acked = self.acked_lsn.load(Ordering::Acquire);
-        if lsn_raw <= acked && acked != 0 {
-            return DeliveryDecision::Dropped;
-        }
-        // Defense-in-depth dedup (ADR-0009): skip if this exact LSN was already
-        // delivered to this session (catches fan-out races above the ack cursor).
-        if let Ok(mut ring) = self.dedup.lock() {
-            if ring.record(lsn_raw) {
-                return DeliveryDecision::Dropped;
-            }
-        }
-        // `try_send` is non-blocking — the whole point. A full buffer → drop.
-        match self.tx.try_send(event) {
+        };
+        // `try_send` is non-blocking — the whole point for live fan-out. A full
+        // buffer → drop. (The snapshot uses `deliver_awaiting` so it is never
+        // truncated by backpressure; a dropped live event is acceptable, a
+        // dropped snapshot row is not.)
+        match self.tx.try_send(SinkMsg::Event(event)) {
             Ok(()) => {
                 self.delivered_lsn.store(lsn_raw, Ordering::Release);
                 DeliveryDecision::Delivered
@@ -213,6 +278,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use nostos_domain::{Lsn, RowOp};
+    use std::sync::Arc;
 
     fn ev(i: u64) -> ReplicationEvent {
         ReplicationEvent::new(
@@ -244,6 +310,77 @@ mod tests {
         let (sink, _rx) = TokioEventSink::channel(8);
         sink.close();
         assert_eq!(sink.deliver(ev(1)).await, DeliveryDecision::Dropped);
+    }
+
+    #[tokio::test]
+    async fn control_frames_share_one_fifo_channel_with_events() {
+        // ADR-0025 hole #2: snapshot boundaries MUST share the sink's FIFO
+        // channel with the snapshot rows (not a separate channel the writer
+        // `select!`s against) so the writer can't land `begin` after early rows.
+        // This asserts the channel-level invariant — begin, rows, end come out
+        // in delivery order from the ONE receiver — which the writer's
+        // stop-at-Control batching (transport.rs) then preserves on the wire.
+        // If a future change reroutes boundaries to a second channel, this fails.
+        let (sink, mut rx) = TokioEventSink::channel(16);
+        assert_eq!(
+            sink.deliver_control(b"begin".to_vec()),
+            DeliveryDecision::Delivered
+        );
+        assert_eq!(sink.deliver(ev(1)).await, DeliveryDecision::Delivered);
+        assert_eq!(sink.deliver(ev(2)).await, DeliveryDecision::Delivered);
+        assert_eq!(
+            sink.deliver_control(b"end".to_vec()),
+            DeliveryDecision::Delivered
+        );
+
+        // Drain in FIFO order: begin, e1, e2, end.
+        let mut order = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                SinkMsg::Control(b) => {
+                    order.push(format!("control({})", String::from_utf8_lossy(&b)));
+                }
+                SinkMsg::Event(e) => order.push(format!("event({})", e.lsn.raw())),
+            }
+        }
+        assert_eq!(
+            order,
+            vec![
+                "control(begin)".to_string(),
+                "event(1)".to_string(),
+                "event(2)".to_string(),
+                "control(end)".to_string(),
+            ],
+            "begin/rows/end must share one FIFO channel (ADR-0025 hole #2)"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_awaiting_blocks_on_full_buffer_then_delivers() {
+        // ADR-0025 residual: snapshot rows use `deliver_awaiting` (backpressure-
+        // aware) so a snapshot is never truncated by sink backpressure. A full
+        // buffer must BLOCK until drained, not drop — the snapshot's
+        // completeness (and thus the reconcile's correctness) depends on it.
+        // (`deliver` drops on full; `deliver_awaiting` awaits — the difference
+        // this test pins.)
+        let (sink, mut rx) = TokioEventSink::channel(1);
+        let sink = Arc::new(sink);
+        // Fill the 1-deep buffer.
+        assert_eq!(
+            sink.deliver_awaiting(ev(1)).await,
+            DeliveryDecision::Delivered
+        );
+        // The next deliver_awaiting must block (buffer full), not drop.
+        let sink2 = Arc::clone(&sink);
+        let handle = tokio::spawn(async move { sink2.deliver_awaiting(ev(2)).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "deliver_awaiting must block on a full buffer (not drop) — else the snapshot truncates"
+        );
+        // Drain one → the blocked deliver_awaiting completes + delivers.
+        rx.recv().await.unwrap();
+        assert_eq!(handle.await.unwrap(), DeliveryDecision::Delivered);
     }
 
     #[tokio::test]

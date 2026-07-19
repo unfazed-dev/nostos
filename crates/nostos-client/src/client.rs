@@ -57,7 +57,7 @@ use std::time::Duration;
 
 use nostos_core::{ApplyEngine, ApplyOutcome, Frame, Outbox, PendingWrite};
 use nostos_domain::Lsn;
-use nostos_infra::wire::{decode_frames, ClientMessage};
+use nostos_infra::wire::{decode_control_frame, decode_frames, ClientMessage};
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
@@ -711,6 +711,38 @@ where
                                 ),
                             }
                         }
+                        continue;
+                    }
+
+                    // Snapshot-reconcile boundary (ADR-0014 offline-delete fix):
+                    // a `{"type":"snapshot_begin"|"snapshot_end","table":"<t>"}`
+                    // control frame is its own wire shape — it does NOT decode
+                    // as a `WireFrame` (no lsn/op/pk), so intercept it BEFORE
+                    // `decode_frames` and drive the engine's orphan-reap. The
+                    // boundary is a single atomic op (no row applies happen
+                    // between begin/end on this pump), and `snapshot_end` reaps
+                    // any local PKs the snapshot did NOT re-confirm — those are
+                    // rows hard-deleted server-side while the client was offline.
+                    if let Some((table, begin)) = decode_control_frame(&bytes) {
+                        let engine = Arc::clone(&self.engine);
+                        // Clone for the 'static spawn_blocking closure; the
+                        // original `table` stays alive for the debug! log below.
+                        let table_for_engine = table.clone();
+                        tokio::task::spawn_blocking(
+                            move || -> nostos_core::Result<()> {
+                                let mut engine = engine.blocking_lock();
+                                // ADR-0025 hole #1: exempt the outbox's
+                                // pending-local pks so the snapshot-reconcile
+                                // never reaps the user's own unacked writes.
+                                let exempt = engine
+                                    .storage()
+                                    .pending_pks_for_table(&table_for_engine)?;
+                                engine.snapshot_boundary(&table_for_engine, begin, &exempt)
+                            },
+                        )
+                        .await
+                        .map_err(|e| ClientError::Join(e.to_string()))??;
+                        debug!(table = %table, begin, "snapshot boundary applied");
                         continue;
                     }
 

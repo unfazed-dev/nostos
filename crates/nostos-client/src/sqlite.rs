@@ -551,6 +551,58 @@ impl Storage for SqliteStorage {
         tx.commit().map_err(rusqlite_err)?;
         Ok(())
     }
+
+    fn pks_for_table(&self, table: &str) -> nostos_core::Result<Vec<String>> {
+        // The snapshot-reconcile seed read. Scoped by `table_name` so the
+        // orphan-candidate set is per-table (a `snapshot_begin/end` pair
+        // bracket exactly one table). Read-only — no transaction needed; the
+        // mutex guard serializes against the apply path on the same conn.
+        let conn = self
+            .conn
+            .lock()
+            .expect("pks_for_table: storage mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT pk FROM cairn_data WHERE table_name = ?1 ORDER BY pk ASC")
+            .map_err(rusqlite_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![table], |row| {
+                let pk: String = row.get(0)?;
+                Ok(pk)
+            })
+            .map_err(rusqlite_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(rusqlite_err)?);
+        }
+        Ok(out)
+    }
+
+    fn delete_pks(&mut self, table: &str, pks: &[String]) -> nostos_core::Result<()> {
+        // One transaction for the whole batch — the orphan-reap is atomic. An
+        // empty slice is a cheap no-op (no transaction opened). Idempotent:
+        // deleting an absent pk affects 0 rows, never errors. Auto-commits on
+        // `tx.commit()` so the reconcile lands durably before the pump acks.
+        if pks.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .expect("delete_pks: storage mutex poisoned");
+        let tx = conn.transaction().map_err(rusqlite_err)?;
+        {
+            let mut delete = tx
+                .prepare_cached("DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2")
+                .map_err(rusqlite_err)?;
+            for pk in pks {
+                delete
+                    .execute(rusqlite::params![table, pk])
+                    .map_err(rusqlite_err)?;
+            }
+        }
+        tx.commit().map_err(rusqlite_err)?;
+        Ok(())
+    }
 }
 
 impl Outbox for SqliteStorage {

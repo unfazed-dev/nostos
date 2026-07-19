@@ -40,7 +40,8 @@ use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, Session
 
 use crate::router::TokioEventSink;
 use crate::wire::{
-    decode_client_message, encode_event, encode_events, encode_write_result, ClientMessage,
+    decode_client_message, encode_event, encode_events, encode_snapshot_boundary,
+    encode_write_result, ClientMessage,
 };
 
 /// Default per-session bounded-buffer depth. Slow clients that fall this far
@@ -271,6 +272,13 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         synthetic_cursor: subscribe.resume_lsn.unwrap_or(0),
     }));
 
+    // Pre-encoded control frame channel (write_result acks + snapshot-reconcile
+    // boundaries — ADR-0013 v2 + ADR-0014). Created BEFORE the first
+    // `register_subscribe` so the first-table snapshot can emit a begin/end
+    // pair through it; the writer task (split below) drains the rx half.
+    let (server_frames_tx, mut server_frames_rx) =
+        tokio::sync::mpsc::channel::<Vec<u8>>(DEFAULT_SESSION_BUFFER);
+
     // 5. Register the FIRST table. A where_sql rejection or the global device
     //    cap is FATAL here (close the socket with a reason before any event
     //    flows, same as the single-table path); subsequent rejects are
@@ -311,8 +319,6 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
     //    tables on the SAME sink). Same single-writer serialization as before:
     //    events AND write-acks share one socket sink, no interleaving race.
     let (writer, mut reader) = socket.split();
-    let (server_frames_tx, mut server_frames_rx) =
-        tokio::sync::mpsc::channel::<Vec<u8>>(DEFAULT_SESSION_BUFFER);
 
     let closed = Arc::new(Notify::new());
     let closed_tx = Arc::clone(&closed);
@@ -343,29 +349,49 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
                 // Replication events from the fan-out sink.
                 maybe_first = rx.recv() => {
                     let Some(first) = maybe_first else { break; };
-                    // Collect the awaited frame + any backlog, capped at MAX_BATCH_FRAMES.
-                    let mut batch: Vec<ReplicationEvent> = Vec::with_capacity(MAX_BATCH_FRAMES);
-                    batch.push(first);
-                    // Non-blocking drain of the backlog.
-                    while batch.len() < MAX_BATCH_FRAMES {
-                        match rx.try_recv() {
-                            Ok(ev) => batch.push(ev),
-                            // Empty or closed → stop draining. (Closed is fine: the
-                            // outer `recv().await` will return None on the next loop
-                            // iteration and we exit cleanly after flushing this batch.)
-                            Err(_) => break,
+                    // The sink channel carries Events AND Control frames (snapshot
+                    // boundaries) on one FIFO queue (ADR-0025 hole #2). A Control
+                    // goes out immediately, alone (a different wire shape — can't
+                    // batch with events); an Event starts a batch. Draining stops
+                    // at a Control so it keeps its FIFO slot, sent right after the
+                    // batch it followed — that is what guarantees begin → rows →
+                    // end on the wire.
+                    match first {
+                        crate::router::SinkMsg::Control(bytes) => {
+                            if writer.send(Message::Binary(bytes)).await.is_err() {
+                                break; // client gone
+                            }
                         }
-                    }
-                    // Single frame → legacy single-object form (no array wrapper).
-                    // Multiple → one JSON-array message.
-                    let msg = if batch.len() == 1 {
-                        Message::Binary(encode_event(&batch[0]))
-                    } else {
-                        let refs: Vec<&ReplicationEvent> = batch.iter().collect();
-                        Message::Binary(encode_events(&refs))
-                    };
-                    if writer.send(msg).await.is_err() {
-                        break; // client gone
+                        crate::router::SinkMsg::Event(first_ev) => {
+                            let mut batch: Vec<ReplicationEvent> =
+                                Vec::with_capacity(MAX_BATCH_FRAMES);
+                            batch.push(first_ev);
+                            let mut pending_control: Option<Vec<u8>> = None;
+                            while batch.len() < MAX_BATCH_FRAMES {
+                                match rx.try_recv() {
+                                    Ok(crate::router::SinkMsg::Event(ev)) => batch.push(ev),
+                                    Ok(crate::router::SinkMsg::Control(bytes)) => {
+                                        pending_control = Some(bytes);
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            let msg = if batch.len() == 1 {
+                                Message::Binary(encode_event(&batch[0]))
+                            } else {
+                                let refs: Vec<&ReplicationEvent> = batch.iter().collect();
+                                Message::Binary(encode_events(&refs))
+                            };
+                            if writer.send(msg).await.is_err() {
+                                break; // client gone
+                            }
+                            if let Some(bytes) = pending_control {
+                                if writer.send(Message::Binary(bytes)).await.is_err() {
+                                    break; // client gone
+                                }
+                            }
+                        }
                     }
                 }
                 // WriteResult acks from the reader task (D2). Never batched —
@@ -554,10 +580,27 @@ async fn register_subscribe(
             .await
         {
             Ok(events) => {
+                // Snapshot-reconcile boundary (ADR-0014 offline-delete fix):
+                // bracket the snapshot's rows with begin/end control frames so
+                // the client can reap local PKs absent from the snapshot (rows
+                // hard-deleted server-side while the client was offline). The
+                // boundaries travel the SAME FIFO channel as the rows
+                // (`sink_concrete` → writer → WS) so the writer can't reorder
+                // them relative to the rows (ADR-0025 hole #2: two channels let
+                // the writer's `select!` land begin after early rows → those
+                // rows never drain → reaped at end). A full sink buffer drops
+                // the boundary (best-effort, like a write-ack): the client keeps
+                // its stale rows but stays consistent (no partial reconcile).
+                let _ = sink_concrete.deliver_control(encode_snapshot_boundary(&req.table, true));
                 let count = events.len();
                 for ev in events {
-                    let _ = sink_concrete.deliver(ev).await;
+                    // ADR-0025 residual: backpressure-aware delivery so the
+                    // snapshot is never truncated by sink backpressure (a
+                    // dropped row would let `end` reap a pk the server still
+                    // has). Live fan-out keeps best-effort `deliver`.
+                    let _ = sink_concrete.deliver_awaiting(ev).await;
                 }
+                let _ = sink_concrete.deliver_control(encode_snapshot_boundary(&req.table, false));
                 debug!(table = %req.table, count, "snapshot-on-subscribe delivered");
                 count
             }

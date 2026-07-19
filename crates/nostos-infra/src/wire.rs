@@ -286,6 +286,71 @@ mod hex {
     }
 }
 
+// ---- Snapshot-reconcile control frames (ADR-0014 offline-delete fix) ----
+//
+// The wire already carries one non-`WireFrame` control shape —
+// `{"type":"write_result",...}` — for client-write acks. The snapshot
+// boundary uses the same pattern: a tagged JSON object that does NOT decode
+// as a `WireFrame` (no `lsn`/`op`/`table`+`pk` pair), so the client pump
+// intercepts it BEFORE `decode_frames` and drives the reconcile engine.
+// `snapshot_begin{T}` is delivered immediately before a snapshot's rows;
+// `snapshot_end{T}` immediately after. Old clients that don't check just see
+// `decode_frames` return an empty Vec for these objects — no crash
+// (back-compat: the wire is additive JSON with a `type` tag).
+
+/// Encode a snapshot boundary control frame as JSON bytes.
+///
+/// `begin = true` → `{"type":"snapshot_begin","table":"<t>"}`;
+/// `begin = false` → `{"type":"snapshot_end","table":"<t>"}`.
+/// Beside [`encode_event`] / [`encode_write_result`] — a distinct control
+/// shape, never batched with replication events (the writer task drains it
+/// through the same `server_frames_tx` channel as write-acks).
+#[must_use]
+pub fn encode_snapshot_boundary(table: &str, begin: bool) -> Vec<u8> {
+    // Hand-built JSON keeps this allocation-light and matches
+    // `encode_write_result`'s style. Only the table name is free-form, so it's
+    // the only field that needs JSON escaping.
+    let mut out = String::with_capacity(48 + table.len());
+    out.push_str("{\"type\":\"");
+    out.push_str(if begin {
+        "snapshot_begin"
+    } else {
+        "snapshot_end"
+    });
+    out.push_str("\",\"table\":");
+    push_json_string(&mut out, table);
+    out.push('}');
+    out.into_bytes()
+}
+
+/// Decode a snapshot boundary control frame from a raw WS message. Returns
+/// `Some((table, begin))` only when the payload is a single JSON object with
+/// `"type":"snapshot_begin"` or `"type":"snapshot_end"`; returns `None` for
+/// everything else (arrays of frames, single `WireFrame` objects,
+/// `write_result` acks, malformed bytes, empty payloads).
+///
+/// The client pump calls this BEFORE [`decode_frames`] so control frames
+/// never enter the row-apply path.
+#[must_use]
+pub fn decode_control_frame(data: &[u8]) -> Option<(String, bool)> {
+    // Cheap peek: arrays (`[`) and anything that isn't an object (`{`) cannot
+    // be a control frame — bail before paying for a full parse. This mirrors
+    // `decode_frames`' first-byte dispatch.
+    let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
+    if first != Some(b'{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+    let ty = v.get("type")?.as_str()?;
+    let begin = match ty {
+        "snapshot_begin" => true,
+        "snapshot_end" => false,
+        _ => return None,
+    };
+    let table = v.get("table")?.as_str()?.to_string();
+    Some((table, begin))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +636,60 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"], "bad \"col\\name\"");
         assert_eq!(v["client_write_id"], "w\"");
+    }
+
+    // ---- snapshot-reconcile control frame tests (ADR-0014) ----
+
+    #[test]
+    fn encode_snapshot_boundary_begin_and_end() {
+        let b = encode_snapshot_boundary("tasks", true);
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["type"], "snapshot_begin");
+        assert_eq!(v["table"], "tasks");
+
+        let e = encode_snapshot_boundary("users", false);
+        let v: serde_json::Value = serde_json::from_slice(&e).unwrap();
+        assert_eq!(v["type"], "snapshot_end");
+        assert_eq!(v["table"], "users");
+    }
+
+    #[test]
+    fn encode_snapshot_boundary_escapes_table_name() {
+        // A table name with a quote must round-trip cleanly.
+        let bytes = encode_snapshot_boundary("a\"b", true);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["table"], "a\"b");
+    }
+
+    #[test]
+    fn decode_control_frame_recognizes_begin_and_end() {
+        let b = encode_snapshot_boundary("tasks", true);
+        assert_eq!(decode_control_frame(&b), Some(("tasks".into(), true)));
+
+        let e = encode_snapshot_boundary("tasks", false);
+        assert_eq!(decode_control_frame(&e), Some(("tasks".into(), false)));
+    }
+
+    #[test]
+    fn decode_control_frame_rejects_non_control_payloads() {
+        // Replication frames (single object + array), write_results, garbage,
+        // and empty payloads all yield None.
+        let event = encode_event(&ev_n(7));
+        assert!(decode_control_frame(&event).is_none());
+
+        let batch = encode_events(&[&ev_n(1), &ev_n(2)]);
+        assert!(decode_control_frame(&batch).is_none());
+
+        let write_ack = encode_write_result("w1", true, None);
+        assert!(decode_control_frame(&write_ack).is_none());
+
+        assert!(decode_control_frame(b"not json").is_none());
+        assert!(decode_control_frame(b"").is_none());
+        assert!(decode_control_frame(b"   ").is_none());
+
+        // A bare object with an unknown `type` is NOT a control frame.
+        assert!(decode_control_frame(br#"{"type":"something_else","table":"t"}"#).is_none());
+        // A snapshot_begin missing the `table` field is malformed → None.
+        assert!(decode_control_frame(br#"{"type":"snapshot_begin"}"#).is_none());
     }
 }

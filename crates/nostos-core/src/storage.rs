@@ -71,4 +71,27 @@ pub trait Storage {
     /// no-op-equivalent upsert — last-writer-wins by WAL order (ADR-0014 tier
     /// (a)). This is what makes reconnect replay safe.
     fn apply_batch(&mut self, ops: &[RowOp], checkpoint: Lsn) -> crate::Result<()>;
+
+    /// Enumerate every primary key the client currently holds for `table`.
+    ///
+    /// The snapshot-reconcile path (ADR-0014 offline-delete fix) uses this at
+    /// `snapshot_begin` to seed the orphan-candidate set: every local PK that
+    /// the server's snapshot does NOT re-confirm is a row that was hard-deleted
+    /// server-side while the client was offline, and MUST be reaped at
+    /// `snapshot_end`. Read-only and infallible at the trait level — a backend
+    /// read failure surfaces as [`StorageError::Backend`].
+    fn pks_for_table(&self, table: &str) -> crate::Result<Vec<String>>;
+
+    /// Bulk-delete the rows identified by `pks` from `table`. Used by the
+    /// snapshot-reconcile `end` step to reap orphans — PKs that were local at
+    /// `begin` but absent from the snapshot. Idempotent: deleting a pk that's
+    /// already gone is a no-op (mirrors `apply_batch`'s Delete semantics).
+    ///
+    /// Implementations SHOULD apply the deletes atomically (one transaction for
+    /// the whole batch) so a partial failure leaves the local image in a
+    /// known-consistent state. The reconcile path calls this outside
+    /// `apply_batch` — it is a separate atomic op, not part of the row-apply
+    /// transaction — so a backend that auto-commits per call (e.g. SQLite
+    /// outside an explicit tx) is acceptable.
+    fn delete_pks(&mut self, table: &str, pks: &[String]) -> crate::Result<()>;
 }

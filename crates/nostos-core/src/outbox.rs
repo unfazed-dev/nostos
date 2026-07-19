@@ -141,6 +141,28 @@ pub trait Outbox {
     fn apply_local(&mut self, _write: &PendingWrite) -> crate::Result<()> {
         Ok(())
     }
+
+    /// The PKs of this table's unacknowledged local writes (derived from
+    /// [`Self::pending`]). The snapshot-reconcile orphan-reap (ADR-0025 hole #1)
+    /// uses this to EXEMPT the user's own optimistic writes: a pending-local
+    /// row sits in the data store before the server echoes it, so it is absent
+    /// from a server snapshot but is NOT an orphan — reaping it would delete
+    /// the user's unsynced work on every (re-)subscribe with a pending outbox.
+    ///
+    /// Default derives from [`Self::pending`] (correct for every backend;
+    /// override only if a direct query is materially cheaper than materializing
+    /// the full pending list).
+    fn pending_pks_for_table(&self, table: &str) -> crate::Result<Vec<String>> {
+        let mut pks: Vec<String> = self
+            .pending()?
+            .into_iter()
+            .filter(|(_, w)| w.table == table)
+            .map(|(_, w)| w.pk)
+            .collect();
+        pks.sort();
+        pks.dedup();
+        Ok(pks)
+    }
 }
 
 /// One local write awaiting server ack. The client's *write intent* — distinct

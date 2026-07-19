@@ -108,6 +108,30 @@ impl Storage for InMemoryStorage {
         }
         Ok(())
     }
+
+    fn pks_for_table(&self, table: &str) -> crate::Result<Vec<String>> {
+        // Same filtered-scan approach as `rows_for` — the BTreeMap is small
+        // (single client view), so a linear scan is fine and obvious. Returns
+        // the PKs in BTreeMap iteration order (sorted), which keeps
+        // snapshot-reconcile deterministic in tests.
+        Ok(self
+            .rows
+            .iter()
+            .filter(|((t, _), _)| t == table)
+            .map(|((_, pk), _)| pk.clone())
+            .collect())
+    }
+
+    fn delete_pks(&mut self, table: &str, pks: &[String]) -> crate::Result<()> {
+        // Bulk-remove: each pk is a direct BTreeMap key. Idempotent — removing
+        // an absent key is a no-op. No shadow copy here (unlike `apply_batch`)
+        // because there's no atomicity-with-checkpoint contract on this path;
+        // the reconcile is a standalone op.
+        for pk in pks {
+            self.rows.remove(&(table.to_owned(), pk.clone()));
+        }
+        Ok(())
+    }
 }
 
 impl Outbox for InMemoryStorage {
