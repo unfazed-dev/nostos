@@ -18,23 +18,24 @@ import 'package:flutter/material.dart';
 
 import '../../models.dart';
 import '../../widgets/connection_badge.dart' show EmptyState, shortId;
-import '../dashboard_shell.dart';
 
 class ChatView extends StatefulWidget {
-  const ChatView({super.key, required this.db, required this.write});
+  const ChatView({super.key, required this.db});
   final NostosDatabase db;
-  final NostosWrite write;
   @override
   State<ChatView> createState() => _ChatViewState();
 }
 
 class _ChatViewState extends State<ChatView> {
-  late final Stream<List<Message>> _messages = widget.db
-      .watchMapped<Message>('SELECT * FROM messages', Message.fromRow);
-  late final Stream<List<Provider>> _providers = widget.db
-      .watchMapped<Provider>('SELECT * FROM providers', Provider.fromRow);
-  late final Stream<List<Client>> _clients = widget.db
-      .watchMapped<Client>('SELECT * FROM clients', Client.fromRow);
+  late final _messagesColl = widget.db.collection<Message>(
+      table: 'messages', fromRow: Message.fromRow);
+  late final Stream<List<Message>> _messages = _messagesColl.watch();
+  late final _providersColl = widget.db.collection<Provider>(
+      table: 'providers', fromRow: Provider.fromRow);
+  late final Stream<List<Provider>> _providers = _providersColl.watch();
+  late final _clientsColl = widget.db.collection<Client>(
+      table: 'clients', fromRow: Client.fromRow);
+  late final Stream<List<Client>> _clients = _clientsColl.watch();
 
   ChatThread? _openThread;
 
@@ -194,19 +195,15 @@ class _ChatViewState extends State<ChatView> {
 
   Future<void> _send(
       String providerId, String clientId, String body, bool asProvider) async {
-    await widget.write(
-      table: 'messages',
-      op: 'upsert',
-      pk: uuidV4(),
-      payload: {
-        'provider_id': providerId,
-        'client_id': clientId,
-        'sender_type': asProvider ? 'provider' : 'client',
-        'sender_id': asProvider ? providerId : clientId,
-        'body': body,
-        'created_at': DateTime.now().toUtc().toIso8601String(),
-      },
-    );
+    await _messagesColl.upsertRow({
+      'id': uuidV4(),
+      'provider_id': providerId,
+      'client_id': clientId,
+      'sender_type': asProvider ? 'provider' : 'client',
+      'sender_id': asProvider ? providerId : clientId,
+      'body': body,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    });
   }
 }
 

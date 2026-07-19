@@ -12,19 +12,20 @@ import '../../models.dart';
 import '../../services/billing_service.dart';
 import '../../widgets/connection_badge.dart'
     show EmptyState, StatusChip, shortId;
-import '../dashboard_shell.dart';
 
 class AppointmentsView extends StatefulWidget {
-  const AppointmentsView({super.key, required this.db, required this.write});
+  const AppointmentsView({super.key, required this.db});
   final NostosDatabase db;
-  final NostosWrite write;
   @override
   State<AppointmentsView> createState() => _AppointmentsViewState();
 }
 
 class _AppointmentsViewState extends State<AppointmentsView> {
-  late final Stream<List<Appointment>> _rows = widget.db.watchMapped<Appointment>(
-      'SELECT * FROM appointments ORDER BY starts_at', Appointment.fromRow);
+  late final _appts = widget.db.collection<Appointment>(
+      table: 'appointments', fromRow: Appointment.fromRow);
+  late final Stream<List<Appointment>> _rows = _appts.watch(orderBy: 'starts_at');
+  late final _invoices = widget.db.collection<Invoice>(
+      table: 'invoices', fromRow: Invoice.fromRow);
 
   Future<void> _add() async {
     final form = await showDialog<Map<String, dynamic>>(
@@ -36,32 +37,17 @@ class _AppointmentsViewState extends State<AppointmentsView> {
     final appointment =
         Map<String, dynamic>.from(form['appointment'] as Map);
     appointment['id'] = appointmentId;
-    await widget.write(
-      table: 'appointments',
-      op: 'upsert',
-      pk: appointmentId,
-      payload: appointment,
-    );
+    await _appts.upsertRow(appointment);
     // Auto-generate invoice if requested — stamp the real appointment_id now.
     final invoice = form['invoice'];
     if (invoice is Map<String, dynamic>) {
       invoice['appointment_id'] = appointmentId;
-      await widget.write(
-        table: 'invoices',
-        op: 'upsert',
-        pk: uuidV4(),
-        payload: invoice,
-      );
+      await _invoices.upsertRow({...invoice, 'id': uuidV4()});
     }
   }
 
   Future<void> _setStatus(Appointment a, String status) async {
-    await widget.write(
-      table: 'appointments',
-      op: 'patch',
-      pk: a.id,
-      payload: {'status': status},
-    );
+    await _appts.patch(a.id, {'status': status});
   }
 
   @override

@@ -13,19 +13,18 @@ import '../../models.dart';
 import '../../services/billing_service.dart';
 import '../../widgets/connection_badge.dart'
     show EmptyState, StatusChip;
-import '../dashboard_shell.dart';
 
 class InvoicesView extends StatefulWidget {
-  const InvoicesView({super.key, required this.db, required this.write});
+  const InvoicesView({super.key, required this.db});
   final NostosDatabase db;
-  final NostosWrite write;
   @override
   State<InvoicesView> createState() => _InvoicesViewState();
 }
 
 class _InvoicesViewState extends State<InvoicesView> {
-  late final Stream<List<Invoice>> _rows = widget.db
-      .watchMapped<Invoice>('SELECT * FROM invoices', Invoice.fromRow);
+  late final _invoices = widget.db.collection<Invoice>(
+      table: 'invoices', fromRow: Invoice.fromRow);
+  late final Stream<List<Invoice>> _rows = _invoices.watch();
 
   Future<void> _add() async {
     final payload = await showDialog<Map<String, dynamic>>(
@@ -33,24 +32,14 @@ class _InvoicesViewState extends State<InvoicesView> {
       builder: (_) => _InvoiceDialog(db: widget.db),
     );
     if (payload == null) return;
-    await widget.write(
-      table: 'invoices',
-      op: 'upsert',
-      pk: uuidV4(),
-      payload: payload,
-    );
+    await _invoices.upsertRow({...payload, 'id': uuidV4()});
   }
 
   Future<void> _markPaid(Invoice inv) async {
-    await widget.write(
-      table: 'invoices',
-      op: 'patch',
-      pk: inv.id,
-      payload: {
-        'status': 'paid',
-        'paid_at': DateTime.now().toUtc().toIso8601String(),
-      },
-    );
+    await _invoices.patch(inv.id, {
+      'status': 'paid',
+      'paid_at': DateTime.now().toUtc().toIso8601String(),
+    });
   }
 
   @override

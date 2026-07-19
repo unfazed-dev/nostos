@@ -18,10 +18,12 @@ class AvailabilitiesView extends StatefulWidget {
 }
 
 class _AvailabilitiesViewState extends State<AvailabilitiesView> {
-  late final Stream<List<Availability>> _rows = widget.db.watchMapped<Availability>(
-      'SELECT * FROM availabilities', Availability.fromRow);
-  late final Stream<List<Provider>> _providers = widget.db
-      .watchMapped<Provider>('SELECT * FROM providers', Provider.fromRow);
+  late final _avail = widget.db.collection<Availability>(
+      table: 'availabilities', fromRow: Availability.fromRow);
+  late final Stream<List<Availability>> _rows = _avail.watch();
+  late final _providersColl = widget.db.collection<Provider>(
+      table: 'providers', fromRow: Provider.fromRow);
+  late final Stream<List<Provider>> _providers = _providersColl.watch();
 
   @override
   Widget build(BuildContext context) => Scaffold(

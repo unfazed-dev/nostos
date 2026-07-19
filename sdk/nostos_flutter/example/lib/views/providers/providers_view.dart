@@ -11,19 +11,18 @@ import 'package:flutter/material.dart';
 import '../../models.dart';
 import '../../widgets/connection_badge.dart' show InitialsAvatar, EmptyState;
 import '../../widgets/form_dialogs.dart';
-import '../dashboard_shell.dart';
 
 class ProvidersView extends StatefulWidget {
-  const ProvidersView({super.key, required this.db, required this.write});
+  const ProvidersView({super.key, required this.db});
   final NostosDatabase db;
-  final NostosWrite write;
   @override
   State<ProvidersView> createState() => _ProvidersViewState();
 }
 
 class _ProvidersViewState extends State<ProvidersView> {
-  late final Stream<List<Provider>> _rows = widget.db
-      .watchMapped<Provider>('SELECT * FROM providers', Provider.fromRow);
+  late final _providers = widget.db.collection<Provider>(
+      table: 'providers', fromRow: Provider.fromRow);
+  late final Stream<List<Provider>> _rows = _providers.watch();
 
   Future<void> _add() async {
     final form = await showFormDialog(
@@ -38,19 +37,15 @@ class _ProvidersViewState extends State<ProvidersView> {
       saveLabel: 'Create',
     );
     if (form == null || form['name'] == null) return;
-    await widget.write(
-      table: 'providers',
-      op: 'upsert',
-      pk: uuidV4(),
-      payload: {
-        ...form,
-        'rate_type': 'hourly',
-        'hourly_rate_cents': 0,
-        'flat_rate_cents': 0,
-        'subscription_rate_cents': 0,
-        'created_at': DateTime.now().toUtc().toIso8601String(),
-      },
-    );
+    await _providers.upsertRow({
+      ...form,
+      'id': uuidV4(),
+      'rate_type': 'hourly',
+      'hourly_rate_cents': 0,
+      'flat_rate_cents': 0,
+      'subscription_rate_cents': 0,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    });
   }
 
   Future<void> _editRates(Provider p) async {
@@ -59,12 +54,7 @@ class _ProvidersViewState extends State<ProvidersView> {
       builder: (_) => _RateEditDialog(provider: p),
     );
     if (result == null) return;
-    await widget.write(
-      table: 'providers',
-      op: 'patch',
-      pk: p.id,
-      payload: result,
-    );
+    await _providers.patch(p.id, result);
   }
 
   @override

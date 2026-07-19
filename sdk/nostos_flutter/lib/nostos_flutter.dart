@@ -16,4 +16,4 @@ export 'src/nostos_config.dart' show NostosConfig;
 // Declare app schemas with the collision-free aliases `NostosTable` /
 // `NostosColumn` instead (same classes).
 export 'src/schema.dart' show NostosSchema, NostosTable, NostosColumn;
-export 'src/nostos_database.dart' show NostosDatabase;
+export 'src/nostos_database.dart' show NostosDatabase, Collection, SyncStatus;

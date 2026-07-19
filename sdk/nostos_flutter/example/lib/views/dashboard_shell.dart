@@ -19,16 +19,6 @@ import 'clients/clients_view.dart';
 import 'invoices/invoices_view.dart';
 import 'providers/providers_view.dart';
 
-/// A durable write into the local outbox. Pages call this (not the db directly)
-/// so the shell can centralize the failure-path SnackBar (optimistic local-first:
-/// writes apply instantly, surface only if the server ultimately rejects them).
-typedef NostosWrite = Future<void> Function({
-  required String table,
-  required String op,
-  required String pk,
-  Map<String, dynamic>? payload,
-});
-
 /// The 6 dashboard tables on ONE socket (D1/ADR-0022). Single-tenant v1 → no
 /// where_sql; every row syncs.
 const kTables = <NostosTableSub>[
@@ -116,23 +106,6 @@ class _DashboardShellState extends State<DashboardShell> {
     }
   }
 
-  Future<void> _write({
-    required String table,
-    required String op,
-    required String pk,
-    Map<String, dynamic>? payload,
-  }) async {
-    try {
-      await widget.db.write(table: table, op: op, pk: pk, payload: payload);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('write failed: $e')));
-    }
-  }
-
-  NostosWrite get _writeFn => _write;
-
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.of(context).size.width > 600;
@@ -185,12 +158,12 @@ class _DashboardShellState extends State<DashboardShell> {
   Widget _page(int index) => IndexedStack(
         index: index,
         children: [
-          ProvidersView(db: widget.db, write: _writeFn),
-          ClientsView(db: widget.db, write: _writeFn),
+          ProvidersView(db: widget.db),
+          ClientsView(db: widget.db),
           AvailabilitiesView(db: widget.db),
-          AppointmentsView(db: widget.db, write: _writeFn),
-          InvoicesView(db: widget.db, write: _writeFn),
-          ChatView(db: widget.db, write: _writeFn),
+          AppointmentsView(db: widget.db),
+          InvoicesView(db: widget.db),
+          ChatView(db: widget.db),
         ],
       );
 
