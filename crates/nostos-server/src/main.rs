@@ -622,7 +622,10 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          cairn_oplog_dropped_total {oplog_dropped}\n\
          # HELP cairn_oplog_flush_failed_total Op-log batch flushes that failed (PG error / connection lost). Batch lost; resume falls back to snapshot-reconcile. ADR-0025.\n\
          # TYPE cairn_oplog_flush_failed_total counter\n\
-         cairn_oplog_flush_failed_total {oplog_flush_failed}\n",
+         cairn_oplog_flush_failed_total {oplog_flush_failed}\n\
+         # HELP cairn_slot_epoch Monotonic epoch bumped on every replication-slot (re)creation. A client whose last-seen epoch differs must full-snapshot (cannot backfill from a recreated slot's dead lineage). ADR-0025.\n\
+         # TYPE cairn_slot_epoch gauge\n\
+         cairn_slot_epoch {slot_epoch}\n",
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
@@ -632,6 +635,7 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         slot_recreated_total = snap.slot_recreated_total,
         oplog_dropped = snap.oplog_dropped,
         oplog_flush_failed = snap.oplog_flush_failed,
+        slot_epoch = snap.slot_epoch,
     )
 }
 

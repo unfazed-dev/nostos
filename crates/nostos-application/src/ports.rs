@@ -608,6 +608,13 @@ pub struct Metrics {
     /// batch's entries are lost to the op-log → affected resume gaps fall back
     /// to snapshot-reconcile. Correctness preserved; alert on any increase.
     pub oplog_flush_failed: AtomicU64,
+    /// Monotonic epoch counter bumped on every logical-replication slot
+    /// (re)creation (the single chute in `ensure_slot_and_publication`'s
+    /// fresh-create block). The reconnect-resume gate compares the client's
+    /// last-seen epoch to this: a mismatch means the slot's lineage broke
+    /// (drop+recreate) and the client cannot backfill from the dead op-stream
+    /// → must full-snapshot. ADR-0025 slice 3 (signal) / slice 4 (gate).
+    pub slot_epoch: AtomicU64,
 }
 
 impl Metrics {
@@ -632,6 +639,7 @@ impl Metrics {
             slot_recreated_total: self.slot_recreated_total.load(Ordering::Relaxed),
             oplog_dropped: self.oplog_dropped.load(Ordering::Relaxed),
             oplog_flush_failed: self.oplog_flush_failed.load(Ordering::Relaxed),
+            slot_epoch: self.slot_epoch.load(Ordering::Relaxed),
         }
     }
 
@@ -655,6 +663,17 @@ impl Metrics {
     pub fn record_slot_recreate(&self) {
         self.slot_recreated_total.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Bump the slot-epoch counter. Called once per slot (re)creation — the
+    /// single chute in `ensure_slot_and_publication`'s fresh-create block
+    /// (covers both first-create and Lost-recreate). Each bump starts a new
+    /// slot lineage; any in-flight client whose last-seen epoch predates it
+    /// must full-snapshot on reconnect (cannot backfill from a dead lineage).
+    /// ADR-0025 slice 3.
+    #[inline]
+    pub fn record_slot_epoch_bump(&self) {
+        self.slot_epoch.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// A point-in-time read of [`Metrics`] (plain values, safe to format/serialize).
@@ -669,4 +688,6 @@ pub struct MetricsSnapshot {
     pub slot_recreated_total: u64,
     pub oplog_dropped: u64,
     pub oplog_flush_failed: u64,
+    /// Current slot epoch (bumped on every slot create/recreate). ADR-0025.
+    pub slot_epoch: u64,
 }

@@ -404,6 +404,13 @@ impl PgReplicator {
         }
     }
 
+    /// Bump the slot-epoch counter into `self.metrics`, if attached (ADR-0025).
+    fn record_epoch_bump(&self) {
+        if let Some(m) = self.metrics.as_ref() {
+            m.record_slot_epoch_bump();
+        }
+    }
+
     /// Set the gauge to the transient `Recreated` state so a flapping slot
     /// shows up in the metric trace even before the next health probe runs.
     fn mark_recreated_health(&self) {
@@ -666,6 +673,14 @@ impl PgReplicator {
         self.pending_snapshot.extend(snapshot_events);
 
         self.seed_resume(Lsn::new(consistent_lsn.as_u64()));
+
+        // Bump the slot epoch — this fresh-create block is the SINGLE chute
+        // for both first-create and Lost-recreate (the Lost arm above drops
+        // the dead slot then falls through to here). Every (re)creation
+        // starts a new lineage; a client whose last-seen epoch predates this
+        // bump cannot backfill from the op-stream and must full-snapshot on
+        // reconnect. ADR-0025 slice 3 (the gate that consumes this is slice 4).
+        self.record_epoch_bump();
         Ok(consistent_lsn)
     }
 
