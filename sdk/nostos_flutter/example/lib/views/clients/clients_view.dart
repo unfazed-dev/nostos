@@ -9,19 +9,18 @@ import 'package:flutter/material.dart';
 import '../../models.dart';
 import '../../widgets/connection_badge.dart' show InitialsAvatar, EmptyState;
 import '../../widgets/form_dialogs.dart';
-import '../dashboard_shell.dart';
 
 class ClientsView extends StatefulWidget {
-  const ClientsView({super.key, required this.db, required this.write});
+  const ClientsView({super.key, required this.db});
   final NostosDatabase db;
-  final NostosWrite write;
   @override
   State<ClientsView> createState() => _ClientsViewState();
 }
 
 class _ClientsViewState extends State<ClientsView> {
-  late final Stream<List<Client>> _clients = widget.db
-      .watchMapped<Client>('SELECT * FROM clients', Client.fromRow);
+  late final _clientsColl = widget.db.collection<Client>(
+      table: 'clients', fromRow: Client.fromRow);
+  late final Stream<List<Client>> _clients = _clientsColl.watch();
 
   Future<void> _add() async {
     final form = await showFormDialog(
@@ -36,15 +35,11 @@ class _ClientsViewState extends State<ClientsView> {
       saveLabel: 'Create',
     );
     if (form == null || form['name'] == null) return;
-    await widget.write(
-      table: 'clients',
-      op: 'upsert',
-      pk: uuidV4(),
-      payload: {
-        ...form,
-        'created_at': DateTime.now().toUtc().toIso8601String(),
-      },
-    );
+    await _clientsColl.upsertRow({
+      ...form,
+      'id': uuidV4(),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    });
   }
 
   @override
