@@ -33,7 +33,8 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, warn};
 
 use nostos_application::ports::{
-    EventSink, SchemaSource, SnapshotSource, SyncAuth, WriteBack, WriteBackError,
+    EventSink, Metrics, OpLogSource, SchemaSource, SnapshotSource, SyncAuth, WriteBack,
+    WriteBackError,
 };
 use nostos_application::SessionManager;
 use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncSession};
@@ -71,6 +72,11 @@ const MAX_TABLES_PER_SOCKET: usize = 32;
 pub struct SyncRouterState {
     pub manager: Arc<SessionManager>,
     pub session_buffer: usize,
+    /// The server-wide metrics handle (ADR-0025 slice 4b). Read for
+    /// `slot_epoch` — the reconnect-resume gate compares the client's epoch to
+    /// it. Defaults to a throwaway `Metrics::new()` in [`Self::new`]; the
+    /// composition root injects the real shared handle via [`Self::with_metrics`].
+    pub metrics: Arc<Metrics>,
     pub auth: Arc<dyn SyncAuth>,
     /// When set, every predicate is AND-constrained to `tenant_column =
     /// principal.tenant_id` (server-enforced, never client-attested). `None`
@@ -98,6 +104,12 @@ pub struct SyncRouterState {
     /// means the endpoint returns 404 (the `FakeReplicator` path, or a binary
     /// built without feature `pg`). Injected under `NOSTOS_REPLICATOR=pg`.
     pub schema_source: Option<Arc<dyn SchemaSource>>,
+    /// The op-log replay port (ADR-0025 slice 4b). When set + the client's
+    /// epoch matches + its `resume_lsn` is in-window, `register_subscribe`
+    /// replays the offline gap from `cairn_oplog` instead of full-snapshotting.
+    /// `None` (fake mode, or a binary built without feature `pg`) → always
+    /// snapshot. Injected under `NOSTOS_REPLICATOR=pg`.
+    pub oplog_reader: Option<Arc<dyn OpLogSource>>,
 }
 
 impl SyncRouterState {
@@ -106,12 +118,14 @@ impl SyncRouterState {
         Self {
             manager,
             session_buffer: DEFAULT_SESSION_BUFFER,
+            metrics: Arc::new(Metrics::new()),
             auth,
             tenant_column: None,
             write_back: Arc::new(crate::write_back::NoWriteBack::new()),
             write_tables: Arc::new(HashSet::new()),
             snapshotter: None,
             schema_source: None,
+            oplog_reader: None,
         }
     }
 
@@ -164,6 +178,26 @@ impl SyncRouterState {
     #[must_use]
     pub fn with_schema_source(mut self, src: Arc<dyn SchemaSource>) -> Self {
         self.schema_source = Some(src);
+        self
+    }
+
+    /// Inject the server-wide metrics handle (ADR-0025 slice 4b). The
+    /// composition root passes the same `Arc<Metrics>` the replicator bumps
+    /// `slot_epoch` into, so `register_subscribe` reads the live epoch. The
+    /// default in [`Self::new`] is a throwaway (slot_epoch stays 0 → the gate
+    /// forces snapshot, which is correct for tests / fake mode).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// Inject the op-log replay adapter (ADR-0025 slice 4b). Call under
+    /// `NOSTOS_REPLICATOR=pg` with a `PgOpLogReader`; otherwise leave it `None`
+    /// (the default) so reconnecting clients always take the snapshot path.
+    #[must_use]
+    pub fn with_oplog_reader(mut self, reader: Arc<dyn OpLogSource>) -> Self {
+        self.oplog_reader = Some(reader);
         self
     }
 }
@@ -288,6 +322,11 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         &subs,
         &manager,
         snapshotter.as_ref(),
+        state
+            .metrics
+            .slot_epoch
+            .load(std::sync::atomic::Ordering::Relaxed),
+        state.oplog_reader.as_ref(),
         &sink_concrete,
         &principal,
         state.tenant_column.as_deref(),
@@ -424,6 +463,10 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
     let write_tables = Arc::clone(&state.write_tables);
     let subs_reader = Arc::clone(&subs);
     let manager_reader = Arc::clone(&manager);
+    // ADR-0025 slice 4b: read slot_epoch fresh per mid-session subscribe (it
+    // bumps on slot recreate) + the op-log reader for the replay branch.
+    let metrics_reader = Arc::clone(&state.metrics);
+    let oplog_reader = state.oplog_reader.clone();
     let read_loop = tokio::spawn(async move {
         while let Some(Ok(msg)) = reader.next().await {
             let data: Option<Vec<u8>> = match msg {
@@ -439,18 +482,24 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
                     filters,
                     where_sql,
                     resume_lsn,
+                    epoch,
                 }) => {
                     let req = SubscribeRequest {
                         table,
                         filters,
                         where_sql,
                         resume_lsn,
+                        client_epoch: epoch,
                     };
                     if let Err(e) = register_subscribe(
                         &req,
                         &subs_reader,
                         &manager_reader,
                         snapshotter.as_ref(),
+                        metrics_reader
+                            .slot_epoch
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        oplog_reader.as_ref(),
                         &ack_sink,
                         &write_principal,
                         tenant_column_for_writes.as_deref(),
@@ -537,11 +586,14 @@ struct SocketSubs {
 /// Returns `Err` WITHOUT registering on any rejection. Critical sections on
 /// `subs` are short and never span an `.await`; access is serialized anyway
 /// (one reader task; the first subscribe runs before the reader is spawned).
+#[allow(clippy::too_many_arguments)] // 9 params is the genuine subscribe surface; a param-struct would obscure the call sites.
 async fn register_subscribe(
     req: &SubscribeRequest,
     subs: &Arc<Mutex<SocketSubs>>,
     manager: &Arc<SessionManager>,
     snapshotter: Option<&Arc<dyn SnapshotSource>>,
+    server_epoch: u64,
+    oplog_reader: Option<&Arc<dyn OpLogSource>>,
     sink_concrete: &Arc<TokioEventSink>,
     principal: &Principal,
     tenant_column: Option<&str>,
@@ -568,6 +620,66 @@ async fn register_subscribe(
         .connect(session, sink_dyn)
         .await
         .map_err(|_| SubscribeReject::DeviceCapReached)?;
+
+    // ── Op-log replay-on-reconnect (ADR-0025 slice 4b). When the client's
+    //    epoch matches the server's current slot epoch AND its resume_lsn is
+    //    within the retained op-log window, replay the offline gap from
+    //    `cairn_oplog` to the fresh sink and SKIP the snapshot. The client
+    //    dedups per-row by lsn (slice 4a), so the concurrent live fan-out +
+    //    replay overlap is safe. Live fan-out started at `manager.connect`
+    //    above. Any decline (epoch mismatch, aged-out resume, empty/failed
+    //    replay, no reader) falls through to the snapshot path below — slice-1
+    //    reconcile is the correctness floor.
+    let client_epoch = req.client_epoch.unwrap_or(0);
+    if client_epoch == server_epoch && !req.table.is_empty() {
+        if let (Some(reader), Some(resume)) = (oplog_reader, req.resume_lsn) {
+            let in_window = matches!(reader.window_tail().await, Ok(tail) if resume >= tail);
+            if in_window {
+                match reader
+                    .replay_after(principal.tenant_id.as_str(), resume)
+                    .await
+                {
+                    Ok(events) if !events.is_empty() => {
+                        let count = events.len();
+                        for ev in events {
+                            // Backpressure-aware (slice-1): the bounded sink
+                            // mustn't truncate the replay. Live `deliver` +
+                            // replay `deliver_awaiting` share the FIFO channel;
+                            // slice-4a's per-row lsn gate dedups the overlap.
+                            let _ = sink_concrete.deliver_awaiting(ev).await;
+                        }
+                        debug!(
+                            table = %req.table, resume, count,
+                            "op-log replay delivered (epoch match, in-window); skipping snapshot"
+                        );
+                        // Record the session on the socket (same bookkeeping as
+                        // the snapshot path's tail, minus the synthetic-cursor
+                        // advance — replay events carry REAL lsns, not synthetic
+                        // ones, so they don't consume the cursor's space).
+                        {
+                            let mut s = subs.lock().await;
+                            s.ids.push(id);
+                            s.tables.insert(req.table.clone());
+                        }
+                        return Ok(());
+                    }
+                    Ok(_) => debug!(
+                        table = %req.table, resume,
+                        "op-log replay empty; falling back to snapshot"
+                    ),
+                    Err(e) => warn!(
+                        table = %req.table, error = %e,
+                        "op-log replay failed; falling back to snapshot"
+                    ),
+                }
+            } else {
+                debug!(
+                    table = %req.table, resume,
+                    "resume_lsn aged out of op-log window; snapshot"
+                );
+            }
+        }
+    }
 
     // Snapshot-on-subscribe for THIS table only. base_lsn is the socket's
     // monotonic synthetic cursor (NOT the frame's resume_lsn) so cross-table
@@ -837,6 +949,9 @@ struct SubscribeRequest {
     /// ANDed in BEFORE tenant enforcement (so it can never widen scope).
     where_sql: Option<String>,
     resume_lsn: Option<u64>,
+    /// The client's last-seen server slot epoch (ADR-0025 slice 4b). `None` on
+    /// old clients → the gate treats it as a mismatch → snapshot (safe default).
+    client_epoch: Option<u64>,
 }
 
 /// Await the first frame, require it to be a `ClientMessage::Subscribe`, and
@@ -862,11 +977,13 @@ async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
                 filters,
                 where_sql,
                 resume_lsn,
+                epoch,
             } => Some(SubscribeRequest {
                 table,
                 filters,
                 where_sql,
                 resume_lsn,
+                client_epoch: epoch,
             }),
             // An ACK or a Write before subscribing is out of order — reject by
             // closing the socket (same discipline as early ACK). The caller
@@ -879,3 +996,230 @@ async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
 
 // (Transport-swap seam removed — axum 0.7's `WebSocket` works directly. If we
 // later swap to WebTransport, this module is the single place that changes.)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use nostos_application::ports::SessionStore;
+    use nostos_domain::{Lsn, RowOp};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::sync::mpsc;
+
+    /// A canned op-log reader for the reconnect-resume branch tests (ADR-0025
+    /// slice 4b). `replay_calls` distinguishes "replay attempted + empty"
+    /// (case e) from "replay never reached" (b, c, d).
+    struct MockOpLog {
+        events: Vec<ReplicationEvent>,
+        tail: u64,
+        replay_calls: Arc<AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl nostos_application::ports::OpLogSource for MockOpLog {
+        async fn replay_after(
+            &self,
+            _tenant: &str,
+            _after: u64,
+        ) -> Result<Vec<ReplicationEvent>, nostos_application::ports::OpLogError> {
+            self.replay_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self.events.clone())
+        }
+        async fn window_tail(&self) -> Result<u64, nostos_application::ports::OpLogError> {
+            Ok(self.tail)
+        }
+    }
+
+    fn ev(lsn: u64) -> ReplicationEvent {
+        ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Insert {
+                table: "tasks".into(),
+                pk: lsn.to_string(),
+                payload: Bytes::from_static(b"x"),
+            },
+        )
+    }
+
+    /// Build the register_subscribe harness. `snapshotter` is `None`, so the
+    /// snapshot path delivers nothing — the replay-vs-snapshot observable is
+    /// whether the sink received events (+ the replay-call counter).
+    #[allow(clippy::unused_async)] // sync body; kept async so call sites read uniformly with the awaited setup.
+    async fn harness() -> (
+        Arc<Mutex<SocketSubs>>,
+        Arc<SessionManager>,
+        Arc<TokioEventSink>,
+        mpsc::Receiver<crate::router::SinkMsg>,
+    ) {
+        let subs = Arc::new(Mutex::new(SocketSubs {
+            ids: Vec::new(),
+            tables: HashSet::new(),
+            synthetic_cursor: 0,
+        }));
+        let store: Arc<dyn SessionStore> = Arc::new(crate::store::InMemorySessionStore::new());
+        let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
+        let (sink, rx) = TokioEventSink::channel(16);
+        (subs, manager, Arc::new(sink), rx)
+    }
+
+    fn req(table: &str, client_epoch: Option<u64>, resume: Option<u64>) -> SubscribeRequest {
+        SubscribeRequest {
+            table: table.into(),
+            filters: Vec::new(),
+            where_sql: None,
+            resume_lsn: resume,
+            client_epoch,
+        }
+    }
+
+    // (a) epoch match + resume ≥ tail + non-empty replay → replay delivers.
+    #[tokio::test]
+    async fn replay_delivers_on_epoch_match_in_window() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev(10)],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        register_subscribe(
+            &req("tasks", Some(1), Some(5)),
+            &subs,
+            &manager,
+            None,
+            1,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(crate::router::SinkMsg::Event(_))
+        ));
+        assert!(rx.try_recv().is_err(), "replay delivered exactly one event");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(subs.lock().await.tables.contains("tasks"));
+    }
+
+    // (b) epoch mismatch → snapshot (replay never reached).
+    #[tokio::test]
+    async fn snapshot_on_epoch_mismatch() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev(10)],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        register_subscribe(
+            &req("tasks", Some(1), Some(5)),
+            &subs,
+            &manager,
+            None,
+            2,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "snapshot path (snapshotter None) delivers nothing"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(subs.lock().await.tables.contains("tasks"));
+    }
+
+    // (c) resume < tail (aged out of the op-log window) → snapshot.
+    #[tokio::test]
+    async fn snapshot_when_resume_aged_out() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev(10)],
+            tail: 100, // resume 5 < tail 100 → aged out
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        register_subscribe(
+            &req("tasks", Some(1), Some(5)),
+            &subs,
+            &manager,
+            None,
+            1,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    // (d) no oplog reader wired → snapshot.
+    #[tokio::test]
+    async fn snapshot_when_no_reader() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let principal = Principal::new("acct", "tenant-acme");
+        register_subscribe(
+            &req("tasks", Some(1), Some(5)),
+            &subs,
+            &manager,
+            None,
+            1,
+            None,
+            &sink,
+            &principal,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+        assert!(subs.lock().await.tables.contains("tasks"));
+    }
+
+    // (e) replay returns empty → fall back to snapshot (replay WAS attempted).
+    #[tokio::test]
+    async fn snapshot_when_replay_empty() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: Vec::new(),
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        register_subscribe(
+            &req("tasks", Some(1), Some(5)),
+            &subs,
+            &manager,
+            None,
+            1,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "empty replay → snapshot, nothing delivered"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "replay was attempted, just empty"
+        );
+        assert!(subs.lock().await.tables.contains("tasks"));
+    }
+}

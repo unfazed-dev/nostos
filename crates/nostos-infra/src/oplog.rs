@@ -134,6 +134,9 @@ impl OpLogWriter for RecordingOpLogWriter {
 pub use self::pg::PgOpLogCompactor;
 
 #[cfg(feature = "pg")]
+pub use self::pg::PgOpLogReader;
+
+#[cfg(feature = "pg")]
 pub use self::pg::PgOpLogWriter;
 
 // ===========================================================================
@@ -143,14 +146,109 @@ pub use self::pg::PgOpLogWriter;
 mod pg {
     use super::{build_entry, OpEntry, BATCH_MAX};
     use async_trait::async_trait;
-    use nostos_application::ports::{Metrics, OpLogWriter};
-    use nostos_domain::ReplicationEvent;
+    use nostos_application::ports::{Metrics, OpLogError, OpLogSource, OpLogWriter};
+    use nostos_domain::{Lsn, ReplicationEvent, RowOp};
     use std::fmt::Write as _;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_postgres::NoTls;
+
+    /// A persisted op-log READER for reconnect resume (ADR-0025 slice 4b).
+    /// Counterpart to [`PgOpLogWriter`] — reads `cairn_oplog` to replay the
+    /// offline gap when a client reconnects with a matching epoch + an in-window
+    /// `resume_lsn`. Owns no connection: each call opens a fresh one (mirror
+    /// `flush_batch`'s connect-on-demand). Replay is a cold path (once per
+    /// reconnect), so the connect cost is negligible + this avoids a long-lived
+    /// reader connection (one less thing to keep alive across restarts).
+    pub struct PgOpLogReader {
+        pg_url: String,
+    }
+
+    impl PgOpLogReader {
+        /// Construct from a libpq-style URL. Reads only — no writes, no slot.
+        #[must_use]
+        pub fn new(pg_url: &str) -> Self {
+            Self {
+                pg_url: pg_url.to_string(),
+            }
+        }
+
+        /// Open a fresh control connection + drive its socket on a detached task
+        /// (same pattern as `flush_batch`). Errors are scrubbed to `OpLogError`.
+        async fn connect(&self) -> Result<tokio_postgres::Client, OpLogError> {
+            let (client, conn) = tokio_postgres::connect(&self.pg_url, NoTls)
+                .await
+                .map_err(|e| OpLogError::Backend(e.to_string()))?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            Ok(client)
+        }
+    }
+
+    #[async_trait]
+    impl OpLogSource for PgOpLogReader {
+        async fn replay_after(
+            &self,
+            tenant_id: &str,
+            after_lsn: u64,
+        ) -> Result<Vec<ReplicationEvent>, OpLogError> {
+            let client = self.connect().await?;
+            // after_lsn (u64 WAL offset) → cairn_oplog.lsn BIGINT (i64). Clamp on
+            // the (impossible-for-real-LSNs) overflow so a corrupt resume_lsn
+            // can't panic the replay — it'll just match nothing + fall back.
+            let after_i64 = i64::try_from(after_lsn).unwrap_or(i64::MAX);
+            // `tenant_id: &str` → `&tenant_id: &&str` coerces to `&dyn ToSql` (the
+            // pointee `&str` impls ToSql + is Sized). Binding `tenant_id` directly
+            // would require `str: Sized` (it isn't) — borrow the borrow.
+            let p1: &(dyn tokio_postgres::types::ToSql + Sync) = &tenant_id;
+            let p2: &(dyn tokio_postgres::types::ToSql + Sync) = &after_i64;
+            let rows = client
+                .query(
+                    "SELECT lsn, table_name, pk, op, payload FROM cairn_oplog \
+                     WHERE tenant_id = $1 AND lsn > $2 ORDER BY lsn",
+                    &[p1, p2],
+                )
+                .await
+                .map_err(|e| OpLogError::Backend(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let lsn: i64 = r.get(0);
+                let table: String = r.get(1);
+                let pk: String = r.get(2);
+                let op: String = r.get(3);
+                let payload: Option<Vec<u8>> = r.get(4);
+                // lsn was stored from a u64 WAL offset; real LSNs (~2^40) are
+                // positive. A negative (corrupt) row collapses to 0 — it'll be
+                // gated out by the client's per-row lsn check, never corrupting.
+                let lsn_u = u64::try_from(lsn).unwrap_or(0);
+                let event = if op == "delete" {
+                    ReplicationEvent::new(Lsn::new(lsn_u), RowOp::Delete { table, pk })
+                } else {
+                    // "upsert" (Insert/Update collapsed at write time). Under the
+                    // client's per-row lsn gate (slice 4a) Insert ≡ Update.
+                    let payload = payload.map(bytes::Bytes::from).unwrap_or_default();
+                    ReplicationEvent::new(Lsn::new(lsn_u), RowOp::Insert { table, pk, payload })
+                };
+                out.push(event);
+            }
+            Ok(out)
+        }
+
+        async fn window_tail(&self) -> Result<u64, OpLogError> {
+            let client = self.connect().await?;
+            let tail: i64 = client
+                .query_one("SELECT COALESCE(MIN(lsn), 0) FROM cairn_oplog", &[])
+                .await
+                .map_err(|e| OpLogError::Backend(e.to_string()))?
+                .get(0);
+            // COALESCE guarantees non-negative; the try_from keeps clippy's
+            // cast_sign_loss quiet on the (impossible) negative path.
+            Ok(u64::try_from(tail).unwrap_or(0))
+        }
+    }
 
     /// A persisted op-log writer backed by the `cairn_oplog` Postgres table.
     ///

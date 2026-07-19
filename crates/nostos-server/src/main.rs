@@ -432,7 +432,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
-        .with_buffer(cfg.session_buffer);
+        .with_buffer(cfg.session_buffer)
+        .with_metrics(Arc::clone(&metrics));
     if let Some(col) = tenant_col {
         state_builder = state_builder.with_tenant_column(col);
     }
@@ -486,6 +487,20 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(nostos_infra::PgSnapshotter::new(&cfg.pg_url));
         state_builder = state_builder.with_snapshotter(snapshotter);
         info!("snapshot-on-subscribe: PgSnapshotter (real source)");
+    }
+
+    // ---- op-log replay-on-reconnect adapter (ADR-0025 slice 4b) ----
+    // Under `NOSTOS_REPLICATOR=pg` inject a `PgOpLogReader` so a reconnecting
+    // client with a matching epoch + an in-window `resume_lsn` gets its offline
+    // gap replayed from `cairn_oplog` instead of a full snapshot. Otherwise
+    // `oplog_reader` stays `None` → reconnect always takes the snapshot path
+    // (slice-1 reconcile remains the correctness floor either way).
+    #[cfg(feature = "pg")]
+    if cfg.replicator == "pg" {
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> =
+            Arc::new(nostos_infra::PgOpLogReader::new(&cfg.pg_url));
+        state_builder = state_builder.with_oplog_reader(reader);
+        info!("op-log replay: PgOpLogReader (real source)");
     }
 
     // Guard (Fix A): NOSTOS_PG_URL set while replicator != "pg" is almost always

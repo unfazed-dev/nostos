@@ -495,6 +495,54 @@ pub enum SnapshotError {
 }
 
 // ---------------------------------------------------------------------------
+// Op-log replay (ADR-0025 slice 4b — reconnect resume without a full snapshot).
+// ---------------------------------------------------------------------------
+
+/// Why an [`OpLogSource`] call failed. The op-log read is a single tenant-scoped
+/// SELECT on the server-internal `cairn_oplog` table, so there is no
+/// invalid-table category (mirror of [`SnapshotError`] minus `InvalidTable`).
+#[derive(Debug, thiserror::Error)]
+pub enum OpLogError {
+    /// The underlying database errored (connection, prepare, query). The
+    /// transport logs it and falls back to the snapshot path — replay is an
+    /// optimization; snapshot-reconcile (slice 1) is the correctness floor.
+    #[error("oplog backend: {0}")]
+    Backend(String),
+}
+
+/// Replay the persisted op-log for reconnect resume (ADR-0025 slice 4b).
+///
+/// On subscribe, when `client_epoch == server_epoch` and the client's
+/// `resume_lsn` is within the retained op-log window, the transport replays the
+/// missed ops (INSERTs/UPDATEs/DELETEs from the offline gap) to the fresh sink
+/// — catching up WITHOUT a full snapshot. The client dedups per-row by lsn
+/// (ADR-0025 slice 4a), so the concurrent live fan-out + replay overlap is safe.
+/// Slice-1 snapshot-reconcile remains the safety net for the batch-lag tail and
+/// gaps that aged out past the retention window.
+#[async_trait]
+pub trait OpLogSource: Send + Sync {
+    /// Replay op-log entries for `tenant_id` with `lsn > after_lsn`, in lsn
+    /// order. Upserts reconstitute as `Insert` RowOps — under the client's
+    /// per-row lsn gate (slice 4a), Insert ≡ Update (the client applies by pk).
+    ///
+    /// # Errors
+    /// [`OpLogError::Backend`] on any database failure.
+    async fn replay_after(
+        &self,
+        tenant_id: &str,
+        after_lsn: u64,
+    ) -> Result<Vec<ReplicationEvent>, OpLogError>;
+
+    /// The lowest `lsn` still retained in the op-log (the window tail, advanced
+    /// by compaction — ADR-0025 slice 5). `resume_lsn < tail` ⇒ the client's
+    /// offline gap aged out ⇒ the transport falls back to the snapshot path.
+    ///
+    /// # Errors
+    /// [`OpLogError::Backend`] on any database failure.
+    async fn window_tail(&self) -> Result<u64, OpLogError>;
+}
+
+// ---------------------------------------------------------------------------
 // Schema discovery (WS1 — Flutter PowerSync-style redesign, Option-C).
 // ---------------------------------------------------------------------------
 

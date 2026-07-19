@@ -61,6 +61,9 @@ pub use schema_source::PgSchemaSource;
 pub use write_back::PgWriteBack;
 
 #[cfg(feature = "pg")]
+pub use oplog::PgOpLogReader;
+
+#[cfg(feature = "pg")]
 pub use oplog::PgOpLogWriter;
 
 #[cfg(feature = "pg")]

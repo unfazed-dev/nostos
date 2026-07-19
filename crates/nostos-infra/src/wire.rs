@@ -58,6 +58,15 @@ pub enum ClientMessage {
         /// so the server seeds its ack cursor and skips re-delivering ≤ it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_lsn: Option<u64>,
+        /// The client's last-seen server slot epoch (ADR-0025 slice 4b). The
+        /// server compares it to its current `slot_epoch`: a mismatch means the
+        /// slot was dropped + recreated (the WAL lineage broke) so the client
+        /// cannot backfill from the dead op-stream → full snapshot. A match,
+        /// with a `resume_lsn` inside the op-log window, → op-log replay
+        /// instead. `None` (an old client that doesn't track epochs) is treated
+        /// as a mismatch → snapshot (the safe default; replay is opt-in).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
     /// Acknowledge applied progress (highest applied LSN).
     Ack { lsn: u64 },
@@ -496,6 +505,7 @@ mod tests {
             filters,
             where_sql,
             resume_lsn,
+            epoch: _,
         } = msg
         else {
             panic!("expected Subscribe");
@@ -518,6 +528,7 @@ mod tests {
             filters,
             where_sql,
             resume_lsn,
+            epoch: _,
         } = msg
         else {
             panic!("expected Subscribe");

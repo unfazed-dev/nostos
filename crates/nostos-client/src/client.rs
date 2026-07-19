@@ -566,6 +566,11 @@ where
             filters: vec![],
             where_sql: self.config.where_sql.clone(),
             resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
+            // ADR-0025 slice 4b: client-side epoch tracking is deferred. None ⇒
+            // server reads client_epoch as 0 ⇒ epoch-mismatch ⇒ full snapshot
+            // (slice-1 reconcile). The op-log replay path stays dormant until
+            // the client persists + sends its last-seen server slot epoch.
+            epoch: None,
         };
         let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
         write
@@ -582,6 +587,7 @@ where
                 filters: vec![],
                 where_sql: sub.where_sql.clone(),
                 resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
+                epoch: None, // see the primary Subscribe above (client epoch deferred)
             };
             let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
             write
