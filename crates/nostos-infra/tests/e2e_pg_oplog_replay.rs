@@ -167,19 +167,20 @@ struct Harness {
 /// WS clients.
 async fn harness(tenant: &str, slot: &str) -> Harness {
     let sql = sql_client().await;
-    // Clean leftover slot + the prior run's rows for this tenant.
+    // Drop a leftover slot from a prior run (same PID ⇒ same slot name; the two
+    // tests share the PID so test 2 must drop test 1's slot). NOTE: we do NOT
+    // delete `tasks` rows here — the caller inserts the seed row BEFORE calling
+    // `harness`, so a cleanup here would delete it. Cross-run isolation is by
+    // the per-run tenant UUID: the op-log query is `WHERE tenant_id = <uuid>`,
+    // so prior runs' rows (other UUIDs) never match.
     let _ = sql
         .batch_execute(format!("SELECT pg_drop_replication_slot('{slot}');").as_str())
         .await;
+    // Confirm the op-log table exists (docker/pg-init applies it). `query` (not
+    // `query_one`) so an EMPTY-but-existing table returns Ok([]) instead of a
+    // RowCount error — the table is empty at fresh setup before any event lands.
     let _ = sql
-        .execute(
-            "DELETE FROM tasks WHERE title LIKE 'e2e-oplog-replay-%'",
-            &[],
-        )
-        .await;
-    // Confirm the op-log + tasks tables exist (docker/pg-init applies them).
-    let _ = sql
-        .query_one("SELECT 1 FROM cairn_oplog LIMIT 1", &[])
+        .query("SELECT 1 FROM cairn_oplog LIMIT 1", &[])
         .await
         .expect("cairn_oplog table exists (run docker compose up -d)");
 
@@ -317,6 +318,13 @@ async fn oplog_replay_delivers_offline_gap_including_deletes() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `docker compose up -d` to run)");
         return;
     }
+    // Init tracing so the op-log writer's flush warns + the replicator's
+    // snapshot/read logs surface under --nocapture (diagnoses why cairn_oplog
+    // stays empty: writer INSERT failure vs snapshot-read gap vs no events).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("nostos=debug,info")
+        .with_test_writer()
+        .try_init();
     let tenant = uuid::Uuid::new_v4().to_string();
     let slot = format!("e2e_oplog_replay_{}", std::process::id());
 
@@ -425,6 +433,13 @@ async fn aged_out_checkpoint_falls_back_to_snapshot() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `docker compose up -d` to run)");
         return;
     }
+    // Init tracing so the op-log writer's flush warns + the replicator's
+    // snapshot/read logs surface under --nocapture (diagnoses why cairn_oplog
+    // stays empty: writer INSERT failure vs snapshot-read gap vs no events).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("nostos=debug,info")
+        .with_test_writer()
+        .try_init();
     let tenant = uuid::Uuid::new_v4().to_string();
     let slot = format!("e2e_oplog_replay_aged_{}", std::process::id());
 
