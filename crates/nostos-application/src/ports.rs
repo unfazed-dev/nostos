@@ -10,8 +10,60 @@
 //! doubles and async adapters. The domain layer stays pure (ADR-0001); only
 //! this layer sees `async`.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Slot-health gauge reported by the PgReplicator into [`Metrics`]. Rendered as
+/// a Prometheus gauge int (see `as_gauge_int`). The replicator is the only
+/// writer; the server's `/metrics` endpoint is the only reader.
+///
+/// Encoding is intentionally a plain `u8` (not the postgres `wal_status` text)
+/// so the application layer never imports a Postgres type — the hexagonal
+/// boundary stays clean (ADR-0009).
+///
+/// - `Healthy` (0): slot exists, `wal_status in ('reserved'|'extended'|'unreserved')`.
+/// - `Reserved` (1): transitional / ambiguous — kept distinct for operators so a
+///   flap is visible in the gauge trace.
+/// - `Lost` (2): `wal_status='lost'` OR slot missing on reconnect. This is the
+///   silent-data-loss signal: WAL between the last client-acked LSN and the new
+///   consistent point is gone. The replicator logs `error!` and re-creates +
+///   re-snapshots, but the gap is unrecoverable — the metric makes it visible.
+/// - `Recreated` (3): the slot was just dropped + re-created with a fresh
+///   snapshot (set transiently after recovery, before the next health probe
+///   flips it back to `Healthy`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SlotHealth {
+    #[default]
+    Healthy = 0,
+    Reserved = 1,
+    Lost = 2,
+    Recreated = 3,
+}
+
+impl SlotHealth {
+    /// Render as the integer Prometheus gauge value (matches the `#[repr(u8)]`).
+    #[inline]
+    #[must_use]
+    pub fn as_gauge_int(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`Self::as_gauge_int`]. Unknown discriminants collapse to
+    /// `Healthy` (a future PG `wal_status` variant we don't model yet should
+    /// not crash metrics rendering — `ponytail:` add a new variant when one
+    /// shows up in the field).
+    #[inline]
+    #[must_use]
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Reserved,
+            2 => Self::Lost,
+            3 => Self::Recreated,
+            _ => Self::Healthy,
+        }
+    }
+}
 
 use async_trait::async_trait;
 
@@ -507,6 +559,18 @@ pub struct Metrics {
     pub dropped: AtomicU64,
     /// Current live session count (gauge, not counter).
     pub sessions: AtomicUsize,
+    /// Replication-slot health gauge (see [`SlotHealth`]). Set by `PgReplicator`
+    /// from `pg_replication_slots.wal_status` on every (re)connect. `Lost` is
+    /// the operator-actionable signal that nostos silently dropped WAL while
+    /// offline — ADR-0009.
+    pub slot_wal_status: AtomicU8,
+    /// Current WAL lsn − slot `restart_lsn` (bytes). 0 when unknown / slot
+    /// missing. Gauge of how much WAL PG is retaining for the slot.
+    pub replication_lag_bytes: AtomicU64,
+    /// Monotonic counter: number of times the slot was dropped + re-created
+    /// from a missing/lost state. Each increment implies a potential silent
+    /// data-loss window — alert on any increase.
+    pub slot_recreated_total: AtomicU64,
 }
 
 impl Metrics {
@@ -526,7 +590,31 @@ impl Metrics {
             delivered: self.delivered.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             sessions: self.sessions.load(Ordering::Relaxed),
+            slot_wal_status: SlotHealth::from_u8(self.slot_wal_status.load(Ordering::Relaxed)),
+            replication_lag_bytes: self.replication_lag_bytes.load(Ordering::Relaxed),
+            slot_recreated_total: self.slot_recreated_total.load(Ordering::Relaxed),
         }
+    }
+
+    /// Set the slot-health gauge. Called by `PgReplicator` from the slot probe.
+    #[inline]
+    pub fn set_slot_health(&self, health: SlotHealth) {
+        self.slot_wal_status
+            .store(health.as_gauge_int(), Ordering::Relaxed);
+    }
+
+    /// Set the WAL-lag gauge (bytes). 0 means "unknown".
+    #[inline]
+    pub fn set_replication_lag(&self, lag_bytes: u64) {
+        self.replication_lag_bytes
+            .store(lag_bytes, Ordering::Relaxed);
+    }
+
+    /// Increment the slot-recreated counter. Called once per drop+recreate
+    /// recovery. Each bump is a potential silent-data-loss window.
+    #[inline]
+    pub fn record_slot_recreate(&self) {
+        self.slot_recreated_total.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -537,4 +625,7 @@ pub struct MetricsSnapshot {
     pub delivered: u64,
     pub dropped: u64,
     pub sessions: usize,
+    pub slot_wal_status: SlotHealth,
+    pub replication_lag_bytes: u64,
+    pub slot_recreated_total: u64,
 }

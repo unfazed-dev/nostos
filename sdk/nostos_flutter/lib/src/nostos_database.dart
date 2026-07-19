@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:meta/meta.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'nostos.dart';
@@ -223,8 +224,8 @@ class NostosDatabase {
   /// Reactive SQL watch: re-runs [sql] whenever the synced data changes and
   /// emits the decoded result set. Thin delegate over `Nostos.watchQuery`
   /// (PowerSync-parity P1). Requires an active [subscribe] first.
-  Stream<List<Map<String, dynamic>>> watch(String sql) =>
-      _nostos.watchQuery(sql);
+  Stream<List<Map<String, dynamic>>> watch(String sql, {Duration? throttle}) =>
+      _nostos.watchQuery(sql, throttle: throttle);
 
   /// Run a one-shot SELECT against on-device SQLite and return the decoded
   /// rows. Non-reactive counterpart to [watch]. Requires an active
@@ -275,9 +276,79 @@ class NostosDatabase {
   }) =>
       _nostos.write(table, op: op, pk: pk, payload: payload);
 
-  /// Tear down the underlying [Nostos] session (sync loop + watch pump).
-  /// Safe to call with no subscription and safe to call more than once.
-  Future<void> close() => _nostos.close();
+  // ─────────────────── Reactive facade (ADR-0024) ───────────────────
+  //
+  // The DEFAULT beautiful dev surface: typed `Collection<T>` handles over the
+  // existing hot-replay-shared watch pump, a derived `count`, typed collapsed
+  // writes, and a hot `SyncStatus`. Raw SQL ([watch]/[getAll]) stays as the
+  // escape hatch. See ADR-0024 + CONTEXT.md.
+
+  /// A typed handle to one synced [table] — the DEFAULT dev surface.
+  ///
+  /// [fromRow] decodes a row `Map` into `T` (required). [toRow] encodes `T` for
+  /// writes — **optional**; pass it only if you use [Collection.upsert]
+  /// (read-only collections omit it). [pkColumn] names the primary-key column
+  /// `toRow` emits (default `'id'`).
+  /// ```dart
+  /// final todos = db.collection<Todo>(
+  ///   table: 'todos', fromRow: Todo.fromRow, toRow: (t) => t.toRow());
+  /// final active = todos.watch(where: 'completed = 0'); // Stream<List<Todo>>
+  /// await todos.upsert(Todo(id: '1', title: 'ship', completed: false));
+  /// ```
+  Collection<T> collection<T>({
+    required String table,
+    required T Function(Map<String, dynamic> row) fromRow,
+    Map<String, dynamic> Function(T value)? toRow,
+    String pkColumn = 'id',
+  }) =>
+      Collection<T>._(this, table, fromRow, toRow, pkColumn);
+
+  /// Hot sync status. Honest P0: carries [SyncStatus.conn] (from the
+  /// underlying connection stream) + [SyncStatus.connected] +
+  /// [SyncStatus.lastSyncedAt]. Richer fields (syncing/reconciling/errors) and
+  /// `DataTrust` land in P1 once the engine exposes those signals (ADR-0024).
+  ValueListenable<SyncStatus> get status {
+    _ensureStatusWired();
+    return _status!;
+  }
+
+  /// Synchronous snapshot of the current [SyncStatus].
+  SyncStatus get currentStatus {
+    _ensureStatusWired();
+    return _status!.value;
+  }
+
+  ValueNotifier<SyncStatus>? _status;
+  StreamSubscription<NostosConnectionState>? _statusSub;
+  bool _statusWired = false;
+
+  void _ensureStatusWired() {
+    if (_statusWired) return;
+    _statusWired = true;
+    _status = ValueNotifier<SyncStatus>(const SyncStatus(
+      conn: NostosConnectionState.disconnected,
+      lastSyncedAt: null,
+    ));
+    // ponytail: the engine exposes only NostosConnectionState today. There is no
+    // "download completed" / "reconcile done" / error signal yet, so lastSyncedAt
+    // is stamped on each `connected` transition (a best-effort proxy) and the
+    // richer SyncStatus fields are deferred to P1 with engine-side signals.
+    _statusSub = _nostos.connectionState.listen((s) {
+      final prev = _status!.value;
+      final lastSynced = s == NostosConnectionState.connected
+          ? DateTime.now()
+          : prev.lastSyncedAt;
+      _status!.value = SyncStatus(conn: s, lastSyncedAt: lastSynced);
+    });
+  }
+
+  /// Tear down the underlying [Nostos] session (sync loop + watch pump) AND the
+  /// status listener. Safe to call with no subscription; idempotent.
+  Future<void> close() async {
+    await _statusSub?.cancel();
+    _status?.dispose();
+    await _nostos.close();
+  }
 
   /// Pause syncing (delegate to [Nostos.disconnect]); reads/writes/UI keep
   /// working offline. See `Nostos.disconnect`.
@@ -304,4 +375,141 @@ class NostosDatabase {
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     return NostosSchema.fromSchemaDescriptor(body);
   }
+}
+
+/// Typed handle to one synced table — the beautiful default dev surface
+/// (ADR-0024). Obtained via [NostosDatabase.collection].
+///
+/// - [watch] returns a typed `Stream<List<T>>` backed by the existing per-table
+///   hot-replay-shared pump ([Nostos.watch]); multiple [watch] callers share the
+///   upstream. `ValueListenableBuilder` users can adapt with a `Stream`→
+///   `ValueNotifier` bridge (P1 helper; until then `StreamBuilder` is the path).
+/// - [count] is a derived selector — a count widget does NOT rebuild on
+///   unrelated column writes.
+/// - [upsert]/[delete] are typed collapsed writes (the moat — no `uploadData`
+///   toll-booth; ADR-0013).
+class Collection<T> {
+  Collection._(this._db, this.table, this._fromRow, this._toRow, this.pkColumn);
+
+  final NostosDatabase _db;
+  final String table;
+  final T Function(Map<String, dynamic> row) _fromRow;
+  final Map<String, dynamic> Function(T value)? _toRow;
+  final String pkColumn;
+
+  /// Reactive typed read. Re-runs whenever the table's synced data changes.
+  ///
+  /// - [where] is a literal SQL fragment (e.g. `'completed = 0'`). Parameter
+  ///   binding (`parameters: [...]`) is P1 — the engine query path is
+  ///   parameter-less today; until then pass constants, **never** interpolated
+  ///   user input.
+  /// - [orderBy] is a literal `ORDER BY` fragment (e.g. `'starts_at'` or
+  ///   `'created_at DESC'`), appended after [where]. Prefer this to stuffing
+  ///   `ORDER BY` into [where].
+  /// - [throttle] coalesces a burst of change ticks into one re-query per
+  ///   window.
+  Stream<List<T>> watch({
+    String? where,
+    Duration? throttle,
+    String? orderBy,
+  }) {
+    var sql = 'SELECT * FROM $table';
+    if (where != null) sql += ' WHERE $where';
+    if (orderBy != null) sql += ' ORDER BY $orderBy';
+    return _db
+        .watch(sql, throttle: throttle)
+        .map((rows) => rows.map(_fromRow).toList(growable: false));
+  }
+
+  /// Derived count — emits the row count matching [where], re-runs on table
+  /// change. Use this for count badges so they don't rebuild on unrelated
+  /// column writes.
+  Stream<int> count({String? where}) {
+    final sql = where == null
+        ? 'SELECT COUNT(*) AS count FROM $table'
+        : 'SELECT COUNT(*) AS count FROM $table WHERE $where';
+    return _db.watch(sql).map((rows) {
+      final v = rows.isEmpty ? null : rows.first['count'];
+      return v is num ? v.toInt() : 0;
+    });
+  }
+
+  /// Typed collapsed write: encodes [value] via `toRow` and enqueues an upsert
+  /// into the durable outbox. Returns the local outbox id (NOT a server ack);
+  /// the applied row round-trips back through [watch] (ADR-0013).
+  ///
+  /// Throws [StateError] if no `toRow` was provided to `collection<T>()`, or
+  /// [ArgumentError] if `toRow(value)` omits the [pkColumn] column.
+  Future<int> upsert(T value) {
+    if (_toRow == null) {
+      throw StateError(
+        'Collection($table).upsert: no toRow was provided to collection<T>(). '
+        'Pass toRow when constructing the collection to use typed writes.',
+      );
+    }
+    final row = _toRow(value);
+    final pk = row[pkColumn]?.toString();
+    if (pk == null) {
+      throw ArgumentError(
+        'Collection($table).upsert: toRow() returned no "$pkColumn" column.',
+      );
+    }
+    return _db.write(table: table, op: 'upsert', pk: pk, payload: row);
+  }
+
+  /// Map-based full-row upsert for form-driven writes. A form dialog returns a
+  /// `Map<String,String>`; constructing a typed `T` only to re-encode it would
+  /// be circular here because the read-model is a *projection* (a subset of
+  /// columns with parsed types), not a full write-image — e.g. a write payload
+  /// stamps `created_at` server-side, a field the read-model lacks. [row] must
+  /// include the [pkColumn]. Prefer [upsert] (typed) when you have a full `T`
+  /// with a `toRow`.
+  Future<int> upsertRow(Map<String, dynamic> row) {
+    final pk = row[pkColumn]?.toString();
+    if (pk == null) {
+      throw ArgumentError(
+        'Collection($table).upsertRow: row omits the "$pkColumn" column.',
+      );
+    }
+    return _db.write(table: table, op: 'upsert', pk: pk, payload: row);
+  }
+
+  /// Column-level patch: update only [columns] of the row identified by [pk].
+  /// The row is never inserted; columns absent from [columns] are untouched.
+  /// This is the canonical partial-update path — server-authoritative per-field
+  /// LWW (ADR-0014). Use it for status flips and single-field edits.
+  Future<int> patch(Object pk, Map<String, dynamic> columns) =>
+      _db.write(table: table, op: 'patch', pk: pk.toString(), payload: columns);
+
+  /// Delete the row whose primary key is [pk].
+  Future<int> delete(Object pk) =>
+      _db.write(table: table, op: 'delete', pk: pk.toString());
+}
+
+/// Honest P0 sync status. Carries the connection state and the last time we
+/// transitioned to `connected`.
+///
+/// Richer fields (`syncing`, `reconciling`, `uploadError`, `downloadError`) and
+/// `DataTrust { fresh, stale, reconciling }` are **gated** — they land in P1
+/// once (a) the engine exposes the signals and (b) the P0 sync fixes (client
+/// WAL backfill across offline gaps; offline hard-delete orphan reconciliation)
+/// ship, so `DataTrust` can be true instead of a permanent `stale` badge
+/// (ADR-0024). Singleton on [NostosDatabase.status].
+class SyncStatus {
+  const SyncStatus({required this.conn, required this.lastSyncedAt});
+
+  /// Current connection state of the underlying sync session.
+  final NostosConnectionState conn;
+
+  /// Last time the session transitioned to `connected` (null before the first
+  /// successful connect). Best-effort proxy for "last synced" until the engine
+  /// exposes a download-completed signal (P1).
+  final DateTime? lastSyncedAt;
+
+  /// Convenience: true when [conn] is [NostosConnectionState.connected].
+  bool get connected => conn == NostosConnectionState.connected;
+
+  @override
+  String toString() =>
+      'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt)';
 }

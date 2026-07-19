@@ -78,6 +78,63 @@ class FakeNostosEngine implements NostosEngine {
   Stream<NostosConnectionState> resume() => stateController.stream;
 }
 
+/// Mirrors the real FFI `watch()`: pushes an initial row snapshot when its
+/// stream is first listened to (the `emit_snapshot` path). The passive
+/// [FakeNostosEngine.watch] (a plain broadcast that never emits on subscribe)
+/// can't reproduce the P0-3 regression; this fake can.
+class SnapshotOnSubscribeEngine implements NostosEngine {
+  SnapshotOnSubscribeEngine({this.queryResult = '[{"id":"1","name":"Alpha"}]'});
+
+  final stateController = StreamController<NostosConnectionState>.broadcast();
+  final List<String> queries = [];
+  String queryResult;
+  int _nextWriteId = 1;
+
+  @override
+  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables}) =>
+      stateController.stream;
+
+  @override
+  Stream<String> watch({required String table}) {
+    // Emit the initial snapshot ON FIRST LISTEN (mirrors emit_snapshot). A
+    // fresh single-subscription controller per call so the snapshot fires once
+    // per subscription, exactly like the FFI pump.
+    late final StreamController<String> c;
+    c = StreamController<String>(
+      onListen: () =>
+          scheduleMicrotask(() => c.add('[{"_pk":"snap-$table"}]')),
+    );
+    return c.stream;
+  }
+
+  @override
+  Future<String> query({required String sql}) async {
+    queries.add(sql);
+    return queryResult;
+  }
+
+  @override
+  Future<int> write({
+    required String table,
+    required String op,
+    required String pk,
+    String? payloadJson,
+  }) async =>
+      _nextWriteId++;
+
+  @override
+  void applySchema(List<ClientTableFfi> tables) {}
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  Stream<NostosConnectionState> resume() => stateController.stream;
+}
+
 void main() {
   group('Nostos.subscribe/watch', () {
     test('watch() before subscribe() throws StateError', () {
@@ -230,6 +287,45 @@ void main() {
           expect(engine.queries.length, 1);
           expect(emitted.length, 1);
         });
+      },
+    );
+
+    test(
+      'watchQuery delivers the initial snapshot to a LATE downstream listener '
+      '(P0-3 regression: _mergeTriggers must subscribe lazily)',
+      () async {
+        // Two subscribed tables => watchQuery's default triggers hit the MERGE
+        // path (sources.length > 1), not the single-source fast path. The
+        // SnapshotOnSubscribeEngine pushes an initial snapshot when its stream
+        // is first listened to (mirrors the FFI emit_snapshot).
+        final engine = SnapshotOnSubscribeEngine();
+        final nostos = Nostos.withEngine(engine);
+        await nostos.subscribeTables(const [
+          NostosTableSub(name: 'tasks'),
+          NostosTableSub(name: 'notes'),
+        ]);
+
+        // Build the stream (what a StreamBuilder does in build()), then yield
+        // one event-loop turn BEFORE subscribing. With the eager-merge bug this
+        // is exactly the firing window: the engine's subscribe-time snapshot
+        // flows into the merge controller while the downstream StreamBuilder
+        // has not mounted yet, so it is dropped into a broadcast with no
+        // listener — "No providers yet." with rows on disk.
+        final stream = nostos.watchQuery('SELECT * FROM tasks');
+        await Future<void>.delayed(Duration.zero);
+
+        // The late subscription (a StreamBuilder mounts on the next frame).
+        // With the lazy-merge fix, subscribing here wires the upstreams, the
+        // engine pushes its snapshot in response, and it reaches this listener.
+        final rows = await stream
+            .take(1)
+            .timeout(const Duration(seconds: 1))
+            .toList();
+
+        expect(rows, hasLength(1));
+        expect(rows.single.single['name'], 'Alpha');
+        expect(engine.queries, isNotEmpty,
+            reason: 'the initial snapshot tick must re-run the SQL');
       },
     );
   });

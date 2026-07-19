@@ -342,6 +342,15 @@ class Nostos {
   /// table changes. Each upstream is a broadcast stream (from [watch]), so
   /// multiple watchQuery callers + direct watch() listeners all share the
   /// same underlying pumps.
+  ///
+  /// Subscribes to upstreams LAZILY (on the first downstream listener), not at
+  /// construction. Eager subscription was a P0 bug: it forwarded each source's
+  /// initial snapshot into this broadcast controller before the downstream
+  /// `StreamBuilder` had subscribed (it mounts on the next frame), so the
+  /// snapshot was dropped — the UI rendered "No providers yet." even with rows
+  /// on disk. Each `watch(t)` source is already wrapped in [_replayLatest], so
+  /// subscribing lazily means the cached snapshot is replayed to the real
+  /// listener when it attaches. See `nostos-soundness-audit-2026-07-19.md` P0-3.
   static Stream<List<Map<String, dynamic>>> _mergeTriggers(
     List<Stream<List<Map<String, dynamic>>>> sources,
   ) {
@@ -349,13 +358,17 @@ class Nostos {
     final controller =
         StreamController<List<Map<String, dynamic>>>.broadcast();
     final subs = <StreamSubscription<List<Map<String, dynamic>>>>[];
-    for (final s in sources) {
-      subs.add(s.listen(controller.add, onError: controller.addError));
-    }
+    controller.onListen = () {
+      if (subs.isNotEmpty) return; // already wired (re-listen after cancel)
+      for (final s in sources) {
+        subs.add(s.listen(controller.add, onError: controller.addError));
+      }
+    };
     controller.onCancel = () {
       for (final sub in subs) {
         sub.cancel();
       }
+      subs.clear();
     };
     return controller.stream;
   }

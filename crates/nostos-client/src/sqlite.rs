@@ -449,6 +449,15 @@ impl Storage for SqliteStorage {
     }
 
     fn apply_batch(&mut self, ops: &[RowOp], checkpoint: Lsn) -> nostos_core::Result<()> {
+        // Snapshot the pending optimistic writes BEFORE taking the conn lock
+        // (`pending()` locks self.conn internally → calling it after the lock
+        // below would deadlock the non-reentrant Mutex). Replayed after the
+        // server batch so optimistic state stays on top of the server image —
+        // the reconnect-glitch fix, Piece B
+        // (docs/plans/reconnect-glitch-fix-2026-07-19.md). `unwrap_or_default`
+        // keeps the replay best-effort: a pending-read failure must NOT block
+        // the authoritative server batch from landing.
+        let pending = self.pending().unwrap_or_default();
         let mut conn = self
             .conn
             .lock()
@@ -476,6 +485,41 @@ impl Storage for SqliteStorage {
                         delete
                             .execute(rusqlite::params![table, pk])
                             .map_err(rusqlite_err)?;
+                    }
+                }
+            }
+
+            // Replay-on-top (reconnect-glitch Piece B): re-stamp each pending
+            // optimistic write so a server snapshot/stream — which lacks the
+            // un-flushed local edits — can't flash the stale image. Locally-
+            // deleted rows stay deleted, locally-modified rows keep their edit,
+            // until the outbox flush + echo reconciles. Same upsert/delete
+            // statements as the server batch; Patch does a read-merge-write via
+            // `merge_payload` (same helper `apply_local` uses). Best-effort per
+            // write: a malformed pending row is skipped (`let _ =`), never fatal
+            // — the server batch + checkpoint still commit; that one row's echo
+            // reconciles later.
+            for (_, write) in &pending {
+                match write.op {
+                    WriteOp::Upsert => {
+                        let payload = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                        let _ = upsert.execute(rusqlite::params![write.table, write.pk, payload]);
+                    }
+                    WriteOp::Delete => {
+                        let _ = delete.execute(rusqlite::params![write.table, write.pk]);
+                    }
+                    WriteOp::Patch => {
+                        let patch_json = write.payload_json.as_deref().unwrap_or("{}");
+                        let existing: Vec<u8> = tx
+                            .query_row(
+                                "SELECT payload FROM cairn_data \
+                                 WHERE table_name = ?1 AND pk = ?2",
+                                rusqlite::params![write.table, write.pk],
+                                |r| r.get::<_, Vec<u8>>(0),
+                            )
+                            .unwrap_or_default();
+                        let merged = merge_payload(&existing, patch_json.as_bytes());
+                        let _ = upsert.execute(rusqlite::params![write.table, write.pk, merged]);
                     }
                 }
             }
@@ -683,13 +727,53 @@ impl Outbox for SqliteStorage {
                 .map_err(rusqlite_err)?;
             }
             WriteOp::Patch => {
-                // Partial-column; the server PATCH path (P3) is source of truth.
-                // ponytail: instant-local patch needs a read-merge-write; defer
-                // until a client issues one (demo + Supabase use upsert/delete).
+                // Column-level UPDATE: read the existing row, shallow-merge the
+                // patch fields, write back. Without this the optimistic local
+                // apply is a silent no-op and the edit stays invisible offline
+                // until the server echo (the "patch edits don't render offline"
+                // regression — providers/invoices/appointments status edits).
+                // The server PATCH path (P3) remains source of truth; this only
+                // renders the change immediately. Patching a row not yet in
+                // `cairn_data` seeds it from the patch fields alone.
+                let patch_json = write.payload_json.as_deref().unwrap_or("{}");
+                let existing: Vec<u8> = conn
+                    .query_row(
+                        "SELECT payload FROM cairn_data \
+                         WHERE table_name = ?1 AND pk = ?2",
+                        rusqlite::params![write.table, write.pk],
+                        |r| r.get::<_, Vec<u8>>(0),
+                    )
+                    .unwrap_or_default();
+                let merged = merge_payload(&existing, patch_json.as_bytes());
+                conn.execute(
+                    "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload) \
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![write.table, write.pk, merged],
+                )
+                .map_err(rusqlite_err)?;
             }
         }
         Ok(())
     }
+}
+
+/// Shallow-merge a JSON-object `patch` into an existing JSON-object `payload`
+/// (`apply_local` Patch path). Patch fields overwrite existing; fields absent
+/// from the patch are preserved. Graceful fallbacks: a missing/non-object
+/// existing row merges onto `{}`, a malformed patch is ignored. This is the
+/// instant-local optimistic render only — the server echo reconciles the
+/// authoritative image on reconnect.
+fn merge_payload(existing: &[u8], patch: &[u8]) -> Vec<u8> {
+    let mut base: serde_json::Value =
+        serde_json::from_slice(existing).unwrap_or_else(|_| serde_json::json!({}));
+    let over: serde_json::Value =
+        serde_json::from_slice(patch).unwrap_or_else(|_| serde_json::json!({}));
+    if let (Some(base_obj), Some(over_obj)) = (base.as_object_mut(), over.as_object()) {
+        for (k, v) in over_obj {
+            base_obj.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::to_vec(&base).unwrap_or_else(|_| existing.to_vec())
 }
 
 /// Map a `rusqlite::Error` into the backend error variant, stringifying so the
@@ -1353,5 +1437,142 @@ mod tests {
         })
         .unwrap();
         assert!(s.query("SELECT id FROM tasks").unwrap().is_empty());
+    }
+
+    /// Regression: `apply_local` with `WriteOp::Patch` must shallow-merge the
+    /// patch fields into the existing row and render immediately offline (the
+    /// providers/invoices/appointments status-edit path). Previously the Patch
+    /// branch was a no-op stub, so a status edit made offline stayed invisible
+    /// until the server echo — a silent local-apply gap masquerading as
+    /// "sync only works when wifi is back".
+    #[test]
+    fn apply_local_patch_merges_fields_and_renders_offline() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_schema(&[ClientTable {
+            name: "providers".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "name".into(), "status".into()],
+        }])
+        .unwrap();
+
+        // Seed an existing provider the way a server echo would.
+        s.apply_batch(
+            &[RowOp::Insert {
+                table: "providers".into(),
+                pk: "p1".into(),
+                payload: Bytes::copy_from_slice(br#"{"id":"p1","name":"Ada","status":"pending"}"#),
+            }],
+            Lsn::new(1),
+        )
+        .unwrap();
+
+        // User flips the status OFFLINE — a Patch carrying only the changed col.
+        s.apply_local(&PendingWrite {
+            table: "providers".into(),
+            op: WriteOp::Patch,
+            pk: "p1".into(),
+            payload_json: Some(r#"{"status":"active"}"#.into()),
+        })
+        .unwrap();
+
+        // The view reflects the patched status AND preserves untouched `name`
+        // (shallow merge — patch overwrites listed fields only).
+        let rows = s.query("SELECT name, status FROM providers").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("name").and_then(serde_json::Value::as_str),
+            Some("Ada"),
+            "patch must preserve fields absent from the patch payload"
+        );
+        assert_eq!(
+            rows[0].get("status").and_then(serde_json::Value::as_str),
+            Some("active"),
+            "patched field must render immediately offline"
+        );
+    }
+
+    /// Phase-1 reconnect-glitch fix (Piece B): `apply_batch` MUST replay pending
+    /// optimistic writes on top of the incoming server batch, so a reconnect
+    /// snapshot/stream that lacks the un-flushed local edits can't flash the
+    /// stale server image (deleted rows reappearing, modified rows reverting).
+    /// Once the outbox flush is acked (`mark_done`), the replay stops and the
+    /// server's authoritative echo wins. See
+    /// `docs/plans/reconnect-glitch-fix-2026-07-19.md`.
+    #[test]
+    fn apply_batch_replays_pending_optimistic_writes_no_reconnect_flash() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_schema(&[ClientTable {
+            name: "providers".into(),
+            primary_key: vec!["id".into()],
+            columns: vec!["id".into(), "status".into()],
+        }])
+        .unwrap();
+
+        // Server has provider p1 = pending.
+        s.apply_batch(
+            &[RowOp::Insert {
+                table: "providers".into(),
+                pk: "p1".into(),
+                payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"pending"}"#),
+            }],
+            Lsn::new(1),
+        )
+        .unwrap();
+
+        // User flips status to 'active' offline: enqueue (outbox) + apply_local.
+        let write = PendingWrite {
+            table: "providers".into(),
+            op: WriteOp::Patch,
+            pk: "p1".into(),
+            payload_json: Some(r#"{"status":"active"}"#.into()),
+        };
+        s.enqueue(write.clone()).unwrap();
+        s.apply_local(&write).unwrap();
+        assert_eq!(
+            s.query("SELECT status FROM providers").unwrap()[0]
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("active"),
+        );
+
+        // Reconnect: a server batch lands WITHOUT the local edit (outbox hasn't
+        // flushed) — server still says 'pending'. Pre-fix this clobbered
+        // 'active' → the flash.
+        s.apply_batch(
+            &[RowOp::Insert {
+                table: "providers".into(),
+                pk: "p1".into(),
+                payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"pending"}"#),
+            }],
+            Lsn::new(2),
+        )
+        .unwrap();
+        assert_eq!(
+            s.query("SELECT status FROM providers").unwrap()[0]
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("active"),
+            "apply_batch must replay pending optimistic writes on top — no reconnect flash",
+        );
+
+        // The outbox flush is acked → the write leaves pending → no more replay.
+        let id = s.pending().unwrap()[0].0;
+        s.mark_done(id).unwrap();
+        s.apply_batch(
+            &[RowOp::Insert {
+                table: "providers".into(),
+                pk: "p1".into(),
+                payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"authoritative"}"#),
+            }],
+            Lsn::new(3),
+        )
+        .unwrap();
+        assert_eq!(
+            s.query("SELECT status FROM providers").unwrap()[0]
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("authoritative"),
+            "after the outbox drains, apply_batch stops replaying — server wins",
+        );
     }
 }
