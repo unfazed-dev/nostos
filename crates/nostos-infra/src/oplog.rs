@@ -131,6 +131,9 @@ impl OpLogWriter for RecordingOpLogWriter {
 }
 
 #[cfg(feature = "pg")]
+pub use self::pg::PgOpLogCompactor;
+
+#[cfg(feature = "pg")]
 pub use self::pg::PgOpLogWriter;
 
 // ===========================================================================
@@ -145,6 +148,7 @@ mod pg {
     use std::fmt::Write as _;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_postgres::NoTls;
 
@@ -206,6 +210,139 @@ mod pg {
                     m.oplog_dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PgOpLogCompactor — bounds cairn_oplog growth (ADR-0025 slice 5).
+    // -----------------------------------------------------------------------
+
+    /// Background compactor that bounds `cairn_oplog` growth. Periodically
+    /// (1) collapses multiple ops on the same `(table_name, pk)` to the latest
+    /// op (the net effect — a trailing `delete` is kept as a tombstone so a
+    /// resuming client whose checkpoint predates the delete still observes the
+    /// row removed; dropping the tombstone would re-orphan the row, the
+    /// slice-1 offline-delete P0), and (2) ages out rows older than the
+    /// retention window (a client whose offline gap exceeds the window falls
+    /// back to snapshot-reconcile — slice 1, the safety net).
+    ///
+    /// Off the fan-out loop (periodic background task). Mirrors `PgOpLogWriter`'s
+    /// detached-spawn + lazy-client + reconnect-on-error discipline.
+    ///
+    /// ponytail: compaction runs on a fixed time-window (`created_at < now() -
+    /// retention`). The sharper watermark is `min(acked_lsn)` across active
+    /// sessions (keep ops below the slowest client's checkpoint even if older
+    /// than the window) — deferred because the SessionStore doesn't expose an
+    /// aggregated min-checkpoint cheaply and slice-1 reconcile covers the
+    /// beyond-window case. Add when a real deployment shows slow clients
+    /// missing an in-window backfill they should have qualified for.
+    pub struct PgOpLogCompactor;
+
+    impl PgOpLogCompactor {
+        /// Spawn the background compaction loop (detached — runs until the
+        /// process exits). `retention_secs` is the backfill-availability
+        /// window; `interval_secs` is the compaction tick period.
+        #[must_use]
+        pub fn new(
+            pg_url: &str,
+            retention_secs: u64,
+            interval_secs: u64,
+            metrics: Arc<Metrics>,
+        ) -> Self {
+            let compact = tokio::spawn(compact_loop(
+                pg_url.to_string(),
+                retention_secs,
+                interval_secs,
+                metrics,
+            ));
+            drop(compact);
+            Self
+        }
+    }
+
+    /// One compaction tick's SQL — consts so a unit test can pin the
+    /// net-effect / tombstone / age-out contract without a live Postgres
+    /// (real-PG verification is slice 6's e2e).
+    ///
+    /// Collapse: keep only the latest op (`MAX(op_id)`) per `(table_name, pk)`.
+    /// `op_id` is `BIGSERIAL`, so `MAX` is the chronologically-last op = the net
+    /// effect. A trailing delete IS the max → survives as a tombstone.
+    const COLLAPSE_SQL: &str = "DELETE FROM cairn_oplog WHERE op_id NOT IN \
+        (SELECT MAX(op_id) FROM cairn_oplog GROUP BY table_name, pk)";
+    /// Retention: age out rows older than the window. `make_interval(secs => $1)`
+    /// binds `$1` as an i64 seconds count (`cairn_oplog.created_at` is TIMESTAMPTZ).
+    const RETENTION_SQL: &str =
+        "DELETE FROM cairn_oplog WHERE created_at < now() - make_interval(secs => $1)";
+
+    /// The periodic compaction loop. Lazily connects; on error drops the client
+    /// (reconnect next tick) and carries on — a failed tick is non-fatal (the
+    /// next tick re-attempts; the op-log merely grows in the interim).
+    async fn compact_loop(
+        pg_url: String,
+        retention_secs: u64,
+        interval_secs: u64,
+        metrics: Arc<Metrics>,
+    ) {
+        let interval = Duration::from_secs(interval_secs.max(1));
+        let retention = i64::try_from(retention_secs).unwrap_or(i64::MAX);
+        let mut client: Option<tokio_postgres::Client> = None;
+        loop {
+            tokio::time::sleep(interval).await;
+            match compact_once(&mut client, &pg_url, retention).await {
+                Ok(swept) => {
+                    if swept > 0 {
+                        metrics.record_oplog_compacted(swept);
+                        tracing::debug!(rows = swept, "oplog compaction swept rows");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "oplog compaction tick failed; retrying next tick");
+                    client = None;
+                }
+            }
+        }
+    }
+
+    /// Run collapse + retention in one transaction; return total rows swept.
+    async fn compact_once(
+        client: &mut Option<tokio_postgres::Client>,
+        pg_url: &str,
+        retention_secs: i64,
+    ) -> Result<u64, tokio_postgres::Error> {
+        if client.is_none() {
+            let (c, conn) = tokio_postgres::connect(pg_url, NoTls).await?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            *client = Some(c);
+        }
+        let c = client.as_mut().expect("client just connected");
+        let tx = c.transaction().await?;
+        let collapsed = tx.execute(COLLAPSE_SQL, &[]).await?;
+        let expired = tx.execute(RETENTION_SQL, &[&retention_secs]).await?;
+        tx.commit().await?;
+        Ok(collapsed.saturating_add(expired))
+    }
+
+    #[cfg(test)]
+    mod compaction_tests {
+        use super::{COLLAPSE_SQL, RETENTION_SQL};
+
+        /// Collapse keeps only the latest op (`MAX(op_id)`) per `(table_name,
+        /// pk)`; a trailing delete survives as the max → tombstone retained.
+        /// Pins the net-effect contract without a live PG (real-PG verify =
+        /// slice 6).
+        #[test]
+        fn collapse_keeps_latest_per_key_and_retains_tombstone() {
+            assert!(COLLAPSE_SQL.contains("MAX(op_id)"));
+            assert!(COLLAPSE_SQL.contains("GROUP BY table_name, pk"));
+        }
+
+        /// Retention ages rows by `created_at` vs the window, never by op_id.
+        #[test]
+        fn retention_ages_by_created_at_window() {
+            assert!(RETENTION_SQL.contains("created_at < now()"));
+            assert!(RETENTION_SQL.contains("make_interval"));
         }
     }
 

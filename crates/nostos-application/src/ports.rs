@@ -615,6 +615,12 @@ pub struct Metrics {
     /// (drop+recreate) and the client cannot backfill from the dead op-stream
     /// → must full-snapshot. ADR-0025 slice 3 (signal) / slice 4 (gate).
     pub slot_epoch: AtomicU64,
+    /// Rows swept by op-log compaction (ADR-0025 slice 5): collapse duplicates
+    /// to the latest op per `(table_name, pk)` + age out rows past the
+    /// retention window. Monotonic; a sustained increase is the expected
+    /// steady state under write load, not an alert — but a flat-zero under
+    /// load means the compactor isn't running.
+    pub oplog_compacted_rows: AtomicU64,
 }
 
 impl Metrics {
@@ -640,6 +646,7 @@ impl Metrics {
             oplog_dropped: self.oplog_dropped.load(Ordering::Relaxed),
             oplog_flush_failed: self.oplog_flush_failed.load(Ordering::Relaxed),
             slot_epoch: self.slot_epoch.load(Ordering::Relaxed),
+            oplog_compacted_rows: self.oplog_compacted_rows.load(Ordering::Relaxed),
         }
     }
 
@@ -674,6 +681,13 @@ impl Metrics {
     pub fn record_slot_epoch_bump(&self) {
         self.slot_epoch.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Add `n` rows swept by op-log compaction (ADR-0025 slice 5). Called once
+    /// per compaction tick with the count of rows collapsed + aged out.
+    #[inline]
+    pub fn record_oplog_compacted(&self, n: u64) {
+        self.oplog_compacted_rows.fetch_add(n, Ordering::Relaxed);
+    }
 }
 
 /// A point-in-time read of [`Metrics`] (plain values, safe to format/serialize).
@@ -690,4 +704,6 @@ pub struct MetricsSnapshot {
     pub oplog_flush_failed: u64,
     /// Current slot epoch (bumped on every slot create/recreate). ADR-0025.
     pub slot_epoch: u64,
+    /// Rows swept by op-log compaction (ADR-0025 slice 5).
+    pub oplog_compacted_rows: u64,
 }

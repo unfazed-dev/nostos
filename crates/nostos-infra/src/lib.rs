@@ -62,3 +62,6 @@ pub use write_back::PgWriteBack;
 
 #[cfg(feature = "pg")]
 pub use oplog::PgOpLogWriter;
+
+#[cfg(feature = "pg")]
+pub use oplog::PgOpLogCompactor;
