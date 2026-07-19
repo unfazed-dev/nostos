@@ -58,6 +58,19 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_OPLOG_BUFFER", default_value_t = 4096)]
     oplog_buffer: usize,
 
+    /// Op-log retention window in seconds (ADR-0025 slice 5). Rows older than
+    /// this are aged out by the compactor. A client whose offline gap exceeds
+    /// the window falls back to snapshot-reconcile (slice 1, the safety net).
+    /// Default 1h.
+    #[arg(long, env = "NOSTOS_OPLOG_RETENTION_SECS", default_value_t = 3600)]
+    oplog_retention_secs: u64,
+
+    /// Op-log compaction tick period in seconds (ADR-0025 slice 5). The
+    /// compactor collapses duplicate ops per (table_name, pk) + ages out rows
+    /// past the retention window. Default 5min.
+    #[arg(long, env = "NOSTOS_OPLOG_COMPACT_INTERVAL_SECS", default_value_t = 300)]
+    oplog_compact_interval_secs: u64,
+
     /// Replicator mode: "fake" (synthetic generator) or "pg" (real Postgres).
     /// "pg" requires the `pg` feature, which is on by default (disable with
     /// `--no-default-features`). Runtime default stays "fake" so zero-setup
@@ -294,6 +307,21 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Op-log compactor (ADR-0025 slice 5): bounds cairn_oplog growth via
+    // periodic collapse (keep latest op per (table_name, pk) — a trailing
+    // delete survives as a tombstone) + retention (age out old rows). Only
+    // under NOSTOS_REPLICATOR=pg. Detached background task (runs until process
+    // exit). The compactor's swept-row count surfaces in `/metrics`.
+    #[cfg(feature = "pg")]
+    if cfg.replicator == "pg" {
+        let _compactor = nostos_infra::PgOpLogCompactor::new(
+            &cfg.pg_url,
+            cfg.oplog_retention_secs,
+            cfg.oplog_compact_interval_secs,
+            Arc::clone(&metrics),
+        );
+    }
 
     let fanout = Arc::new({
         let builder = FanOutService::new(Arc::clone(&store))
@@ -625,7 +653,10 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          cairn_oplog_flush_failed_total {oplog_flush_failed}\n\
          # HELP cairn_slot_epoch Monotonic epoch bumped on every replication-slot (re)creation. A client whose last-seen epoch differs must full-snapshot (cannot backfill from a recreated slot's dead lineage). ADR-0025.\n\
          # TYPE cairn_slot_epoch gauge\n\
-         cairn_slot_epoch {slot_epoch}\n",
+         cairn_slot_epoch {slot_epoch}\n\
+         # HELP cairn_oplog_compacted_rows_total Rows swept by op-log compaction (collapse duplicates to latest op per (table_name, pk) + age out rows past the retention window). ADR-0025 slice 5.\n\
+         # TYPE cairn_oplog_compacted_rows_total counter\n\
+         cairn_oplog_compacted_rows_total {oplog_compacted_rows}\n",
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
@@ -636,6 +667,7 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         oplog_dropped = snap.oplog_dropped,
         oplog_flush_failed = snap.oplog_flush_failed,
         slot_epoch = snap.slot_epoch,
+        oplog_compacted_rows = snap.oplog_compacted_rows,
     )
 }
 
