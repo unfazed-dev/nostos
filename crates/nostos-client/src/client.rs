@@ -348,6 +348,8 @@ where
         // Broadcast the local tick so live watch pumps re-query NOW and render
         // the optimistic row (offline-first). Best-effort: no receivers is fine.
         if let Some(tick) = local_tick {
+            // Best-effort: `send` on a broadcast with no live receivers is a
+            // no-op, not an error — fine (no pump attached yet).
             let _ = self.changes.send(tick);
         }
         // Wake a live `run_once` loop so it re-drains the outbox now, instead
