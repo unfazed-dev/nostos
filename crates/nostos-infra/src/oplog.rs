@@ -207,7 +207,7 @@ mod pg {
             let p2: &(dyn tokio_postgres::types::ToSql + Sync) = &after_i64;
             let rows = client
                 .query(
-                    "SELECT lsn, table_name, pk, op, payload FROM cairn_oplog \
+                    "SELECT lsn, table_name, pk, op, payload::text FROM cairn_oplog \
                      WHERE tenant_id = $1 AND lsn > $2 ORDER BY lsn",
                     &[p1, p2],
                 )
@@ -219,7 +219,10 @@ mod pg {
                 let table: String = r.get(1);
                 let pk: String = r.get(2);
                 let op: String = r.get(3);
-                let payload: Option<Vec<u8>> = r.get(4);
+                // payload is JSONB; read its text form (a Vec<u8> read would
+                // panic — Vec<u8> FromSql is BYTEA-only). The bytes are the
+                // row's JSON tuple image, applied opaquely by the client.
+                let payload: Option<String> = r.get(4);
                 // lsn was stored from a u64 WAL offset; real LSNs (~2^40) are
                 // positive. A negative (corrupt) row collapses to 0 — it'll be
                 // gated out by the client's per-row lsn check, never corrupting.
@@ -229,7 +232,9 @@ mod pg {
                 } else {
                     // "upsert" (Insert/Update collapsed at write time). Under the
                     // client's per-row lsn gate (slice 4a) Insert ≡ Update.
-                    let payload = payload.map(bytes::Bytes::from).unwrap_or_default();
+                    let payload = payload
+                        .map(|s| bytes::Bytes::from(s.into_bytes()))
+                        .unwrap_or_default();
                     ReplicationEvent::new(Lsn::new(lsn_u), RowOp::Insert { table, pk, payload })
                 };
                 out.push(event);
@@ -548,7 +553,8 @@ mod pg {
             };
             let tenant = tenant_column
                 .and_then(|col| payload.get(col))
-                .map(std::string::ToString::to_string);
+                .and_then(|v| v.as_str())
+                .map(String::from);
             vals.push(OpVal::I64(e.lsn));
             vals.push(OpVal::Str(e.table.clone()));
             vals.push(OpVal::Str(e.pk.clone()));
