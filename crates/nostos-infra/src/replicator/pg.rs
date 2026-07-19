@@ -886,8 +886,6 @@ impl PgReplicator {
 
     /// Cache a relation's metadata so subsequent row ops can resolve oid → table.
     fn cache_relation(&mut self, rel: &RelationWithoutStreamingEnabled) {
-        // PK = columns whose flags bit 0 (REPLICA_IDENTITY) is set, OR the first
-        // column if none are flagged (defensive default).
         // `c.oid` here is pgoutput's field name for the column's *type* OID
         // (the wire protocol's "data type ID"), not a table/object oid —
         // verified against pgoutput 0.0.7's `RelationColumn` source.
@@ -896,17 +894,34 @@ impl PgReplicator {
             .iter()
             .map(|c| (c.name.clone(), c.oid))
             .collect();
-        let pk_indices: Vec<usize> = rel
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.flags & 0x1 != 0)
-            .map(|(i, _)| i)
-            .collect();
-        let pk_indices = if pk_indices.is_empty() {
-            vec![0]
-        } else {
-            pk_indices
+        // pk_indices authority: the catalog (`pg_index.indkey`, populated by
+        // `bootstrap_relations_from_catalog` / `catalog_relations`) is the
+        // *primary key*. The Relation message's column flag bit 0 marks the
+        // *replica identity*: under DEFAULT that equals the PK (so the flag
+        // filter is right), but under `REPLICA IDENTITY FULL` it marks EVERY
+        // column — the flag filter would then yield a composite "pk" of all
+        // columns, breaking pk matching for every op (ADR-0025 delete-tenant
+        // fix enables FULL on tenant tables). Preserve the catalog's pk_indices
+        // when present; fall back to the flag heuristic only when bootstrap
+        // hasn't populated the entry (DEFAULT identity is the common case where
+        // flag == PK, so the fallback stays correct there).
+        let catalog_pk = self.relations.get(&rel.oid).map(|e| e.pk_indices.clone());
+        let pk_indices = match catalog_pk {
+            Some(v) if !v.is_empty() => v,
+            _ => {
+                let flagged: Vec<usize> = rel
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.flags & 0x1 != 0)
+                    .map(|(i, _)| i)
+                    .collect();
+                if flagged.is_empty() {
+                    vec![0]
+                } else {
+                    flagged
+                }
+            }
         };
         let qualified_name =
             if rel.relation_namespace.is_empty() || rel.relation_namespace == "public" {
@@ -943,13 +958,24 @@ impl PgReplicator {
             nostos_domain::Operation::Update => RowOp::Update { table, pk, payload },
             nostos_domain::Operation::Delete => {
                 // Deletes have no full tuple — shouldn't reach here.
-                RowOp::Delete { table, pk }
+                RowOp::Delete {
+                    table,
+                    pk,
+                    old_payload: None,
+                }
             }
         };
         Some(self.stamp(row, lsn))
     }
 
-    /// Build a `RowOp::Delete` from just the PK/old-key tuple.
+    /// Build a `RowOp::Delete` from the PK/old-key tuple.
+    ///
+    /// Under `REPLICA IDENTITY FULL`, Postgres ships the full pre-delete row
+    /// (`OldTupleData`) — we render it to `old_payload` so the op-log writer can
+    /// lift the tenant column for tenant-scoped delete replay (ADR-0025
+    /// follow-up). Under `REPLICA IDENTITY DEFAULT` only the PK columns arrive
+    /// (`PrimaryKeyTupleData`) — `old_payload` stays `None` and delete replay
+    /// falls back to snapshot-reconcile (slice 1).
     fn pk_only_op(
         &self,
         oid: i32,
@@ -960,14 +986,26 @@ impl PgReplicator {
     ) -> Option<NostosEvent> {
         let meta = self.relations.get(&oid)?;
         let table = meta.qualified_name.clone();
-        let pk = match old {
-            Some(
-                pgoutput::events::base::tuple_data::OldDataOrPrimaryKeyTupleData::PrimaryKeyTupleData(tuple)
-                | pgoutput::events::base::tuple_data::OldDataOrPrimaryKeyTupleData::OldTupleData(tuple),
-            ) => pk_string(meta, tuple),
-            None => "0".to_string(),
+        let (pk, old_payload) = match old {
+            Some(pgoutput::events::base::tuple_data::OldDataOrPrimaryKeyTupleData::OldTupleData(
+                tuple,
+            )) => (
+                pk_string(meta, tuple),
+                Some(Bytes::from(tuple_to_json_payload(meta, tuple))),
+            ),
+            Some(pgoutput::events::base::tuple_data::OldDataOrPrimaryKeyTupleData::PrimaryKeyTupleData(
+                tuple,
+            )) => (pk_string(meta, tuple), None),
+            None => ("0".to_string(), None),
         };
-        Some(self.stamp(RowOp::Delete { table, pk }, lsn))
+        Some(self.stamp(
+            RowOp::Delete {
+                table,
+                pk,
+                old_payload,
+            },
+            lsn,
+        ))
     }
 }
 

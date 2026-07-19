@@ -133,7 +133,7 @@ pub fn encode_event(event: &ReplicationEvent) -> Vec<u8> {
             pk.clone(),
             Some(hex::encode(payload)),
         ),
-        RowOp::Delete { table, pk } => (Operation::Delete, table.clone(), pk.clone(), None),
+        RowOp::Delete { table, pk, .. } => (Operation::Delete, table.clone(), pk.clone(), None),
     };
     let frame = WireFrame {
         lsn: event.lsn.raw(),
@@ -244,7 +244,7 @@ fn event_to_frame_value(event: &ReplicationEvent) -> WireFrame {
             pk.clone(),
             Some(hex::encode(payload)),
         ),
-        RowOp::Delete { table, pk } => (Operation::Delete, table.clone(), pk.clone(), None),
+        RowOp::Delete { table, pk, .. } => (Operation::Delete, table.clone(), pk.clone(), None),
     };
     WireFrame {
         lsn: event.lsn.raw(),
@@ -488,6 +488,7 @@ mod tests {
             RowOp::Delete {
                 table: "tasks".into(),
                 pk: "9".into(),
+                old_payload: None,
             },
         );
         let bytes = encode_event(&del);

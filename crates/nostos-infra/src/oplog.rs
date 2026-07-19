@@ -42,8 +42,14 @@ struct OpEntry {
     pk: String,
     /// "upsert" for Insert/Update, "delete" for Delete.
     op: &'static str,
-    /// Raw tuple-image bytes (JSON). Empty for deletes.
+    /// Raw NEW tuple-image bytes (JSON) — what's stored in `cairn_oplog.payload`.
+    /// Empty for deletes (they store NULL).
     payload: Bytes,
+    /// The OLD tuple image for a delete under `REPLICA IDENTITY FULL` — the
+    /// tenant column is lifted from it at flush (deletes have no NEW payload).
+    /// `None` for upserts + DEFAULT-identity deletes. Never stored (clients
+    /// delete by pk); server-internal only (ADR-0025 delete-tenant follow-up).
+    old_payload: Option<Bytes>,
     #[allow(dead_code)]
     txn_id: Option<u64>,
 }
@@ -64,14 +70,20 @@ fn build_entry(event: &ReplicationEvent) -> OpEntry {
             pk: pk.clone(),
             op: "upsert",
             payload: payload.clone(),
+            old_payload: None,
             txn_id,
         },
-        RowOp::Delete { table, pk } => OpEntry {
+        RowOp::Delete {
+            table,
+            pk,
+            old_payload,
+        } => OpEntry {
             lsn,
             table: table.clone(),
             pk: pk.clone(),
             op: "delete",
             payload: Bytes::new(),
+            old_payload: old_payload.clone(),
             txn_id,
         },
     }
@@ -228,7 +240,17 @@ mod pg {
                 // gated out by the client's per-row lsn check, never corrupting.
                 let lsn_u = u64::try_from(lsn).unwrap_or(0);
                 let event = if op == "delete" {
-                    ReplicationEvent::new(Lsn::new(lsn_u), RowOp::Delete { table, pk })
+                    // Replay-delivered deletes carry no old image: clients apply
+                    // by pk (+ per-row lsn gate). old_payload was a write-time
+                    // signal for tenant-tagging, not needed at replay.
+                    ReplicationEvent::new(
+                        Lsn::new(lsn_u),
+                        RowOp::Delete {
+                            table,
+                            pk,
+                            old_payload: None,
+                        },
+                    )
                 } else {
                     // "upsert" (Insert/Update collapsed at write time). Under the
                     // client's per-row lsn gate (slice 4a) Insert ≡ Update.
@@ -494,6 +516,20 @@ mod pg {
         // the follow-up (reconcile covers it).
     }
 
+    /// Lift the tenant column from a tuple-image JSON byte slice. Returns
+    /// `None` when the column is absent, the slice is empty (a DEFAULT-identity
+    /// delete carries no tuple), or the JSON is malformed. Used for BOTH upsert
+    /// payloads and delete old-images so tenant-tagging is uniform (ADR-0025
+    /// delete-tenant follow-up).
+    fn lift_tenant(src: &[u8], col: Option<&str>) -> Option<String> {
+        let col = col?;
+        if src.is_empty() {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(src).ok()?;
+        v.get(col).and_then(|c| c.as_str()).map(String::from)
+    }
+
     /// Flush one batch as a single multi-row INSERT. Opens the connection
     /// lazily on first use. The payload JSON is parsed here (off the fan-out
     /// loop) so `tenant_id` can be lifted at flush time — the read path
@@ -544,6 +580,7 @@ mod pg {
         // types so one multi-row INSERT can bind them uniformly).
         let mut vals: Vec<OpVal> = Vec::with_capacity(batch.len() * 6);
         for e in batch {
+            // Stored payload: the NEW tuple image (upserts) or NULL (deletes).
             let payload: serde_json::Value = if e.payload.is_empty() {
                 serde_json::Value::Null
             } else {
@@ -551,10 +588,18 @@ mod pg {
                 // produced it) becomes NULL rather than failing the batch.
                 serde_json::from_slice(&e.payload).unwrap_or(serde_json::Value::Null)
             };
-            let tenant = tenant_column
-                .and_then(|col| payload.get(col))
-                .and_then(|v| v.as_str())
-                .map(String::from);
+            // Tenant source: the NEW image (upserts), or the OLD image for a
+            // delete under REPLICA IDENTITY FULL (deletes have no NEW payload;
+            // without the old image the tenant would be NULL and a tenant-
+            // filtered replay would drop the delete → ghost row). A DEFAULT-
+            // identity delete has neither → None → replay falls back to
+            // snapshot-reconcile (slice 1).
+            let tenant_src: &[u8] = if e.payload.is_empty() {
+                e.old_payload.as_ref().map_or(&[][..], |b| b.as_ref())
+            } else {
+                &e.payload
+            };
+            let tenant = lift_tenant(tenant_src, tenant_column);
             vals.push(OpVal::I64(e.lsn));
             vals.push(OpVal::Str(e.table.clone()));
             vals.push(OpVal::Str(e.pk.clone()));
@@ -602,6 +647,7 @@ mod pg {
                 "delete" => RowOp::Delete {
                     table: "t".into(),
                     pk: lsn.to_string(),
+                    old_payload: None,
                 },
                 _ => RowOp::Insert {
                     table: "t".into(),
@@ -625,6 +671,58 @@ mod pg {
             let del = build_entry(&ev(2, "delete"));
             assert_eq!(del.op, "delete");
             assert!(del.payload.is_empty());
+        }
+
+        /// ADR-0025 delete-tenant follow-up: `build_entry` threads the delete's
+        /// `old_payload` (the old row image under REPLICA IDENTITY FULL) so
+        /// `lift_tenant` can tag the op-log row with the tenant. The stored
+        /// `payload` stays empty (clients delete by pk; the old image is
+        /// server-internal).
+        #[test]
+        fn build_entry_threads_delete_old_payload_for_tenant_lifting() {
+            let old_img: &[u8] = b"{\"org_id\":\"acme\",\"title\":\"x\"}";
+            let ev = ReplicationEvent::new(
+                Lsn::new(7),
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "p".into(),
+                    old_payload: Some(Bytes::copy_from_slice(old_img)),
+                },
+            );
+            let e = build_entry(&ev);
+            assert_eq!(e.op, "delete");
+            assert!(
+                e.payload.is_empty(),
+                "stored payload stays NULL for deletes"
+            );
+            // old_payload (the old row image under REPLICA IDENTITY FULL) is
+            // threaded through so lift_tenant can tag the op-log row.
+            let old = e.old_payload.as_deref();
+            assert_eq!(old, Some(old_img));
+            // lift_tenant resolves the tenant from the OLD image for a delete.
+            assert_eq!(
+                lift_tenant(old.unwrap_or(&[]), Some("org_id")),
+                Some("acme".to_string()),
+            );
+        }
+
+        /// `lift_tenant`: returns None on empty src (DEFAULT-identity delete),
+        /// missing column, non-string value, or malformed JSON; never panics.
+        #[test]
+        fn lift_tenant_handles_missing_empty_and_malformed() {
+            assert_eq!(lift_tenant(b"", Some("org_id")), None);
+            assert_eq!(lift_tenant(b"{}", Some("org_id")), None);
+            assert_eq!(lift_tenant(b"{\"org_id\":42}", Some("org_id")), None);
+            assert_eq!(lift_tenant(b"not json", Some("org_id")), None);
+            assert_eq!(
+                lift_tenant(br#"{"org_id":"t"}"#, None),
+                None,
+                "no column → None"
+            );
+            assert_eq!(
+                lift_tenant(br#"{"org_id":"tenant-xyz"}"#, Some("org_id")),
+                Some("tenant-xyz".to_string()),
+            );
         }
 
         /// `OpVal::as_tosql` returns the right reference type per variant — a

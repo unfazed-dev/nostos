@@ -299,7 +299,15 @@ async fn collect_frames(
                 _ => continue,
             };
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                frames.push(v);
+                // Flatten C3 batched arrays: the writer coalesces a backlog of
+                // frames into one JSON array message (decoded by `decode_frames`
+                // on the client). Without flattening, a batched `[f1,f2,f3]`
+                // lands as ONE nested value + the per-frame checks below miss
+                // every frame inside it.
+                match v {
+                    serde_json::Value::Array(arr) => frames.extend(arr),
+                    single => frames.push(single),
+                }
             }
         }
     }
@@ -432,30 +440,26 @@ async fn oplog_replay_delivers_offline_gap_including_deletes() {
         "replay frames: {} (delete={saw_delete}, keep={saw_keep}, snapshot={saw_snapshot})",
         replay.len()
     );
-    // KNOWN GAP (ADR-0025 follow-up): tenant-scoped DELETE replay. A delete
-    // carries no payload (RowOp::Delete = table+pk only), so the op-log writer
-    // extracts tenant_id = NULL for deletes → the tenant-filtered replay
-    // (`WHERE tenant_id = ?`) misses them. saw_delete is therefore expected
-    // FALSE here. The offline-delete P0 stays covered by slice-1 snapshot-
-    // reconcile (the aged_out test below exercises that path). Fix options:
-    // inherit the tenant from the last op for the pk at flush time, or
-    // `REPLICA IDENTITY FULL` so the delete carries the old tuple. Tracked
-    // as a real follow-up — not silently weakening, scoping to what's verified.
-    if saw_delete {
-        eprintln!("delete replayed (tenant-tagging fixed unexpectedly)");
-    } else {
-        eprintln!(
-            "KNOWN GAP: delete {gap_del} not replayed (NULL tenant_id; see comment). \
-             Upsert replay + no-snapshot-boundary still prove the replay path."
-        );
-    }
-    // The replay MECHANISM is proven: reconnect with epoch+checkpoint delivered
-    // tenant data frames via the op-log (no snapshot boundary). The strict
-    // per-op assertion (gap_keep specifically) is relaxed: the replayed count
-    // has a flush-timing nuance (1-of-2 upserts in the window) layered on the
-    // delete-tenant gap above. Both are tracked follow-ups; the path itself
-    // works end-to-end (the ADR-0025 thesis: epoch+checkpoint ⇒ replay, not
-    // snapshot).
+    // ADR-0025 delete-tenant follow-up (FIXED): under `ALTER TABLE tasks
+    // REPLICA IDENTITY FULL` the DELETE's WAL record carries the full old row
+    // image (incl. org_id). The op-log writer lifts the tenant from that old
+    // image, so the tenant-filtered replay (`WHERE tenant_id = ?`) now MATCHES
+    // deletes — saw_delete must be TRUE. Pre-fix this was NULL tenant → the
+    // replay silently dropped the delete → ghost row on reconnect (the test
+    // only asserted !saw_snapshot + !empty then). The kept-row upsert must
+    // also arrive: the gap_landed wait blocks until the delete (highest lsn)
+    // is persisted, so the lower-lsn keep-insert flushed in the same or an
+    // earlier batch.
+    assert!(
+        saw_delete,
+        "DELETE-REPLAY FAILED: the deleted row {gap_del} was NOT delivered as a delete op on \
+         the tenant-filtered replay. Under REPLICA IDENTITY FULL the op-log writer must tag the \
+         delete with the tenant lifted from the old row image. (frames: {replay:?})"
+    );
+    assert!(
+        saw_keep,
+        "KEEP-REPLAY FAILED: the kept row {gap_keep} was NOT delivered on replay (frames: {replay:?})"
+    );
     assert!(
         !replay.is_empty(),
         "REPLAY FAILED: the reconnect delivered zero frames — the replay path didn't fire (frames: {replay:?})"

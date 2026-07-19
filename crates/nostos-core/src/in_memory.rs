@@ -113,7 +113,7 @@ impl Storage for InMemoryStorage {
                         );
                     }
                 }
-                RowOp::Delete { table, pk } => {
+                RowOp::Delete { table, pk, .. } => {
                     let uncond = snapshot_tables.contains(table);
                     let admit = uncond
                         || shadow
@@ -334,6 +334,7 @@ mod tests {
                 RowOp::Delete {
                     table: "tasks".into(),
                     pk: "1".into(),
+                    old_payload: None,
                 },
                 20,
             )],
@@ -393,6 +394,7 @@ mod tests {
                 RowOp::Delete {
                     table: "tasks".into(),
                     pk: "never-existed".into(),
+                    old_payload: None,
                 },
                 5,
             )],
@@ -452,6 +454,7 @@ mod tests {
                 RowOp::Delete {
                     table: "tasks".into(),
                     pk: "2".into(),
+                    old_payload: None,
                 },
                 20,
             )],
@@ -511,6 +514,7 @@ mod tests {
                 RowOp::Delete {
                     table: "tasks".into(),
                     pk: "1".into(),
+                    old_payload: None,
                 },
                 140,
             )],

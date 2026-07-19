@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_org_assignee
     ON tasks (org_id, assignee_id);
 
+-- ADR-0025 delete-tenant follow-up: tenant-scoped tables MUST use REPLICA
+-- IDENTITY FULL so a DELETE carries the full old row image (incl. org_id);
+-- the op-log writer lifts the tenant from it so tenant-filtered replay still
+-- matches deletes (else NULL tenant → dropped → ghost rows on reconnect).
+ALTER TABLE tasks REPLICA IDENTITY FULL;
+
 -- ── Provider-dashboard schema (multi-table demo, D4) ───────────────────────
 -- Single-tenant v1: all rows sync (no where_sql partitioning). ponytail:
 -- per-provider where_sql partitioning is the multi-tenant upgrade path.

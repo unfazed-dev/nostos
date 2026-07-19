@@ -537,7 +537,7 @@ impl Storage for SqliteStorage {
                                 .map_err(rusqlite_err)?;
                         }
                     }
-                    RowOp::Delete { table, pk } => {
+                    RowOp::Delete { table, pk, .. } => {
                         if snapshot_tables.contains(table.as_str()) {
                             delete_uncond
                                 .execute(rusqlite::params![table, pk])
@@ -1128,6 +1128,7 @@ mod tests {
                 RowOp::Delete {
                     table: "tasks".into(),
                     pk: "1".into(),
+                    old_payload: None,
                 },
                 20,
             )],
@@ -1182,6 +1183,7 @@ mod tests {
                 RowOp::Delete {
                     table: "tasks".into(),
                     pk: "1".into(),
+                    old_payload: None,
                 },
                 20,
             )],
@@ -1515,6 +1517,7 @@ mod tests {
                 RowOp::Delete {
                     table: "tasks".into(),
                     pk: "t1".into(),
+                    old_payload: None,
                 },
                 2,
             )],

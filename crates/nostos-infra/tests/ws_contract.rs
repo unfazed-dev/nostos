@@ -106,6 +106,7 @@ async fn delete_frame_omits_payload() {
         RowOp::Delete {
             table: "tasks".into(),
             pk: "9".into(),
+            old_payload: None,
         },
     );
     svc.fan_out(&event, |_, _| Some(ColumnValue::Any)).await;
