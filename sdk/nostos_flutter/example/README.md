@@ -1,15 +1,22 @@
 # nostos_flutter example — Provider Dashboard (offline-first, multi-table)
 
 A Flutter (macOS) app demonstrating the ratified `nostos_flutter` SDK surface:
-subscribe to **5 Postgres tables over one `/sync` socket**, render each
+subscribe to **6 Postgres tables over one `/sync` socket**, render each
 reactively via `watchMapped<T>`, write offline-first (durable outbox that
 flushes on reconnect), and **pause/resume syncing for real** via
 `disconnect()` / `resume()`.
 
-Tables (NavigationRail tabs): **Providers · Clients · Availabilities ·
-Appointments · Invoices**. Schema + seed live in
-[`docker/pg-init/`](../../docker/pg-init/) (3 providers, 4 clients, 5
-availabilities; appointments + invoices are unseeded — create them in-app).
+A **production-quality booking application**: providers with configurable rates
+(hourly / flat-fee / subscription), clients managing bookings, availabilities,
+appointments, **invoices with auto-calculated billing** (rate × hours, rate
+snapshotted at issue time), and a **realtime chat interface** between providers
+and clients — all local-first and reactive via nostos sync.
+
+Tables (tabs): **Providers · Clients · Availabilities · Appointments ·
+Invoices · Chat**. Schema + seed live in
+[`supabase/schema.sql`](../../supabase/schema.sql) (4 providers with mixed
+rate types, 4 clients, 7 availabilities, 5 appointments, 3 auto-calculated
+invoices, 6 chat messages).
 
 > **nostos reads your schema — it does not create it.** Your Postgres/Supabase DB
 > is the source of truth; nostos mirrors it to on-device SQLite via logical
@@ -35,7 +42,7 @@ Two terminals:
 # (collapsed-write model — no uploadData), so it gates them at the SQL trust
 # boundary. NOSTOS_WRITE_TABLES defaults EMPTY (no tables writable). Set it to
 # the dashboard's 5 tables so create/complete/cancel/issue work:
-NOSTOS_WRITE_TABLES=appointments,providers,clients,invoices,availabilities make dev-stack
+NOSTOS_WRITE_TABLES=appointments,providers,clients,invoices,availabilities,messages make dev-stack
 
 # Terminal 2 — run the Flutter app (from this example/ dir).
 flutter run -d macos
@@ -53,9 +60,41 @@ you skip the `NOSTOS_WRITE_TABLES=…` prefix, create/edit/delete are rejected w
 names the exact fix). Full security model (least-privilege role, the RLS
 trade-off): [`../../docs/SECURITY.md`](../../docs/SECURITY.md).
 
+## Features
+
+### Provider rate management (hourly / flat / subscription)
+Each provider sets a `rate_type` + the three rate values via the tune icon on
+their card. The rate type determines how invoices auto-calculate:
+
+| Rate type | Invoice calculation | Example |
+|---|---|---|
+| **hourly** | `duration_min × hourly_rate_cents / 60` | 60min × $250/hr = $250.00 |
+| **flat** | flat fee (duration-independent) | $180/visit |
+| **subscription** | recurring monthly | $800/mo |
+
+### Auto-calculated invoices (rate snapshot)
+Creating an invoice from an appointment auto-calculates the amount via
+`BillingService` (pure Dart, no server round-trip). The rate is **snapshotted**
+into the invoice row at issue time (`rate_cents` + `line_type` + `hours_min`), so
+a provider changing their rate later never re-prices a historical invoice — the
+canonical billing pattern. The invoice creation dialog shows a live preview of
+the breakdown before you commit.
+
+### Appointments with optional auto-invoice
+The appointment creation dialog has a "Auto-generate invoice" checkbox (on by
+default). When checked, the invoice is created alongside the appointment in a
+single flow — no separate step.
+
+### Realtime chat (synced table = realtime stream)
+The **Chat** tab is a realtime messaging interface between providers and clients.
+This uses the 2026 local-first best practice (PowerSync / LiveStore pattern): the
+synced `messages` table **IS** the realtime stream — no separate WebSocket. The
+view watches `messages` reactively via `watchMapped`; sending a message writes to
+the local outbox and it round-trips back through nostos replication in ~2-4s.
+
 ## Offline-first demo (the point of this app)
 
-1. With the server up, watch rows stream in across all 5 tabs.
+1. With the server up, watch rows stream in across all 6 tabs.
 2. Tap the **Disconnect** icon (top-right). The badge → `disconnected`; the app
    stays fully usable — reads/writes/UI keep working because `disconnect()`
    aborts ONLY the `/sync` loop, not the local client or storage.

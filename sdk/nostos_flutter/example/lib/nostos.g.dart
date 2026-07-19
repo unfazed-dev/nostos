@@ -22,6 +22,12 @@ const nostosSchema = NostosSchema(tables: [
     NostosColumn.text('email'),
     NostosColumn.text('phone'),
     NostosColumn.text('created_at'),
+    NostosColumn.text('rate_type'),
+    NostosColumn.text('hourly_rate_cents'),
+    NostosColumn.text('flat_rate_cents'),
+    NostosColumn.text('subscription_rate_cents'),
+    NostosColumn.text('bio'),
+    NostosColumn.text('avatar_color'),
   ]),
   NostosTable(name: 'clients', primaryKey: ['id'], columns: [
     NostosColumn.text('id'),
@@ -56,6 +62,23 @@ const nostosSchema = NostosSchema(tables: [
     NostosColumn.text('status'),
     NostosColumn.text('issued_at'),
     NostosColumn.text('created_at'),
+    NostosColumn.text('provider_id'),
+    NostosColumn.text('line_type'),
+    NostosColumn.text('rate_cents'),
+    NostosColumn.text('hours_min'),
+    NostosColumn.text('description'),
+    NostosColumn.text('due_at'),
+    NostosColumn.text('paid_at'),
+  ]),
+  NostosTable(name: 'messages', primaryKey: ['id'], columns: [
+    NostosColumn.text('id'),
+    NostosColumn.text('provider_id'),
+    NostosColumn.text('client_id'),
+    NostosColumn.text('sender_type'),
+    NostosColumn.text('sender_id'),
+    NostosColumn.text('body'),
+    NostosColumn.text('created_at'),
+    NostosColumn.text('read_at'),
   ]),
 ]);
 
@@ -91,13 +114,19 @@ class Task {
 }
 
 class Provider {
-  const Provider({required this.id, this.name, this.specialty, this.email, this.phone, this.createdAt});
+  const Provider({required this.id, this.name, this.specialty, this.email, this.phone, this.createdAt, this.rateType, this.hourlyRateCents, this.flatRateCents, this.subscriptionRateCents, this.bio, this.avatarColor});
   final String id;
   final String? name;
   final String? specialty;
   final String? email;
   final String? phone;
   final String? createdAt;
+  final String? rateType;
+  final String? hourlyRateCents;
+  final String? flatRateCents;
+  final String? subscriptionRateCents;
+  final String? bio;
+  final String? avatarColor;
 
   factory Provider.fromRow(Map<String, dynamic> r) => Provider(
     id: (r['_pk'] ?? r['id']).toString(),
@@ -106,6 +135,12 @@ class Provider {
     email: r['email']?.toString(),
     phone: r['phone']?.toString(),
     createdAt: r['created_at']?.toString(),
+    rateType: r['rate_type']?.toString(),
+    hourlyRateCents: r['hourly_rate_cents']?.toString(),
+    flatRateCents: r['flat_rate_cents']?.toString(),
+    subscriptionRateCents: r['subscription_rate_cents']?.toString(),
+    bio: r['bio']?.toString(),
+    avatarColor: r['avatar_color']?.toString(),
   );
 
   Map<String, dynamic> toPayload() => {
@@ -115,6 +150,12 @@ class Provider {
     'email': email,
     'phone': phone,
     'created_at': createdAt,
+    'rate_type': rateType,
+    'hourly_rate_cents': hourlyRateCents,
+    'flat_rate_cents': flatRateCents,
+    'subscription_rate_cents': subscriptionRateCents,
+    'bio': bio,
+    'avatar_color': avatarColor,
   };
 }
 
@@ -206,7 +247,7 @@ class Appointment {
 }
 
 class Invoice {
-  const Invoice({required this.id, this.appointmentId, this.clientId, this.amountCents, this.status, this.issuedAt, this.createdAt});
+  const Invoice({required this.id, this.appointmentId, this.clientId, this.amountCents, this.status, this.issuedAt, this.createdAt, this.providerId, this.lineType, this.rateCents, this.hoursMin, this.description, this.dueAt, this.paidAt});
   final String id;
   final String? appointmentId;
   final String? clientId;
@@ -214,6 +255,13 @@ class Invoice {
   final String? status;
   final String? issuedAt;
   final String? createdAt;
+  final String? providerId;
+  final String? lineType;
+  final String? rateCents;
+  final String? hoursMin;
+  final String? description;
+  final String? dueAt;
+  final String? paidAt;
 
   factory Invoice.fromRow(Map<String, dynamic> r) => Invoice(
     id: (r['_pk'] ?? r['id']).toString(),
@@ -223,6 +271,13 @@ class Invoice {
     status: r['status']?.toString(),
     issuedAt: r['issued_at']?.toString(),
     createdAt: r['created_at']?.toString(),
+    providerId: r['provider_id']?.toString(),
+    lineType: r['line_type']?.toString(),
+    rateCents: r['rate_cents']?.toString(),
+    hoursMin: r['hours_min']?.toString(),
+    description: r['description']?.toString(),
+    dueAt: r['due_at']?.toString(),
+    paidAt: r['paid_at']?.toString(),
   );
 
   Map<String, dynamic> toPayload() => {
@@ -233,6 +288,47 @@ class Invoice {
     'status': status,
     'issued_at': issuedAt,
     'created_at': createdAt,
+    'provider_id': providerId,
+    'line_type': lineType,
+    'rate_cents': rateCents,
+    'hours_min': hoursMin,
+    'description': description,
+    'due_at': dueAt,
+    'paid_at': paidAt,
+  };
+}
+
+class Message {
+  const Message({required this.id, this.providerId, this.clientId, this.senderType, this.senderId, this.body, this.createdAt, this.readAt});
+  final String id;
+  final String? providerId;
+  final String? clientId;
+  final String? senderType;
+  final String? senderId;
+  final String? body;
+  final String? createdAt;
+  final String? readAt;
+
+  factory Message.fromRow(Map<String, dynamic> r) => Message(
+    id: (r['_pk'] ?? r['id']).toString(),
+    providerId: r['provider_id']?.toString(),
+    clientId: r['client_id']?.toString(),
+    senderType: r['sender_type']?.toString(),
+    senderId: r['sender_id']?.toString(),
+    body: r['body']?.toString(),
+    createdAt: r['created_at']?.toString(),
+    readAt: r['read_at']?.toString(),
+  );
+
+  Map<String, dynamic> toPayload() => {
+    'id': id,
+    'provider_id': providerId,
+    'client_id': clientId,
+    'sender_type': senderType,
+    'sender_id': senderId,
+    'body': body,
+    'created_at': createdAt,
+    'read_at': readAt,
   };
 }
 

@@ -304,22 +304,35 @@ impl NostosHandle {
             ));
         }
 
-        // Immediate snapshot BEFORE any network activity: durable rows from a
-        // prior session must be visible offline, not only after the first
-        // commit of a fresh one.
+        // Subscribe to the change broadcast BEFORE emitting the initial
+        // snapshot. The broadcast is no-replay (`broadcast::channel(64)` in
+        // nostos-client), so a commit landing between emit_snapshot and
+        // subscribe_changes would be permanently lost — the "connected but
+        // lists render empty" regression (nostos-client/src/client.rs:1051,
+        // invariant `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`
+        // at client.rs:1097). Subscribing first closes that window; a commit
+        // in the remaining gap just triggers a redundant re-snapshot from the
+        // pump (idempotent — a full snapshot, self-healing on lag).
+        let mut changes = session.client.subscribe_changes();
+
+        // Immediate snapshot AFTER subscribing: durable rows from a prior
+        // session must be visible offline, not only after the first commit of
+        // a fresh one. Ordering relative to subscribe_changes is load-bearing
+        // (see comment above).
         emit_snapshot(&session.client, &table, &rows_sink).await;
 
         // Re-snapshot on every applied batch. Each watch gets its own broadcast
         // receiver; a tick that didn't touch this table just re-queries
         // cheaply (a full snapshot, not a diff — self-healing on lag).
-        let mut changes = session.client.subscribe_changes();
         let pump_client = Arc::clone(&session.client);
         let pump_table = table;
         let pump_sink = rows_sink;
         let pump_task = self.rt.spawn(async move {
             loop {
                 match changes.recv().await {
-                    Ok(_) => emit_snapshot(&pump_client, &pump_table, &pump_sink).await,
+                    Ok(_) => {
+                        emit_snapshot(&pump_client, &pump_table, &pump_sink).await;
+                    }
                     Err(RecvError::Lagged(_)) => {
                         emit_snapshot(&pump_client, &pump_table, &pump_sink).await;
                     }
@@ -372,7 +385,7 @@ impl NostosHandle {
                 "write() table {table:?} is not in the subscribed set — add it to subscribe() first"
             ));
         }
-        session
+        let r = session
             .client
             .write(PendingWrite {
                 table,
@@ -381,7 +394,8 @@ impl NostosHandle {
                 payload_json,
             })
             .await
-            .map_err(|e: ClientError| e.to_string())
+            .map_err(|e: ClientError| e.to_string());
+        r
     }
 
     /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
