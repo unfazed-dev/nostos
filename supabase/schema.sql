@@ -263,3 +263,33 @@ INSERT INTO messages (id, provider_id, client_id, sender_type, sender_id, body, 
   ('66666666-6666-6666-6666-666666666605', '11111111-1111-1111-1111-111111111103', '22222222-2222-2222-2222-222222222203', 'client',  '22222222-2222-2222-2222-222222222203', 'Dr. Turing, how do I pay the subscription invoice?',   '2026-07-15T09:00:00+00:00'),
   ('66666666-6666-6666-6666-666666666606', '11111111-1111-1111-1111-111111111103', '22222222-2222-2222-2222-222222222203', 'provider','11111111-1111-1111-1111-111111111103', 'The July invoice is in your Invoices tab. Tap it to mark paid once your bank clears it.', '2026-07-15T09:10:00+00:00')
 ON CONFLICT (id) DO NOTHING;
+
+-- ===========================================================================
+-- cairn_oplog — persisted operation log for reconnect resume (ADR-0025 slice 2).
+-- Written at the fan-out chokepoint (batched, off the fan-out loop by a
+-- background flush task) and replayed on reconnect from a client's checkpoint
+-- so a resuming client receives missed INSERT/UPDATE/DELETE ops in-window
+-- instead of re-snapshotting. Snapshot-reconcile (slice 1) remains the
+-- fallback for long gaps / first-connect / epoch mismatch.
+--
+-- tenant_id is lifted from each row's tenant column at write time (NULL for
+-- non-tenant-scoped tables); the (tenant_id, lsn) index is the replay path.
+-- (table_name, pk) supports future compaction (slice 5).
+--
+-- NOT IN cairn_pub: this is nostos's internal resume table, not a synced app
+-- table. Publishing it would feed its own writes back through logical
+-- replication as spurious client events (a feedback loop). Keep it out of the
+-- publication.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS cairn_oplog (
+    op_id      BIGSERIAL   PRIMARY KEY,
+    lsn        BIGINT      NOT NULL,
+    table_name TEXT        NOT NULL,
+    pk         TEXT        NOT NULL,
+    op         TEXT        NOT NULL,                 -- 'upsert' | 'delete'
+    payload    JSONB,                                -- NULL for deletes
+    tenant_id  TEXT,                                  -- NULL when the row's table has no tenant column
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cairn_oplog_tenant_lsn ON cairn_oplog (tenant_id, lsn);
+CREATE INDEX IF NOT EXISTS idx_cairn_oplog_table_pk   ON cairn_oplog (table_name, pk);

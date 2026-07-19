@@ -18,6 +18,9 @@
 
 pub mod auth;
 mod jwks;
+/// Persisted operation-log writers (ADR-0025 slice 2). `RecordingOpLogWriter`
+/// (always available, in-memory — bench/test) + `PgOpLogWriter` (feature "pg").
+pub mod oplog;
 pub mod replicator;
 pub mod router;
 /// `#[cfg(feature = "pg")]` — the typed-schema endpoint adapter (WS1). Absent
@@ -34,6 +37,7 @@ pub mod wire;
 pub mod write_back;
 
 pub use auth::{AllowAnonymous, SupabaseJwtAuth};
+pub use oplog::RecordingOpLogWriter;
 pub use replicator::{FakeReplicator, FakeReplicatorConfig};
 pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;
@@ -55,3 +59,6 @@ pub use schema_source::PgSchemaSource;
 
 #[cfg(feature = "pg")]
 pub use write_back::PgWriteBack;
+
+#[cfg(feature = "pg")]
+pub use oplog::PgOpLogWriter;

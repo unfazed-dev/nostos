@@ -393,6 +393,34 @@ pub enum WriteBackError {
     Backend(String),
 }
 
+/// Persists replication events to a durable op-log so a reconnecting client
+/// can replay missed ops (including DELETEs) from its checkpoint instead of
+/// re-snapshotting — the in-window resume path (ADR-0025 slice 2+).
+/// Snapshot-reconcile (slice 1) remains the fallback for long gaps /
+/// first-connect / epoch mismatch.
+///
+/// # Non-blocking contract (LOAD-BEARING)
+///
+/// `append` MUST return promptly without performing inline I/O on the caller's
+/// path. The caller is the `FanOutService::run` loop, where at the 833k
+/// ops/sec headline the per-event budget is ~1.2µs; a Postgres round-trip is
+/// ~0.5–2ms — inline I/O would stall the loop, starve the bounded session
+/// sinks, and flip deliveries from `Delivered` to `Dropped` (silently breaking
+/// the 0% drop headline). An implementation batches internally and flushes off
+/// the caller's path (e.g. a background task with its own bounded queue).
+///
+/// A full internal buffer drops the entry (best-effort: snapshot-reconcile
+/// preserves correctness for the affected gap) and counts it via the impl's
+/// own metrics — `append` returns `()` because the fan-out loop does not act
+/// on op-log drop decisions; it is fire-and-forget.
+#[async_trait]
+pub trait OpLogWriter: Send + Sync {
+    /// Append one event to the durable op-log. Non-blocking — see the trait
+    /// doc for the contract. `()` return: drop/flush-failure accounting is
+    /// internal, surfaced via [`Metrics`] (`oplog_dropped` / `oplog_flush_failed`).
+    async fn append(&self, event: &ReplicationEvent);
+}
+
 /// Reads a table's current rows as a one-shot snapshot, delivered to a
 /// freshly-subscribing session as `Insert` events BEFORE live fan-out — so a
 /// client that connects to an already-populated table sees pre-existing rows
@@ -571,6 +599,15 @@ pub struct Metrics {
     /// from a missing/lost state. Each increment implies a potential silent
     /// data-loss window — alert on any increase.
     pub slot_recreated_total: AtomicU64,
+    /// Op-log entries dropped because the writer's bounded buffer was full
+    /// (ADR-0025 slice 2). A non-zero value means the in-window resume path
+    /// degraded to snapshot-reconcile for some gaps — correct, but a capacity
+    /// signal. Alert on sustained increase.
+    pub oplog_dropped: AtomicU64,
+    /// Op-log batch flushes that failed (PG error / connection lost). The
+    /// batch's entries are lost to the op-log → affected resume gaps fall back
+    /// to snapshot-reconcile. Correctness preserved; alert on any increase.
+    pub oplog_flush_failed: AtomicU64,
 }
 
 impl Metrics {
@@ -593,6 +630,8 @@ impl Metrics {
             slot_wal_status: SlotHealth::from_u8(self.slot_wal_status.load(Ordering::Relaxed)),
             replication_lag_bytes: self.replication_lag_bytes.load(Ordering::Relaxed),
             slot_recreated_total: self.slot_recreated_total.load(Ordering::Relaxed),
+            oplog_dropped: self.oplog_dropped.load(Ordering::Relaxed),
+            oplog_flush_failed: self.oplog_flush_failed.load(Ordering::Relaxed),
         }
     }
 
@@ -628,4 +667,6 @@ pub struct MetricsSnapshot {
     pub slot_wal_status: SlotHealth,
     pub replication_lag_bytes: u64,
     pub slot_recreated_total: u64,
+    pub oplog_dropped: u64,
+    pub oplog_flush_failed: u64,
 }

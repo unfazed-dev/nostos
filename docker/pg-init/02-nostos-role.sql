@@ -30,3 +30,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO cairn_writer;
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON providers, clients, availabilities, appointments, invoices
     TO cairn_writer;
+-- cairn_oplog (ADR-0025 slice 2) — nostos-server writes the op-log at the
+-- fan-out chokepoint (INSERT) and reads it back on reconnect replay (SELECT).
+-- Never UPDATE/DELETE here (compaction is slice 5); grant only what slice 2
+-- uses. Not part of the synced-table allowlist — this is nostos's internal
+-- resume table, not a client-writable table.
+GRANT SELECT, INSERT ON cairn_oplog TO cairn_writer;

@@ -78,6 +78,11 @@ pub struct FanOutService {
     /// than the policy's threshold behind the head of the stream. Default
     /// disabled ([`EvictionPolicy::disabled`]) — see ADR-0016.
     eviction: crate::EvictionPolicy,
+    /// Persisted op-log writer (ADR-0025 slice 2). `None` by default — the
+    /// benchmark and fake-mode deploys run without one (no behavior change).
+    /// A `pg` deploy wires a `PgOpLogWriter` to enable in-window reconnect
+    /// replay. See [`crate::ports::OpLogWriter`] for the non-blocking contract.
+    op_log: Option<Arc<dyn crate::ports::OpLogWriter>>,
 }
 
 impl FanOutService {
@@ -89,6 +94,7 @@ impl FanOutService {
             push_interval: std::time::Duration::ZERO,
             metrics: None,
             eviction: crate::EvictionPolicy::disabled(),
+            op_log: None,
         }
     }
 
@@ -117,6 +123,16 @@ impl FanOutService {
     #[must_use]
     pub fn with_push_interval(mut self, interval: std::time::Duration) -> Self {
         self.push_interval = interval;
+        self
+    }
+
+    /// Attach a persisted op-log writer (ADR-0025 slice 2). When set, every
+    /// fanned-out event is also appended to the durable op-log so a
+    /// reconnecting client can replay missed ops in-window. Opt-in: the bench
+    /// and fake-mode deploys omit it (no behavior change).
+    #[must_use]
+    pub fn with_op_log(mut self, writer: Arc<dyn crate::ports::OpLogWriter>) -> Self {
+        self.op_log = Some(writer);
         self
     }
 
@@ -203,6 +219,13 @@ impl FanOutService {
     {
         let mut total = FanOutOutcome::default();
         while let Some(event) = replicator.next_event().await {
+            // Op-log (ADR-0025 slice 2): record the event durably for in-window
+            // reconnect replay. Non-blocking (the impl enqueues to a bounded
+            // buffer; a background task flushes). Fire-and-forget — recorded
+            // regardless of whether live fan-out later drops it.
+            if let Some(w) = &self.op_log {
+                w.append(&event).await;
+            }
             total = total.merged(self.fan_out(&event, &column_extractor).await);
             // Ack-driven progress: advance the slot only as far as the slowest
             // live client has confirmed. None = no session has acked → don't

@@ -165,3 +165,33 @@ BEGIN
         END IF;
     END LOOP;
 END $$;
+
+-- ===========================================================================
+-- cairn_oplog — persisted operation log for reconnect resume (ADR-0025 slice 2).
+-- Written at the fan-out chokepoint (batched, off the fan-out loop by a
+-- background flush task) and replayed on reconnect from a client's checkpoint
+-- so a resuming client receives missed INSERT/UPDATE/DELETE ops in-window
+-- instead of re-snapshotting. Snapshot-reconcile (slice 1) remains the
+-- fallback for long gaps / first-connect / epoch mismatch.
+--
+-- tenant_id is lifted from each row's tenant column at write time (NULL for
+-- non-tenant-scoped tables); the (tenant_id, lsn) index is the replay path.
+-- (table_name, pk) supports future compaction (slice 5).
+--
+-- NOT IN cairn_pub: this is nostos's internal resume table, not a synced app
+-- table. Publishing it would feed its own writes back through logical
+-- replication as spurious client events (a feedback loop). Keep it out of the
+-- publication.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS cairn_oplog (
+    op_id      BIGSERIAL   PRIMARY KEY,
+    lsn        BIGINT      NOT NULL,
+    table_name TEXT        NOT NULL,
+    pk         TEXT        NOT NULL,
+    op         TEXT        NOT NULL,                 -- 'upsert' | 'delete'
+    payload    JSONB,                                -- NULL for deletes
+    tenant_id  TEXT,                                  -- NULL when the row's table has no tenant column
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cairn_oplog_tenant_lsn ON cairn_oplog (tenant_id, lsn);
+CREATE INDEX IF NOT EXISTS idx_cairn_oplog_table_pk   ON cairn_oplog (table_name, pk);

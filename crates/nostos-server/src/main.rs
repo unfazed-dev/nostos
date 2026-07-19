@@ -48,6 +48,16 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_SESSION_BUFFER", default_value_t = 1024)]
     session_buffer: usize,
 
+    /// Op-log writer's bounded internal channel depth (ADR-0025 slice 2). The
+    /// fan-out loop `try_send`s each event into this buffer; a background task
+    /// drains + flushes to `cairn_oplog`. On full, the entry is dropped (the
+    /// resume path falls back to snapshot-reconcile for the gap — correct, but
+    /// a capacity signal). Default 4096; raise if
+    /// `cairn_oplog_dropped_total` is non-zero under sustained load. Only
+    /// meaningful under `NOSTOS_REPLICATOR=pg`.
+    #[arg(long, env = "NOSTOS_OPLOG_BUFFER", default_value_t = 4096)]
+    oplog_buffer: usize,
+
     /// Replicator mode: "fake" (synthetic generator) or "pg" (real Postgres).
     /// "pg" requires the `pg` feature, which is on by default (disable with
     /// `--no-default-features`). Runtime default stays "fake" so zero-setup
@@ -268,11 +278,36 @@ async fn main() -> anyhow::Result<()> {
     } else {
         nostos_application::EvictionPolicy::disabled()
     };
-    let fanout = Arc::new(
-        FanOutService::new(Arc::clone(&store))
+    // Op-log writer (ADR-0025 slice 2): persisted op-log for in-window
+    // reconnect replay. Only under `NOSTOS_REPLICATOR=pg` — the fake replicator
+    // has no source database to durably write to (the bench drives a
+    // RecordingOpLogWriter directly). Shares the metrics handle so `/metrics`
+    // surfaces the drop + flush-failure counters.
+    #[cfg(feature = "pg")]
+    let op_log: Option<Arc<dyn nostos_application::ports::OpLogWriter>> = if cfg.replicator == "pg" {
+        Some(Arc::new(nostos_infra::PgOpLogWriter::new(
+            &cfg.pg_url,
+            Some(cfg.tenant_column.clone()),
+            cfg.oplog_buffer,
+            Some(Arc::clone(&metrics)),
+        )))
+    } else {
+        None
+    };
+
+    let fanout = Arc::new({
+        let builder = FanOutService::new(Arc::clone(&store))
             .with_metrics(Arc::clone(&metrics))
-            .with_eviction(eviction),
-    );
+            .with_eviction(eviction);
+        // Attach the op-log when built (cfg-gated so the non-pg build never
+        // references the (absent) PgOpLogWriter type).
+        #[cfg(feature = "pg")]
+        let builder = match op_log {
+            Some(w) => builder.with_op_log(w),
+            None => builder,
+        };
+        builder
+    });
 
     // ---- start the replicator → fan-out driver ----
     // The extractor lifts named columns out of an event's payload so predicates
@@ -581,7 +616,13 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          cairn_replication_lag_bytes {replication_lag_bytes}\n\
          # HELP cairn_slot_recreated_total Number of times the replication slot was dropped + re-created from a missing/lost state. Each increment is a potential silent-data-loss window; alert on any increase.\n\
          # TYPE cairn_slot_recreated_total counter\n\
-         cairn_slot_recreated_total {slot_recreated_total}\n",
+         cairn_slot_recreated_total {slot_recreated_total}\n\
+         # HELP cairn_oplog_dropped_total Op-log entries dropped (writer buffer full). The resume path falls back to snapshot-reconcile for the gap. ADR-0025.\n\
+         # TYPE cairn_oplog_dropped_total counter\n\
+         cairn_oplog_dropped_total {oplog_dropped}\n\
+         # HELP cairn_oplog_flush_failed_total Op-log batch flushes that failed (PG error / connection lost). Batch lost; resume falls back to snapshot-reconcile. ADR-0025.\n\
+         # TYPE cairn_oplog_flush_failed_total counter\n\
+         cairn_oplog_flush_failed_total {oplog_flush_failed}\n",
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
@@ -589,6 +630,8 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         slot_wal_status = snap.slot_wal_status.as_gauge_int(),
         replication_lag_bytes = snap.replication_lag_bytes,
         slot_recreated_total = snap.slot_recreated_total,
+        oplog_dropped = snap.oplog_dropped,
+        oplog_flush_failed = snap.oplog_flush_failed,
     )
 }
 
