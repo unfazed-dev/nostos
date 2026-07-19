@@ -315,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
                         "WAL-bloat backstop: will set max_slot_wal_keep_size on the slot"
                     );
                 }
-                let mut repl = PgReplicator::new(pg_cfg);
+                let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
                 let fanout_drv = Arc::clone(&fanout);
                 let drv = tokio::spawn(async move {
                     // Extract a column from the JSON payload: parse the small
@@ -572,11 +572,23 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          cairn_events_dropped_total {dropped}\n\
          # HELP cairn_live_sessions Current live sync sessions.\n\
          # TYPE cairn_live_sessions gauge\n\
-         cairn_live_sessions {sessions}\n",
+         cairn_live_sessions {sessions}\n\
+         # HELP cairn_slot_wal_status Replication-slot health gauge (0=healthy, 1=reserved, 2=lost, 3=recreated). 'lost' means silent-data-loss risk; alert on cairn_slot_recreated_total. ADR-0009.\n\
+         # TYPE cairn_slot_wal_status gauge\n\
+         cairn_slot_wal_status {slot_wal_status}\n\
+         # HELP cairn_replication_lag_bytes Current WAL lsn minus slot restart_lsn, in bytes. 0 when slot is missing/unknown.\n\
+         # TYPE cairn_replication_lag_bytes gauge\n\
+         cairn_replication_lag_bytes {replication_lag_bytes}\n\
+         # HELP cairn_slot_recreated_total Number of times the replication slot was dropped + re-created from a missing/lost state. Each increment is a potential silent-data-loss window; alert on any increase.\n\
+         # TYPE cairn_slot_recreated_total counter\n\
+         cairn_slot_recreated_total {slot_recreated_total}\n",
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
         sessions = sessions,
+        slot_wal_status = snap.slot_wal_status.as_gauge_int(),
+        replication_lag_bytes = snap.replication_lag_bytes,
+        slot_recreated_total = snap.slot_recreated_total,
     )
 }
 

@@ -55,6 +55,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write; // ponytail: single write!() in json_escape for a String push
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -69,7 +70,7 @@ use pgwire_replication::{Lsn as PgLsn, ReplicationConfig, TlsConfig};
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, warn};
 
-use nostos_application::ports::ReplicatorStream;
+use nostos_application::ports::{Metrics, ReplicatorStream, SlotHealth};
 use nostos_domain::{Lsn, ReplicationEvent as NostosEvent, RowOp};
 
 use super::typed;
@@ -77,6 +78,23 @@ use super::typed;
 /// The concrete pgoutput monomorphization we use everywhere in this module:
 /// text values (no binary), no streaming large txns.
 type Event = PgEvent<BinaryValueTraitOff, StreamingValueTraitOff>;
+
+/// Result of [`PgReplicator::probe_slot_health`]. Encodes the missing-vs-lost-
+/// vs-healthy trichotomy that `ensure_slot_and_publication` switches on. The
+/// `Lost { slot_existed: false }` case is "slot MISSING on connect"; the
+/// `slot_existed: true` case is `wal_status='lost'` (the slot row is still
+/// there but PG has evicted the WAL it needed). Both are the same data-loss
+/// class for our purposes — see the comment in `ensure_slot_and_publication`.
+enum SlotProbe {
+    /// Slot exists and WAL is retained. `restart_lsn` is carried so we can
+    /// report the lag gauge without a second round-trip; the actual start LSN
+    /// is resolved by `resolve_resume_lsn` (which prefers `confirmed_flush_lsn`
+    /// — the ack-driven boundary, ADR-0009).
+    Healthy { restart_lsn: Option<PgLsn> },
+    /// Slot MISSING, OR present with `wal_status='lost'`. The retained WAL is
+    /// gone; recovery is drop+recreate+resnapshot.
+    Lost { slot_existed: bool },
+}
 
 /// Cached relation metadata, keyed by the OID pgoutput sends with each row op.
 ///
@@ -212,6 +230,11 @@ pub struct PgReplicator {
     /// changes. Empty on restart with an existing slot (no snapshot replay).
     /// See `snapshot.rs` and the module-level "initial snapshot" docs.
     pending_snapshot: std::collections::VecDeque<nostos_domain::ReplicationEvent>,
+    /// Optional handle into the server's aggregate metrics. When attached (the
+    /// production wiring in nostos-server), the slot-health gauge + recreated
+    /// counter + WAL-lag gauge are updated on every (re)connect. `None` keeps
+    /// the replicator usable from tests that don't care about metrics.
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl PgReplicator {
@@ -227,7 +250,19 @@ impl PgReplicator {
             last_seen: Lsn::ZERO,
             last_confirmed: Lsn::ZERO,
             pending_snapshot: std::collections::VecDeque::new(),
+            metrics: None,
         }
+    }
+
+    /// Attach the server-wide aggregate metrics handle. The replicator reports
+    /// slot-health (from `pg_replication_slots.wal_status`), WAL-lag, and the
+    /// slot-recreated counter into it on every (re)connect, so the silent-
+    /// data-loss risk of a missing/`lost` slot is operator-visible (ADR-0009).
+    /// Mirrors `FanOutService::with_metrics`.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Ensure the replication slot + publication exist and the stream is open.
@@ -289,6 +324,110 @@ impl PgReplicator {
             "postgresql://{}:{}@{}:{}/{}",
             self.cfg.user, self.cfg.password, self.cfg.host, self.cfg.port, self.cfg.database
         )
+    }
+
+    /// Probe `pg_replication_slots` for the slot's `wal_status` + `restart_lsn`.
+    /// This is the cheap, every-(re)connect detection that catches the silent-
+    /// data-loss cases (`missing` slot and `wal_status='lost'`). One round-trip
+    /// on a control-plane connection; no replication-stream effect.
+    ///
+    /// `wal_status` values (PG docs):
+    /// - `reserved` / `extended`: WAL retained, last LSN known — Healthy.
+    /// - `unreserved`: WAL retained but PG may reclaim soon under pressure —
+    ///   we treat as Healthy (the lag gauge is the operator signal here).
+    /// - `lost`: WAL evicted (`max_slot_wal_keep_size` fired) — data-loss class.
+    ///
+    /// ponytail: a future PG major version adding a new wal_status variant will
+    /// fall through to Healthy here — the lag gauge + recreate counter still
+    /// surface trouble, and the explicit match in the trace log names the value.
+    async fn probe_slot_health(&self, sql: &tokio_postgres::Client) -> SlotProbe {
+        let row = sql
+            .query_opt(
+                "SELECT wal_status::text, restart_lsn::text \
+                 FROM pg_replication_slots WHERE slot_name = $1",
+                &[&self.cfg.slot],
+            )
+            .await;
+        match row {
+            Ok(Some(row)) => {
+                let wal_status: String = row.get(0);
+                let restart_text: Option<String> = row.get(1);
+                let restart_lsn = restart_text
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| PgLsn::parse(&s).ok());
+                match wal_status.as_str() {
+                    "lost" => {
+                        warn!(slot = %self.cfg.slot, "pg_replication_slots.wal_status = 'lost' (WAL evicted; data-loss class)");
+                        SlotProbe::Lost { slot_existed: true }
+                    }
+                    other => {
+                        debug!(slot = %self.cfg.slot, wal_status = %other, "slot healthy");
+                        SlotProbe::Healthy { restart_lsn }
+                    }
+                }
+            }
+            Ok(None) => {
+                // No row → slot does not exist. This is the original bug: a
+                // previous nostos run created the slot, advanced it ack-driven,
+                // then someone (a DB restore, manual drop, or a clean
+                // re-provision) made it vanish. Treat as data-loss class.
+                warn!(slot = %self.cfg.slot, "replication slot MISSING on connect (will recreate + resnapshot; potential data-loss window)");
+                SlotProbe::Lost {
+                    slot_existed: false,
+                }
+            }
+            Err(e) => {
+                // Probe failed (transient PG error / connection blip). Don't
+                // block the slot-creation path — fall through to fresh-create,
+                // which will either succeed (slot was actually missing) or
+                // surface a real error. We log + treat as missing rather than
+                // fail-fast: the fresh-create below is the safe superset.
+                warn!(error = %e, slot = %self.cfg.slot, "slot-health probe failed; falling through to create path");
+                SlotProbe::Lost {
+                    slot_existed: false,
+                }
+            }
+        }
+    }
+
+    /// Record the slot-health gauge into `self.metrics`, if attached.
+    fn record_health(&self, health: SlotHealth) {
+        if let Some(m) = self.metrics.as_ref() {
+            m.set_slot_health(health);
+        }
+    }
+
+    /// Record the slot-recreated counter into `self.metrics`, if attached.
+    fn record_recreate(&self) {
+        if let Some(m) = self.metrics.as_ref() {
+            m.record_slot_recreate();
+        }
+    }
+
+    /// Set the gauge to the transient `Recreated` state so a flapping slot
+    /// shows up in the metric trace even before the next health probe runs.
+    fn mark_recreated_health(&self) {
+        self.record_health(SlotHealth::Recreated);
+    }
+
+    /// Compute + record `pg_current_wal_lsn() - restart_lsn` as the WAL-lag
+    /// gauge (bytes). Cheap (one round-trip) and only worth doing when the slot
+    /// is healthy — a missing/lost slot reports the gauge as 0.
+    async fn record_lag(&self, sql: &tokio_postgres::Client, restart: PgLsn) {
+        let Ok(row) = sql
+            .query_one("SELECT pg_current_wal_lsn()::text", &[])
+            .await
+        else {
+            return;
+        };
+        let now_text: String = row.get(0);
+        let Ok(now) = PgLsn::parse(&now_text) else {
+            return;
+        };
+        let lag = now.as_u64().saturating_sub(restart.as_u64());
+        if let Some(m) = self.metrics.as_ref() {
+            m.set_replication_lag(lag);
+        }
     }
 
     /// Pre-seed `relations` from `pg_class`/`pg_attribute` so row decoding works
@@ -404,17 +543,65 @@ impl PgReplicator {
             return Ok(PgLsn::from_u64(explicit.raw()));
         }
 
-        // Detect existing slot (slot-exists-on-start edge case). If the slot
-        // exists, this is a RESTART: no snapshot, resolve LSN from the slot.
-        let exists: bool = sql
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
-                &[&self.cfg.slot],
-            )
-            .await
-            .is_ok_and(|r| r.get::<_, bool>(0));
-        if exists {
-            return self.resolve_resume_lsn(&sql).await;
+        // ── Slot-health probe: distinguish "EXISTS + healthy" (a real restart)
+        //    from "MISSING / wal_status='lost'" (silent-data-loss risk). The
+        //    pre-fix code treated a missing slot as FRESH and silently resumed
+        //    from current WAL, destroying every change that happened while nostos
+        //    was offline — a `lost` slot (max_slot_wal_keep_size fired) is the
+        //    same data-loss class. We now log CRITICAL + bump the
+        //    `slot_recreated_total` counter + re-snapshot, so the loss is
+        //    operator-visible instead of silent. Design choice (re-snapshot-
+        //    with-loud-warning over fail-fast) keeps the client working while
+        //    flagging the risk; matches the manual recovery documented in
+        //    example/README.md:194-239. See ADR-0009 (ack-driven LSN — a slot
+        //    advanced past unacked LSN is silent data loss on reconnect).
+        let probe = self.probe_slot_health(&sql).await;
+        match probe {
+            SlotProbe::Healthy { restart_lsn } => {
+                // Real restart: slot exists with WAL retained. Resolve start
+                // LSN from the slot and report the lag gauge.
+                self.record_health(SlotHealth::Healthy);
+                if let Some(restart) = restart_lsn {
+                    self.record_lag(&sql, restart).await;
+                }
+                return self.resolve_resume_lsn(&sql).await;
+            }
+            SlotProbe::Lost { slot_existed } => {
+                // The slot either is missing on connect or has wal_status='lost'
+                // (max_slot_wal_keep_size evicted the retained WAL while nostos
+                // was offline). Both are silent-data-loss classes: WAL between
+                // the last client-acked LSN and now is gone. We cannot recover
+                // it — but we CAN make it visible. Log CRITICAL, bump the
+                // counter, then drop (if it still exists) and re-create with a
+                // fresh snapshot so the client at least converges on current
+                // state instead of silently stalling at the head of the stream.
+                error!(
+                    slot = %self.cfg.slot,
+                    slot_existed,
+                    "DATA-LOSS RISK: replication slot was missing or wal_status='lost' \
+                     on connect. WAL between the last client-acked LSN and the new \
+                     consistent point is unrecoverable. Recreating + re-snapshotting; \
+                     alert on cairn_slot_recreated_total and investigate \
+                     max_slot_wal_keep_size / nostos downtime. (ADR-0009)"
+                );
+                self.record_health(SlotHealth::Lost);
+                self.record_recreate();
+                if slot_existed {
+                    // Drop the invalidated slot so the fresh-create path below
+                    // succeeds. pg_drop_replication_slot fails if the slot is
+                    // still active — but we are on a control-plane connection
+                    // here, not the replication connection (which has not been
+                    // opened yet this cycle), so the slot is necessarily
+                    // inactive from our point of view.
+                    if let Err(e) = sql
+                        .query_one("SELECT pg_drop_replication_slot($1)", &[&self.cfg.slot])
+                        .await
+                    {
+                        warn!(error = %e, slot = %self.cfg.slot, "drop of lost/invalidated slot failed; will attempt fresh create anyway");
+                    }
+                }
+                self.mark_recreated_health();
+            }
         }
 
         // ── FRESH slot: create it inside a REPEATABLE READ txn that also
@@ -953,7 +1140,41 @@ impl ReplicatorStream for PgReplicator {
                     }
                 }
                 Err(e) => {
-                    error!(error = %e, "PgReplicator error; will reconnect after backoff");
+                    // SQLSTATE 55000 (`object_not_in_prerequisite_state`) is
+                    // what PG raises when the replication slot is gone or
+                    // invalidated mid-stream (e.g. an operator drop, an
+                    // ALTER-SLOT, or a `max_slot_wal_keep_size` eviction that
+                    // lands between keepalives). The pre-fix loop just retried
+                    // `ensure_connected` every 2s forever — but the slot was
+                    // gone, so each retry re-created it silently and resumed
+                    // from current WAL (silent data loss). Now we detect the
+                    // case explicitly: log CRITICAL, set the Lost gauge, bump
+                    // the recreate counter here (the actual drop+recreate+re-
+                    // snapshot happens inside `ensure_slot_and_publication` on
+                    // the next `ensure_connected` call, driven by the slot-
+                    // health probe). String-match because pgwire-replication
+                    // 0.3.2's recv error type does not expose SQLSTATE
+                    // directly (ponytail: if a future version exposes the
+                    // SqlState enum, compare against
+                    // `SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE` instead).
+                    let msg = e.to_string();
+                    let is_slot_invalidated = msg.contains("55000")
+                        || msg.contains("object_not_in_prerequisite_state")
+                        || msg.contains("replication slot")
+                        || msg.contains("does not exist");
+                    if is_slot_invalidated {
+                        error!(
+                            error = %e,
+                            slot = %self.cfg.slot,
+                            "DATA-LOSS RISK: replication slot dropped or invalidated \
+                             mid-stream (SQLSTATE 55000 class). Recreating + re-snapshotting \
+                             on reconnect; alert on cairn_slot_recreated_total. (ADR-0009)"
+                        );
+                        self.record_health(SlotHealth::Lost);
+                        self.record_recreate();
+                    } else {
+                        error!(error = %e, "PgReplicator error; will reconnect after backoff");
+                    }
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     let _ = self.ensure_connected().await;
                 }
