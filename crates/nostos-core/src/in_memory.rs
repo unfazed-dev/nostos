@@ -24,7 +24,9 @@ use crate::{Outbox, PendingWrite, Storage, StorageError, WriteOp};
 /// and the backing store for unit tests; `SqliteStorage` adds real durability.
 #[derive(Debug, Default)]
 pub struct InMemoryStorage {
-    rows: BTreeMap<(String, String), Vec<u8>>,
+    /// `(table, pk)` → `(payload, applied_lsn)`. The applied_lsn drives per-row
+    /// gating (ADR-0025 slice 4a): a stale op (lsn < applied_lsn) is skipped.
+    rows: BTreeMap<(String, String), (Vec<u8>, u64)>,
     checkpoint: Lsn,
     /// The write outbox: `(id, PendingWrite)` pairs, oldest first. The next id
     /// to assign is `next_write_id` (monotonic, mirrors AUTOINCREMENT).
@@ -44,7 +46,7 @@ impl InMemoryStorage {
     pub fn payload(&self, table: &str, pk: &str) -> Option<&[u8]> {
         self.rows
             .get(&(table.to_owned(), pk.to_owned()))
-            .map(Vec::as_slice)
+            .map(|(bytes, _)| bytes.as_slice())
     }
 
     /// Enumerate the `(pk, payload_bytes)` pairs the store holds for `table`,
@@ -64,7 +66,7 @@ impl InMemoryStorage {
         self.rows
             .iter()
             .filter(|((t, _), _)| t == table)
-            .map(|((_, pk), bytes)| (pk.clone(), bytes.clone()))
+            .map(|((_, pk), (bytes, _))| (pk.clone(), bytes.clone()))
             .collect()
     }
 
@@ -86,18 +88,40 @@ impl Storage for InMemoryStorage {
         Ok(self.checkpoint)
     }
 
-    fn apply_batch(&mut self, ops: &[RowOp], checkpoint: Lsn) -> crate::Result<()> {
+    fn apply_batch(
+        &mut self,
+        ops: &[(RowOp, u64)],
+        checkpoint: Lsn,
+        snapshot_tables: &std::collections::HashSet<String>,
+    ) -> crate::Result<()> {
         // Atomicity: mutate a shadow copy, swap in only if every op succeeded.
         // (For the in-memory impl no op can fail, but the structure documents
         // the contract that SqliteStorage enforces with a real transaction.)
         let mut shadow = self.rows.clone();
-        for op in ops {
+        for (op, lsn) in ops {
             match op {
                 RowOp::Insert { table, pk, payload } | RowOp::Update { table, pk, payload } => {
-                    shadow.insert((table.clone(), pk.clone()), payload.as_ref().to_vec());
+                    let uncond = snapshot_tables.contains(table);
+                    let admit = uncond
+                        || shadow
+                            .get(&(table.clone(), pk.clone()))
+                            .is_none_or(|(_, prev)| *lsn >= *prev);
+                    if admit {
+                        shadow.insert(
+                            (table.clone(), pk.clone()),
+                            (payload.as_ref().to_vec(), *lsn),
+                        );
+                    }
                 }
                 RowOp::Delete { table, pk } => {
-                    shadow.remove(&(table.clone(), pk.clone()));
+                    let uncond = snapshot_tables.contains(table);
+                    let admit = uncond
+                        || shadow
+                            .get(&(table.clone(), pk.clone()))
+                            .is_none_or(|(_, prev)| *prev <= *lsn);
+                    if admit {
+                        shadow.remove(&(table.clone(), pk.clone()));
+                    }
                 }
             }
         }
@@ -175,8 +199,11 @@ impl Outbox for InMemoryStorage {
                     .unwrap_or("null")
                     .as_bytes()
                     .to_vec();
+                // Optimistic: stamp MAX so the local edit survives any in-flight
+                // server op on this pk until the echo reconciles (mirrors the
+                // unconditional re-stamp SqliteStorage's Piece-B loop does).
                 self.rows
-                    .insert((write.table.clone(), write.pk.clone()), payload);
+                    .insert((write.table.clone(), write.pk.clone()), (payload, u64::MAX));
             }
             WriteOp::Delete => {
                 self.rows.remove(&(write.table.clone(), write.pk.clone()));
@@ -204,6 +231,7 @@ fn _storage_error_is_reachable() -> StorageError {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::collections::HashSet;
 
     fn ins(table: &str, pk: &str, payload: &[u8]) -> RowOp {
         RowOp::Insert {
@@ -211,6 +239,10 @@ mod tests {
             pk: pk.into(),
             payload: Bytes::copy_from_slice(payload),
         }
+    }
+
+    fn empty_snap() -> HashSet<String> {
+        HashSet::new()
     }
 
     #[test]
@@ -223,8 +255,11 @@ mod tests {
     #[test]
     fn apply_inserts_rows_and_advances_checkpoint() {
         let mut s = InMemoryStorage::new();
-        let ops = [ins("tasks", "1", b"alice"), ins("tasks", "2", b"bob")];
-        s.apply_batch(&ops, Lsn::new(100)).unwrap();
+        let ops = [
+            (ins("tasks", "1", b"alice"), 100),
+            (ins("tasks", "2", b"bob"), 100),
+        ];
+        s.apply_batch(&ops, Lsn::new(100), &empty_snap()).unwrap();
 
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(100));
         assert_eq!(s.row_count(), 2);
@@ -239,11 +274,19 @@ mod tests {
         // count bloat, no duplicate. Last-writer-wins by WAL order (ADR-0014 a).
         let mut s = InMemoryStorage::new();
 
-        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"v1"), 10)],
+            Lsn::new(10),
+            &empty_snap(),
+        )
+        .unwrap();
         // Re-apply the SAME op (same table+pk) — must UPSERT, not insert a copy.
-        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"v1"), 10)],
+            Lsn::new(10),
+            &empty_snap(),
+        )
+        .unwrap();
 
         assert_eq!(s.row_count(), 1, "no duplicate row");
         assert_eq!(s.payload("tasks", "1"), Some(b"v1" as &[u8]));
@@ -252,15 +295,23 @@ mod tests {
     #[test]
     fn update_overwrites_payload_by_pk() {
         let mut s = InMemoryStorage::new();
-        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
-            .unwrap();
         s.apply_batch(
-            &[RowOp::Update {
-                table: "tasks".into(),
-                pk: "1".into(),
-                payload: Bytes::copy_from_slice(b"v2"),
-            }],
+            &[(ins("tasks", "1", b"v1"), 10)],
+            Lsn::new(10),
+            &empty_snap(),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[(
+                RowOp::Update {
+                    table: "tasks".into(),
+                    pk: "1".into(),
+                    payload: Bytes::copy_from_slice(b"v2"),
+                },
+                20,
+            )],
             Lsn::new(20),
+            &empty_snap(),
         )
         .unwrap();
 
@@ -272,14 +323,22 @@ mod tests {
     #[test]
     fn delete_removes_row() {
         let mut s = InMemoryStorage::new();
-        s.apply_batch(&[ins("tasks", "1", b"x")], Lsn::new(10))
-            .unwrap();
         s.apply_batch(
-            &[RowOp::Delete {
-                table: "tasks".into(),
-                pk: "1".into(),
-            }],
+            &[(ins("tasks", "1", b"x"), 10)],
+            Lsn::new(10),
+            &empty_snap(),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[(
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "1".into(),
+                },
+                20,
+            )],
             Lsn::new(20),
+            &empty_snap(),
         )
         .unwrap();
 
@@ -291,11 +350,19 @@ mod tests {
     #[test]
     fn checkpoint_is_monotonic_lower_lsn_does_not_regress() {
         let mut s = InMemoryStorage::new();
-        s.apply_batch(&[ins("tasks", "1", b"x")], Lsn::new(100))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"x"), 100)],
+            Lsn::new(100),
+            &empty_snap(),
+        )
+        .unwrap();
         // A late-arriving batch with a stale LSN must NOT drag the checkpoint back.
-        s.apply_batch(&[ins("tasks", "2", b"y")], Lsn::new(50))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "2", b"y"), 50)],
+            Lsn::new(50),
+            &empty_snap(),
+        )
+        .unwrap();
 
         assert_eq!(
             s.checkpoint().unwrap(),
@@ -311,7 +378,7 @@ mod tests {
         // A transaction boundary (commit) with no row ops should still move the
         // checkpoint — the client acks the commit LSN even if it carried no rows.
         let mut s = InMemoryStorage::new();
-        s.apply_batch(&[], Lsn::new(42)).unwrap();
+        s.apply_batch(&[], Lsn::new(42), &empty_snap()).unwrap();
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(42));
         assert_eq!(s.row_count(), 0);
     }
@@ -322,11 +389,15 @@ mod tests {
         // not error and must not change row count.
         let mut s = InMemoryStorage::new();
         s.apply_batch(
-            &[RowOp::Delete {
-                table: "tasks".into(),
-                pk: "never-existed".into(),
-            }],
+            &[(
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "never-existed".into(),
+                },
+                5,
+            )],
             Lsn::new(5),
+            &empty_snap(),
         )
         .unwrap();
         assert_eq!(s.row_count(), 0);
@@ -341,11 +412,11 @@ mod tests {
         let mut s = InMemoryStorage::new();
         // Insert out of pk order — the accessor must still hand back sorted.
         let ops = [
-            ins("tasks", "2", b"bob"),
-            ins("tasks", "1", b"alice"),
-            ins("users", "9", b"carol"), // different table — must be excluded
+            (ins("tasks", "2", b"bob"), 10),
+            (ins("tasks", "1", b"alice"), 10),
+            (ins("users", "9", b"carol"), 10), // different table — must be excluded
         ];
-        s.apply_batch(&ops, Lsn::new(10)).unwrap();
+        s.apply_batch(&ops, Lsn::new(10), &empty_snap()).unwrap();
 
         let rows = s.rows_for("tasks");
         assert_eq!(
@@ -368,16 +439,24 @@ mod tests {
         // state, not its history.
         let mut s = InMemoryStorage::new();
         s.apply_batch(
-            &[ins("tasks", "1", b"keep"), ins("tasks", "2", b"drop")],
+            &[
+                (ins("tasks", "1", b"keep"), 10),
+                (ins("tasks", "2", b"drop"), 10),
+            ],
             Lsn::new(10),
+            &empty_snap(),
         )
         .unwrap();
         s.apply_batch(
-            &[RowOp::Delete {
-                table: "tasks".into(),
-                pk: "2".into(),
-            }],
+            &[(
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "2".into(),
+                },
+                20,
+            )],
             Lsn::new(20),
+            &empty_snap(),
         )
         .unwrap();
 
@@ -390,19 +469,83 @@ mod tests {
         // An update overwrites the payload by pk; the enumeration must show the
         // latest bytes, not the original insert.
         let mut s = InMemoryStorage::new();
-        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
-            .unwrap();
         s.apply_batch(
-            &[RowOp::Update {
-                table: "tasks".into(),
-                pk: "1".into(),
-                payload: Bytes::copy_from_slice(b"v2"),
-            }],
+            &[(ins("tasks", "1", b"v1"), 10)],
+            Lsn::new(10),
+            &empty_snap(),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[(
+                RowOp::Update {
+                    table: "tasks".into(),
+                    pk: "1".into(),
+                    payload: Bytes::copy_from_slice(b"v2"),
+                },
+                20,
+            )],
             Lsn::new(20),
+            &empty_snap(),
         )
         .unwrap();
 
         let rows = s.rows_for("tasks");
         assert_eq!(rows, vec![("1".to_string(), b"v2".to_vec())]);
+    }
+
+    #[test]
+    fn stale_delete_is_gated_out_and_row_survives() {
+        // ADR-0025 slice 4a core correctness: out-of-order delivery must not
+        // corrupt state. Apply a live INSERT@160 then a replayed DELETE@140 on
+        // the same pk — the delete is stale (lsn < applied_lsn) and MUST be
+        // skipped, leaving the row at its newer value.
+        let mut s = InMemoryStorage::new();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"new"), 160)],
+            Lsn::new(160),
+            &empty_snap(),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[(
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "1".into(),
+                },
+                140,
+            )],
+            Lsn::new(160),
+            &empty_snap(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.payload("tasks", "1"),
+            Some(b"new" as &[u8]),
+            "stale delete gated out — newer row survives"
+        );
+        assert_eq!(s.row_count(), 1);
+    }
+
+    #[test]
+    fn snapshot_table_overwrites_despite_lower_lsn() {
+        // ADR-0025 slice 4a design D: a table in snapshot_tables applies
+        // UNCONDITIONALLY, so a synthetic-LSN snapshot row (lsn below the
+        // persisted real lsn) still clobbers the stored row.
+        let mut s = InMemoryStorage::new();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"real"), 9_000)],
+            Lsn::new(9_000),
+            &empty_snap(),
+        )
+        .unwrap();
+        let snap = HashSet::from(["tasks".to_string()]);
+        // Synthetic snapshot row at lsn=5 (<< 9_000) — unconditional under D.
+        s.apply_batch(&[(ins("tasks", "1", b"snap"), 5)], Lsn::new(9_000), &snap)
+            .unwrap();
+        assert_eq!(
+            s.payload("tasks", "1"),
+            Some(b"snap" as &[u8]),
+            "snapshot row applies unconditionally despite lower lsn"
+        );
     }
 }

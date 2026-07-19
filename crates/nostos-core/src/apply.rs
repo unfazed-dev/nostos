@@ -298,12 +298,23 @@ impl<S: Storage> ApplyEngine<S> {
         let count = self.pending.len();
         let checkpoint = self.high_water;
 
-        // Materialize the RowOps and apply atomically. On error the storage
-        // contract guarantees nothing committed — leave pending intact so a
-        // retry re-attempts the same batch.
-        let ops: Vec<RowOp> = self.pending.drain(..).map(Frame::into_row_op).collect();
-        match self.storage.apply_batch(&ops, checkpoint) {
+        // ADR-0025 slice 4a: sort by LSN so the storage's per-row `>=` gate sees
+        // monotonic input across a mixed live+replay batch, then pair each op
+        // with its source LSN for per-row gating. `snapshot_tables` (design D)
+        // = tables with an open snapshot-reconcile window → apply unconditionally
+        // (synthetic-LSN snapshot rows must clobber stored rows).
+        self.pending.sort_by_key(|f| f.lsn);
+        let ops: Vec<(RowOp, u64)> = self
+            .pending
+            .iter()
+            .map(|f| (f.clone().into_row_op(), f.lsn))
+            .collect();
+        let snapshot_tables: HashSet<String> = self.snapshot_orphans.keys().cloned().collect();
+        // Built `ops` from iter() (not drain) → on error `pending` is intact for
+        // retry; no Frame-rebuild needed. The sort is idempotent on re-flush.
+        match self.storage.apply_batch(&ops, checkpoint, &snapshot_tables) {
             Ok(()) => {
+                self.pending.clear();
                 self.open_txn = None;
                 Ok(Some(ApplyOutcome {
                     checkpoint,
@@ -311,27 +322,7 @@ impl<S: Storage> ApplyEngine<S> {
                 }))
             }
             // Surface the backend error verbatim; pending is preserved for retry.
-            Err(StorageError::Backend(msg)) => {
-                // Re-buffer the ops we drained so a retry sees the same batch.
-                // (We lost the original Frame metadata converting to RowOp, but
-                // the ops are what matter for re-apply — idempotent by pk.)
-                self.pending = ops
-                    .into_iter()
-                    .map(|op| Frame {
-                        lsn: checkpoint.raw(),
-                        op: op.operation(),
-                        table: op.table().to_owned(),
-                        pk: op.pk().to_owned(),
-                        payload: if op.has_payload() {
-                            Some(op.payload_bytes().to_vec())
-                        } else {
-                            None
-                        },
-                        txn_id: None,
-                    })
-                    .collect();
-                Err(StorageError::Backend(msg))
-            }
+            Err(StorageError::Backend(msg)) => Err(StorageError::Backend(msg)),
         }
     }
 }
@@ -483,12 +474,16 @@ mod tests {
         let mut storage = InMemoryStorage::new();
         storage
             .apply_batch(
-                &[RowOp::Insert {
-                    table: "tasks".into(),
-                    pk: "1".into(),
-                    payload: Bytes::from_static(b"x"),
-                }],
+                &[(
+                    RowOp::Insert {
+                        table: "tasks".into(),
+                        pk: "1".into(),
+                        payload: Bytes::from_static(b"x"),
+                    },
+                    500,
+                )],
                 Lsn::new(500),
+                &HashSet::new(),
             )
             .unwrap();
 
@@ -518,12 +513,16 @@ mod tests {
         let mut replay = InMemoryStorage::new();
         replay
             .apply_batch(
-                &[RowOp::Insert {
-                    table: "tasks".into(),
-                    pk: "1".into(),
-                    payload: b"payload-1".to_vec().into(),
-                }],
+                &[(
+                    RowOp::Insert {
+                        table: "tasks".into(),
+                        pk: "1".into(),
+                        payload: b"payload-1".to_vec().into(),
+                    },
+                    50,
+                )],
                 Lsn::new(50),
+                &HashSet::new(),
             )
             .unwrap();
         let mut engine2 = ApplyEngine::with_max_batch(replay, 100);
@@ -591,12 +590,16 @@ mod tests {
         let mut storage = InMemoryStorage::new();
         storage
             .apply_batch(
-                &[RowOp::Insert {
-                    table: "T".into(),
-                    pk: "A".into(),
-                    payload: Bytes::from_static(b"old"),
-                }],
+                &[(
+                    RowOp::Insert {
+                        table: "T".into(),
+                        pk: "A".into(),
+                        payload: Bytes::from_static(b"old"),
+                    },
+                    1,
+                )],
                 Lsn::new(1),
+                &HashSet::new(),
             )
             .unwrap();
 
@@ -640,18 +643,25 @@ mod tests {
         storage
             .apply_batch(
                 &[
-                    RowOp::Insert {
-                        table: "T".into(),
-                        pk: "A".into(),
-                        payload: Bytes::from_static(b"a"),
-                    },
-                    RowOp::Insert {
-                        table: "T".into(),
-                        pk: "B".into(),
-                        payload: Bytes::from_static(b"b"),
-                    },
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "A".into(),
+                            payload: Bytes::from_static(b"a"),
+                        },
+                        1,
+                    ),
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "B".into(),
+                            payload: Bytes::from_static(b"b"),
+                        },
+                        1,
+                    ),
                 ],
                 Lsn::new(1),
+                &HashSet::new(),
             )
             .unwrap();
 
@@ -691,18 +701,25 @@ mod tests {
         storage
             .apply_batch(
                 &[
-                    RowOp::Insert {
-                        table: "T".into(),
-                        pk: "A".into(),
-                        payload: Bytes::from_static(b"a-old"),
-                    },
-                    RowOp::Insert {
-                        table: "T".into(),
-                        pk: "B".into(),
-                        payload: Bytes::from_static(b"b"),
-                    },
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "A".into(),
+                            payload: Bytes::from_static(b"a-old"),
+                        },
+                        1,
+                    ),
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "B".into(),
+                            payload: Bytes::from_static(b"b"),
+                        },
+                        1,
+                    ),
                 ],
                 Lsn::new(1),
+                &HashSet::new(),
             )
             .unwrap();
 
@@ -741,12 +758,16 @@ mod tests {
         let mut storage = InMemoryStorage::new();
         storage
             .apply_batch(
-                &[RowOp::Insert {
-                    table: "T".into(),
-                    pk: "A".into(),
-                    payload: Bytes::from_static(b"a"),
-                }],
+                &[(
+                    RowOp::Insert {
+                        table: "T".into(),
+                        pk: "A".into(),
+                        payload: Bytes::from_static(b"a"),
+                    },
+                    1,
+                )],
                 Lsn::new(1),
+                &HashSet::new(),
             )
             .unwrap();
         let mut engine = ApplyEngine::new(storage);
@@ -766,12 +787,16 @@ mod tests {
         // A is in the store (instant-local optimistic render)...
         storage
             .apply_batch(
-                &[RowOp::Insert {
-                    table: "T".into(),
-                    pk: "A".into(),
-                    payload: Bytes::from_static(b"a-local"),
-                }],
+                &[(
+                    RowOp::Insert {
+                        table: "T".into(),
+                        pk: "A".into(),
+                        payload: Bytes::from_static(b"a-local"),
+                    },
+                    1,
+                )],
                 Lsn::new(1),
+                &HashSet::new(),
             )
             .unwrap();
         // ...AND A is pending in the outbox (server has not echoed it yet).

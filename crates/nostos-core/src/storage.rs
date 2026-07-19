@@ -20,6 +20,8 @@
 //! the stored bytes are durable and resumable but not SQL-queryable. That is an
 //! honest scoping: the wire delivers opaque bytes today, so storage mirrors it.
 
+use std::collections::HashSet;
+
 use nostos_domain::{Lsn, RowOp};
 
 /// An error applying a batch. Backend-specific failure modes (SQLite busy, disk
@@ -70,7 +72,27 @@ pub trait Storage {
     /// **Idempotency:** re-applying the same `RowOp` (same table + pk) is a
     /// no-op-equivalent upsert — last-writer-wins by WAL order (ADR-0014 tier
     /// (a)). This is what makes reconnect replay safe.
-    fn apply_batch(&mut self, ops: &[RowOp], checkpoint: Lsn) -> crate::Result<()>;
+    ///
+    /// **Per-row LSN gating (ADR-0025 slice 4a):** each entry in `ops` carries
+    /// its source LSN. An upsert applies only if `lsn >= row.applied_lsn` (a
+    /// stale replay/live op must not overwrite a newer row); a delete applies
+    /// only if `row.applied_lsn <= lsn` (a stale delete must not drop a newer
+    /// row). This is what makes concurrent op-log replay + live fan-out safe
+    /// when they interleave out of order on the same pk.
+    ///
+    /// **Snapshot windows (design D):** `snapshot_tables` names tables whose
+    /// snapshot-reconcile window is open (a `snapshot_begin{T}` was seen without
+    /// its matching `end`). Ops on such a table apply UNCONDITIONALLY — the
+    /// snapshot is authoritative current-state whose synthetic-LSN rows must
+    /// clobber stored rows regardless of the persisted `applied_lsn` — and still
+    /// stamp `applied_lsn = lsn`. Synthetic vs real LSNs never mix: snapshot
+    /// phase is unconditional; live/replay phase is always `>=`-gated.
+    fn apply_batch(
+        &mut self,
+        ops: &[(RowOp, u64)],
+        checkpoint: Lsn,
+        snapshot_tables: &HashSet<String>,
+    ) -> crate::Result<()>;
 
     /// Enumerate every primary key the client currently holds for `table`.
     ///
