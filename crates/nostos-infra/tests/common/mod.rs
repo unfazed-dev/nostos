@@ -129,6 +129,36 @@ pub fn subscribe_frame_with(
     format!("{{\"type\":\"subscribe\",\"table\":\"{table}\",\"filters\":{filters_json}{resume}}}")
 }
 
+/// A subscribe frame with optional resume_lsn AND epoch (ADR-0025 slice 4b —
+/// the client's last-seen server slot epoch; `None` ⇒ server reads client_epoch
+/// as 0 ⇒ epoch-mismatch ⇒ full snapshot). Used by the op-log replay e2e
+/// (slice 6), which drives the protocol with raw frames + an explicit epoch.
+pub fn subscribe_frame_with_epoch(
+    table: &str,
+    filters: &[(&str, &str)],
+    resume_lsn: Option<u64>,
+    epoch: Option<u64>,
+) -> String {
+    let filters_json = if filters.is_empty() {
+        String::from("[]")
+    } else {
+        let items: Vec<String> = filters
+            .iter()
+            .map(|(c, v)| format!("{{\"column\":\"{c}\",\"value\":\"{v}\"}}"))
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+    let resume = match resume_lsn {
+        Some(l) => format!(",\"resume_lsn\":{l}"),
+        None => String::new(),
+    };
+    let epoch = match epoch {
+        Some(e) => format!(",\"epoch\":{e}"),
+        None => String::new(),
+    };
+    format!("{{\"type\":\"subscribe\",\"table\":\"{table}\",\"filters\":{filters_json}{resume}{epoch}}}")
+}
+
 /// An ACK frame — the client confirms it has applied through `lsn`.
 pub fn ack_frame(lsn: u64) -> String {
     format!("{{\"type\":\"ack\",\"lsn\":{lsn}}}")
