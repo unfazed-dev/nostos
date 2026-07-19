@@ -41,8 +41,8 @@ use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, Session
 
 use crate::router::TokioEventSink;
 use crate::wire::{
-    decode_client_message, encode_event, encode_events, encode_snapshot_boundary,
-    encode_write_result, ClientMessage,
+    decode_client_message, encode_event, encode_events, encode_resume_info,
+    encode_snapshot_boundary, encode_write_result, ClientMessage,
 };
 
 /// Default per-session bounded-buffer depth. Slow clients that fall this far
@@ -313,6 +313,20 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
     let (server_frames_tx, mut server_frames_rx) =
         tokio::sync::mpsc::channel::<Vec<u8>>(DEFAULT_SESSION_BUFFER);
 
+    // ADR-0025 F2: advertise the server's current slot epoch ONCE at subscribe
+    // (before snapshot/replay frames) on BOTH paths, so the client can persist
+    // + resend it on reconnect (the resume gate compares client vs server
+    // epoch). Read fresh here — register_subscribe reads the same value below
+    // for the gate, so the client persists exactly the epoch its resume will be
+    // judged against.
+    let server_epoch = state
+        .metrics
+        .slot_epoch
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let _ = server_frames_tx
+        .send(encode_resume_info(server_epoch))
+        .await;
+
     // 5. Register the FIRST table. A where_sql rejection or the global device
     //    cap is FATAL here (close the socket with a reason before any event
     //    flows, same as the single-table path); subsequent rejects are
@@ -322,10 +336,7 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
         &subs,
         &manager,
         snapshotter.as_ref(),
-        state
-            .metrics
-            .slot_epoch
-            .load(std::sync::atomic::Ordering::Relaxed),
+        server_epoch,
         state.oplog_reader.as_ref(),
         &sink_concrete,
         &principal,

@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS cairn_outbox (\
 /// The single meta key holding the last-applied LSN (`u64` decimal).
 const CHECKPOINT_KEY: &str = "checkpoint";
 
+/// The meta key holding the last-seen server slot epoch (ADR-0025 reconnect-
+/// resume gate). Stored as a `u64` decimal alongside the checkpoint.
+const EPOCH_KEY: &str = "epoch";
+
 /// A synced table's schema as the client sees it — the minimal projection of
 /// the server's `SchemaDescriptor` (nostos-application) that the view layer
 /// needs. Defined here (not reusing `SchemaDescriptor`) because nostos-client
@@ -468,6 +472,47 @@ impl Storage for SqliteStorage {
             StorageError::Backend(format!("corrupt checkpoint value {raw:?}: {e}"))
         })?;
         Ok(Lsn::new(raw))
+    }
+
+    fn epoch(&self) -> nostos_core::Result<u64> {
+        let conn = self.conn.lock().expect("epoch: storage mutex poisoned");
+        // No row yet (fresh DB, or never received a resume_info) → epoch 0
+        // (client sends epoch: None → server treats as mismatch → snapshot).
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM cairn_meta WHERE key = ?1",
+                rusqlite::params![EPOCH_KEY],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(rusqlite_err)?;
+        match raw {
+            None => Ok(0),
+            Some(s) => s.parse().map_err(|e: std::num::ParseIntError| {
+                StorageError::Backend(format!("corrupt epoch value {s:?}: {e}"))
+            }),
+        }
+    }
+
+    fn save_epoch(&self, epoch: u64) -> nostos_core::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("save_epoch: storage mutex poisoned");
+        // INSERT OR REPLACE: the epoch row may not exist on the first write
+        // (unlike checkpoint, which the schema seeds). Overwrite is correct —
+        // epoch is the server's latest advertised value, not monotonic from
+        // the client's view (the server may bump it on slot recreate).
+        conn.execute(
+            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![EPOCH_KEY, epoch.to_string()],
+        )
+        .map_err(rusqlite_err)?;
+        Ok(())
     }
 
     fn apply_batch(
@@ -1222,6 +1267,23 @@ mod tests {
     }
 
     // ---- DURABILITY: the property that distinguishes this from InMemoryStorage ----
+
+    #[test]
+    fn epoch_save_load_roundtrips_and_defaults_to_zero() {
+        // ADR-0025 F2: the client persists the server's advertised slot epoch so
+        // the reconnect-resume gate can choose replay over a full snapshot.
+        let s = SqliteStorage::open_in_memory().unwrap();
+        // Fresh DB: no epoch row → 0 → Subscribe sends epoch: None (snapshot).
+        assert_eq!(s.epoch().unwrap(), 0);
+        s.save_epoch(7).unwrap();
+        assert_eq!(s.epoch().unwrap(), 7);
+        // INSERT OR REPLACE: the server's latest epoch wins (it may bump on a
+        // slot recreate); epoch is NOT monotonic from the client's view.
+        s.save_epoch(9).unwrap();
+        assert_eq!(s.epoch().unwrap(), 9);
+        // Epoch is independent of the checkpoint row.
+        assert_eq!(s.checkpoint().unwrap(), Lsn::ZERO);
+    }
 
     #[test]
     fn checkpoint_survives_drop_and_reopen_on_disk() {

@@ -360,6 +360,39 @@ pub fn decode_control_frame(data: &[u8]) -> Option<(String, bool)> {
     Some((table, begin))
 }
 
+/// Encode a `resume_info` control frame advertising the server's current slot
+/// epoch (ADR-0025 reconnect-resume gate). Emitted once at subscribe on BOTH the
+/// snapshot + replay paths so the client can persist + resend its last-seen
+/// epoch on reconnect. Beside [`encode_snapshot_boundary`] / write-acks — its
+/// own wire shape, never batched with replication events.
+#[must_use]
+pub fn encode_resume_info(epoch: u64) -> Vec<u8> {
+    // u64 → decimal; no free-form fields → no escaping needed.
+    let mut out = String::from("{\"type\":\"resume_info\",\"epoch\":");
+    out.push_str(&epoch.to_string());
+    out.push('}');
+    out.into_bytes()
+}
+
+/// Decode a `resume_info` control frame. Returns `Some(epoch)` only when the
+/// payload is a single JSON object with `"type":"resume_info"` and a numeric
+/// `epoch`; `None` for everything else (arrays, row frames, snapshot
+/// boundaries, malformed bytes). The client pump calls this BEFORE
+/// [`decode_frames`] so it never enters the row-apply path.
+#[must_use]
+pub fn decode_resume_info(data: &[u8]) -> Option<u64> {
+    let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
+    if first != Some(b'{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+    if v.get("type")?.as_str()? != "resume_info" {
+        return None;
+    }
+    let epoch = v.get("epoch")?.as_u64()?;
+    Some(epoch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +704,38 @@ mod tests {
         let bytes = encode_snapshot_boundary("a\"b", true);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["table"], "a\"b");
+    }
+
+    #[test]
+    fn encode_decode_resume_info_roundtrips() {
+        let bytes = encode_resume_info(42);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "resume_info");
+        assert_eq!(v["epoch"], 42);
+        assert_eq!(decode_resume_info(&bytes), Some(42));
+    }
+
+    #[test]
+    fn decode_resume_info_rejects_non_resume_frames() {
+        // ADR-0025 F2: the client intercept calls this BEFORE the row path, so
+        // it must return None for everything that isn't a resume_info frame.
+        assert_eq!(decode_resume_info(b""), None);
+        assert_eq!(decode_resume_info(b"[]"), None);
+        assert_eq!(decode_resume_info(b"{}"), None);
+        assert_eq!(
+            decode_resume_info(&encode_snapshot_boundary("tasks", true)),
+            None
+        );
+        assert_eq!(
+            decode_resume_info(br#"{"type":"resume_info"}"#),
+            None,
+            "no epoch"
+        );
+        assert_eq!(
+            decode_resume_info(br#"{"type":"resume_info","epoch":"no"}"#),
+            None,
+            "non-numeric epoch"
+        );
     }
 
     #[test]

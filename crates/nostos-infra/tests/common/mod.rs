@@ -214,11 +214,24 @@ pub async fn subscribe_and_collect_at(
             tokio::time::timeout(Duration::from_millis(200), ws.next()).await
         {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                got.push(v);
+                if is_data_frame(&v) {
+                    got.push(v);
+                }
             }
         }
     }
     got
+}
+
+/// True for a frame the test should treat as row data (insert/update/delete or
+/// the control frames a specific test inspects). Filters out `resume_info` — a
+/// pure metadata frame the server emits at subscribe (ADR-0025 F2); collecting
+/// it would shift every `frames[0]` assertion. Mirrors the production client,
+/// which intercepts `resume_info` before the row-apply path. Other control
+/// frames (snapshot boundaries, write_result acks) are NOT filtered here —
+/// specific tests inspect them inline.
+pub fn is_data_frame(v: &serde_json::Value) -> bool {
+    v.get("type").and_then(|t| t.as_str()) != Some("resume_info")
 }
 
 /// Decode the server's hex-encoded wire payload back to bytes, for assertions.

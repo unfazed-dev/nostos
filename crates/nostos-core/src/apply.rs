@@ -170,6 +170,16 @@ impl<S: Storage> ApplyEngine<S> {
         self.storage.checkpoint()
     }
 
+    /// The durable last-seen server slot epoch (ADR-0025 reconnect-resume gate).
+    pub fn epoch(&self) -> crate::Result<u64> {
+        self.storage.epoch()
+    }
+
+    /// Persist the server's current slot epoch (delegates to storage).
+    pub fn save_epoch(&self, epoch: u64) -> crate::Result<()> {
+        self.storage.save_epoch(epoch)
+    }
+
     /// Is there a buffered-but-unflushed batch right now? `true` between a
     /// frame that got admitted (buffered) and the next commit boundary /
     /// explicit [`Self::flush`].

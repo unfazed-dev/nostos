@@ -57,6 +57,24 @@ pub trait Storage {
     /// Called once per (re)connect to seed the `Subscribe` frame.
     fn checkpoint(&self) -> crate::Result<Lsn>;
 
+    /// Read the durable last-seen server slot epoch (ADR-0025 reconnect-resume
+    /// gate). On a fresh database this is `0` — the client sends `epoch: None`
+    /// and the server treats it as a mismatch (full snapshot). Updated from the
+    /// server's `resume_info` frame.
+    ///
+    /// Default `Ok(0)` — backends that don't persist epoch behave as a fresh
+    /// client (snapshot on every reconnect) until overridden.
+    fn epoch(&self) -> crate::Result<u64> {
+        Ok(0)
+    }
+
+    /// Persist the server's current slot epoch. Called whenever the server
+    /// advertises a new epoch via `resume_info`. Default no-op — backends that
+    /// don't persist epoch simply won't resume-by-replay (snapshot fallback).
+    fn save_epoch(&self, _epoch: u64) -> crate::Result<()> {
+        Ok(())
+    }
+
     /// Atomically apply a batch of row operations and advance the checkpoint.
     ///
     /// **Atomicity contract:** every `op` in `ops` AND the checkpoint advance to

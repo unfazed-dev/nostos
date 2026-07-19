@@ -211,7 +211,9 @@ async fn subscribe_with_filter(
             tokio::time::timeout(Duration::from_millis(200), ws.next()).await
         {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                got.push(v);
+                if common::is_data_frame(&v) {
+                    got.push(v);
+                }
             }
         }
     }
@@ -333,7 +335,9 @@ async fn subscribe_with_where_sql_token(
             tokio::time::timeout(Duration::from_millis(200), ws.next()).await
         {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                got.push(v);
+                if common::is_data_frame(&v) {
+                    got.push(v);
+                }
             }
         }
     }
