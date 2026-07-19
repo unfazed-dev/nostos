@@ -3,9 +3,9 @@
 // This is the 2026 local-first best practice (confirmed via research:
 // PowerSync, LiveStore, Electric): a synced table IS the realtime stream. No
 // separate WebSocket. Messages flow through nostos replication like any other
-// row; the chat view watches the table reactively via watchMapped, and sending
-// a message writes to the local outbox → it round-trips back through the watch
-// once the server applies it.
+// row; the chat view watches the table reactively via db.collection<Message>,
+// and sending a message writes to the local outbox → it round-trips back
+// through the watch once the server applies it.
 //
 // UI: a thread list (provider↔client pairs, derived client-side from the
 // messages stream). Tapping a thread opens the message bubbles view. A send
@@ -16,6 +16,7 @@
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter/material.dart';
 
+import '../../nostos.g.dart' as gen;
 import '../../models.dart';
 import '../../widgets/connection_badge.dart' show EmptyState, shortId;
 
@@ -30,6 +31,12 @@ class _ChatViewState extends State<ChatView> {
   late final _messagesColl = widget.db.collection<Message>(
       table: 'messages', fromRow: Message.fromRow);
   late final Stream<List<Message>> _messages = _messagesColl.watch();
+  // Typed write image (ADR-0024 Option C). Read collection stays over the
+  // presentation Message (timeLabel/isFromProvider getters).
+  late final _messagesWrite = widget.db.collection<gen.Message>(
+      table: 'messages',
+      fromRow: gen.Message.fromRow,
+      toRow: (m) => m.toPayload());
   late final _providersColl = widget.db.collection<Provider>(
       table: 'providers', fromRow: Provider.fromRow);
   late final Stream<List<Provider>> _providers = _providersColl.watch();
@@ -195,15 +202,15 @@ class _ChatViewState extends State<ChatView> {
 
   Future<void> _send(
       String providerId, String clientId, String body, bool asProvider) async {
-    await _messagesColl.upsertRow({
-      'id': uuidV4(),
-      'provider_id': providerId,
-      'client_id': clientId,
-      'sender_type': asProvider ? 'provider' : 'client',
-      'sender_id': asProvider ? providerId : clientId,
-      'body': body,
-      'created_at': DateTime.now().toUtc().toIso8601String(),
-    });
+    await _messagesWrite.upsert(gen.Message(
+      id: uuidV4(),
+      providerId: providerId,
+      clientId: clientId,
+      senderType: asProvider ? 'provider' : 'client',
+      senderId: asProvider ? providerId : clientId,
+      body: body,
+      createdAt: DateTime.now().toUtc().toIso8601String(),
+    ));
   }
 }
 

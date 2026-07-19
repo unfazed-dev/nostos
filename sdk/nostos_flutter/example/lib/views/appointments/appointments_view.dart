@@ -8,6 +8,7 @@
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter/material.dart';
 
+import '../../nostos.g.dart' as gen;
 import '../../models.dart';
 import '../../services/billing_service.dart';
 import '../../widgets/connection_badge.dart'
@@ -24,8 +25,17 @@ class _AppointmentsViewState extends State<AppointmentsView> {
   late final _appts = widget.db.collection<Appointment>(
       table: 'appointments', fromRow: Appointment.fromRow);
   late final Stream<List<Appointment>> _rows = _appts.watch(orderBy: 'starts_at');
-  late final _invoices = widget.db.collection<Invoice>(
-      table: 'invoices', fromRow: Invoice.fromRow);
+  // Typed write images (ADR-0024 Option C). _appts stays over the presentation
+  // Appointment (watch + patch); duration_min is int? in codegen (matches the
+  // dialog's parsed int). rate_cents/hours_min on the invoice are String? (TEXT).
+  late final _apptsWrite = widget.db.collection<gen.Appointment>(
+      table: 'appointments',
+      fromRow: gen.Appointment.fromRow,
+      toRow: (a) => a.toPayload());
+  late final _invoicesWrite = widget.db.collection<gen.Invoice>(
+      table: 'invoices',
+      fromRow: gen.Invoice.fromRow,
+      toRow: (i) => i.toPayload());
 
   Future<void> _add() async {
     final form = await showDialog<Map<String, dynamic>>(
@@ -36,13 +46,33 @@ class _AppointmentsViewState extends State<AppointmentsView> {
     final appointmentId = uuidV4();
     final appointment =
         Map<String, dynamic>.from(form['appointment'] as Map);
-    appointment['id'] = appointmentId;
-    await _appts.upsertRow(appointment);
+    await _apptsWrite.upsert(gen.Appointment(
+      id: appointmentId,
+      providerId: appointment['provider_id'] as String?,
+      clientId: appointment['client_id'] as String?,
+      startsAt: appointment['starts_at'] as String?,
+      durationMin: appointment['duration_min'] as int?,
+      status: appointment['status'] as String?,
+      createdAt: appointment['created_at'] as String?,
+    ));
     // Auto-generate invoice if requested — stamp the real appointment_id now.
     final invoice = form['invoice'];
     if (invoice is Map<String, dynamic>) {
       invoice['appointment_id'] = appointmentId;
-      await _invoices.upsertRow({...invoice, 'id': uuidV4()});
+      await _invoicesWrite.upsert(gen.Invoice(
+        id: uuidV4(),
+        appointmentId: invoice['appointment_id'] as String?,
+        clientId: invoice['client_id'] as String?,
+        providerId: invoice['provider_id'] as String?,
+        amountCents: invoice['amount_cents'] as int?,
+        lineType: invoice['line_type'] as String?,
+        rateCents: invoice['rate_cents']?.toString(),
+        hoursMin: invoice['hours_min']?.toString(),
+        description: invoice['description'] as String?,
+        status: invoice['status'] as String?,
+        issuedAt: invoice['issued_at'] as String?,
+        createdAt: invoice['created_at'] as String?,
+      ));
     }
   }
 

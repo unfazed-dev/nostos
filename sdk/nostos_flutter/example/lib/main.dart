@@ -3,11 +3,11 @@
 // A production-quality booking application showcasing the nostos Flutter SDK:
 //   - 6 tables on ONE /sync socket: providers, clients, availabilities,
 //     appointments, invoices, messages (D1/ADR-0022 multi-table subscribe).
-//   - Reactive typed watch → watchMapped<T>('SELECT * FROM <table>', fromRow)
-//     per NavigationRail/BottomNav tab. IndexedStack preserves state across
-//     tab switches (the reactive-stream fix).
-//   - Durable offline writes → write(table, op, pk, payload) lands in the local
-//     SQLite outbox + flushes on reconnect (ADR-0013).
+//   - Reactive typed watch → db.collection<T>(table, fromRow).watch() per
+//     NavigationRail/BottomNav tab (ADR-0024 facade over the hot-replay
+//     stream). IndexedStack preserves state across tab switches.
+//   - Durable offline writes → Collection.upsertRow / .patch / .delete land in
+//     the local SQLite outbox + flush on reconnect (ADR-0013 / ADR-0024).
 //   - REAL pause/resume (D2) → disconnect() aborts ONLY the /sync loop; reads,
 //     writes, and the UI keep working offline.
 //   - Auto-calculated billing → invoices compute from provider rates (hourly /

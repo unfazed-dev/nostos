@@ -6,6 +6,7 @@
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter/material.dart';
 
+import '../../nostos.g.dart' as gen;
 import '../../models.dart';
 import '../../widgets/connection_badge.dart' show InitialsAvatar, EmptyState;
 import '../../widgets/form_dialogs.dart';
@@ -21,6 +22,12 @@ class _ClientsViewState extends State<ClientsView> {
   late final _clientsColl = widget.db.collection<Client>(
       table: 'clients', fromRow: Client.fromRow);
   late final Stream<List<Client>> _clients = _clientsColl.watch();
+  // Typed write image (ADR-0024 Option C) — keep the read collection over the
+  // presentation model (UI uses Client.initials etc.), write via gen.Client.
+  late final _clientsWrite = widget.db.collection<gen.Client>(
+      table: 'clients',
+      fromRow: gen.Client.fromRow,
+      toRow: (c) => c.toPayload());
 
   Future<void> _add() async {
     final form = await showFormDialog(
@@ -35,11 +42,14 @@ class _ClientsViewState extends State<ClientsView> {
       saveLabel: 'Create',
     );
     if (form == null || form['name'] == null) return;
-    await _clientsColl.upsertRow({
-      ...form,
-      'id': uuidV4(),
-      'created_at': DateTime.now().toUtc().toIso8601String(),
-    });
+    await _clientsWrite.upsert(gen.Client(
+      id: uuidV4(),
+      name: form['name'],
+      email: form['email'],
+      phone: form['phone'],
+      notes: form['notes'],
+      createdAt: DateTime.now().toUtc().toIso8601String(),
+    ));
   }
 
   @override

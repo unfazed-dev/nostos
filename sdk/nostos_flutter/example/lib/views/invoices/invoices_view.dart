@@ -9,6 +9,7 @@
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter/material.dart';
 
+import '../../nostos.g.dart' as gen;
 import '../../models.dart';
 import '../../services/billing_service.dart';
 import '../../widgets/connection_badge.dart'
@@ -25,6 +26,13 @@ class _InvoicesViewState extends State<InvoicesView> {
   late final _invoices = widget.db.collection<Invoice>(
       table: 'invoices', fromRow: Invoice.fromRow);
   late final Stream<List<Invoice>> _rows = _invoices.watch();
+  // Typed write image (ADR-0024 Option C). BillingService still builds the
+  // payload Map; we project it into gen.Invoice here. Codegen keeps
+  // amount_cents as int? but rate_cents/hours_min as String? (TEXT columns).
+  late final _invoicesWrite = widget.db.collection<gen.Invoice>(
+      table: 'invoices',
+      fromRow: gen.Invoice.fromRow,
+      toRow: (i) => i.toPayload());
 
   Future<void> _add() async {
     final payload = await showDialog<Map<String, dynamic>>(
@@ -32,7 +40,20 @@ class _InvoicesViewState extends State<InvoicesView> {
       builder: (_) => _InvoiceDialog(db: widget.db),
     );
     if (payload == null) return;
-    await _invoices.upsertRow({...payload, 'id': uuidV4()});
+    await _invoicesWrite.upsert(gen.Invoice(
+      id: uuidV4(),
+      appointmentId: payload['appointment_id'] as String?,
+      clientId: payload['client_id'] as String?,
+      providerId: payload['provider_id'] as String?,
+      amountCents: payload['amount_cents'] as int?,
+      lineType: payload['line_type'] as String?,
+      rateCents: payload['rate_cents']?.toString(),
+      hoursMin: payload['hours_min']?.toString(),
+      description: payload['description'] as String?,
+      status: payload['status'] as String?,
+      issuedAt: payload['issued_at'] as String?,
+      createdAt: payload['created_at'] as String?,
+    ));
   }
 
   Future<void> _markPaid(Invoice inv) async {

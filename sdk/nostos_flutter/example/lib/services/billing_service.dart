@@ -81,7 +81,7 @@ class BillingService {
     );
   }
 
-  /// Build the full invoice write payload (for `db.write(table: 'invoices', ...)`),
+  /// Build the full invoice write payload (for `Collection<Invoice>.upsertRow`),
   /// including the rate snapshot fields. The caller supplies the appointment +
   /// client + provider IDs; the billing engine fills in the money + line detail.
   static Map<String, dynamic> buildInvoicePayload({

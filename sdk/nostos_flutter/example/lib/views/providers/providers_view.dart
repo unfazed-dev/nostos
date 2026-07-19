@@ -8,6 +8,7 @@
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter/material.dart';
 
+import '../../nostos.g.dart' as gen;
 import '../../models.dart';
 import '../../widgets/connection_badge.dart' show InitialsAvatar, EmptyState;
 import '../../widgets/form_dialogs.dart';
@@ -23,6 +24,13 @@ class _ProvidersViewState extends State<ProvidersView> {
   late final _providers = widget.db.collection<Provider>(
       table: 'providers', fromRow: Provider.fromRow);
   late final Stream<List<Provider>> _rows = _providers.watch();
+  // Typed write image (ADR-0024 Option C). Read collection stays over the
+  // presentation Provider (initials/rateLabel getters). Codegen keeps rate
+  // fields as String? (TEXT cols) — defaults are '0', not 0.
+  late final _providersWrite = widget.db.collection<gen.Provider>(
+      table: 'providers',
+      fromRow: gen.Provider.fromRow,
+      toRow: (p) => p.toPayload());
 
   Future<void> _add() async {
     final form = await showFormDialog(
@@ -37,15 +45,18 @@ class _ProvidersViewState extends State<ProvidersView> {
       saveLabel: 'Create',
     );
     if (form == null || form['name'] == null) return;
-    await _providers.upsertRow({
-      ...form,
-      'id': uuidV4(),
-      'rate_type': 'hourly',
-      'hourly_rate_cents': 0,
-      'flat_rate_cents': 0,
-      'subscription_rate_cents': 0,
-      'created_at': DateTime.now().toUtc().toIso8601String(),
-    });
+    await _providersWrite.upsert(gen.Provider(
+      id: uuidV4(),
+      name: form['name'],
+      specialty: form['specialty'],
+      email: form['email'],
+      phone: form['phone'],
+      rateType: 'hourly',
+      hourlyRateCents: '0',
+      flatRateCents: '0',
+      subscriptionRateCents: '0',
+      createdAt: DateTime.now().toUtc().toIso8601String(),
+    ));
   }
 
   Future<void> _editRates(Provider p) async {

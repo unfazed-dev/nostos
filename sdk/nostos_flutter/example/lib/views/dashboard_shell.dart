@@ -6,8 +6,6 @@
 // survive tab switches (the IndexedStack + _replayLatest pattern that fixed the
 // "empty lists on tab switch" bug — see nostos.dart:_replayLatest).
 
-import 'dart:async';
-
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter/material.dart';
 
@@ -39,11 +37,15 @@ class DashboardShell extends StatefulWidget {
 
 class _DashboardShellState extends State<DashboardShell> {
   int _selectedIndex = 0;
+  // Reactive source-of-truth for the badge + transition SnackBars is the
+  // ADR-0024 `db.status: ValueListenable<SyncStatus>` (typed value object over
+  // the underlying NostosConnectionState). We addListener on it directly — no
+  // StreamSubscription, no hand-rolled NostosConnectionState bookkeeping.
   String _state = 'disconnected';
   // Seamless-offline UX: no visible queue, no manual pause toggle. The only
   // reconnect feedback is a transient SnackBar (optimistic local-first +
   // background reconciliation — see docs/plans/sync-strategy-analysis-2026-07-19.md).
-  NostosConnectionState? _prevState;
+  SyncStatus? _prevStatus;
   bool _everConnected = false;
   // In-app offline toggle — for testing the seamless-UX path WITHOUT toggling
   // the OS network. Tap drops the WS (badge → offline); writes while paused are
@@ -51,48 +53,55 @@ class _DashboardShellState extends State<DashboardShell> {
   // removed). Tap again resumes; the listener above fires "Back online — data
   // synced". Also doubles as a user-facing "work offline" mode.
   bool _paused = false;
-  StreamSubscription<NostosConnectionState>? _stateSub;
 
   @override
   void initState() {
     super.initState();
-    _stateSub = widget.db.connectionState.listen((s) {
-      if (!mounted) return;
-      final nowConnected = s == NostosConnectionState.connected;
-      final wasConnected = _prevState == NostosConnectionState.connected;
-      setState(() => _state = s.name);
-      // "You're offline": fires on a genuine connected → disconnected drop
-      // (real network loss OR the in-app toggle). Reassures the user their
-      // edits are still being saved locally (optimistic local-first).
-      if (wasConnected && !nowConnected) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("You're offline — changes save locally"),
-            duration: Duration(seconds: 2),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-      // "Back online — data synced" ONLY on a genuine reconnect: we were
-      // connected before, dropped, and just came back. Suppresses first-boot
-      // connect so a fresh app launch doesn't toast.
-      if (nowConnected && !wasConnected && _everConnected) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Back online — data synced'),
-            duration: Duration(seconds: 2),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-      if (nowConnected) _everConnected = true;
-      _prevState = s;
-    });
+    // Seed prevStatus from the current value so the FIRST status tick has a
+    // correct "wasConnected" baseline (matches the old stream's first-tick
+    // behavior where _prevState started null → wasConnected=false).
+    _prevStatus = widget.db.status.value;
+    _state = _prevStatus!.conn.name;
+    widget.db.status.addListener(_onStatus);
+  }
+
+  void _onStatus() {
+    if (!mounted) return;
+    final status = widget.db.status.value;
+    final nowConnected = status.connected;
+    final wasConnected = _prevStatus?.connected ?? false;
+    setState(() => _state = status.conn.name);
+    // "You're offline": fires on a genuine connected → disconnected drop
+    // (real network loss OR the in-app toggle). Reassures the user their
+    // edits are still being saved locally (optimistic local-first).
+    if (wasConnected && !nowConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("You're offline — changes save locally"),
+          duration: Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+    // "Back online — data synced" ONLY on a genuine reconnect: we were
+    // connected before, dropped, and just came back. Suppresses first-boot
+    // connect so a fresh app launch doesn't toast.
+    if (nowConnected && !wasConnected && _everConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Back online — data synced'),
+          duration: Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+    if (nowConnected) _everConnected = true;
+    _prevStatus = status;
   }
 
   @override
   void dispose() {
-    _stateSub?.cancel();
+    widget.db.status.removeListener(_onStatus);
     super.dispose();
   }
 
