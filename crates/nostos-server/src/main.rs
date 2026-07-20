@@ -348,6 +348,15 @@ async fn main() -> anyhow::Result<()> {
     // the payload is opaque bytes, so we return `Any` (table-only matching). For
     // the PgReplicator the payload is a small JSON object {col:val}, so we parse
     // it and return real values — enabling filter predicates like org_id=acme.
+    //
+    // C6 (late-append P1): retain the pg replicator's JoinHandle so we can
+    // abort it BEFORE draining the op-log at shutdown — prevents the silent
+    // late-append-into-final-flush race (ghost row on matching-epoch reconnect;
+    // see oplog.rs `drain_boundary_late_append_during_final_flush_is_lost`).
+    // The fake branch intentionally detaches (`mem::forget`): it's the bench
+    // path, the op-log is pg-only, and FakeReplicator has no producer window.
+    #[cfg(feature = "pg")]
+    let mut repl_handle: Option<tokio::task::JoinHandle<()>> = None;
     match cfg.replicator.as_str() {
         "fake" => {
             let mut repl = FakeReplicator::new(FakeReplicatorConfig::small(u64::MAX));
@@ -400,7 +409,7 @@ async fn main() -> anyhow::Result<()> {
                     let outcome = fanout_drv.run(&mut repl, extract).await;
                     info!(?outcome, "PgReplicator stream ended");
                 });
-                std::mem::forget(drv);
+                repl_handle = Some(drv);
                 info!(
                     slot = %cfg.pg_slot,
                     publication = %cfg.pg_publication,
@@ -515,11 +524,17 @@ async fn main() -> anyhow::Result<()> {
     // The common cause is a fixture/.env that sets NOSTOS_PG_URL but omits
     // NOSTOS_REPLICATOR=pg. Fail loudly at startup instead of degrading silently.
     if cfg.replicator != "pg" && !cfg.pg_url.trim().is_empty() {
-        warn!(
-            replicator = %cfg.replicator,
-            "NOSTOS_PG_URL is set but NOSTOS_REPLICATOR is not 'pg' — \
-             snapshot-on-subscribe is OFF; clients will not receive pre-existing \
-             rows on connect. Set NOSTOS_REPLICATOR=pg to enable it."
+        // C10: BAIL (not warn) — a warn still let the server start degraded,
+        // causing the silent "connected but lists empty" symptom (snapshot-
+        // on-subscribe ADR-0014 stays OFF; clients receive no pre-existing
+        // rows). Failing loudly at startup makes the misconfiguration
+        // undiscoverable-by-accident. See docs/OPERATING.md §1.1(a).
+        anyhow::bail!(
+            "NOSTOS_PG_URL is set but NOSTOS_REPLICATOR={:?} is not 'pg' — \
+             snapshot-on-subscribe (ADR-0014) is OFF, so clients would silently \
+             receive none of the table's pre-existing rows on connect. \
+             Set NOSTOS_REPLICATOR=pg, or unset NOSTOS_PG_URL.",
+            cfg.replicator
         );
     }
 
@@ -597,6 +612,15 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+    // ADR-0026 fix A (C6 late-append P1): stop ingesting new replication
+    // changes BEFORE draining the op-log, so no append can race into the final
+    // flush and be silently lost (ghost row on matching-epoch reconnect). The
+    // detached replicator is the producer; the op-log drain is the consumer —
+    // stop the producer first.
+    #[cfg(feature = "pg")]
+    if let Some(h) = repl_handle.take() {
+        h.abort();
+    }
     // ADR-0025 slice-6 follow-up: drain the op-log writer's in-flight batch so
     // a SIGTERM doesn't drop the last ≤BATCH_MAX entries mid-INSERT (those
     // clients would otherwise fall back to snapshot-reconcile on reconnect).

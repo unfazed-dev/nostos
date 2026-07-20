@@ -290,7 +290,17 @@ mod pg {
     /// the flush task is the sole consumer; reconnect on error). Pool when a
     /// real load shows the single writer is the bottleneck.
     pub struct PgOpLogWriter {
-        tx: mpsc::Sender<OpEntry>,
+        /// Channel authority: `Some(sender)` while live; `None` once
+        /// `shutdown()` has `.take()`n it (fix B, C6). Dropping the only
+        /// sender clone makes the flush_loop's all-senders-dropped
+        /// `rx.recv() => None` arm authoritative — the post-break drain loses
+        /// nothing (None returns only when the buffer is empty), and any
+        /// concurrent `append()` finds the sender gone → rejected loudly via
+        /// `oplog_dropped`, never silently buffered (the matching-epoch
+        /// replay path ADR-0025 F2 skips snapshot so slice-1 reconcile would
+        /// not cover a ghost-row). std::sync::Mutex (not tokio) — append only
+        /// does a non-blocking try_send under the guard.
+        tx: std::sync::Mutex<Option<mpsc::Sender<OpEntry>>>,
         metrics: Option<Arc<Metrics>>,
         /// One-shot shutdown signal: `shutdown()` notifies this + the flush
         /// loop drains its in-flight batch + exits (ADR-0025 slice-6 follow-up).
@@ -331,7 +341,7 @@ mod pg {
                 Arc::clone(&shutdown),
             ));
             Self {
-                tx,
+                tx: std::sync::Mutex::new(Some(tx)),
                 metrics,
                 shutdown,
                 handle: Mutex::new(Some(flush)),
@@ -342,10 +352,20 @@ mod pg {
     #[async_trait]
     impl OpLogWriter for PgOpLogWriter {
         async fn append(&self, event: &ReplicationEvent) {
-            if self.tx.try_send(build_entry(event)).is_err() {
-                // Buffer full → drop newest (mirrors the session sink's
-                // try_send semantics). Affected resume gaps fall back to
-                // snapshot-reconcile (correctness preserved by slice 1).
+            // Lock the std Mutex (no .await inside) + branch on channel
+            // authority. Some(sender) → try_send; None → shutdown() took the
+            // sender → REJECT via the same drop-with-metric path as a full
+            // buffer (fix B, C6). The matching-epoch replay path (ADR-0025 F2)
+            // skips snapshot so a silently-accepted DELETE would ghost-row.
+            let sent = match self.tx.lock().unwrap().as_ref() {
+                Some(s) => s.try_send(build_entry(event)).is_ok(),
+                None => false,
+            };
+            if !sent {
+                // Buffer full OR shutdown-took-the-sender → drop newest
+                // (mirrors the session sink's try_send semantics). Affected
+                // resume gaps fall back to snapshot-reconcile (correctness
+                // preserved by slice 1).
                 if let Some(m) = &self.metrics {
                     m.oplog_dropped.fetch_add(1, Ordering::Relaxed);
                 }
@@ -354,9 +374,21 @@ mod pg {
 
         /// Signal the flush loop to drain + exit, then await its final flush.
         /// Idempotent: a second call finds the handle already taken → no-op.
-        /// Late appends after the drain race + may be lost (acceptable during
-        /// shutdown; slice-1 reconcile covers any gap).
+        ///
+        /// ADR-0026 fix B (C6): DROP the sender first (`.take()` the only Sender clone)
+        /// so the flush_loop's all-senders-dropped `rx.recv() => None` arm
+        /// becomes authoritative — the post-break drain loses nothing (None
+        /// returns only when the buffer is empty). Any concurrent `append()`
+        /// now finds the sender gone → rejected loudly via `oplog_dropped`,
+        /// never silently buffered. The Notify + JoinHandle await still wake
+        /// the loop promptly + confirm the final flush landed.
         async fn shutdown(&self) {
+            // Take the sender FIRST: concurrent append() now finds None →
+            // rejected at the authority layer. The dropped sender makes the
+            // flush_loop's `rx.recv() => None` path fire authoritatively
+            // (buffer empty by definition when None returns) — the existing
+            // post-break drain loses nothing.
+            drop(self.tx.lock().unwrap().take());
             self.shutdown.notify_one();
             if let Some(handle) = self.handle.lock().await.take() {
                 if let Err(e) = handle.await {
@@ -852,6 +884,247 @@ mod pg {
                 done.is_ok(),
                 "shutdown must complete even when PG is unreachable (a live PG isn't required \
                  for the mechanism — slice-1 reconcile covers any flush gap)"
+            );
+        }
+
+        /// ADR-0025 slice-6 RESIDUAL drain-race — POST-CHANNEL-CLOSE sub-case.
+        ///
+        /// Context: `e395dea` shipped `OpLogWriter::shutdown` /
+        /// `PgOpLogWriter::shutdown` — a `Notify` the `flush_loop` `select!`s
+        /// on → drain channel + final flush. That closed the DETACHED-flush
+        /// case (SIGTERM no longer drops the last ≤`BATCH_MAX` in-flight batch;
+        /// see `shutdown_drains_and_completes_when_pg_unreachable` above).
+        ///
+        /// This test pins the POST-shutdown channel state: once `shutdown()`
+        /// returns, the flush task has exited and DROPPED `rx` → the channel
+        /// is CLOSED → any further `try_send` returns `TrySendError::Closed`.
+        /// That is the SAFEST possible outcome: the caller sees a loud error,
+        /// never a silent accept. `oplog.rs:357`'s "Late appends ... may be
+        /// lost" does NOT apply to this sub-case (the append is REJECTED, not
+        /// silently buffered).
+        ///
+        /// Why this matters: the matching-epoch replay path (ADR-0025 F2 —
+        /// `resume_info{epoch}` / `Storage::save_epoch`) SKIPS the snapshot, so
+        /// slice-1 reconcile (`nostos-core/src/apply.rs:597`,
+        /// `snapshot_reconcile_removes_orphans_absent_from_snapshot`, SNAPSHOT-
+        /// only) does not run. A SILENTLY-dropped DELETE on this path leaves a
+        /// ghost row. This test guards the post-close sub-case (safe); the
+        /// DURING-shutdown drain-boundary sub-case is probed by
+        /// `drain_boundary_late_append_during_final_flush_is_lost` below.
+        ///
+        /// Run: `cargo test -p nostos-infra --features pg
+        /// post_shutdown_append_is_rejected_as_closed` (no live PG needed).
+        #[tokio::test]
+        async fn post_shutdown_append_is_rejected_as_closed() {
+            let w = PgOpLogWriter::new("postgresql://127.0.0.1:1/db", None, 8, None);
+
+            // Complete shutdown. The flush_loop's final `rx.try_recv()` drain
+            // returns Empty → loop exits → task ends → `rx` is DROPPED → the
+            // channel transitions to closed. JoinHandle is consumed.
+            let done = tokio::time::timeout(Duration::from_secs(15), w.shutdown()).await;
+            assert!(done.is_ok(), "shutdown must complete");
+
+            // Sanity: the flush task is gone (handle taken → None) — i.e. the
+            // channel's receiver has been dropped.
+            {
+                let guard = w.handle.lock().await;
+                assert!(
+                    guard.is_none(),
+                    "shutdown must consume the JoinHandle (flush task exited)"
+                );
+            }
+
+            // The late DELETE append — the production race's POST-close sub-case.
+            let delete_event = ReplicationEvent::new(
+                Lsn::new(42),
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "row-1".into(),
+                    old_payload: None,
+                },
+            );
+            // fix B (C6): shutdown() `.take()`s the only sender clone. The
+            // Option is None → the late append cannot even reach try_send —
+            // rejected at the authority layer (oplog_dropped bumps via
+            // append()). Under a regression that keeps the sender alive past
+            // shutdown, this Option would be Some(Sender) (with a closed
+            // receiver) and the post-close sub-case re-opens as a ghost-row
+            // vector. (`is_ok()` collapsed in-map so the closure returns
+            // Option<bool>, not the large TrySendError<OpEntry>.)
+            let send_result: Option<bool> =
+                w.tx.lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|s| s.try_send(build_entry(&delete_event)).is_ok());
+
+            // DESIRED + ACTUAL: the sender is GONE (None) because shutdown()
+            // took it. The late append is REJECTED loudly, not silently
+            // buffered. If a future change keeps the sender alive past
+            // shutdown() the map() returns Some(_) and this assertion fires.
+            assert!(
+                send_result.is_none(),
+                "post-shutdown append must be rejected: shutdown() took the \
+                 sender (fix B, C6) → w.tx is None → the late append cannot \
+                 reach try_send. Got Some(_) — the sender is still alive after \
+                 shutdown, which would silently buffer a late DELETE (ghost-row \
+                 risk on a matching-epoch replay, ADR-0025 F2)."
+            );
+        }
+
+        /// ADR-0025 slice-6 drain-race — DRAIN-BOUNDARY sub-case, GUARDED by
+        /// fix B (channel-close-on-shutdown, C6). Load-bearing guard.
+        ///
+        /// PRE-FIX-B probe finding: the `flush_loop`'s post-break path was
+        /// `drain once → final flush once → exit` with NO second drain. A
+        /// `try_send` landing AFTER the drain (during the final flush, or
+        /// after it but before the task dropped `rx`) was buffered with no
+        /// consumer → silently lost on task exit. On a matching-epoch replay
+        /// (ADR-0025 F2 `resume_info{epoch}`) the server SKIPS the snapshot so
+        /// slice-1 reconcile (`nostos-core/src/apply.rs:597`, snapshot-only)
+        /// never ran → a missed DELETE left a ghost row. (The pre-fix probe
+        /// lived here as `drain_boundary_late_append_during_final_flush_is_lost`
+        /// and DEMONSTRATED the race via `late_result.is_ok()`.)
+        ///
+        /// FIX B (this test's guard): `shutdown()` now `.take()`s the only
+        /// sender clone FIRST → the flush_loop's all-senders-dropped
+        /// `rx.recv() => None` arm fires authoritatively (None returns only
+        /// when the buffer is empty → post-break drain loses nothing). Any
+        /// concurrent `append()` finds the sender gone → rejected at the
+        /// authority layer (oplog_dropped bumps), never silently buffered.
+        ///
+        /// Why this test is layered at unit-level with a slow TCP server:
+        /// with ECONNREFUSED + an empty batch the window is ~µs (drain is
+        /// Empty → no final flush → task exits immediately). The slow server
+        /// widens the FINAL flush to a known ~300ms window; we seed an op that
+        /// survives the main flush so the post-break drain picks it up
+        /// (non-empty batch → final flush runs), then inject the DELETE during
+        /// that final flush — exactly the pre-fix race boundary. Under fix B
+        /// the sender is GONE by this point (taken at shutdown start) → the
+        /// late append cannot even reach try_send. No live PG needed.
+        ///
+        /// Run: `cargo test -p nostos-infra --features pg
+        /// drain_boundary_late_append_is_rejected_not_lost -- --nocapture`.
+        ///
+        /// ponytail: the flush_loop's post-break path still lacks a second
+        /// drain — fix B closes the silent-buffer window by dropping the
+        /// sender on shutdown, not by adding a drain. If a future change
+        /// re-introduces a sender-clone that outlives `shutdown()`, this
+        /// assertion flips to Some(_) and the ghost-row vector re-opens.
+        #[tokio::test]
+        async fn drain_boundary_late_append_is_rejected_not_lost() {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
+
+            // Slow "PG" server: accept N connections, read the startup bytes,
+            // sleep 300ms, then close → tokio-postgres' connect() fails after
+            // ~300ms. This widens `flush_one_batch`'s lazy-connect step from
+            // ~µs (ECONNREFUSED) to a known ~300ms window, giving the main
+            // flush AND the post-break final flush a wide, raceable duration.
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let slow_pg = tokio::spawn(async move {
+                for _ in 0..16 {
+                    let Ok((mut s, _)) = listener.accept().await else {
+                        return;
+                    };
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 1024];
+                        let _ = s.read(&mut buf).await;
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let _ = s.shutdown().await;
+                    });
+                }
+            });
+
+            let metrics = Arc::new(Metrics::new());
+            let w = Arc::new(PgOpLogWriter::new(
+                &format!("postgresql://127.0.0.1:{port}/db"),
+                None,
+                8,
+                Some(Arc::clone(&metrics)),
+            ));
+
+            // 1. Seed op1 → flush_loop recv → MAIN flush starts (slow, ~300ms).
+            w.append(&ev(1, "insert")).await;
+            // Let the main flush's lazy-connect begin before we seed more.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            // 2. Seed op2 WHILE the main flush is in progress. op2 sits in the
+            //    channel buffer (flush_loop is busy in flush_one_batch, not
+            //    recving). This guarantees the post-break drain picks up op2 →
+            //    a non-empty batch → the final flush runs (also slow, ~300ms).
+            w.append(&ev(2, "insert")).await;
+
+            // 3. Signal shutdown (the replicator is still "running" — modeled
+            //    here by the fact that we append below after notifying). In
+            //    production nostos-server/main.rs:606 calls `w.shutdown().await`
+            //    WITHOUT first stopping the replicator task (main.rs:351-421),
+            //    so this race IS reachable.
+            let w_for_shutdown = Arc::clone(&w);
+            let shutdown_task = tokio::spawn(async move {
+                w_for_shutdown.shutdown().await;
+            });
+
+            // 4. Wait for the main flush to fail (oplog_flush_failed → 1).
+            //    Then the flush_loop returns to the select! → sees the shutdown
+            //    notify → breaks → drains [op2] → enters the FINAL flush.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while metrics.oplog_flush_failed.load(Ordering::Relaxed) < 1
+                && std::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                metrics.oplog_flush_failed.load(Ordering::Relaxed) >= 1,
+                "main flush must have failed by now (op1 → slow server → close)"
+            );
+            // Let the drain + final-flush-start complete: the flush_loop is now
+            // ~this many ms INTO the final flush (~300ms total).
+            tokio::time::sleep(Duration::from_millis(80)).await;
+
+            // 5. Inject the late DELETE during the final flush. PRE-FIX-B this
+            //    `try_send` succeeded (channel alive, buffer had capacity) and
+            //    the op was silently lost on task exit. FIX-B: shutdown()
+            //    `.take()`d the only sender clone → w.tx is None → the late
+            //    append cannot even reach try_send.
+            let delete_event = ReplicationEvent::new(
+                Lsn::new(42),
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "row-1".into(),
+                    old_payload: None,
+                },
+            );
+            // (`is_ok()` collapsed in-map so the closure returns Option<bool>,
+            // not the large TrySendError<OpEntry>.)
+            let late_result: Option<bool> =
+                w.tx.lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|s| s.try_send(build_entry(&delete_event)).is_ok());
+
+            // 6. Wait for shutdown to complete (final flush + task exit).
+            let done = tokio::time::timeout(Duration::from_secs(15), shutdown_task).await;
+            assert!(done.is_ok(), "shutdown must complete");
+
+            slow_pg.abort();
+
+            // 7. GUARD ASSERTION (fix B, C6). The sender is GONE (None) because
+            //    shutdown() took it before the drain even ran. The late DELETE
+            //    cannot reach try_send → rejected at the authority layer
+            //    (oplog_dropped bumps via append) → no silent-buffer window →
+            //    no ghost row on a matching-epoch replay. If a future change
+            //    re-introduces a sender clone that outlives shutdown(), this
+            //    flips to Some(_) and the ghost-row vector re-opens.
+            assert!(
+                late_result.is_none(),
+                "FIX B GUARD: `w.tx` is None after shutdown() took the sender — \
+                 the late DELETE during the final flush is rejected at the \
+                 authority layer, not silently buffered. Got Some(_) — a sender \
+                 clone outlived shutdown() and the late append reached the \
+                 channel buffer, re-opening the ghost-row vector (ADR-0025 F2: \
+                 matching-epoch replay skips snapshot so slice-1 reconcile at \
+                 apply.rs:597 would not cover the lost DELETE)."
             );
         }
     }
