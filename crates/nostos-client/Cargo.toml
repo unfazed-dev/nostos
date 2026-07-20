@@ -37,9 +37,12 @@ axum = { workspace = true }
 bytes = { workspace = true }
 # pg-only (behind the `pg` feature above) — the e2e_pg_sync harness needs a
 # control-plane SQL client (slot cleanup, direct-row assertions) and typed
-# uuid binding, matching nostos-infra's own e2e_pg_* tests.
+# uuid binding, matching nostos-infra's own e2e_pg_* tests. The tenant-mode
+# reconnect-replay e2e also needs HMAC/SHA2 to mint Supabase-shape JWTs.
 tokio-postgres = { workspace = true }
 uuid = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true
