@@ -419,6 +419,14 @@ pub trait OpLogWriter: Send + Sync {
     /// doc for the contract. `()` return: drop/flush-failure accounting is
     /// internal, surfaced via [`Metrics`] (`oplog_dropped` / `oplog_flush_failed`).
     async fn append(&self, event: &ReplicationEvent);
+
+    /// Graceful shutdown: drain the in-flight batch + any pending channel
+    /// entries, then end the flush task. Call once during server shutdown
+    /// (after the replicator/fan-out stop) so a SIGTERM doesn't drop the last
+    /// ≤BATCH_MAX entries mid-INSERT (ADR-0025 slice-6 follow-up; correctness
+    /// is still covered by slice-1 reconcile if this isn't called). Default
+    /// no-op for backends with nothing to drain.
+    async fn shutdown(&self) {}
 }
 
 /// Reads a table's current rows as a one-shot snapshot, delivered to a

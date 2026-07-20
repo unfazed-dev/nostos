@@ -307,6 +307,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    // Retain a clone of the op-log writer so we can drain it on graceful
+    // shutdown (after axum returns) — the original Arc moves into the
+    // FanOutService below. ADR-0025 slice-6 follow-up.
+    #[cfg(feature = "pg")]
+    let op_log_shutdown = op_log.clone();
 
     // Op-log compactor (ADR-0025 slice 5): bounds cairn_oplog growth via
     // periodic collapse (keep latest op per (table_name, pk) — a trailing
@@ -592,6 +597,15 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+    // ADR-0025 slice-6 follow-up: drain the op-log writer's in-flight batch so
+    // a SIGTERM doesn't drop the last ≤BATCH_MAX entries mid-INSERT (those
+    // clients would otherwise fall back to snapshot-reconcile on reconnect).
+    #[cfg(feature = "pg")]
+    {
+        if let Some(w) = op_log_shutdown {
+            w.shutdown().await;
+        }
+    }
     Ok(())
 }
 

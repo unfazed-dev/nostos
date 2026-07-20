@@ -165,6 +165,8 @@ mod pg {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::mpsc;
+    use tokio::sync::{Mutex, Notify};
+    use tokio::task::JoinHandle;
     use tokio_postgres::NoTls;
 
     /// A persisted op-log READER for reconnect resume (ADR-0025 slice 4b).
@@ -290,6 +292,13 @@ mod pg {
     pub struct PgOpLogWriter {
         tx: mpsc::Sender<OpEntry>,
         metrics: Option<Arc<Metrics>>,
+        /// One-shot shutdown signal: `shutdown()` notifies this + the flush
+        /// loop drains its in-flight batch + exits (ADR-0025 slice-6 follow-up).
+        shutdown: Arc<Notify>,
+        /// The flush task's handle, awaited by `shutdown()` so the caller can
+        /// confirm the final flush landed before the process exits. Taken
+        /// (set to `None`) on shutdown so a second call is a no-op.
+        handle: Mutex<Option<JoinHandle<()>>>,
     }
 
     impl PgOpLogWriter {
@@ -309,18 +318,24 @@ mod pg {
         ) -> Self {
             let (tx, rx) = mpsc::channel::<OpEntry>(buffer.max(1));
             let flush_metrics = metrics.clone();
-            // Detached flush task — spawn + drop the handle (tokio detaches);
-            // self-terminates when all senders drop. Named + dropped (not `_`)
-            // so it satisfies JoinHandle's #[must_use] without tripping
-            // let_underscore_future or underscore-binding.
+            let shutdown = Arc::new(Notify::new());
+            // The flush task owns the receiver + a clone of the shutdown
+            // signal; the JoinHandle is RETAINED (not detached) so `shutdown`
+            // can await the final flush. The task self-terminates if all
+            // senders drop first (no shutdown call).
             let flush = tokio::spawn(flush_loop(
                 pg_url.to_string(),
                 tenant_column,
                 rx,
                 flush_metrics,
+                Arc::clone(&shutdown),
             ));
-            drop(flush);
-            Self { tx, metrics }
+            Self {
+                tx,
+                metrics,
+                shutdown,
+                handle: Mutex::new(Some(flush)),
+            }
         }
     }
 
@@ -333,6 +348,19 @@ mod pg {
                 // snapshot-reconcile (correctness preserved by slice 1).
                 if let Some(m) = &self.metrics {
                     m.oplog_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        /// Signal the flush loop to drain + exit, then await its final flush.
+        /// Idempotent: a second call finds the handle already taken → no-op.
+        /// Late appends after the drain race + may be lost (acceptable during
+        /// shutdown; slice-1 reconcile covers any gap).
+        async fn shutdown(&self) {
+            self.shutdown.notify_one();
+            if let Some(handle) = self.handle.lock().await.take() {
+                if let Err(e) = handle.await {
+                    tracing::warn!(error = %e, "oplog flush task did not join cleanly");
                 }
             }
         }
@@ -485,16 +513,33 @@ mod pg {
     /// The background flush loop: batch up to `BATCH_MAX` available entries,
     /// one multi-row INSERT per batch. Reconnects lazily; on a flush failure
     /// drops the client (reconnect next round), bumps `oplog_flush_failed`,
-    /// and loses the batch (reconcile covers the gap).
+    /// and loses the batch (reconcile covers the gap). Exits on EITHER all
+    /// senders dropping (natural) OR the `shutdown` signal (graceful server
+    /// exit) — in both cases any remaining batch is flushed one last time
+    /// before the task ends (ADR-0025 slice-6 follow-up: the pre-fix path
+    /// dropped a mid-flight batch on process exit; correctness was covered by
+    /// slice-1 reconcile, this just avoids the restart snapshot herd).
     async fn flush_loop(
         pg_url: String,
         tenant_column: Option<String>,
         mut rx: mpsc::Receiver<OpEntry>,
         metrics: Option<Arc<Metrics>>,
+        shutdown: Arc<Notify>,
     ) {
         let mut client: Option<tokio_postgres::Client> = None;
         let mut batch: Vec<OpEntry> = Vec::with_capacity(BATCH_MAX);
-        while let Some(first) = rx.recv().await {
+        loop {
+            // Wait for the next entry OR a shutdown signal — whichever fires
+            // first. `biased` prefers shutdown so a drain request isn't queued
+            // behind a slow recv.
+            let first = tokio::select! {
+                biased;
+                () = shutdown.notified() => break,
+                first = rx.recv() => match first {
+                    Some(e) => e,
+                    None => break, // all senders dropped → natural exit
+                },
+            };
             batch.push(first);
             // Drain immediately-available entries up to BATCH_MAX — coalesces
             // a burst into one round-trip without adding latency when the
@@ -506,25 +551,58 @@ mod pg {
                     break;
                 }
             }
-            match flush_batch(&mut client, &pg_url, tenant_column.as_deref(), &batch).await {
-                Ok(()) => batch.clear(),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        rows = batch.len(),
-                        "oplog flush failed; batch lost (snapshot-reconcile covers the gap)"
-                    );
-                    client = None;
-                    batch.clear();
-                    if let Some(m) = &metrics {
-                        m.oplog_flush_failed.fetch_add(1, Ordering::Relaxed);
-                    }
+            flush_one_batch(
+                &mut client,
+                &pg_url,
+                tenant_column.as_deref(),
+                &mut batch,
+                metrics.as_ref(),
+            )
+            .await;
+        }
+        // Shutdown / natural exit: drain anything left in the channel + flush
+        // one final batch so the last ops aren't lost when the runtime drops.
+        while let Ok(e) = rx.try_recv() {
+            batch.push(e);
+        }
+        if !batch.is_empty() {
+            flush_one_batch(
+                &mut client,
+                &pg_url,
+                tenant_column.as_deref(),
+                &mut batch,
+                metrics.as_ref(),
+            )
+            .await;
+        }
+    }
+
+    /// Flush one batch (best-effort) + clear it. On failure: warn, drop the
+    /// client (reconnect next round), bump `oplog_flush_failed`, clear (the
+    // batch is lost — slice-1 reconcile covers the gap). Factored so the main
+    // loop + the shutdown final flush share one path.
+    async fn flush_one_batch(
+        client: &mut Option<tokio_postgres::Client>,
+        pg_url: &str,
+        tenant_column: Option<&str>,
+        batch: &mut Vec<OpEntry>,
+        metrics: Option<&Arc<Metrics>>,
+    ) {
+        match flush_batch(client, pg_url, tenant_column, batch).await {
+            Ok(()) => batch.clear(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    rows = batch.len(),
+                    "oplog flush failed; batch lost (snapshot-reconcile covers the gap)"
+                );
+                *client = None;
+                batch.clear();
+                if let Some(m) = metrics {
+                    m.oplog_flush_failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
-        // rx.recv() returned None → all senders dropped → shutdown. Any
-        // buffered-but-unflushed entries are lost; slice-6 shutdown-flush is
-        // the follow-up (reconcile covers it).
     }
 
     /// Lift the tenant column from a tuple-image JSON byte slice. Returns
@@ -754,6 +832,27 @@ mod pg {
             let _: &(dyn tokio_postgres::types::ToSql + Sync) = v4.as_tosql();
             let _: &(dyn tokio_postgres::types::ToSql + Sync) = v5.as_tosql();
             let _: &(dyn tokio_postgres::types::ToSql + Sync) = v6.as_tosql();
+        }
+
+        /// ADR-0025 slice-6 follow-up: `shutdown` signals the flush loop to
+        /// drain + exit, then awaits the task join. It must complete promptly
+        /// even when PG is unreachable — flush_batch fails fast on
+        /// ECONNREFUSED → batch cleared → loop returns to recv → notify breaks
+        /// it → final flush fails → task ends. Pins the shutdown mechanism
+        /// (signal + handle join) without a live PG; the flush *content* is
+        /// verified by the real-PG e2e.
+        #[tokio::test]
+        async fn shutdown_drains_and_completes_when_pg_unreachable() {
+            let w = PgOpLogWriter::new("postgresql://127.0.0.1:1/db", None, 8, None);
+            for i in 1..=5 {
+                w.append(&ev(i, "insert")).await;
+            }
+            let done = tokio::time::timeout(Duration::from_secs(15), w.shutdown()).await;
+            assert!(
+                done.is_ok(),
+                "shutdown must complete even when PG is unreachable (a live PG isn't required \
+                 for the mechanism — slice-1 reconcile covers any flush gap)"
+            );
         }
     }
 }
