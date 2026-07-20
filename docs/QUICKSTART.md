@@ -103,6 +103,23 @@ fixtures/flutter/todo/tool/nostos_live_down.sh
 
 ### What the proof actually showed (2026-07-12) — a launch-blocking finding
 
+> **Update (2026-07-20): the root causes documented below were addressed in
+> code after this section was written.** The three cited causes are all
+> resolved at the code level: (1) the missed-commit window — `subscribe_changes()`
+> now precedes `emit_snapshot()` at `sdk/nostos_flutter/rust/src/api/nostos.rs:307-322`
+> (invariant `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
+> `client.rs:1097`), and the watch pump re-snapshots on every applied batch
+> (self-healing on lag); (2) the "no idle/time-based fallback in `feed()`" gap —
+> `ApplyEngine::feed` now has a time-bounded flush seam (`has_pending()` +
+> `flush_quiesce`, 50 ms default) in `crates/nostos-core/src/apply.rs:194-219`;
+> (3) `idle_timeout` is now a surfaced `SyncClientConfig` knob
+> (`crates/nostos-client/src/client.rs:90-200`), not a hard-baked `None` — the
+> old `nostos.rs:145` citation is stale. The 2026-07-12 `nostos_live_test.dart`
+> run that follows is preserved as the historical repro record. **Empirical
+> re-verification (re-running `nostos_live_test.dart` as the W5 stranger step)
+> is still pending** and remains the actual launch gate — code-level evidence
+> is not a substitute for the integration run.
+
 `integration_test/nostos_live_test.dart` set out to drive two real `Nostos`
 instances (user-a / user-b, distinct HS256 JWTs) through
 `NostosTodoRepository` against a real `nostos-server` + real docker Postgres.
@@ -226,13 +243,15 @@ author present), which stays a launch-blocking TODO.
 
 ## Known gaps (read before you build on this)
 
-- **LAUNCH-BLOCKING: `watch()` can permanently miss a real-Postgres write
-  with no follow-up activity, and an isolated first connection's write may
-  never even reach the server.** See "What the proof actually showed" above
-  for the full root cause and citations. This is not an edge case — it's the
-  normal shape of using this product (one user, one action). Fixing it is a
-  prerequisite for shipping the Flutter+Postgres story at all, not a
-  polish item.
+- **`watch()` write-miss / first-write-non-reach (originally flagged
+  LAUNCH-BLOCKING 2026-07-12): root causes addressed in code 2026-07-20**
+  (subscribe-before-emit + `flush_quiesce` + `idle_timeout` knob — see the
+  dated update under "What the proof actually showed" above). **Status pending
+  empirical re-verification via the W5 stranger test** (`nostos_live_test.dart`),
+  which is the real launch gate — not yet re-run. The `nostos init
+  --write-tables <tables>` flag at step 3 is what enables writes (the server
+  allowlist defaults empty, ADR-0013); omitting it makes writes silently
+  no-op, so always pass it.
 - **`Nostos` has no `close()`/`dispose()`.** Every `Nostos.connect()` appears to
   leave its background connection running indefinitely; a real app that
   reconnects (e.g. on auth state change, per the README's `NostosSupabase`
