@@ -393,6 +393,42 @@ pub enum WriteBackError {
     Backend(String),
 }
 
+/// Persists replication events to a durable op-log so a reconnecting client
+/// can replay missed ops (including DELETEs) from its checkpoint instead of
+/// re-snapshotting — the in-window resume path (ADR-0025 slice 2+).
+/// Snapshot-reconcile (slice 1) remains the fallback for long gaps /
+/// first-connect / epoch mismatch.
+///
+/// # Non-blocking contract (LOAD-BEARING)
+///
+/// `append` MUST return promptly without performing inline I/O on the caller's
+/// path. The caller is the `FanOutService::run` loop, where at the 833k
+/// ops/sec headline the per-event budget is ~1.2µs; a Postgres round-trip is
+/// ~0.5–2ms — inline I/O would stall the loop, starve the bounded session
+/// sinks, and flip deliveries from `Delivered` to `Dropped` (silently breaking
+/// the 0% drop headline). An implementation batches internally and flushes off
+/// the caller's path (e.g. a background task with its own bounded queue).
+///
+/// A full internal buffer drops the entry (best-effort: snapshot-reconcile
+/// preserves correctness for the affected gap) and counts it via the impl's
+/// own metrics — `append` returns `()` because the fan-out loop does not act
+/// on op-log drop decisions; it is fire-and-forget.
+#[async_trait]
+pub trait OpLogWriter: Send + Sync {
+    /// Append one event to the durable op-log. Non-blocking — see the trait
+    /// doc for the contract. `()` return: drop/flush-failure accounting is
+    /// internal, surfaced via [`Metrics`] (`oplog_dropped` / `oplog_flush_failed`).
+    async fn append(&self, event: &ReplicationEvent);
+
+    /// Graceful shutdown: drain the in-flight batch + any pending channel
+    /// entries, then end the flush task. Call once during server shutdown
+    /// (after the replicator/fan-out stop) so a SIGTERM doesn't drop the last
+    /// ≤BATCH_MAX entries mid-INSERT (ADR-0025 slice-6 follow-up; correctness
+    /// is still covered by slice-1 reconcile if this isn't called). Default
+    /// no-op for backends with nothing to drain.
+    async fn shutdown(&self) {}
+}
+
 /// Reads a table's current rows as a one-shot snapshot, delivered to a
 /// freshly-subscribing session as `Insert` events BEFORE live fan-out — so a
 /// client that connects to an already-populated table sees pre-existing rows
@@ -464,6 +500,54 @@ pub enum SnapshotError {
     /// [`WriteBackError::Backend`].
     #[error("snapshot backend: {0}")]
     Backend(String),
+}
+
+// ---------------------------------------------------------------------------
+// Op-log replay (ADR-0025 slice 4b — reconnect resume without a full snapshot).
+// ---------------------------------------------------------------------------
+
+/// Why an [`OpLogSource`] call failed. The op-log read is a single tenant-scoped
+/// SELECT on the server-internal `cairn_oplog` table, so there is no
+/// invalid-table category (mirror of [`SnapshotError`] minus `InvalidTable`).
+#[derive(Debug, thiserror::Error)]
+pub enum OpLogError {
+    /// The underlying database errored (connection, prepare, query). The
+    /// transport logs it and falls back to the snapshot path — replay is an
+    /// optimization; snapshot-reconcile (slice 1) is the correctness floor.
+    #[error("oplog backend: {0}")]
+    Backend(String),
+}
+
+/// Replay the persisted op-log for reconnect resume (ADR-0025 slice 4b).
+///
+/// On subscribe, when `client_epoch == server_epoch` and the client's
+/// `resume_lsn` is within the retained op-log window, the transport replays the
+/// missed ops (INSERTs/UPDATEs/DELETEs from the offline gap) to the fresh sink
+/// — catching up WITHOUT a full snapshot. The client dedups per-row by lsn
+/// (ADR-0025 slice 4a), so the concurrent live fan-out + replay overlap is safe.
+/// Slice-1 snapshot-reconcile remains the safety net for the batch-lag tail and
+/// gaps that aged out past the retention window.
+#[async_trait]
+pub trait OpLogSource: Send + Sync {
+    /// Replay op-log entries for `tenant_id` with `lsn > after_lsn`, in lsn
+    /// order. Upserts reconstitute as `Insert` RowOps — under the client's
+    /// per-row lsn gate (slice 4a), Insert ≡ Update (the client applies by pk).
+    ///
+    /// # Errors
+    /// [`OpLogError::Backend`] on any database failure.
+    async fn replay_after(
+        &self,
+        tenant_id: &str,
+        after_lsn: u64,
+    ) -> Result<Vec<ReplicationEvent>, OpLogError>;
+
+    /// The lowest `lsn` still retained in the op-log (the window tail, advanced
+    /// by compaction — ADR-0025 slice 5). `resume_lsn < tail` ⇒ the client's
+    /// offline gap aged out ⇒ the transport falls back to the snapshot path.
+    ///
+    /// # Errors
+    /// [`OpLogError::Backend`] on any database failure.
+    async fn window_tail(&self) -> Result<u64, OpLogError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +655,28 @@ pub struct Metrics {
     /// from a missing/lost state. Each increment implies a potential silent
     /// data-loss window — alert on any increase.
     pub slot_recreated_total: AtomicU64,
+    /// Op-log entries dropped because the writer's bounded buffer was full
+    /// (ADR-0025 slice 2). A non-zero value means the in-window resume path
+    /// degraded to snapshot-reconcile for some gaps — correct, but a capacity
+    /// signal. Alert on sustained increase.
+    pub oplog_dropped: AtomicU64,
+    /// Op-log batch flushes that failed (PG error / connection lost). The
+    /// batch's entries are lost to the op-log → affected resume gaps fall back
+    /// to snapshot-reconcile. Correctness preserved; alert on any increase.
+    pub oplog_flush_failed: AtomicU64,
+    /// Monotonic epoch counter bumped on every logical-replication slot
+    /// (re)creation (the single chute in `ensure_slot_and_publication`'s
+    /// fresh-create block). The reconnect-resume gate compares the client's
+    /// last-seen epoch to this: a mismatch means the slot's lineage broke
+    /// (drop+recreate) and the client cannot backfill from the dead op-stream
+    /// → must full-snapshot. ADR-0025 slice 3 (signal) / slice 4 (gate).
+    pub slot_epoch: AtomicU64,
+    /// Rows swept by op-log compaction (ADR-0025 slice 5): collapse duplicates
+    /// to the latest op per `(table_name, pk)` + age out rows past the
+    /// retention window. Monotonic; a sustained increase is the expected
+    /// steady state under write load, not an alert — but a flat-zero under
+    /// load means the compactor isn't running.
+    pub oplog_compacted_rows: AtomicU64,
 }
 
 impl Metrics {
@@ -593,6 +699,10 @@ impl Metrics {
             slot_wal_status: SlotHealth::from_u8(self.slot_wal_status.load(Ordering::Relaxed)),
             replication_lag_bytes: self.replication_lag_bytes.load(Ordering::Relaxed),
             slot_recreated_total: self.slot_recreated_total.load(Ordering::Relaxed),
+            oplog_dropped: self.oplog_dropped.load(Ordering::Relaxed),
+            oplog_flush_failed: self.oplog_flush_failed.load(Ordering::Relaxed),
+            slot_epoch: self.slot_epoch.load(Ordering::Relaxed),
+            oplog_compacted_rows: self.oplog_compacted_rows.load(Ordering::Relaxed),
         }
     }
 
@@ -616,6 +726,24 @@ impl Metrics {
     pub fn record_slot_recreate(&self) {
         self.slot_recreated_total.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Bump the slot-epoch counter. Called once per slot (re)creation — the
+    /// single chute in `ensure_slot_and_publication`'s fresh-create block
+    /// (covers both first-create and Lost-recreate). Each bump starts a new
+    /// slot lineage; any in-flight client whose last-seen epoch predates it
+    /// must full-snapshot on reconnect (cannot backfill from a dead lineage).
+    /// ADR-0025 slice 3.
+    #[inline]
+    pub fn record_slot_epoch_bump(&self) {
+        self.slot_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Add `n` rows swept by op-log compaction (ADR-0025 slice 5). Called once
+    /// per compaction tick with the count of rows collapsed + aged out.
+    #[inline]
+    pub fn record_oplog_compacted(&self, n: u64) {
+        self.oplog_compacted_rows.fetch_add(n, Ordering::Relaxed);
+    }
 }
 
 /// A point-in-time read of [`Metrics`] (plain values, safe to format/serialize).
@@ -628,4 +756,10 @@ pub struct MetricsSnapshot {
     pub slot_wal_status: SlotHealth,
     pub replication_lag_bytes: u64,
     pub slot_recreated_total: u64,
+    pub oplog_dropped: u64,
+    pub oplog_flush_failed: u64,
+    /// Current slot epoch (bumped on every slot create/recreate). ADR-0025.
+    pub slot_epoch: u64,
+    /// Rows swept by op-log compaction (ADR-0025 slice 5).
+    pub oplog_compacted_rows: u64,
 }

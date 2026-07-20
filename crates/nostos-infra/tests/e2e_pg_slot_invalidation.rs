@@ -261,6 +261,7 @@ async fn dropped_slot_is_detected_and_recovered() {
     //    timeout covers the 2s reconnect backoff in case the new driver's first
     //    next_event hit the recv-error branch first.
     let baseline_recreates = baseline.slot_recreated_total;
+    let baseline_epoch = baseline.slot_epoch;
     let metrics_for_poll = Arc::clone(&metrics);
     let detected = wait_for(Duration::from_secs(15), || {
         let m = Arc::clone(&metrics_for_poll);
@@ -276,6 +277,19 @@ async fn dropped_slot_is_detected_and_recovered() {
     assert!(
         slot_exists(&slot).await,
         "RECOVERY FAILED: slot should exist again after recreate"
+    );
+
+    // ── Phase 6b: ASSERT EPOCH BUMP (ADR-0025 slice 3). The recreate started a
+    //    new slot lineage → slot_epoch must have incremented above baseline. A
+    //    client whose last-seen epoch predates this bump will be forced to
+    //    full-snapshot on reconnect (slice 4's gate consumes this signal).
+    let post_recreate = metrics.snapshot();
+    assert!(
+        post_recreate.slot_epoch > baseline_epoch,
+        "EPOCH GATE FAILED: slot_epoch did not increment above baseline \
+         ({baseline_epoch}) after mid-stream slot recreate. The reconnect-resume \
+         gate (ADR-0025 slice 4) would misfire without this bump. snapshot: \
+         {post_recreate:?}"
     );
 
     // ── Phase 7: ASSERT LIVE DELIVERY POST-RECOVERY. A new insert reaches the

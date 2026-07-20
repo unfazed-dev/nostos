@@ -126,6 +126,7 @@ impl WriteBack for EchoWriteBack {
             RowOp::Delete {
                 table: table.to_string(),
                 pk: pk.to_string(),
+                old_payload: None,
             },
         );
         self.emit(ev);

@@ -16,6 +16,7 @@
 // for the same throughput-reporting pattern.
 #![allow(clippy::cast_precision_loss)]
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -47,7 +48,15 @@ fn sqlite_apply_throughput_meets_floor() {
         let checkpoint = Lsn::new(u64::try_from(n).unwrap() * 10);
 
         let start = Instant::now();
-        storage.apply_batch(&ops, checkpoint).expect("apply_batch");
+        storage
+            .apply_batch(
+                &ops.iter()
+                    .map(|o| (o.clone(), checkpoint.raw()))
+                    .collect::<Vec<_>>(),
+                checkpoint,
+                &HashSet::new(),
+            )
+            .expect("apply_batch");
         let elapsed = start.elapsed();
 
         let rows_per_sec = (n as f64) / elapsed.as_secs_f64().max(1e-9);
@@ -77,7 +86,15 @@ fn batched_apply_is_faster_than_per_row() {
     let ops = make_ops(n);
     let batched_time = {
         let s = Instant::now();
-        batched.apply_batch(&ops, Lsn::new(n as u64 * 10)).unwrap();
+        batched
+            .apply_batch(
+                &ops.iter()
+                    .map(|o| (o.clone(), n as u64 * 10))
+                    .collect::<Vec<_>>(),
+                Lsn::new(n as u64 * 10),
+                &HashSet::new(),
+            )
+            .unwrap();
         s.elapsed()
     };
 
@@ -87,7 +104,11 @@ fn batched_apply_is_faster_than_per_row() {
         let s = Instant::now();
         for (i, op) in make_ops(n).into_iter().enumerate() {
             per_row
-                .apply_batch(&[op], Lsn::new(i as u64 * 10 + 10))
+                .apply_batch(
+                    &[(op, i as u64 * 10 + 10)],
+                    Lsn::new(i as u64 * 10 + 10),
+                    &HashSet::new(),
+                )
                 .unwrap();
         }
         s.elapsed()

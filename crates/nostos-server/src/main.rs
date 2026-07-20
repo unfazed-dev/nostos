@@ -48,6 +48,29 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_SESSION_BUFFER", default_value_t = 1024)]
     session_buffer: usize,
 
+    /// Op-log writer's bounded internal channel depth (ADR-0025 slice 2). The
+    /// fan-out loop `try_send`s each event into this buffer; a background task
+    /// drains + flushes to `cairn_oplog`. On full, the entry is dropped (the
+    /// resume path falls back to snapshot-reconcile for the gap — correct, but
+    /// a capacity signal). Default 4096; raise if
+    /// `cairn_oplog_dropped_total` is non-zero under sustained load. Only
+    /// meaningful under `NOSTOS_REPLICATOR=pg`.
+    #[arg(long, env = "NOSTOS_OPLOG_BUFFER", default_value_t = 4096)]
+    oplog_buffer: usize,
+
+    /// Op-log retention window in seconds (ADR-0025 slice 5). Rows older than
+    /// this are aged out by the compactor. A client whose offline gap exceeds
+    /// the window falls back to snapshot-reconcile (slice 1, the safety net).
+    /// Default 1h.
+    #[arg(long, env = "NOSTOS_OPLOG_RETENTION_SECS", default_value_t = 3600)]
+    oplog_retention_secs: u64,
+
+    /// Op-log compaction tick period in seconds (ADR-0025 slice 5). The
+    /// compactor collapses duplicate ops per (table_name, pk) + ages out rows
+    /// past the retention window. Default 5min.
+    #[arg(long, env = "NOSTOS_OPLOG_COMPACT_INTERVAL_SECS", default_value_t = 300)]
+    oplog_compact_interval_secs: u64,
+
     /// Replicator mode: "fake" (synthetic generator) or "pg" (real Postgres).
     /// "pg" requires the `pg` feature, which is on by default (disable with
     /// `--no-default-features`). Runtime default stays "fake" so zero-setup
@@ -268,11 +291,56 @@ async fn main() -> anyhow::Result<()> {
     } else {
         nostos_application::EvictionPolicy::disabled()
     };
-    let fanout = Arc::new(
-        FanOutService::new(Arc::clone(&store))
+    // Op-log writer (ADR-0025 slice 2): persisted op-log for in-window
+    // reconnect replay. Only under `NOSTOS_REPLICATOR=pg` — the fake replicator
+    // has no source database to durably write to (the bench drives a
+    // RecordingOpLogWriter directly). Shares the metrics handle so `/metrics`
+    // surfaces the drop + flush-failure counters.
+    #[cfg(feature = "pg")]
+    let op_log: Option<Arc<dyn nostos_application::ports::OpLogWriter>> = if cfg.replicator == "pg" {
+        Some(Arc::new(nostos_infra::PgOpLogWriter::new(
+            &cfg.pg_url,
+            Some(cfg.tenant_column.clone()),
+            cfg.oplog_buffer,
+            Some(Arc::clone(&metrics)),
+        )))
+    } else {
+        None
+    };
+    // Retain a clone of the op-log writer so we can drain it on graceful
+    // shutdown (after axum returns) — the original Arc moves into the
+    // FanOutService below. ADR-0025 slice-6 follow-up.
+    #[cfg(feature = "pg")]
+    let op_log_shutdown = op_log.clone();
+
+    // Op-log compactor (ADR-0025 slice 5): bounds cairn_oplog growth via
+    // periodic collapse (keep latest op per (table_name, pk) — a trailing
+    // delete survives as a tombstone) + retention (age out old rows). Only
+    // under NOSTOS_REPLICATOR=pg. Detached background task (runs until process
+    // exit). The compactor's swept-row count surfaces in `/metrics`.
+    #[cfg(feature = "pg")]
+    if cfg.replicator == "pg" {
+        let _compactor = nostos_infra::PgOpLogCompactor::new(
+            &cfg.pg_url,
+            cfg.oplog_retention_secs,
+            cfg.oplog_compact_interval_secs,
+            Arc::clone(&metrics),
+        );
+    }
+
+    let fanout = Arc::new({
+        let builder = FanOutService::new(Arc::clone(&store))
             .with_metrics(Arc::clone(&metrics))
-            .with_eviction(eviction),
-    );
+            .with_eviction(eviction);
+        // Attach the op-log when built (cfg-gated so the non-pg build never
+        // references the (absent) PgOpLogWriter type).
+        #[cfg(feature = "pg")]
+        let builder = match op_log {
+            Some(w) => builder.with_op_log(w),
+            None => builder,
+        };
+        builder
+    });
 
     // ---- start the replicator → fan-out driver ----
     // The extractor lifts named columns out of an event's payload so predicates
@@ -280,6 +348,15 @@ async fn main() -> anyhow::Result<()> {
     // the payload is opaque bytes, so we return `Any` (table-only matching). For
     // the PgReplicator the payload is a small JSON object {col:val}, so we parse
     // it and return real values — enabling filter predicates like org_id=acme.
+    //
+    // C6 (late-append P1): retain the pg replicator's JoinHandle so we can
+    // abort it BEFORE draining the op-log at shutdown — prevents the silent
+    // late-append-into-final-flush race (ghost row on matching-epoch reconnect;
+    // see oplog.rs `drain_boundary_late_append_during_final_flush_is_lost`).
+    // The fake branch intentionally detaches (`mem::forget`): it's the bench
+    // path, the op-log is pg-only, and FakeReplicator has no producer window.
+    #[cfg(feature = "pg")]
+    let mut repl_handle: Option<tokio::task::JoinHandle<()>> = None;
     match cfg.replicator.as_str() {
         "fake" => {
             let mut repl = FakeReplicator::new(FakeReplicatorConfig::small(u64::MAX));
@@ -332,7 +409,7 @@ async fn main() -> anyhow::Result<()> {
                     let outcome = fanout_drv.run(&mut repl, extract).await;
                     info!(?outcome, "PgReplicator stream ended");
                 });
-                std::mem::forget(drv);
+                repl_handle = Some(drv);
                 info!(
                     slot = %cfg.pg_slot,
                     publication = %cfg.pg_publication,
@@ -369,7 +446,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
-        .with_buffer(cfg.session_buffer);
+        .with_buffer(cfg.session_buffer)
+        .with_metrics(Arc::clone(&metrics));
     if let Some(col) = tenant_col {
         state_builder = state_builder.with_tenant_column(col);
     }
@@ -425,6 +503,20 @@ async fn main() -> anyhow::Result<()> {
         info!("snapshot-on-subscribe: PgSnapshotter (real source)");
     }
 
+    // ---- op-log replay-on-reconnect adapter (ADR-0025 slice 4b) ----
+    // Under `NOSTOS_REPLICATOR=pg` inject a `PgOpLogReader` so a reconnecting
+    // client with a matching epoch + an in-window `resume_lsn` gets its offline
+    // gap replayed from `cairn_oplog` instead of a full snapshot. Otherwise
+    // `oplog_reader` stays `None` → reconnect always takes the snapshot path
+    // (slice-1 reconcile remains the correctness floor either way).
+    #[cfg(feature = "pg")]
+    if cfg.replicator == "pg" {
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> =
+            Arc::new(nostos_infra::PgOpLogReader::new(&cfg.pg_url));
+        state_builder = state_builder.with_oplog_reader(reader);
+        info!("op-log replay: PgOpLogReader (real source)");
+    }
+
     // Guard (Fix A): NOSTOS_PG_URL set while replicator != "pg" is almost always
     // a misconfiguration — snapshot-on-subscribe (ADR-0014) stays OFF and a
     // freshly-subscribing client silently receives NONE of the table's
@@ -432,11 +524,17 @@ async fn main() -> anyhow::Result<()> {
     // The common cause is a fixture/.env that sets NOSTOS_PG_URL but omits
     // NOSTOS_REPLICATOR=pg. Fail loudly at startup instead of degrading silently.
     if cfg.replicator != "pg" && !cfg.pg_url.trim().is_empty() {
-        warn!(
-            replicator = %cfg.replicator,
-            "NOSTOS_PG_URL is set but NOSTOS_REPLICATOR is not 'pg' — \
-             snapshot-on-subscribe is OFF; clients will not receive pre-existing \
-             rows on connect. Set NOSTOS_REPLICATOR=pg to enable it."
+        // C10: BAIL (not warn) — a warn still let the server start degraded,
+        // causing the silent "connected but lists empty" symptom (snapshot-
+        // on-subscribe ADR-0014 stays OFF; clients receive no pre-existing
+        // rows). Failing loudly at startup makes the misconfiguration
+        // undiscoverable-by-accident. See docs/OPERATING.md §1.1(a).
+        anyhow::bail!(
+            "NOSTOS_PG_URL is set but NOSTOS_REPLICATOR={:?} is not 'pg' — \
+             snapshot-on-subscribe (ADR-0014) is OFF, so clients would silently \
+             receive none of the table's pre-existing rows on connect. \
+             Set NOSTOS_REPLICATOR=pg, or unset NOSTOS_PG_URL.",
+            cfg.replicator
         );
     }
 
@@ -514,6 +612,24 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+    // ADR-0026 fix A (C6 late-append P1): stop ingesting new replication
+    // changes BEFORE draining the op-log, so no append can race into the final
+    // flush and be silently lost (ghost row on matching-epoch reconnect). The
+    // detached replicator is the producer; the op-log drain is the consumer —
+    // stop the producer first.
+    #[cfg(feature = "pg")]
+    if let Some(h) = repl_handle.take() {
+        h.abort();
+    }
+    // ADR-0025 slice-6 follow-up: drain the op-log writer's in-flight batch so
+    // a SIGTERM doesn't drop the last ≤BATCH_MAX entries mid-INSERT (those
+    // clients would otherwise fall back to snapshot-reconcile on reconnect).
+    #[cfg(feature = "pg")]
+    {
+        if let Some(w) = op_log_shutdown {
+            w.shutdown().await;
+        }
+    }
     Ok(())
 }
 
@@ -581,7 +697,19 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          cairn_replication_lag_bytes {replication_lag_bytes}\n\
          # HELP cairn_slot_recreated_total Number of times the replication slot was dropped + re-created from a missing/lost state. Each increment is a potential silent-data-loss window; alert on any increase.\n\
          # TYPE cairn_slot_recreated_total counter\n\
-         cairn_slot_recreated_total {slot_recreated_total}\n",
+         cairn_slot_recreated_total {slot_recreated_total}\n\
+         # HELP cairn_oplog_dropped_total Op-log entries dropped (writer buffer full). The resume path falls back to snapshot-reconcile for the gap. ADR-0025.\n\
+         # TYPE cairn_oplog_dropped_total counter\n\
+         cairn_oplog_dropped_total {oplog_dropped}\n\
+         # HELP cairn_oplog_flush_failed_total Op-log batch flushes that failed (PG error / connection lost). Batch lost; resume falls back to snapshot-reconcile. ADR-0025.\n\
+         # TYPE cairn_oplog_flush_failed_total counter\n\
+         cairn_oplog_flush_failed_total {oplog_flush_failed}\n\
+         # HELP cairn_slot_epoch Monotonic epoch bumped on every replication-slot (re)creation. A client whose last-seen epoch differs must full-snapshot (cannot backfill from a recreated slot's dead lineage). ADR-0025.\n\
+         # TYPE cairn_slot_epoch gauge\n\
+         cairn_slot_epoch {slot_epoch}\n\
+         # HELP cairn_oplog_compacted_rows_total Rows swept by op-log compaction (collapse duplicates to latest op per (table_name, pk) + age out rows past the retention window). ADR-0025 slice 5.\n\
+         # TYPE cairn_oplog_compacted_rows_total counter\n\
+         cairn_oplog_compacted_rows_total {oplog_compacted_rows}\n",
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
@@ -589,6 +717,10 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         slot_wal_status = snap.slot_wal_status.as_gauge_int(),
         replication_lag_bytes = snap.replication_lag_bytes,
         slot_recreated_total = snap.slot_recreated_total,
+        oplog_dropped = snap.oplog_dropped,
+        oplog_flush_failed = snap.oplog_flush_failed,
+        slot_epoch = snap.slot_epoch,
+        oplog_compacted_rows = snap.oplog_compacted_rows,
     )
 }
 

@@ -157,7 +157,23 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         Arc::clone(&store),
         nostos_domain::Tier::Enterprise,
     ));
-    let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
+    // ADR-0025 slice 2: optionally measure the fan-out-loop cost of the op-log
+    // by attaching a RecordingOpLogWriter (its append = try_send + drop-newest,
+    // mirroring PgOpLogWriter's hot path). Set NOSTOS_BENCH_OPLOG=1 for the
+    // production-shaped run; leave unset for the fan-out-ceiling baseline. The
+    // two together are the honest before/after the plan mandates (the real-PG
+    // write-amplification cost is a separate real-PG measurement, slice 6).
+    let op_log: Option<Arc<nostos_infra::RecordingOpLogWriter>> =
+        if std::env::var_os("NOSTOS_BENCH_OPLOG").is_some() {
+            Some(Arc::new(nostos_infra::RecordingOpLogWriter::new(4096)))
+        } else {
+            None
+        };
+    let op_log_handle = op_log.clone();
+    let fanout = Arc::new(match op_log {
+        Some(w) => FanOutService::new(Arc::clone(&store)).with_op_log(w),
+        None => FanOutService::new(Arc::clone(&store)),
+    });
 
     // ---- in-process axum server on an ephemeral port ----
     // The bench measures raw fan-out throughput; auth isAllowAnonymous (no
@@ -289,6 +305,18 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         drop_rate,
         "run complete"
     );
+
+    // ADR-0025 slice 2: when the op-log writer is attached, surface its drop
+    // count. Must stay 0 — a non-zero value means the writer's bounded buffer
+    // couldn't keep up with the FakeReplicator flood (the fan-out loop's
+    // try_send cost would be too high, or the drain too slow).
+    if let Some(h) = &op_log_handle {
+        info!(
+            clients,
+            oplog_dropped = h.dropped(),
+            "op-log recording writer drop count (must be 0)"
+        );
+    }
 
     Ok(RunResult {
         clients,

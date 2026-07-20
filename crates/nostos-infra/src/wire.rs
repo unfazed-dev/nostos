@@ -58,6 +58,15 @@ pub enum ClientMessage {
         /// so the server seeds its ack cursor and skips re-delivering ≤ it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_lsn: Option<u64>,
+        /// The client's last-seen server slot epoch (ADR-0025 slice 4b). The
+        /// server compares it to its current `slot_epoch`: a mismatch means the
+        /// slot was dropped + recreated (the WAL lineage broke) so the client
+        /// cannot backfill from the dead op-stream → full snapshot. A match,
+        /// with a `resume_lsn` inside the op-log window, → op-log replay
+        /// instead. `None` (an old client that doesn't track epochs) is treated
+        /// as a mismatch → snapshot (the safe default; replay is opt-in).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
     /// Acknowledge applied progress (highest applied LSN).
     Ack { lsn: u64 },
@@ -124,7 +133,7 @@ pub fn encode_event(event: &ReplicationEvent) -> Vec<u8> {
             pk.clone(),
             Some(hex::encode(payload)),
         ),
-        RowOp::Delete { table, pk } => (Operation::Delete, table.clone(), pk.clone(), None),
+        RowOp::Delete { table, pk, .. } => (Operation::Delete, table.clone(), pk.clone(), None),
     };
     let frame = WireFrame {
         lsn: event.lsn.raw(),
@@ -235,7 +244,7 @@ fn event_to_frame_value(event: &ReplicationEvent) -> WireFrame {
             pk.clone(),
             Some(hex::encode(payload)),
         ),
-        RowOp::Delete { table, pk } => (Operation::Delete, table.clone(), pk.clone(), None),
+        RowOp::Delete { table, pk, .. } => (Operation::Delete, table.clone(), pk.clone(), None),
     };
     WireFrame {
         lsn: event.lsn.raw(),
@@ -284,6 +293,104 @@ mod hex {
         }
         s
     }
+}
+
+// ---- Snapshot-reconcile control frames (ADR-0014 offline-delete fix) ----
+//
+// The wire already carries one non-`WireFrame` control shape —
+// `{"type":"write_result",...}` — for client-write acks. The snapshot
+// boundary uses the same pattern: a tagged JSON object that does NOT decode
+// as a `WireFrame` (no `lsn`/`op`/`table`+`pk` pair), so the client pump
+// intercepts it BEFORE `decode_frames` and drives the reconcile engine.
+// `snapshot_begin{T}` is delivered immediately before a snapshot's rows;
+// `snapshot_end{T}` immediately after. Old clients that don't check just see
+// `decode_frames` return an empty Vec for these objects — no crash
+// (back-compat: the wire is additive JSON with a `type` tag).
+
+/// Encode a snapshot boundary control frame as JSON bytes.
+///
+/// `begin = true` → `{"type":"snapshot_begin","table":"<t>"}`;
+/// `begin = false` → `{"type":"snapshot_end","table":"<t>"}`.
+/// Beside [`encode_event`] / [`encode_write_result`] — a distinct control
+/// shape, never batched with replication events (the writer task drains it
+/// through the same `server_frames_tx` channel as write-acks).
+#[must_use]
+pub fn encode_snapshot_boundary(table: &str, begin: bool) -> Vec<u8> {
+    // Hand-built JSON keeps this allocation-light and matches
+    // `encode_write_result`'s style. Only the table name is free-form, so it's
+    // the only field that needs JSON escaping.
+    let mut out = String::with_capacity(48 + table.len());
+    out.push_str("{\"type\":\"");
+    out.push_str(if begin {
+        "snapshot_begin"
+    } else {
+        "snapshot_end"
+    });
+    out.push_str("\",\"table\":");
+    push_json_string(&mut out, table);
+    out.push('}');
+    out.into_bytes()
+}
+
+/// Decode a snapshot boundary control frame from a raw WS message. Returns
+/// `Some((table, begin))` only when the payload is a single JSON object with
+/// `"type":"snapshot_begin"` or `"type":"snapshot_end"`; returns `None` for
+/// everything else (arrays of frames, single `WireFrame` objects,
+/// `write_result` acks, malformed bytes, empty payloads).
+///
+/// The client pump calls this BEFORE [`decode_frames`] so control frames
+/// never enter the row-apply path.
+#[must_use]
+pub fn decode_control_frame(data: &[u8]) -> Option<(String, bool)> {
+    // Cheap peek: arrays (`[`) and anything that isn't an object (`{`) cannot
+    // be a control frame — bail before paying for a full parse. This mirrors
+    // `decode_frames`' first-byte dispatch.
+    let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
+    if first != Some(b'{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+    let ty = v.get("type")?.as_str()?;
+    let begin = match ty {
+        "snapshot_begin" => true,
+        "snapshot_end" => false,
+        _ => return None,
+    };
+    let table = v.get("table")?.as_str()?.to_string();
+    Some((table, begin))
+}
+
+/// Encode a `resume_info` control frame advertising the server's current slot
+/// epoch (ADR-0025 reconnect-resume gate). Emitted once at subscribe on BOTH the
+/// snapshot + replay paths so the client can persist + resend its last-seen
+/// epoch on reconnect. Beside [`encode_snapshot_boundary`] / write-acks — its
+/// own wire shape, never batched with replication events.
+#[must_use]
+pub fn encode_resume_info(epoch: u64) -> Vec<u8> {
+    // u64 → decimal; no free-form fields → no escaping needed.
+    let mut out = String::from("{\"type\":\"resume_info\",\"epoch\":");
+    out.push_str(&epoch.to_string());
+    out.push('}');
+    out.into_bytes()
+}
+
+/// Decode a `resume_info` control frame. Returns `Some(epoch)` only when the
+/// payload is a single JSON object with `"type":"resume_info"` and a numeric
+/// `epoch`; `None` for everything else (arrays, row frames, snapshot
+/// boundaries, malformed bytes). The client pump calls this BEFORE
+/// [`decode_frames`] so it never enters the row-apply path.
+#[must_use]
+pub fn decode_resume_info(data: &[u8]) -> Option<u64> {
+    let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
+    if first != Some(b'{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+    if v.get("type")?.as_str()? != "resume_info" {
+        return None;
+    }
+    let epoch = v.get("epoch")?.as_u64()?;
+    Some(epoch)
 }
 
 #[cfg(test)]
@@ -414,6 +521,7 @@ mod tests {
             RowOp::Delete {
                 table: "tasks".into(),
                 pk: "9".into(),
+                old_payload: None,
             },
         );
         let bytes = encode_event(&del);
@@ -431,6 +539,7 @@ mod tests {
             filters,
             where_sql,
             resume_lsn,
+            epoch: _,
         } = msg
         else {
             panic!("expected Subscribe");
@@ -453,6 +562,7 @@ mod tests {
             filters,
             where_sql,
             resume_lsn,
+            epoch: _,
         } = msg
         else {
             panic!("expected Subscribe");
@@ -571,5 +681,92 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"], "bad \"col\\name\"");
         assert_eq!(v["client_write_id"], "w\"");
+    }
+
+    // ---- snapshot-reconcile control frame tests (ADR-0014) ----
+
+    #[test]
+    fn encode_snapshot_boundary_begin_and_end() {
+        let b = encode_snapshot_boundary("tasks", true);
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["type"], "snapshot_begin");
+        assert_eq!(v["table"], "tasks");
+
+        let e = encode_snapshot_boundary("users", false);
+        let v: serde_json::Value = serde_json::from_slice(&e).unwrap();
+        assert_eq!(v["type"], "snapshot_end");
+        assert_eq!(v["table"], "users");
+    }
+
+    #[test]
+    fn encode_snapshot_boundary_escapes_table_name() {
+        // A table name with a quote must round-trip cleanly.
+        let bytes = encode_snapshot_boundary("a\"b", true);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["table"], "a\"b");
+    }
+
+    #[test]
+    fn encode_decode_resume_info_roundtrips() {
+        let bytes = encode_resume_info(42);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "resume_info");
+        assert_eq!(v["epoch"], 42);
+        assert_eq!(decode_resume_info(&bytes), Some(42));
+    }
+
+    #[test]
+    fn decode_resume_info_rejects_non_resume_frames() {
+        // ADR-0025 F2: the client intercept calls this BEFORE the row path, so
+        // it must return None for everything that isn't a resume_info frame.
+        assert_eq!(decode_resume_info(b""), None);
+        assert_eq!(decode_resume_info(b"[]"), None);
+        assert_eq!(decode_resume_info(b"{}"), None);
+        assert_eq!(
+            decode_resume_info(&encode_snapshot_boundary("tasks", true)),
+            None
+        );
+        assert_eq!(
+            decode_resume_info(br#"{"type":"resume_info"}"#),
+            None,
+            "no epoch"
+        );
+        assert_eq!(
+            decode_resume_info(br#"{"type":"resume_info","epoch":"no"}"#),
+            None,
+            "non-numeric epoch"
+        );
+    }
+
+    #[test]
+    fn decode_control_frame_recognizes_begin_and_end() {
+        let b = encode_snapshot_boundary("tasks", true);
+        assert_eq!(decode_control_frame(&b), Some(("tasks".into(), true)));
+
+        let e = encode_snapshot_boundary("tasks", false);
+        assert_eq!(decode_control_frame(&e), Some(("tasks".into(), false)));
+    }
+
+    #[test]
+    fn decode_control_frame_rejects_non_control_payloads() {
+        // Replication frames (single object + array), write_results, garbage,
+        // and empty payloads all yield None.
+        let event = encode_event(&ev_n(7));
+        assert!(decode_control_frame(&event).is_none());
+
+        let batch = encode_events(&[&ev_n(1), &ev_n(2)]);
+        assert!(decode_control_frame(&batch).is_none());
+
+        let write_ack = encode_write_result("w1", true, None);
+        assert!(decode_control_frame(&write_ack).is_none());
+
+        assert!(decode_control_frame(b"not json").is_none());
+        assert!(decode_control_frame(b"").is_none());
+        assert!(decode_control_frame(b"   ").is_none());
+
+        // A bare object with an unknown `type` is NOT a control frame.
+        assert!(decode_control_frame(br#"{"type":"something_else","table":"t"}"#).is_none());
+        // A snapshot_begin missing the `table` field is malformed → None.
+        assert!(decode_control_frame(br#"{"type":"snapshot_begin"}"#).is_none());
     }
 }

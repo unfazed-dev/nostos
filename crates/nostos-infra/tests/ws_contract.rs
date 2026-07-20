@@ -106,6 +106,7 @@ async fn delete_frame_omits_payload() {
         RowOp::Delete {
             table: "tasks".into(),
             pk: "9".into(),
+            old_payload: None,
         },
     );
     svc.fan_out(&event, |_, _| Some(ColumnValue::Any)).await;
@@ -210,7 +211,9 @@ async fn subscribe_with_filter(
             tokio::time::timeout(Duration::from_millis(200), ws.next()).await
         {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                got.push(v);
+                if common::is_data_frame(&v) {
+                    got.push(v);
+                }
             }
         }
     }
@@ -332,7 +335,9 @@ async fn subscribe_with_where_sql_token(
             tokio::time::timeout(Duration::from_millis(200), ws.next()).await
         {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                got.push(v);
+                if common::is_data_frame(&v) {
+                    got.push(v);
+                }
             }
         }
     }

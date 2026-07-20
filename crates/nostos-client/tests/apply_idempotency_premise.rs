@@ -28,6 +28,8 @@
 //! premise. If they don't, the upsert-by-`(table, pk)` is not collapsing
 //! duplicates and the design is broken.
 
+use std::collections::HashSet;
+
 use bytes::Bytes;
 
 use nostos_client::SqliteStorage;
@@ -69,11 +71,11 @@ fn stored_payload(storage: &SqliteStorage, table: &str, pk: &str) -> Vec<u8> {
 #[test]
 fn identical_batch_applied_twice_collapses_to_one_row() {
     let mut s = SqliteStorage::open_in_memory().expect("open sqlite");
-    let batch = [echo_upsert(), echo_upsert()]; // two identical ops, same LSN
+    let batch = [(echo_upsert(), ECHO_LSN), (echo_upsert(), ECHO_LSN)]; // two identical ops, same LSN
 
-    s.apply_batch(&batch, Lsn::new(ECHO_LSN))
+    s.apply_batch(&batch, Lsn::new(ECHO_LSN), &HashSet::new())
         .expect("first apply");
-    s.apply_batch(&batch, Lsn::new(ECHO_LSN))
+    s.apply_batch(&batch, Lsn::new(ECHO_LSN), &HashSet::new())
         .expect("second apply (the echo / replay)");
 
     assert_eq!(
@@ -97,12 +99,20 @@ fn identical_batch_applied_twice_collapses_to_one_row() {
 #[test]
 fn identical_op_in_two_separate_batches_collapses_to_one_row() {
     let mut s = SqliteStorage::open_in_memory().expect("open sqlite");
-    let op = echo_upsert();
+    let pair = (echo_upsert(), ECHO_LSN);
 
-    s.apply_batch(std::slice::from_ref(&op), Lsn::new(ECHO_LSN))
-        .expect("first batch");
-    s.apply_batch(std::slice::from_ref(&op), Lsn::new(ECHO_LSN))
-        .expect("second batch (the echo, separately delivered)");
+    s.apply_batch(
+        std::slice::from_ref(&pair),
+        Lsn::new(ECHO_LSN),
+        &HashSet::new(),
+    )
+    .expect("first batch");
+    s.apply_batch(
+        std::slice::from_ref(&pair),
+        Lsn::new(ECHO_LSN),
+        &HashSet::new(),
+    )
+    .expect("second batch (the echo, separately delivered)");
 
     assert_eq!(
         s.row_count_for_test(),
@@ -128,18 +138,30 @@ fn both_delivery_shapes_converge_to_identical_state() {
 
     // Path A: one batch of two identical ops.
     let mut a = SqliteStorage::open_in_memory().expect("open sqlite A");
-    a.apply_batch(&[echo_upsert(), echo_upsert()], Lsn::new(ECHO_LSN))
-        .expect("apply A");
+    a.apply_batch(
+        &[(echo_upsert(), ECHO_LSN), (echo_upsert(), ECHO_LSN)],
+        Lsn::new(ECHO_LSN),
+        &HashSet::new(),
+    )
+    .expect("apply A");
     let a_count = a.row_count_for_test();
     let a_payload = stored_payload(&a, "tasks", "row-x");
 
     // Path B: two separate batches, one identical op each.
     let mut b = SqliteStorage::open_in_memory().expect("open sqlite B");
-    let op = echo_upsert();
-    b.apply_batch(std::slice::from_ref(&op), Lsn::new(ECHO_LSN))
-        .expect("apply B1");
-    b.apply_batch(std::slice::from_ref(&op), Lsn::new(ECHO_LSN))
-        .expect("apply B2");
+    let pair = (echo_upsert(), ECHO_LSN);
+    b.apply_batch(
+        std::slice::from_ref(&pair),
+        Lsn::new(ECHO_LSN),
+        &HashSet::new(),
+    )
+    .expect("apply B1");
+    b.apply_batch(
+        std::slice::from_ref(&pair),
+        Lsn::new(ECHO_LSN),
+        &HashSet::new(),
+    )
+    .expect("apply B2");
     let b_count = b.row_count_for_test();
     let b_payload = stored_payload(&b, "tasks", "row-x");
 

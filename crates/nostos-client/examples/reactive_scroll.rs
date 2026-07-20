@@ -173,6 +173,7 @@ impl WriteBack for RecordingWriteBack {
             RowOp::Delete {
                 table: table.to_string(),
                 pk: pk.to_string(),
+                old_payload: None,
             },
         );
         self.captured.lock().await.push(ev);

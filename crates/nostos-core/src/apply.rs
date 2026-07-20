@@ -30,6 +30,7 @@
 use nostos_domain::{Lsn, RowOp};
 
 use crate::{Storage, StorageError};
+use std::collections::{HashMap, HashSet};
 
 /// One decoded replication row, ready to apply. The pure-runtime twin of
 /// `nostos_infra::wire::WireFrame` minus the hex encoding.
@@ -68,6 +69,7 @@ impl Frame {
             nostos_domain::Operation::Delete => RowOp::Delete {
                 table: self.table,
                 pk: self.pk,
+                old_payload: None,
             },
         }
     }
@@ -105,6 +107,11 @@ pub struct ApplyEngine<S> {
     high_water: Lsn,
     /// Soft cap on buffered frames across non-transactional runs.
     max_batch: usize,
+    /// Snapshot-reconcile orphan candidates (ADR-0014 offline-delete fix).
+    /// `begin` seeds this with the local PKs of the snapshotted table; each
+    /// received snapshot row removes its pk; `end` reaps whatever remains.
+    /// Empty except during an open snapshot window.
+    snapshot_orphans: HashMap<String, HashSet<String>>,
 }
 
 /// Default soft cap before a non-transactional flush. Large enough to amortize
@@ -133,6 +140,7 @@ impl<S: Storage> ApplyEngine<S> {
             open_txn: None,
             high_water,
             max_batch,
+            snapshot_orphans: HashMap::new(),
         }
     }
 
@@ -160,6 +168,16 @@ impl<S: Storage> ApplyEngine<S> {
     /// The current durable checkpoint (delegates to storage).
     pub fn checkpoint(&self) -> crate::Result<Lsn> {
         self.storage.checkpoint()
+    }
+
+    /// The durable last-seen server slot epoch (ADR-0025 reconnect-resume gate).
+    pub fn epoch(&self) -> crate::Result<u64> {
+        self.storage.epoch()
+    }
+
+    /// Persist the server's current slot epoch (delegates to storage).
+    pub fn save_epoch(&self, epoch: u64) -> crate::Result<()> {
+        self.storage.save_epoch(epoch)
     }
 
     /// Is there a buffered-but-unflushed batch right now? `true` between a
@@ -205,6 +223,15 @@ impl<S: Storage> ApplyEngine<S> {
         // Admit the frame.
         self.high_water = self.high_water.max(frame.lsn());
         self.open_txn = frame.txn_id;
+
+        // Snapshot-reconcile: a row the snapshot re-confirms is NOT an orphan,
+        // so remove its pk from the open snapshot's candidate set (ADR-0014).
+        // Applies to upserts (the row is present) AND deletes (the row is
+        // already gone, can't be an orphan). A no-op when no snapshot is open.
+        if let Some(orphans) = self.snapshot_orphans.get_mut(&frame.table) {
+            orphans.remove(&frame.pk);
+        }
+
         self.pending.push(frame);
 
         // Soft cap: flush a batch of independent (non-txn) frames so we don't
@@ -220,6 +247,56 @@ impl<S: Storage> ApplyEngine<S> {
         Ok(flushed)
     }
 
+    /// A snapshot boundary control frame (ADR-0014 offline-delete fix).
+    ///
+    /// The server emits `snapshot_begin{T}` before a snapshot's rows and
+    /// `snapshot_end{T}` after. Between them, every upsert the engine applies
+    /// for `T` is a row the snapshot confirmed present; any local PK that does
+    /// NOT appear in the snapshot is a row hard-deleted server-side while the
+    /// client was offline (the snapshot is present-rows-only — `PgSnapshotter`
+    /// delivers no tombstones). At `end` we reap that orphan set.
+    ///
+    /// - `begin`: snapshot the current local PKs for `table` into the orphan
+    ///   candidate set, MINUS `exempt_pks` (the outbox's pending-local PKs —
+    ///   ADR-0025 hole #1: the user's own unacked writes must never be reaped).
+    ///   If a snapshot was already open for `table`, the new begin replaces it
+    ///   (defensive — the wire is begin/end-paired).
+    /// - `end`: remove the recorded set and bulk-delete every pk still in it
+    ///   (those that no snapshot row re-confirmed). No-op if no snapshot was
+    ///   open for `table` (a stray `end` without a `begin`).
+    ///
+    /// The delete commits immediately (the storage contract for `delete_pks`
+    /// permits auto-commit-per-call) so it lands before the pump acks. The
+    /// orphan-set removal on the per-row apply path is in `feed` — received
+    /// rows are subtracted from the set so they survive the `end` reap.
+    pub fn snapshot_boundary(
+        &mut self,
+        table: &str,
+        begin: bool,
+        exempt_pks: &[String],
+    ) -> crate::Result<()> {
+        if begin {
+            let mut orphans: HashSet<String> =
+                self.storage.pks_for_table(table)?.into_iter().collect();
+            // ADR-0025 hole #1: never reap the user's own pending-local writes.
+            for pk in exempt_pks {
+                orphans.remove(pk);
+            }
+            self.snapshot_orphans.insert(table.to_string(), orphans);
+            Ok(())
+        } else {
+            // `end`: reap whatever remains in the orphan set.
+            if let Some(orphans) = self.snapshot_orphans.remove(table) {
+                if !orphans.is_empty() {
+                    let to_delete: Vec<String> = orphans.into_iter().collect();
+                    self.storage.delete_pks(table, &to_delete)?;
+                }
+            }
+            // Stray `end` with no open snapshot for `table` → no-op.
+            Ok(())
+        }
+    }
+
     /// Flush any buffered frames as one atomic commit. Returns `None` if there
     /// was nothing pending (the caller may still want to ack the high-water LSN).
     ///
@@ -232,12 +309,23 @@ impl<S: Storage> ApplyEngine<S> {
         let count = self.pending.len();
         let checkpoint = self.high_water;
 
-        // Materialize the RowOps and apply atomically. On error the storage
-        // contract guarantees nothing committed — leave pending intact so a
-        // retry re-attempts the same batch.
-        let ops: Vec<RowOp> = self.pending.drain(..).map(Frame::into_row_op).collect();
-        match self.storage.apply_batch(&ops, checkpoint) {
+        // ADR-0025 slice 4a: sort by LSN so the storage's per-row `>=` gate sees
+        // monotonic input across a mixed live+replay batch, then pair each op
+        // with its source LSN for per-row gating. `snapshot_tables` (design D)
+        // = tables with an open snapshot-reconcile window → apply unconditionally
+        // (synthetic-LSN snapshot rows must clobber stored rows).
+        self.pending.sort_by_key(|f| f.lsn);
+        let ops: Vec<(RowOp, u64)> = self
+            .pending
+            .iter()
+            .map(|f| (f.clone().into_row_op(), f.lsn))
+            .collect();
+        let snapshot_tables: HashSet<String> = self.snapshot_orphans.keys().cloned().collect();
+        // Built `ops` from iter() (not drain) → on error `pending` is intact for
+        // retry; no Frame-rebuild needed. The sort is idempotent on re-flush.
+        match self.storage.apply_batch(&ops, checkpoint, &snapshot_tables) {
             Ok(()) => {
+                self.pending.clear();
                 self.open_txn = None;
                 Ok(Some(ApplyOutcome {
                     checkpoint,
@@ -245,27 +333,7 @@ impl<S: Storage> ApplyEngine<S> {
                 }))
             }
             // Surface the backend error verbatim; pending is preserved for retry.
-            Err(StorageError::Backend(msg)) => {
-                // Re-buffer the ops we drained so a retry sees the same batch.
-                // (We lost the original Frame metadata converting to RowOp, but
-                // the ops are what matter for re-apply — idempotent by pk.)
-                self.pending = ops
-                    .into_iter()
-                    .map(|op| Frame {
-                        lsn: checkpoint.raw(),
-                        op: op.operation(),
-                        table: op.table().to_owned(),
-                        pk: op.pk().to_owned(),
-                        payload: if op.has_payload() {
-                            Some(op.payload_bytes().to_vec())
-                        } else {
-                            None
-                        },
-                        txn_id: None,
-                    })
-                    .collect();
-                Err(StorageError::Backend(msg))
-            }
+            Err(StorageError::Backend(msg)) => Err(StorageError::Backend(msg)),
         }
     }
 }
@@ -274,6 +342,7 @@ impl<S: Storage> ApplyEngine<S> {
 mod tests {
     use super::*;
     use crate::InMemoryStorage;
+    use crate::Outbox;
     use bytes::Bytes;
 
     fn frame(lsn: u64, pk: &str, txn: Option<u64>) -> Frame {
@@ -416,12 +485,16 @@ mod tests {
         let mut storage = InMemoryStorage::new();
         storage
             .apply_batch(
-                &[RowOp::Insert {
-                    table: "tasks".into(),
-                    pk: "1".into(),
-                    payload: Bytes::from_static(b"x"),
-                }],
+                &[(
+                    RowOp::Insert {
+                        table: "tasks".into(),
+                        pk: "1".into(),
+                        payload: Bytes::from_static(b"x"),
+                    },
+                    500,
+                )],
                 Lsn::new(500),
+                &HashSet::new(),
             )
             .unwrap();
 
@@ -451,12 +524,16 @@ mod tests {
         let mut replay = InMemoryStorage::new();
         replay
             .apply_batch(
-                &[RowOp::Insert {
-                    table: "tasks".into(),
-                    pk: "1".into(),
-                    payload: b"payload-1".to_vec().into(),
-                }],
+                &[(
+                    RowOp::Insert {
+                        table: "tasks".into(),
+                        pk: "1".into(),
+                        payload: b"payload-1".to_vec().into(),
+                    },
+                    50,
+                )],
                 Lsn::new(50),
+                &HashSet::new(),
             )
             .unwrap();
         let mut engine2 = ApplyEngine::with_max_batch(replay, 100);
@@ -508,5 +585,273 @@ mod tests {
         // Sanity on the test-local helper (kept so the RowOp path is exercised).
         let op = into_op(frame(1, "x", None));
         assert!(matches!(op, RowOp::Insert { .. }));
+    }
+
+    // ---- snapshot-reconcile (ADR-0014 offline-delete fix) ----
+
+    /// The P0 fix: a row hard-deleted server-side while the client was offline
+    /// is absent from the snapshot → the client keeps a stale ORPHAN. The
+    /// snapshot_begin/end boundary pair must reap local PKs the snapshot did
+    /// NOT re-confirm.
+    #[test]
+    fn snapshot_reconcile_removes_orphans_absent_from_snapshot() {
+        // Seed: local has pk=A in table T (e.g. carried over from a prior
+        // session). The server has since hard-deleted A, so the snapshot only
+        // contains B.
+        let mut storage = InMemoryStorage::new();
+        storage
+            .apply_batch(
+                &[(
+                    RowOp::Insert {
+                        table: "T".into(),
+                        pk: "A".into(),
+                        payload: Bytes::from_static(b"old"),
+                    },
+                    1,
+                )],
+                Lsn::new(1),
+                &HashSet::new(),
+            )
+            .unwrap();
+
+        let mut engine = ApplyEngine::new(storage);
+
+        // snapshot_begin{T}: seed the orphan candidate set with the local PKs.
+        engine.snapshot_boundary("T", true, &[]).unwrap();
+        // The snapshot delivers only B (A is absent — server hard-deleted it).
+        engine
+            .feed(Frame {
+                lsn: 2,
+                op: nostos_domain::Operation::Insert,
+                table: "T".into(),
+                pk: "B".into(),
+                payload: Some(b"new".to_vec()),
+                txn_id: None,
+            })
+            .unwrap();
+        // snapshot_end{T}: reap orphans → A is gone, B stays.
+        engine.snapshot_boundary("T", false, &[]).unwrap();
+        engine.flush().unwrap();
+
+        let storage = engine.into_storage();
+        assert!(
+            storage.payload("T", "A").is_none(),
+            "orphan pk A (absent from snapshot) must be reaped"
+        );
+        assert_eq!(
+            storage.payload("T", "B"),
+            Some(b"new" as &[u8]),
+            "snapshot row B must be present"
+        );
+    }
+
+    /// A live upsert OUTSIDE any snapshot window must NOT trigger reconcile —
+    /// no false deletes. The orphan set is empty except between begin/end, so
+    /// a stray frame can never reap a row.
+    #[test]
+    fn live_upsert_outside_snapshot_does_not_reconcile() {
+        let mut storage = InMemoryStorage::new();
+        storage
+            .apply_batch(
+                &[
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "A".into(),
+                            payload: Bytes::from_static(b"a"),
+                        },
+                        1,
+                    ),
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "B".into(),
+                            payload: Bytes::from_static(b"b"),
+                        },
+                        1,
+                    ),
+                ],
+                Lsn::new(1),
+                &HashSet::new(),
+            )
+            .unwrap();
+
+        let mut engine = ApplyEngine::new(storage);
+        // A live upsert for pk=C with NO boundary calls.
+        engine
+            .feed(Frame {
+                lsn: 2,
+                op: nostos_domain::Operation::Insert,
+                table: "T".into(),
+                pk: "C".into(),
+                payload: Some(b"c".to_vec()),
+                txn_id: None,
+            })
+            .unwrap();
+        engine.flush().unwrap();
+
+        let storage = engine.into_storage();
+        assert_eq!(storage.payload("T", "A"), Some(b"a" as &[u8]));
+        assert_eq!(storage.payload("T", "B"), Some(b"b" as &[u8]));
+        assert_eq!(storage.payload("T", "C"), Some(b"c" as &[u8]));
+        assert_eq!(
+            storage.row_count(),
+            3,
+            "no false deletes outside a snapshot window"
+        );
+    }
+
+    /// A row that arrives during the snapshot window must NOT be reaped: the
+    /// apply path removes its pk from the orphan candidate set. This is the
+    /// per-row subtraction that protects received rows from the `end` reap.
+    #[test]
+    fn snapshot_window_received_row_is_protected_from_reap() {
+        let mut storage = InMemoryStorage::new();
+        // Local has A and B; the snapshot will re-deliver A only (B was
+        // hard-deleted server-side).
+        storage
+            .apply_batch(
+                &[
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "A".into(),
+                            payload: Bytes::from_static(b"a-old"),
+                        },
+                        1,
+                    ),
+                    (
+                        RowOp::Insert {
+                            table: "T".into(),
+                            pk: "B".into(),
+                            payload: Bytes::from_static(b"b"),
+                        },
+                        1,
+                    ),
+                ],
+                Lsn::new(1),
+                &HashSet::new(),
+            )
+            .unwrap();
+
+        let mut engine = ApplyEngine::new(storage);
+        engine.snapshot_boundary("T", true, &[]).unwrap();
+        // A re-arrives (present in snapshot) → removed from orphan set.
+        engine
+            .feed(Frame {
+                lsn: 2,
+                op: nostos_domain::Operation::Insert,
+                table: "T".into(),
+                pk: "A".into(),
+                payload: Some(b"a-new".to_vec()),
+                txn_id: None,
+            })
+            .unwrap();
+        engine.snapshot_boundary("T", false, &[]).unwrap();
+        engine.flush().unwrap();
+
+        let storage = engine.into_storage();
+        assert_eq!(
+            storage.payload("T", "A"),
+            Some(b"a-new" as &[u8]),
+            "re-confirmed row A survived (and was updated)"
+        );
+        assert!(
+            storage.payload("T", "B").is_none(),
+            "absent row B reaped as orphan"
+        );
+    }
+
+    /// A snapshot_end with no matching begin (stray control frame, e.g. a
+    /// redelivery) is a no-op — no rows touched.
+    #[test]
+    fn snapshot_end_without_begin_is_noop() {
+        let mut storage = InMemoryStorage::new();
+        storage
+            .apply_batch(
+                &[(
+                    RowOp::Insert {
+                        table: "T".into(),
+                        pk: "A".into(),
+                        payload: Bytes::from_static(b"a"),
+                    },
+                    1,
+                )],
+                Lsn::new(1),
+                &HashSet::new(),
+            )
+            .unwrap();
+        let mut engine = ApplyEngine::new(storage);
+        engine.snapshot_boundary("T", false, &[]).unwrap();
+        let storage = engine.into_storage();
+        assert_eq!(storage.payload("T", "A"), Some(b"a" as &[u8]));
+    }
+
+    /// ADR-0025 hole #1: a pending-local write (in the outbox, not yet echoed
+    /// by the server) sits in the data store, so it is absent from a server
+    /// snapshot. It MUST NOT be reaped — it is the user's own unacked work, not
+    /// an orphan. The `exempt_pks` set (the outbox's pending pks for the table)
+    /// removes it from the orphan seed at `begin`.
+    #[test]
+    fn snapshot_reconcile_exempts_pending_local_writes() {
+        let mut storage = InMemoryStorage::new();
+        // A is in the store (instant-local optimistic render)...
+        storage
+            .apply_batch(
+                &[(
+                    RowOp::Insert {
+                        table: "T".into(),
+                        pk: "A".into(),
+                        payload: Bytes::from_static(b"a-local"),
+                    },
+                    1,
+                )],
+                Lsn::new(1),
+                &HashSet::new(),
+            )
+            .unwrap();
+        // ...AND A is pending in the outbox (server has not echoed it yet).
+        storage
+            .enqueue(crate::PendingWrite {
+                table: "T".into(),
+                op: crate::outbox::WriteOp::Upsert,
+                pk: "A".into(),
+                payload_json: Some(r#"{"id":"A"}"#.into()),
+            })
+            .unwrap();
+        // The caller derives the exempt set from the outbox (ADR-0025 hole #1).
+        let exempt = storage.pending_pks_for_table("T").unwrap();
+        assert_eq!(exempt, vec!["A".to_string()]);
+
+        let mut engine = ApplyEngine::new(storage);
+        // snapshot_begin{T}: seed orphans MINUS the exempt pending-local pk A.
+        engine.snapshot_boundary("T", true, &exempt).unwrap();
+        // The snapshot delivers only B (A is absent — the server doesn't know
+        // A yet; A is still in the client's outbox).
+        engine
+            .feed(Frame {
+                lsn: 2,
+                op: nostos_domain::Operation::Insert,
+                table: "T".into(),
+                pk: "B".into(),
+                payload: Some(b"b-snap".to_vec()),
+                txn_id: None,
+            })
+            .unwrap();
+        // snapshot_end{T}: reap — but A is exempt, so it survives.
+        engine.snapshot_boundary("T", false, &[]).unwrap();
+        engine.flush().unwrap();
+
+        let storage = engine.into_storage();
+        assert_eq!(
+            storage.payload("T", "A"),
+            Some(b"a-local" as &[u8]),
+            "pending-local write A must NOT be reaped (hole #1)"
+        );
+        assert_eq!(
+            storage.payload("T", "B"),
+            Some(b"b-snap" as &[u8]),
+            "snapshot row B present"
+        );
     }
 }

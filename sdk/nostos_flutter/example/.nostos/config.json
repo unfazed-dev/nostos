@@ -1,7 +1,0 @@
-{
-  "project": "nostos-dashboard",
-  "sync_url": "ws://127.0.0.1:8800/sync",
-  "backend": {
-    "kind": "postgres"
-  }
-}

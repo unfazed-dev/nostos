@@ -16,6 +16,16 @@ use crate::lsn::Lsn;
 /// the wire codec (infra) is responsible for translating to/from the
 /// on-the-wire frame. [`Bytes`] is reference-counted, so a fan-out to 10,000
 /// sessions clones a refcount, not 10,000 copies of the row.
+///
+/// `Delete` carries an optional `old_payload` — the row's *old* tuple image,
+/// present only when the source table uses `REPLICA IDENTITY FULL` (Postgres
+/// then ships the full pre-delete row in the WAL). The op-log writer lifts the
+/// tenant column from it so a tenant-filtered replay (`WHERE tenant_id = ?`)
+/// still matches deletes (ADR-0025 follow-up: without it, deletes carry no
+/// tuple → `tenant_id = NULL` → tenant replay silently drops them → ghost
+/// rows). Under `REPLICA IDENTITY DEFAULT` (PK-only) it is `None` and delete
+/// replay falls back to snapshot-reconcile (slice 1). It is NEVER sent on the
+/// wire — clients delete by pk; the old image is server-internal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RowOp {
     Insert {
@@ -31,6 +41,8 @@ pub enum RowOp {
     Delete {
         table: String,
         pk: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_payload: Option<Bytes>,
     },
 }
 
@@ -190,6 +202,7 @@ mod tests {
         let del = RowOp::Delete {
             table: "tasks".into(),
             pk: "1".into(),
+            old_payload: None,
         };
         assert!(!del.has_payload());
         assert_eq!(del.payload_len(), 0);
@@ -202,6 +215,7 @@ mod tests {
             RowOp::Delete {
                 table: "t".into(),
                 pk: "x".into(),
+                old_payload: None,
             },
         )
         .with_txn(99);

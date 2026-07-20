@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS cairn_data (\
     table_name TEXT NOT NULL,\
     pk TEXT NOT NULL,\
     payload BLOB NOT NULL,\
+    applied_lsn INTEGER NOT NULL DEFAULT 0,\
     PRIMARY KEY (table_name, pk)\
 );\
 CREATE TABLE IF NOT EXISTS cairn_meta (\
@@ -74,6 +75,10 @@ CREATE TABLE IF NOT EXISTS cairn_outbox (\
 
 /// The single meta key holding the last-applied LSN (`u64` decimal).
 const CHECKPOINT_KEY: &str = "checkpoint";
+
+/// The meta key holding the last-seen server slot epoch (ADR-0025 reconnect-
+/// resume gate). Stored as a `u64` decimal alongside the checkpoint.
+const EPOCH_KEY: &str = "epoch";
 
 /// A synced table's schema as the client sees it — the minimal projection of
 /// the server's `SchemaDescriptor` (nostos-application) that the view layer
@@ -127,6 +132,7 @@ impl SqliteStorage {
     fn init(conn: Connection) -> Result<Self, StorageError> {
         conn.execute_batch(SCHEMA).map_err(rusqlite_err)?;
         Self::migrate_outbox_dlq(&conn)?;
+        Self::migrate_applied_lsn(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -165,6 +171,26 @@ impl SqliteStorage {
         .map_err(rusqlite_err)?;
         conn.execute(
             "ALTER TABLE cairn_outbox ADD COLUMN dlq INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(rusqlite_err)?;
+        Ok(())
+    }
+
+    /// v2 migration: add the per-row `applied_lsn` column to `cairn_data` for
+    /// databases created by a pre-slice-4a binary (ADR-0025 slice 4a). The
+    /// column drives per-row LSN gating (a stale replay/live op must not
+    /// overwrite a newer row). Same probe-then-ALTER pattern as
+    /// [`Self::migrate_outbox_dlq`]: `CREATE TABLE IF NOT EXISTS` in [`SCHEMA`]
+    /// emits the column on a fresh file, so this only fires on an existing DB
+    /// from an older binary. `ADD COLUMN … DEFAULT 0` is constant-time on SQLite
+    /// (no row rewrite), so this is cheap even on a large `cairn_data`.
+    fn migrate_applied_lsn(conn: &Connection) -> Result<(), StorageError> {
+        if cairn_data_has_column(conn, "applied_lsn")? {
+            return Ok(());
+        }
+        conn.execute(
+            "ALTER TABLE cairn_data ADD COLUMN applied_lsn INTEGER NOT NULL DEFAULT 0",
             [],
         )
         .map_err(rusqlite_err)?;
@@ -448,7 +474,53 @@ impl Storage for SqliteStorage {
         Ok(Lsn::new(raw))
     }
 
-    fn apply_batch(&mut self, ops: &[RowOp], checkpoint: Lsn) -> nostos_core::Result<()> {
+    fn epoch(&self) -> nostos_core::Result<u64> {
+        let conn = self.conn.lock().expect("epoch: storage mutex poisoned");
+        // No row yet (fresh DB, or never received a resume_info) → epoch 0
+        // (client sends epoch: None → server treats as mismatch → snapshot).
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM cairn_meta WHERE key = ?1",
+                rusqlite::params![EPOCH_KEY],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(rusqlite_err)?;
+        match raw {
+            None => Ok(0),
+            Some(s) => s.parse().map_err(|e: std::num::ParseIntError| {
+                StorageError::Backend(format!("corrupt epoch value {s:?}: {e}"))
+            }),
+        }
+    }
+
+    fn save_epoch(&self, epoch: u64) -> nostos_core::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("save_epoch: storage mutex poisoned");
+        // INSERT OR REPLACE: the epoch row may not exist on the first write
+        // (unlike checkpoint, which the schema seeds). Overwrite is correct —
+        // epoch is the server's latest advertised value, not monotonic from
+        // the client's view (the server may bump it on slot recreate).
+        conn.execute(
+            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![EPOCH_KEY, epoch.to_string()],
+        )
+        .map_err(rusqlite_err)?;
+        Ok(())
+    }
+
+    fn apply_batch(
+        &mut self,
+        ops: &[(RowOp, u64)],
+        checkpoint: Lsn,
+        snapshot_tables: &std::collections::HashSet<String>,
+    ) -> nostos_core::Result<()> {
         // Snapshot the pending optimistic writes BEFORE taking the conn lock
         // (`pending()` locks self.conn internally → calling it after the lock
         // below would deadlock the non-reentrant Mutex). Replayed after the
@@ -465,26 +537,61 @@ impl Storage for SqliteStorage {
         let tx = conn.transaction().map_err(rusqlite_err)?;
 
         {
-            let mut upsert = tx
+            // ADR-0025 slice 4a: per-row LSN gating. Four statements — gated
+            // (live/replay; `>= applied_lsn` so a stale op can't overwrite a
+            // newer row) vs unconditional (tables in `snapshot_tables`, design
+            // D — authoritative snapshot current-state always clobbers). SQLite
+            // stores integers as i64; clamp u64 lsns (real PG lsns fit i64).
+            let to_i64 = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+            let mut upsert_gated = tx
                 .prepare_cached(
-                    "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload) VALUES (?1, ?2, ?3)",
+                    "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                     VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT(table_name, pk) DO UPDATE SET \
+                     payload = excluded.payload, applied_lsn = excluded.applied_lsn \
+                     WHERE cairn_data.applied_lsn <= excluded.applied_lsn",
                 )
                 .map_err(rusqlite_err)?;
-            let mut delete = tx
+            let mut upsert_uncond = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(rusqlite_err)?;
+            let mut delete_gated = tx
+                .prepare_cached(
+                    "DELETE FROM cairn_data \
+                     WHERE table_name = ?1 AND pk = ?2 AND applied_lsn <= ?3",
+                )
+                .map_err(rusqlite_err)?;
+            let mut delete_uncond = tx
                 .prepare_cached("DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2")
                 .map_err(rusqlite_err)?;
 
-            for op in ops {
+            for (op, lsn) in ops {
+                let lsn_i64 = to_i64(*lsn);
                 match op {
                     RowOp::Insert { table, pk, payload } | RowOp::Update { table, pk, payload } => {
-                        upsert
-                            .execute(rusqlite::params![table, pk, payload.as_ref()])
-                            .map_err(rusqlite_err)?;
+                        if snapshot_tables.contains(table.as_str()) {
+                            upsert_uncond
+                                .execute(rusqlite::params![table, pk, payload.as_ref(), lsn_i64])
+                                .map_err(rusqlite_err)?;
+                        } else {
+                            upsert_gated
+                                .execute(rusqlite::params![table, pk, payload.as_ref(), lsn_i64])
+                                .map_err(rusqlite_err)?;
+                        }
                     }
-                    RowOp::Delete { table, pk } => {
-                        delete
-                            .execute(rusqlite::params![table, pk])
-                            .map_err(rusqlite_err)?;
+                    RowOp::Delete { table, pk, .. } => {
+                        if snapshot_tables.contains(table.as_str()) {
+                            delete_uncond
+                                .execute(rusqlite::params![table, pk])
+                                .map_err(rusqlite_err)?;
+                        } else {
+                            delete_gated
+                                .execute(rusqlite::params![table, pk, lsn_i64])
+                                .map_err(rusqlite_err)?;
+                        }
                     }
                 }
             }
@@ -493,20 +600,28 @@ impl Storage for SqliteStorage {
             // optimistic write so a server snapshot/stream — which lacks the
             // un-flushed local edits — can't flash the stale image. Locally-
             // deleted rows stay deleted, locally-modified rows keep their edit,
-            // until the outbox flush + echo reconciles. Same upsert/delete
-            // statements as the server batch; Patch does a read-merge-write via
-            // `merge_payload` (same helper `apply_local` uses). Best-effort per
-            // write: a malformed pending row is skipped (`let _ =`), never fatal
-            // — the server batch + checkpoint still commit; that one row's echo
-            // reconciles later.
+            // until the outbox flush + echo reconciles. UNCONDITIONAL statements
+            // (local writes always win on re-stamp — they're authoritative-local
+            // with no real WAL lsn yet; stamp applied_lsn = checkpoint so a later
+            // server op at the same lsn still gates in). Patch does a read-merge-
+            // write via `merge_payload` (same helper `apply_local` uses).
+            // Best-effort per write: a malformed pending row is skipped
+            // (`let _ =`), never fatal — the server batch + checkpoint still
+            // commit; that one row's echo reconciles later.
+            let local_lsn = i64::try_from(checkpoint.raw()).unwrap_or(i64::MAX);
             for (_, write) in &pending {
                 match write.op {
                     WriteOp::Upsert => {
                         let payload = write.payload_json.as_deref().unwrap_or("null").as_bytes();
-                        let _ = upsert.execute(rusqlite::params![write.table, write.pk, payload]);
+                        let _ = upsert_uncond.execute(rusqlite::params![
+                            write.table,
+                            write.pk,
+                            payload,
+                            local_lsn
+                        ]);
                     }
                     WriteOp::Delete => {
-                        let _ = delete.execute(rusqlite::params![write.table, write.pk]);
+                        let _ = delete_uncond.execute(rusqlite::params![write.table, write.pk]);
                     }
                     WriteOp::Patch => {
                         let patch_json = write.payload_json.as_deref().unwrap_or("{}");
@@ -519,7 +634,12 @@ impl Storage for SqliteStorage {
                             )
                             .unwrap_or_default();
                         let merged = merge_payload(&existing, patch_json.as_bytes());
-                        let _ = upsert.execute(rusqlite::params![write.table, write.pk, merged]);
+                        let _ = upsert_uncond.execute(rusqlite::params![
+                            write.table,
+                            write.pk,
+                            merged,
+                            local_lsn
+                        ]);
                     }
                 }
             }
@@ -548,6 +668,58 @@ impl Storage for SqliteStorage {
         )
         .map_err(rusqlite_err)?;
 
+        tx.commit().map_err(rusqlite_err)?;
+        Ok(())
+    }
+
+    fn pks_for_table(&self, table: &str) -> nostos_core::Result<Vec<String>> {
+        // The snapshot-reconcile seed read. Scoped by `table_name` so the
+        // orphan-candidate set is per-table (a `snapshot_begin/end` pair
+        // bracket exactly one table). Read-only — no transaction needed; the
+        // mutex guard serializes against the apply path on the same conn.
+        let conn = self
+            .conn
+            .lock()
+            .expect("pks_for_table: storage mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT pk FROM cairn_data WHERE table_name = ?1 ORDER BY pk ASC")
+            .map_err(rusqlite_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![table], |row| {
+                let pk: String = row.get(0)?;
+                Ok(pk)
+            })
+            .map_err(rusqlite_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(rusqlite_err)?);
+        }
+        Ok(out)
+    }
+
+    fn delete_pks(&mut self, table: &str, pks: &[String]) -> nostos_core::Result<()> {
+        // One transaction for the whole batch — the orphan-reap is atomic. An
+        // empty slice is a cheap no-op (no transaction opened). Idempotent:
+        // deleting an absent pk affects 0 rows, never errors. Auto-commits on
+        // `tx.commit()` so the reconcile lands durably before the pump acks.
+        if pks.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .expect("delete_pks: storage mutex poisoned");
+        let tx = conn.transaction().map_err(rusqlite_err)?;
+        {
+            let mut delete = tx
+                .prepare_cached("DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2")
+                .map_err(rusqlite_err)?;
+            for pk in pks {
+                delete
+                    .execute(rusqlite::params![table, pk])
+                    .map_err(rusqlite_err)?;
+            }
+        }
         tx.commit().map_err(rusqlite_err)?;
         Ok(())
     }
@@ -835,6 +1007,23 @@ fn outbox_has_column(conn: &Connection, needle: &str) -> Result<bool, StorageErr
     Ok(names.iter().any(|n| n == needle))
 }
 
+/// Like [`outbox_has_column`] but for `cairn_data` (ADR-0025 slice 4a
+/// `applied_lsn` migration probe).
+fn cairn_data_has_column(conn: &Connection, needle: &str) -> Result<bool, StorageError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(cairn_data)")
+        .map_err(rusqlite_err)?;
+    let names: Vec<String> = stmt
+        .query_map([], |row| {
+            let name: String = row.get(1)?;
+            Ok(name)
+        })
+        .map_err(rusqlite_err)?
+        .filter_map(Result::ok)
+        .collect();
+    Ok(names.iter().any(|n| n == needle))
+}
+
 /// Convert a `rusqlite::types::Value` (the tagged, type-erased SQLite value)
 /// into a `serde_json::Value` for [`SqliteStorage::query`]'s result rows.
 ///
@@ -878,6 +1067,7 @@ const NIBBLE_TO_HEX: &[u8; 16] = b"0123456789abcdef";
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::collections::HashSet;
 
     fn ins(table: &str, pk: &str, payload: &[u8]) -> RowOp {
         RowOp::Insert {
@@ -897,7 +1087,12 @@ mod tests {
     fn apply_inserts_rows_and_advances_checkpoint() {
         let mut s = SqliteStorage::open_in_memory().unwrap();
         let ops = [ins("tasks", "1", b"alice"), ins("tasks", "2", b"bob")];
-        s.apply_batch(&ops, Lsn::new(100)).unwrap();
+        s.apply_batch(
+            &ops.iter().map(|o| (o.clone(), 100)).collect::<Vec<_>>(),
+            Lsn::new(100),
+            &HashSet::new(),
+        )
+        .unwrap();
 
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(100));
         // Row count via the same SQLite path.
@@ -911,11 +1106,19 @@ mod tests {
     #[test]
     fn apply_is_idempotent_reapply_does_not_duplicate() {
         let mut s = SqliteStorage::open_in_memory().unwrap();
-        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"v1"), 10)],
+            Lsn::new(10),
+            &HashSet::new(),
+        )
+        .unwrap();
         // Same pk again — must UPSERT, not insert a second row.
-        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"v1"), 10)],
+            Lsn::new(10),
+            &HashSet::new(),
+        )
+        .unwrap();
 
         let conn = s.conn.lock().unwrap();
         let count: i64 = conn
@@ -927,15 +1130,23 @@ mod tests {
     #[test]
     fn update_overwrites_payload_by_pk() {
         let mut s = SqliteStorage::open_in_memory().unwrap();
-        s.apply_batch(&[ins("tasks", "1", b"v1")], Lsn::new(10))
-            .unwrap();
         s.apply_batch(
-            &[RowOp::Update {
-                table: "tasks".into(),
-                pk: "1".into(),
-                payload: Bytes::copy_from_slice(b"v2"),
-            }],
+            &[(ins("tasks", "1", b"v1"), 10)],
+            Lsn::new(10),
+            &HashSet::new(),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[(
+                RowOp::Update {
+                    table: "tasks".into(),
+                    pk: "1".into(),
+                    payload: Bytes::copy_from_slice(b"v2"),
+                },
+                20,
+            )],
             Lsn::new(20),
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -951,14 +1162,23 @@ mod tests {
     #[test]
     fn delete_removes_row() {
         let mut s = SqliteStorage::open_in_memory().unwrap();
-        s.apply_batch(&[ins("tasks", "1", b"x")], Lsn::new(10))
-            .unwrap();
         s.apply_batch(
-            &[RowOp::Delete {
-                table: "tasks".into(),
-                pk: "1".into(),
-            }],
+            &[(ins("tasks", "1", b"x"), 10)],
+            Lsn::new(10),
+            &HashSet::new(),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[(
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "1".into(),
+                    old_payload: None,
+                },
+                20,
+            )],
             Lsn::new(20),
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -974,11 +1194,12 @@ mod tests {
         let mut s = SqliteStorage::open_in_memory().unwrap();
         s.apply_batch(
             &[
-                ins("tasks", "2", b"bob"),
-                ins("tasks", "1", b"alice"),
-                ins("notes", "1", b"other-table"),
+                (ins("tasks", "2", b"bob"), 10),
+                (ins("tasks", "1", b"alice"), 10),
+                (ins("notes", "1", b"other-table"), 10),
             ],
             Lsn::new(10),
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -996,14 +1217,23 @@ mod tests {
     #[test]
     fn rows_for_excludes_deleted_rows() {
         let mut s = SqliteStorage::open_in_memory().unwrap();
-        s.apply_batch(&[ins("tasks", "1", b"x")], Lsn::new(10))
-            .unwrap();
         s.apply_batch(
-            &[RowOp::Delete {
-                table: "tasks".into(),
-                pk: "1".into(),
-            }],
+            &[(ins("tasks", "1", b"x"), 10)],
+            Lsn::new(10),
+            &HashSet::new(),
+        )
+        .unwrap();
+        s.apply_batch(
+            &[(
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "1".into(),
+                    old_payload: None,
+                },
+                20,
+            )],
             Lsn::new(20),
+            &HashSet::new(),
         )
         .unwrap();
         assert!(s.rows_for("tasks").unwrap().is_empty());
@@ -1012,11 +1242,19 @@ mod tests {
     #[test]
     fn checkpoint_is_monotonic_stale_lsn_does_not_regress() {
         let mut s = SqliteStorage::open_in_memory().unwrap();
-        s.apply_batch(&[ins("tasks", "1", b"x")], Lsn::new(100))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"x"), 100)],
+            Lsn::new(100),
+            &HashSet::new(),
+        )
+        .unwrap();
         // A replay batch carrying a stale LSN must not move the cursor back.
-        s.apply_batch(&[ins("tasks", "2", b"y")], Lsn::new(50))
-            .unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "2", b"y"), 50)],
+            Lsn::new(50),
+            &HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(100));
     }
 
@@ -1024,11 +1262,28 @@ mod tests {
     fn empty_batch_still_advances_checkpoint() {
         // A commit boundary with no rows must still ack the LSN.
         let mut s = SqliteStorage::open_in_memory().unwrap();
-        s.apply_batch(&[], Lsn::new(42)).unwrap();
+        s.apply_batch(&[], Lsn::new(42), &HashSet::new()).unwrap();
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(42));
     }
 
     // ---- DURABILITY: the property that distinguishes this from InMemoryStorage ----
+
+    #[test]
+    fn epoch_save_load_roundtrips_and_defaults_to_zero() {
+        // ADR-0025 F2: the client persists the server's advertised slot epoch so
+        // the reconnect-resume gate can choose replay over a full snapshot.
+        let s = SqliteStorage::open_in_memory().unwrap();
+        // Fresh DB: no epoch row → 0 → Subscribe sends epoch: None (snapshot).
+        assert_eq!(s.epoch().unwrap(), 0);
+        s.save_epoch(7).unwrap();
+        assert_eq!(s.epoch().unwrap(), 7);
+        // INSERT OR REPLACE: the server's latest epoch wins (it may bump on a
+        // slot recreate); epoch is NOT monotonic from the client's view.
+        s.save_epoch(9).unwrap();
+        assert_eq!(s.epoch().unwrap(), 9);
+        // Epoch is independent of the checkpoint row.
+        assert_eq!(s.checkpoint().unwrap(), Lsn::ZERO);
+    }
 
     #[test]
     fn checkpoint_survives_drop_and_reopen_on_disk() {
@@ -1039,8 +1294,12 @@ mod tests {
 
         {
             let mut s = SqliteStorage::open(&path).unwrap();
-            s.apply_batch(&[ins("tasks", "1", b"durable")], Lsn::new(777))
-                .unwrap();
+            s.apply_batch(
+                &[(ins("tasks", "1", b"durable"), 777)],
+                Lsn::new(777),
+                &HashSet::new(),
+            )
+            .unwrap();
             // drop → connection closes, file is flushed to disk.
         }
 
@@ -1204,12 +1463,16 @@ mod tests {
         // and what json_extract operates on. Stored as opaque bytes (BLOB).
         let payload = br#"{"title":"hello","n":42}"#;
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "t1".into(),
-                pk: "1".into(),
-                payload: Bytes::copy_from_slice(payload),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "t1".into(),
+                    pk: "1".into(),
+                    payload: Bytes::copy_from_slice(payload),
+                },
+                1,
+            )],
             Lsn::new(1),
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -1248,14 +1511,18 @@ mod tests {
         // Payload is the column-named JSON object the Pg path emits
         // (tuple_to_json_payload keyed by column name).
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "tasks".into(),
-                pk: "t1".into(),
-                payload: Bytes::copy_from_slice(
-                    br#"{"id":"t1","title":"buy milk","completed":false}"#,
-                ),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "tasks".into(),
+                    pk: "t1".into(),
+                    payload: Bytes::copy_from_slice(
+                        br#"{"id":"t1","title":"buy milk","completed":false}"#,
+                    ),
+                },
+                1,
+            )],
             Lsn::new(1),
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -1308,11 +1575,16 @@ mod tests {
         // A DELETE on cairn_data propagates through the view (the view is live,
         // not a snapshot).
         s.apply_batch(
-            &[RowOp::Delete {
-                table: "tasks".into(),
-                pk: "t1".into(),
-            }],
+            &[(
+                RowOp::Delete {
+                    table: "tasks".into(),
+                    pk: "t1".into(),
+                    old_payload: None,
+                },
+                2,
+            )],
             Lsn::new(2),
+            &HashSet::new(),
         )
         .unwrap();
         assert!(s.query("SELECT id FROM tasks").unwrap().is_empty());
@@ -1334,14 +1606,18 @@ mod tests {
         }])
         .unwrap();
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "tasks".into(),
-                pk: "t1".into(),
-                payload: Bytes::copy_from_slice(
-                    br#"{"id":"t1","title":"buy milk","due":"2026-03-01"}"#,
-                ),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "tasks".into(),
+                    pk: "t1".into(),
+                    payload: Bytes::copy_from_slice(
+                        br#"{"id":"t1","title":"buy milk","due":"2026-03-01"}"#,
+                    ),
+                },
+                1,
+            )],
             Lsn::new(1),
+            &HashSet::new(),
         )
         .unwrap();
         // v1 view does not expose `due`.
@@ -1413,12 +1689,16 @@ mod tests {
 
         // The server's echo arrives with the authoritative image — UPSERT wins.
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "tasks".into(),
-                pk: "t1".into(),
-                payload: Bytes::copy_from_slice(br#"{"id":"t1","title":"authoritative"}"#),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "tasks".into(),
+                    pk: "t1".into(),
+                    payload: Bytes::copy_from_slice(br#"{"id":"t1","title":"authoritative"}"#),
+                },
+                100,
+            )],
             Lsn::new(100),
+            &HashSet::new(),
         )
         .unwrap();
         let rows = s.query("SELECT title FROM tasks").unwrap();
@@ -1457,12 +1737,18 @@ mod tests {
 
         // Seed an existing provider the way a server echo would.
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "providers".into(),
-                pk: "p1".into(),
-                payload: Bytes::copy_from_slice(br#"{"id":"p1","name":"Ada","status":"pending"}"#),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "providers".into(),
+                    pk: "p1".into(),
+                    payload: Bytes::copy_from_slice(
+                        br#"{"id":"p1","name":"Ada","status":"pending"}"#,
+                    ),
+                },
+                1,
+            )],
             Lsn::new(1),
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -1510,12 +1796,16 @@ mod tests {
 
         // Server has provider p1 = pending.
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "providers".into(),
-                pk: "p1".into(),
-                payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"pending"}"#),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "providers".into(),
+                    pk: "p1".into(),
+                    payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"pending"}"#),
+                },
+                1,
+            )],
             Lsn::new(1),
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -1539,12 +1829,16 @@ mod tests {
         // flushed) — server still says 'pending'. Pre-fix this clobbered
         // 'active' → the flash.
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "providers".into(),
-                pk: "p1".into(),
-                payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"pending"}"#),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "providers".into(),
+                    pk: "p1".into(),
+                    payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"pending"}"#),
+                },
+                2,
+            )],
             Lsn::new(2),
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(
@@ -1559,12 +1853,16 @@ mod tests {
         let id = s.pending().unwrap()[0].0;
         s.mark_done(id).unwrap();
         s.apply_batch(
-            &[RowOp::Insert {
-                table: "providers".into(),
-                pk: "p1".into(),
-                payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"authoritative"}"#),
-            }],
+            &[(
+                RowOp::Insert {
+                    table: "providers".into(),
+                    pk: "p1".into(),
+                    payload: Bytes::copy_from_slice(br#"{"id":"p1","status":"authoritative"}"#),
+                },
+                3,
+            )],
             Lsn::new(3),
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(

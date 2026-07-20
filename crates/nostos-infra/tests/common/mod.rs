@@ -129,6 +129,36 @@ pub fn subscribe_frame_with(
     format!("{{\"type\":\"subscribe\",\"table\":\"{table}\",\"filters\":{filters_json}{resume}}}")
 }
 
+/// A subscribe frame with optional resume_lsn AND epoch (ADR-0025 slice 4b —
+/// the client's last-seen server slot epoch; `None` ⇒ server reads client_epoch
+/// as 0 ⇒ epoch-mismatch ⇒ full snapshot). Used by the op-log replay e2e
+/// (slice 6), which drives the protocol with raw frames + an explicit epoch.
+pub fn subscribe_frame_with_epoch(
+    table: &str,
+    filters: &[(&str, &str)],
+    resume_lsn: Option<u64>,
+    epoch: Option<u64>,
+) -> String {
+    let filters_json = if filters.is_empty() {
+        String::from("[]")
+    } else {
+        let items: Vec<String> = filters
+            .iter()
+            .map(|(c, v)| format!("{{\"column\":\"{c}\",\"value\":\"{v}\"}}"))
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+    let resume = match resume_lsn {
+        Some(l) => format!(",\"resume_lsn\":{l}"),
+        None => String::new(),
+    };
+    let epoch = match epoch {
+        Some(e) => format!(",\"epoch\":{e}"),
+        None => String::new(),
+    };
+    format!("{{\"type\":\"subscribe\",\"table\":\"{table}\",\"filters\":{filters_json}{resume}{epoch}}}")
+}
+
 /// An ACK frame — the client confirms it has applied through `lsn`.
 pub fn ack_frame(lsn: u64) -> String {
     format!("{{\"type\":\"ack\",\"lsn\":{lsn}}}")
@@ -184,11 +214,24 @@ pub async fn subscribe_and_collect_at(
             tokio::time::timeout(Duration::from_millis(200), ws.next()).await
         {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-                got.push(v);
+                if is_data_frame(&v) {
+                    got.push(v);
+                }
             }
         }
     }
     got
+}
+
+/// True for a frame the test should treat as row data (insert/update/delete or
+/// the control frames a specific test inspects). Filters out `resume_info` — a
+/// pure metadata frame the server emits at subscribe (ADR-0025 F2); collecting
+/// it would shift every `frames[0]` assertion. Mirrors the production client,
+/// which intercepts `resume_info` before the row-apply path. Other control
+/// frames (snapshot boundaries, write_result acks) are NOT filtered here —
+/// specific tests inspect them inline.
+pub fn is_data_frame(v: &serde_json::Value) -> bool {
+    v.get("type").and_then(|t| t.as_str()) != Some("resume_info")
 }
 
 /// Decode the server's hex-encoded wire payload back to bytes, for assertions.

@@ -173,6 +173,7 @@ impl FakeReplicator {
             Operation::Delete => RowOp::Delete {
                 table: self.cfg.table.clone(),
                 pk,
+                old_payload: None,
             },
         };
         // Group events into transactions of 8 — mirrors what PgReplicator stamps

@@ -57,7 +57,7 @@ use std::time::Duration;
 
 use nostos_core::{ApplyEngine, ApplyOutcome, Frame, Outbox, PendingWrite};
 use nostos_domain::Lsn;
-use nostos_infra::wire::{decode_frames, ClientMessage};
+use nostos_infra::wire::{decode_control_frame, decode_frames, decode_resume_info, ClientMessage};
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
@@ -286,6 +286,13 @@ where
     /// Read the current durable checkpoint (delegates through the engine).
     pub async fn checkpoint(&self) -> nostos_core::Result<Lsn> {
         self.engine.lock().await.checkpoint()
+    }
+
+    /// Read the durable last-seen server slot epoch (ADR-0025 reconnect-resume
+    /// gate). 0 on a fresh DB → the Subscribe sends `epoch: None` → the server
+    /// treats it as a mismatch (full snapshot). Delegates through the engine.
+    pub async fn epoch(&self) -> nostos_core::Result<u64> {
+        self.engine.lock().await.epoch()
     }
 
     /// Enqueue a local write to the durable outbox. Returns the write's
@@ -559,13 +566,19 @@ where
             .map_err(|e| ClientError::Connect(e.to_string()))?;
         let (mut write, mut read) = ws.split();
 
-        // ---- Subscribe with the durable resume_lsn ----
+        // ---- Subscribe with the durable resume_lsn + epoch ----
         let resume_lsn = self.checkpoint().await?;
+        // ADR-0025 F2: send the last-seen server slot epoch so the reconnect-
+        // resume gate can choose op-log replay (epoch matches) over a full
+        // snapshot (mismatch). 0 on a fresh DB → None → server treats as
+        // mismatch (correct for a first-ever connect).
+        let client_epoch = self.epoch().await?;
         let subscribe = ClientMessage::Subscribe {
             table: self.config.table.clone(),
             filters: vec![],
             where_sql: self.config.where_sql.clone(),
             resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
+            epoch: (client_epoch > 0).then_some(client_epoch),
         };
         let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
         write
@@ -582,6 +595,7 @@ where
                 filters: vec![],
                 where_sql: sub.where_sql.clone(),
                 resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
+                epoch: (client_epoch > 0).then_some(client_epoch),
             };
             let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
             write
@@ -711,6 +725,73 @@ where
                                 ),
                             }
                         }
+                        continue;
+                    }
+
+                    // ADR-0025 F2: `resume_info` advertises the server's current
+                    // slot epoch. Persist it so the NEXT reconnect's Subscribe
+                    // carries the epoch this session was gated against (the
+                    // resume gate compares client vs server epoch — a match ⇒
+                    // op-log replay, a mismatch ⇒ full snapshot). Intercepted
+                    // before the row path; never batched with events.
+                    if let Some(epoch) = decode_resume_info(&bytes) {
+                        let engine = Arc::clone(&self.engine);
+                        // Non-fatal: a persist failure just means the next
+                        // reconnect falls back to snapshot (epoch unknown) — it
+                        // must NOT kill this session's data delivery.
+                        match tokio::task::spawn_blocking(move || {
+                            engine.blocking_lock().save_epoch(epoch)
+                        })
+                        .await
+                        .map_err(|e| ClientError::Join(e.to_string()))
+                        {
+                            Ok(Ok(())) => {
+                                debug!(server_epoch = epoch, "resume_info received — epoch persisted");
+                            }
+                            Ok(Err(e)) => warn!(
+                                server_epoch = epoch,
+                                error = %e,
+                                "save_epoch failed; next reconnect falls back to snapshot"
+                            ),
+                            Err(e) => warn!(
+                                server_epoch = epoch,
+                                error = %e,
+                                "save_epoch task join failed"
+                            ),
+                        }
+                        last_frame_at = tokio::time::Instant::now();
+                        continue;
+                    }
+
+                    // Snapshot-reconcile boundary (ADR-0014 offline-delete fix):
+                    // a `{"type":"snapshot_begin"|"snapshot_end","table":"<t>"}`
+                    // control frame is its own wire shape — it does NOT decode
+                    // as a `WireFrame` (no lsn/op/pk), so intercept it BEFORE
+                    // `decode_frames` and drive the engine's orphan-reap. The
+                    // boundary is a single atomic op (no row applies happen
+                    // between begin/end on this pump), and `snapshot_end` reaps
+                    // any local PKs the snapshot did NOT re-confirm — those are
+                    // rows hard-deleted server-side while the client was offline.
+                    if let Some((table, begin)) = decode_control_frame(&bytes) {
+                        let engine = Arc::clone(&self.engine);
+                        // Clone for the 'static spawn_blocking closure; the
+                        // original `table` stays alive for the debug! log below.
+                        let table_for_engine = table.clone();
+                        tokio::task::spawn_blocking(
+                            move || -> nostos_core::Result<()> {
+                                let mut engine = engine.blocking_lock();
+                                // ADR-0025 hole #1: exempt the outbox's
+                                // pending-local pks so the snapshot-reconcile
+                                // never reaps the user's own unacked writes.
+                                let exempt = engine
+                                    .storage()
+                                    .pending_pks_for_table(&table_for_engine)?;
+                                engine.snapshot_boundary(&table_for_engine, begin, &exempt)
+                            },
+                        )
+                        .await
+                        .map_err(|e| ClientError::Join(e.to_string()))??;
+                        debug!(table = %table, begin, "snapshot boundary applied");
                         continue;
                     }
 

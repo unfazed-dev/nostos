@@ -94,7 +94,7 @@ fi
 # follow-up (needs the cloud project ref — see docs/plans/flutter-supabase-plug-and-play-launch.md).
 if want flutter; then
   if command -v flutter >/dev/null 2>&1; then
-    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
+    run_slice flutter "cd sdk/nostos_flutter && flutter test integration_test/nostos_server_test.dart -d macos"
   else
     skip_slice flutter "(flutter not on PATH)"
   fi
