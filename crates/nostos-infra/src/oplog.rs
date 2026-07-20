@@ -357,10 +357,21 @@ mod pg {
     /// ponytail: compaction runs on a fixed time-window (`created_at < now() -
     /// retention`). The sharper watermark is `min(acked_lsn)` across active
     /// sessions (keep ops below the slowest client's checkpoint even if older
-    /// than the window) — deferred because the SessionStore doesn't expose an
-    /// aggregated min-checkpoint cheaply and slice-1 reconcile covers the
-    /// beyond-window case. Add when a real deployment shows slow clients
-    /// missing an in-window backfill they should have qualified for.
+    /// than the window).
+    ///
+    /// **This is an intentional efficiency deferral, NOT a correctness gap**
+    /// (ADR-0025 F3, documented-closed). The time-window + slice-1 reconcile
+    /// already make compaction safe: (a) an *active* subscriber never replays —
+    /// it receives live fan-out, so aging rows it hasn't ACKed can't lose it
+    /// data; (b) a client offline past the window reconnects with an aged-out
+    /// checkpoint → the replay gate falls back to snapshot-reconcile (slice 1,
+    /// verified by `aged_out_checkpoint_falls_back_to_snapshot`). `min(acked_lsn)`
+    /// would only let a *slow-but-active* client replay (cheap) instead of
+    /// snapshotting (dearer) when its ack lags inside the window — a narrow
+    /// efficiency edge. It's deferred because the SessionStore doesn't expose
+    /// an aggregated min-checkpoint cheaply. Add when a real deployment shows
+    /// slow clients missing an in-window backfill they should have qualified
+    /// for; until then the time-window is simpler + correctness-equivalent.
     pub struct PgOpLogCompactor;
 
     impl PgOpLogCompactor {
