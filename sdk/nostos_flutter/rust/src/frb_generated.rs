@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0-beta.5";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1736867153;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1484564550;
 
 // Section: executor
 
@@ -497,6 +497,69 @@ fn wire__crate__api__nostos__NostosHandle_watch_impl(
         },
     )
 }
+fn wire__crate__api__nostos__NostosHandle_watch_write_status_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NostosHandle_watch_write_status",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NostosHandle>,
+            >>::sse_decode(&mut deserializer);
+            let api_status_sink = <StreamSink<
+                crate::api::nostos::WriteQueueStatusFfi,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::api::nostos::NostosHandle::watch_write_status(
+                            &*api_that_guard,
+                            api_status_sink,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__nostos__NostosHandle_write_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -655,6 +718,19 @@ impl SseDecode
     }
 }
 
+impl SseDecode
+    for StreamSink<
+        crate::api::nostos::WriteQueueStatusFfi,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
 impl SseDecode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -797,6 +873,20 @@ impl SseDecode for usize {
     }
 }
 
+impl SseDecode for crate::api::nostos::WriteQueueStatusFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_pending = <u64>::sse_decode(deserializer);
+        let mut var_deadLettered = <u64>::sse_decode(deserializer);
+        let mut var_lastError = <Option<String>>::sse_decode(deserializer);
+        return crate::api::nostos::WriteQueueStatusFfi {
+            pending: var_pending,
+            dead_lettered: var_deadLettered,
+            last_error: var_lastError,
+        };
+    }
+}
+
 impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -821,8 +911,14 @@ fn pde_ffi_dispatcher_primary_impl(
         6 => wire__crate__api__nostos__NostosHandle_resume_impl(port, ptr, rust_vec_len, data_len),
         7 => wire__crate__api__nostos__NostosHandle_subscribe_impl(port, ptr, rust_vec_len, data_len),
         8 => wire__crate__api__nostos__NostosHandle_watch_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__nostos__NostosHandle_write_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__nostos__init_app_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__nostos__NostosHandle_watch_write_status_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        10 => wire__crate__api__nostos__NostosHandle_write_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__nostos__init_app_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -924,6 +1020,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::nostos::TableSubFfi>
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::nostos::WriteQueueStatusFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.pending.into_into_dart().into_dart(),
+            self.dead_lettered.into_into_dart().into_dart(),
+            self.last_error.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::nostos::WriteQueueStatusFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::nostos::WriteQueueStatusFfi>
+    for crate::api::nostos::WriteQueueStatusFfi
+{
+    fn into_into_dart(self) -> crate::api::nostos::WriteQueueStatusFfi {
+        self
+    }
+}
 
 impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -960,6 +1078,18 @@ impl SseEncode for StreamSink<String, flutter_rust_bridge::for_generated::SseCod
 impl SseEncode
     for StreamSink<
         crate::api::nostos::NostosConnectionState,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
+impl SseEncode
+    for StreamSink<
+        crate::api::nostos::WriteQueueStatusFfi,
         flutter_rust_bridge::for_generated::SseCodec,
     >
 {
@@ -1094,6 +1224,15 @@ impl SseEncode for usize {
             .cursor
             .write_u64::<NativeEndian>(self as _)
             .unwrap();
+    }
+}
+
+impl SseEncode for crate::api::nostos::WriteQueueStatusFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.pending, serializer);
+        <u64>::sse_encode(self.dead_lettered, serializer);
+        <Option<String>>::sse_encode(self.last_error, serializer);
     }
 }
 

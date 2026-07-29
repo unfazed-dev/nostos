@@ -1,5 +1,55 @@
 # Nostos Completion Assessment — 2026-07-29
 
+**Status:** assessment COMPLETE · **A1/A2/A4/A6 IMPLEMENTED same day** (see addendum)
+
+> ## Addendum — 2026-07-29, later that day: A1–A6 implemented
+>
+> The operator authorised implementation after this assessment was written. What shipped,
+> and what it changed about the findings above:
+>
+> | Item | Outcome |
+> |---|---|
+> | **A1** | **DONE — and the diagnosis in §2.3 was half wrong.** Restored `sdk/nostos_flutter/example/`; the SDK integration test now **PASSES** (`connect → subscribe → fan-out → watch() emits`, real macOS `.app` + real `cargo run -p nostos-server`). |
+> | **A2** | **DONE.** `WriteQueueStatus` on a `watch` channel in `nostos-client` → FFI `watchWriteStatus()` → `SyncStatus.{pendingWrites, deadLetteredWrites, lastWriteError}` + 4 derived getters. ADR-0027. |
+> | ~~A3~~ | Stays withdrawn (already wired via `nostos init --write-tables`). |
+> | **A4** | **DONE.** Swift guard now requires a *booted* simulator, matching the Android guards. |
+> | **A5** | **DONE** (committed first, `fade479`). |
+> | **A6** | **DONE.** New `sdk-e2e` CI job runs `rust node tauri` under a new `SDK_E2E_STRICT=1`. |
+>
+> ### Correction: there was never an Xcode/SPM machine fault
+>
+> §2.3 claims two independent faults, one of them environmental. **That was wrong, and the
+> error was mine.** When I tested the restored tree I ran the harness from the *plugin*
+> directory (`sdk/nostos_flutter/`), which is what the harness did at HEAD — not from
+> `example/`. The SPM error came from that invalid invocation.
+>
+> Run correctly, the true failure at HEAD is `No macOS desktop project configured`, and
+> there is exactly **one** fault: `9322d83` moved the test into a package that cannot host
+> it. The move was botched rather than a tradeoff — the moved file was byte-identical
+> except its docstring, and it still computes `repoRoot` as `Directory.current.path/../../..`,
+> which is right from `example/` and points *above* the repo from the plugin dir.
+>
+> **This closes C5c**, the largest honest unknown in this document. Flutter sync is now
+> demonstrated end-to-end, not assumed.
+>
+> ### A2 landed with a different error semantic than proposed
+>
+> Part 7 said "add `pendingWrites` + `lastWriteError`". As built, **`lastWriteError` is set
+> only on dead-letter**, never on an ordinary `WriteResult{ok:false}` — `client.rs:172`
+> documents those as routinely transient and self-healing, so surfacing them would train
+> users to dismiss write errors. `pending > 0` is likewise *not* an error; it is the
+> offline-first promise working. Rationale in ADR-0027.
+>
+> ### Still open
+>
+> **A7** (moat-number drift), **A8** (mark superseded plans), **A9** (boot a device to close
+> kotlin/swift/reactnative) — not requested in this pass. C8, C15, C17 remain unknown; C17
+> (the stranger test) is operator-only by construction.
+>
+> Everything below is the original assessment, unedited.
+
+---
+
 **Status:** COMPLETE (assessment only — no implementation performed, per standing scope rule)
 
 ## Verdict in one paragraph

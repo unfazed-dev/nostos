@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `emit_snapshot`, `hex_encode`, `row_to_json_object`, `run_connection_loop`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Session`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `drop`, `eq`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `drop`, `eq`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NostosHandle>>
 abstract class NostosHandle implements RustOpaqueInterface {
@@ -156,6 +156,27 @@ abstract class NostosHandle implements RustOpaqueInterface {
   /// is not in the subscribed set.
   Stream<String> watch({required String table});
 
+  /// Stream durable-outbox status: how many writes are queued, how many have
+  /// permanently failed, and the server's message for the last permanent
+  /// failure.
+  ///
+  /// This is the write-side counterpart to `subscribe`'s connection-state
+  /// sink. Without it a Dart app cannot tell its user that a write was lost:
+  /// [`Self::write`] returns once the write is durable locally, and a server
+  /// rejection afterwards was previously only a `tracing` warning inside the
+  /// Rust client. Flutter's own optimistic-state guidance assumes a failed
+  /// write surfaces so the UI can revert; this is the signal that makes that
+  /// pattern expressible on Nostos.
+  ///
+  /// Emits the current value immediately on subscribe (the backing channel is
+  /// a `watch`, not a broadcast), so a status widget built at any point in the
+  /// app's life renders the true count rather than waiting for the next
+  /// change.
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called.
+  Stream<WriteQueueStatusFfi> watchWriteStatus();
+
   /// Enqueue a durable write against the active subscription's table.
   /// Returns once the write is captured in the local outbox (NOT once the
   /// server acks it — that happens asynchronously; the row round-trips back
@@ -255,4 +276,40 @@ class TableSubFfi {
           runtimeType == other.runtimeType &&
           name == other.name &&
           whereSql == other.whereSql;
+}
+
+/// FFI mirror of [`nostos_client::WriteQueueStatus`] — flutter_rust_bridge can
+/// only generate Dart for types declared in this crate's `api` module, so the
+/// engine type is re-declared here rather than re-exported.
+class WriteQueueStatusFfi {
+  /// Writes durably queued but not yet ack'd. `> 0` while offline is the
+  /// offline-first promise working, not an error.
+  final BigInt pending;
+
+  /// Writes that permanently failed this session.
+  final BigInt deadLettered;
+
+  /// Server error text from the most recent permanent failure. Set ONLY on a
+  /// dead-letter — a plain rejection is usually transient and retries, so
+  /// surfacing it would train users to ignore write errors.
+  final String? lastError;
+
+  const WriteQueueStatusFfi({
+    required this.pending,
+    required this.deadLettered,
+    this.lastError,
+  });
+
+  @override
+  int get hashCode =>
+      pending.hashCode ^ deadLettered.hashCode ^ lastError.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WriteQueueStatusFfi &&
+          runtimeType == other.runtimeType &&
+          pending == other.pending &&
+          deadLettered == other.deadLettered &&
+          lastError == other.lastError;
 }

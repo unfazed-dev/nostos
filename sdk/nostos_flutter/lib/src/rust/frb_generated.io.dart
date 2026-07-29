@@ -51,6 +51,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_StreamSink_nostos_connection_state_Sse(dynamic raw);
 
   @protected
+  RustStreamSink<WriteQueueStatusFfi>
+  dco_decode_StreamSink_write_queue_status_ffi_Sse(dynamic raw);
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
@@ -93,6 +97,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BigInt dco_decode_usize(dynamic raw);
 
   @protected
+  WriteQueueStatusFfi dco_decode_write_queue_status_ffi(dynamic raw);
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
@@ -121,6 +128,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   RustStreamSink<NostosConnectionState>
   sse_decode_StreamSink_nostos_connection_state_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RustStreamSink<WriteQueueStatusFfi>
+  sse_decode_StreamSink_write_queue_status_ffi_Sse(
     SseDeserializer deserializer,
   );
 
@@ -171,6 +184,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BigInt sse_decode_usize(SseDeserializer deserializer);
 
   @protected
+  WriteQueueStatusFfi sse_decode_write_queue_status_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
@@ -209,6 +227,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_StreamSink_nostos_connection_state_Sse(
     RustStreamSink<NostosConnectionState> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_write_queue_status_ffi_Sse(
+    RustStreamSink<WriteQueueStatusFfi> self,
     SseSerializer serializer,
   );
 
@@ -268,6 +292,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_usize(BigInt self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_write_queue_status_ffi(
+    WriteQueueStatusFfi self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);

@@ -29,7 +29,10 @@
 //! reaches `dead_letter_max_attempts` (ADR-0013 v2) the write is quarantined
 //! (removed from the pending queue but NOT deleted) so the queue head advances
 //! past a permanently-failing write. The error surfaces via the client's log
-//! channel on every rejection; the user-facing surface is a Phase-2 concern.
+//! channel on every rejection. The user-facing surface is
+//! [`WriteQueueStatus`] (ADR-0027): pending/dead-lettered counts and the
+//! server's message, published on a `watch` channel — dead-letters only, since
+//! a plain rejection is usually transient and retries.
 //!
 //! The flush and the apply both reach the storage through the same engine
 //! mutex, so they're serialized by construction (single-threaded, per the
@@ -223,6 +226,34 @@ pub struct SessionOutcome {
 /// crash can't strand the outbox without the data (ADR-0013). The flush loop
 /// reaches the outbox through the same engine mutex as the apply loop — they're
 /// serialized by construction.
+/// A snapshot of the durable outbox, for UI binding (ADR-0027).
+///
+/// The engine already knew all of this — it just had nowhere to say it. Before
+/// this existed, a rejected write was a `warn!` in the logs and nothing else,
+/// so an app literally could not tell its user that a write was lost (the Dart
+/// `write()` returns an outbox id, not a server ack).
+///
+/// The distinction that matters is transient-vs-permanent. A `WriteResult{ok:
+/// false}` is often legitimate and self-healing — see
+/// [`SyncClientConfig::dead_letter_max_attempts`] — so surfacing every
+/// rejection would make apps show scary errors for writes that are about to
+/// succeed on retry. [`Self::last_error`] is therefore set ONLY when a write is
+/// dead-lettered, i.e. when it has permanently failed and left the queue. That
+/// is the point at which a human has to be told.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WriteQueueStatus {
+    /// Writes durably queued but not yet ack'd by the server. `> 0` while
+    /// offline is normal and expected — that IS the offline-first promise.
+    pub pending: u64,
+    /// Writes permanently failed this session (quarantined, NOT deleted —
+    /// still inspectable via e.g. `SqliteStorage::dead_letter_entries`).
+    pub dead_lettered: u64,
+    /// The server's error text from the most recent dead-letter, verbatim
+    /// (e.g. the `NOSTOS_WRITE_TABLES` allowlist rejection, which names the
+    /// exact env var to set). `None` until one happens.
+    pub last_error: Option<String>,
+}
+
 pub struct SyncClient<S>
 where
     S: nostos_core::Storage + Outbox + Send + 'static,
@@ -230,6 +261,17 @@ where
     url: String,
     config: SyncClientConfig,
     engine: Arc<Mutex<ApplyEngine<S>>>,
+    /// Hot outbox status for UI binding — `watch`, not `broadcast`, because a
+    /// late subscriber must see the CURRENT value immediately (a status widget
+    /// built after connect still needs to render "3 pending"), and because
+    /// coalescing intermediate values is correct for a status readout.
+    ///
+    /// ponytail: `pending` is a counter seeded from storage at construction and
+    /// adjusted ±1 at the three mutation sites, not a re-count per change — a
+    /// `pending()` scan on every write would be O(queue) per keystroke. It can
+    /// only drift if something mutates the outbox behind this client's back,
+    /// which nothing does today. Re-seed from `pending()` if that ever changes.
+    write_status: tokio::sync::watch::Sender<WriteQueueStatus>,
     /// Broadcasts one [`ApplyOutcome`] per commit (each transaction-boundary or
     /// soft-cap flush that lands in storage — see [`Self::run_once`]). Additive:
     /// nothing subscribes by default (`send` on zero receivers is a harmless
@@ -255,7 +297,17 @@ where
     /// the given storage backend and config.
     #[must_use]
     pub fn new(url: impl Into<String>, storage: S, config: SyncClientConfig) -> Self {
+        // Seed `pending` from the durable outbox BEFORE the storage moves into
+        // the engine: writes made in a previous session survive a restart, so
+        // an app that reopens with 3 unsent writes must render "3 pending", not
+        // "0". A read failure here is not worth refusing to construct a client
+        // over — fall back to 0 and let the next mutation correct it.
+        let pending = storage.pending().map_or(0, |p| p.len() as u64);
         let engine = Arc::new(Mutex::new(ApplyEngine::new(storage)));
+        let (write_status, _) = tokio::sync::watch::channel(WriteQueueStatus {
+            pending,
+            ..WriteQueueStatus::default()
+        });
         // Capacity is a lag buffer, not a hard cap: a slow/absent subscriber
         // just misses old notifications (`RecvError::Lagged`) — the next one
         // still carries the latest checkpoint, and a readback consumer like
@@ -268,7 +320,32 @@ where
             engine,
             changes,
             write_notify: Notify::new(),
+            write_status,
         }
+    }
+
+    /// Watch the durable outbox: pending count, dead-letter count, and the last
+    /// permanent failure's server error. See [`WriteQueueStatus`] for why only
+    /// dead-letters set the error.
+    ///
+    /// Unlike [`Self::subscribe_changes`], a receiver created at any time sees
+    /// the current value immediately — no need to subscribe before `run_once`.
+    #[must_use]
+    pub fn subscribe_write_status(&self) -> tokio::sync::watch::Receiver<WriteQueueStatus> {
+        self.write_status.subscribe()
+    }
+
+    /// Current outbox status without holding a subscription.
+    #[must_use]
+    pub fn write_status(&self) -> WriteQueueStatus {
+        self.write_status.borrow().clone()
+    }
+
+    /// Apply `f` to the live status and publish the result. `send_modify`
+    /// notifies watchers unconditionally, which is what we want: a re-emitted
+    /// identical value is harmless to a UI, whereas a dropped transition is not.
+    fn update_write_status(&self, f: impl FnOnce(&mut WriteQueueStatus)) {
+        self.write_status.send_modify(f);
     }
 
     /// Subscribe to per-commit apply notifications. Each applied batch (a
@@ -352,6 +429,10 @@ where
             .await
             .map_err(|e| ClientError::Join(e.to_string()))??;
         debug!(write_id = id, "enqueued local write to outbox");
+        // The write is durable but unsent — it counts as pending until the
+        // server acks it (or it dead-letters). This is what lets an app render
+        // "2 unsynced changes" while offline.
+        self.update_write_status(|s| s.pending += 1);
         // Broadcast the local tick so live watch pumps re-query NOW and render
         // the optimistic row (offline-first). Best-effort: no receivers is fine.
         if let Some(tick) = local_tick {
@@ -420,6 +501,8 @@ where
         })
         .await
         .map_err(|e| ClientError::Join(e.to_string()))??;
+        // Ack'd and gone from the outbox — one fewer unsynced change.
+        self.update_write_status(|s| s.pending = s.pending.saturating_sub(1));
         Ok(())
     }
 
@@ -441,7 +524,11 @@ where
     /// `0 >= max` is false for any positive max — the write is never
     /// dead-lettered, matching the pre-v2 retry-forever behavior for test
     /// doubles that don't model DLQ state.
-    async fn bump_and_maybe_dead_letter(&self, id: u64) -> Result<(u32, bool), ClientError> {
+    async fn bump_and_maybe_dead_letter(
+        &self,
+        id: u64,
+        server_error: Option<&str>,
+    ) -> Result<(u32, bool), ClientError> {
         let max = self.config.dead_letter_max_attempts;
         let engine = Arc::clone(&self.engine);
         let (attempts, dld) =
@@ -457,6 +544,23 @@ where
             })
             .await
             .map_err(|e| ClientError::Join(e.to_string()))??;
+        // ONLY the dead-letter transition is user-visible. A plain rejection is
+        // routinely transient (a constraint race with a concurrent write) and
+        // will retry on its own — reporting it would train users to ignore the
+        // error, which is worse than not showing it. Once the write is
+        // quarantined it has permanently failed and left the queue, and that IS
+        // worth interrupting someone over.
+        if dld {
+            self.update_write_status(|s| {
+                s.pending = s.pending.saturating_sub(1);
+                s.dead_lettered += 1;
+                s.last_error = Some(
+                    server_error
+                        .unwrap_or("write permanently rejected by server (no detail)")
+                        .to_owned(),
+                );
+            });
+        }
         Ok((attempts, dld))
     }
 
@@ -701,7 +805,10 @@ where
                             // for inspection (e.g. `SqliteStorage::dead_letter_entries`)
                             // and is excluded from subsequent `pending()` calls. The
                             // user-facing surface for a dead-letter is a Phase-2 concern.
-                            match self.bump_and_maybe_dead_letter(id).await {
+                            match self
+                                .bump_and_maybe_dead_letter(id, result.error.as_deref())
+                                .await
+                            {
                                 Ok((attempts, true)) => warn!(
                                     write_id = id,
                                     attempts,
@@ -1039,6 +1146,77 @@ mod tests {
         assert_eq!(decode_hex(""), Some(vec![]));
         assert_eq!(decode_hex("abc"), None); // odd length
         assert_eq!(decode_hex("zz"), None); // non-hex
+    }
+
+    /// The load-bearing distinction in `WriteQueueStatus`: a transient
+    /// rejection must stay invisible, a dead-letter must surface.
+    ///
+    /// If this inverts, apps either cry wolf on writes that are about to
+    /// succeed on retry (last_error set too early) or silently lose a write
+    /// (never set) — the exact defect this type was added to fix. Asserting
+    /// only the final state would pass even if every rejection set the error,
+    /// so the intermediate `is_none()` check is the point of the test.
+    #[tokio::test]
+    async fn only_dead_letter_surfaces_a_write_error() {
+        // SqliteStorage, not InMemoryStorage: `Outbox::bump_attempts` has a
+        // default impl returning Ok(0), which InMemoryStorage doesn't override,
+        // so the dead-letter branch (`count >= max`) is unreachable there and
+        // this test would pass vacuously.
+        let client = SyncClient::new(
+            "ws://localhost:9999/sync",
+            crate::SqliteStorage::open_in_memory().expect("open"),
+            SyncClientConfig {
+                dead_letter_max_attempts: 3,
+                ..SyncClientConfig::default()
+            },
+        );
+
+        let id = client
+            .write(nostos_core::PendingWrite {
+                table: "tasks".into(),
+                op: nostos_core::WriteOp::Upsert,
+                pk: "t1".into(),
+                payload_json: Some(r#"{"id":"t1"}"#.into()),
+            })
+            .await
+            .expect("enqueue");
+        assert_eq!(client.write_status().pending, 1, "queued write is pending");
+
+        // Rejections 1 and 2 are under the threshold: the write stays queued
+        // and will retry, so nothing is shown to the user.
+        for attempt in 1..=2 {
+            let (_, dead_lettered) = client
+                .bump_and_maybe_dead_letter(id, Some("transient conflict"))
+                .await
+                .expect("bump");
+            assert!(!dead_lettered, "attempt {attempt} must not dead-letter");
+            let s = client.write_status();
+            assert!(
+                s.last_error.is_none(),
+                "attempt {attempt}: a retryable rejection must stay silent, got {:?}",
+                s.last_error
+            );
+            assert_eq!(s.pending, 1, "attempt {attempt}: still queued");
+            assert_eq!(s.dead_lettered, 0);
+        }
+
+        // Attempt 3 hits dead_letter_max_attempts: permanently failed, out of
+        // the queue, and now the app can tell its user.
+        let (attempts, dead_lettered) = client
+            .bump_and_maybe_dead_letter(id, Some("table not writable: 'tasks'"))
+            .await
+            .expect("bump");
+        assert_eq!(attempts, 3);
+        assert!(dead_lettered, "3rd rejection must dead-letter");
+
+        let s = client.write_status();
+        assert_eq!(
+            s.last_error.as_deref(),
+            Some("table not writable: 'tasks'"),
+            "the server's actionable message must reach the app verbatim"
+        );
+        assert_eq!(s.dead_lettered, 1);
+        assert_eq!(s.pending, 0, "dead-lettered write left the pending queue");
     }
 
     #[test]

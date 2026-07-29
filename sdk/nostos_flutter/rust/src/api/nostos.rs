@@ -64,6 +64,32 @@ pub enum NostosConnectionState {
     Disconnected,
 }
 
+/// FFI mirror of [`nostos_client::WriteQueueStatus`] — flutter_rust_bridge can
+/// only generate Dart for types declared in this crate's `api` module, so the
+/// engine type is re-declared here rather than re-exported.
+#[derive(Debug, Clone)]
+pub struct WriteQueueStatusFfi {
+    /// Writes durably queued but not yet ack'd. `> 0` while offline is the
+    /// offline-first promise working, not an error.
+    pub pending: u64,
+    /// Writes that permanently failed this session.
+    pub dead_lettered: u64,
+    /// Server error text from the most recent permanent failure. Set ONLY on a
+    /// dead-letter — a plain rejection is usually transient and retries, so
+    /// surfacing it would train users to ignore write errors.
+    pub last_error: Option<String>,
+}
+
+impl From<nostos_client::WriteQueueStatus> for WriteQueueStatusFfi {
+    fn from(s: nostos_client::WriteQueueStatus) -> Self {
+        Self {
+            pending: s.pending,
+            dead_lettered: s.dead_lettered,
+            last_error: s.last_error,
+        }
+    }
+}
+
 /// frb-friendly mirror of `nostos_client`'s `ClientTable` — the client-side
 /// schema projection the WS2 view layer consumes. frb generates Dart bindings
 /// for structs declared in THIS crate, so we mirror (rather than configuring
@@ -337,6 +363,55 @@ impl NostosHandle {
                         emit_snapshot(&pump_client, &pump_table, &pump_sink).await;
                     }
                     Err(RecvError::Closed) => break,
+                }
+            }
+        });
+        session.watch_tasks.push(pump_task);
+        Ok(())
+    }
+
+    /// Stream durable-outbox status: how many writes are queued, how many have
+    /// permanently failed, and the server's message for the last permanent
+    /// failure.
+    ///
+    /// This is the write-side counterpart to `subscribe`'s connection-state
+    /// sink. Without it a Dart app cannot tell its user that a write was lost:
+    /// [`Self::write`] returns once the write is durable locally, and a server
+    /// rejection afterwards was previously only a `tracing` warning inside the
+    /// Rust client. Flutter's own optimistic-state guidance assumes a failed
+    /// write surfaces so the UI can revert; this is the signal that makes that
+    /// pattern expressible on Nostos.
+    ///
+    /// Emits the current value immediately on subscribe (the backing channel is
+    /// a `watch`, not a broadcast), so a status widget built at any point in the
+    /// app's life renders the true count rather than waiting for the next
+    /// change.
+    ///
+    /// # Errors
+    /// Returns an error string if `subscribe()` hasn't been called.
+    pub async fn watch_write_status(
+        &self,
+        status_sink: StreamSink<WriteQueueStatusFfi>,
+    ) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| "watch_write_status() called before subscribe()".to_string())?;
+
+        let mut rx = session.client.subscribe_write_status();
+        // Current value first: writes queued in a PREVIOUS session are already
+        // pending at construction, so a fresh subscriber must see them without
+        // waiting for a change that may never come while offline.
+        let _ = status_sink.add(WriteQueueStatusFfi::from(rx.borrow_and_update().clone()));
+
+        let pump_sink = status_sink;
+        let pump_task = self.rt.spawn(async move {
+            // `changed()` errors only when every sender is gone, i.e. the
+            // client was dropped — end the pump rather than spin.
+            while rx.changed().await.is_ok() {
+                let next = rx.borrow_and_update().clone();
+                if pump_sink.add(WriteQueueStatusFfi::from(next)).is_err() {
+                    break; // Dart side closed the stream.
                 }
             }
         });

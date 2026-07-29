@@ -50,6 +50,16 @@ class _FakeEngine implements NostosEngine {
   @override
   Stream<String> watch({required String table}) => rowsController.stream;
 
+  /// Drives `SyncStatus`'s write fields. Broadcast + no initial value: the real
+  /// engine replays the current value on listen, but a test that never pushes
+  /// should see the defaults.
+  final writeStatusController = StreamController<
+      ({int pending, int deadLettered, String? lastError})>.broadcast();
+
+  @override
+  Stream<({int pending, int deadLettered, String? lastError})>
+      watchWriteStatus() => writeStatusController.stream;
+
   /// Every (table, op, pk, payloadJson) the engine was asked to write, in order.
   final List<({String table, String op, String pk, String? payloadJson})>
       writes = [];
@@ -259,6 +269,70 @@ void main() {
       final after = db.currentStatus;
       expect(after.connected, isTrue);
       expect(after.lastSyncedAt, isNotNull);
+    });
+
+    test('pending writes surface without being reported as an error', () async {
+      final (engine, db) = newDb();
+      expect(db.currentStatus.pendingWrites, 0);
+      expect(db.currentStatus.hasWriteError, isFalse);
+      await db.subscribe('todos');
+
+      final seen = db.status;
+      engine.writeStatusController
+          .add((pending: 2, deadLettered: 0, lastError: null));
+      await pumpEventQueue();
+
+      expect(seen.value.pendingWrites, 2);
+      expect(seen.value.hasPendingWrites, isTrue);
+      expect(
+        seen.value.hasWriteError,
+        isFalse,
+        reason: 'queued-but-unsent is the offline-first promise, not a failure',
+      );
+    });
+
+    test('a dead-lettered write surfaces the server message', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      final seen = db.status;
+
+      engine.writeStatusController.add((
+        pending: 0,
+        deadLettered: 1,
+        lastError: "table not writable: 'todos'",
+      ));
+      await pumpEventQueue();
+
+      expect(seen.value.hasWriteError, isTrue);
+      expect(seen.value.lastWriteError, "table not writable: 'todos'");
+      expect(seen.value.deadLetteredWrites, 1);
+    });
+
+    test('a connection change preserves the write fields', () async {
+      // The regression this guards: two independent streams feed one
+      // ValueNotifier, so a naive listener that rebuilds SyncStatus from only
+      // its own stream silently wipes the other's fields — a reconnect would
+      // erase a real "your write was lost" error mid-display.
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      final seen = db.status;
+
+      engine.writeStatusController
+          .add((pending: 3, deadLettered: 1, lastError: 'boom'));
+      await pumpEventQueue();
+      expect(seen.value.pendingWrites, 3);
+
+      final connectedFuture = db.connectionState
+          .firstWhere((s) => s == NostosConnectionState.connected);
+      engine.stateController.add(NostosConnectionState.connected);
+      await connectedFuture;
+      await pumpEventQueue();
+
+      expect(seen.value.connected, isTrue);
+      expect(seen.value.pendingWrites, 3, reason: 'not reset by a conn change');
+      expect(seen.value.deadLetteredWrites, 1);
+      expect(seen.value.lastWriteError, 'boom');
+      expect(seen.value.uploading, isTrue, reason: 'connected + 3 pending');
     });
   });
 

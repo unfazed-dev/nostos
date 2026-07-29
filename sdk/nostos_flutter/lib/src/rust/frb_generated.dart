@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0-beta.5';
 
   @override
-  int get rustContentHash => 1736867153;
+  int get rustContentHash => 1484564550;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -110,6 +110,10 @@ abstract class RustLibApi extends BaseApi {
   Stream<String> crateApiNostosNostosHandleWatch({
     required NostosHandle that,
     required String table,
+  });
+
+  Stream<WriteQueueStatusFfi> crateApiNostosNostosHandleWatchWriteStatus({
+    required NostosHandle that,
   });
 
   Future<BigInt> crateApiNostosNostosHandleWrite({
@@ -442,6 +446,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Stream<WriteQueueStatusFfi> crateApiNostosNostosHandleWatchWriteStatus({
+    required NostosHandle that,
+  }) {
+    final statusSink = RustStreamSink<WriteQueueStatusFfi>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+              that,
+              serializer,
+            );
+            sse_encode_StreamSink_write_queue_status_ffi_Sse(
+              statusSink,
+              serializer,
+            );
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 9,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiNostosNostosHandleWatchWriteStatusConstMeta,
+          argValues: [that, statusSink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return statusSink.stream;
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleWatchWriteStatusConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_watch_write_status",
+        argNames: ["that", "statusSink"],
+      );
+
+  @override
   Future<BigInt> crateApiNostosNostosHandleWrite({
     required NostosHandle that,
     required String table,
@@ -464,7 +512,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 10,
             port: port_,
           );
         },
@@ -494,7 +542,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 11,
             port: port_,
           );
         },
@@ -562,6 +610,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   RustStreamSink<NostosConnectionState>
   dco_decode_StreamSink_nostos_connection_state_Sse(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
+  RustStreamSink<WriteQueueStatusFfi>
+  dco_decode_StreamSink_write_queue_status_ffi_Sse(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     throw UnimplementedError();
   }
@@ -664,6 +719,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  WriteQueueStatusFfi dco_decode_write_queue_status_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return WriteQueueStatusFfi(
+      pending: dco_decode_u_64(arr[0]),
+      deadLettered: dco_decode_u_64(arr[1]),
+      lastError: dco_decode_opt_String(arr[2]),
+    );
+  }
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_String(deserializer);
@@ -717,6 +785,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   RustStreamSink<NostosConnectionState>
   sse_decode_StreamSink_nostos_connection_state_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
+  RustStreamSink<WriteQueueStatusFfi>
+  sse_decode_StreamSink_write_queue_status_ffi_Sse(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -848,6 +925,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  WriteQueueStatusFfi sse_decode_write_queue_status_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_pending = sse_decode_u_64(deserializer);
+    var var_deadLettered = sse_decode_u_64(deserializer);
+    var var_lastError = sse_decode_opt_String(deserializer);
+    return WriteQueueStatusFfi(
+      pending: var_pending,
+      deadLettered: var_deadLettered,
+      lastError: var_lastError,
+    );
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
@@ -928,6 +1020,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       self.setupAndSerialize(
         codec: SseCodec(
           decodeSuccessData: sse_decode_nostos_connection_state,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
+  void sse_encode_StreamSink_write_queue_status_ffi_Sse(
+    RustStreamSink<WriteQueueStatusFfi> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_write_queue_status_ffi,
           decodeErrorData: sse_decode_AnyhowException,
         ),
       ),
@@ -1048,6 +1157,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_usize(BigInt self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putBigUint64(self);
+  }
+
+  @protected
+  void sse_encode_write_queue_status_ffi(
+    WriteQueueStatusFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_64(self.pending, serializer);
+    sse_encode_u_64(self.deadLettered, serializer);
+    sse_encode_opt_String(self.lastError, serializer);
   }
 
   @protected
@@ -1216,6 +1336,28 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// is not in the subscribed set.
   Stream<String> watch({required String table}) => RustLib.instance.api
       .crateApiNostosNostosHandleWatch(that: this, table: table);
+
+  /// Stream durable-outbox status: how many writes are queued, how many have
+  /// permanently failed, and the server's message for the last permanent
+  /// failure.
+  ///
+  /// This is the write-side counterpart to `subscribe`'s connection-state
+  /// sink. Without it a Dart app cannot tell its user that a write was lost:
+  /// [`Self::write`] returns once the write is durable locally, and a server
+  /// rejection afterwards was previously only a `tracing` warning inside the
+  /// Rust client. Flutter's own optimistic-state guidance assumes a failed
+  /// write surfaces so the UI can revert; this is the signal that makes that
+  /// pattern expressible on Nostos.
+  ///
+  /// Emits the current value immediately on subscribe (the backing channel is
+  /// a `watch`, not a broadcast), so a status widget built at any point in the
+  /// app's life renders the true count rather than waiting for the next
+  /// change.
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called.
+  Stream<WriteQueueStatusFfi> watchWriteStatus() =>
+      RustLib.instance.api.crateApiNostosNostosHandleWatchWriteStatus(that: this);
 
   /// Enqueue a durable write against the active subscription's table.
   /// Returns once the write is captured in the local outbox (NOT once the

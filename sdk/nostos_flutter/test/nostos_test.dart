@@ -50,6 +50,10 @@ class FakeNostosEngine implements NostosEngine {
   Stream<String> watch({required String table}) => rowsController.stream;
 
   @override
+  Stream<({int pending, int deadLettered, String? lastError})>
+      watchWriteStatus() => const Stream.empty();
+
+  @override
   Future<int> write({
     required String table,
     required String op,
@@ -84,6 +88,10 @@ class FakeNostosEngine implements NostosEngine {
 /// can't reproduce the P0-3 regression; this fake can.
 class SnapshotOnSubscribeEngine implements NostosEngine {
   SnapshotOnSubscribeEngine({this.queryResult = '[{"id":"1","name":"Alpha"}]'});
+
+  @override
+  Stream<({int pending, int deadLettered, String? lastError})>
+      watchWriteStatus() => const Stream.empty();
 
   final stateController = StreamController<NostosConnectionState>.broadcast();
   final List<String> queries = [];

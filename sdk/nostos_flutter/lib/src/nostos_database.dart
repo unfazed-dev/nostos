@@ -303,10 +303,15 @@ class NostosDatabase {
   }) =>
       Collection<T>._(this, table, fromRow, toRow, pkColumn);
 
-  /// Hot sync status. Honest P0: carries [SyncStatus.conn] (from the
-  /// underlying connection stream) + [SyncStatus.connected] +
-  /// [SyncStatus.lastSyncedAt]. Richer fields (syncing/reconciling/errors) and
-  /// `DataTrust` land in P1 once the engine exposes those signals (ADR-0024).
+  /// Hot sync status: connection state ([SyncStatus.conn],
+  /// [SyncStatus.connected], [SyncStatus.lastSyncedAt]) folded together with
+  /// the durable outbox ([SyncStatus.pendingWrites],
+  /// [SyncStatus.lastWriteError] — ADR-0027).
+  ///
+  /// Still deferred: a download-progress / reconcile signal and `DataTrust`,
+  /// which need engine-side signals that don't exist yet (ADR-0024).
+  /// [SyncStatus.lastSyncedAt] remains a proxy stamped on each `connected`
+  /// transition; the write half is now exact.
   ValueListenable<SyncStatus> get status {
     _ensureStatusWired();
     return _status!;
@@ -320,6 +325,8 @@ class NostosDatabase {
 
   ValueNotifier<SyncStatus>? _status;
   StreamSubscription<NostosConnectionState>? _statusSub;
+  StreamSubscription<({int pending, int deadLettered, String? lastError})>?
+      _writeStatusSub;
   bool _statusWired = false;
 
   void _ensureStatusWired() {
@@ -329,16 +336,36 @@ class NostosDatabase {
       conn: NostosConnectionState.disconnected,
       lastSyncedAt: null,
     ));
-    // ponytail: the engine exposes only NostosConnectionState today. There is no
-    // "download completed" / "reconcile done" / error signal yet, so lastSyncedAt
-    // is stamped on each `connected` transition (a best-effort proxy) and the
-    // richer SyncStatus fields are deferred to P1 with engine-side signals.
+    // ponytail: there is still no "download completed" / "reconcile done"
+    // signal, so lastSyncedAt stays a best-effort proxy stamped on each
+    // `connected` transition. The WRITE side is no longer a proxy — it comes
+    // from the engine's real outbox (see the second subscription below).
     _statusSub = _nostos.connectionState.listen((s) {
       final prev = _status!.value;
       final lastSynced = s == NostosConnectionState.connected
           ? DateTime.now()
           : prev.lastSyncedAt;
-      _status!.value = SyncStatus(conn: s, lastSyncedAt: lastSynced);
+      _status!.value = SyncStatus(
+        conn: s,
+        lastSyncedAt: lastSynced,
+        pendingWrites: prev.pendingWrites,
+        deadLetteredWrites: prev.deadLetteredWrites,
+        lastWriteError: prev.lastWriteError,
+      );
+    });
+    // Two streams, one ValueListenable: the connection and the outbox change
+    // independently (a write queues while offline; a dead-letter arrives while
+    // connected), so each listener carries the other's fields forward rather
+    // than resetting them.
+    _writeStatusSub = _nostos.writeStatus.listen((w) {
+      final prev = _status!.value;
+      _status!.value = SyncStatus(
+        conn: prev.conn,
+        lastSyncedAt: prev.lastSyncedAt,
+        pendingWrites: w.pending,
+        deadLetteredWrites: w.deadLettered,
+        lastWriteError: w.lastError,
+      );
     });
   }
 
@@ -346,6 +373,7 @@ class NostosDatabase {
   /// status listener. Safe to call with no subscription; idempotent.
   Future<void> close() async {
     await _statusSub?.cancel();
+    await _writeStatusSub?.cancel();
     _status?.dispose();
     await _nostos.close();
   }
@@ -496,7 +524,51 @@ class Collection<T> {
 /// ship, so `DataTrust` can be true instead of a permanent `stale` badge
 /// (ADR-0024). Singleton on [NostosDatabase.status].
 class SyncStatus {
-  const SyncStatus({required this.conn, required this.lastSyncedAt});
+  const SyncStatus({
+    required this.conn,
+    required this.lastSyncedAt,
+    this.pendingWrites = 0,
+    this.deadLetteredWrites = 0,
+    this.lastWriteError,
+  });
+
+  /// Writes captured locally but not yet ack'd by the server.
+  ///
+  /// `> 0` is normal and healthy while offline — that IS the offline-first
+  /// promise. Show it as "N unsynced changes", not as an error.
+  final int pendingWrites;
+
+  /// Writes that permanently failed this session and were removed from the
+  /// send queue. Unlike [pendingWrites], this number never goes down on its
+  /// own: it counts data the user will lose unless the app does something.
+  final int deadLetteredWrites;
+
+  /// The server's message for the most recent permanent write failure, or
+  /// `null` if none.
+  ///
+  /// Deliberately NOT set for ordinary rejections — those are frequently
+  /// transient and retry on their own, so surfacing them would teach users to
+  /// dismiss write errors. When this is non-null a write is genuinely lost and
+  /// a human should be told. The text is the server's verbatim reason and is
+  /// usually actionable (e.g. a `NOSTOS_WRITE_TABLES` rejection names the exact
+  /// env var to set).
+  final String? lastWriteError;
+
+  /// True when at least one write is permanently lost. This is the condition
+  /// Flutter's own optimistic-state guidance expects you to render (revert the
+  /// optimistic value and tell the user) — before this existed, a Nostos app
+  /// had no way to detect it.
+  bool get hasWriteError => lastWriteError != null;
+
+  /// True when there is local work the server hasn't confirmed yet.
+  bool get hasPendingWrites => pendingWrites > 0;
+
+  /// True while connected with queued writes still draining.
+  bool get uploading => connected && pendingWrites > 0;
+
+  /// True once a sync has completed at least once — use it to tell "empty
+  /// because nothing synced yet" apart from "empty because there is no data".
+  bool get hasSynced => lastSyncedAt != null;
 
   /// Current connection state of the underlying sync session.
   final NostosConnectionState conn;
@@ -511,5 +583,7 @@ class SyncStatus {
 
   @override
   String toString() =>
-      'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt)';
+      'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt, '
+      'pendingWrites: $pendingWrites, deadLetteredWrites: $deadLetteredWrites, '
+      'lastWriteError: $lastWriteError)';
 }

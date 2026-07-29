@@ -56,6 +56,17 @@ abstract class NostosEngine {
   /// applied change). `table` must be among those passed to [subscribe].
   Stream<String> watch({required String table});
 
+  /// Durable-outbox status: queued writes, permanently-failed writes, and the
+  /// server's message for the last permanent failure.
+  ///
+  /// A record rather than a class on purpose: this is internal plumbing between
+  /// the engine and [SyncStatus] (the type apps actually bind to), so a named
+  /// type here would be a third spelling of the same three fields.
+  ///
+  /// Emits the current value immediately on listen. `lastError` is set only for
+  /// a *permanently* failed write — ordinary rejections retry and stay silent.
+  Stream<({int pending, int deadLettered, String? lastError})> watchWriteStatus();
+
   /// Returns the local outbox id.
   Future<int> write({
     required String table,
@@ -119,6 +130,16 @@ class RustNostosEngine implements NostosEngine {
 
   @override
   Stream<String> watch({required String table}) => _handle.watch(table: table);
+
+  @override
+  Stream<({int pending, int deadLettered, String? lastError})>
+      watchWriteStatus() => _handle.watchWriteStatus().map(
+            (s) => (
+              pending: s.pending.toInt(),
+              deadLettered: s.deadLettered.toInt(),
+              lastError: s.lastError,
+            ),
+          );
 
   @override
   Future<int> write({
