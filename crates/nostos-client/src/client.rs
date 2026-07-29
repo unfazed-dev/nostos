@@ -266,11 +266,13 @@ where
     /// built after connect still needs to render "3 pending"), and because
     /// coalescing intermediate values is correct for a status readout.
     ///
-    /// ponytail: `pending` is a counter seeded from storage at construction and
-    /// adjusted ±1 at the three mutation sites, not a re-count per change — a
-    /// `pending()` scan on every write would be O(queue) per keystroke. It can
-    /// only drift if something mutates the outbox behind this client's back,
-    /// which nothing does today. Re-seed from `pending()` if that ever changes.
+    /// `pending` is seeded from storage at construction, incremented on enqueue
+    /// (always a new row, so +1 is exact), and **re-counted from storage** on
+    /// ack and on dead-letter. The removals re-count rather than decrement
+    /// because both are idempotent — a redelivered ack for an already-removed
+    /// write would otherwise decrement twice and report "0 unsynced" while
+    /// writes are still queued. The scan runs inside the existing blocking
+    /// section, so it costs one query per server response, never per keystroke.
     write_status: tokio::sync::watch::Sender<WriteQueueStatus>,
     /// Broadcasts one [`ApplyOutcome`] per commit (each transaction-boundary or
     /// soft-cap flush that lands in storage — see [`Self::run_once`]). Additive:
@@ -495,14 +497,20 @@ where
     /// Mark an outbox write done (the server ack'd it with `WriteResult{ok:true}`).
     async fn mark_write_done(&self, id: u64) -> Result<(), ClientError> {
         let engine = Arc::clone(&self.engine);
-        tokio::task::spawn_blocking(move || -> nostos_core::Result<()> {
+        // Re-count rather than decrement: `mark_done` is idempotent, and the
+        // caller documents redelivery-after-a-partial-flush as a real path — a
+        // second ack for an already-removed write would decrement twice and
+        // undercount, showing "0 unsynced" while writes are still queued. The
+        // count happens inside the SAME blocking section under the SAME lock,
+        // so it costs one scan per server ack, not per keystroke.
+        let remaining = tokio::task::spawn_blocking(move || -> nostos_core::Result<u64> {
             let mut engine = engine.blocking_lock();
-            engine.storage_mut().mark_done(id)
+            engine.storage_mut().mark_done(id)?;
+            Ok(engine.storage().pending()?.len() as u64)
         })
         .await
         .map_err(|e| ClientError::Join(e.to_string()))??;
-        // Ack'd and gone from the outbox — one fewer unsynced change.
-        self.update_write_status(|s| s.pending = s.pending.saturating_sub(1));
+        self.update_write_status(|s| s.pending = remaining);
         Ok(())
     }
 
@@ -531,15 +539,18 @@ where
     ) -> Result<(u32, bool), ClientError> {
         let max = self.config.dead_letter_max_attempts;
         let engine = Arc::clone(&self.engine);
-        let (attempts, dld) =
-            tokio::task::spawn_blocking(move || -> nostos_core::Result<(u32, bool)> {
+        let (attempts, dld, remaining) =
+            tokio::task::spawn_blocking(move || -> nostos_core::Result<(u32, bool, u64)> {
                 let engine = engine.blocking_lock();
                 let count = engine.storage().bump_attempts(id)?;
                 if count >= max {
                     engine.storage().mark_dead_letter(id)?;
-                    Ok((count, true))
+                    // Same reasoning as mark_write_done: re-count under the
+                    // lock so a repeated dead-letter can't double-decrement.
+                    let remaining = engine.storage().pending()?.len() as u64;
+                    Ok((count, true, remaining))
                 } else {
-                    Ok((count, false))
+                    Ok((count, false, 0))
                 }
             })
             .await
@@ -552,7 +563,7 @@ where
         // worth interrupting someone over.
         if dld {
             self.update_write_status(|s| {
-                s.pending = s.pending.saturating_sub(1);
+                s.pending = remaining;
                 s.dead_lettered += 1;
                 s.last_error = Some(
                     server_error
@@ -1217,6 +1228,45 @@ mod tests {
         );
         assert_eq!(s.dead_lettered, 1);
         assert_eq!(s.pending, 0, "dead-lettered write left the pending queue");
+    }
+
+    /// A redelivered ack must not double-decrement `pending`.
+    ///
+    /// `mark_done` is idempotent and the flush loop documents redelivery after
+    /// a partial flush as a real path, so a naive `pending -= 1` undercounts —
+    /// the app would show "all synced" with writes still queued, which is worse
+    /// than showing nothing.
+    #[tokio::test]
+    async fn duplicate_ack_does_not_undercount_pending() {
+        let client = SyncClient::new(
+            "ws://localhost:9999/sync",
+            crate::SqliteStorage::open_in_memory().expect("open"),
+            SyncClientConfig::default(),
+        );
+        let mk = |pk: &str| nostos_core::PendingWrite {
+            table: "tasks".into(),
+            op: nostos_core::WriteOp::Upsert,
+            pk: pk.into(),
+            payload_json: Some(format!(r#"{{"id":"{pk}"}}"#)),
+        };
+
+        let first = client.write(mk("t1")).await.expect("enqueue");
+        client.write(mk("t2")).await.expect("enqueue");
+        assert_eq!(client.write_status().pending, 2);
+
+        client.mark_write_done(first).await.expect("ack");
+        assert_eq!(client.write_status().pending, 1);
+
+        // The server redelivers the same WriteResult — nothing left to remove.
+        client
+            .mark_write_done(first)
+            .await
+            .expect("redelivered ack");
+        assert_eq!(
+            client.write_status().pending,
+            1,
+            "t2 is still queued; a duplicate ack must not drop the count to 0"
+        );
     }
 
     #[test]
