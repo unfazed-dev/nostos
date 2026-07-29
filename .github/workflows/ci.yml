@@ -82,6 +82,44 @@ jobs:
         with:
           command: check licenses advisories bans
 
+  sdk-e2e:
+    name: SDK live-replication e2e (host slices)
+    runs-on: ubuntu-latest
+    # Until this job existed, `scripts/sdk-e2e.sh` was a manual ritual: nothing
+    # in CI ran it, so a change that broke an SDK's live PUSH+ECHO round-trip
+    # merged green. The workspace test job doesn't cover it — these slices drive
+    # each SDK's real public API against a spawned spine, not library internals.
+    #
+    # Only the three slices that need no browser, device, or extra SDK install
+    # run here: `rust` (cargo), `tauri` (cargo), and `node` (self-builds the
+    # addon; smoke_live.cjs imports node builtins only, so there is no npm
+    # install to drift). web/capacitor need Playwright browsers, dotnet needs the
+    # .NET SDK, and flutter/swift/kotlin/reactnative need a booted device — all
+    # deliberately left to the local `make sdk-e2e`.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run host SDK e2e slices
+        # SDK_E2E_STRICT=1 makes a SKIP fatal. Naming the slices is not enough
+        # on its own: the guards inside the script would still let a slice skip
+        # (e.g. a missing toolchain) and the job would pass having proved
+        # nothing — the same false-green shape as the self-skipping
+        # NOSTOS_E2E_PG suite. Strict mode is what makes this job's green mean
+        # "three round-trips actually ran".
+        run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node tauri
+      - name: Upload slice logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-e2e-logs
+          path: /tmp/sdk-e2e-*.log
+          if-no-files-found: ignore
+
   flutter:
     name: nostos_flutter — analyze + test
     # macos-latest, not ubuntu-latest: the only host build path this SDK has
