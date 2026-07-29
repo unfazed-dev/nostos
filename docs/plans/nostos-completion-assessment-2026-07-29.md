@@ -60,9 +60,45 @@
 > ### Still open
 >
 > **A7** (moat-number drift), **A8** (mark superseded plans), **A9** (boot a device to close
-> kotlin/swift/reactnative), **A10 (new)** fake-replicator pacing knob — not requested in
-> this pass. C8, C15, C17 remain unknown; C17 (the stranger test) is operator-only by
-> construction.
+> kotlin/swift/reactnative) — not requested in this pass. C8, C15, C17 remain unknown; C17
+> (the stranger test) is operator-only by construction.
+>
+> ### A10 — DONE 2026-07-30 (fake-replicator firehose)
+>
+> Two opt-in knobs on `FakeReplicatorConfig`, both `0` = today's unbounded behaviour:
+> `paced(events_per_sec)` (per-event `tokio::time::sleep`) and `recycling_keys(n)`
+> (`pk = emitted % n + 1`). `nostos-server`'s two fake branches now default to
+> **20 events/sec over 50 keys** (`NOSTOS_FAKE_EPS` / `NOSTOS_FAKE_KEYS`, `0` to firehose
+> deliberately). `nostos-bench` builds its own config, so the 833k-ops/sec ceiling is
+> untouched — verified by inspection: `crates/nostos-bench/src/main.rs:226` calls
+> `FakeReplicatorConfig::{small,large}` directly, never the server CLI.
+>
+> **Recycling is the load-bearing half, not pacing.** Client apply is an upsert
+> (`ON CONFLICT(table_name, pk) DO UPDATE`, `nostos-client/src/sqlite.rs:548`), so a bounded
+> key space bounds the *table*, which is what makes the Flutter glue's per-tick full-table
+> `emit_snapshot` O(1) in session length instead of O(events). Pacing alone only slows the
+> quadratic. Checks: `recycling_keys_bounds_the_key_space` and `pacing_throttles_emission`
+> in `crates/nostos-infra/src/replicator/fake.rs`.
+>
+> **Measured (debug build, 10 s, `nostos-server` alone with NO client connected):**
+>
+> | config | server CPU |
+> |---|---|
+> | `NOSTOS_FAKE_EPS=0 NOSTOS_FAKE_KEYS=0` (the old default) | **100.0%** — a full core |
+> | new default (20 eps / 50 keys) | **0.0%** |
+>
+> A full core burned with nothing observing it — that is the firehose, and it is gone.
+> What is *not* re-measured: the client-side Flutter saturation. The O(1)-snapshot claim
+> follows from the upsert + bounded key space, but no device run was done in this pass
+> (A9 remains unauthorized). `make ci`: exit 0, 435 passed. The SDK e2e harness
+> (`sdk/nostos_flutter/example/integration_test/nostos_server_test.dart`) was checked for
+> sensitivity to the new caps — it spawns `cargo run -p nostos-server` with only
+> `NOSTOS_BIND` set, and both assertions are `isNotEmpty` under 15 s timeouts, which 20 eps
+> satisfies in well under a second. No harness asserts a row/event count above 50.
+>
+> Blast radius stayed narrow because only the Flutter glue re-snapshots per change tick
+> (`sdk/nostos_flutter/rust/src/api/nostos.rs`); kotlin/dotnet/swift poll instead, node/tauri
+> have no watch pump. So the server-side default is the whole fix — no per-SDK change.
 >
 > Everything below is the original assessment, unedited.
 

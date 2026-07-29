@@ -20,8 +20,10 @@ flag is absent; flag wins when present.
 | `NOSTOS_BIND` | `0.0.0.0:8800` | axum bind address. |
 | `NOSTOS_WS_PATH` | `/sync` | WebSocket path clients connect to. |
 | `NOSTOS_SESSION_BUFFER` | `1024` | Per-session bounded channel depth; slow clients that fall further behind are dropped (explicit, observable — never silent OOM). |
-| `NOSTOS_REPLICATOR` | `fake` | **Critical.** `fake` = synthetic generator (zero-setup). `pg` = real Postgres logical replication. Anything else bails: `unknown NOSTOS_REPLICATOR value: {other}` (`main.rs:427`). |
-| `NOSTOS_PG_URL` | _empty_ | Postgres URL for `NOSTOS_REPLICATOR=pg`. Empty under `pg` bails fast (`main.rs:370`, `main.rs:457`). |
+| `NOSTOS_REPLICATOR` | `fake` | **Critical.** `fake` = synthetic generator (zero-setup). `pg` = real Postgres logical replication. Anything else bails: `unknown NOSTOS_REPLICATOR value: {other}` (`main.rs:466`). |
+| `NOSTOS_PG_URL` | _empty_ | Postgres URL for `NOSTOS_REPLICATOR=pg`. Empty under `pg` bails fast (`main.rs:406`, `main.rs:497`). |
+| `NOSTOS_FAKE_EPS` | `20` | Fake-replicator emission rate, events/sec. `0` = unbounded firehose. `fake` only; the benchmark builds its own config, so this never touches the moat numbers (A10). |
+| `NOSTOS_FAKE_KEYS` | `50` | Fake-replicator distinct primary keys; `0` = monotonic (table grows forever). Client apply is an upsert on `(table, pk)`, so this bounds the *table* — which is what keeps a full-table watch snapshot O(1) in session length. `fake` only (A10). |
 | `NOSTOS_WRITE_TABLES` | _empty_ | **Critical.** Comma-separated tables clients may write over `/sync` (ADR-0013). Empty = no tables writable — writes are rejected with `"table not writable: '<t>' — add it to NOSTOS_WRITE_TABLES"` (`crates/nostos-infra/src/transport.rs:792`). Demo needs `NOSTOS_WRITE_TABLES=tasks`. |
 | `NOSTOS_PG_SLOT` | `cairn_slot` | Logical-replication slot name. Server creates it lazily on first connect if missing (see §2). |
 | `NOSTOS_PG_PUBLICATION` | `cairn_pub` | Publication name. Must exist before `nostos dev` connects — `nostos init` creates it. |
@@ -173,9 +175,9 @@ Run this in order. Each line is **symptom → check → fix**.
    Symptom: clients connect, subscribe acks, zero rows arrive, only live
    inserts show.
    Check: `grep NOSTOS_REPLICATOR .env` or read server startup logs for
-   `replicator: FakeReplicator (synthetic, unbounded)` vs
+   `replicator: FakeReplicator (synthetic; 0 = unbounded)` vs
    `replicator: PgReplicator (real Postgres logical replication)`
-   (`main.rs:363` / `main.rs:407`).
+   (`main.rs:397` / `main.rs:442`).
    Fix: `NOSTOS_REPLICATOR=pg`. See §1.1 (a).
 
 2. **Is `NOSTOS_WRITE_TABLES` populated?**
@@ -296,6 +298,8 @@ nostos-server [OPTIONS]
 OPTIONS (most-commonly-tuned; see §1 for the full table):
   --bind <ADDR>                         bind address              [env: NOSTOS_BIND, default: 0.0.0.0:8800]
   --replicator <fake|pg>                                          [env: NOSTOS_REPLICATOR, default: fake]
+  --fake-events-per-sec <N>             0 = unbounded             [env: NOSTOS_FAKE_EPS, default: 20]
+  --fake-distinct-keys <N>              0 = grows forever         [env: NOSTOS_FAKE_KEYS, default: 50]
   --pg-url <URL>                                                  [env: NOSTOS_PG_URL, default: -]
   --write-tables <CSV>                                            [env: NOSTOS_WRITE_TABLES, default: -]
   --pg-slot <NAME>                                               [env: NOSTOS_PG_SLOT, default: cairn_slot]

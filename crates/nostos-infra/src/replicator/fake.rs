@@ -41,6 +41,19 @@ pub struct FakeReplicatorConfig {
     pub table: String,
     /// Seed for deterministic generation (so runs are reproducible).
     pub seed: u64,
+    /// Emit at most this many events per second. `0` = unbounded (the
+    /// benchmark default — pacing would cap the very ceiling we measure).
+    /// Set it for interactive/dev servers, where an unbounded generator is
+    /// pure load with no observer (ADR-0027 finding, A10).
+    pub events_per_sec: u64,
+    /// Recycle primary keys over this many distinct values. `0` = monotonic
+    /// (`pk = emitted + 1`, so the table grows forever).
+    ///
+    /// Client apply is an upsert (`ON CONFLICT(table_name, pk) DO UPDATE`,
+    /// `sqlite.rs`), so a bounded key space means a bounded *table*. That is
+    /// what keeps a full-table watch snapshot O(1) in session length instead
+    /// of O(events) — pacing alone only slows the growth.
+    pub distinct_keys: u64,
 }
 
 impl FakeReplicatorConfig {
@@ -52,6 +65,8 @@ impl FakeReplicatorConfig {
             payload_size: 100,
             table: "tasks".into(),
             seed: DEFAULT_SEED,
+            events_per_sec: 0,
+            distinct_keys: 0,
         }
     }
 
@@ -63,7 +78,24 @@ impl FakeReplicatorConfig {
             payload_size: 4096,
             table: "tasks".into(),
             seed: DEFAULT_SEED,
+            events_per_sec: 0,
+            distinct_keys: 0,
         }
+    }
+
+    /// Cap the emission rate (events/second). `0` restores unbounded.
+    #[must_use]
+    pub fn paced(mut self, events_per_sec: u64) -> Self {
+        self.events_per_sec = events_per_sec;
+        self
+    }
+
+    /// Recycle primary keys over `n` distinct values, bounding the table the
+    /// stream produces. `0` restores the monotonic (ever-growing) key space.
+    #[must_use]
+    pub fn recycling_keys(mut self, n: u64) -> Self {
+        self.distinct_keys = n;
+        self
     }
 }
 
@@ -158,7 +190,12 @@ impl FakeReplicator {
 
         let lsn = Lsn::new(self.next_lsn.fetch_add(10, Ordering::Relaxed));
         let r = self.next_rand();
-        let pk = (emitted + 1).to_string();
+        let pk = if self.cfg.distinct_keys == 0 {
+            emitted + 1
+        } else {
+            emitted % self.cfg.distinct_keys + 1
+        }
+        .to_string();
         let op = match Self::pick_op(r) {
             Operation::Insert => RowOp::Insert {
                 table: self.cfg.table.clone(),
@@ -187,8 +224,18 @@ impl FakeReplicator {
 #[async_trait]
 impl ReplicatorStream for FakeReplicator {
     async fn next_event(&mut self) -> Option<ReplicationEvent> {
-        // No I/O — yield immediately. The router's backpressure (bounded sinks)
-        // is what naturally rate-limits us to the sustainable throughput.
+        // Unpaced: no I/O — yield immediately. The router's backpressure
+        // (bounded sinks) is what naturally rate-limits us to the sustainable
+        // throughput. This is the benchmark path.
+        //
+        // ponytail: pacing is a per-event sleep, so the real rate is
+        // `min(events_per_sec, 1s / timer_granularity)` (~1 kHz on tokio).
+        // Good enough for dev/demo; batch-and-sleep if a paced load test ever
+        // needs a precise high rate.
+        // `checked_div` is the `events_per_sec == 0` (unbounded) branch.
+        if let Some(nanos) = 1_000_000_000_u64.checked_div(self.cfg.events_per_sec) {
+            tokio::time::sleep(std::time::Duration::from_nanos(nanos)).await;
+        }
         self.next_event_inner()
     }
 }
@@ -244,6 +291,34 @@ mod tests {
                 assert_eq!(e.payload_len(), 4096);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn recycling_keys_bounds_the_key_space() {
+        // A10: client apply is an upsert on (table, pk), so a bounded key space
+        // bounds the *table* — that is what keeps a full-table watch snapshot
+        // O(1) in session length instead of O(events).
+        let mut r = FakeReplicator::new(FakeReplicatorConfig::small(500).recycling_keys(10));
+        let mut keys = std::collections::HashSet::new();
+        while let Some(e) = r.next_event().await {
+            keys.insert(e.op.pk().to_string());
+        }
+        assert_eq!(keys.len(), 10, "keys: {keys:?}");
+    }
+
+    #[tokio::test]
+    async fn pacing_throttles_emission() {
+        // Real time, but only ~50 ms of it: sleeps overshoot, never undershoot,
+        // so a floor assert can't flake. (`start_paused` would need tokio's
+        // `test-util` feature — not worth a dep for a 50 ms test.)
+        let start = std::time::Instant::now();
+        let mut r = FakeReplicator::new(FakeReplicatorConfig::small(5).paced(100));
+        while r.next_event().await.is_some() {}
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(30),
+            "elapsed: {:?}",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
