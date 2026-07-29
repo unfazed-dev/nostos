@@ -68,6 +68,7 @@ Single process (`nostos-bench`):
    - sends a `Subscribe { predicate }` frame,
    - enters a read loop, incrementing a per-client `AtomicU64` and pushing receive timestamps into a latency histogram.
 3. Obtains an in-process handle to the server's `FanOutService` and constructs a `FakeReplicator` that emits `M` synthetic events as fast as the router will accept them (the router's backpressure is the rate limiter).
+   - **`NOSTOS_FAKE_EPS` / `NOSTOS_FAKE_KEYS` do not apply here.** Those bound the `nostos-server` *binary's* dev default (A10, ADR-0027); `nostos-bench` builds its own `FakeReplicatorConfig` (`crates/nostos-bench/src/main.rs:226`), leaving both knobs at `0` = unpaced, monotonic keys. The measured ceiling is unaffected by them — and must stay that way, since pacing would cap the very number this document defines.
 4. Waits until the sum of per-client counters ≥ `M` (with a timeout).
 5. Computes: sustained ops/sec = `M / wall_clock`. Drop rate = `1 - (delivered / M)`. p99 latency from the histogram.
 
