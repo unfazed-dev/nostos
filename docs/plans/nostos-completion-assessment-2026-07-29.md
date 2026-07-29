@@ -40,11 +40,29 @@
 > users to dismiss write errors. `pending > 0` is likewise *not* an error; it is the
 > offline-first promise working. Rationale in ADR-0027.
 >
+> ### New finding from A2's verification (pre-existing, not caused by A2)
+>
+> The zero-setup fake-replicator environment **saturates any session that outlives a few
+> seconds**: `main.rs` runs `FakeReplicatorConfig::small(u64::MAX)` with no pacing knob
+> (`fake.rs` has none), and each `watch` pump re-queries the full, monotonically growing
+> table per change tick — quadratic. Native stack sampling (1,717 samples of a wedged run)
+> showed ~80% of a worker inside `emit_snapshot` + hex/JSON/SSE encoding + a Dart GC storm,
+> and **zero frames** in the new write-status pump. The SDK e2e passes by finishing in ~3s.
+> Named fix (future work, needs its own measurement): a pacing/bound env knob on the fake
+> replicator, or a default `watch` throttle. Recorded in ADR-0027's consequences.
+>
+> Verification-tooling traps recorded for the next agent: (1) frb's content hash covers the
+> *generated bindings* only — a Rust logic change with unchanged signatures sails through
+> the hash check on a stale dylib, so `flutter clean` after ANY glue-crate edit before
+> trusting a run; (2) macOS `sample <pid>` on the wedged app was the tool that ended three
+> rounds of wrong theorizing in one shot.
+>
 > ### Still open
 >
 > **A7** (moat-number drift), **A8** (mark superseded plans), **A9** (boot a device to close
-> kotlin/swift/reactnative) — not requested in this pass. C8, C15, C17 remain unknown; C17
-> (the stranger test) is operator-only by construction.
+> kotlin/swift/reactnative), **A10 (new)** fake-replicator pacing knob — not requested in
+> this pass. C8, C15, C17 remain unknown; C17 (the stranger test) is operator-only by
+> construction.
 >
 > Everything below is the original assessment, unedited.
 
