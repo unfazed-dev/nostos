@@ -5,7 +5,7 @@
 // (see docs/plans/w4-packaging-fallback.md's W0a spike, which proved the
 // packaging mechanism in isolation; this proves the real SDK on top of it).
 //
-// Run from `sdk/nostos_flutter/`:
+// Run from `sdk/nostos_flutter/example/`:
 //   flutter test integration_test/nostos_server_test.dart -d macos
 //
 // Spins up `cargo run -p nostos-server` itself (zero-setup default:
