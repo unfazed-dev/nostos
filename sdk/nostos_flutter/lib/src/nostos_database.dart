@@ -211,15 +211,24 @@ class NostosDatabase {
   /// predicate — see `Nostos.subscribe`). Must be called before [watch] /
   /// [getAll] / [write] for that table. For multiple tables on one
   /// connection, use [subscribeTables].
-  Future<void> subscribe(String table, {String? where}) =>
-      _nostos.subscribe(table, where: where);
+  Future<void> subscribe(String table, {String? where}) async {
+    await _nostos.subscribe(table, where: where);
+    _hasSubscribed = true;
+    // Only if someone is already observing status — see [_wireWriteStatus]
+    // for why the pump attaches at the LATER of first-status-access and
+    // first-subscribe, never eagerly.
+    if (_statusWired) _wireWriteStatus();
+  }
 
   /// Subscribe to [tables] over one `/sync` socket (D1/ADR-0022 multi-table).
   /// Each entry may carry its own `whereSql`. Replaces any prior subscription.
   /// Call once with the full table set, then [watch] / [getAll] / [write] per
   /// table.
-  Future<void> subscribeTables(List<NostosTableSub> tables) =>
-      _nostos.subscribeTables(tables);
+  Future<void> subscribeTables(List<NostosTableSub> tables) async {
+    await _nostos.subscribeTables(tables);
+    _hasSubscribed = true;
+    if (_statusWired) _wireWriteStatus();
+  }
 
   /// Reactive SQL watch: re-runs [sql] whenever the synced data changes and
   /// emits the decoded result set. Thin delegate over `Nostos.watchQuery`
@@ -303,10 +312,15 @@ class NostosDatabase {
   }) =>
       Collection<T>._(this, table, fromRow, toRow, pkColumn);
 
-  /// Hot sync status. Honest P0: carries [SyncStatus.conn] (from the
-  /// underlying connection stream) + [SyncStatus.connected] +
-  /// [SyncStatus.lastSyncedAt]. Richer fields (syncing/reconciling/errors) and
-  /// `DataTrust` land in P1 once the engine exposes those signals (ADR-0024).
+  /// Hot sync status: connection state ([SyncStatus.conn],
+  /// [SyncStatus.connected], [SyncStatus.lastSyncedAt]) folded together with
+  /// the durable outbox ([SyncStatus.pendingWrites],
+  /// [SyncStatus.lastWriteError] — ADR-0027).
+  ///
+  /// Still deferred: a download-progress / reconcile signal and `DataTrust`,
+  /// which need engine-side signals that don't exist yet (ADR-0024).
+  /// [SyncStatus.lastSyncedAt] remains a proxy stamped on each `connected`
+  /// transition; the write half is now exact.
   ValueListenable<SyncStatus> get status {
     _ensureStatusWired();
     return _status!;
@@ -320,7 +334,10 @@ class NostosDatabase {
 
   ValueNotifier<SyncStatus>? _status;
   StreamSubscription<NostosConnectionState>? _statusSub;
+  StreamSubscription<({int pending, int deadLettered, String? lastError})>?
+      _writeStatusSub;
   bool _statusWired = false;
+  bool _hasSubscribed = false;
 
   void _ensureStatusWired() {
     if (_statusWired) return;
@@ -329,23 +346,76 @@ class NostosDatabase {
       conn: NostosConnectionState.disconnected,
       lastSyncedAt: null,
     ));
-    // ponytail: the engine exposes only NostosConnectionState today. There is no
-    // "download completed" / "reconcile done" / error signal yet, so lastSyncedAt
-    // is stamped on each `connected` transition (a best-effort proxy) and the
-    // richer SyncStatus fields are deferred to P1 with engine-side signals.
+    // ponytail: there is still no "download completed" / "reconcile done"
+    // signal, so lastSyncedAt stays a best-effort proxy stamped on each
+    // `connected` transition. The WRITE side is no longer a proxy — it comes
+    // from the engine's real outbox (see the second subscription below).
     _statusSub = _nostos.connectionState.listen((s) {
       final prev = _status!.value;
       final lastSynced = s == NostosConnectionState.connected
           ? DateTime.now()
           : prev.lastSyncedAt;
-      _status!.value = SyncStatus(conn: s, lastSyncedAt: lastSynced);
+      _status!.value = SyncStatus(
+        conn: s,
+        lastSyncedAt: lastSynced,
+        pendingWrites: prev.pendingWrites,
+        deadLetteredWrites: prev.deadLetteredWrites,
+        lastWriteError: prev.lastWriteError,
+      );
     });
+    // The other half of the later-of rule (see [_wireWriteStatus]): status
+    // first read AFTER a subscribe → attach the pump now. (`_statusWired` is
+    // already true above, so the recursive _ensureStatusWired call inside is
+    // a no-op, not a loop.)
+    if (_hasSubscribed) _wireWriteStatus();
+  }
+
+  /// Attach the outbox pump — at the LATER of first [status] access and first
+  /// [subscribe], never eagerly. Two independent reasons, both load-bearing:
+  ///
+  /// 1. Precondition: the engine's `watchWriteStatus()` errors without an
+  ///    active subscription, while the connection-state stream doesn't.
+  ///    Reading [status] before subscribing is legitimate (you get the honest
+  ///    `disconnected` default), so attaching at status-access time would turn
+  ///    a valid call into a stream error.
+  /// 2. Cost: apps that never read [status] never pay for the FFI stream.
+  ///    This matters under high event rates — the zero-setup fake-replicator
+  ///    server emits events unthrottled forever, and profiling showed any
+  ///    session there saturates on the (pre-existing) full-snapshot watch
+  ///    pumps within seconds; the SDK's own read-only e2e survives precisely
+  ///    because it attaches nothing it doesn't use.
+  ///
+  /// Re-subscribing re-attaches: the old pump belongs to the replaced session,
+  /// so it is cancelled rather than left orphaned.
+  void _wireWriteStatus() {
+    _ensureStatusWired();
+    unawaited(_writeStatusSub?.cancel());
+    // Two streams, one ValueListenable: the connection and the outbox change
+    // independently (a write queues while offline; a dead-letter arrives while
+    // connected), so each listener carries the other's fields forward rather
+    // than resetting them.
+    _writeStatusSub = _nostos.writeStatus.listen(
+      (w) {
+        final prev = _status!.value;
+        _status!.value = SyncStatus(
+          conn: prev.conn,
+          lastSyncedAt: prev.lastSyncedAt,
+          pendingWrites: w.pending,
+          deadLetteredWrites: w.deadLettered,
+          lastWriteError: w.lastError,
+        );
+      },
+      // A dead pump must not take the app with it: the connection half of
+      // SyncStatus keeps working, and the write counts simply stop updating.
+      onError: (Object _) {},
+    );
   }
 
   /// Tear down the underlying [Nostos] session (sync loop + watch pump) AND the
   /// status listener. Safe to call with no subscription; idempotent.
   Future<void> close() async {
     await _statusSub?.cancel();
+    await _writeStatusSub?.cancel();
     _status?.dispose();
     await _nostos.close();
   }
@@ -496,7 +566,51 @@ class Collection<T> {
 /// ship, so `DataTrust` can be true instead of a permanent `stale` badge
 /// (ADR-0024). Singleton on [NostosDatabase.status].
 class SyncStatus {
-  const SyncStatus({required this.conn, required this.lastSyncedAt});
+  const SyncStatus({
+    required this.conn,
+    required this.lastSyncedAt,
+    this.pendingWrites = 0,
+    this.deadLetteredWrites = 0,
+    this.lastWriteError,
+  });
+
+  /// Writes captured locally but not yet ack'd by the server.
+  ///
+  /// `> 0` is normal and healthy while offline — that IS the offline-first
+  /// promise. Show it as "N unsynced changes", not as an error.
+  final int pendingWrites;
+
+  /// Writes that permanently failed this session and were removed from the
+  /// send queue. Unlike [pendingWrites], this number never goes down on its
+  /// own: it counts data the user will lose unless the app does something.
+  final int deadLetteredWrites;
+
+  /// The server's message for the most recent permanent write failure, or
+  /// `null` if none.
+  ///
+  /// Deliberately NOT set for ordinary rejections — those are frequently
+  /// transient and retry on their own, so surfacing them would teach users to
+  /// dismiss write errors. When this is non-null a write is genuinely lost and
+  /// a human should be told. The text is the server's verbatim reason and is
+  /// usually actionable (e.g. a `NOSTOS_WRITE_TABLES` rejection names the exact
+  /// env var to set).
+  final String? lastWriteError;
+
+  /// True when at least one write is permanently lost. This is the condition
+  /// Flutter's own optimistic-state guidance expects you to render (revert the
+  /// optimistic value and tell the user) — before this existed, a Nostos app
+  /// had no way to detect it.
+  bool get hasWriteError => lastWriteError != null;
+
+  /// True when there is local work the server hasn't confirmed yet.
+  bool get hasPendingWrites => pendingWrites > 0;
+
+  /// True while connected with queued writes still draining.
+  bool get uploading => connected && pendingWrites > 0;
+
+  /// True once a sync has completed at least once — use it to tell "empty
+  /// because nothing synced yet" apart from "empty because there is no data".
+  bool get hasSynced => lastSyncedAt != null;
 
   /// Current connection state of the underlying sync session.
   final NostosConnectionState conn;
@@ -511,5 +625,7 @@ class SyncStatus {
 
   @override
   String toString() =>
-      'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt)';
+      'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt, '
+      'pendingWrites: $pendingWrites, deadLetteredWrites: $deadLetteredWrites, '
+      'lastWriteError: $lastWriteError)';
 }

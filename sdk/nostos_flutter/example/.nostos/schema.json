@@ -1,0 +1,361 @@
+{
+  "publication": "cairn_pub",
+  "tables": [
+    {
+      "columns": [
+        {
+          "affinity": "TEXT",
+          "name": "id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "org_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "assignee_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "title",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "INTEGER",
+          "name": "completed",
+          "pg_oid": 16
+        },
+        {
+          "affinity": "TEXT",
+          "name": "created_at",
+          "pg_oid": 1184
+        },
+        {
+          "affinity": "TEXT",
+          "name": "updated_at",
+          "pg_oid": 1184
+        }
+      ],
+      "name": "tasks",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "columns": [
+        {
+          "affinity": "TEXT",
+          "name": "id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "name",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "specialty",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "email",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "phone",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "created_at",
+          "pg_oid": 1184
+        },
+        {
+          "affinity": "TEXT",
+          "name": "rate_type",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "hourly_rate_cents",
+          "pg_oid": 20
+        },
+        {
+          "affinity": "TEXT",
+          "name": "flat_rate_cents",
+          "pg_oid": 20
+        },
+        {
+          "affinity": "TEXT",
+          "name": "subscription_rate_cents",
+          "pg_oid": 20
+        },
+        {
+          "affinity": "TEXT",
+          "name": "bio",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "avatar_color",
+          "pg_oid": 25
+        }
+      ],
+      "name": "providers",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "columns": [
+        {
+          "affinity": "TEXT",
+          "name": "id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "name",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "email",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "phone",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "notes",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "created_at",
+          "pg_oid": 1184
+        }
+      ],
+      "name": "clients",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "columns": [
+        {
+          "affinity": "TEXT",
+          "name": "id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "provider_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "INTEGER",
+          "name": "weekday",
+          "pg_oid": 23
+        },
+        {
+          "affinity": "INTEGER",
+          "name": "start_min",
+          "pg_oid": 23
+        },
+        {
+          "affinity": "INTEGER",
+          "name": "end_min",
+          "pg_oid": 23
+        }
+      ],
+      "name": "availabilities",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "columns": [
+        {
+          "affinity": "TEXT",
+          "name": "id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "provider_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "client_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "starts_at",
+          "pg_oid": 1184
+        },
+        {
+          "affinity": "INTEGER",
+          "name": "duration_min",
+          "pg_oid": 23
+        },
+        {
+          "affinity": "TEXT",
+          "name": "status",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "notes",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "created_at",
+          "pg_oid": 1184
+        }
+      ],
+      "name": "appointments",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "columns": [
+        {
+          "affinity": "TEXT",
+          "name": "id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "appointment_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "client_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "INTEGER",
+          "name": "amount_cents",
+          "pg_oid": 23
+        },
+        {
+          "affinity": "TEXT",
+          "name": "status",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "issued_at",
+          "pg_oid": 1184
+        },
+        {
+          "affinity": "TEXT",
+          "name": "created_at",
+          "pg_oid": 1184
+        },
+        {
+          "affinity": "TEXT",
+          "name": "provider_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "line_type",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "rate_cents",
+          "pg_oid": 20
+        },
+        {
+          "affinity": "TEXT",
+          "name": "hours_min",
+          "pg_oid": 20
+        },
+        {
+          "affinity": "TEXT",
+          "name": "description",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "due_at",
+          "pg_oid": 1184
+        },
+        {
+          "affinity": "TEXT",
+          "name": "paid_at",
+          "pg_oid": 1184
+        }
+      ],
+      "name": "invoices",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "columns": [
+        {
+          "affinity": "TEXT",
+          "name": "id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "provider_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "client_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "sender_type",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "sender_id",
+          "pg_oid": 2950
+        },
+        {
+          "affinity": "TEXT",
+          "name": "body",
+          "pg_oid": 25
+        },
+        {
+          "affinity": "TEXT",
+          "name": "created_at",
+          "pg_oid": 1184
+        },
+        {
+          "affinity": "TEXT",
+          "name": "read_at",
+          "pg_oid": 1184
+        }
+      ],
+      "name": "messages",
+      "primary_key": [
+        "id"
+      ]
+    }
+  ]
+}

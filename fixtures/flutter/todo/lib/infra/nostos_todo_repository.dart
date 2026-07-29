@@ -1,7 +1,12 @@
+import 'dart:async';
+
 import 'package:nostos_flutter/nostos_flutter.dart';
+import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:todo/domain/todo_repository.dart';
 
-/// Nostos-backed [TodoRepository] — the W5 showcase. Only constructed when
+/// Nostos-backed [TodoRepository] — the W5 showcase over the reactive facade
+/// (ADR-0024: `NostosDatabase` + `Collection<T>`). Only constructed when
 /// [Env.isNostosLive]; the mock app uses [InMemoryTodoRepository], the
 /// Supabase-direct app uses [SupabaseTodoRepository].
 ///
@@ -13,47 +18,85 @@ import 'package:todo/domain/todo_repository.dart';
 /// `user_id`: the server force-stamps it from the JWT `sub`, and any
 /// client-claimed value is silently overwritten (ADR-0018).
 ///
-/// Writes go through [Nostos.write]'s durable local outbox — the call returns
-/// as soon as the write is captured on disk, not once the server acks it, so
-/// the UI never blocks on connectivity (offline create/toggle both work; they
-/// sync when the socket reconnects). See the SDK README's "Known gaps": a
-/// write the server rejects (e.g. a cross-tenant attempt) has NO surface back
-/// to Dart today — it just stays queued and retries forever, silently, at the
-/// `nostos-client` outbox layer. This repository cannot detect that case; ADR-
-/// 0018 isolation is proven at the server/Postgres boundary instead (see
+/// Writes ([add]/[toggle]/[update]/[remove]) go through [Collection]'s
+/// collapsed-write outbox — the call returns as soon as the write is
+/// captured on disk, not once the server acks it, so the UI never blocks on
+/// connectivity (offline CRUD all work; they sync when the socket
+/// reconnects). See the SDK README's "Known gaps": a write the server rejects
+/// (e.g. a cross-tenant attempt) has NO surface back to Dart today — it just
+/// stays queued and retries silently at the `nostos-client` outbox layer.
+/// This repository cannot detect that case; ADR-0018 isolation is proven at
+/// the server/Postgres boundary instead (see
 /// integration_test/nostos_live_test.dart).
 class NostosTodoRepository implements TodoRepository {
-  NostosTodoRepository._(this._nostos);
+  NostosTodoRepository._(this._db, this._collection);
 
-  final Nostos _nostos;
+  final NostosDatabase _db;
+  final Collection<Todo> _collection;
   static const _table = 'todos';
+
+  /// The declared read-view schema — re-applied on every connect (the
+  /// migration story, see [NostosSchema]). The WS2 view projects these three
+  /// columns from `cairn_data.payload` via `json_extract`; the server's
+  /// `todos` table also carries `user_id`/`created_at`, which stay in the
+  /// payload JSON unprojected (the read model is a projection, not a mirror).
+  static final NostosSchema _schema = NostosSchema(tables: [
+    NostosTable(
+      name: _table,
+      primaryKey: const ['id'],
+      columns: const [
+        NostosColumn.text('id'),
+        NostosColumn.text('title'),
+        NostosColumn.integer('done'),
+      ],
+    ),
+  ]);
 
   /// The last row set [watch] emitted, keyed by id — used by [toggle] to
   /// flip `done` without a network round-trip (mirrors the read-then-write
   /// shape [SupabaseTodoRepository] uses, but from the local reactive cache
-  /// instead of a fresh query — there's no ad-hoc query API on [Nostos]).
+  /// instead of a fresh query).
   final Map<String, Todo> _lastById = {};
 
-  /// Connects, subscribes to `todos` (no filter — see class doc), and
-  /// returns a ready repository. [wsUrl]/[token] come from [Env.nostosWsUrl]/
-  /// [Env.nostosToken] in the app; the integration test passes its own.
-  /// [sqlitePath] overrides the default per-url local store location — used
-  /// by the offline-persistence scenario to reopen the same durable store
-  /// across a fresh `Nostos` instance (see [Nostos.connect]).
+  /// Connects, declares the [todos] schema (creating the WS2 read-view),
+  /// subscribes to `todos` (no filter — see class doc), and returns a ready
+  /// repository. [wsUrl]/[token] come from [Env.nostosWsUrl]/[Env.nostosToken]
+  /// in the app; the integration test passes its own. [sqlitePath] overrides
+  /// the default per-app local store location — used by the offline-persistence
+  /// scenario to reopen the same durable store across a fresh repository
+  /// instance.
   static Future<NostosTodoRepository> connect({
     required String wsUrl,
     required String token,
     String? sqlitePath,
   }) async {
-    final nostos = await Nostos.connect(url: wsUrl, token: token, sqlitePath: sqlitePath);
-    await nostos.subscribe(_table);
-    return NostosTodoRepository._(nostos);
+    final path = sqlitePath ?? await _defaultSqlitePath();
+    final db = await NostosDatabase.connect(
+      url: wsUrl,
+      token: token,
+      schema: _schema,
+      sqlitePath: path,
+    );
+    await db.subscribe(_table);
+    return NostosTodoRepository._(
+      db,
+      db.collection<Todo>(
+        table: _table,
+        fromRow: Todo.fromJson,
+        toRow: (t) => t.toJson(),
+        pkColumn: 'id',
+      ),
+    );
+  }
+
+  static Future<String> _defaultSqlitePath() async {
+    final dir = await getApplicationSupportDirectory();
+    return '${dir.path}/nostos_todo.sqlite';
   }
 
   @override
   Stream<List<Todo>> watch() {
-    return _nostos.watch(_table).map((rows) {
-      final todos = rows.map(_toTodo).toList();
+    return _collection.watch().map((todos) {
       _lastById
         ..clear()
         ..addEntries(todos.map((t) => MapEntry(t.id, t)));
@@ -64,12 +107,7 @@ class NostosTodoRepository implements TodoRepository {
   @override
   Future<void> add(String title) async {
     final id = DateTime.now().microsecondsSinceEpoch.toString();
-    await _nostos.write(
-      _table,
-      op: 'upsert',
-      pk: id,
-      payload: {'title': title, 'done': false},
-    );
+    await _collection.upsertRow({'id': id, 'title': title, 'done': false});
   }
 
   @override
@@ -79,31 +117,28 @@ class NostosTodoRepository implements TodoRepository {
     // Deliberately omit `title` from the payload: the server's ON CONFLICT
     // SET only touches columns present in the payload, so an omitted `title`
     // is left unchanged rather than overwritten with an empty value.
-    await _nostos.write(_table, op: 'upsert', pk: id, payload: {'done': next});
+    await _collection.patch(id, {'done': next});
   }
 
-  /// A row's payload always carries every column for a Postgres-backed
-  /// deployment (including `id`); `_pk` (stamped client-side by the SDK) is
-  /// the fallback for any payload shape that omits it.
-  static Todo _toTodo(Map<String, dynamic> row) {
-    final id = (row['id'] ?? row['_pk']) as String;
-    return Todo(
-      id: id,
-      title: row['title'] as String? ?? '',
-      done: _asBool(row['done']),
-    );
+  @override
+  Future<void> update(String id, {String? title, bool? done}) async {
+    final cols = <String, dynamic>{};
+    if (title != null) cols['title'] = title;
+    if (done != null) cols['done'] = done;
+    if (cols.isEmpty) return;
+    await _collection.patch(id, cols);
   }
 
-  /// `PgReplicator::tuple_to_json_payload` (crates/nostos-infra) now renders
-  /// a Postgres `boolean` column as a real JSON bool (ADR-0019's OID-keyed
-  /// mapping) — a real Postgres source delivers `"done":true`, matching a
-  /// mock/fake source. The `String` arm below is kept as defensive
-  /// passthrough (e.g. for a hand-rolled test payload or a future non-pg
-  /// source using the pre-ADR-0019 shape), not because the real wire needs
-  /// it anymore.
-  static bool _asBool(Object? value) => switch (value) {
-    bool b => b,
-    String s => s == 'true',
-    _ => false,
-  };
+  @override
+  Future<void> remove(String id) async {
+    await _collection.delete(id);
+  }
+
+  /// Hot sync status (ADR-0024). Drives the UI's offline banner via
+  /// [TodoViewModel.currentStatus]. `conn == connected` is the online
+  /// signal; `lastSyncedAt` stamps the last transition to connected.
+  ValueListenable<SyncStatus> get status => _db.status;
+
+  @override
+  Future<void> dispose() => _db.close();
 }

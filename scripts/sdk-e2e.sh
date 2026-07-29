@@ -94,18 +94,30 @@ fi
 # follow-up (needs the cloud project ref — see docs/plans/flutter-supabase-plug-and-play-launch.md).
 if want flutter; then
   if command -v flutter >/dev/null 2>&1; then
-    run_slice flutter "cd sdk/nostos_flutter && flutter test integration_test/nostos_server_test.dart -d macos"
+    # Runs from example/, not the plugin dir: nostos_flutter is a PLUGIN package
+    # and `-d macos` needs a runnable host app to build. (Between 9322d83 and
+    # its restore this pointed at the plugin dir and could only ever fail with
+    # "No macOS desktop project configured".)
+    #
+    # If this fails with a flutter_rust_bridge content-hash mismatch, the cached
+    # native lib is older than the generated bindings — run
+    # `cd sdk/nostos_flutter/example && flutter clean && flutter pub get` after
+    # any `flutter_rust_bridge_codegen generate`.
+    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
   else
     skip_slice flutter "(flutter not on PATH)"
   fi
 fi
 
-# Swift — needs the iPhone simulator (xcodebuild + simctl).
+# Swift — needs a BOOTED iPhone simulator (xcodebuild + simctl). Checking only
+# that simctl runs (i.e. that a simulator is *installed*) turns "nothing to run
+# against" into a red FAIL; the Android guards below check for a booted device,
+# so match them and SKIP honestly instead.
 if want swift; then
-  if xcrun simctl list devices >/dev/null 2>&1; then
+  if xcrun simctl list devices 2>/dev/null | grep -q '(Booted)'; then
     run_slice swift "cd sdk/nostos_swift/ios-test && ./build.sh"
   else
-    skip_slice swift "(no Xcode / iPhone simulator)"
+    skip_slice swift "(no booted iPhone simulator — \`xcrun simctl boot <device>\`)"
   fi
 fi
 
@@ -157,4 +169,14 @@ done
 echo ""
 printf "  ${GREEN}%d passed${RESET}, ${RED}%d failed${RESET}, ${YELLOW}%d skipped${RESET} / %d slices\n" \
   "$pass" "$fail" "$skip" "${#RESULTS[@]}"
+
+# Strict mode (CI): a SKIP means the toolchain we expected wasn't there, which
+# on a runner is a broken job, not an honest "no device". Without this, a CI
+# job that names its slices still goes green when every one of them skips —
+# the same false-pass shape as the NOSTOS_E2E_PG suite self-skipping. Local runs
+# leave this unset so device-less boxes stay honest rather than noisy.
+if [ "${SDK_E2E_STRICT:-0}" = "1" ] && [ "$skip" -gt 0 ]; then
+  printf "  ${RED}strict mode: %d skipped slice(s) count as failures${RESET}\n" "$skip"
+  exit $((fail + skip))
+fi
 exit "$fail"

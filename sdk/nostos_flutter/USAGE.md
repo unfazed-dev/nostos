@@ -403,12 +403,33 @@ final ValueListenable<SyncStatus> status = db.status;
 final SyncStatus now = db.currentStatus;
 ```
 
-`SyncStatus` carries (honest P0 surface):
-- `conn` — `NostosConnectionState { connecting, connected, reconnecting, disconnected }`,
-- `connected` — `bool`,
-- `lastSyncedAt` — `DateTime?`.
+`SyncStatus` carries:
 
-(Richer fields — `syncing` / `reconciling` / errors — are a P1 fast-follow.)
+| Field | Type | Meaning |
+|---|---|---|
+| `conn` | `NostosConnectionState` | `connecting / connected / reconnecting / disconnected` |
+| `connected` | `bool` | convenience for `conn == connected` |
+| `lastSyncedAt` | `DateTime?` | best-effort: stamped on each `connected` transition |
+| `hasSynced` | `bool` | has synced at least once — tells "nothing synced yet" from "no data" |
+| `pendingWrites` | `int` | writes captured locally, not yet ack'd by the server |
+| `hasPendingWrites` | `bool` | `pendingWrites > 0` |
+| `uploading` | `bool` | connected with writes still draining |
+| `deadLetteredWrites` | `int` | writes that **permanently failed** this session |
+| `lastWriteError` | `String?` | the server's message for the last permanent failure |
+| `hasWriteError` | `bool` | `lastWriteError != null` |
+
+### Pending is not an error
+
+`pendingWrites > 0` while offline is the offline-first promise working. Show it
+as "N unsynced changes".
+
+`lastWriteError` is different: it is set **only** when a write has permanently
+failed and left the send queue. Ordinary server rejections are frequently
+transient and retry on their own, so they deliberately do not set it — surfacing
+those would train users to dismiss write errors. When `hasWriteError` is true, a
+write is genuinely lost and a human should be told. The message is the server's
+verbatim reason and is usually actionable (a write-allowlist rejection, for
+example, names the exact env var to set).
 
 Banner widget:
 ```dart
@@ -416,6 +437,13 @@ ListenableBuilder(
   listenable: db.status,
   builder: (context, _) {
     final s = db.currentStatus;
+    if (s.hasWriteError) {
+      return Text('Change not saved: ${s.lastWriteError}');
+    }
+    if (s.hasPendingWrites) {
+      return Text('${s.pendingWrites} unsynced change'
+          '${s.pendingWrites == 1 ? '' : 's'}');
+    }
     return Text(s.connected
         ? 'Synced${s.lastSyncedAt == null ? '' : ' · ${s.lastSyncedAt}'}'
         : 'Offline — changes queued');
@@ -423,8 +451,14 @@ ListenableBuilder(
 );
 ```
 
-For a raw stream (e.g. non-Flutter logic), use `db.connectionState` →
-`Stream<NostosConnectionState>`.
+This is what makes Flutter's own optimistic-state pattern expressible on Nostos:
+`db.write` returns as soon as the write is durable *locally*, so there is no
+`catch` to revert in — `hasWriteError` is the signal that a previously-accepted
+write did not survive the server.
+
+For raw streams (e.g. non-Flutter logic), use `db.connectionState` →
+`Stream<NostosConnectionState>`, or `nostos.writeStatus` →
+`Stream<({int pending, int deadLettered, String? lastError})>`.
 
 ---
 
@@ -507,6 +541,12 @@ ValueListenable<SyncStatus> get status;
 SyncStatus get currentStatus;
 Stream<NostosConnectionState> get connectionState;
 Future<void> close();
+
+// SyncStatus
+NostosConnectionState get conn;   bool get connected;
+DateTime? get lastSyncedAt;      bool get hasSynced;
+int get pendingWrites;           bool get hasPendingWrites;   bool get uploading;
+int get deadLetteredWrites;      String? get lastWriteError;  bool get hasWriteError;
 
 // Reads
 Stream<List<Map<String, dynamic>>> watch(String sql, {Duration? throttle});

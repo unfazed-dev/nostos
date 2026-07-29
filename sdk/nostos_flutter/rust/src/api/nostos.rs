@@ -64,6 +64,32 @@ pub enum NostosConnectionState {
     Disconnected,
 }
 
+/// FFI mirror of [`nostos_client::WriteQueueStatus`] — flutter_rust_bridge can
+/// only generate Dart for types declared in this crate's `api` module, so the
+/// engine type is re-declared here rather than re-exported.
+#[derive(Debug, Clone)]
+pub struct WriteQueueStatusFfi {
+    /// Writes durably queued but not yet ack'd. `> 0` while offline is the
+    /// offline-first promise working, not an error.
+    pub pending: u64,
+    /// Writes that permanently failed this session.
+    pub dead_lettered: u64,
+    /// Server error text from the most recent permanent failure. Set ONLY on a
+    /// dead-letter — a plain rejection is usually transient and retries, so
+    /// surfacing it would train users to ignore write errors.
+    pub last_error: Option<String>,
+}
+
+impl From<nostos_client::WriteQueueStatus> for WriteQueueStatusFfi {
+    fn from(s: nostos_client::WriteQueueStatus) -> Self {
+        Self {
+            pending: s.pending,
+            dead_lettered: s.dead_lettered,
+            last_error: s.last_error,
+        }
+    }
+}
+
 /// frb-friendly mirror of `nostos_client`'s `ClientTable` — the client-side
 /// schema projection the WS2 view layer consumes. frb generates Dart bindings
 /// for structs declared in THIS crate, so we mirror (rather than configuring
@@ -163,7 +189,8 @@ impl NostosHandle {
     #[frb(sync)]
     #[must_use]
     pub fn connect(url: String, token: Option<String>, db_path: String) -> NostosHandle {
-        let rt = tokio::runtime::Runtime::new().expect("nostos_flutter: failed to start tokio runtime");
+        let rt =
+            tokio::runtime::Runtime::new().expect("nostos_flutter: failed to start tokio runtime");
         NostosHandle {
             rt,
             url,
@@ -289,11 +316,7 @@ impl NostosHandle {
     /// # Errors
     /// Returns an error string if `subscribe()` hasn't been called or `table`
     /// is not in the subscribed set.
-    pub async fn watch(
-        &self,
-        table: String,
-        rows_sink: StreamSink<String>,
-    ) -> Result<(), String> {
+    pub async fn watch(&self, table: String, rows_sink: StreamSink<String>) -> Result<(), String> {
         let mut guard = self.session.lock().await;
         let session = guard
             .as_mut()
@@ -341,6 +364,65 @@ impl NostosHandle {
             }
         });
         session.watch_tasks.push(pump_task);
+        Ok(())
+    }
+
+    /// Stream durable-outbox status: how many writes are queued, how many have
+    /// permanently failed, and the server's message for the last permanent
+    /// failure.
+    ///
+    /// This is the write-side counterpart to `subscribe`'s connection-state
+    /// sink. Without it a Dart app cannot tell its user that a write was lost:
+    /// [`Self::write`] returns once the write is durable locally, and a server
+    /// rejection afterwards was previously only a `tracing` warning inside the
+    /// Rust client. Flutter's own optimistic-state guidance assumes a failed
+    /// write surfaces so the UI can revert; this is the signal that makes that
+    /// pattern expressible on Nostos.
+    ///
+    /// Emits the current value immediately on subscribe (the backing channel is
+    /// a `watch`, not a broadcast), so a status widget built at any point in the
+    /// app's life renders the true count rather than waiting for the next
+    /// change.
+    ///
+    /// # Errors
+    /// Returns an error string if `subscribe()` hasn't been called.
+    pub async fn watch_write_status(
+        &self,
+        status_sink: StreamSink<WriteQueueStatusFfi>,
+    ) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| "watch_write_status() called before subscribe()".to_string())?;
+
+        let mut rx = session.client.subscribe_write_status();
+        // Spawn BEFORE touching the sink, and emit the current value from
+        // inside the pump task — not from here. Emitting while `guard` is held
+        // keeps the session mutex locked across an FFI hop into Dart, and this
+        // handle's every other entry point (`write`, `watch`, `disconnect`)
+        // needs that same mutex, so the app stalls for as long as the Dart side
+        // takes to accept the frame.
+        let pump_task = self.rt.spawn(async move {
+            // Current value first: writes queued in a PREVIOUS session are
+            // already pending at construction, so a fresh subscriber must see
+            // them without waiting for a change that may never come offline.
+            if status_sink
+                .add(WriteQueueStatusFfi::from(rx.borrow_and_update().clone()))
+                .is_err()
+            {
+                return;
+            }
+            // `changed()` errors only when every sender is gone, i.e. the
+            // client was dropped — end the pump rather than spin.
+            while rx.changed().await.is_ok() {
+                let next = rx.borrow_and_update().clone();
+                if status_sink.add(WriteQueueStatusFfi::from(next)).is_err() {
+                    break; // Dart side closed the stream.
+                }
+            }
+        });
+        session.watch_tasks.push(pump_task);
+        drop(guard);
         Ok(())
     }
 
@@ -424,9 +506,9 @@ impl NostosHandle {
     /// prepare / a row fails to decode (`StorageError::Backend`).
     pub async fn query(&self, sql: String) -> Result<String, String> {
         let guard = self.session.lock().await;
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| "no active subscription — call subscribe() before query()".to_string())?;
+        let session = guard.as_ref().ok_or_else(|| {
+            "no active subscription — call subscribe() before query()".to_string()
+        })?;
         // `with_storage` returns `Result<R, ClientError>` where `R` is whatever
         // the closure returns — here `s.query()` itself yields a
         // `Result<Vec<Map>, StorageError>`. Flatten both layers to a
@@ -530,10 +612,7 @@ impl NostosHandle {
 /// commit notification retries.
 async fn emit_snapshot(client: &SyncClient<SqliteStorage>, table: &str, sink: &StreamSink<String>) {
     let table_owned = table.to_owned();
-    let Ok(read) = client
-        .with_storage(move |s| s.rows_for(&table_owned))
-        .await
-    else {
+    let Ok(read) = client.with_storage(move |s| s.rows_for(&table_owned)).await else {
         return;
     };
     let Ok(rows) = read else {

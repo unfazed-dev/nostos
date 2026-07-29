@@ -146,6 +146,10 @@ class _FakeEngine implements NostosEngine {
   Stream<String> watch({required String table}) => rows;
 
   @override
+  Stream<({int pending, int deadLettered, String? lastError})>
+      watchWriteStatus() => const Stream.empty();
+
+  @override
   Future<String> query({required String sql}) async => queryResult;
 
   @override

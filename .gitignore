@@ -46,6 +46,8 @@ perf.data*
 
 .claude/
 .claude-flow/
+.kimi-code/
+.headroom/
 
 # --- Agent-Native local plan bridge (machine-local token/state, never commit) ---
 plans/*/.plan-url

@@ -59,12 +59,14 @@
 // test (this file shells out to tool/mint_jwt.sh and `docker exec ... psql`
 // — both subprocess spawns the sandbox blocks; see DebugProfile.entitlements).
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:todo/domain/todo_repository.dart';
 import 'package:todo/infra/nostos_todo_repository.dart';
 
 // Must match tool/nostos_env.sh.
@@ -268,6 +270,119 @@ void main() {
           'server would not even re-deliver this row: resume_lsn is read '
           'from the durable checkpoint nostos1 already advanced past it)',
     );
+  });
+
+  // Scenario (e) mirrors (a2)'s "add via repo, assert via watch()" shape, but
+  // then exercises repo.remove() (the data-layer delete added in the CRUD
+  // migration) and asserts BOTH the local watch() reflects the deletion AND
+  // the row is gone from Postgres (collapsed-apply delete-back path,
+  // ADR-0013).
+  testWidgets(
+      '(e) delete: repo.remove() deletes locally (watch()) and the delete '
+      'reaches Postgres server-side (collapsed-apply delete-back, ADR-0013)',
+      (tester) async {
+    final repoA = await NostosTodoRepository.connect(
+      wsUrl: _wsUrl,
+      token: tokenA,
+      sqlitePath: '${tmpDir.path}/a-delete.sqlite',
+    );
+    final marker = 'delete-${DateTime.now().microsecondsSinceEpoch}';
+    await repoA.add(marker);
+
+    // Capture the id via watch() — repo.add() generates it internally, so the
+    // caller learns it only by reading back.
+    final id = await _idForTitle(repoA, marker);
+    expect(id, isNotNull,
+        reason: 'setup: the row must appear in watch() before we delete it');
+
+    await repoA.remove(id!);
+
+    // (1) Local: watch() reflects the deletion within a bounded time.
+    final sawRemoval = await repoA.watch().any((todos) {
+      return todos.every((t) => t.title != marker);
+    }).timeout(const Duration(seconds: 15), onTimeout: () => false);
+    expect(sawRemoval, isTrue,
+        reason: 'watch() must reflect the deletion locally '
+            '(collapsed-apply delete-back path, ADR-0013)');
+
+    // (2) Server: the row is gone from Postgres.
+    final stillInPg =
+        await _pollForTitle(marker, timeout: const Duration(seconds: 10));
+    expect(stillInPg, isFalse,
+        reason: 'the row must be deleted from Postgres server-side');
+  });
+
+  // Scenario (f) exercises repo.update() (the partial-update path added in the
+  // CRUD migration). Patches title AND done in a single collapsed write, then
+  // asserts BOTH the local watch() reflects the new field values AND the
+  // patched title reaches Postgres (per-field LWW, ADR-0014).
+  testWidgets(
+      '(f) patch/update: repo.update() patches title+done in one write, '
+      'watch() reflects the new state, and the patched title reaches Postgres',
+      (tester) async {
+    final repoA = await NostosTodoRepository.connect(
+      wsUrl: _wsUrl,
+      token: tokenA,
+      sqlitePath: '${tmpDir.path}/a-patch.sqlite',
+    );
+    final marker = 'patch-${DateTime.now().microsecondsSinceEpoch}';
+    await repoA.add(marker);
+
+    final id = await _idForTitle(repoA, marker);
+    expect(id, isNotNull,
+        reason: 'setup: the row must appear in watch() before we patch it');
+
+    final patchedTitle = '$marker-patched';
+    await repoA.update(id!, title: patchedTitle, done: true);
+
+    // Local: watch() reflects the patched title AND the done flag — on the
+    // SAME row (matched by id, not title, so the assertion stays sound even
+    // if other rows with the marker title still exist).
+    final sawPatch = await repoA.watch().any((todos) {
+      for (final t in todos) {
+        if (t.id == id) return t.title == patchedTitle && t.done;
+      }
+      return false;
+    }).timeout(const Duration(seconds: 15), onTimeout: () => false);
+    expect(sawPatch, isTrue,
+        reason: 'watch() must reflect the patched title AND done flag on the '
+            'matching row (per-field LWW, ADR-0014)');
+
+    // Server: the row in Postgres carries the new title.
+    final landed = await _pollForTitle(patchedTitle,
+        timeout: const Duration(seconds: 10));
+    expect(landed, isTrue,
+        reason: 'the patched title must reach Postgres server-side');
+  });
+}
+
+/// Waits for a row titled [title] to appear in [repo]'s watch() stream, then
+/// returns its id. Returns null on timeout. repo.add() generates the id
+/// internally (server-side), so callers in scenarios (e) and (f) need to read
+/// it back via watch() before they can target a specific row for delete/patch.
+Future<String?> _idForTitle(
+  NostosTodoRepository repo,
+  String title, {
+  Duration timeout = const Duration(seconds: 15),
+}) {
+  String? captured;
+  late StreamSubscription<List<Todo>> sub;
+  final completer = Completer<String?>();
+  sub = repo.watch().listen((snapshot) {
+    for (final t in snapshot) {
+      if (t.title == title) {
+        captured = t.id;
+        break;
+      }
+    }
+    if (captured != null && !completer.isCompleted) {
+      completer.complete(captured);
+      sub.cancel();
+    }
+  });
+  return completer.future.timeout(timeout, onTimeout: () {
+    sub.cancel();
+    return null;
   });
 }
 
