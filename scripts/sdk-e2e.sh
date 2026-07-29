@@ -94,6 +94,15 @@ fi
 # follow-up (needs the cloud project ref — see docs/plans/flutter-supabase-plug-and-play-launch.md).
 if want flutter; then
   if command -v flutter >/dev/null 2>&1; then
+    # Runs from example/, not the plugin dir: nostos_flutter is a PLUGIN package
+    # and `-d macos` needs a runnable host app to build. (Between 9322d83 and
+    # its restore this pointed at the plugin dir and could only ever fail with
+    # "No macOS desktop project configured".)
+    #
+    # If this fails with a flutter_rust_bridge content-hash mismatch, the cached
+    # native lib is older than the generated bindings — run
+    # `cd sdk/nostos_flutter/example && flutter clean && flutter pub get` after
+    # any `flutter_rust_bridge_codegen generate`.
     run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
   else
     skip_slice flutter "(flutter not on PATH)"

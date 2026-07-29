@@ -90,12 +90,20 @@ jobs:
     # merged green. The workspace test job doesn't cover it — these slices drive
     # each SDK's real public API against a spawned spine, not library internals.
     #
-    # Only the three slices that need no browser, device, or extra SDK install
-    # run here: `rust` (cargo), `tauri` (cargo), and `node` (self-builds the
-    # addon; smoke_live.cjs imports node builtins only, so there is no npm
-    # install to drift). web/capacitor need Playwright browsers, dotnet needs the
-    # .NET SDK, and flutter/swift/kotlin/reactnative need a booted device — all
-    # deliberately left to the local `make sdk-e2e`.
+    # Only the two slices that need nothing beyond Rust + Node run here:
+    # `rust` (plain cargo test) and `node` (builds the addon from source —
+    # nostos_node.node is gitignored, not committed — and smoke_live.cjs imports
+    # node builtins only, so there is no npm install to drift).
+    #
+    # `tauri` is deliberately EXCLUDED despite also being "just cargo":
+    # sdk/nostos_tauri depends on `tauri = "2"`, which needs libwebkit2gtk-4.1-dev
+    # / libsoup / libgtk-3-dev system packages to compile on bare ubuntu-latest.
+    # Adding that apt step to gate a thin wrapper trades a reliable job for a
+    # fragile one; it stays covered by the local `make sdk-e2e`. Add it here if
+    # the webkit deps ever become worth maintaining.
+    #
+    # web/capacitor need Playwright browsers, dotnet needs the .NET SDK, and
+    # flutter/swift/kotlin/reactnative need a booted device — all local-only.
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -111,7 +119,7 @@ jobs:
         # nothing — the same false-green shape as the self-skipping
         # NOSTOS_E2E_PG suite. Strict mode is what makes this job's green mean
         # "three round-trips actually ran".
-        run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node tauri
+        run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node
       - name: Upload slice logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
