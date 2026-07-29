@@ -211,15 +211,24 @@ class NostosDatabase {
   /// predicate — see `Nostos.subscribe`). Must be called before [watch] /
   /// [getAll] / [write] for that table. For multiple tables on one
   /// connection, use [subscribeTables].
-  Future<void> subscribe(String table, {String? where}) =>
-      _nostos.subscribe(table, where: where);
+  Future<void> subscribe(String table, {String? where}) async {
+    await _nostos.subscribe(table, where: where);
+    _hasSubscribed = true;
+    // Only if someone is already observing status — see [_wireWriteStatus]
+    // for why the pump attaches at the LATER of first-status-access and
+    // first-subscribe, never eagerly.
+    if (_statusWired) _wireWriteStatus();
+  }
 
   /// Subscribe to [tables] over one `/sync` socket (D1/ADR-0022 multi-table).
   /// Each entry may carry its own `whereSql`. Replaces any prior subscription.
   /// Call once with the full table set, then [watch] / [getAll] / [write] per
   /// table.
-  Future<void> subscribeTables(List<NostosTableSub> tables) =>
-      _nostos.subscribeTables(tables);
+  Future<void> subscribeTables(List<NostosTableSub> tables) async {
+    await _nostos.subscribeTables(tables);
+    _hasSubscribed = true;
+    if (_statusWired) _wireWriteStatus();
+  }
 
   /// Reactive SQL watch: re-runs [sql] whenever the synced data changes and
   /// emits the decoded result set. Thin delegate over `Nostos.watchQuery`
@@ -328,6 +337,7 @@ class NostosDatabase {
   StreamSubscription<({int pending, int deadLettered, String? lastError})>?
       _writeStatusSub;
   bool _statusWired = false;
+  bool _hasSubscribed = false;
 
   void _ensureStatusWired() {
     if (_statusWired) return;
@@ -353,20 +363,52 @@ class NostosDatabase {
         lastWriteError: prev.lastWriteError,
       );
     });
+    // The other half of the later-of rule (see [_wireWriteStatus]): status
+    // first read AFTER a subscribe → attach the pump now. (`_statusWired` is
+    // already true above, so the recursive _ensureStatusWired call inside is
+    // a no-op, not a loop.)
+    if (_hasSubscribed) _wireWriteStatus();
+  }
+
+  /// Attach the outbox pump — at the LATER of first [status] access and first
+  /// [subscribe], never eagerly. Two independent reasons, both load-bearing:
+  ///
+  /// 1. Precondition: the engine's `watchWriteStatus()` errors without an
+  ///    active subscription, while the connection-state stream doesn't.
+  ///    Reading [status] before subscribing is legitimate (you get the honest
+  ///    `disconnected` default), so attaching at status-access time would turn
+  ///    a valid call into a stream error.
+  /// 2. Cost: apps that never read [status] never pay for the FFI stream.
+  ///    This matters under high event rates — the zero-setup fake-replicator
+  ///    server emits events unthrottled forever, and profiling showed any
+  ///    session there saturates on the (pre-existing) full-snapshot watch
+  ///    pumps within seconds; the SDK's own read-only e2e survives precisely
+  ///    because it attaches nothing it doesn't use.
+  ///
+  /// Re-subscribing re-attaches: the old pump belongs to the replaced session,
+  /// so it is cancelled rather than left orphaned.
+  void _wireWriteStatus() {
+    _ensureStatusWired();
+    unawaited(_writeStatusSub?.cancel());
     // Two streams, one ValueListenable: the connection and the outbox change
     // independently (a write queues while offline; a dead-letter arrives while
     // connected), so each listener carries the other's fields forward rather
     // than resetting them.
-    _writeStatusSub = _nostos.writeStatus.listen((w) {
-      final prev = _status!.value;
-      _status!.value = SyncStatus(
-        conn: prev.conn,
-        lastSyncedAt: prev.lastSyncedAt,
-        pendingWrites: w.pending,
-        deadLetteredWrites: w.deadLettered,
-        lastWriteError: w.lastError,
-      );
-    });
+    _writeStatusSub = _nostos.writeStatus.listen(
+      (w) {
+        final prev = _status!.value;
+        _status!.value = SyncStatus(
+          conn: prev.conn,
+          lastSyncedAt: prev.lastSyncedAt,
+          pendingWrites: w.pending,
+          deadLetteredWrites: w.deadLettered,
+          lastWriteError: w.lastError,
+        );
+      },
+      // A dead pump must not take the app with it: the connection half of
+      // SyncStatus keeps working, and the write counts simply stop updating.
+      onError: (Object _) {},
+    );
   }
 
   /// Tear down the underlying [Nostos] session (sync loop + watch pump) AND the

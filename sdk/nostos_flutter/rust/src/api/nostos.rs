@@ -189,7 +189,8 @@ impl NostosHandle {
     #[frb(sync)]
     #[must_use]
     pub fn connect(url: String, token: Option<String>, db_path: String) -> NostosHandle {
-        let rt = tokio::runtime::Runtime::new().expect("nostos_flutter: failed to start tokio runtime");
+        let rt =
+            tokio::runtime::Runtime::new().expect("nostos_flutter: failed to start tokio runtime");
         NostosHandle {
             rt,
             url,
@@ -315,11 +316,7 @@ impl NostosHandle {
     /// # Errors
     /// Returns an error string if `subscribe()` hasn't been called or `table`
     /// is not in the subscribed set.
-    pub async fn watch(
-        &self,
-        table: String,
-        rows_sink: StreamSink<String>,
-    ) -> Result<(), String> {
+    pub async fn watch(&self, table: String, rows_sink: StreamSink<String>) -> Result<(), String> {
         let mut guard = self.session.lock().await;
         let session = guard
             .as_mut()
@@ -399,23 +396,33 @@ impl NostosHandle {
             .ok_or_else(|| "watch_write_status() called before subscribe()".to_string())?;
 
         let mut rx = session.client.subscribe_write_status();
-        // Current value first: writes queued in a PREVIOUS session are already
-        // pending at construction, so a fresh subscriber must see them without
-        // waiting for a change that may never come while offline.
-        let _ = status_sink.add(WriteQueueStatusFfi::from(rx.borrow_and_update().clone()));
-
-        let pump_sink = status_sink;
+        // Spawn BEFORE touching the sink, and emit the current value from
+        // inside the pump task — not from here. Emitting while `guard` is held
+        // keeps the session mutex locked across an FFI hop into Dart, and this
+        // handle's every other entry point (`write`, `watch`, `disconnect`)
+        // needs that same mutex, so the app stalls for as long as the Dart side
+        // takes to accept the frame.
         let pump_task = self.rt.spawn(async move {
+            // Current value first: writes queued in a PREVIOUS session are
+            // already pending at construction, so a fresh subscriber must see
+            // them without waiting for a change that may never come offline.
+            if status_sink
+                .add(WriteQueueStatusFfi::from(rx.borrow_and_update().clone()))
+                .is_err()
+            {
+                return;
+            }
             // `changed()` errors only when every sender is gone, i.e. the
             // client was dropped — end the pump rather than spin.
             while rx.changed().await.is_ok() {
                 let next = rx.borrow_and_update().clone();
-                if pump_sink.add(WriteQueueStatusFfi::from(next)).is_err() {
+                if status_sink.add(WriteQueueStatusFfi::from(next)).is_err() {
                     break; // Dart side closed the stream.
                 }
             }
         });
         session.watch_tasks.push(pump_task);
+        drop(guard);
         Ok(())
     }
 
@@ -499,9 +506,9 @@ impl NostosHandle {
     /// prepare / a row fails to decode (`StorageError::Backend`).
     pub async fn query(&self, sql: String) -> Result<String, String> {
         let guard = self.session.lock().await;
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| "no active subscription — call subscribe() before query()".to_string())?;
+        let session = guard.as_ref().ok_or_else(|| {
+            "no active subscription — call subscribe() before query()".to_string()
+        })?;
         // `with_storage` returns `Result<R, ClientError>` where `R` is whatever
         // the closure returns — here `s.query()` itself yields a
         // `Result<Vec<Map>, StorageError>`. Flatten both layers to a
@@ -605,10 +612,7 @@ impl NostosHandle {
 /// commit notification retries.
 async fn emit_snapshot(client: &SyncClient<SqliteStorage>, table: &str, sink: &StreamSink<String>) {
     let table_owned = table.to_owned();
-    let Ok(read) = client
-        .with_storage(move |s| s.rows_for(&table_owned))
-        .await
-    else {
+    let Ok(read) = client.with_storage(move |s| s.rows_for(&table_owned)).await else {
         return;
     };
     let Ok(rows) = read else {
