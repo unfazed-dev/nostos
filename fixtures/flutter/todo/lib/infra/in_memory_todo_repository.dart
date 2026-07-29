@@ -43,6 +43,30 @@ class InMemoryTodoRepository implements TodoRepository {
     _emit();
   }
 
+  @override
+  Future<void> update(String id, {String? title, bool? done}) async {
+    final i = _todos.indexWhere((t) => t.id == id);
+    if (i == -1) return;
+    final old = _todos[i];
+    _todos[i] = Todo(
+      id: old.id,
+      title: title ?? old.title,
+      done: done ?? old.done,
+    );
+    _emit();
+  }
+
+  @override
+  Future<void> remove(String id) async {
+    _todos.removeWhere((t) => t.id == id);
+    _emit();
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _controller.close();
+  }
+
   void _emit() {
     _controller.add(List.unmodifiable(_todos));
   }

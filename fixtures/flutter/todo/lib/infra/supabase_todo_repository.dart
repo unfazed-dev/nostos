@@ -47,4 +47,21 @@ class SupabaseTodoRepository implements TodoRepository {
     final current = (res?['done'] as bool?) ?? false;
     await _client.from('todos').update({'done': !current}).eq('id', id);
   }
+
+  @override
+  Future<void> update(String id, {String? title, bool? done}) async {
+    final patch = <String, dynamic>{};
+    if (title != null) patch['title'] = title;
+    if (done != null) patch['done'] = done;
+    if (patch.isEmpty) return;
+    await _client.from('todos').update(patch).eq('id', id);
+  }
+
+  @override
+  Future<void> remove(String id) async {
+    await _client.from('todos').delete().eq('id', id);
+  }
+
+  @override
+  Future<void> dispose() async {}
 }
