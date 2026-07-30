@@ -367,6 +367,33 @@ and a multi-user pomodoro on one device is precisely the shape that leaks.
 protocol. **Design 4a's trait surface before WS1 freezes that protocol**, or WS1 gets designed twice:
 the required-method count goes 7 → 9, and the ADR-0017 addendum's parity estimate moves with it.
 
+- **4g. Trait contract — the thing WS1 must marshal (DESIGNED 2026-07-31).** Two new sync,
+  WASM-clean methods. This is the stable surface WS1's `postMessage` protocol fronts, so the Worker
+  is not designed twice:
+
+  ```rust
+  // nostos-core/src/storage.rs
+  /// Clear ALL persisted state: rows, the checkpoint, AND the epoch.
+  /// The checkpoint MUST reset to 0 — a stale LSN makes the next principal resume
+  /// past the snapshot and see an empty DB permanently (resume-without-snapshot
+  /// unsoundness, same class). Sign-out / principal-change only. ADR-0029.
+  fn clear(&mut self) -> crate::Result<()>;
+
+  // nostos-core/src/outbox.rs
+  /// Clear pending writes + the dead-letter queue (ADR-0027). The 4b decision
+  /// (what happens to UNSYNCED writes on sign-out) layers ABOVE this: the discard
+  /// option calls clear() directly; the per-principal option adds an outbox-internal
+  /// principal tag + a refuse-replay-on-mismatch check — an impl policy, NOT a new
+  /// trait method, so it is invisible to WS1's protocol.
+  fn clear(&mut self) -> crate::Result<()>;
+  ```
+
+  **WS1 consequence (for the swarm):** the Worker `postMessage` protocol carries a `clear` command
+  fronting BOTH clears **atomically** (one Worker transaction — half a clear is a data leak). With
+  WS4 landed the ADR-0017 addendum's required-method parity moves **7 → 5 (1.4×) becomes 9 → 5
+  (1.8× floor)** — both `clear()`s are required, not defaulted, because a no-op default would be a
+  silent cross-user leak (the same "defaults degrade" trap as ADR-0025's other defaulted methods).
+
 Then the fixtures:
 
 5. `fixtures/shared/spec/keys.json` + multi-actor personas. **The persona convention needs
