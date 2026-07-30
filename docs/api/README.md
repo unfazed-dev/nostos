@@ -30,6 +30,53 @@ page cites the file it came from so you can check it yourself.
 `publish = false`, and `@nostos-sync/capacitor` depends on `@nostos-sync/web` by relative path. Consume them
 from a path/git dependency for now. See [`../IDENTITY.md`](../IDENTITY.md).
 
+## Why the SDKs differ
+
+Two independent reasons, and they deserve different treatment: **design around the first, expect
+the second to disappear.** Do not read the matrix above as one taxonomy.
+
+### 1. SQL vs KV reads — the crate graph (design around this)
+
+No SDK chose this. It follows from which crate a binding can reach.
+
+`nostos-core`'s entire dependency list is `nostos-domain`, `serde`, `serde_json`, `thiserror` — **no
+tokio, no rusqlite.** It is WASM-clean by construction, and the crate map in `CLAUDE.md` makes that
+a rule violations fail review over. `nostos-ffi-wasm` then depends on exactly `nostos-core` +
+`wasm-bindgen`.
+
+| Binding | Reaches | `Storage` impl | Reads look like |
+|---|---|---|---|
+| Flutter, Node, RN, Tauri, Kotlin, Swift, .NET | `nostos-client` | `SqliteStorage` (rusqlite) | SQL over views |
+| Browser, Capacitor | `nostos-core` via WASM | `InMemoryStorage` — `BTreeMap<(table,pk),(bytes,lsn)>` + a `BTreeMap` outbox | `rowsFor(table)`, bytes |
+
+The `Storage` trait (`crates/nostos-core/src/storage.rs:52`) is the seam that lets one apply engine
+serve both. That is the hexagonal boundary working, not a compromise.
+
+**This is not because SQLite cannot run in WASM.**
+[ADR-0017](../adr/0017-web-persistence.md) evaluated three options and **commits to SQLite-WASM
+with the `opfs-sahpool` VFS** after launch, explicitly rejecting wa-sqlite and raw OPFS. So the KV
+tier is a deferred slice with a chosen destination, not a platform ceiling.
+
+What actually blocks it is the **threading model, not SQL**: `createSyncAccessHandle` is Worker-only
+by spec, and `nostos-ffi-wasm` runs on the main thread today. Going durable means spawning a
+dedicated Worker, defining a `postMessage` command protocol, marshalling `RowOp`/`PendingWrite`
+across it, and **moving the WebSocket transport too** — it cannot call sync storage from the main
+thread. Until then the browser's durability story is the `localStorage` checkpoint plus
+replay-from-`resume_lsn`, and Safari Private Browsing disallows OPFS, so any durable backend will
+still need the in-memory fallback.
+
+ADR-0017 also found **no prior art for nostos's shape**: PowerSync, RxDB, Dexie, ElectricSQL and
+Triplit are all TypeScript already running in a Worker. None is a Rust→wasm client with a `Storage`
+trait on the main thread.
+
+### 2. Reactive vs poll — where the work stopped (expect this to change)
+
+Not architectural. Nothing prevents a Kotlin or Node equivalent of Flutter's `Collection<T>`:
+same core, same trait, same capability. [ADR-0024](../adr/0024-client-reactive-facade-and-query-primitive.md)
+built the reactive facade for Flutter because Flutter was the launch target, and the other eight
+simply do not have one yet. If you are picking an SDK today, poll after writes; do not architect
+around the absence.
+
 ## The shape every SDK shares
 
 Five SDKs (Kotlin, Swift, .NET, React Native, Node) are thin bindings over the same Rust
