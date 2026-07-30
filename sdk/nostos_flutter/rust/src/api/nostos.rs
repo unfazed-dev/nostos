@@ -133,7 +133,11 @@ const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(120);
 pub struct NostosHandle {
     rt: tokio::runtime::Runtime,
     url: String,
-    token: Option<String>,
+    /// Seed bearer token for the NEXT `subscribe()`. Behind a lock because
+    /// `set_token` must be able to replace it — an access token expires (about
+    /// an hour for a Supabase JWT) and a fixed value strands the client on a
+    /// dead credential. Read via `token.read()`, never cached.
+    token: std::sync::RwLock<Option<String>>,
     db_path: String,
     session: AsyncMutex<Option<Session>>,
 }
@@ -194,7 +198,7 @@ impl NostosHandle {
         NostosHandle {
             rt,
             url,
-            token,
+            token: std::sync::RwLock::new(token),
             db_path,
             session: AsyncMutex::new(None),
         }
@@ -274,7 +278,13 @@ impl NostosHandle {
         let storage = SqliteStorage::open(&self.db_path).map_err(|e| e.to_string())?;
         let config = SyncClientConfig {
             table: primary.name,
-            token: self.token.clone(),
+            // Read the seed fresh: a `set_token` between `connect()` and here
+            // (e.g. a refresh landing during startup) must not be discarded.
+            token: self
+                .token
+                .read()
+                .expect("subscribe: token lock poisoned")
+                .clone(),
             where_sql: primary.where_sql,
             extra_tables: extra,
             // Long-lived by design: no PER-BATCH idle disconnect, unbounded
@@ -533,6 +543,34 @@ impl NostosHandle {
     /// so the UI signal has one owner. Cancellation is task-abort: `run_once`
     /// respects no stop token, and `tokio::sync::Mutex` (no poison) + `Arc`
     /// client state mean the client stays usable for local work after the abort.
+    /// Replace the bearer token for subsequent connections (ADR-0010 auth).
+    ///
+    /// Call this when the auth provider rotates a token — for `supabase_flutter`
+    /// that is `onAuthStateChange` firing `tokenRefreshed`. Without it a client
+    /// keeps re-sending the token it was constructed with, the server rejects it
+    /// on `exp`, and the reconnect loop retries a dead credential forever: the
+    /// app renders stale rows and never syncs again.
+    ///
+    /// Updates BOTH the handle's seed (so a later `subscribe()` builds its config
+    /// with the new value) and the live `SyncClient` if a session already exists.
+    /// Missing either half leaves a window where the refresh is silently lost —
+    /// the seed alone would not reach a running client, and the client alone
+    /// would be discarded by the next `subscribe()`.
+    ///
+    /// Does not force a reconnect: a live socket keeps running and the next
+    /// connection picks the token up, so a refresh self-heals within one backoff
+    /// window. Crucially it tears nothing down, so `watch` streams stay open —
+    /// rebuilding the handle instead would close every stream the UI holds.
+    pub async fn set_token(&self, token: Option<String>) {
+        *self
+            .token
+            .write()
+            .expect("set_token: token lock poisoned") = token.clone();
+        if let Some(session) = self.session.lock().await.as_ref() {
+            session.client.set_token(token);
+        }
+    }
+
     pub async fn disconnect(&self) -> Result<(), String> {
         let mut guard = self.session.lock().await;
         if let Some(session) = guard.as_mut() {

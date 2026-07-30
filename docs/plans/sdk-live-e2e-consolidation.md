@@ -1,3 +1,10 @@
+> **SUPERSEDED (2026-07-30).** Its bar was **7/7** platforms. There are now **ten**, and all
+> ten prove a live PUSH+ECHO round-trip in one `SDK_E2E_STRICT=1 make sdk-e2e` run (exit 0,
+> zero skips) — see the A9 section of
+> [`nostos-completion-assessment-2026-07-29.md`](nostos-completion-assessment-2026-07-29.md).
+> Superseded by [`sdk-parity-final-three.md`](sdk-parity-final-three.md) for the 10-platform
+> scope. Kept because its per-slice harness design is still what `scripts/sdk-e2e.sh` runs.
+
 # SDK Live-E2E Consolidation — 7/7 platforms, real replication round-trips
 
 **Started:** 2026-07-12. **Owner:** Claude (tech lead). **Bar (operator-approved):**
@@ -115,6 +122,13 @@ round-trip → capture proof.
    all 7 slices; host slices (rust/node/tauri/web) always run, device slices
    (flutter/swift/kotlin) SKIP-with-reason when their runtime is absent. Optional
    slice-name args for focused runs (`scripts/sdk-e2e.sh rust web`).
+
+   > **Count grew after this was written (note added 2026-07-30).** "7 slices" was
+   > accurate at this commit; `ALL_SLICES` is now **10** — capacitor, dotnet, and
+   > reactnative landed later. The step above is left as-is because it records what
+   > this piece shipped; `scripts/sdk-e2e.sh` is the authority on the current set.
+   > The same stale "7" had propagated into the script header and the Makefile help
+   > text, where it was a live claim rather than a record, and was corrected there.
 
 **Run it:** `make sdk-e2e` (or `scripts/sdk-e2e.sh [slices…]`).
 

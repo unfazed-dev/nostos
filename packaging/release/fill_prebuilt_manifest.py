@@ -11,7 +11,7 @@ tooling (packaging/homebrew/nostos.rb).
 
 Usage: fill_prebuilt_manifest.py <base_url> <ref_name>
   base_url: the release's asset download prefix, e.g.
-    https://github.com/nostos-sync/nostos/releases/download/v0.1.0
+    https://github.com/unfazed-dev/nostos/releases/download/v0.1.0
   ref_name: the tag name, e.g. v0.1.0
 
 Expects a `dist/` directory (relative to cwd) containing a

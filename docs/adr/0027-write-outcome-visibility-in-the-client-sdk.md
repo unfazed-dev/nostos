@@ -136,8 +136,21 @@ respecting: each extra state is a branch every consuming app must handle.
   SDK's integration test survives the environment by finishing in ~3s; during
   verification, eagerly attaching the pump in `subscribe` added just enough
   startup latency to lose that race reproducibly, which is what motivated the
-  later-of rule above. The environment fix (a pacing/bound knob on the fake
-  replicator) is deliberately NOT part of this change.
+  later-of rule above. **FIXED (A10, 2026-07-30):** `FakeReplicatorConfig` gained
+  `paced(events_per_sec)` and `recycling_keys(n)` (both `0` = today's unbounded
+  behaviour, so `nostos-bench` and the moat numbers are untouched), and
+  `nostos-server`'s fake branches now default to 20 events/sec over 50 distinct
+  keys (`NOSTOS_FAKE_EPS` / `NOSTOS_FAKE_KEYS`). Key recycling is the load-bearing
+  half: client apply is an upsert on `(table, pk)`, so a bounded key space bounds
+  the *table*, which makes the full-table watch snapshot O(1) in session length.
+  Pacing alone would only slow the quadratic growth. Measured — **server-side
+  generator load only, no client attached** — 10 s: old default **100% CPU** (a
+  full core spinning on fan-out with zero consumers) → new default **0.0%**. That
+  is a distinct defect from the client-side saturation diagnosed above (per-tick
+  `emit_snapshot` + hex/JSON/SSE + Dart GC), which was **not** re-measured in this
+  pass; the O(1)-snapshot claim follows from the upsert + bounded key space, not
+  from a device run. See the A10 section of
+  `docs/plans/nostos-completion-assessment-2026-07-29.md`.
 - **Negative — regenerating the bridge invalidates cached native libs.** After
   `flutter_rust_bridge_codegen generate`, a stale `.dylib` fails at runtime with
   a `_sanityCheckContentHash` mismatch, not at compile time. `flutter clean &&

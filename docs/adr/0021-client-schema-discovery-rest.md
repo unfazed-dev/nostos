@@ -8,8 +8,12 @@
 WS1 of the Flutter PowerSync-style redesign (Option-C,
 `docs/plans/nostos-flutter-powersync-connection-redesign.md`) needs the client to
 discover the publication's typed schema (tables, columns, SQLite affinities) to
-auto-build its typed tables — the headline DX win over PowerSync's hand-written
-`Schema`. nostos-server already bootstraps this metadata from the Postgres
+auto-build its typed read surface — the headline DX win over PowerSync's
+hand-written `Schema`. (This originally read "auto-build its typed **tables**",
+which the client never did and now never will: the descriptor drives one SQLite
+**VIEW** per table over the opaque `cairn_data` payload, and materialized typed
+tables are rejected — [ADR-0028](0028-client-read-views-over-opaque-payload.md).
+Nothing about *this* decision changes; only the consumer's shape.) nostos-server already bootstraps this metadata from the Postgres
 catalog (`PgReplicator::catalog_relations` → `RelationMeta`, ADR-0019), but it
 was private to the replicator — unreachable from the client or even from
 `nostos-server`'s own HTTP surface. ADR-0019 explicitly named this as the

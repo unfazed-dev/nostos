@@ -29,11 +29,16 @@ a reactive `Stream` of rows; `write` is a durable local outbox.
 
 ---
 
-## 2. From the landing page (nostos.run)
+## 2. From the landing page (not yet live)
 
-The marketing site at **nostos.run** (the `web/` SvelteKit app — "The Nostos
-Field" identity, ADR-0008) is the front door. From there you choose one of two
-paths:
+<!-- NOSTOS-IDENTITY-PENDING: no domain is registered — docs/IDENTITY.md. This
+     section read "the marketing site at nostos.run … is the front door", present
+     tense, for a site that does not exist at an unregistered domain. -->
+
+The marketing site (the `web/` SvelteKit app — "The Nostos Field" identity,
+ADR-0008) is **planned as** the front door; **no domain is registered yet**, so
+this section describes the intended flow, not something you can visit today.
+From there you would choose one of two paths:
 
 ### Path A — Nostos Cloud (managed)
 
@@ -128,7 +133,7 @@ dependencies:
   nostos_flutter:
     path: ../../sdk/nostos_flutter        # adjust to your checkout
     # git:
-    #   url: https://github.com/nostos-sync/nostos
+    #   url: https://github.com/unfazed-dev/nostos
     #   path: sdk/nostos_flutter
 ```
 
@@ -231,14 +236,21 @@ await db.subscribe('tasks');          // start the sync session for a table
 Throws `StateError` if no Supabase session is live — sign in first (Section 3).
 
 ```dart
+// Supabase.initialize(...) must already have run — this factory reads
+// Supabase.instance's current session itself, so it takes no Supabase args.
 final db = await NostosDatabase.supabase(
   nostosUrl: 'wss://sync.<your-project>.nostos.app/sync',
-  supabaseUrl: 'https://<project-ref>.supabase.co',
-  supabaseAnonKey: 'YOUR_KEY',
-  schema: appSchema,
+  schema: appSchema,                  // omit to fetch via GET /schema
   sqlitePath: '${dir.path}/cairn.sqlite',
 );
 ```
+
+> Corrected 2026-07-30: this sample previously passed `supabaseUrl:` and
+> `supabaseAnonKey:` to `NostosDatabase.supabase`. **Neither parameter exists** —
+> the real signature is `{nostosUrl, schema, sqlitePath}`, and it would not have
+> compiled. Pass Supabase's own URL/key to `Supabase.initialize`, or use
+> `NostosDatabase.open(config: …)`, whose `NostosConfig` *does* carry a
+> `supabaseUrl` / `supabaseAnonKey` block — that is where the confusion came from.
 
 ### Lowest-level — `NostosDatabase.connect`
 

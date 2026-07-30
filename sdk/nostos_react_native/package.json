@@ -1,14 +1,14 @@
 {
   "name": "@nostos-sync/react-native",
-  "version": "0.0.0",
-  "description": "React Native facade over nostos-swift / nostos-kotlin UniFFI bindings — Codegen TurboModule + TS facade. Hermes has no WebAssembly (issue #429), so @nostos-sync/web is a dead end in RN; this is the non-WASM RN path.",
+  "version": "0.1.0",
+  "description": "React Native facade over nostos-swift / nostos-kotlin UniFFI bindings \u2014 Codegen TurboModule + TS facade. Hermes has no WebAssembly (issue #429), so @nostos-sync/web is a dead end in RN; this is the non-WASM RN path.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "license": "Apache-2.0",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "jest"
+    "test": "npm run typecheck && jest"
   },
   "peerDependencies": {
     "react-native": ">=0.79"
@@ -31,7 +31,9 @@
     "transform": {
       "^.+\\.tsx?$": [
         "ts-jest",
-        { "tsconfig": "tsconfig.json" }
+        {
+          "tsconfig": "tsconfig.json"
+        }
       ]
     }
   },
@@ -41,5 +43,14 @@
     "README.md",
     "tsconfig.json",
     "tsconfig.build.json"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unfazed-dev/nostos.git",
+    "directory": "sdk/nostos_react_native"
+  },
+  "homepage": "https://github.com/unfazed-dev/nostos",
+  "bugs": {
+    "url": "https://github.com/unfazed-dev/nostos/issues"
+  }
 }

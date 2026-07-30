@@ -1,6 +1,7 @@
 # ADR-0016: Client SDK + durable checkpoint + WAL-bloat protection
 
-- **Status:** Shipped (client core + durable checkpoint + WAL-bloat protection); FFI bridges remain (ADR-0015)
+- **Status:** **Shipped** (client core + durable checkpoint + WAL-bloat protection). Corrected
+  2026-07-30: the trailing "FFI bridges remain (ADR-0015)" was stale — every bridge shipped.
 - **Date:** 2026-06-27 (deferred) · 2026-06-28 (shipped)
 
 ## Context

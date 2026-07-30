@@ -10,8 +10,8 @@
 //! NOT a polished SDK.
 //!
 //! # Runtime shape
-//! The four `#[tauri::command]` handlers (`connect` / `write` / `query` /
-//! `checkpoint`) are thin wrappers over `impl NostosState` async methods, which
+//! The five `#[tauri::command]` handlers (`connect` / `subscribe` / `write` /
+//! `query` / `checkpoint`) are thin wrappers over `impl NostosState` async methods, which
 //! `.await` on the host runtime Tauri runs the command on (or, in tests, the
 //! `#[tokio::test]` runtime). `NostosState` ALSO owns a
 //! `tokio::runtime::Runtime` — the home of the long-lived `subscribe()` run
@@ -351,6 +351,19 @@ async fn connect(
     state.connect(url, token, db_path).await
 }
 
+/// Start the live-replication run loop for `table` on the active session.
+///
+/// Without this exposed, a JS frontend could `connect` (which opens SQLite and
+/// builds the client but does NO network I/O) and then wait forever: nothing
+/// drives `run_once`, so no server-pushed row ever lands. It was registered in
+/// neither `generate_handler!` nor `build.rs`, so the whole download path was
+/// unreachable from JS while `cargo test` stayed green — the Rust test calls
+/// `NostosState::subscribe` directly and never crosses the command boundary.
+#[tauri::command]
+async fn subscribe(state: State<'_, NostosState>, table: String) -> Result<(), String> {
+    state.subscribe(table).await
+}
+
 /// Enqueue a durable write against the active session's table.
 #[tauri::command]
 async fn write(
@@ -386,6 +399,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         })
         .invoke_handler(tauri::generate_handler![
             connect,
+            subscribe,
             write,
             query,
             checkpoint,

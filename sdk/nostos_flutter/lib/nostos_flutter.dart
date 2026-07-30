@@ -2,12 +2,24 @@
 /// Rust `nostos-client` (SQLite + WebSocket sync loop) via
 /// flutter_rust_bridge's native-assets backend.
 ///
-/// No connector class, no client-side schema artifact: `subscribe` sets the
-/// server-side predicate, `watch` gives you a reactive `Stream` of rows,
-/// `write` is a durable local outbox. See the package README for the
-/// quickstart.
+/// Start at [NostosDatabase] — `NostosDatabase.open` / `.supabase` is the taught
+/// entry point. It resolves the server schema for you (`GET /schema`), so
+/// `SELECT * FROM <table>` works immediately, and adds typed
+/// [Collection]-per-table handles and a [SyncStatus] signal.
+///
+/// No connector class and no *hand-written* schema: `subscribe` sets the
+/// server-side predicate, `watch` gives you a reactive `Stream` of rows, and
+/// `write` applies locally at once and syncs in the background through a
+/// durable outbox. A [NostosSchema] is optional — pass one only to constrain or
+/// pin what the server reports. See the package README for the quickstart.
+///
+/// [Nostos] is the low-level engine handle underneath [NostosDatabase]. It stays
+/// exported as an escape hatch (and is the seam tests fake against), but it is
+/// deliberately not the documented path — prefer [NostosDatabase] unless you have
+/// a reason not to.
 library;
 
+// `Nostos` is the low-level handle; `NostosDatabase` (below) is the taught surface.
 export 'src/nostos.dart' show Nostos, NostosSupabase, NostosConnectionState, NostosTableSub;
 export 'src/nostos_config.dart' show NostosConfig;
 // `Table` and `Column` are intentionally NOT re-exported at the package

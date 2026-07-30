@@ -202,9 +202,18 @@ pub.dev, brew, drafts).
 1. **Now (blocks W0):** create a fresh free-tier Supabase project for
    testing; provide URL + direct connection string + a PAT (or just the DB
    password) — goes in untracked `.env` / `fixtures/flutter/todo/env.json`.
-2. **Before W6:** create the GitHub org/repo (`nostos-sync/nostos` per
-   Cargo.toml), push `main` (needed for release artifacts + `hook/build.dart`
-   URLs). pub.dev publisher account; brew tap repo.
+2. **Before W6:** push `main` to the existing repo —
+   **`github.com/unfazed-dev/nostos`** (already the `origin` remote), needed for
+   release artifacts + `hook/build.dart` URLs. pub.dev publisher account;
+   brew tap repo (`unfazed-dev/homebrew-tap`).
+
+   > Corrected 2026-07-30: this step used to read "create the GitHub org/repo
+   > (`nostos-sync/nostos` per Cargo.toml)". **No such org exists or was ever
+   > intended** — the name was invented, written into `Cargo.toml`, and then
+   > cited back as if the manifest were evidence for it. It spread to 24 files
+   > including the Homebrew formula's download URLs and the landing page's
+   > "Star on GitHub" link. All corrected to `unfazed-dev`. Do not re-derive a
+   > fact from a file that got the fact from you.
 3. **Launch day:** benchmark re-run sign-off, drafts review, Show HN timing.
 4. **Post-launch (W8→cloud beta):** Fly/hosting account, Stripe live keys,
    ToS/privacy (C-list in gap list).

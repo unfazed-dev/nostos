@@ -1,7 +1,7 @@
 {
   "name": "@nostos-sync/capacitor",
-  "version": "0.0.0",
-  "description": "Capacitor v8 web-only plugin re-exporting @nostos-sync/web's live browser sync path (NostosSocket via the --target web wasm build). No native android/ios source — the webview is a full browser engine, so WASM + WebSocket run unmodified.",
+  "version": "0.1.0",
+  "description": "Capacitor v8 web-only plugin re-exporting @nostos-sync/web's live browser sync path (NostosSocket via the --target web wasm build). No native android/ios source \u2014 the webview is a full browser engine, so WASM + WebSocket run unmodified.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -26,5 +26,14 @@
     "@capacitor/core": "^8.4.1",
     "@playwright/test": "^1.40.0",
     "typescript": "^5.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unfazed-dev/nostos.git",
+    "directory": "sdk/nostos_capacitor"
+  },
+  "homepage": "https://github.com/unfazed-dev/nostos",
+  "bugs": {
+    "url": "https://github.com/unfazed-dev/nostos/issues"
   }
 }

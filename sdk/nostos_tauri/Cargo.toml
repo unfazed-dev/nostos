@@ -3,11 +3,13 @@ name = "nostos-tauri"
 # tauri-plugin 2.6+ requires `links` == package.name so its build script can
 # associate the generated permission artifacts with this crate.
 links = "nostos-tauri"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Tauri 2 plugin exposing nostos-client's SyncClient<SqliteStorage> to desktop web apps (feasibility scaffold)."
 license = "Apache-2.0"
+repository = "https://github.com/unfazed-dev/nostos"
+homepage = "https://github.com/unfazed-dev/nostos"  # NOSTOS-IDENTITY-PENDING
 
 [lib]
 crate-type = ["lib"]

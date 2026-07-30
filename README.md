@@ -10,7 +10,7 @@
 
 Nostos is a from-scratch, **Rust-native** competitor to [PowerSync](https://powersync.com): a sync engine that keeps an on-device SQLite database in sync with a server-side Postgres, **even when the device is offline.** It targets the empty market cell that no incumbent occupies today — *Apache-2.0 + Postgres-logical-replication + 2-way offline + first-class Flutter/RN/Web SDKs + Rust-fast + free self-host.*
 
-> **Status:** alpha — Phase 3 🚧, v0.1 prepared, launch gated on the operator (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). Not production-ready. The server fan-out moat is proven (833,308 ops/sec @ 1k clients, 0.00% drops = 208× PowerSync's published ceiling — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator, native client, and write-back v1 are shipped. Public launch is now gated on the Flutter+Supabase plug-and-play bar — see [`docs/plans/flutter-supabase-plug-and-play-launch.md`](docs/plans/flutter-supabase-plug-and-play-launch.md).
+> **Status:** alpha — Phase 3 🚧, v0.1 prepared, launch gated on the operator (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). Not production-ready. The server fan-out moat is proven (833,307 ops/sec @ 1k clients, 0.00% drops = 208× PowerSync's published **high** ceiling of 4k ops/sec, 417× its 2k low — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator, native client, and write-back v1 are shipped. Public launch is now gated on the Flutter+Supabase plug-and-play bar — see [`docs/plans/flutter-supabase-plug-and-play-launch.md`](docs/plans/flutter-supabase-plug-and-play-launch.md).
 
 ---
 
@@ -20,7 +20,7 @@ PowerSync is the incumbent — and still carries real, current limits Nostos exp
 
 | Wedge | The incumbent's limit | Nostos's answer |
 |---|---|---|
-| **Server throughput** | PowerSync's server is **TypeScript/Node.js** — published ceiling ~2–4k ops/sec | **Pure-Rust server** (tokio + axum) — proven 833,308 ops/sec @ 1k clients, 0.00% drops (208×) |
+| **Server throughput** | PowerSync's server is **TypeScript/Node.js** — published ceiling ~2–4k ops/sec | **Pure-Rust server** (tokio + axum) — proven 833,307 ops/sec @ 1k clients, 0.00% drops (208× their 4k high, 417× their 2k low) |
 | **License** | PowerSync's server is **FSL** (source-available, no-compete, 2-yr wait to Apache) | **Apache-2.0 today** — server, core, and every SDK. Clean for enterprise legal |
 | **Write-back** | You build & host the `uploadData()` endpoint; ElectricSQL is read-only | **Direct write-back** — Nostos writes to your Postgres for you, no customer-built endpoints |
 | **Self-host** | PowerSync Cloud is metered per-op; FSL "Open Edition" carries the license delay | **Free, full-featured, unlimited self-host** — no feature gates |
@@ -100,7 +100,9 @@ nostos/
 
 The domain layer knows nothing about tokio, postgres, or axum. The application layer defines *ports* (`ReplicatorStream`, `EventSink`, `SessionStore`) — the infrastructure layer provides *adapters* that implement those ports. This is what lets the benchmark swap a `FakeReplicator` in for the real `PgReplicator` without touching a line of domain or use-case code.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, and
+**[`docs/api/`](docs/api/README.md) for the API reference** — one page per SDK, every signature
+extracted from source and cited to the file it came from.
 
 ---
 
@@ -209,8 +211,12 @@ Output: `benches/results/RESULTS.md` + a JSON artifact + an SVG chart. See [`doc
 Self-hosting is free forever (see License). If you'd rather never operate the
 sync server yourself, a managed `nostos deploy` beta is coming: we run your
 Nostos instance, tier-stamped and metered, connected to your own Postgres or
-Supabase database. Email **founders@nostos.run** with subject `waitlist` to get
-in line for the design-partner beta.
+Supabase database. Open a [GitHub discussion or issue](https://github.com/unfazed-dev/nostos/issues)
+titled `waitlist` to get in line for the design-partner beta.
+
+<!-- NOSTOS-IDENTITY-PENDING: contact mailbox undecided (docs/IDENTITY.md). This
+     asked readers to email founders@nostos.run — an unregistered domain, so every
+     waitlist mail would have bounced into nowhere. -->
 
 ---
 

@@ -1,6 +1,10 @@
 # ADR-0015: FFI bridge strategy (Front 5)
 
-- **Status:** WASM shipped (in-memory apply bridge); Flutter / RN / Node-native remain
+- **Status:** **All bridges shipped** — corrected 2026-07-30. Previously "WASM shipped; Flutter /
+  RN / Node-native remain"; all three landed and each has a passing `sdk-e2e` slice (Flutter via
+  flutter_rust_bridge with a first-class `Stream`, RN via a Turbo Native Module over UniFFI
+  (ADR-0020), Node via napi-rs). Kotlin, Swift, .NET, Tauri and Capacitor followed the same
+  strategy. Still deferred: OPFS browser persistence (ADR-0017), which is Worker-only by spec.
 - **Date:** 2026-06-27 (deferred) · 2026-06-28 (WASM shipped)
 
 ## Context

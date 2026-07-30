@@ -44,6 +44,11 @@ class NostosDatabase {
   /// Exposed for inspection / codegen; not meant to be mutated.
   final NostosSchema schema;
 
+  /// Supabase auth listener forwarding token rotations (set by
+  /// [NostosDatabase.supabase] only). MUST be cancelled in [close] — a surviving
+  /// listener would call `setToken` on a closed engine on the next refresh.
+  StreamSubscription<AuthState>? _authSub;
+
   /// Open a [Nostos] connection and resolve the schema.
   ///
   /// [url] is the `nostos-server` `/sync` WebSocket URL (the one `nostos dev`
@@ -155,15 +160,22 @@ class NostosDatabase {
   /// Throws [StateError] if there is no live Supabase session (the user
   /// must sign in before calling this factory).
   ///
-  /// ponytail: the access token is read ONCE at connect time. Transparent
-  /// refresh on token rotation via
-  /// `Supabase.instance.client.auth.onAuthStateChange` (re-binding the
-  /// token on `tokenRefreshed` / `initialSession` events) is a deliberate
-  /// v1 fast-follow — until then, long-lived sessions that rotate the
-  /// token mid-flight will eventually hit 401s and need a reconnect. The
-  /// upgrade path is to subscribe to `onAuthStateChange` inside this
-  /// factory and forward the new token to the underlying `Nostos` (see
-  /// `NostosSupabase` for the token-swap primitive).
+  /// **Token refresh is handled for you** (since 2026-07-30). This factory
+  /// subscribes to `Supabase.instance.client.auth.onAuthStateChange` and
+  /// forwards rotated tokens into the sync client via [Nostos.setToken] — see
+  /// [_wireSupabaseTokenRefresh]. [close] cancels that subscription.
+  ///
+  /// This used to say the token was read ONCE at connect time and that
+  /// transparent refresh was a "v1 fast-follow", which undersold it: the
+  /// consequence was that sync stopped roughly an hour after sign-in and never
+  /// recovered, with nothing surfaced but a flapping connection state. It also
+  /// pointed at "the token-swap primitive" in `NostosSupabase`, which did not
+  /// exist — `NostosSupabase.connect` only forwards to `Nostos.connect`.
+  ///
+  /// Note the fix is deliberately NOT a reconnect: [Nostos.setToken] mutates the
+  /// live token so the next connection uses it, leaving every `watch` stream
+  /// open. Rebuilding the handle instead — the obvious pure-Dart approach —
+  /// would end those streams and look to a user like data disappearing.
   static Future<NostosDatabase> supabase({
     required String nostosUrl,
     NostosSchema? schema,
@@ -175,12 +187,50 @@ class NostosDatabase {
         'no Supabase session — sign in before calling NostosDatabase.supabase()',
       );
     }
-    return _open(
+    final db = await _open(
       url: nostosUrl,
       token: session.accessToken,
       schema: schema,
       sqlitePath: sqlitePath,
     );
+    db._wireSupabaseTokenRefresh();
+    return db;
+  }
+
+  /// Forward Supabase token rotations into the sync client for the life of this
+  /// database. Cancelled by [close].
+  ///
+  /// Without this, sync dies about an hour after sign-in and never recovers: the
+  /// access token expires, the server rejects it on `exp`, and the reconnect loop
+  /// re-sends the same dead credential indefinitely while the UI keeps rendering
+  /// local rows. That failure is invisible apart from the connection state
+  /// flapping, which is what made it worth fixing inside the factory rather than
+  /// documenting as the caller's job.
+  ///
+  /// `signedIn` is handled as well as `tokenRefreshed` because
+  /// `supabase_flutter` replays `signedIn` on session recovery at startup, and a
+  /// recovered session can carry a token newer than the one we opened with.
+  /// `signedOut` clears the token instead of leaving a stale credential in place.
+  ///
+  /// [Nostos.setToken] tears nothing down, so this never disturbs an open stream.
+  void _wireSupabaseTokenRefresh() {
+    _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+      switch (data.event) {
+        case AuthChangeEvent.tokenRefreshed:
+        case AuthChangeEvent.signedIn:
+        case AuthChangeEvent.userUpdated:
+          final token = data.session?.accessToken;
+          if (token != null) {
+            // Fire-and-forget: the FFI call is cheap and a failure here must not
+            // take down the auth stream (which would strand every later refresh).
+            _nostos.setToken(token).catchError((Object _) {});
+          }
+        case AuthChangeEvent.signedOut:
+          _nostos.setToken(null).catchError((Object _) {});
+        default:
+          break;
+      }
+    });
   }
 
   /// Shared open path for [connect] and [supabase]: open the [Nostos]
@@ -243,15 +293,24 @@ class NostosDatabase {
       (jsonDecode(await _nostos.query(sql)) as List<dynamic>)
           .cast<Map<String, dynamic>>();
 
-  /// Raw-SQL execute. Currently a READ-ONLY alias of [getAll].
+  /// Raw-SQL execute. A READ-ONLY alias of [getAll] — **by convention, not by
+  /// enforcement.**
   ///
-  /// ponytail: writes through raw SQL are a deliberate fast-follow ceiling
-  /// — the demo's add/delete/edit flows all route through [write] (which
-  /// enqueues into the durable outbox and round-trips the applied row back
-  /// through [watch]). Accepting arbitrary INSERT/UPDATE/DELETE here would
-  /// bypass the outbox and desync the local view from the server's
-  /// replication stream. Parse raw SQL for writes in a follow-up and route
-  /// them into [write]; until then, [execute] is SELECT-only.
+  /// Nothing here parses your SQL. `SqliteStorage::query` runs whatever it is
+  /// handed, so a `DELETE` reaches SQLite and returns an empty result set.
+  /// Two things keep that from corrupting state, and it is worth knowing which
+  /// is which: statements aimed at a **synced table** fail loudly, with SQLite's
+  /// `cannot modify ... because it is a view` (the read surface is a VIEW —
+  /// ADR-0028), but statements aimed at an **internal** table are not
+  /// protected, and `DELETE FROM cairn_outbox` would silently destroy queued
+  /// writes. Do not route DML through here.
+  ///
+  /// ponytail: writes through raw SQL are a deliberate ceiling — add/delete/edit
+  /// route through [write] / [Collection.upsert] / [Collection.patch] /
+  /// [Collection.delete], which apply locally at once and round-trip the applied
+  /// row back through [watch]. Accepting arbitrary INSERT/UPDATE/DELETE would
+  /// bypass the outbox and desync local state from the replication stream.
+  /// Upgrade path: parse raw SQL and route writes into [write].
   Future<List<Map<String, dynamic>>> execute(String sql) => getAll(sql);
 
   /// Reactive typed-record watch (WS6): like [watch] but maps each row to a
@@ -414,6 +473,9 @@ class NostosDatabase {
   /// Tear down the underlying [Nostos] session (sync loop + watch pump) AND the
   /// status listener. Safe to call with no subscription; idempotent.
   Future<void> close() async {
+    // Auth listener first: it calls into the engine, so leaving it attached
+    // across the close below would let a token refresh hit a closed engine.
+    await _authSub?.cancel();
     await _statusSub?.cancel();
     await _writeStatusSub?.cancel();
     _status?.dispose();

@@ -1,6 +1,9 @@
 # ADR-0023: The `.nostos/` project directory and pluggable backend adapters
 
-- **Status:** Proposed
+- **Status:** **Accepted (shipped)** — corrected 2026-07-30, it said "Proposed" after shipping.
+  As built: `DOT_NOSTOS_DIR` / `.nostos/config.json` / `.nostos/schema.json` in
+  `crates/nostos-cli/src/config.rs:178`, written by `nostos link` and `nostos pull`, plus all seven
+  subcommands (`init`, `link`, `pull`, `gen`, `dev`, `doctor`, `deploy`).
 - **Date:** 2026-07-14
 - **Related:** ADR-0001 (hexagonal ports), ADR-0007 (Supabase assembly), ADR-0019 (schema-as-views), ADR-0021 (schema discovery REST)
 

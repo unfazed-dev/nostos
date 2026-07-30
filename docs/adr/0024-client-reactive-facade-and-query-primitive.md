@@ -7,7 +7,7 @@ adr_decision:
   result_of_real_tradeoff: true
   rejected_alternatives: "ValueListenable-primary (wraps the existing hot-replay Stream in a per-query ValueNotifier; storm-justification falsified — nostos.dart:117-182 already shares via _watchCache + _replayLatest; marginal widget-ergonomics win the demo doesn't need); both-first-class watch()+values (more surface to maintain); supersede NostosDatabase (throws away 2026-07-13 ratified alignment)."
   all_three_true: true
-status: proposed
+status: accepted (shipped 2026-07-19; status corrected 2026-07-30 — it read "proposed" while Collection<T>/SyncStatus were exported and used by the demo)
 date: 2026-07-19
 revision: 1 (2026-07-19, same day — primitive re-decided after reading full nostos.dart impl; see Revision note)
 ---

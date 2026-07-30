@@ -2,8 +2,8 @@
 #
 # Tap flow (deliberately manual, not CI-pushed — matches the plan's
 # "don't over-automate" call on the pub.dev/manifest side too):
-#   1. Operator creates a `nostos-sync/homebrew-tap` tap repo
-#      (https://github.com/nostos-sync/homebrew-tap), containing a
+#   1. Operator creates a `unfazed-dev/homebrew-tap` tap repo
+#      (https://github.com/unfazed-dev/homebrew-tap), containing a
 #      `Formula/nostos.rb` copied from this template.
 #   2. After each `.github/workflows/release.yml` run, an operator (or,
 #      later, a follow-up CI job once the tap repo exists and a push
@@ -14,7 +14,7 @@
 #      enough that automating that *last* step later is low-risk. What's
 #      NOT wanted is `release.yml` reaching into a *different* repo's git
 #      history on every tag before a human has looked at a single release.
-#   3. Users then: `brew tap nostos-sync/nostos && brew install nostos`.
+#   3. Users then: `brew tap unfazed-dev/tap && brew install nostos`.
 #
 # Archive naming/hash source: .github/workflows/release.yml's
 # cli-server-macos and cli-server-linux jobs, which publish
@@ -24,24 +24,24 @@
 # out of scope for a developer-machine CLI install.
 class Nostos < Formula
   desc "Local-first sync engine CLI — init/dev/doctor/deploy for a Postgres + Supabase sync backend"
-  homepage "https://nostos.run"
+  homepage "https://github.com/unfazed-dev/nostos"
   version "0.1.0" # bump alongside workspace.package.version in the root Cargo.toml
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/nostos-sync/nostos/releases/download/v0.1.0/nostos-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/unfazed-dev/nostos/releases/download/v0.1.0/nostos-aarch64-apple-darwin.tar.gz"
       sha256 "REPLACE_WITH_aarch64-apple-darwin_TAR_GZ_SHA256"
     end
     on_intel do
-      url "https://github.com/nostos-sync/nostos/releases/download/v0.1.0/nostos-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/unfazed-dev/nostos/releases/download/v0.1.0/nostos-x86_64-apple-darwin.tar.gz"
       sha256 "REPLACE_WITH_x86_64-apple-darwin_TAR_GZ_SHA256"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/nostos-sync/nostos/releases/download/v0.1.0/nostos-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/unfazed-dev/nostos/releases/download/v0.1.0/nostos-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "REPLACE_WITH_x86_64-unknown-linux-gnu_TAR_GZ_SHA256"
     end
   end

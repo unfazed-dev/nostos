@@ -79,7 +79,7 @@ ci: lint test ## Local mirror of CI: lint + test.
 	@echo "✓ CI clean locally"
 
 .PHONY: sdk-e2e
-sdk-e2e: ## Run all 7 SDK live-replication E2E slices (PUSH+ECHO) vs the shared spine.
+sdk-e2e: ## Run all 10 SDK live-replication E2E slices (PUSH+ECHO) vs the shared spine.
 	@./scripts/sdk-e2e.sh
 
 # ----------------------------------------------------------------------------

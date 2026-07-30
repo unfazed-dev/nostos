@@ -84,6 +84,17 @@ class _FakeEngine implements NostosEngine {
     await stateController.close();
   }
 
+  /// Recorded so a test can assert `Nostos.setToken` actually delegates —
+  /// a silently-dropped refresh is the exact bug this seam exists to prevent.
+  String? lastSetToken;
+  int setTokenCalls = 0;
+
+  @override
+  Future<void> setToken(String? token) async {
+    lastSetToken = token;
+    setTokenCalls++;
+  }
+
   @override
   Future<void> disconnect() async {}
 

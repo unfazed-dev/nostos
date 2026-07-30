@@ -54,7 +54,9 @@ trap cleanup EXIT INT TERM
 
 echo "[harness] 0/6 ensure emulator ($AVD @ $EMU_SERIAL)"
 if ! "$ADB" devices | grep -q "^$EMU_SERIAL\b.*device$"; then
-    echo "[harness]   booting $AVD headless (port $(echo "$EMU_SERIAL" | tr -d 'a-z_'))"
+    # `tr -d 'a-z_'` left the hyphen, so this logged "port -5556". The boot below
+    # already used the digits-only form; only the message was wrong.
+    echo "[harness]   booting $AVD headless (port $(echo "$EMU_SERIAL" | sed 's/[^0-9]//g'))"
     "$EMU_BIN" -avd "$AVD" -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect \
         -port "$(echo "$EMU_SERIAL" | sed 's/[^0-9]//g')" > /tmp/nostos_kotlin_emu_boot.log 2>&1 &
     EMU_BOOT_PID=$!
@@ -137,8 +139,16 @@ ANDROID_SERIAL="$EMU_SERIAL" ./gradlew connectedDebugAndroidTest -PnostosPort="$
 }
 
 echo "[harness] 6/6 capture [kt-e2e] proof lines + test XML"
-# Spool logcat from the test run, then grep for the proof lines.
-"$ADB" -s "$EMU_SERIAL" logcat -d -t 800 | grep '\[kt-e2e\]' || true
+# Capture logcat ONCE — the printed spool and the verdict below must come from
+# the SAME dump. This previously dumped twice (`-d -t 800` for the spool, then an
+# unbounded `-d` for the verdict) and on a chatty emulator the proof lines rotated
+# out of the readable window between the two adb round-trips: the spool printed
+# `[kt-e2e] ECHO_OK` while the verdict recorded ECHO_OK=0 and the slice failed
+# with the instrumented test green (tests=2 failures=0). That is the capture flake
+# the comment above describes — dumping once removes the race by construction
+# instead of just widening the buffer and hoping.
+LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d 2>/dev/null || true)
+printf '%s\n' "$LOGCAT_DUMP" | grep '\[kt-e2e\]' || true
 echo "[harness] ----- test XML (failures count) -----"
 XML_GLOB="build/outputs/androidTest-results/connected/**/*.xml"
 # shellcheck disable=SC2086
@@ -153,10 +163,24 @@ for f in files:
 PY
 
 # Verdict: PUSH_OK + ECHO_OK must both be in logcat, AND failures=0 in XML.
-LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d 2>/dev/null || true)
+# Reuses the single $LOGCAT_DUMP captured in step 6/6 — do NOT re-dump here.
 PUSH_OK=0; ECHO_OK=0
-echo "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] PUSH_OK' && PUSH_OK=1
-echo "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] ECHO_OK' && ECHO_OK=1
+# Match with bash pattern tests, NOT `printf … | grep -q`. Under `set -o
+# pipefail` that pipeline reports FAILURE ON A SUCCESSFUL MATCH whenever the
+# dump is large: `grep -q` exits at the first hit, `printf` then dies of
+# SIGPIPE (141), and pipefail propagates 141, so `&& PUSH_OK=1` never runs.
+# Size-dependent (reproduced: small payload exits 0, large payload exits 141),
+# so it hid until step 6/6 enlarged the ring buffer to stop proof lines rotating
+# out — the bigger dump is what makes SIGPIPE land. Why it hit PUSH_OK and not
+# ECHO_OK on the same dump is NOT established; both matched, only one verdict
+# stuck, and the plausible story (ECHO_OK sits later, so grep reads further
+# before exiting and printf finishes writing) is untested against a real
+# 2000-line logcat. Do not rely on that asymmetry — the fix removes the pipe. That
+# made this the THIRD verdict-machinery bug in this file (after the two-dump
+# race and the wrong-dump verdict) — each one an SDK that worked while the
+# harness said otherwise. `[[ … == *…* ]]` spawns no process and cannot pipe.
+[[ "$LOGCAT_DUMP" == *'[kt-e2e] PUSH_OK'* ]] && PUSH_OK=1
+[[ "$LOGCAT_DUMP" == *'[kt-e2e] ECHO_OK'* ]] && ECHO_OK=1
 XML_FAIL=$(python3 - "$XML_GLOB" <<'PY' 2>/dev/null || echo "?"
 import glob, sys, xml.etree.ElementTree as ET
 files = glob.glob(sys.argv[1], recursive=True)

@@ -60,9 +60,166 @@
 > ### Still open
 >
 > **A7** (moat-number drift), **A8** (mark superseded plans), **A9** (boot a device to close
-> kotlin/swift/reactnative), **A10 (new)** fake-replicator pacing knob — not requested in
-> this pass. C8, C15, C17 remain unknown; C17 (the stranger test) is operator-only by
-> construction.
+> kotlin/swift/reactnative) — not requested in this pass. C8, C15, C17 remain unknown; C17
+> (the stranger test) is operator-only by construction.
+>
+> ### A10 — DONE 2026-07-30 (fake-replicator firehose)
+>
+> Two opt-in knobs on `FakeReplicatorConfig`, both `0` = today's unbounded behaviour:
+> `paced(events_per_sec)` (per-event `tokio::time::sleep`) and `recycling_keys(n)`
+> (`pk = emitted % n + 1`). `nostos-server`'s two fake branches now default to
+> **20 events/sec over 50 keys** (`NOSTOS_FAKE_EPS` / `NOSTOS_FAKE_KEYS`, `0` to firehose
+> deliberately). `nostos-bench` builds its own config, so the 833k-ops/sec ceiling is
+> untouched — verified by inspection: `crates/nostos-bench/src/main.rs:226` calls
+> `FakeReplicatorConfig::{small,large}` directly, never the server CLI.
+>
+> **Recycling is the load-bearing half, not pacing.** Client apply is an upsert
+> (`ON CONFLICT(table_name, pk) DO UPDATE`, `nostos-client/src/sqlite.rs:548`), so a bounded
+> key space bounds the *table*, which is what makes the Flutter glue's per-tick full-table
+> `emit_snapshot` O(1) in session length instead of O(events). Pacing alone only slows the
+> quadratic. Checks: `recycling_keys_bounds_the_key_space` and `pacing_throttles_emission`
+> in `crates/nostos-infra/src/replicator/fake.rs`.
+>
+> **Measured (debug build, 10 s, `nostos-server` alone with NO client connected):**
+>
+> | config | server CPU |
+> |---|---|
+> | `NOSTOS_FAKE_EPS=0 NOSTOS_FAKE_KEYS=0` (the old default) | **100.0%** — a full core |
+> | new default (20 eps / 50 keys) | **0.0%** |
+>
+> A full core burned with nothing observing it — that is the firehose, and it is gone.
+> What is *not* re-measured: the client-side Flutter saturation. The O(1)-snapshot claim
+> follows from the upsert + bounded key space, but no device run was done in this pass
+> (A9 remains unauthorized). `make ci`: exit 0, 435 passed. The SDK e2e harness
+> (`sdk/nostos_flutter/example/integration_test/nostos_server_test.dart`) was checked for
+> sensitivity to the new caps — it spawns `cargo run -p nostos-server` with only
+> `NOSTOS_BIND` set, and both assertions are `isNotEmpty` under 15 s timeouts, which 20 eps
+> satisfies in well under a second. No harness asserts a row/event count above 50.
+>
+> Blast radius stayed narrow because only the Flutter glue re-snapshots per change tick
+> (`sdk/nostos_flutter/rust/src/api/nostos.rs`); kotlin/dotnet/swift poll instead, node/tauri
+> have no watch pump. So the server-side default is the whole fix — no per-SDK change.
+>
+> **A10 follow-up, 2026-07-30:** the flutter slice of `make sdk-e2e` PASSES with the new
+> 20 eps / 50 keys default in force. That upgrades the "no harness asserts a count above 50"
+> reasoning above from *assumed* to *verified* — the analysis was right, and it is now
+> empirically confirmed rather than argued.
+>
+> ### C15 — CLOSED 2026-07-30 (per-SDK publishability + stub-vs-real)
+>
+> C15 was `unknown` ("3 subagents dispatched for this returned nothing"). Now established.
+>
+> **Stub-vs-real: settled by A9.** No slice is a stub on the sync path — all ten prove a live
+> PUSH+ECHO round-trip. This third of C15 is closed by the strict run, not by inspection.
+>
+> **Publishability: 1 of 9 SDK packages is publishable today.**
+>
+> | sdk | version | LICENSE file | repository field | README | verdict |
+> |---|---|---|---|---|---|
+> | `nostos_flutter` | **0.1.0** | ✅ | ✅ | ✅ | **publishable** |
+> | `nostos_capacitor` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_dotnet` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_react_native` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_web` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_kotlin` | 0.0.0 | ❌ | ❌ | ❌ | blocked |
+> | `nostos_swift` | 0.0.0 | ❌ | ❌ | ❌ | blocked |
+> | `nostos_tauri` | 0.0.0 | ❌ | ❌ | ❌ | blocked |
+> | `nostos_node` | 0.0.0 | ❌ (no `license` field either) | ❌ | ❌ | blocked, worst case |
+>
+> Common blockers: placeholder version `0.0.0` (8/9), no per-package `LICENSE` (8/9), no
+> `repository` field (8/9) — all hard or near-hard requirements on npm / crates.io / NuGet /
+> Maven. Four have no README at all (kotlin, node, swift, tauri). `nostos_tauri` has no
+> ecosystem manifest beyond `Cargo.toml`, so it would publish to crates.io and needs the
+> license/description/repository keys there.
+>
+> **This does not block the Flutter+Supabase wedge** — `nostos_flutter` is the one that is
+> ready, which is consistent with the strategy. But it means **"10/10 SDK parity" is a
+> *functional* claim, not a *distributable* one**, and those must not be conflated in public
+> copy. Checked accordingly: `README.md` makes no install claims (good), and
+> `show-hn-draft.md` said "Flutter/RN/Node SDKs are scoped, not shipped" — which now
+> *understates* verified work. Rewritten to the accurate split: functional and e2e-proven,
+> not yet registry-published.
+>
+> **New follow-up (not done here): A11 — packaging pass.** Set real versions, add per-package
+> LICENSE + repository, write the four missing READMEs. Mechanical, ~1 session, needed before
+> any "install nostos for <platform>" claim.
+>
+> **Not established:** README *drift* (whether each SDK's code samples still compile against
+> its exported surface). That needs per-sample typechecking, which I did not run. Remains
+> genuinely open — the one part of C15 I could not close.
+>
+> ### A7 — DONE 2026-07-30 (moat-number drift) — and my first call on it was WRONG
+>
+> I initially reported A7 as "effectively already done, only a rounding residue." That was
+> **under-called**, from a coarse `grep | uniq -c` that collapsed duplicates and never
+> compared exact figures across files. An exact sweep found real drift:
+>
+> | location | was | now |
+> |---|---|---|
+> | `README.md:13`, `README.md:23` | 833,**308** | 833,307 |
+> | `docs/launch/show-hn-draft.md:51` | 833,**308** | 833,307 |
+> | `docs/launch/powersync-vs-nostos-draft.md:44` | 833,**308** | 833,307 |
+> | `benches/results/chart.svg` (the rendered chart) | 833,**308** | 833,307 |
+>
+> Canonical is `benches/results/RESULTS.md` = **833,307**. Two of the four wrong figures were
+> in the **public launch drafts**, and one was in the chart image that ships in the README —
+> i.e. a number that contradicts our own published benchmark file, going out on Show HN.
+> `git grep 833,308` now returns nothing.
+>
+> `chart.svg` is *generated* (`crates/nostos-bench/src/report.rs:141`) from the same
+> `grouped(run.ops_per_sec)` helper as the RESULTS table, so this was **not** a generator
+> bug — the committed chart was simply from an older run than the committed RESULTS.md. The
+> next `make bench` regenerates both consistently. No re-benching was done (A7 is docs-only;
+> re-running would change the headline within ±5% noise, which is a separate decision).
+>
+> ### A9 — DONE 2026-07-30 — **10/10 slices PASS in strict mode**, and §2.2 is superseded
+>
+> `SDK_E2E_STRICT=1 make sdk-e2e` → **exit 0, all ten slices PASS, zero skips** (strict mode
+> makes any skip fatal, so this green cannot be a self-skip false pass):
+>
+> | rust | node | tauri | web | capacitor | dotnet | flutter | swift | kotlin | reactnative |
+> |---|---|---|---|---|---|---|---|---|---|
+> | 2s | 1s | 2s | 2s | 2s | 4s | 30s | 6s | 11s | 12s |
+>
+> This **supersedes §2.2's "6 PASS / 2 FAIL / 2 SKIP — the headline finding"**. It also closes
+> C7 (*assumed*: swift would pass with a booted sim) and C8 (*unknown*: kotlin/reactnative
+> health) — both now **verified**.
+>
+> **Neither original failure was an SDK defect. Both were harness bugs**, and both would have
+> hit anyone who booted a device and tried:
+>
+> 1. **swift — hardcoded simulator UDID.** `sdk/nostos_swift/ios-test/build.sh` gated on
+>    *any* booted sim (`sdk-e2e.sh:117`) but then targeted a **specific hardcoded UDID**
+>    (`CAFC93F7…`, "iPhone 17 probe"). Boot any other device and the guard goes green, then
+>    `simctl install` dies with `Unable to lookup in current state: Shutdown` — reported as a
+>    swift FAIL with nothing wrong in the SDK. Now derived from
+>    `simctl list devices booted`, so guard and action agree by construction.
+>    The same file also **hardcoded absolute paths to one machine**
+>    (`/Volumes/developer_ssd/…`), which would have broken the slice on any other checkout —
+>    now derived from `${BASH_SOURCE[0]}`.
+> 2. **kotlin — logcat double-dump race.** The harness dumped logcat **twice**: `-d -t 800`
+>    for the human spool, then an unbounded `-d` for the verdict. On a chatty emulator the
+>    proof lines rotated out of the readable window between the two adb round-trips, so the
+>    spool printed `[kt-e2e] ECHO_OK` while the verdict recorded `ECHO_OK=0` — with the
+>    instrumented test green (`tests=2 failures=0`). That is precisely the flake its own
+>    comment documents as "fixed in the RN harness 2026-07-13"; kotlin kept the racy shape.
+>    Now a single `$LOGCAT_DUMP` feeds both, which removes the race by construction rather
+>    than widening the buffer and hoping. Side effect: 34s → 11s.
+>
+> **Correction to C8's stated blocker.** The assessment recorded "Never executed — no Android
+> emulator on this machine." That is **false**: five AVDs exist (`Medium_Phone_API_36`,
+> `Pixel_9`, `nostos_api34`, `pack-9`, `probe_arm64`). `nostos_api34` boots headless in ~15s.
+>
+> **Operator note for reproducing.** Boot `nostos_api34` on **port 5556** specifically
+> (`emulator -avd nostos_api34 -no-window -port 5556`) — the kotlin harness expects
+> `emulator-5556` and boots it itself if absent, so booting that AVD on the default 5554
+> instead holds its lock and deadlocks the harness's own boot. Any iPhone sim works for swift.
+>
+> Also tightened the phrasing: "208× PowerSync's published ceiling (~2–4k ops/sec)" conflated
+> the range with the multiple (208× is against the **4k high**; against the 2k low it is 417×).
+> `README.md` and `CLAUDE.md` now name the high ceiling explicitly and cite 417× for the low,
+> matching what `show-hn-draft.md:51` already said correctly. `CLAUDE.md` gained a standing
+> rule: quote the high multiple, never the low, and never a figure absent from RESULTS.md.
 >
 > Everything below is the original assessment, unedited.
 
@@ -639,8 +796,8 @@ That sentence is the answer to "what stage is the project at."
 | C5b | The flutter failure on this machine is environmental (Xcode/SPM), pre-dating `9322d83` | **verified** | Pre-regression tree fails on SPM resolution; matches a toolchain fault recorded on this machine 2026-07-20 |
 | C5c | Whether `nostos_flutter` sync actually works today | **unknown** | Cannot be established on this machine — needs a working Xcode/SPM toolchain or a device-free test path |
 | C6 | Swift slice fails only because the sim is not booted | **verified** | Log shows xcodegen→xcodebuild→app built; failure is `simctl install … state: Shutdown` |
-| C7 | Swift slice would PASS with a booted sim | **assumed** | Everything up to install succeeded; not run |
-| C8 | kotlin / reactnative SDK health | **unknown** | Never executed — no Android emulator on this machine |
+| C7 | Swift slice would PASS with a booted sim | ~~assumed~~ → **verified, but the reason was wrong** | It PASSES (2026-07-30) — yet booting a sim was *not sufficient*: `build.sh` targeted a hardcoded UDID, so the slice only ever ran on one machine's one device. C6's diagnosis was right about the symptom and incomplete about the cause |
+| C8 | ~~kotlin / reactnative SDK health~~ | **verified FALSE as stated** | The blocker claim "no Android emulator on this machine" was simply untrue — five AVDs exist (`Medium_Phone_API_36`, `Pixel_9`, `nostos_api34`, `pack-9`, `probe_arm64`). That unchecked assumption is the only thing that kept A9 open for 17 days. Both slices PASS (2026-07-30); the kotlin failure was a harness logcat race, not SDK health |
 | C9 | The env-var *name* `NOSTOS_WRITE_TABLES` has 0 hits in QUICKSTART/README, 9 in OPERATING | **verified** | Per-file `grep -c` |
 | C9b | ~~Therefore a stranger's writes silently fail~~ | **verified FALSE** | QUICKSTART wires it via `nostos init --write-tables todos` (`QUICKSTART.md:42`), explained at `:252`; parsed `init.rs:64-68`, persisted `config.rs:47,157`, emitted to deploy templates `deploy.rs:56,106`. Claim withdrawn; A3 dropped |
 | C10 | The Dart SDK gives a developer no way to learn a write failed | **verified** | `SyncStatus` = `{conn,lastSyncedAt}` (`nostos_database.dart:498-515`); `client.rs:32` "user-facing surface is a Phase-2 concern"; `client.rs:710,718` retry→dead-letter; write returns "local outbox id (NOT a server ack)" (`nostos_database.dart:438`) |
@@ -693,3 +850,81 @@ decisive here: **running the project's own harness beat reasoning about its code
 `make ci` + `make sdk-e2e` took ~90 seconds and produced the entire headline, and the one
 experiment that actually *tested* a hypothesis (restoring `example/`) is what caught my
 own wrong root-cause.
+
+---
+
+## Addendum — 2026-07-30: A11 packaging + the README-drift audit (C15 closed)
+
+The operator asked for the residues of the previous addendum to be fixed, which closed A11
+and the last open piece of C15. **Five real defects surfaced, none of which any test would
+have caught**, plus two of my own errors.
+
+### A11 — packaging pass: DONE
+
+| what | before | after |
+|---|---|---|
+| versions | 8 packages at `0.0.0` | all `0.1.0` (matching `[workspace.package]` and `nostos_flutter`) |
+| `LICENSE` file | 1 of 9 | **9 of 9** |
+| `repository` / `homepage` | 2 of 9 | 9 of 9 (npm also gets `bugs`) |
+| READMEs | 5 of 9 | **9 of 9** (new: kotlin, swift, node, tauri) |
+
+**One prediction I checked instead of trusting:** the concern was raised that a new `LICENSE`
+would not ship in the npm tarball, since the `files` arrays list only `dist`/`README.md`.
+`npm pack --dry-run` says otherwise — **npm force-includes `LICENSE`** regardless of `files`.
+Verified, not assumed. Likewise the csproj needs **no** `PackageLicenseFile`: it already sets
+`PackageLicenseExpression`, and NuGet rejects both together (NU5035).
+
+### The five defects
+
+1. **`sdk/nostos_tauri` never exposed `subscribe` to JS.** `generate_handler!` and `build.rs`
+   listed only `connect`/`write`/`query`/`checkpoint`. Since `connect` does *no* network I/O
+   and `subscribe` is what drives the run loop, **the entire download path was unreachable
+   from a Tauri frontend** — connect, then wait forever. Fixed (handler + `build.rs` +
+   `permissions/default.toml`, all three required or the ACL rejects the call at runtime).
+   *Why no test caught it:* the tauri slice is `cargo test`, which calls `NostosState::subscribe`
+   directly and never crosses the command boundary. Recorded in the new README.
+2. **`dotnet/Nostos.DotNet.csproj` was not well-formed XML** — two fatal errors: a mismatched
+   `<PackageProjectUrl>…</PackageUrl>` tag pair, and `--` inside an XML comment (forbidden by
+   the XML spec; it came from pasting a `--library` CLI flag into a comment). Any
+   `dotnet build`/`pack` of that project would fail. *Why no test caught it:* the E2E builds
+   `dotnet/smoke/Smoke.csproj`, a different project — the packageable one is compiled by nothing.
+3. **`@nostos-sync/react-native`'s own `npm run typecheck` failed** under its own strict tsconfig
+   (`config.url` is `string | null | undefined`, the native Spec wants `string`). Fixed with a
+   real guard that throws a message naming the fix, rather than a cast — a null URL should not
+   reach the TurboModule boundary. *Why no test caught it:* `test` was `jest` only, so nothing
+   ran `typecheck`. Now `test` = `typecheck && jest`, so it cannot regress.
+4. **`sdk/nostos_web/README.md` understated a shipped capability** — it called the whole package
+   a "reduced-scope feasibility proof" that "does NOT yet open a live WebSocket." The *browser*
+   path (`pkg-web` → `NostosSocket`) opens a real WebSocket and is proven by
+   `e2e/browser_live.spec.cjs`, which **is** the passing `web` slice. Only the Node facade is
+   reduced-scope. Now documents both paths with a `NostosSocket` API table.
+5. **`sdk/nostos_flutter/README.md` gave actively wrong advice** — "one active subscription per
+   `Nostos` instance… use a second `Nostos.connect(...)`" for a second table. `subscribeTables`
+   multiplexes many tables over **one** socket (ADR-0022). Following the README opened a
+   redundant connection.
+
+Also corrected: three stale "dotnet is not installed / E2E is SKIP-with-reason" claims in the
+dotnet README and csproj. `dotnet` lives at `~/.dotnet/dotnet` — **not on `PATH`**, which is why
+the original bare `which dotnet` check read as absent. The slice passes.
+
+### Two of my own errors
+
+- **I reported "working tree clean" while `README.md` had an uncommitted stray `/`** appended
+  with no trailing newline. The claim was wrong; the file is fixed.
+- **The C7/C8 claim rows were left stale** after A9 closed. C8's blocker — "no Android emulator
+  on this machine" — was simply **false** (five AVDs exist), and that single unchecked assumption
+  is what kept A9 open for 17 days. C7 was *right about the symptom and incomplete about the
+  cause*: booting a simulator was necessary but **not sufficient**, because `build.sh` targeted a
+  hardcoded UDID. Both rows now say so.
+
+### The pattern across all of it
+
+Every one of the five defects sits in a place **no test executes**: a command list, a project file
+nothing builds, a script nothing runs, prose. The e2e suite proves the *runtime* path and is
+silent on the *packaging and documentation* path — so "10/10 slices PASS" was never evidence about
+either. That is the same shape as the harness bugs on 2026-07-29 (**a guard checking something
+weaker than what the action requires**), one level out.
+
+**Still genuinely open:** nothing in the engineering column. The SDKs are now *packaged* but
+still **not published** — no npm/Maven/NuGet/pub coordinate exists. Do not let public copy drift
+in the other direction: "10/10 parity" remains a **functional** claim, never a *distributable* one.

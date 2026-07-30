@@ -78,6 +78,24 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_REPLICATOR", default_value = "fake")]
     replicator: String,
 
+    /// Fake-replicator emission rate, events/second. `0` = unbounded.
+    ///
+    /// A10: the default is *paced*, not unbounded. An unbounded synthetic
+    /// stream is pure load with no observer — it saturated any interactive
+    /// session that outlived a few seconds (ADR-0027 finding). The benchmark
+    /// builds its own config (`nostos-bench`), so the measured ceiling is
+    /// untouched; set `0` here to firehose deliberately.
+    #[arg(long, env = "NOSTOS_FAKE_EPS", default_value_t = 20)]
+    fake_events_per_sec: u64,
+
+    /// Fake-replicator distinct primary keys. `0` = monotonic (grows forever).
+    ///
+    /// Client apply is an upsert on `(table, pk)`, so a bounded key space
+    /// bounds the *table* — which keeps a full-table watch snapshot O(1) in
+    /// session length. Pacing alone only slows the growth.
+    #[arg(long, env = "NOSTOS_FAKE_KEYS", default_value_t = 50)]
+    fake_distinct_keys: u64,
+
     /// Postgres URL for the real replicator (`NOSTOS_REPLICATOR=pg`).
     /// Empty by default — selecting `pg` without setting `NOSTOS_PG_URL` fails
     /// fast with an actionable error (see the replicator match below).
@@ -359,7 +377,11 @@ async fn main() -> anyhow::Result<()> {
     let mut repl_handle: Option<tokio::task::JoinHandle<()>> = None;
     match cfg.replicator.as_str() {
         "fake" => {
-            let mut repl = FakeReplicator::new(FakeReplicatorConfig::small(u64::MAX));
+            let mut repl = FakeReplicator::new(
+                FakeReplicatorConfig::small(u64::MAX)
+                    .paced(cfg.fake_events_per_sec)
+                    .recycling_keys(cfg.fake_distinct_keys),
+            );
             let fanout_drv = Arc::clone(&fanout);
             let drv = tokio::spawn(async move {
                 let extract = |_e: &ReplicationEvent, _col: &str| -> Option<ColumnValue> {
@@ -369,7 +391,11 @@ async fn main() -> anyhow::Result<()> {
                 info!(?outcome, "replicator stream ended");
             });
             std::mem::forget(drv);
-            info!("replicator: FakeReplicator (synthetic, unbounded)");
+            info!(
+                events_per_sec = cfg.fake_events_per_sec,
+                distinct_keys = cfg.fake_distinct_keys,
+                "replicator: FakeReplicator (synthetic; 0 = unbounded)"
+            );
         }
         "pg" => {
             #[cfg(feature = "pg")]
@@ -422,7 +448,11 @@ async fn main() -> anyhow::Result<()> {
                     "NOSTOS_REPLICATOR=pg but this binary was built without the `pg` feature. \
                      Rebuild with `cargo build -p nostos-server --features pg`. Falling back to fake."
                 );
-                let mut repl = FakeReplicator::new(FakeReplicatorConfig::small(u64::MAX));
+                let mut repl = FakeReplicator::new(
+                    FakeReplicatorConfig::small(u64::MAX)
+                        .paced(cfg.fake_events_per_sec)
+                        .recycling_keys(cfg.fake_distinct_keys),
+                );
                 let fanout_drv = Arc::clone(&fanout);
                 let drv = tokio::spawn(async move {
                     let extract = |_e: &ReplicationEvent, _col: &str| Some(ColumnValue::Any);

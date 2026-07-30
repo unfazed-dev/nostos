@@ -91,6 +91,13 @@ abstract class NostosEngine {
 
   /// Pause syncing: abort only the connect loop; reads, writes (durable outbox),
   /// and `watch` pumps keep working offline. Pair with [resume]. Idempotent.
+  /// Replace the bearer token used by subsequent connections.
+  ///
+  /// Tears nothing down: a live socket keeps running and the next connection
+  /// picks the new token up. That is the point — rebuilding the handle to change
+  /// a token would end every `watch` stream the UI is holding.
+  Future<void> setToken(String? token);
+
   Future<void> disconnect();
 
   /// Resume syncing after [disconnect]: respawn the connect loop on the same
@@ -164,6 +171,10 @@ class RustNostosEngine implements NostosEngine {
   @override
   void applySchema(List<rust.ClientTableFfi> tables) =>
       _handle.applySchema(tables: tables);
+
+  @override
+  @override
+  Future<void> setToken(String? token) => _handle.setToken(token: token);
 
   @override
   Future<void> close() => _handle.close();

@@ -397,12 +397,27 @@ impl SqliteStorage {
     /// payload — no decoder, no inference, no apply-path change.
     ///
     /// `cairn_data` stays the single source of truth; the apply path is
-    /// UNCHANGED. This is the lazy cousin of "materialized typed tables": zero
-    /// new storage, zero migration, reversible (`DROP VIEW`). Ceiling: no non-PK
-    /// column indexes (a view computes `json_extract` per row → full scan on
-    /// `WHERE col = ?`). ponytail: fast-follow to real typed tables + indexes
-    /// when a query needs them. FakeReplicator's non-JSON bytes degrade to NULL
-    /// (dev fixture, not production).
+    /// UNCHANGED. Zero new storage, zero migration, reversible (`DROP VIEW`).
+    ///
+    /// **This is the decided read model, not a stepping stone** — ADR-0028.
+    /// Materialized typed tables are *rejected*: their motivation (column
+    /// affinity killing the TEXT→timestamptz bug class) was spent when that bug
+    /// was fixed server-side in `PgWriteBack`, and this comment used to name
+    /// them as the fast-follow on a ceiling that isn't real. A slow
+    /// `WHERE col = ?` is fixed **in place** with a partial expression index on
+    /// this table — SQLite indexes expressions, and the planner uses it through
+    /// the view (measured, ADR-0028):
+    ///
+    /// ```sql
+    /// CREATE INDEX ix ON cairn_data(json_extract(payload,'$.title'))
+    ///   WHERE table_name='tasks';
+    /// -- SCAN cairn_data  ->  SEARCH cairn_data USING INDEX ix (<expr>=?)
+    /// ```
+    ///
+    /// Remaining real limitation: no column *affinity* — `json_extract` returns
+    /// the JSON value's own type, so a timestamp arriving as a JSON string sorts
+    /// lexicographically (fine for ISO-8601). FakeReplicator's non-JSON bytes
+    /// degrade to NULL (dev fixture, not production).
     ///
     /// Each view is `DROP VIEW IF EXISTS` + `CREATE VIEW`, so re-applying a
     /// *changed* schema refreshes the projection in place — bumping the

@@ -48,7 +48,7 @@ We measured server fan-out against PowerSync's **published** server ceiling of
 
 | Tier | Nostos | Drops | vs PowerSync ceiling |
 |------|-------|-------|----------------------|
-| **1k clients** | **833,308 ops/sec** | **0%** | **208× their high ceiling** (417× their low) |
+| **1k clients** | **833,307 ops/sec** | **0%** | **208× their high ceiling** (417× their low) |
 | 5k clients | 660k ops/sec | 0.91% | still dramatically faster |
 | 10k clients (probe) | ~483k ops/sec | ~61.4% | throughput high, drops NOT under 1% |
 
@@ -97,7 +97,12 @@ picked SQLite-WASM `opfs-sahpool` post-launch to avoid the COOP/COEP tax).
 The web client's `localStorage` checkpoint is **best-effort durability** — the
 browser may evict it under storage pressure; correctness is unaffected (the
 client re-fetches from `resume_lsn` on reconnect), but a cold tab may replay
-more than expected. Flutter/RN/Node SDKs are scoped, not shipped.
+more than expected. The SDKs are **functional but not yet published to package
+registries**: all ten slices (rust, node, tauri, web, capacitor, dotnet, flutter,
+swift, kotlin, react-native) prove a live PUSH+ECHO round-trip against a real
+spine in CI-strict mode, but only `nostos_flutter` currently carries publishable
+metadata — the rest sit at version `0.0.0` with no per-package LICENSE. So: build
+from the repo today, `pub add`/`npm i` after the packaging pass.
 Conflict-resolution tiers above LWW, declarative write rules, and function
 mode are Phase 4.
 

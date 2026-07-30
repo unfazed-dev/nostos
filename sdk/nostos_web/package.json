@@ -1,6 +1,6 @@
 {
   "name": "@nostos-sync/web",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "PowerSync-style JS facade over nostos-ffi-wasm (browser: live WS via web-sys; node: apply engine only)",
   "main": "index.js",
   "types": "index.d.ts",
@@ -20,5 +20,14 @@
   ],
   "devDependencies": {
     "@playwright/test": "^1.40.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unfazed-dev/nostos.git",
+    "directory": "sdk/nostos_web"
+  },
+  "homepage": "https://github.com/unfazed-dev/nostos",
+  "bugs": {
+    "url": "https://github.com/unfazed-dev/nostos/issues"
   }
 }
