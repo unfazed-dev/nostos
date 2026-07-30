@@ -56,11 +56,17 @@ cd sdk/nostos_kotlin
 cargo build --release --target aarch64-linux-android
 cargo build --release --target x86_64-linux-android      # emulator
 
-# 2. regenerate the Kotlin bindings (committed under kotlin-sources/)
-cargo run --bin uniffi-bindgen -- generate \
-  --library target/release/libnostos_kotlin.dylib \
+# 2. regenerate the Kotlin bindings (committed under kotlin-sources/).
+#    Needs the standalone CLI: cargo install uniffi-bindgen-cli --version 0.28
+#    (verify: `uniffi-bindgen --version` → uniffi-bindgen 0.28.3)
+cargo build --lib          # host .dylib — bindgen reads its symbols
+uniffi-bindgen generate \
+  --library target/debug/libnostos_kotlin.dylib \
   --language kotlin --out-dir kotlin-sources
 ```
+
+Those are the exact commands `scripts/run-live-e2e.sh` runs (steps 1–2), so they
+are covered by `make sdk-e2e kotlin`.
 
 `kotlin-sources/uniffi/nostos_kotlin/nostos_kotlin.kt` is **committed** — it is
 the reviewable artifact, and regenerating it should produce no diff.

@@ -30,6 +30,14 @@ Five commands, namespaced `plugin:cairn|<command>`:
 | `query` | `{ sql }` | `string` — JSON array of rows |
 | `checkpoint` | — | `number` — the durable LSN |
 
+**Argument names are camelCase, not the Rust snake_case.** `db_path` → `dbPath`,
+`payload_json` → `payloadJson`. This is not a guess: `#[tauri::command]` defaults
+to `argument_case: ArgumentCase::Camel` and converts each key with
+`to_lower_camel_case()` (`tauri-macros-2.6.3/src/command/wrapper.rs:51,507`).
+Adding `#[tauri::command(rename_all = "snake_case")]` would flip it. **No JS
+caller exists in this repo** — the slice is `cargo test` — so nothing here would
+catch a wrong key; that citation is the verification.
+
 ```js
 import { invoke } from "@tauri-apps/api/core";
 

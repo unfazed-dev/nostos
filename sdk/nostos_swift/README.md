@@ -60,9 +60,12 @@ cargo build --release                                  # host (macOS)
 cargo build --release --target aarch64-apple-ios-sim   # simulator
 cargo build --release --target aarch64-apple-ios       # device
 
-# 2. regenerate the Swift bindings (committed under swift-sources/)
-cargo run --bin uniffi-bindgen -- generate \
-  --library target/release/libnostos_swift.dylib \
+# 2. regenerate the Swift bindings (committed under swift-sources/).
+#    Needs the standalone CLI: cargo install uniffi-bindgen-cli --version 0.28
+#    (verify: `uniffi-bindgen --version` → uniffi-bindgen 0.28.3)
+cargo build --lib          # host .dylib — bindgen reads its symbols
+uniffi-bindgen generate \
+  --library target/debug/libnostos_swift.dylib \
   --language swift --out-dir swift-sources
 
 # 3. typecheck the generated Swift without linking
