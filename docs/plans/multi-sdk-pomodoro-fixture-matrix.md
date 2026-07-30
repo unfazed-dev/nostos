@@ -307,6 +307,18 @@ land last because it changes the wire; 4 carries a trait-design dependency that 
    test path.
 2. **Reactive facade → all 9** — generalize ADR-0024's `Collection<T>`/`watch`. Floor set by
    `nostos_dotnet` and `nostos_swift`, which have zero reactive code today.
+   **DESIGN RESOLVED 2026-07-31 (verified in code):** the push channel **already exists** —
+   `SyncClient.subscribe_changes()` → `broadcast::Receiver<ApplyOutcome>` (`client.rs:387`), capacity
+   64, **no replay**, fired at `:469` (after a local write), `:701` and `:1030` (after remote applies).
+   So the 5 native SDKs (kotlin, swift, dotnet, node, tauri + RN-via-kotlin) are **pure binding work
+   over the existing channel** — no nostos-client change. The load-bearing invariant every binding must
+   encode (tested `client.rs:1473`): **`subscribe_changes()` BEFORE the first snapshot read**, or a
+   commit landing between the two is permanently lost (broadcast has no replay). Each SDK owns a
+   replay-last-snapshot-to-late-subscribers layer (Flutter's `_replayLatest`). Full-snapshot per tick,
+   not diffs. **web + capacitor stay blocked on WS1** — they drive the in-memory WASM `NostosEngine`,
+   not `SyncClient`, so the channel cannot reach them until WS1's Worker hosts a real
+   `SqliteWasmStorage`; their `watch()` is currently a ponytail stub. **Thin slice = kotlin** (UniFFI
+   callback interface): proves the port and unblocks RN (wraps kotlin) + informs swift/dotnet.
 3. **CRDT merge tier** — new ADR, per-field causal metadata, merge logic in `nostos-core`.
    **Gated by D7: it ships with before/after benchmark numbers or it does not merge.** The wire
    carries no causal metadata today — ordering is purely LSN/server-arrival — so this *is* a
