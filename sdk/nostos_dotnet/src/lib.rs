@@ -39,17 +39,23 @@
 //! .NET-project property, not a Rust property; the Rust crate stays forbid-unsafe.
 //!
 //! # ponytail: deferred surfaces (upgrade path)
-//! - **`subscribe(table)` run loop + poll**: WIRED. `subscribe()` spawns
+//! - **`subscribe(table)` run loop**: WIRED. `subscribe()` spawns
 //!   `client.run_with_reconnect()` on the owned runtime; the loop drives the
 //!   WS session (subscribe-ack + drain + flush) and applies incoming rows to
-//!   the on-device SQLite store via the engine. .NET polls `query()` until the
-//!   expected row appears — the SAME shape the Rust E2E template
-//!   (`crates/nostos-client/tests/e2e_live_replication.rs`) uses, and the exact
-//!   shape `sdk/nostos_swift` + `sdk/nostos_kotlin` shipped. Ceiling: no row-tick
-//!   callback / push notification to .NET yet — callers discover new rows by
-//!   polling. Upgrade path: a UniFFI callback interface for row-ticks (same
-//!   shape as the Flutter `rows_sink`), or a `poll_new_rows()` drain over
-//!   `SyncClient::subscribe_changes()`'s broadcast channel.
+//!   the on-device SQLite store via the engine. `subscribe()` stays the
+//!   run-loop DRIVER — reactive push is a separate call (`watch()`).
+//! - **`watch(table, sink)` reactive push**: WIRED. A TRUE Rust→.NET push via
+//!   a UniFFI SYNCHRONOUS callback interface (`SnapshotSink::on_snapshot`),
+//!   draining `SyncClient::subscribe_changes()`'s broadcast on the owned
+//!   runtime — the .NET port of Flutter's `watch(table, rows_sink)` and
+//!   Kotlin's `watch(table, sink)` (commit 41265fd). The Nord UniFFI-CS
+//!   bindgen (v0.9.2+v0.28.3) supports `#[uniffi::export(with_foreign)]` the
+//!   same way mainline UniFFI does for Kotlin/Swift — verified empirically
+//!   (bindgen generates an `ISnapshotSink` C# interface + the foreign-callback
+//!   vtable from the Rust trait). The app consumer implements `SnapshotSink`
+//!   (typically adapting `OnSnapshot` onto an `IObservable<string>` /
+//!   `Channel<string>`) and receives full-snapshot-per-tick callbacks; it
+//!   never wall-clock-polls.
 //! - **Windows cross-compile**: `cargo build --target x86_64-pc-windows-msvc`
 //!   compiles the Rust to `.rlib`/`.dll` objects but FAILS at link on macOS
 //!   (no Windows SDK / MSVC linker on this host). This is a KNOWN limitation
@@ -79,6 +85,7 @@ use std::time::Duration;
 use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig};
 use nostos_core::{PendingWrite, WriteOp};
 use nostos_domain::Lsn;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex as AsyncMutex;
 
 // UniFFI scaffolding — emits the FFI entrypoints (`uniffi_*` symbols) that
@@ -119,6 +126,42 @@ impl NostosError {
     }
 }
 
+/// Reactive push channel: .NET implements this interface, Rust invokes it.
+///
+/// This is the .NET port of the Kotlin SDK's `SnapshotSink` (commit 41265fd)
+/// and Flutter's `rows_sink: StreamSink<String>` — a TRUE Rust→foreign PUSH
+/// (the app consumer does NOT poll). Chosen over a C#-side poll over
+/// `subscribe_changes` because it is the faithful reactive port and the
+/// Nord UniFFI-CS bindgen (v0.9.2+v0.28.3) supports the `with_foreign`
+/// callback-interface the same way mainline UniFFI does for Kotlin/Swift
+/// (verified empirically — bindgen generates a C# `ISnapshotSink` interface
+/// + the foreign-callback vtable).
+///
+/// # Why a SYNC callback (UniFFI 0.28)
+/// UniFFI 0.28's **async**-foreign-callback path (a foreign-implemented
+/// method that returns a `Future`) is genuinely awkward — that is NOT what we
+/// use. A fire-and-forget `on_snapshot(json) -> ()` is a SYNCHRONOUS foreign
+/// callback (`#[uniffi::export(with_foreign)]`), the stable, well-supported
+/// path in UniFFI 0.28: the Rust pump task invokes the callback through
+/// UniFFI's vtable (callable from any Rust thread, including a tokio worker),
+/// blocking that worker only for the duration of the C# method body (which a
+/// sink just forwards to a `Channel<T>` / `IObservable<T>` — microseconds).
+/// `with_foreign` (vs the legacy `callback_interface`) ALSO permits a RUST
+/// impl, which is what the host reactivity test exercises without a .NET
+/// runtime.
+///
+/// # Snapshot shape
+/// `json` is a JSON array-of-objects string: one object per row of the watched
+/// table's rows in `cairn_data`, full snapshot per tick (NOT a diff —
+/// self-healing on lag, mirrors Flutter's `emit_snapshot`).
+#[uniffi::export(with_foreign)]
+pub trait SnapshotSink: Send + Sync {
+    /// Receive a full-table snapshot. Invoked once with the initial snapshot
+    /// (immediately after `watch()` subscribes) and again after every change
+    /// tick (remote apply or local write).
+    fn on_snapshot(&self, json: String);
+}
+
 /// A live Nostos client handle for .NET. Owns the tokio runtime the
 /// `SyncClient`'s async API runs on, plus at most one active session (v1: one
 /// table per client, matching `nostos-client`'s Phase-0 predicate floor and the
@@ -140,18 +183,41 @@ pub struct NostosClient {
 
 /// The active session. Dropping this — including via a second `connect()`
 /// replacing it — releases the `Arc<SyncClient<SqliteStorage>>` AND aborts the
-/// background run loop (`run_task`) so a superseded session's WebSocket +
-/// reconnect loop actually stops instead of leaking. Mirrors `nostos_swift`'s
-/// and `nostos_kotlin`'s `Session` shape verbatim.
+/// background run loop (`run_task`) AND every `watch()` pump (`watch_tasks`)
+/// so a superseded session's WebSocket + reconnect loop + reactive pumps
+/// actually stop instead of leaking. Mirrors `nostos_swift`'s and
+/// `nostos_kotlin`'s `Session` shape, extended with the reactive pumps
+/// Flutter's `Session` carries.
 struct Session {
     client: Arc<SyncClient<SqliteStorage>>,
     table: String,
     run_task: Option<tokio::task::JoinHandle<()>>,
+    /// One pump per `watch()` call. Each owns its own `subscribe_changes()`
+    /// receiver. Aborted on session teardown (Drop) so the watch lifecycle is
+    /// tied to the sync session — cancels on `connect()`-replacing-a-session or
+    /// client drop. Mirrors Flutter's `session.watch_tasks`.
+    watch_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Replay cache (Flutter's `_replayLatest` port): the last snapshot JSON
+    /// emitted for this session's table. The no-replay Rust broadcast
+    /// (`broadcast::channel(64)` in nostos-client) means a LATE subscriber's own
+    /// `subscribe_changes()` receiver can't see prior ticks — this cache lets a
+    /// late `watch()` replay the last emitted snapshot instantly (no storage
+    /// round-trip) instead of forcing it to wait for the next tick. The first
+    /// subscriber (empty cache) falls back to a live storage query (source of
+    /// truth), which is then cached for the next subscriber.
+    last_snapshot: Arc<AsyncMutex<Option<String>>>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         if let Some(task) = self.run_task.take() {
+            task.abort();
+        }
+        // Abort every reactive pump too — the watches are tied to this session,
+        // so they must not outlive it. (A pump whose receiver goes Closed on
+        // client drop would exit anyway, but abort is immediate + explicit and
+        // guards against a pump mid-storage-query.)
+        for task in self.watch_tasks.drain(..) {
             task.abort();
         }
     }
@@ -211,6 +277,8 @@ impl NostosClient {
                 client,
                 table: "tasks".to_owned(),
                 run_task: None,
+                watch_tasks: Vec::new(),
+                last_snapshot: Arc::new(AsyncMutex::new(None)),
             });
             Ok(())
         })
@@ -230,14 +298,15 @@ impl NostosClient {
     /// table is fixed at `connect()` time (default `"tasks"`); a mismatched
     /// `table` here is a programming error.
     ///
-    /// # ponytail: poll-only
-    /// UniFFI 0.28's async-callback path (the natural fit for a row-tick
-    /// callback into .NET) is fiddly enough to defer; the run loop applies
-    /// rows to storage as they arrive, and .NET polls `query()` until the
-    /// expected row appears (same shape as the Rust E2E template and the
-    /// Swift / Kotlin SDKs). A future `poll_new_rows()` draining
-    /// `SyncClient::subscribe_changes()`'s broadcast channel is the upgrade
-    /// path if `query()` polling proves too coarse.
+    /// # Reactive push vs poll
+    /// `subscribe()` itself stays the run-loop driver (it does NOT push row
+    /// ticks into .NET). Reactive push is a SEPARATE call — `watch(table,
+    /// sink)` — which drains `SyncClient::subscribe_changes()`'s broadcast on
+    /// the owned runtime and invokes a `SnapshotSink` callback per tick (the
+    /// .NET port of Flutter's `rows_sink` / Kotlin's `SnapshotSink`, commit
+    /// 41265fd). Callers who want push implement `SnapshotSink`; callers who
+    /// want poll still have `query()`. `subscribe()` + `watch()` compose:
+    /// `subscribe()` keeps the store fed, `watch()` fans ticks out.
     ///
     /// # Errors
     /// `NostosError` if no session is active (call `connect()` first) or the
@@ -349,11 +418,9 @@ impl NostosClient {
         self.rt.block_on(async {
             let client = {
                 let guard = self.session.lock().await;
-                let session = guard
-                    .as_ref()
-                    .ok_or_else(|| NostosError::Message {
-                        message: "query() called before connect()".to_string(),
-                    })?;
+                let session = guard.as_ref().ok_or_else(|| NostosError::Message {
+                    message: "query() called before connect()".to_string(),
+                })?;
                 Arc::clone(&session.client)
             };
             // `with_storage` runs the closure on the client's storage task;
@@ -377,22 +444,164 @@ impl NostosClient {
         self.rt.block_on(async {
             let client = {
                 let guard = self.session.lock().await;
-                let session = guard
-                    .as_ref()
-                    .ok_or_else(|| NostosError::Message {
-                        message: "checkpoint() called before connect()".to_string(),
-                    })?;
+                let session = guard.as_ref().ok_or_else(|| NostosError::Message {
+                    message: "checkpoint() called before connect()".to_string(),
+                })?;
                 Arc::clone(&session.client)
             };
             let lsn: Lsn = client.checkpoint().await.map_err(NostosError::wrap)?;
             Ok(lsn.0)
         })
     }
+
+    /// Reactive watch: emit the full-table snapshot to `sink` immediately, and
+    /// again after every change tick (remote apply or local write). This is
+    /// the .NET port of Flutter's `watch(table, rows_sink)` and Kotlin's
+    /// `watch(table, sink)` (commit 41265fd) — a TRUE Rust→.NET push via a
+    /// UniFFI callback interface, not a poll. The .NET consumer implements
+    /// [`SnapshotSink`] and receives `on_snapshot(json)` calls; it never
+    /// wall-clock-polls the store. The natural C# adapter is an
+    /// `IObservable<string>` / `Channel<string>` fed from `OnSnapshot`.
+    ///
+    /// One pump per call. The pump's lifecycle is tied to the sync session:
+    /// `Session::Drop` (on a session-replacing `connect()` or client drop)
+    /// aborts every pump. There is no per-watch handle to cancel today (the
+    /// floor; a `stop_watch(table)` is the mechanical follow-on if a caller
+    /// needs to unsubscribe mid-session).
+    ///
+    /// `table` MUST match the active session's table (v1: one table per client).
+    ///
+    /// # Load-bearing ordering: subscribe BEFORE the first snapshot read
+    /// The nostos-client change broadcast is no-replay
+    /// (`broadcast::channel(64)`). A receiver created AFTER a commit permanently
+    /// misses that commit — the "connected but lists render empty" regression.
+    /// The invariant is encoded directly in nostos-client at
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`, and this
+    /// port honors it: the broadcast receiver is created FIRST, the initial
+    /// snapshot is read AFTER. A commit in the residual gap just triggers a
+    /// redundant re-snapshot from the pump (idempotent — full snapshot,
+    /// self-healing on lag).
+    ///
+    /// # Errors
+    /// `NostosError` if `connect()` hasn't run or `table` doesn't match the
+    /// session fixed at `connect()` time.
+    pub fn watch(&self, table: String, sink: Arc<dyn SnapshotSink>) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let mut guard = self.session.lock().await;
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| NostosError::Message {
+                    message: "watch() called before connect()".to_string(),
+                })?;
+            if session.table != table {
+                return Err(NostosError::Message {
+                    message: format!(
+                        "watch() table {table:?} does not match active session table {:?} — v1 supports one table per NostosClient",
+                        session.table
+                    ),
+                });
+            }
+
+            // (1) SUBSCRIBE FIRST — load-bearing (see method doc). Must precede
+            // the initial snapshot read below; this receiver is the only way to
+            // learn of a commit that lands in the gap before the pump starts.
+            let mut changes = session.client.subscribe_changes();
+
+            // (2) Initial snapshot AFTER subscribing. Replay cache first: a late
+            // subscriber (a second `watch()` for the same table after data has
+            // already flowed) gets the last-emitted snapshot instantly without a
+            // storage round-trip. First subscriber (empty cache) falls back to a
+            // live storage query — the source of truth — which is then cached.
+            let cached = session.last_snapshot.lock().await.clone();
+            let initial_json = match cached {
+                Some(json) => json,
+                None => {
+                    let json = snapshot_json(&session.client, &table).await?;
+                    *session.last_snapshot.lock().await = Some(json.clone());
+                    json
+                }
+            };
+            sink.on_snapshot(initial_json);
+
+            // (3) Pump: re-snapshot on EVERY change tick. Full snapshot per tick
+            // (not a diff — self-healing on lag). Each watch owns its own
+            // receiver; a tick on a different table just re-queries cheaply.
+            // `Lagged` (the receiver fell >64 ticks behind) is treated as a tick
+            // — a full snapshot resyncs. `Closed` (the client dropped its
+            // senders) exits the pump.
+            let pump_client = Arc::clone(&session.client);
+            let pump_sink = Arc::clone(&sink);
+            let pump_cache = Arc::clone(&session.last_snapshot);
+            let pump_task = self.rt.spawn(async move {
+                // Ok / Lagged → re-snapshot + emit. Closed (the client dropped
+                // its senders) fails the `while let` and the pump exits.
+                while let Ok(_) | Err(RecvError::Lagged(_)) = changes.recv().await {
+                    // Snapshot read failure (e.g. transient busy) is best-effort:
+                    // skip this tick, the next one retries. Mirrors Flutter's
+                    // emit-on-tick contract.
+                    if let Ok(json) = snapshot_json(&pump_client, &table).await {
+                        {
+                            let mut cache = pump_cache.lock().await;
+                            *cache = Some(json.clone());
+                        }
+                        pump_sink.on_snapshot(json);
+                    }
+                }
+            });
+            session.watch_tasks.push(pump_task);
+            Ok(())
+        })
+    }
+}
+
+/// Read the full row snapshot for `table` as a JSON array-of-objects string.
+///
+/// Queries `cairn_data` directly (NOT a `SELECT * FROM {table}` VIEW): the
+/// `tasks`/etc. VIEW is only created by `SqliteStorage::apply_schema` once the
+/// server has shipped a schema, but `cairn_data` exists on every store right
+/// after `open()` (`CREATE TABLE IF NOT EXISTS cairn_data` in
+/// `nostos-client/src/sqlite.rs`). So this snapshot succeeds on a fresh/empty
+/// store (returning `"[]"`) as well as a populated one — the correct
+/// offline-first UX. `table` is the session-validated value (the caller's
+/// `watch()` already confirmed it equals the fixed session table), so the
+/// interpolation is injection-safe; the canonical per-table snapshot query is
+/// `SELECT pk, payload FROM cairn_data WHERE table_name = ?1 ...`
+/// (nostos-client/src/sqlite.rs).
+///
+/// Mirrors `nostos_kotlin`'s `snapshot_json` verbatim (commit 41265fd).
+async fn snapshot_json(
+    client: &Arc<SyncClient<SqliteStorage>>,
+    table: &str,
+) -> Result<String, NostosError> {
+    let sql =
+        format!("SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC");
+    let rows = client
+        .with_storage(move |s| s.query(&sql))
+        .await
+        .map_err(|e: ClientError| NostosError::wrap(e))?
+        .map_err(NostosError::wrap)?;
+    serde_json::to_string(&rows).map_err(NostosError::wrap)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test-only [`SnapshotSink`] that records every emitted snapshot into a
+    /// `std::sync::mpsc` channel. `mpsc::Sender` is `Send` but not `Sync`, so
+    /// it is wrapped in a `Mutex` (which IS `Send + Sync`) to satisfy the
+    /// `SnapshotSink: Send + Sync` bound. The test thread receives via
+    /// `recv_timeout` — a blocking EVENT wait on the callback, NOT a wall-clock
+    /// poll of the SDK. This is the honest reactivity proof.
+    struct RecordingSink(std::sync::Mutex<std::sync::mpsc::Sender<String>>);
+
+    impl SnapshotSink for RecordingSink {
+        fn on_snapshot(&self, json: String) {
+            // Best-effort: a dropped receiver (test gone) is fine; the pump
+            // keeps running until Session::Drop aborts it.
+            let _ = self.0.lock().expect("sink lock").send(json);
+        }
+    }
 
     /// Proof-of-integration: the SAME `SyncClient<SqliteStorage>` the sibling
     /// SDKs drive constructs + serves an offline query through the UniFFI
@@ -401,8 +610,8 @@ mod tests {
     /// query round-trip).
     #[test]
     fn nostos_client_offline_connect_query_round_trip() {
-        let client =
-            NostosClient::new("ws://localhost:0".into(), None, ":memory:".into()).expect("construct");
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
 
         client.connect().expect("connect");
 
@@ -421,8 +630,8 @@ mod tests {
     /// `nostos_tauri`, and `nostos_node` enforce.
     #[test]
     fn write_before_connect_is_an_error() {
-        let client =
-            NostosClient::new("ws://localhost:0".into(), None, ":memory:".into()).expect("construct");
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
 
         let err = client
             .write("tasks".into(), "upsert".into(), "pk1".into(), None)
@@ -439,8 +648,8 @@ mod tests {
     /// `nostos_kotlin`'s `subscribe_before_connect_is_an_error`.
     #[test]
     fn subscribe_before_connect_is_an_error() {
-        let client =
-            NostosClient::new("ws://localhost:0".into(), None, ":memory:".into()).expect("construct");
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
 
         let err = client
             .subscribe("tasks".into())
@@ -458,8 +667,8 @@ mod tests {
     /// `nostos_kotlin`'s `subscribe_table_mismatch_is_an_error`.
     #[test]
     fn subscribe_table_mismatch_is_an_error() {
-        let client =
-            NostosClient::new("ws://localhost:0".into(), None, ":memory:".into()).expect("construct");
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
         client.connect().expect("connect");
 
         let err = client
@@ -482,8 +691,8 @@ mod tests {
     /// `nostos_kotlin`'s `subscribe_after_connect_spawns_run_loop`.
     #[test]
     fn subscribe_after_connect_spawns_run_loop() {
-        let client =
-            NostosClient::new("ws://localhost:0".into(), None, ":memory:".into()).expect("construct");
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
         client.connect().expect("connect");
 
         client.subscribe("tasks".into()).expect("subscribe");
@@ -498,5 +707,116 @@ mod tests {
         // spawned run_with_reconnect task. If abort is broken, this test
         // hangs on runtime shutdown.
         drop(client);
+    }
+
+    /// REACTIVITY PROOF (host, no device/.NET runtime): `watch()` emits the
+    /// initial snapshot, and a local `write()` — which applies a row to
+    /// `cairn_data` AND fires the change broadcast (nostos-client/client.rs
+    /// invariant `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
+    /// `rows_applied == 1`) — causes the pump to emit a NEW snapshot, WITHOUT
+    /// the test polling a timer. `recv_timeout` blocks on the callback
+    /// delivery (an event wait), so this is reactive-by-callback, not
+    /// reactive-by-poll. Mirrors `nostos_kotlin`'s
+    /// `watch_emits_initial_snapshot_then_refires_on_local_write` (commit
+    /// 41265fd) verbatim.
+    ///
+    /// This also implicitly covers the subscribe-before-snapshot invariant: if
+    /// `watch()` read the snapshot BEFORE subscribing, a write racing in that
+    /// gap would be missed. The dedicated nostos-client test
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot` pins the
+    /// engine side; this test pins the FFI port's ordering (initial snapshot
+    /// emitted, then the post-write snapshot arrives).
+    #[test]
+    fn watch_emits_initial_snapshot_then_refires_on_local_write() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.connect().expect("connect");
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(tx))) as Arc<dyn SnapshotSink>;
+
+        // watch() subscribes (broadcast receiver created BEFORE the initial
+        // snapshot read — the load-bearing invariant) and emits the initial
+        // snapshot synchronously before returning.
+        client.watch("tasks".into(), sink).expect("watch");
+
+        // (1) Initial snapshot delivered — empty store → "[]" (cairn_data has
+        // no rows for tasks yet). No polling: blocking event wait, 5s ceiling.
+        let initial = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initial snapshot should arrive immediately");
+        assert_eq!(
+            initial, "[]",
+            "fresh store tasks snapshot should be empty array"
+        );
+
+        // (2) Local write applies a row to cairn_data AND fires the change
+        // broadcast tick. The pump (on the owned runtime) wakes, re-snapshots,
+        // and fires on_snapshot AGAIN — the reactive proof.
+        client
+            .write(
+                "tasks".into(),
+                "upsert".into(),
+                "pk1".into(),
+                Some(r#"{"id":"pk1","title":"reactive"}"#.to_owned()),
+            )
+            .expect("write");
+
+        // No polling: blocking event wait on the NEXT callback delivery.
+        let after_write = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("post-write snapshot should arrive reactively");
+        assert!(
+            after_write.contains("pk1"),
+            "post-write snapshot should contain the upserted row, got: {after_write}"
+        );
+
+        // Drop the client: Session::Drop aborts the pump. If abort is broken,
+        // this test hangs on runtime shutdown.
+        drop(client);
+    }
+
+    /// `watch()` before `connect()` surfaces a clear error — the same
+    /// before-connect contract `write()`/`subscribe()` enforce. Mirrors
+    /// `nostos_kotlin`'s `watch_before_connect_is_an_error` (commit 41265fd).
+    #[test]
+    fn watch_before_connect_is_an_error() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+
+        let (tx, _rx) = std::sync::mpsc::channel::<String>();
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(tx))) as Arc<dyn SnapshotSink>;
+
+        let err = client
+            .watch("tasks".into(), sink)
+            .expect_err("watch before connect should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("before connect"),
+            "expected a before-connect error, got: {msg}"
+        );
+    }
+
+    /// `watch()` with a table that doesn't match the session fixed at
+    /// `connect()` time surfaces a clear error — the same one-table-per-client
+    /// guard `write()`/`subscribe()` enforce. Mirrors `nostos_kotlin`'s
+    /// `watch_table_mismatch_is_an_error` (commit 41265fd).
+    #[test]
+    fn watch_table_mismatch_is_an_error() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.connect().expect("connect");
+
+        let (tx, _rx) = std::sync::mpsc::channel::<String>();
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(tx))) as Arc<dyn SnapshotSink>;
+
+        let err = client
+            .watch("not-tasks".into(), sink)
+            .expect_err("mismatched-table watch should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not match"),
+            "expected a table-mismatch error, got: {msg}"
+        );
     }
 }
