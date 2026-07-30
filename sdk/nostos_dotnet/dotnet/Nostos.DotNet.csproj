@@ -3,11 +3,18 @@
   <!--
   =============================================================================
   Nostos.DotNet — .NET projection over the Nord UniFFI-CS generated surface.
-  -----------------------------------------------------------------------------
-  THIS FILE IS NOT BUILT ON THIS HOST — `dotnet` is not installed (E2E is
-  SKIP-with-reason; see ../README.md). The committed dotnet/generated/
-  nostos.cs IS the visible artifact; this .csproj is the multi-target
-  shell that wraps it when a reviewer does install the .NET SDK.
+  =============================================================================
+  NOTE: this multi-target project is NOT the one the E2E builds — that is
+  dotnet/smoke/Smoke.csproj (net8.0, host-only), which is why the live
+  dotnet slice can pass while THIS file has never been compiled. That gap
+  hid two hard errors until 2026-07-30: a mismatched PackageProjectUrl
+  closing tag, and a double hyphen inside an XML comment (both fatal to any
+  `dotnet build`/`pack` of this project). Superseded claim, kept as the
+  lesson: this header used to assert "dotnet is not installed on this host,
+  E2E is SKIP-with-reason" — `dotnet` IS installed (~/.dotnet/dotnet) and the
+  slice PASSES. A stale environment claim in a comment is how the two errors
+  above stayed invisible. Building this project needs the iOS/Android/Windows
+  workloads, so `make sdk-e2e` deliberately does not.
 
   Multi-targeting:
     - net8.0-ios          (iOS device + sim — links libnostos_dotnet.dylib via
@@ -33,13 +40,13 @@
     <RootNamespace>Nostos</RootNamespace>
     <AssemblyName>Nostos.DotNet</AssemblyName>
     <PackageId>Nostos.DotNet</PackageId>
-    <Version>0.0.0</Version>
+    <Version>0.1.0</Version>
     <Description>UniFFI bridge exposing nostos-client's SyncClient&lt;SqliteStorage&gt; to .NET via Nord UniFFI-CS — feasibility scaffold.</Description>
     <Authors>Cairn Sync, Inc.</Authors>
     <Company>Cairn Sync, Inc.</Company>
     <Copyright>Apache-2.0</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://nostos.run</PackageUrl>
+    <PackageProjectUrl>https://nostos.run</PackageProjectUrl>
     <RepositoryUrl>https://github.com/nostos-sync/nostos</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
 
@@ -57,9 +64,10 @@
   <ItemGroup>
     <!-- The committed bindgen output. The Nord uniffi-bindgen-cs names the
          file after the namespace (nostos.cs), NOT after the primary class.
-         Regenerate via:
-         uniffi-bindgen-cs --library ../target/release/libnostos_dotnet.dylib \
-           --out-dir generated --config ../uniffi.toml -->
+         Regenerate with the `uniffi-bindgen-cs` invocation in ../README.md
+         ("Regenerate the C# bindings"). The exact flags are NOT inlined here:
+         an XML comment may not contain a double hyphen, so pasting a CLI
+         flag into this file makes the whole .csproj unparseable. -->
     <Compile Include="generated/**/*.cs" Exclude="bin/**;obj/**" />
   </ItemGroup>
 

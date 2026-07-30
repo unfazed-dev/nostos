@@ -1,10 +1,11 @@
 ## Default Permission
 
-Nostos Tauri plugin — default permissions for the offline connect/write/query/checkpoint surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all four commands unconditionally.
+Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all five commands unconditionally.
 
 #### This default permission set includes the following:
 
 - `allow-connect`
+- `allow-subscribe`
 - `allow-write`
 - `allow-query`
 - `allow-checkpoint`
@@ -92,6 +93,32 @@ Enables the query command without any pre-configured scope.
 <td>
 
 Denies the query command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:allow-subscribe`
+
+</td>
+<td>
+
+Enables the subscribe command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:deny-subscribe`
+
+</td>
+<td>
+
+Denies the subscribe command without any pre-configured scope.
 
 </td>
 </tr>
