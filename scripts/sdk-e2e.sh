@@ -106,7 +106,12 @@ if want flutter; then
     # native lib is older than the generated bindings — run
     # `cd sdk/nostos_flutter/example && flutter clean && flutter pub get` after
     # any `flutter_rust_bridge_codegen generate`.
-    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
+    # The doc-signature check rides along here because it needs no Flutter SDK
+    # but has no other home that runs: `make ci` is Rust-only and `dart analyze`
+    # does not compile fenced markdown, which is how README.md and USAGE.md both
+    # documented `NostosDatabase.supabase(supabaseUrl:, supabaseAnonKey:)` — three
+    # parameters that never existed — until 2026-07-30.
+    run_slice flutter "python3 sdk/nostos_flutter/scripts/check-doc-signatures.py && cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
   else
     skip_slice flutter "(flutter not on PATH)"
   fi

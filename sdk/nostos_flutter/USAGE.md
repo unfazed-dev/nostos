@@ -236,14 +236,21 @@ await db.subscribe('tasks');          // start the sync session for a table
 Throws `StateError` if no Supabase session is live — sign in first (Section 3).
 
 ```dart
+// Supabase.initialize(...) must already have run — this factory reads
+// Supabase.instance's current session itself, so it takes no Supabase args.
 final db = await NostosDatabase.supabase(
   nostosUrl: 'wss://sync.<your-project>.nostos.app/sync',
-  supabaseUrl: 'https://<project-ref>.supabase.co',
-  supabaseAnonKey: 'YOUR_KEY',
-  schema: appSchema,
+  schema: appSchema,                  // omit to fetch via GET /schema
   sqlitePath: '${dir.path}/cairn.sqlite',
 );
 ```
+
+> Corrected 2026-07-30: this sample previously passed `supabaseUrl:` and
+> `supabaseAnonKey:` to `NostosDatabase.supabase`. **Neither parameter exists** —
+> the real signature is `{nostosUrl, schema, sqlitePath}`, and it would not have
+> compiled. Pass Supabase's own URL/key to `Supabase.initialize`, or use
+> `NostosDatabase.open(config: …)`, whose `NostosConfig` *does* carry a
+> `supabaseUrl` / `supabaseAnonKey` block — that is where the confusion came from.
 
 ### Lowest-level — `NostosDatabase.connect`
 

@@ -56,22 +56,39 @@ is deterministic, so the index goes on the base table and the planner uses it
 *through* the view. Measured on SQLite 3.51 with 5,000 rows:
 
 ```sql
-CREATE VIEW v_tasks AS
+-- The view is named after the table itself — `view_name()` is
+-- `table.replace('.', "_")`, and pg.rs strips a `public.` prefix, so a
+-- `public.tasks` relation projects to a view literally called `tasks`.
+CREATE VIEW tasks AS
   SELECT pk AS _pk, json_extract(payload,'$.title') AS title
   FROM cairn_data WHERE table_name='tasks';
 
-EXPLAIN QUERY PLAN SELECT * FROM v_tasks WHERE title='t42';
+EXPLAIN QUERY PLAN SELECT * FROM tasks WHERE title='t42';
 -- before: SCAN cairn_data
 
 CREATE INDEX ix ON cairn_data(json_extract(payload,'$.title'))
   WHERE table_name='tasks';          -- partial + expression index
 
-EXPLAIN QUERY PLAN SELECT * FROM v_tasks WHERE title='t42';
+EXPLAIN QUERY PLAN SELECT * FROM tasks WHERE title='t42';
 -- after:  SEARCH cairn_data USING INDEX ix (<expr>=?)
 ```
 
 Correct rows either way; the partial predicate keeps the index scoped to one
-logical table.
+logical table. (Measured on a standalone fixture with these exact statements, not
+through the client.)
+
+That naming is what makes `SELECT * FROM tasks` work with no prefix to learn, and
+it is why raw DML against a synced table hits a **view** rather than missing
+entirely — the loud-failure property below depends on it.
+
+> **Known edge, non-public schemas.** `view_name` collapses the dot, so a
+> relation in a non-`public` schema becomes the view `myschema_tasks`, while
+> `Collection.watch` builds `SELECT * FROM myschema.tasks`
+> (`nostos_database.dart:495`) — which SQLite reads as schema `myschema`, table
+> `tasks`, and fails. Only `public` (the stripped case) is exercised; the
+> `sdk-e2e` flutter slice runs `NOSTOS_REPLICATOR=fake` with a bare `tasks`, so
+> nothing covers this. Untested, not known-broken — but do not assume a
+> non-public schema works.
 
 ## Decision
 
