@@ -139,8 +139,16 @@ ANDROID_SERIAL="$EMU_SERIAL" ./gradlew connectedDebugAndroidTest -PnostosPort="$
 }
 
 echo "[harness] 6/6 capture [kt-e2e] proof lines + test XML"
-# Spool logcat from the test run, then grep for the proof lines.
-"$ADB" -s "$EMU_SERIAL" logcat -d -t 800 | grep '\[kt-e2e\]' || true
+# Capture logcat ONCE — the printed spool and the verdict below must come from
+# the SAME dump. This previously dumped twice (`-d -t 800` for the spool, then an
+# unbounded `-d` for the verdict) and on a chatty emulator the proof lines rotated
+# out of the readable window between the two adb round-trips: the spool printed
+# `[kt-e2e] ECHO_OK` while the verdict recorded ECHO_OK=0 and the slice failed
+# with the instrumented test green (tests=2 failures=0). That is the capture flake
+# the comment above describes — dumping once removes the race by construction
+# instead of just widening the buffer and hoping.
+LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d 2>/dev/null || true)
+printf '%s\n' "$LOGCAT_DUMP" | grep '\[kt-e2e\]' || true
 echo "[harness] ----- test XML (failures count) -----"
 XML_GLOB="build/outputs/androidTest-results/connected/**/*.xml"
 # shellcheck disable=SC2086
@@ -155,10 +163,10 @@ for f in files:
 PY
 
 # Verdict: PUSH_OK + ECHO_OK must both be in logcat, AND failures=0 in XML.
-LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d 2>/dev/null || true)
+# Reuses the single $LOGCAT_DUMP captured in step 6/6 — do NOT re-dump here.
 PUSH_OK=0; ECHO_OK=0
-echo "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] PUSH_OK' && PUSH_OK=1
-echo "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] ECHO_OK' && ECHO_OK=1
+printf '%s\n' "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] PUSH_OK' && PUSH_OK=1
+printf '%s\n' "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] ECHO_OK' && ECHO_OK=1
 XML_FAIL=$(python3 - "$XML_GLOB" <<'PY' 2>/dev/null || echo "?"
 import glob, sys, xml.etree.ElementTree as ET
 files = glob.glob(sys.argv[1], recursive=True)
