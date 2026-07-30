@@ -26,8 +26,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+REPO = ROOT.parent.parent
 SRC = ROOT / "lib" / "src" / "nostos_database.dart"
-DOCS = [ROOT / "README.md", ROOT / "USAGE.md"]
+# `docs/api/flutter.md` is a THIRD copy of these signatures, which is exactly the
+# duplication that let `supabaseUrl:` survive in two files at once. It is in scope.
+DOCS = [ROOT / "README.md", ROOT / "USAGE.md", REPO / "docs" / "api" / "flutter.md"]
 
 
 def factory_params(src: str) -> dict[str, set[str]]:

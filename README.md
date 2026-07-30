@@ -100,7 +100,9 @@ nostos/
 
 The domain layer knows nothing about tokio, postgres, or axum. The application layer defines *ports* (`ReplicatorStream`, `EventSink`, `SessionStore`) — the infrastructure layer provides *adapters* that implement those ports. This is what lets the benchmark swap a `FakeReplicator` in for the real `PgReplicator` without touching a line of domain or use-case code.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, and
+**[`docs/api/`](docs/api/README.md) for the API reference** — one page per SDK, every signature
+extracted from source and cited to the file it came from.
 
 ---
 
