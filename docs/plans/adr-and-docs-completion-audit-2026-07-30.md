@@ -65,6 +65,11 @@ The browser keeps rows in an in-memory `BTreeMap`. A reload loses everything exc
 `localStorage` checkpoint. Destination chosen (SQLite-WASM + `opfs-sahpool`); the blocker is the
 Worker re-architecture, not SQL. Native platforms are unaffected.
 
+**Scope corrected 2026-07-30:** the browser also has **no outbox on the write path**, so it is a
+*live-only* client rather than a durable-minus-reload one. Both limits are now stated in
+`sdk/nostos_web/README.md`, whose Ceiling section had claimed "the remaining gap is Node-only" —
+wrong, and wrong in the flattering direction.
+
 **Left unbuilt on purpose, and it is the one item in this audit I am not closing.** ADR-0017 is a
 *ratified* deferral, and the work it names is not a bug fix — it is: spawn a dedicated Worker,
 define a `postMessage` command/response protocol, marshal `RowOp`/`PendingWrite` across it, and move
@@ -72,15 +77,28 @@ the WebSocket transport into the Worker too (it cannot call sync storage from th
 Multi-day, and by the ADR's own admission with "no Node-verifiable test path". Building that inside
 a fix-up pass would be the opposite of the discipline the rest of this audit applies.
 
-**One cheaper option ADR-0017 never evaluated, for a decision — not a recommendation to skip the
-Worker.** Its candidate table lists only OPFS-based mechanisms, yet its own prior-art table shows
-RxDB, Dexie and Triplit all persisting to **IndexedDB**, which *is* available on the main thread.
-That suggests a smaller intermediate step: keep the in-memory `BTreeMap` as the sync read path
-(preserving the sync `Storage` trait untouched) and mirror mutations to IndexedDB write-behind,
-hydrating at startup. It buys survive-a-reload without a Worker or a trait change. It is genuinely
-weaker than SQLite-WASM — no transaction spanning a batch, so a torn write must be repaired by the
-existing `resume_lsn` replay rather than rolled back — which is exactly why it needs an explicit
-decision and an ADR amendment, not a quiet commit.
+**The cheaper IndexedDB option I raised here was examined and REJECTED** — see the 2026-07-30
+addendum to ADR-0017. Recording it against myself, since two of my claims above were wrong:
+
+- **The gap is bigger than "rows".** `NostosSocket::write` (`nostos-ffi-wasm/src/lib.rs:496`) sends
+  the frame straight to the socket and **never touches `Outbox`** — with the socket closed it
+  returns an error. The browser is therefore a **live-only** client: no offline write capture, no
+  optimistic local row. Not silent (the caller gets an `Err`), but row durability alone would not
+  make it offline-capable. ADR-0017 predates this surface (ADR: 2026-07-04; `write`: 2026-07-12),
+  which is why its Consequences reason only about rows.
+- **"No transaction spanning a batch" was wrong.** IndexedDB *has* transactions and they span
+  object stores, so rows + checkpoint could commit atomically. The real blocker is that its API is
+  **async** while `Storage`/`Outbox` are **sync** — no sync trait method can await an IDB request,
+  so IndexedDB can only be a write-behind mirror, never a `Storage` impl.
+
+Rejected because the mirror fixes the visible half and leaves the half that matters: rows would
+survive a reload while an offline write still throws, which *looks* offline-capable and isn't. Plus
+it would have to demote the `localStorage` checkpoint (otherwise the checkpoint runs ahead of the
+mirrored rows and resume permanently skips the rows in between), and SQLite-WASM deletes it later.
+
+Also re-priced while writing the addendum: the Worker `postMessage` protocol must now marshal
+**13 trait methods, not the 5** ADR-0017 budgeted (ADR-0025 added the snapshot-reconcile pair,
+ADR-0027 the dead-letter pair). The deferred slice got ~2.6× more expensive while sitting still.
 
 ### 3. CRDT / custom merge tier (ADR-0004, ADR-0014) — does not block
 Per-field LWW ships and is the documented default. CRDT was always "Phase 4, opt-in".

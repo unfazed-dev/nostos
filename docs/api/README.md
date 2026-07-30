@@ -13,6 +13,11 @@ page cites the file it came from so you can check it yourself.
 
 ## Pick your SDK
 
+> **The two WASM-engine rows are live-only for writes.** Web (browser) and Capacitor send a write
+> straight to the socket and never touch the outbox, so a write with the socket closed errors instead
+> of queueing, and rows do not survive a reload. Every SQLite-backed row enqueues durably *before*
+> any network call. See the [ADR-0017 addendum](../adr/0017-web-persistence.md).
+
 | SDK | Page | Package | Live sync | Local reads |
 |---|---|---|---|---|
 | Flutter / Dart | [`flutter.md`](flutter.md) | `nostos_flutter` | ✅ | **SQL** over SQLite views |

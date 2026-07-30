@@ -1,6 +1,8 @@
 # ADR-0017: Web persistence (Front 5 — browser-durable storage)
 
-- **Status:** Deferred past v0.1 — decision recorded, follow-up scoped
+- **Status:** Deferred past v0.1 — decision recorded, follow-up scoped.
+  Amended 2026-07-30 (IndexedDB alternative rejected; scope corrected — see the
+  addendum at the end).
 - **Date:** 2026-07-04
 
 ## Context
@@ -153,3 +155,94 @@ not merely a current-state observation.
 - `crates/nostos-core/src/outbox.rs` (Outbox trait)
 - `crates/nostos-client/src/sqlite.rs` (reference impl for the follow-up)
 - `crates/nostos-ffi-wasm/src/transport.rs` (the transport that must move to the Worker)
+
+## Addendum: IndexedDB rejected; the browser is *live-only*, not merely non-durable (2026-07-30)
+
+**Status:** Accepted. The deferral above stands. Its *scope* was wrong, and the
+cheaper IndexedDB alternative floated in
+`docs/plans/adr-and-docs-completion-audit-2026-07-30.md` is **rejected**.
+
+Three facts checked against code rather than against this ADR's own prose.
+
+### 1. The browser has no outbox at all — writes are live-only
+
+`NostosSocket::write` (`crates/nostos-ffi-wasm/src/lib.rs:496`) builds a frame and
+calls `ws.send_with_str` directly. It never touches `Outbox`. With the socket not
+OPEN it returns `Err("nostos write: WebSocket send failed (socket not OPEN)")`.
+
+Contrast the native path (`crates/nostos-client/src/client.rs:418`): `enqueue()`
+first — durable before any network round-trip — then `apply_local()` for the
+instant local row.
+
+So the browser is **not a local-first client that forgets its rows on reload**. It
+is a **live-only client**: no offline write capture, no optimistic local row, and
+rows that vanish on reload. This is *not* silent data loss — the caller gets an
+`Err` — but it means row durability alone would not make the browser
+offline-capable.
+
+This ADR predates the browser write surface (ADR-0017: 2026-07-04;
+`NostosSocket::write`: `65aa4ef`, 2026-07-12), which is why its Consequences
+section reasons only about rows and concludes the cost is "one cold-reload
+re-fetch, not data loss". True of rows; silent about writes.
+
+### 2. The trait surface is 13 methods, not 5
+
+This ADR sized the Worker `postMessage` protocol against a 5-method trait.
+Today: `Storage` has 6 (`checkpoint`, `epoch`, `save_epoch`, `apply_batch`,
+`pks_for_table`, `delete_pks` — 4 required) and `Outbox` has 7 (`enqueue`,
+`pending`, `mark_done`, `bump_attempts`, `mark_dead_letter`, `apply_local`,
+`pending_pks_for_table` — 3 required). ADR-0025 added the snapshot-reconcile
+pair; ADR-0027 added the dead-letter pair.
+
+The follow-up got ~2.6× more expensive while sitting still. Assume it keeps doing
+so: every ADR that widens a client trait silently re-prices this work.
+
+### 3. Why IndexedDB is rejected — and what the real blocker is
+
+**Correction to the audit that proposed it:** the objection is *not* that
+IndexedDB lacks transactions. It has them, they span multiple object stores, and
+rows + checkpoint can therefore commit atomically — `Storage`'s central contract
+would survive.
+
+The actual blocker: IndexedDB's API is **asynchronous** and both `Storage` and
+`Outbox` are **synchronous** (deliberately — `nostos-core` is WASM-clean, no
+tokio). No sync trait method can await an IDB request, so IndexedDB cannot
+implement either trait on the main thread. It can only be a *write-behind mirror*
+alongside the in-memory store.
+
+Rejected, because a mirror fixes the visible half and leaves the half that
+matters:
+
+1. Rows would survive a reload; a write with the socket closed would still throw.
+   The result **looks** offline-capable and is not — worse than an honestly
+   live-only client, because the failure moves from "obviously missing" to
+   "discovered in production".
+2. The mirror must write the checkpoint in the same IDB transaction as the rows.
+   The existing `localStorage` checkpoint would then run **ahead** of the mirrored
+   rows, and resuming from it skips every row between the two positions —
+   permanently, since the server never re-sends them. Fixing that means demoting
+   `localStorage`, i.e. modifying the one durable thing the browser has today.
+3. SQLite-WASM deletes it. Two persistence mechanisms where the second erases the
+   first is work that pays for itself only if the first ships for months.
+
+### Re-scoped follow-up
+
+Steps 1–5 stand, plus:
+
+6. The Worker must land **`Storage` and `Outbox` together.** Rows-only repeats the
+   half-feature rejected above.
+7. Until then the documented ceiling is "**live-only**", not "non-durable".
+   `sdk/nostos_web/README.md` claimed "the remaining gap is Node-only" — wrong, and
+   wrong in the direction that flatters us. Corrected in this commit.
+
+If a durable read cache is later wanted on its own merits (instant paint, no
+snapshot re-fetch), that is a **performance** argument requiring its own
+before/after measurement — not this ADR's durability argument, and not a reason to
+revisit point 3.
+
+### References (addendum)
+
+- ADR-0013 addendum v2 (outbox dead-letter policy — two of the 13 methods)
+- ADR-0025 (snapshot-reconcile — the other two)
+- `docs/plans/adr-and-docs-completion-audit-2026-07-30.md` (where the rejected
+  IndexedDB option was raised)

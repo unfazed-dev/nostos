@@ -82,7 +82,21 @@ From `index.js`. `connect()` here does **not** open a socket — see *Ceiling*.
 
 ## Ceiling (ponytail)
 
-**The remaining gap is Node-only.** `NostosSocket.connect()` is wired to
+**In the browser this is a *live-only* client.** Two limits, both by design and
+both tracked in the [ADR-0017 addendum](../../docs/adr/0017-web-persistence.md):
+
+- **Rows do not survive a reload.** They live in an in-memory `BTreeMap`; only the
+  `localStorage` checkpoint persists, so a refresh replays from `resume_lsn`
+  (one re-fetch, no duplicates — ADR-0009's exactly-once holds).
+- **`write` requires a live socket.** It sends the frame directly and never
+  touches the outbox, so with the socket closed it returns an error instead of
+  queueing. There is no offline write capture and no optimistic local row —
+  unlike the native client, which enqueues durably *before* any network call.
+
+Neither is silent: a failed write returns `Err`. But do not describe the browser
+build as offline-capable — it is not yet.
+
+**A third gap is Node-only.** `NostosSocket.connect()` is wired to
 `web-sys::WebSocket` + `Window::localStorage`, which Node lacks, so the
 `index.js` facade intentionally does not call it — it would panic at the first
 `web_sys::WebSocket::new()` or `window()` access. The browser build has no such
