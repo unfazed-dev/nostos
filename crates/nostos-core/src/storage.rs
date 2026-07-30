@@ -134,4 +134,25 @@ pub trait Storage {
     /// transaction — so a backend that auto-commits per call (e.g. SQLite
     /// outside an explicit tx) is acceptable.
     fn delete_pks(&mut self, table: &str, pks: &[String]) -> crate::Result<()>;
+
+    /// Wipe ALL local state for sign-out / principal switch (ADR-0029).
+    ///
+    /// Resets the store to a fresh-database state: no rows, checkpoint
+    /// [`Lsn::ZERO`], epoch `0`, and (on a backend that bundles the outbox in
+    /// the same physical store, like `SqliteStorage`) a drained outbox +
+    /// dead-letter queue. After `clear()`, the next (re)connect MUST behave as
+    /// a brand-new client: subscribe with no `resume_lsn` and take the full
+    /// snapshot.
+    ///
+    /// **REQUIRED, not defaulted.** A no-op default would be a silent
+    /// cross-user data leak — the same "defaults degrade" trap as the other
+    /// defaulted methods (ADR-0025). Every impl MUST wipe its own surface; the
+    /// compiler enforces parity.
+    ///
+    /// **The load-bearing detail:** the checkpoint MUST reset to `0`, not
+    /// merely have its rows deleted. A stale checkpoint makes the next
+    /// principal resume from the old LSN, never receive a snapshot, and see an
+    /// empty database permanently — the resume-without-snapshot unsoundness
+    /// class.
+    fn clear(&mut self) -> crate::Result<()>;
 }

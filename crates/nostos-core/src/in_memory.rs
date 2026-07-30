@@ -156,6 +156,22 @@ impl Storage for InMemoryStorage {
         }
         Ok(())
     }
+
+    fn clear(&mut self) -> crate::Result<()> {
+        // ADR-0029: reset to fresh-client state for sign-out / principal switch.
+        // `rows.clear()` empties the data store; the checkpoint reset to ZERO is
+        // load-bearing — a stale checkpoint makes the next principal resume from
+        // the old LSN, skip the snapshot, and see an empty DB permanently
+        // (resume-without-snapshot unsoundness). InMemoryStorage does not persist
+        // epoch (the trait default is always 0), so there is no epoch field to
+        // reset. The outbox is cleared here too so a single call wipes the whole
+        // principal's footprint; Outbox::clear covers the outbox-only path.
+        self.rows.clear();
+        // ADR-0029: checkpoint → 0 is load-bearing (resume-without-snapshot guard).
+        self.checkpoint = Lsn::ZERO;
+        self.outbox.clear();
+        Ok(())
+    }
 }
 
 impl Outbox for InMemoryStorage {
@@ -214,6 +230,16 @@ impl Outbox for InMemoryStorage {
                 // until a client issues one (demo + Supabase use upsert/delete).
             }
         }
+        Ok(())
+    }
+
+    fn clear(&mut self) -> crate::Result<()> {
+        // ponytail: 4b per-principal retention layers above this (ADR-0029
+        // §Decision-2, pending ratification) — today sign-out discards ALL
+        // pending writes. InMemoryStorage has no dead-letter state (the
+        // bump_attempts/mark_dead_letter defaults are no-ops here), so draining
+        // the BTreeMap is the complete wipe.
+        self.outbox.clear();
         Ok(())
     }
 }
@@ -551,5 +577,41 @@ mod tests {
             Some(b"snap" as &[u8]),
             "snapshot row applies unconditionally despite lower lsn"
         );
+    }
+
+    #[test]
+    fn clear_resets_to_fresh_client_state() {
+        // ADR-0029: sign-out wipe resets to a fresh-client image — no rows,
+        // checkpoint ZERO (load-bearing — a stale checkpoint makes the next
+        // principal resume past the snapshot and see an empty DB permanently),
+        // and a drained outbox. InMemoryStorage carries no epoch field (the
+        // trait default is always 0), so there is no epoch to reset here.
+        let mut s = InMemoryStorage::new();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"alice"), 100)],
+            Lsn::new(100),
+            &empty_snap(),
+        )
+        .unwrap();
+        s.enqueue(PendingWrite {
+            table: "tasks".into(),
+            op: WriteOp::Upsert,
+            pk: "2".into(),
+            payload_json: Some(r#"{"title":"b"}"#.into()),
+        })
+        .unwrap();
+        assert_eq!(s.row_count(), 1);
+        assert_eq!(s.checkpoint().unwrap(), Lsn::new(100));
+        assert_eq!(s.outbox_len(), 1);
+
+        Storage::clear(&mut s).unwrap();
+
+        assert_eq!(s.row_count(), 0, "rows cleared");
+        assert_eq!(
+            s.checkpoint().unwrap(),
+            Lsn::ZERO,
+            "checkpoint reset to 0 — the resume-without-snapshot guard",
+        );
+        assert_eq!(s.outbox_len(), 0, "outbox cleared");
     }
 }

@@ -163,6 +163,25 @@ pub trait Outbox {
         pks.dedup();
         Ok(pks)
     }
+
+    /// Wipe pending writes AND the dead-letter queue (ADR-0029).
+    ///
+    /// On sign-out / principal switch this discards the outgoing principal's
+    /// unsynced writes so they cannot replay under the next principal's token
+    /// (cross-user write attribution). Dead-lettered rows (ADR-0027) are wiped
+    /// too — they are inspectable quarantine state, not durable user data the
+    /// new principal inherits.
+    ///
+    /// **REQUIRED, not defaulted.** A no-op default would leave the prior
+    /// principal's pending writes to flush under the new token — a silent
+    /// cross-user write-attribution leak (the same "defaults degrade" trap as
+    /// [`crate::Storage::clear`]).
+    ///
+    /// **Pending-write disposition (ADR-0029 §Decision-2):** today `clear()`
+    /// discards ALL pending writes. Per-principal retention (persist + refuse on
+    /// mismatch) is a RECOMMENDATION awaiting operator ratification; it will
+    /// layer ABOVE this method (outbox-internal, no trait change).
+    fn clear(&mut self) -> crate::Result<()>;
 }
 
 /// One local write awaiting server ack. The client's *write intent* — distinct
