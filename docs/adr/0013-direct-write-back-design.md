@@ -6,7 +6,7 @@
   PowerSync's `uploadData()`, so a reader who checked here was told the headline feature did not
   exist. As built: `PgWriteBack` in `nostos-infra`, gated by `NOSTOS_WRITE_TABLES`
   (`nostos-server/src/main.rs:112`, empty by default), covered by `e2e_pg_writeback.rs` +
-  `e2e_pg_writeback_timestamp.rs` against real Postgres, and exercised as the ECHO half of all 10
+  `e2e_pg_writeback_timestamp.rs` against real Postgres, and exercised as the ECHO half of all 9
   `sdk-e2e` slices. Still deferred: nothing in this ADR's core path.
 - **Date:** 2026-06-27
 

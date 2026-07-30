@@ -161,18 +161,25 @@ jobs:
       - name: flutter analyze
         working-directory: sdk/nostos_flutter
         run: flutter analyze
-      - name: flutter test
-        # Unit tests only (test/), NOT example/integration_test/ -d macos:
-        # that integration test launches a real packaged .app against a real
-        # `cargo run -p nostos-server` subprocess, which needs a windowed
-        # runner (a GUI session, not just a headless macOS VM) and the
-        # App-Sandbox-subprocess-spawning exception already documented in
-        # example/macos/Runner/DebugProfile.entitlements — neither is
-        # reliably available on a hosted Actions runner. Left as a manual /
-        # local verification step (see README's Testing section) until a
-        # self-hosted or windowed runner is worth the maintenance cost.
-        working-directory: sdk/nostos_flutter
-        run: flutter test
+      # `flutter test` REMOVED 2026-07-30. `sdk/nostos_flutter/{test,test_driver}`
+      # were moved under `archive/` by operator decision ("archive the tests as
+      # well - take it all"), so no Dart tests remain here to run. Consequence,
+      # stated plainly rather than buried: the Flutter SDK — the flagship — now
+      # has NO automated test coverage of its Dart surface, and the sdk-e2e
+      # flutter slice was archived in the same pass, so it has no live
+      # PUSH+ECHO proof either. Restoring both means Dart tests plus a host app
+      # under `fixtures/` (docs/plans/multi-sdk-pomodoro-fixture-matrix.md).
+      #
+      # The doc-signature guard moved here from that archived sdk-e2e slice,
+      # which was its only home. It needs no Flutter SDK and no device: it
+      # parses the fenced Dart in README.md / USAGE.md / docs/api/flutter.md and
+      # fails when a snippet names a NostosDatabase factory parameter that does
+      # not exist in lib/. README.md and USAGE.md both documented three invented
+      # `NostosDatabase.supabase` parameters for weeks because nothing checks
+      # prose — `make ci` is Rust-only and `dart analyze` does not compile
+      # fenced markdown. This step is now the only thing preventing a repeat.
+      - name: doc signatures match real factories
+        run: python3 sdk/nostos_flutter/scripts/check-doc-signatures.py
       # The glue crate is a deliberate non-workspace member (ADR-0015
       # addendum), so the workspace-wide clippy/test jobs never see it —
       # gate its Rust here explicitly.
