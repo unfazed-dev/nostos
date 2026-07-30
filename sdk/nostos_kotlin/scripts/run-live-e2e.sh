@@ -165,8 +165,20 @@ PY
 # Verdict: PUSH_OK + ECHO_OK must both be in logcat, AND failures=0 in XML.
 # Reuses the single $LOGCAT_DUMP captured in step 6/6 — do NOT re-dump here.
 PUSH_OK=0; ECHO_OK=0
-printf '%s\n' "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] PUSH_OK' && PUSH_OK=1
-printf '%s\n' "$LOGCAT_DUMP" | grep -q '\[kt-e2e\] ECHO_OK' && ECHO_OK=1
+# Match with bash pattern tests, NOT `printf … | grep -q`. Under `set -o
+# pipefail` that pipeline reports FAILURE ON A SUCCESSFUL MATCH whenever the
+# dump is large: `grep -q` exits at the first hit, `printf` then dies of
+# SIGPIPE (141), and pipefail propagates 141, so `&& PUSH_OK=1` never runs.
+# It bit PUSH_OK and not ECHO_OK for a reason — ECHO_OK is the LAST proof line,
+# so grep reads to EOF and printf finishes writing before exiting. PUSH_OK is
+# logged first, with the rest of the dump behind it.
+# Size-dependent, so it hid until step 6/6 enlarged the ring buffer to stop
+# proof lines rotating out: the bigger dump is what makes SIGPIPE land. That
+# made this the THIRD verdict-machinery bug in this file (after the two-dump
+# race and the wrong-dump verdict) — each one an SDK that worked while the
+# harness said otherwise. `[[ … == *…* ]]` spawns no process and cannot pipe.
+[[ "$LOGCAT_DUMP" == *'[kt-e2e] PUSH_OK'* ]] && PUSH_OK=1
+[[ "$LOGCAT_DUMP" == *'[kt-e2e] ECHO_OK'* ]] && ECHO_OK=1
 XML_FAIL=$(python3 - "$XML_GLOB" <<'PY' 2>/dev/null || echo "?"
 import glob, sys, xml.etree.ElementTree as ET
 files = glob.glob(sys.argv[1], recursive=True)

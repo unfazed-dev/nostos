@@ -122,8 +122,14 @@ ANDROID_SERIAL="$EMU_SERIAL" ./gradlew connectedDebugAndroidTest -PnostosPort="$
 echo "[rn-harness] 4/5 capture [rn-e2e] proof lines + test XML"
 LOGCAT_DUMP=$("$ADB" -s "$EMU_SERIAL" logcat -d 2>/dev/null || true)
 PUSH_OK=0; ECHO_OK=0
-echo "$LOGCAT_DUMP" | grep -q '\[rn-e2e\] PUSH_OK' && PUSH_OK=1
-echo "$LOGCAT_DUMP" | grep -q '\[rn-e2e\] ECHO_OK' && ECHO_OK=1
+# NOT `echo "$LOGCAT_DUMP" | grep -q …` — under `set -o pipefail` that reports
+# failure on a SUCCESSFUL match once the dump is big: `grep -q` exits at the
+# first hit, `echo` dies of SIGPIPE (141), pipefail propagates it, and
+# `&& PUSH_OK=1` never runs. It cost the kotlin slice a red FAIL at 558868b
+# with `[kt-e2e] PUSH_OK` sitting in the captured dump; this file had the
+# identical shape and was passing only on dump-size luck.
+[[ "$LOGCAT_DUMP" == *'[rn-e2e] PUSH_OK'* ]] && PUSH_OK=1
+[[ "$LOGCAT_DUMP" == *'[rn-e2e] ECHO_OK'* ]] && ECHO_OK=1
 
 XML_GLOB="$NOSTOS_RN/android/build/outputs/androidTest-results/connected/**/*.xml"
 XML_FAIL=$(python3 - "$XML_GLOB" <<'PY' 2>/dev/null || echo "?"

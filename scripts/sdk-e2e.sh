@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sdk-e2e.sh — run the 7 SDK live-replication E2E slices against the
+# scripts/sdk-e2e.sh — run the 10 SDK live-replication E2E slices against the
 # shared no-docker spine (nostos-infra/examples/e2e_server).
 #
 # Each slice spawns its own spine instance and proves BOTH replication
@@ -8,13 +8,16 @@
 #   ECHO  — SDK write()s a row   → server's echo WriteBack re-emits it
 #                                 → SDK applies it → readable on-device
 #
-# Host slices (rust, node, tauri, web) always run. Device-dependent slices
-# (flutter, swift, kotlin) SKIP with a reason when their runtime is absent, so
-# the runner is honest on a host-only box. See
-# docs/plans/sdk-live-e2e-consolidation.md.
+# Host slices (rust, node, tauri, web, capacitor) always run. Toolchain- and
+# device-dependent slices (dotnet, flutter, swift, kotlin, reactnative) SKIP
+# with a reason when their runtime is absent, so the runner is honest on a
+# host-only box. Keep this grouping in step with ALL_SLICES below and the
+# `want <slice>` guards — it said "7 slices / host: rust node tauri web /
+# device: flutter swift kotlin" until 2026-07-30, three slices after that
+# stopped being true. See docs/plans/sdk-live-e2e-consolidation.md.
 #
 # Usage:
-#   scripts/sdk-e2e.sh            # run all 7
+#   scripts/sdk-e2e.sh            # run all 10
 #   scripts/sdk-e2e.sh rust node  # run a subset (names match the slice keys)
 
 set -uo pipefail
@@ -113,8 +116,15 @@ fi
 # that simctl runs (i.e. that a simulator is *installed*) turns "nothing to run
 # against" into a red FAIL; the Android guards below check for a booted device,
 # so match them and SKIP honestly instead.
+#
+# All three device guards below feed `grep -q` from a HERE-STRING, never a pipe.
+# `cmd | grep -q` under `set -o pipefail` reports failure on a successful match
+# when cmd's output is long enough: grep exits at the first hit, cmd dies of
+# SIGPIPE (141), pipefail propagates it. In a guard that inverts the meaning —
+# the device IS booted and the slice SKIPs anyway, which strict mode then counts
+# as a failure. `<<<` feeds a file, so nothing can be signalled.
 if want swift; then
-  if xcrun simctl list devices 2>/dev/null | grep -q '(Booted)'; then
+  if grep -q '(Booted)' <<< "$(xcrun simctl list devices 2>/dev/null || true)"; then
     run_slice swift "cd sdk/nostos_swift/ios-test && ./build.sh"
   else
     skip_slice swift "(no booted iPhone simulator — \`xcrun simctl boot <device>\`)"
@@ -124,7 +134,7 @@ fi
 # Kotlin — needs an Android API-34 emulator (nostos_api34 / emulator-5556).
 if want kotlin; then
   ADB="${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb"
-  if [ -x "$ADB" ] && "$ADB" devices 2>/dev/null | grep -q 'emulator.*device'; then
+  if [ -x "$ADB" ] && grep -q 'emulator.*device' <<< "$("$ADB" devices 2>/dev/null || true)"; then
     run_slice kotlin "cd sdk/nostos_kotlin && ./scripts/run-live-e2e.sh"
   else
     skip_slice kotlin "(no booted Android emulator)"
@@ -137,7 +147,7 @@ fi
 # is a fast-follow (nostos_swift is sim-proven, so the pieces exist).
 if want reactnative; then
   ADB="${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb"
-  if [ -x "$ADB" ] && "$ADB" devices 2>/dev/null | grep -q 'emulator.*device'; then
+  if [ -x "$ADB" ] && grep -q 'emulator.*device' <<< "$("$ADB" devices 2>/dev/null || true)"; then
     run_slice reactnative "cd sdk/nostos_react_native && ./scripts/run-android-e2e.sh"
   else
     skip_slice reactnative "(no booted Android emulator)"

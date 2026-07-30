@@ -152,14 +152,40 @@ cd sdk/nostos_dotnet/dotnet
 dotnet build Nostos.DotNet.csproj      # needs the iOS/Android/Windows workloads
 ```
 
+**Attempted for real on 2026-07-30 and it FAILS on this host** — `4× error
+NETSDK1147: To build this project, the following workloads must be installed:
+ios`. `dotnet` itself is fine (8.0.422 at `~/.dotnet/dotnet`), but `dotnet
+workload list` is **empty**, and every one of the four TFMs is workload-gated,
+so there is no TFM that builds here without `dotnet workload restore` (a
+multi-GB install). Do not read the earlier "(Optional)" as "unverified but
+probably fine": it is *known not to compile on a stock host*.
+
+NETSDK1147 fires during workload import, **before any C# compiles**, so this
+does not clear the file — it only proves MSBuild got as far as resolving
+`TargetFrameworks`. Everything past that point is still unproven.
+
 **This project is not built by any test** — the E2E builds
 `dotnet/smoke/Smoke.csproj` (plain `net8.0`, host-only) instead, because the
 multi-target build needs mobile workloads. That is precisely why two fatal XML
 errors survived in it until 2026-07-30 (a mismatched `PackageProjectUrl` closing
-tag and a double hyphen inside an XML comment, which XML forbids). Both are
-fixed; if you edit that file, `python3 -c "import xml.etree.ElementTree as
-E;E.parse('dotnet/Nostos.DotNet.csproj')"` is a one-second guard that would have
-caught both.
+tag and a double hyphen inside an XML comment, which XML forbids).
+
+**Guard, if you edit this file** — evaluate it, don't just parse it. This needs
+no workloads, runs in ~2s, and is strictly stronger than an XML parse: it proves
+MSBuild can *evaluate* every property and item, and it shows you the packaging
+metadata that would otherwise only be checked at `dotnet pack` time.
+
+```bash
+dotnet msbuild Nostos.DotNet.csproj \
+  -getProperty:TargetFrameworks -getProperty:PackageId \
+  -getProperty:Version -getProperty:PackageLicenseExpression
+# → TargetFrameworks net8.0-ios;net8.0-android;net8.0-windows;net8.0-maccatalyst
+#   PackageId Nostos.DotNet · Version 0.1.0 · PackageLicenseExpression Apache-2.0
+```
+
+Verified passing 2026-07-30. `-getItem:PackageReference` returns `[]` — the
+project has no external NuGet dependencies, which is why nothing but the
+workloads stands between it and a compile.
 
 ## API surface
 
