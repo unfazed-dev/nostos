@@ -1,3 +1,10 @@
+> **SUPERSEDED (2026-07-30).** Its bar was **7/7** platforms. There are now **ten**, and all
+> ten prove a live PUSH+ECHO round-trip in one `SDK_E2E_STRICT=1 make sdk-e2e` run (exit 0,
+> zero skips) — see the A9 section of
+> [`nostos-completion-assessment-2026-07-29.md`](nostos-completion-assessment-2026-07-29.md).
+> Superseded by [`sdk-parity-final-three.md`](sdk-parity-final-three.md) for the 10-platform
+> scope. Kept because its per-slice harness design is still what `scripts/sdk-e2e.sh` runs.
+
 # SDK Live-E2E Consolidation — 7/7 platforms, real replication round-trips
 
 **Started:** 2026-07-12. **Owner:** Claude (tech lead). **Bar (operator-approved):**

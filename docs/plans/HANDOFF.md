@@ -1,4 +1,11 @@
-# Implementation Handoff — start here
+> **SUPERSEDED (2026-07-30) — do NOT start here.** This was the entrypoint in July 2026;
+> its "execute the committed plans task-by-task" list is stale. Current front door:
+> [`nostos-completion-assessment-2026-07-29.md`](nostos-completion-assessment-2026-07-29.md)
+> for project state, the reading order in `CLAUDE.md` for orientation, and
+> [`README.md`](README.md) for which plans in this directory are still live.
+> Kept for the historical record of the planning→implementation transition.
+
+# Implementation Handoff — start here <sub>(historical)</sub>
 
 You are the **implementation agent** for nostos. The planning phase is done; your job is to execute the committed plans task-by-task. Do not re-plan, do not re-litigate ADRs (architectural changes need a new ADR or an addendum, flagged to the operator). The human operator oversees only — nothing you do may publish, deploy, spend money, or leave this repository's directory tree.
 

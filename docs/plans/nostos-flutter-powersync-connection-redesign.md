@@ -1,3 +1,12 @@
+> **Read this first (2026-07-30). Live as an API proposal; DEAD as a bug fix.**
+> The problem statement below — "add does nothing", "5 rows → 1 shows" — was **falsified by
+> real-Postgres repro on 2026-07-13**. Actual causes: a `PgWriteBack`
+> TEXT-vs-`TIMESTAMPTZ` bind (chrono fix), and a config bug (`NOSTOS_REPLICATOR != pg`, so the
+> snapshotter was `None`). **Neither is fixed by this redesign.** Both are since fixed.
+> The seven API-shape decisions here were ratified separately and remain GATED-ON-GO, so the
+> plan stands as an API proposal. Do not cite its diagnosis as motivation.
+> Index: [`README.md`](README.md).
+
 # Nostos Flutter — PowerSync-Style Connection Redesign
 
 **Started:** 2026-07-13. **Owner:** Claude (tech lead). **Status:** PLAN — no
