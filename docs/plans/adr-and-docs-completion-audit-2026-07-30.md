@@ -82,10 +82,12 @@ addendum to ADR-0017. Recording it against myself, since two of my claims above 
 
 - **The gap is bigger than "rows".** `NostosSocket::write` (`nostos-ffi-wasm/src/lib.rs:496`) sends
   the frame straight to the socket and **never touches `Outbox`** — with the socket closed it
-  returns an error. The browser is therefore a **live-only** client: no offline write capture, no
-  optimistic local row. Not silent (the caller gets an `Err`), but row durability alone would not
-  make it offline-capable. ADR-0017 predates this surface (ADR: 2026-07-04; `write`: 2026-07-12),
-  which is why its Consequences reason only about rows.
+  **throws** (wasm-bindgen turns the `Err` into a thrown exception). The browser is therefore a
+  **live-only** client: no offline write capture, no optimistic local row. Not silent, but row
+  durability alone would not make it offline-capable. ADR-0017 predates this surface (ADR:
+  2026-07-04; `write`: 2026-07-12), which is why its Consequences reason only about rows.
+  Scoped to `NostosSocket` — `NostosClient.write` on the Node facade feeds the apply engine and opens
+  no socket at all.
 - **"No transaction spanning a batch" was wrong.** IndexedDB *has* transactions and they span
   object stores, so rows + checkpoint could commit atomically. The real blocker is that its API is
   **async** while `Storage`/`Outbox` are **sync** — no sync trait method can await an IDB request,
@@ -96,9 +98,16 @@ survive a reload while an offline write still throws, which *looks* offline-capa
 it would have to demote the `localStorage` checkpoint (otherwise the checkpoint runs ahead of the
 mirrored rows and resume permanently skips the rows in between), and SQLite-WASM deletes it later.
 
-Also re-priced while writing the addendum: the Worker `postMessage` protocol must now marshal
-**13 trait methods, not the 5** ADR-0017 budgeted (ADR-0025 added the snapshot-reconcile pair,
-ADR-0027 the dead-letter pair). The deferred slice got ~2.6× more expensive while sitting still.
+Also re-priced while writing the addendum — **and I first got this wrong too.** I compared 13 total
+methods against ADR-0017's 5 and called it 2.6×; the ADR's 5 were the *required* ones, so
+required-vs-required is **7 vs 5 = 1.4×** (ADR-0025 added `pks_for_table`/`delete_pks`). The other 6
+have defaults, but the defaults *degrade*: no dead-letter quarantine (ADR-0027), no instant-local
+row, no oplog epoch check. So 1.4× for a correct Worker backend, ~2.6× for one at parity with
+native. Either way the deferred slice got more expensive while sitting still.
+
+The reject-the-mirror call above is mine as tech lead, not an operator ratification — the operator
+asked for the amendment and the audit had left the option open. Point 3 of the addendum is the
+argument to attack if it should be overturned.
 
 ### 3. CRDT / custom merge tier (ADR-0004, ADR-0014) — does not block
 Per-field LWW ships and is the documented default. CRDT was always "Phase 4, opt-in".

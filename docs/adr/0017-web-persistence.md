@@ -162,13 +162,26 @@ not merely a current-state observation.
 cheaper IndexedDB alternative floated in
 `docs/plans/adr-and-docs-completion-audit-2026-07-30.md` is **rejected**.
 
+**Who decided:** the rejection is a tech-lead call made while writing this
+addendum, not an operator ratification — the operator asked for the amendment, and
+the audit had put the IndexedDB option forward as *open*. Overturnable; the
+argument to attack is point 3 below.
+
 Three facts checked against code rather than against this ADR's own prose.
 
 ### 1. The browser has no outbox at all — writes are live-only
 
 `NostosSocket::write` (`crates/nostos-ffi-wasm/src/lib.rs:496`) builds a frame and
 calls `ws.send_with_str` directly. It never touches `Outbox`. With the socket not
-OPEN it returns `Err("nostos write: WebSocket send failed (socket not OPEN)")`.
+OPEN its `Err` — `"nostos write: WebSocket send failed (socket not OPEN)"` — is
+**thrown** at the JS boundary (wasm-bindgen maps `Result<(), JsValue>` to a
+thrown exception, not a returned error value; Capacitor's `async write` surfaces
+it as a rejected promise).
+
+This is `NostosSocket.write` — the live browser transport — specifically. The
+`NostosClient.write` on the `index.js` facade is a different surface: it feeds the
+apply engine directly and never opens a socket at all (its `connect()` only sets a
+flag), which is the separately-documented Node ceiling below.
 
 Contrast the native path (`crates/nostos-client/src/client.rs:418`): `enqueue()`
 first — durable before any network round-trip — then `apply_local()` for the
@@ -185,17 +198,24 @@ This ADR predates the browser write surface (ADR-0017: 2026-07-04;
 section reasons only about rows and concludes the cost is "one cold-reload
 re-fetch, not data loss". True of rows; silent about writes.
 
-### 2. The trait surface is 13 methods, not 5
+### 2. The required trait surface is 7 methods, not 5 — and 13 for undegraded behaviour
 
-This ADR sized the Worker `postMessage` protocol against a 5-method trait.
-Today: `Storage` has 6 (`checkpoint`, `epoch`, `save_epoch`, `apply_batch`,
-`pks_for_table`, `delete_pks` — 4 required) and `Outbox` has 7 (`enqueue`,
-`pending`, `mark_done`, `bump_attempts`, `mark_dead_letter`, `apply_local`,
-`pending_pks_for_table` — 3 required). ADR-0025 added the snapshot-reconcile
-pair; ADR-0027 added the dead-letter pair.
+Point 2 of the deferral above counted 5: `checkpoint`, `apply_batch`, `enqueue`,
+`pending`, `mark_done`. All five are still required. ADR-0025 added two more
+required ones (`pks_for_table`, `delete_pks` for snapshot-reconcile), so
+**required-vs-required is 7 vs 5 — 1.4×, not the 2.6× first written here.**
 
-The follow-up got ~2.6× more expensive while sitting still. Assume it keeps doing
-so: every ADR that widens a client trait silently re-prices this work.
+The full surface is 13 (`Storage` 6, `Outbox` 7); the other 6 have defaults. But
+those defaults *degrade* rather than fail, and each degradation is a real feature
+switched off: the `bump_attempts`/`mark_dead_letter` default disables dead-letter
+quarantine (ADR-0027), `apply_local`'s default drops the instant-local row so
+writes only appear on the server echo, and `epoch`/`save_epoch` skip the oplog
+epoch check. A Worker backend that ships only the 7 required methods is correct
+but visibly worse than the native client.
+
+So: 1.4× on the floor, up to 2.6× for parity. Either way the follow-up got more
+expensive while sitting still — every ADR that widens a client trait silently
+re-prices this work.
 
 ### 3. Why IndexedDB is rejected — and what the real blocker is
 

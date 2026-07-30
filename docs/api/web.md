@@ -69,11 +69,14 @@ reload except the `localStorage` checkpoint.
 
 ## Ceilings
 
-- **Live-only: `write` needs an open socket.** It sends the frame directly and never touches the
-  outbox, so with the socket closed it returns an error rather than queueing. No offline write
-  capture and no optimistic local row — the native SDKs enqueue durably *before* any network call.
-  Combined with the in-memory rows above, do not describe this build as offline-capable.
-  ([ADR-0017 addendum](../adr/0017-web-persistence.md))
+- **Live-only: `NostosSocket.write` needs an open socket.** It sends the frame directly and never
+  touches the outbox, so with the socket closed it **throws** rather than queueing (wasm-bindgen
+  turns the `Err` into a thrown exception). No offline write capture and no optimistic local row —
+  the native SDKs enqueue durably *before* any network call. Combined with the in-memory rows above,
+  do not describe this build as offline-capable. ([ADR-0017
+  addendum](../adr/0017-web-persistence.md))
+  *(`NostosClient.write` on the Node facade is a different surface — it feeds the apply engine and
+  never opens a socket at all; see the Node ceiling above.)*
 - One table per socket.
 - No reactive stream in the browser path — poll `rowsFor` after writes, or wrap the pump yourself.
 - Payloads are bytes both directions; you own encode/decode.
