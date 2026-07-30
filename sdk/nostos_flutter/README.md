@@ -104,21 +104,20 @@ final db = await NostosDatabase.open(
 );
 ```
 
-> ### ⚠️ You must re-connect when the token refreshes
+> ### Token refresh is handled for you
 >
-> **Sync stops when the access token expires — about an hour after login on
-> Supabase's default TTL — and does not recover on its own.** The token is fixed
-> when you connect: `ClientConfig.token` is immutable, the reconnect loop re-sends
-> the same value on every attempt, and the server enforces `exp`. So the client
-> retries a dead token indefinitely while your UI shows stale data.
+> `NostosDatabase.supabase` subscribes to `onAuthStateChange` and forwards rotated
+> tokens into the sync client, so a session that refreshes mid-flight keeps
+> syncing. `close()` cancels that subscription.
 >
-> Until this is wired transparently, listen to `onAuthStateChange` and re-connect
-> with the new token on `tokenRefreshed`. Watch `SyncStatus.lastWriteError` /
-> connection state to see it happen.
+> **This was a real defect until 2026-07-30:** the token was captured once at
+> connect, the reconnect loop re-sent it forever, and the server enforces `exp` —
+> so sync stopped about an hour after sign-in and never recovered, with nothing
+> visible but a flapping connection state.
 >
-> Tracked as an open P1 with the agreed fix (a pure-Dart auto-wire inside
-> `NostosDatabase.supabase`) in
-> [`docs/plans/nostos-flutter-powersync-connection-redesign.md`](../../docs/plans/nostos-flutter-powersync-connection-redesign.md).
+> If you manage auth yourself, call `nostos.setToken(newToken)` on rotation. Use
+> that, **not** a re-connect: swapping the token in place leaves your `watch`
+> streams open, whereas building a fresh handle ends every one of them.
 
 `NostosDatabase.supabase` does **not** depend on the `supabase_flutter`
 package — pass `accessToken` from whatever auth source you use. `supabaseUrl` is

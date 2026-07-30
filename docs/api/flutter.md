@@ -128,13 +128,26 @@ const schema = NostosSchema(tables: [
 
 `NostosColumn({required name, affinity, pgOid})` plus `.text(name)` / `.integer(name)` shorthands.
 
-## ⚠️ Token refresh — open P1
+## Token refresh — handled (since 2026-07-30)
 
-**Sync stops when the access token expires** — about an hour after login on Supabase's default
-TTL — **and does not recover.** The token is fixed at connect: `ClientConfig.token` is immutable,
-the reconnect loop re-sends it every attempt, and the server enforces `exp`. Listen to
-`onAuthStateChange` and re-connect with the new token on `tokenRefreshed`. Tracked with its agreed
-fix in [`../plans/nostos-flutter-powersync-connection-redesign.md`](../plans/nostos-flutter-powersync-connection-redesign.md).
+`NostosDatabase.supabase` wires `onAuthStateChange` into the sync client, so rotated tokens are
+forwarded automatically and `close()` cancels the listener. Managing auth yourself? Call:
+
+```dart
+await nostos.setToken(newAccessToken);   // or null on sign-out
+```
+
+**Use `setToken`, never a re-connect.** It swaps the credential on the live client so the next
+connection uses it — nothing is torn down and open `watch` streams keep flowing. Rebuilding the
+handle (the obvious alternative) ends every stream, because `_replayLatest` wires
+`onDone: controller.close`; an hour after login your UI would look like it had lost its data.
+
+It does not force a reconnect either: a live socket runs on, and a client already in the reconnect
+loop picks the new token up on its next attempt, so a refresh self-heals within one backoff window.
+
+**What this fixed:** the token was captured once at connect, `run_with_reconnect` re-sent it on
+every attempt, and the server enforces `exp` — so sync died roughly an hour after sign-in and never
+recovered, surfacing only as a flapping connection state.
 
 ## Proven by
 

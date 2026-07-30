@@ -36,7 +36,31 @@ Verified against `sdk/nostos_flutter/lib/` and `crates/` on 2026-07-30, not from
 | D6 | Supabase first-class | ⚠️ **partial** | `NostosSupabase` + `.supabase(…)` shipped; **no connector / no token refresh — open P1, below** |
 | D7 | Rollout = replace `Nostos` | ⚠️ **settled differently** | Both exported; `NostosDatabase` is the only *taught* surface. No `@Deprecated` |
 
-### D6's open P1 — token refresh
+### D6's token-refresh gap — CLOSED 2026-07-30
+
+**Fixed, and not the way it was ratified.** The agreed fix was a pure-Dart `onAuthStateChange`
+auto-wire with no Rust change. Reading the engine falsified that: the token is baked in at
+`NostosHandle::connect`, `SyncClientConfig` is immutable after construction, and there is **no**
+token-swap primitive (the docstring that claimed `NostosSupabase` had one was wrong). So "pure Dart"
+necessarily meant *rebuilding the handle* — and `_replayLatest` wires `onDone: controller.close`,
+so every `watch` stream the UI holds would end. That trades silent sync-death for apparent
+data-loss, which is worse.
+
+Built instead (grilling option **b**, the named upgrade path):
+
+- `SyncClient.token: RwLock<Option<String>>` seeded from config, read by `connect_url()`, with
+  `set_token()` (`crates/nostos-client/src/client.rs`). Test:
+  `set_token_changes_the_next_connect_url`.
+- `NostosHandle::set_token` updates both the seed and the live client — the seed alone would not
+  reach a running client, the client alone would be discarded by the next `subscribe()`.
+- `Nostos.setToken` + `NostosEngine.setToken`; `NostosDatabase.supabase` subscribes to
+  `onAuthStateChange` (`tokenRefreshed`, `signedIn`, `userUpdated`, and `signedOut` → clear), with
+  the subscription cancelled in `close()`.
+- Dart tests: delegation, null-clearing, and **that an active `watch` stream is not disturbed**.
+
+No reconnect is forced; a refresh self-heals within one backoff window.
+
+### Original write-up of the gap (kept for the record)
 
 `NostosConnector` **does not exist** anywhere in `lib/` or `crates/`. The plan's
 "implement `NostosConnector` (`fetchCredentials` → token, refresh)" was never built;

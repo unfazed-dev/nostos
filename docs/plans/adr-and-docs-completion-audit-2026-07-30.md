@@ -44,16 +44,43 @@ sketch. That is the single most misleading line in the repo.
 
 Ranked by whether they block a launch.
 
-### 1. Token refresh — blocks a Supabase launch
-`ClientConfig.token` is immutable, the reconnect loop re-sends it, the server enforces `exp`. **A
-Supabase app stops syncing about an hour after login and never recovers.** Fix ratified 2026-07-30
-(pure-Dart `onAuthStateChange` auto-wire), not built. This is the only gap that silently breaks a
-working app.
+### 1. Token refresh — ~~blocks a Supabase launch~~ **FIXED 2026-07-30**
+Was: `ClientConfig.token` immutable, reconnect loop re-sends it, server enforces `exp` ⇒ a Supabase
+app stopped syncing about an hour after login and never recovered.
 
-### 2. Web durability (ADR-0017) — blocks a *web* launch, nothing else
+Now: `SyncClient.set_token` (token behind a `RwLock`, read by `connect_url()`) → `NostosHandle::
+set_token` (updates the seed *and* the live client) → `Nostos.setToken` → `NostosDatabase.supabase`
+auto-wires `onAuthStateChange`, cancelled in `close()`.
+
+**The ratified fix was wrong and got replaced.** "Pure Dart, no Rust change" required rebuilding the
+handle, because the token is constructor-baked and no swap primitive existed (the docstring claiming
+`NostosSupabase` had one was false). Rebuilding ends every `watch` stream —
+`_replayLatest` wires `onDone: controller.close` — so the app would appear to lose its data an hour
+after login instead of silently not syncing. Strictly worse. The FFI route touches no stream.
+Guarded by `set_token_changes_the_next_connect_url` plus three Dart tests, one of which asserts an
+active `watch` stream survives a refresh.
+
+### 2. Web durability (ADR-0017) — blocks a *web* launch, nothing else — **NOT FIXED, deliberately**
 The browser keeps rows in an in-memory `BTreeMap`. A reload loses everything except the
 `localStorage` checkpoint. Destination chosen (SQLite-WASM + `opfs-sahpool`); the blocker is the
 Worker re-architecture, not SQL. Native platforms are unaffected.
+
+**Left unbuilt on purpose, and it is the one item in this audit I am not closing.** ADR-0017 is a
+*ratified* deferral, and the work it names is not a bug fix — it is: spawn a dedicated Worker,
+define a `postMessage` command/response protocol, marshal `RowOp`/`PendingWrite` across it, and move
+the WebSocket transport into the Worker too (it cannot call sync storage from the main thread).
+Multi-day, and by the ADR's own admission with "no Node-verifiable test path". Building that inside
+a fix-up pass would be the opposite of the discipline the rest of this audit applies.
+
+**One cheaper option ADR-0017 never evaluated, for a decision — not a recommendation to skip the
+Worker.** Its candidate table lists only OPFS-based mechanisms, yet its own prior-art table shows
+RxDB, Dexie and Triplit all persisting to **IndexedDB**, which *is* available on the main thread.
+That suggests a smaller intermediate step: keep the in-memory `BTreeMap` as the sync read path
+(preserving the sync `Storage` trait untouched) and mirror mutations to IndexedDB write-behind,
+hydrating at startup. It buys survive-a-reload without a Worker or a trait change. It is genuinely
+weaker than SQLite-WASM — no transaction spanning a batch, so a torn write must be repaired by the
+existing `resume_lsn` replay rather than rolled back — which is exactly why it needs an explicit
+decision and an ADR amendment, not a quiet commit.
 
 ### 3. CRDT / custom merge tier (ADR-0004, ADR-0014) — does not block
 Per-field LWW ships and is the documented default. CRDT was always "Phase 4, opt-in".

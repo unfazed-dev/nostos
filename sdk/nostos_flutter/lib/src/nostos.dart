@@ -316,6 +316,25 @@ class Nostos {
   /// [close] has run, [connectionState] stops emitting (its underlying
   /// controller is closed), so a caller that wants to keep observing state
   /// after a fresh [subscribe] should create a new [Nostos] instead.
+  /// Replace the bearer token used for subsequent connections.
+  ///
+  /// Call this whenever your auth provider rotates the access token. For
+  /// `supabase_flutter` that is `onAuthStateChange` emitting `tokenRefreshed` —
+  /// and [NostosDatabase.supabase] wires this up for you, so you only need this
+  /// directly if you manage auth yourself.
+  ///
+  /// **Why it matters:** a Supabase JWT expires in roughly an hour and the server
+  /// enforces `exp`. Without a refresh the reconnect loop re-sends the dead token
+  /// forever — the app keeps rendering local rows and never syncs again, with no
+  /// error surfaced beyond the connection state flapping.
+  ///
+  /// Safe mid-session and idempotent. Nothing is torn down: no reconnect is
+  /// forced, [watch] streams stay open, and the durable outbox is untouched. A
+  /// live socket keeps running until it drops naturally; if the client is already
+  /// retrying, the next attempt uses the new token, so a refresh self-heals
+  /// within one backoff window.
+  Future<void> setToken(String? token) => _engine.setToken(token);
+
   Future<void> close() async {
     await _engine.close();
     await _stateController.close();
@@ -455,9 +474,16 @@ class Nostos {
 ///   accessToken: session.accessToken,
 /// );
 /// ```
-/// `supabase_flutter`'s `onAuthStateChange` fires on token refresh; re-call
-/// `NostosSupabase.connect` (or re-`subscribe`) with the new token when it
-/// does — auto-refresh pass-through is not yet wired transparently (v1).
+/// `supabase_flutter`'s `onAuthStateChange` fires on token refresh. Call
+/// [Nostos.setToken] with the new token when it does — that swaps the credential
+/// in place without tearing anything down, so open `watch` streams survive.
+/// (Do **not** re-`connect` for this: a fresh handle ends every stream the UI
+/// holds.) If you use [NostosDatabase.supabase] instead of this wrapper, that
+/// wiring is already done for you.
+///
+/// Corrected 2026-07-30: this previously said auto-refresh was "not yet wired
+/// transparently (v1)" and advised re-calling `connect`. It is now wired in
+/// `NostosDatabase.supabase`, and re-connecting was never the right advice.
 class NostosSupabase {
   const NostosSupabase._();
 

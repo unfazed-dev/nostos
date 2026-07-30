@@ -74,17 +74,6 @@ abstract class NostosHandle implements RustOpaqueInterface {
     dbPath: dbPath,
   );
 
-  /// Pause syncing: abort ONLY the connect/apply/reconnect loop, keeping the
-  /// `SyncClient`, its `SqliteStorage`, and every `watch()` pump alive. Reads,
-  /// writes (which land in the durable outbox), and the UI keep working
-  /// offline. `resume()` restarts it. Idempotent: a no-op when already paused
-  /// or when there is no active subscription.
-  ///
-  /// Emits nothing on `state_sink` here (the aborted loop leaves it mid
-  /// `connecting`/`reconnecting`); the Dart wrapper surfaces `disconnected`
-  /// so the UI signal has one owner. Cancellation is task-abort: `run_once`
-  /// respects no stop token, and `tokio::sync::Mutex` (no poison) + `Arc`
-  /// client state mean the client stays usable for local work after the abort.
   Future<void> disconnect();
 
   /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
@@ -125,6 +114,37 @@ abstract class NostosHandle implements RustOpaqueInterface {
   /// name; the Dart public API mirrors the pause/resume pair (WS5) for the
   /// same reason — `connect` clashes with `Nostos.connect`/`NostosDatabase.connect`.
   Stream<NostosConnectionState> resume();
+
+  /// Pause syncing: abort ONLY the connect/apply/reconnect loop, keeping the
+  /// `SyncClient`, its `SqliteStorage`, and every `watch()` pump alive. Reads,
+  /// writes (which land in the durable outbox), and the UI keep working
+  /// offline. `resume()` restarts it. Idempotent: a no-op when already paused
+  /// or when there is no active subscription.
+  ///
+  /// Emits nothing on `state_sink` here (the aborted loop leaves it mid
+  /// `connecting`/`reconnecting`); the Dart wrapper surfaces `disconnected`
+  /// so the UI signal has one owner. Cancellation is task-abort: `run_once`
+  /// respects no stop token, and `tokio::sync::Mutex` (no poison) + `Arc`
+  /// client state mean the client stays usable for local work after the abort.
+  /// Replace the bearer token for subsequent connections (ADR-0010 auth).
+  ///
+  /// Call this when the auth provider rotates a token — for `supabase_flutter`
+  /// that is `onAuthStateChange` firing `tokenRefreshed`. Without it a client
+  /// keeps re-sending the token it was constructed with, the server rejects it
+  /// on `exp`, and the reconnect loop retries a dead credential forever: the
+  /// app renders stale rows and never syncs again.
+  ///
+  /// Updates BOTH the handle's seed (so a later `subscribe()` builds its config
+  /// with the new value) and the live `SyncClient` if a session already exists.
+  /// Missing either half leaves a window where the refresh is silently lost —
+  /// the seed alone would not reach a running client, and the client alone
+  /// would be discarded by the next `subscribe()`.
+  ///
+  /// Does not force a reconnect: a live socket keeps running and the next
+  /// connection picks the token up, so a refresh self-heals within one backoff
+  /// window. Crucially it tears nothing down, so `watch` streams stay open —
+  /// rebuilding the handle instead would close every stream the UI holds.
+  Future<void> setToken({String? token});
 
   /// Subscribe to `tables` over ONE `/sync` WebSocket (D1/ADR-0022 multi-
   /// table-per-handle). The first entry is the primary; the rest are extra

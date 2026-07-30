@@ -260,6 +260,11 @@ where
 {
     url: String,
     config: SyncClientConfig,
+    /// The live bearer token, seeded from `config.token` and replaceable via
+    /// [`SyncClient::set_token`]. Separate from `config` because `config` is
+    /// immutable after construction and a token is the one field that must
+    /// outlive its initial value — see `set_token` for why.
+    token: std::sync::RwLock<Option<String>>,
     engine: Arc<Mutex<ApplyEngine<S>>>,
     /// Hot outbox status for UI binding — `watch`, not `broadcast`, because a
     /// late subscriber must see the CURRENT value immediately (a status widget
@@ -316,14 +321,35 @@ where
         // `watch()` re-queries storage rather than replaying a diff, so a
         // lagged receiver self-heals on the next tick.
         let (changes, _) = tokio::sync::broadcast::channel(64);
+        let token = std::sync::RwLock::new(config.token.clone());
         Self {
             url: url.into(),
             config,
+            token,
             engine,
             changes,
             write_notify: Notify::new(),
             write_status,
         }
+    }
+
+    /// Replace the bearer token used by **subsequent** connections.
+    ///
+    /// This exists because an access token outlives nothing gracefully: a
+    /// Supabase JWT expires in about an hour, the server enforces `exp`, and
+    /// [`Self::run_with_reconnect`] re-sends whatever token it was built with on
+    /// every attempt. Without this, a long-lived client retries a dead token
+    /// forever and the app silently stops syncing while still rendering stale
+    /// rows.
+    ///
+    /// Deliberately does **not** force a reconnect. If the socket is live the
+    /// new token is simply picked up next time one is opened; if the client is
+    /// already in the reconnect loop, the next attempt uses it, so a refresh
+    /// self-heals within one backoff window. Nothing else is torn down — the
+    /// storage, the outbox, and every `changes` subscriber survive, which is the
+    /// whole point of doing this here instead of rebuilding the client.
+    pub fn set_token(&self, token: Option<String>) {
+        *self.token.write().expect("set_token: token lock poisoned") = token;
     }
 
     /// Watch the durable outbox: pending count, dead-letter count, and the last
@@ -576,8 +602,17 @@ where
     }
 
     /// The WS URL to connect to, with `?token=` appended if a token is set.
+    ///
+    /// Reads the live token (see [`Self::set_token`]), NOT `config.token` — the
+    /// config value is only the seed. Reading the config here would silently
+    /// undo every refresh.
     fn connect_url(&self) -> String {
-        match &self.config.token {
+        let token = self
+            .token
+            .read()
+            .expect("connect_url: token lock poisoned")
+            .clone();
+        match &token {
             Some(token) if !token.is_empty() => {
                 // Append token as a query param (the transport reads ?token=).
                 let sep = if self.url.contains('?') { '&' } else { '?' };
@@ -1299,6 +1334,36 @@ mod tests {
             },
         );
         assert_eq!(c2.connect_url(), "ws://localhost:9999/sync?x=1&token=tok");
+    }
+
+    /// `set_token` must reach `connect_url`, or a refreshed JWT never gets used
+    /// and the client retries an expired one until `max_retries`.
+    #[test]
+    fn set_token_changes_the_next_connect_url() {
+        let c = SyncClient::new(
+            "ws://localhost:9999/sync",
+            nostos_core::InMemoryStorage::new(),
+            SyncClientConfig {
+                token: Some("stale".into()),
+                ..SyncClientConfig::default()
+            },
+        );
+        assert_eq!(c.connect_url(), "ws://localhost:9999/sync?token=stale");
+
+        c.set_token(Some("fresh".into()));
+        assert_eq!(
+            c.connect_url(),
+            "ws://localhost:9999/sync?token=fresh",
+            "refreshed token must be used by the next connection"
+        );
+
+        // Clearing drops the query param entirely (anonymous / NOSTOS_SYNC_AUTH=none).
+        c.set_token(None);
+        assert_eq!(c.connect_url(), "ws://localhost:9999/sync");
+
+        // An empty string is treated as absent, same as the seed path.
+        c.set_token(Some(String::new()));
+        assert_eq!(c.connect_url(), "ws://localhost:9999/sync");
     }
 
     #[test]
