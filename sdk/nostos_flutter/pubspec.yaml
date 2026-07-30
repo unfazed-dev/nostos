@@ -1,8 +1,9 @@
 name: nostos_flutter
 description: "Plug-and-play local-first sync for Flutter — Rust-owned SQLite + WebSocket sync loop, no connector class, no client-side schema artifact."
 version: 0.1.0
-homepage: https://nostos.run
-repository: https://github.com/nostos-sync/nostos
+# NOSTOS-IDENTITY-PENDING: no domain registered — see docs/IDENTITY.md
+homepage: https://github.com/unfazed-dev/nostos
+repository: https://github.com/unfazed-dev/nostos
 
 environment:
   sdk: ^3.12.0

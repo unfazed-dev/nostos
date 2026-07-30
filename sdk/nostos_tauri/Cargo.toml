@@ -8,8 +8,8 @@ edition = "2021"
 publish = false
 description = "Tauri 2 plugin exposing nostos-client's SyncClient<SqliteStorage> to desktop web apps (feasibility scaffold)."
 license = "Apache-2.0"
-repository = "https://github.com/nostos-sync/nostos"
-homepage = "https://nostos.run"
+repository = "https://github.com/unfazed-dev/nostos"
+homepage = "https://github.com/unfazed-dev/nostos"  # NOSTOS-IDENTITY-PENDING
 
 [lib]
 crate-type = ["lib"]

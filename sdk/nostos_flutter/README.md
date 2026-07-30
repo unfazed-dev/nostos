@@ -1,6 +1,6 @@
 # nostos_flutter
 
-Plug-and-play local-first sync for Flutter, backed by [Nostos](https://nostos.run)
+Plug-and-play local-first sync for Flutter, backed by [Nostos](https://github.com/unfazed-dev/nostos)
 (Postgres logical replication → Rust fan-out server → on-device SQLite,
 Apache-2.0 end to end). Rust owns SQLite and the sync loop
 (`nostos-client`'s `SyncClient`); this package wraps it with

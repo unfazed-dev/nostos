@@ -42,12 +42,12 @@
     <PackageId>Nostos.DotNet</PackageId>
     <Version>0.1.0</Version>
     <Description>UniFFI bridge exposing nostos-client's SyncClient&lt;SqliteStorage&gt; to .NET via Nord UniFFI-CS — feasibility scaffold.</Description>
-    <Authors>Cairn Sync, Inc.</Authors>
-    <Company>Cairn Sync, Inc.</Company>
+    <Authors>unfazed-dev</Authors>
+    <Company>unfazed-dev</Company>
     <Copyright>Apache-2.0</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://nostos.run</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/nostos-sync/nostos</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/unfazed-dev/nostos</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/unfazed-dev/nostos</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
 
     <!-- C# side needs unsafe for the bindgen's IntPtr / P/Invoke glue.

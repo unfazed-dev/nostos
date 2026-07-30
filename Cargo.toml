@@ -57,10 +57,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
-authors = ["Cairn Sync, Inc. <founders@nostos.run>"]
-repository = "https://github.com/nostos-sync/nostos"
-homepage = "https://nostos.run"
-documentation = "https://docs.nostos.run"
+# NOSTOS-IDENTITY-PENDING: legal entity + contact mailbox undecided — docs/IDENTITY.md
+authors = ["unfazed-dev"]
+repository = "https://github.com/unfazed-dev/nostos"
+# NOSTOS-IDENTITY-PENDING: no domain registered yet — the repo IS the homepage
+homepage = "https://github.com/unfazed-dev/nostos"
+documentation = "https://github.com/unfazed-dev/nostos/tree/main/docs"
 readme = "README.md"
 keywords = ["sync", "local-first", "postgres", "offline", "replication"]
 categories = ["database", "database-implementations"]

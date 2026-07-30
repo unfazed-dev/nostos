@@ -19,11 +19,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nostos-sync/nostos.git",
+    "url": "git+https://github.com/unfazed-dev/nostos.git",
     "directory": "sdk/nostos_node"
   },
-  "homepage": "https://github.com/nostos-sync/nostos",
+  "homepage": "https://github.com/unfazed-dev/nostos",
   "bugs": {
-    "url": "https://github.com/nostos-sync/nostos/issues"
+    "url": "https://github.com/unfazed-dev/nostos/issues"
   }
 }

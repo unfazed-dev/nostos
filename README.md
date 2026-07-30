@@ -209,8 +209,12 @@ Output: `benches/results/RESULTS.md` + a JSON artifact + an SVG chart. See [`doc
 Self-hosting is free forever (see License). If you'd rather never operate the
 sync server yourself, a managed `nostos deploy` beta is coming: we run your
 Nostos instance, tier-stamped and metered, connected to your own Postgres or
-Supabase database. Email **founders@nostos.run** with subject `waitlist` to get
-in line for the design-partner beta.
+Supabase database. Open a [GitHub discussion or issue](https://github.com/unfazed-dev/nostos/issues)
+titled `waitlist` to get in line for the design-partner beta.
+
+<!-- NOSTOS-IDENTITY-PENDING: contact mailbox undecided (docs/IDENTITY.md). This
+     asked readers to email founders@nostos.run — an unregistered domain, so every
+     waitlist mail would have bounced into nowhere. -->
 
 ---
 

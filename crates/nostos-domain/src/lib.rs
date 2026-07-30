@@ -8,7 +8,7 @@
 //! application layer defines ports over these types; the infra layer implements
 //! them. Nothing here may depend on anything above.
 //!
-//! [`docs/ARCHITECTURE.md`]: https://github.com/nostos-sync/nostos/blob/main/docs/ARCHITECTURE.md
+//! [`docs/ARCHITECTURE.md`]: https://github.com/unfazed-dev/nostos/blob/main/docs/ARCHITECTURE.md
 
 #![forbid(unsafe_code)]
 

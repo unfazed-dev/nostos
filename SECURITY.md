@@ -2,10 +2,17 @@
 
 ## Reporting a vulnerability
 
-Report security vulnerabilities privately to **founders@nostos.run**. Do not
-open a public GitHub issue for a suspected vulnerability — public issues are
-fine for everything else, but a vulnerability report should stay private
-until a fix ships.
+Report security vulnerabilities privately through **[GitHub private vulnerability
+reporting](https://github.com/unfazed-dev/nostos/security/advisories/new)**
+(repo → Security → Report a vulnerability). Do not open a public GitHub issue for
+a suspected vulnerability — public issues are fine for everything else, but a
+vulnerability report should stay private until a fix ships.
+
+<!-- NOSTOS-IDENTITY-PENDING: no contact mailbox exists yet — docs/IDENTITY.md.
+     This previously read "report privately to founders@nostos.run", a mailbox on
+     an UNREGISTERED domain: such a report reaches nobody, and the reporter has
+     no way to know it vanished. Add a real address here when one exists; until
+     then GitHub's private reporting is the channel that actually works. -->
 
 Include what you can: affected version/commit, reproduction steps, and
 impact. We'll acknowledge your report and follow up as we investigate; credit

@@ -2,8 +2,8 @@
 name = "nostos_node"
 version = "0.1.0"
 license = "Apache-2.0"
-repository = "https://github.com/nostos-sync/nostos"
-homepage = "https://nostos.run"
+repository = "https://github.com/unfazed-dev/nostos"
+homepage = "https://github.com/unfazed-dev/nostos"  # NOSTOS-IDENTITY-PENDING
 description = "napi-rs bridge exposing nostos-client SyncClient<SqliteStorage> to Node.js."
 edition = "2021"
 publish = false
