@@ -183,9 +183,11 @@ dotnet msbuild Nostos.DotNet.csproj \
 #   PackageId Nostos.DotNet · Version 0.1.0 · PackageLicenseExpression Apache-2.0
 ```
 
-Verified passing 2026-07-30. `-getItem:PackageReference` returns `[]` — the
-project has no external NuGet dependencies, which is why nothing but the
-workloads stands between it and a compile.
+Verified passing 2026-07-30. `-getItem:PackageReference` returns `[]`, but read
+that narrowly: the evaluation ran **without workloads**, so it cannot see item
+groups the workload SDKs contribute or that are conditioned on a TFM it never
+resolved. It is evidence of no *hand-declared* NuGet dependency in this file,
+not proof that workloads are the only thing between it and a compile.
 
 ## API surface
 

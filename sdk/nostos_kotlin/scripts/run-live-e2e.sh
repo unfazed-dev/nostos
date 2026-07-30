@@ -169,11 +169,13 @@ PUSH_OK=0; ECHO_OK=0
 # pipefail` that pipeline reports FAILURE ON A SUCCESSFUL MATCH whenever the
 # dump is large: `grep -q` exits at the first hit, `printf` then dies of
 # SIGPIPE (141), and pipefail propagates 141, so `&& PUSH_OK=1` never runs.
-# It bit PUSH_OK and not ECHO_OK for a reason — ECHO_OK is the LAST proof line,
-# so grep reads to EOF and printf finishes writing before exiting. PUSH_OK is
-# logged first, with the rest of the dump behind it.
-# Size-dependent, so it hid until step 6/6 enlarged the ring buffer to stop
-# proof lines rotating out: the bigger dump is what makes SIGPIPE land. That
+# Size-dependent (reproduced: small payload exits 0, large payload exits 141),
+# so it hid until step 6/6 enlarged the ring buffer to stop proof lines rotating
+# out — the bigger dump is what makes SIGPIPE land. Why it hit PUSH_OK and not
+# ECHO_OK on the same dump is NOT established; both matched, only one verdict
+# stuck, and the plausible story (ECHO_OK sits later, so grep reads further
+# before exiting and printf finishes writing) is untested against a real
+# 2000-line logcat. Do not rely on that asymmetry — the fix removes the pipe. That
 # made this the THIRD verdict-machinery bug in this file (after the two-dump
 # race and the wrong-dump verdict) — each one an SDK that worked while the
 # harness said otherwise. `[[ … == *…* ]]` spawns no process and cannot pipe.
