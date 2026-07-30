@@ -118,7 +118,7 @@ jobs:
         # (e.g. a missing toolchain) and the job would pass having proved
         # nothing — the same false-green shape as the self-skipping
         # NOSTOS_E2E_PG suite. Strict mode is what makes this job's green mean
-        # "three round-trips actually ran".
+        # "both round-trips actually ran".
         run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node
       - name: Upload slice logs on failure
         if: failure()

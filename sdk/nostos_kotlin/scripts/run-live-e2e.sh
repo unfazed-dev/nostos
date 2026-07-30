@@ -54,7 +54,9 @@ trap cleanup EXIT INT TERM
 
 echo "[harness] 0/6 ensure emulator ($AVD @ $EMU_SERIAL)"
 if ! "$ADB" devices | grep -q "^$EMU_SERIAL\b.*device$"; then
-    echo "[harness]   booting $AVD headless (port $(echo "$EMU_SERIAL" | tr -d 'a-z_'))"
+    # `tr -d 'a-z_'` left the hyphen, so this logged "port -5556". The boot below
+    # already used the digits-only form; only the message was wrong.
+    echo "[harness]   booting $AVD headless (port $(echo "$EMU_SERIAL" | sed 's/[^0-9]//g'))"
     "$EMU_BIN" -avd "$AVD" -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect \
         -port "$(echo "$EMU_SERIAL" | sed 's/[^0-9]//g')" > /tmp/nostos_kotlin_emu_boot.log 2>&1 &
     EMU_BOOT_PID=$!

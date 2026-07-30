@@ -100,6 +100,41 @@
 > (`sdk/nostos_flutter/rust/src/api/nostos.rs`); kotlin/dotnet/swift poll instead, node/tauri
 > have no watch pump. So the server-side default is the whole fix — no per-SDK change.
 >
+> **A10 follow-up, 2026-07-30:** the flutter slice of `make sdk-e2e` PASSES with the new
+> 20 eps / 50 keys default in force. That upgrades the "no harness asserts a count above 50"
+> reasoning above from *assumed* to *verified* — the analysis was right, and it is now
+> empirically confirmed rather than argued.
+>
+> ### A7 — DONE 2026-07-30 (moat-number drift) — and my first call on it was WRONG
+>
+> I initially reported A7 as "effectively already done, only a rounding residue." That was
+> **under-called**, from a coarse `grep | uniq -c` that collapsed duplicates and never
+> compared exact figures across files. An exact sweep found real drift:
+>
+> | location | was | now |
+> |---|---|---|
+> | `README.md:13`, `README.md:23` | 833,**308** | 833,307 |
+> | `docs/launch/show-hn-draft.md:51` | 833,**308** | 833,307 |
+> | `docs/launch/powersync-vs-nostos-draft.md:44` | 833,**308** | 833,307 |
+> | `benches/results/chart.svg` (the rendered chart) | 833,**308** | 833,307 |
+>
+> Canonical is `benches/results/RESULTS.md` = **833,307**. Two of the four wrong figures were
+> in the **public launch drafts**, and one was in the chart image that ships in the README —
+> i.e. a number that contradicts our own published benchmark file, going out on Show HN.
+> `git grep 833,308` now returns nothing.
+>
+> `chart.svg` is *generated* (`crates/nostos-bench/src/report.rs:141`) from the same
+> `grouped(run.ops_per_sec)` helper as the RESULTS table, so this was **not** a generator
+> bug — the committed chart was simply from an older run than the committed RESULTS.md. The
+> next `make bench` regenerates both consistently. No re-benching was done (A7 is docs-only;
+> re-running would change the headline within ±5% noise, which is a separate decision).
+>
+> Also tightened the phrasing: "208× PowerSync's published ceiling (~2–4k ops/sec)" conflated
+> the range with the multiple (208× is against the **4k high**; against the 2k low it is 417×).
+> `README.md` and `CLAUDE.md` now name the high ceiling explicitly and cite 417× for the low,
+> matching what `show-hn-draft.md:51` already said correctly. `CLAUDE.md` gained a standing
+> rule: quote the high multiple, never the low, and never a figure absent from RESULTS.md.
+>
 > Everything below is the original assessment, unedited.
 
 ---
