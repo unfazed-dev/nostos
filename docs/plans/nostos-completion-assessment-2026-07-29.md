@@ -129,6 +129,49 @@
 > next `make bench` regenerates both consistently. No re-benching was done (A7 is docs-only;
 > re-running would change the headline within ±5% noise, which is a separate decision).
 >
+> ### A9 — DONE 2026-07-30 — **10/10 slices PASS in strict mode**, and §2.2 is superseded
+>
+> `SDK_E2E_STRICT=1 make sdk-e2e` → **exit 0, all ten slices PASS, zero skips** (strict mode
+> makes any skip fatal, so this green cannot be a self-skip false pass):
+>
+> | rust | node | tauri | web | capacitor | dotnet | flutter | swift | kotlin | reactnative |
+> |---|---|---|---|---|---|---|---|---|---|
+> | 2s | 1s | 2s | 2s | 2s | 4s | 30s | 6s | 11s | 12s |
+>
+> This **supersedes §2.2's "6 PASS / 2 FAIL / 2 SKIP — the headline finding"**. It also closes
+> C7 (*assumed*: swift would pass with a booted sim) and C8 (*unknown*: kotlin/reactnative
+> health) — both now **verified**.
+>
+> **Neither original failure was an SDK defect. Both were harness bugs**, and both would have
+> hit anyone who booted a device and tried:
+>
+> 1. **swift — hardcoded simulator UDID.** `sdk/nostos_swift/ios-test/build.sh` gated on
+>    *any* booted sim (`sdk-e2e.sh:117`) but then targeted a **specific hardcoded UDID**
+>    (`CAFC93F7…`, "iPhone 17 probe"). Boot any other device and the guard goes green, then
+>    `simctl install` dies with `Unable to lookup in current state: Shutdown` — reported as a
+>    swift FAIL with nothing wrong in the SDK. Now derived from
+>    `simctl list devices booted`, so guard and action agree by construction.
+>    The same file also **hardcoded absolute paths to one machine**
+>    (`/Volumes/developer_ssd/…`), which would have broken the slice on any other checkout —
+>    now derived from `${BASH_SOURCE[0]}`.
+> 2. **kotlin — logcat double-dump race.** The harness dumped logcat **twice**: `-d -t 800`
+>    for the human spool, then an unbounded `-d` for the verdict. On a chatty emulator the
+>    proof lines rotated out of the readable window between the two adb round-trips, so the
+>    spool printed `[kt-e2e] ECHO_OK` while the verdict recorded `ECHO_OK=0` — with the
+>    instrumented test green (`tests=2 failures=0`). That is precisely the flake its own
+>    comment documents as "fixed in the RN harness 2026-07-13"; kotlin kept the racy shape.
+>    Now a single `$LOGCAT_DUMP` feeds both, which removes the race by construction rather
+>    than widening the buffer and hoping. Side effect: 34s → 11s.
+>
+> **Correction to C8's stated blocker.** The assessment recorded "Never executed — no Android
+> emulator on this machine." That is **false**: five AVDs exist (`Medium_Phone_API_36`,
+> `Pixel_9`, `nostos_api34`, `pack-9`, `probe_arm64`). `nostos_api34` boots headless in ~15s.
+>
+> **Operator note for reproducing.** Boot `nostos_api34` on **port 5556** specifically
+> (`emulator -avd nostos_api34 -no-window -port 5556`) — the kotlin harness expects
+> `emulator-5556` and boots it itself if absent, so booting that AVD on the default 5554
+> instead holds its lock and deadlocks the harness's own boot. Any iPhone sim works for swift.
+>
 > Also tightened the phrasing: "208× PowerSync's published ceiling (~2–4k ops/sec)" conflated
 > the range with the multiple (208× is against the **4k high**; against the 2k low it is 417×).
 > `README.md` and `CLAUDE.md` now name the high ceiling explicitly and cite 417× for the low,
