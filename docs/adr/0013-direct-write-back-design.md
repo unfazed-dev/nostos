@@ -1,6 +1,13 @@
 # ADR-0013: Direct write-back (Front 2 — deferred)
 
-- **Status:** Deferred (Phase 4 — design sketch)
+- **Status:** **Accepted (shipped)** — corrected 2026-07-30. This read "Deferred (Phase 4 —
+  design sketch)" long after it shipped, which was the most misleading line in the repo: the
+  landing page and `docs/STRATEGY.md` both sell direct write-back as *the* differentiator against
+  PowerSync's `uploadData()`, so a reader who checked here was told the headline feature did not
+  exist. As built: `PgWriteBack` in `nostos-infra`, gated by `NOSTOS_WRITE_TABLES`
+  (`nostos-server/src/main.rs:112`, empty by default), covered by `e2e_pg_writeback.rs` +
+  `e2e_pg_writeback_timestamp.rs` against real Postgres, and exercised as the ECHO half of all 10
+  `sdk-e2e` slices. Still deferred: nothing in this ADR's core path.
 - **Date:** 2026-06-27
 
 ## Context
