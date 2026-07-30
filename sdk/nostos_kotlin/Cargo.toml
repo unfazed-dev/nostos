@@ -21,11 +21,13 @@
 
 [package]
 name = "nostos-kotlin"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 publish = false
 description = "UniFFI bridge exposing nostos-client's SyncClient<SqliteStorage> to Kotlin (Android) — feasibility scaffold."
 license = "Apache-2.0"
+repository = "https://github.com/nostos-sync/nostos"
+homepage = "https://nostos.run"
 
 # Standalone workspace root — detaches from the parent nostos workspace (mirrors
 # sdk/nostos_swift/Cargo.toml + sdk/nostos_tauri/Cargo.toml + sdk/nostos_node/Cargo.toml

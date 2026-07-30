@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-swift"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "nostos-client",
  "nostos-core",

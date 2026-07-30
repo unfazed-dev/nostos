@@ -26,7 +26,7 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 
 | plan | topic | basis |
 |---|---|---|
-| `nostos-completion-assessment-2026-07-29.md` | Overall project state: what is done, what gates launch. Carries the A1–A10 addendum. | verified |
+| `nostos-completion-assessment-2026-07-29.md` | Overall project state: what is done, what gates launch. Carries the A1–A10 addendum **and the 2026-07-30 A11 / README-drift addendum** (five defects in places no test executes: an unreachable Tauri command, a malformed csproj, a failing RN typecheck, and two READMEs that misdescribed shipped behaviour). Engineering column is empty; the SDKs are packaged but **not published**. | verified |
 | `flutter-supabase-plug-and-play-launch.md` | The master plan — W0–W8 launch sequencing and the ≤5-min stranger-test gate. | inferred |
 | `reconnect-glitch-fix-2026-07-19.md` | Reconnect UI glitch. Its own header says "Phase 1 implementing; Phase 2 tracked" — Phase 2 is still open. | inferred |
 
@@ -44,7 +44,7 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 
 | plan | outcome | basis |
 |---|---|---|
-| `sdk-parity-final-three.md` | RN + Capacitor + .NET landed. Its "→ 10/10" bar is **met**: all ten slices pass a live round-trip in strict mode (2026-07-30). | verified |
+| `sdk-parity-final-three.md` | RN + Capacitor + .NET landed. Its "→ 10/10" bar is **met**: all ten slices pass a live round-trip in strict mode (2026-07-30). Read that as *functional* parity only — every SDK is now packaged (v0.1.0, LICENSE, repository, README) but **none is published to a registry**. | verified |
 | `nostos-persisted-oplog-backfill-2026-07-19.md` | ADR-0025 — all 7 slices + F1/F2/F3 shipped; real-PG e2e green. | verified |
 | `nostos-soundness-audit-2026-07-19.md` | 3 P0s all resolved (slot invalidation, watch bug, the OPERATING.md playbook gap). | verified |
 | `nostos-next-after-oplog-epoch-2026-07-20.md` | Its C-claims are closed: C6/C7/C10/C11 verified-fixed 2026-07-20; the last open one, **C9** (W5 empirical re-verify), is closed by the 10/10 strict run on 2026-07-30. | verified |

@@ -796,8 +796,8 @@ That sentence is the answer to "what stage is the project at."
 | C5b | The flutter failure on this machine is environmental (Xcode/SPM), pre-dating `9322d83` | **verified** | Pre-regression tree fails on SPM resolution; matches a toolchain fault recorded on this machine 2026-07-20 |
 | C5c | Whether `nostos_flutter` sync actually works today | **unknown** | Cannot be established on this machine — needs a working Xcode/SPM toolchain or a device-free test path |
 | C6 | Swift slice fails only because the sim is not booted | **verified** | Log shows xcodegen→xcodebuild→app built; failure is `simctl install … state: Shutdown` |
-| C7 | Swift slice would PASS with a booted sim | **assumed** | Everything up to install succeeded; not run |
-| C8 | kotlin / reactnative SDK health | **unknown** | Never executed — no Android emulator on this machine |
+| C7 | Swift slice would PASS with a booted sim | ~~assumed~~ → **verified, but the reason was wrong** | It PASSES (2026-07-30) — yet booting a sim was *not sufficient*: `build.sh` targeted a hardcoded UDID, so the slice only ever ran on one machine's one device. C6's diagnosis was right about the symptom and incomplete about the cause |
+| C8 | ~~kotlin / reactnative SDK health~~ | **verified FALSE as stated** | The blocker claim "no Android emulator on this machine" was simply untrue — five AVDs exist (`Medium_Phone_API_36`, `Pixel_9`, `nostos_api34`, `pack-9`, `probe_arm64`). That unchecked assumption is the only thing that kept A9 open for 17 days. Both slices PASS (2026-07-30); the kotlin failure was a harness logcat race, not SDK health |
 | C9 | The env-var *name* `NOSTOS_WRITE_TABLES` has 0 hits in QUICKSTART/README, 9 in OPERATING | **verified** | Per-file `grep -c` |
 | C9b | ~~Therefore a stranger's writes silently fail~~ | **verified FALSE** | QUICKSTART wires it via `nostos init --write-tables todos` (`QUICKSTART.md:42`), explained at `:252`; parsed `init.rs:64-68`, persisted `config.rs:47,157`, emitted to deploy templates `deploy.rs:56,106`. Claim withdrawn; A3 dropped |
 | C10 | The Dart SDK gives a developer no way to learn a write failed | **verified** | `SyncStatus` = `{conn,lastSyncedAt}` (`nostos_database.dart:498-515`); `client.rs:32` "user-facing surface is a Phase-2 concern"; `client.rs:710,718` retry→dead-letter; write returns "local outbox id (NOT a server ack)" (`nostos_database.dart:438`) |
@@ -850,3 +850,81 @@ decisive here: **running the project's own harness beat reasoning about its code
 `make ci` + `make sdk-e2e` took ~90 seconds and produced the entire headline, and the one
 experiment that actually *tested* a hypothesis (restoring `example/`) is what caught my
 own wrong root-cause.
+
+---
+
+## Addendum — 2026-07-30: A11 packaging + the README-drift audit (C15 closed)
+
+The operator asked for the residues of the previous addendum to be fixed, which closed A11
+and the last open piece of C15. **Five real defects surfaced, none of which any test would
+have caught**, plus two of my own errors.
+
+### A11 — packaging pass: DONE
+
+| what | before | after |
+|---|---|---|
+| versions | 8 packages at `0.0.0` | all `0.1.0` (matching `[workspace.package]` and `nostos_flutter`) |
+| `LICENSE` file | 1 of 9 | **9 of 9** |
+| `repository` / `homepage` | 2 of 9 | 9 of 9 (npm also gets `bugs`) |
+| READMEs | 5 of 9 | **9 of 9** (new: kotlin, swift, node, tauri) |
+
+**One prediction I checked instead of trusting:** the concern was raised that a new `LICENSE`
+would not ship in the npm tarball, since the `files` arrays list only `dist`/`README.md`.
+`npm pack --dry-run` says otherwise — **npm force-includes `LICENSE`** regardless of `files`.
+Verified, not assumed. Likewise the csproj needs **no** `PackageLicenseFile`: it already sets
+`PackageLicenseExpression`, and NuGet rejects both together (NU5035).
+
+### The five defects
+
+1. **`sdk/nostos_tauri` never exposed `subscribe` to JS.** `generate_handler!` and `build.rs`
+   listed only `connect`/`write`/`query`/`checkpoint`. Since `connect` does *no* network I/O
+   and `subscribe` is what drives the run loop, **the entire download path was unreachable
+   from a Tauri frontend** — connect, then wait forever. Fixed (handler + `build.rs` +
+   `permissions/default.toml`, all three required or the ACL rejects the call at runtime).
+   *Why no test caught it:* the tauri slice is `cargo test`, which calls `NostosState::subscribe`
+   directly and never crosses the command boundary. Recorded in the new README.
+2. **`dotnet/Nostos.DotNet.csproj` was not well-formed XML** — two fatal errors: a mismatched
+   `<PackageProjectUrl>…</PackageUrl>` tag pair, and `--` inside an XML comment (forbidden by
+   the XML spec; it came from pasting a `--library` CLI flag into a comment). Any
+   `dotnet build`/`pack` of that project would fail. *Why no test caught it:* the E2E builds
+   `dotnet/smoke/Smoke.csproj`, a different project — the packageable one is compiled by nothing.
+3. **`@nostos-sync/react-native`'s own `npm run typecheck` failed** under its own strict tsconfig
+   (`config.url` is `string | null | undefined`, the native Spec wants `string`). Fixed with a
+   real guard that throws a message naming the fix, rather than a cast — a null URL should not
+   reach the TurboModule boundary. *Why no test caught it:* `test` was `jest` only, so nothing
+   ran `typecheck`. Now `test` = `typecheck && jest`, so it cannot regress.
+4. **`sdk/nostos_web/README.md` understated a shipped capability** — it called the whole package
+   a "reduced-scope feasibility proof" that "does NOT yet open a live WebSocket." The *browser*
+   path (`pkg-web` → `NostosSocket`) opens a real WebSocket and is proven by
+   `e2e/browser_live.spec.cjs`, which **is** the passing `web` slice. Only the Node facade is
+   reduced-scope. Now documents both paths with a `NostosSocket` API table.
+5. **`sdk/nostos_flutter/README.md` gave actively wrong advice** — "one active subscription per
+   `Nostos` instance… use a second `Nostos.connect(...)`" for a second table. `subscribeTables`
+   multiplexes many tables over **one** socket (ADR-0022). Following the README opened a
+   redundant connection.
+
+Also corrected: three stale "dotnet is not installed / E2E is SKIP-with-reason" claims in the
+dotnet README and csproj. `dotnet` lives at `~/.dotnet/dotnet` — **not on `PATH`**, which is why
+the original bare `which dotnet` check read as absent. The slice passes.
+
+### Two of my own errors
+
+- **I reported "working tree clean" while `README.md` had an uncommitted stray `/`** appended
+  with no trailing newline. The claim was wrong; the file is fixed.
+- **The C7/C8 claim rows were left stale** after A9 closed. C8's blocker — "no Android emulator
+  on this machine" — was simply **false** (five AVDs exist), and that single unchecked assumption
+  is what kept A9 open for 17 days. C7 was *right about the symptom and incomplete about the
+  cause*: booting a simulator was necessary but **not sufficient**, because `build.sh` targeted a
+  hardcoded UDID. Both rows now say so.
+
+### The pattern across all of it
+
+Every one of the five defects sits in a place **no test executes**: a command list, a project file
+nothing builds, a script nothing runs, prose. The e2e suite proves the *runtime* path and is
+silent on the *packaging and documentation* path — so "10/10 slices PASS" was never evidence about
+either. That is the same shape as the harness bugs on 2026-07-29 (**a guard checking something
+weaker than what the action requires**), one level out.
+
+**Still genuinely open:** nothing in the engineering column. The SDKs are now *packaged* but
+still **not published** — no npm/Maven/NuGet/pub coordinate exists. Do not let public copy drift
+in the other direction: "10/10 parity" remains a **functional** claim, never a *distributable* one.

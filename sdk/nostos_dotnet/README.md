@@ -6,14 +6,44 @@ UniFFI bridge exposing `nostos_client::SyncClient<SqliteStorage>` to **.NET**
 the native, Tauri, Flutter, Swift, Kotlin, and Node SDKs drive, loaded into
 .NET via UniFFI's proc-macro FFI, with no engine/wire changes.
 
-> **Pre-1.0 caveat (honest):** this is a **feasibility scaffold**, not a
-> polished SDK. The Rust surface compiles + cross-compiles to every target the
-> Swift and Kotlin SDKs already target, and the Nord bindgen emits committed
-> C# the reviewer can read without installing .NET — but no `.nupkg` is
-> produced, no NuGet feed is wired, and **no C# runtime E2E has run on this
-> host** (`dotnet` is not installed; E2E is **SKIP-with-reason**, see below).
-> The REUSE thesis — one Rust proc-macro interface, four foreign bindings — is
-> what this scaffold proves.
+> **Pre-1.0 caveat (honest):** this is a **v0.1 alpha**, not a polished SDK.
+> No `.nupkg` is produced and no NuGet feed is wired, so there is no
+> `dotnet add package Nostos.DotNet` yet (A11).
+>
+> **A live C# E2E round-trip now passes** (`make sdk-e2e dotnet` — real PUSH +
+> ECHO against the Rust spine). This paragraph previously claimed "no C#
+> runtime E2E has run on this host; `dotnet` is not installed; E2E is
+> SKIP-with-reason" — that was true when written and is now false. The stale
+> version of the same claim, duplicated into a comment in
+> `dotnet/Nostos.DotNet.csproj`, is how two fatal XML errors in that file went
+> unnoticed until 2026-07-30: nothing builds it, because the E2E builds
+> `dotnet/smoke/Smoke.csproj` instead.
+
+## Usage
+
+```csharp
+using uniffi.nostos;
+
+var client = new NostosClient("ws://127.0.0.1:8080/sync", token: null, dbPath: "cairn.db");
+client.Connect();
+client.Subscribe("tasks");
+
+client.Write("tasks", "upsert", "t1", JsonSerializer.Serialize(new { title = "Walk dog" }));
+var rowsJson = client.Query("SELECT * FROM tasks");   // JSON string
+var lsn = client.Checkpoint();
+```
+
+The Nord bindgen PascalCases the UniFFI method names (`connect` → `Connect`) and
+puts everything in the `uniffi.nostos` namespace (from `uniffi.toml`), **not** a
+`Nostos.DotNet` namespace — the assembly name and the namespace differ on purpose.
+
+All calls are **blocking**: the Rust side owns a multi-thread tokio runtime and
+`block_on`s. `Write` returns the outbox id once the write is durable locally,
+**not** when the server acks it — see
+[ADR-0027](../../docs/adr/0027-write-outcome-visibility-in-the-client-sdk.md).
+
+This exact sequence is what [`dotnet/smoke/Program.cs`](dotnet/smoke/Program.cs)
+runs in the passing E2E.
 
 ## Why UniFFI-CS (Nord)
 
@@ -110,18 +140,26 @@ namespace `nostos`, not after the primary class) is **committed** so reviewers
 can read the C# surface without installing .NET. The C# namespace is
 `uniffi.nostos` (Nord bindgen convention: `uniffi.<namespace>`).
 
-### 4. (Optional) Build the .csproj — SKIPPED on this host
+### 4. (Optional) Build the multi-target .csproj
 
-`dotnet` is not installed on this host. The `.csproj` is multi-target
+`Nostos.DotNet.csproj` is multi-target
 (`net8.0-ios;net8.0-android;net8.0-windows;net8.0-maccatalyst`) and sets
 `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>` (C# side only — the bindgen emits
 `IntPtr` / P/Invoke pointers; the Rust crate stays `#![forbid(unsafe_code)]`).
 
 ```bash
-# NOT RUN on this host — dotnet not installed
 cd sdk/nostos_dotnet/dotnet
-dotnet build Nostos.DotNet.csproj
+dotnet build Nostos.DotNet.csproj      # needs the iOS/Android/Windows workloads
 ```
+
+**This project is not built by any test** — the E2E builds
+`dotnet/smoke/Smoke.csproj` (plain `net8.0`, host-only) instead, because the
+multi-target build needs mobile workloads. That is precisely why two fatal XML
+errors survived in it until 2026-07-30 (a mismatched `PackageProjectUrl` closing
+tag and a double hyphen inside an XML comment, which XML forbids). Both are
+fixed; if you edit that file, `python3 -c "import xml.etree.ElementTree as
+E;E.parse('dotnet/Nostos.DotNet.csproj')"` is a one-second guard that would have
+caught both.
 
 ## API surface
 
@@ -149,18 +187,32 @@ The SAME surface as nostos_swift and nostos_kotlin — `NostosClient` Object wit
   glue that C# requires `unsafe` blocks to touch. The Rust crate stays
   forbid-unsafe regardless.
 
-## E2E status: SKIP-with-reason
+## E2E status: PASSING
 
-No C# runtime E2E has run on this host because `dotnet` is not installed
-(`which dotnet` → empty). The deliverable is:
+```bash
+make sdk-e2e dotnet        # from the repo root
+```
+
+A live C# round-trip runs against the shared Rust spine and is gated on both
+directions: **PUSH** (a row pushed server-side lands in on-device SQLite and is
+visible via `Query`) and **ECHO** (a C# `Write` comes back through the server's
+write-back fan-out). Driven by [`dotnet/smoke/Program.cs`](dotnet/smoke/Program.cs)
+via `scripts/run-dotnet-e2e.sh`.
+
+> Superseded, kept as the record: this section used to read "SKIP-with-reason —
+> no C# runtime E2E has run on this host because `dotnet` is not installed
+> (`which dotnet` → empty)". `dotnet` lives at `~/.dotnet/dotnet`, which is not
+> on `PATH` — hence the original `which` check failing. The harness resolves that
+> fallback explicitly (`scripts/run-dotnet-e2e.sh`), so a bare `which dotnet`
+> returning empty does **not** mean .NET is unavailable.
+
+Also verified:
 
 1. Rust compiles + cross-compiles (host / iOS / iOS-sim / Android).
-2. Windows-msvc FAILS (known — `ring` C dep + link need MSVC toolchain not on macOS; see Build §2).
+2. Windows-msvc FAILS (known — `ring`'s C dep + link need an MSVC toolchain not
+   present on macOS; see Build §2).
 3. Nord `uniffi-bindgen-cs` generates committed C# (`dotnet/generated/nostos.cs`).
 4. `forbid(unsafe_code)` holds on the Rust crate.
-
-C# E2E (construct `NostosClient`, `connect()`, `query("SELECT 1 AS one")`,
-assert the row) is the next increment once `dotnet` is installed.
 
 ## Verbs
 

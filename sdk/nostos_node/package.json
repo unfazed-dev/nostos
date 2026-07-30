@@ -1,6 +1,6 @@
 {
   "name": "@nostos-sync/node",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "napi-rs scaffold exposing nostos-client SyncClient<SqliteStorage> to Node.js (feasibility proof, not a polished SDK)",
   "main": "nostos_node.node",
   "scripts": {
@@ -16,5 +16,14 @@
   "devDependencies": {
     "@napi-rs/cli": "^2"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nostos-sync/nostos.git",
+    "directory": "sdk/nostos_node"
+  },
+  "homepage": "https://github.com/nostos-sync/nostos",
+  "bugs": {
+    "url": "https://github.com/nostos-sync/nostos/issues"
+  }
 }

@@ -30,12 +30,30 @@ nostos.watch('tasks').listen((rows) {
 await nostos.write('tasks', op: 'upsert', pk: '1', payload: {'title': 'buy milk'});
 ```
 
-`subscribe`/`watch` model **one active subscription per `Nostos` instance** —
-this mirrors `nostos-client`'s `SyncClient`, which binds one table at
-construction. Calling `subscribe` again replaces the previous subscription.
-Need more than one table at once? Use a second `Nostos.connect(...)` instance
-for now (ponytail — a future multi-table `nostos-client` session removes this
-constraint).
+**Multiple tables share one socket.** `subscribe(table)` is the single-table
+convenience; `subscribeTables` takes a list and multiplexes them over the same
+`/sync` connection (D1 / [ADR-0022](../../docs/adr/0022-flutter-multitable-sync-and-pause-resume.md)),
+each with its own optional predicate:
+
+```dart
+await nostos.subscribeTables([
+  NostosTableSub(name: 'tasks', whereSql: "status = 'open'"),
+  NostosTableSub(name: 'projects'),
+]);
+
+nostos.watch('tasks').listen((rows) { /* ... */ });
+nostos.watch('projects').listen((rows) { /* ... */ });
+```
+
+One *subscription set* is active per `Nostos` instance: calling `subscribe` or
+`subscribeTables` again **replaces** the previous set (tearing down its
+background connection and watch pumps). `watch(table)` throws a `StateError` if
+`table` is not in the active set — so subscribe first.
+
+> Corrected 2026-07-30: this section previously said one *table* per instance and
+> advised opening a second `Nostos.connect(...)` for a second table. That was
+> stale — it predates multi-table subscription, and following it opens a
+> redundant socket.
 
 ### Supabase
 
