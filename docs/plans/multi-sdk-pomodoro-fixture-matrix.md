@@ -508,8 +508,14 @@ spikes (ws1/ws2/ws3) ran, all primary-source-verified, and two new ADRs are writ
   correctness preserved, only durability lost).
 - **Marshalling:** RowOp payload crosses as a transferable `Uint8Array` (zero-copy on the echo hot
   path); `PendingWrite.payload_json` crosses inline (already a string).
-- **Open toolchain decision:** wasm-bindgen dual-entry (main `NostosEngine` + Worker) from one crate
-  — likely a **separate Worker-entrypoint crate**. Validate FIRST (the WS1 thin slice).
+- **Dual-entry decision RESOLVED 2026-07-31 (ws1-thin → option c):** NOT a separate crate.
+  `wasm-pack --target web` emits one ES module + one `.wasm` with no entry selector, and the
+  generated `nostos_ffi_wasm.js` has **0 main-thread-only globals** (`window.`/`document.` grep = 0),
+  so the Worker is the sole consumer of the existing artifact and the main thread becomes a pure
+  `postMessage` proxy that imports NO wasm. **Zero Rust changes.** ws1-thin proved the boot boundary
+  (Worker loads the wasm, round-trips a `postMessage`, returns `checkpoint`). Remaining gap for the
+  full build: confirm the heavier in-Worker path — `NostosSocket` (web-sys WebSocket) + the
+  OPFS / `FileSystemSyncAccessHandle` SQLite-WASM VFS — boots; this slice exercised only `NostosEngine`.
 - **Test plan:** Playwright + bundled Chromium (OPFS since 102+), `launchPersistentContext`;
   durability (offline write → reload → present), drain, Safari-fallback stub. **Open gap: OPFS
   persistence across reload in HEADLESS Chromium — unverified.** ADR-0017's "no Node path" is about

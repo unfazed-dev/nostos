@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nostos WS1 Worker probe</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+  </head>
+  <body>
+    <h1>WS1 dual-entry Worker probe</h1>
+    <p id="status">spawning worker…</p>
+    <!--
+      WS1 thin-slice harness. Serves the SAME pkg-web wasm the main-thread
+      live demo (app.html) uses, but loads it inside a module Worker and
+      round-trips one postMessage ping. Proves dual-entry from one crate
+      (ADR-0017) with NO Rust changes. The Playwright spec watches the
+      [worker-e2e] console markers this page emits.
+    -->
+    <script type="module">
+      const log = (m) => console.log("[worker-e2e] " + m);
+      // Absolute path: the static server maps /worker/* -> sdk/nostos_web/worker/*.
+      const worker = new Worker("/worker/nostos.worker.js", { type: "module" });
+      const seen = { wasmReady: false, pong: null, errors: [] };
+
+      worker.onmessage = (ev) => {
+        const d = ev.data || {};
+        if (d.ok === "wasm-ready") {
+          seen.wasmReady = true;
+          log("WASM_READY_IN_WORKER");
+        } else if (d.ok === "pong") {
+          seen.pong = d;
+          log("PONG checkpoint=" + d.checkpoint);
+        } else if (d.error) {
+          seen.errors.push(d.error);
+          log("WORKER_MSG_ERROR " + d.error);
+        }
+      };
+      worker.onerror = (e) => {
+        const msg = String((e && e.message) || e);
+        seen.errors.push(msg);
+        log("WORKER_ERROR " + msg);
+      };
+      worker.onmessageerror = () => log("MESSAGE_ERROR");
+
+      // A module worker fully evaluates (imports resolved, top-level code run,
+      // onmessage assigned) BEFORE the first message is delivered, so there is
+      // no race — the ping is queued until the listener is attached.
+      worker.postMessage({ id: 1, cmd: "ping" });
+      document.getElementById("status").textContent = "ping sent; awaiting pong…";
+      window.__seen = seen;
+    </script>
+  </body>
+</html>
