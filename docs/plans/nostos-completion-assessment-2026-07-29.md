@@ -105,6 +105,49 @@
 > reasoning above from *assumed* to *verified* — the analysis was right, and it is now
 > empirically confirmed rather than argued.
 >
+> ### C15 — CLOSED 2026-07-30 (per-SDK publishability + stub-vs-real)
+>
+> C15 was `unknown` ("3 subagents dispatched for this returned nothing"). Now established.
+>
+> **Stub-vs-real: settled by A9.** No slice is a stub on the sync path — all ten prove a live
+> PUSH+ECHO round-trip. This third of C15 is closed by the strict run, not by inspection.
+>
+> **Publishability: 1 of 9 SDK packages is publishable today.**
+>
+> | sdk | version | LICENSE file | repository field | README | verdict |
+> |---|---|---|---|---|---|
+> | `nostos_flutter` | **0.1.0** | ✅ | ✅ | ✅ | **publishable** |
+> | `nostos_capacitor` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_dotnet` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_react_native` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_web` | 0.0.0 | ❌ | ❌ | ✅ | blocked |
+> | `nostos_kotlin` | 0.0.0 | ❌ | ❌ | ❌ | blocked |
+> | `nostos_swift` | 0.0.0 | ❌ | ❌ | ❌ | blocked |
+> | `nostos_tauri` | 0.0.0 | ❌ | ❌ | ❌ | blocked |
+> | `nostos_node` | 0.0.0 | ❌ (no `license` field either) | ❌ | ❌ | blocked, worst case |
+>
+> Common blockers: placeholder version `0.0.0` (8/9), no per-package `LICENSE` (8/9), no
+> `repository` field (8/9) — all hard or near-hard requirements on npm / crates.io / NuGet /
+> Maven. Four have no README at all (kotlin, node, swift, tauri). `nostos_tauri` has no
+> ecosystem manifest beyond `Cargo.toml`, so it would publish to crates.io and needs the
+> license/description/repository keys there.
+>
+> **This does not block the Flutter+Supabase wedge** — `nostos_flutter` is the one that is
+> ready, which is consistent with the strategy. But it means **"10/10 SDK parity" is a
+> *functional* claim, not a *distributable* one**, and those must not be conflated in public
+> copy. Checked accordingly: `README.md` makes no install claims (good), and
+> `show-hn-draft.md` said "Flutter/RN/Node SDKs are scoped, not shipped" — which now
+> *understates* verified work. Rewritten to the accurate split: functional and e2e-proven,
+> not yet registry-published.
+>
+> **New follow-up (not done here): A11 — packaging pass.** Set real versions, add per-package
+> LICENSE + repository, write the four missing READMEs. Mechanical, ~1 session, needed before
+> any "install nostos for <platform>" claim.
+>
+> **Not established:** README *drift* (whether each SDK's code samples still compile against
+> its exported surface). That needs per-sample typechecking, which I did not run. Remains
+> genuinely open — the one part of C15 I could not close.
+>
 > ### A7 — DONE 2026-07-30 (moat-number drift) — and my first call on it was WRONG
 >
 > I initially reported A7 as "effectively already done, only a rounding residue." That was
