@@ -475,30 +475,67 @@ workstream 2's cost.
 - The `cmd | grep -q` SIGPIPE-under-pipefail bug is **already fixed** in the kotlin harness
   (`[[ ]]` against a here-string). No live instance remains. Do not reintroduce it.
 
-## 11. Done in this pass vs not — ratified ≠ implemented
+## 11. Status — design wave RESOLVED 2026-07-31
 
-**Done and verified:** the sweep/archive (§4) with its fallout fixed — `cargo metadata` OK,
-`bash -n` OK, `sdk-e2e.sh flutter` exits 1 loudly, doc-signature guard passing, no dead code left
-behind — plus all seven decisions recorded (§3).
-
-**Not started, deliberately.** All four workstreams are **ratified, not implemented**. Nothing in
-this pass is engine work:
+**Done and verified:** the sweep/archive (§4) + its fallout; all seven decisions (§3); the WS4
+`clear()` trait contract (§9 4g); the analyzer-fix. **Design wave complete** — three read-only
+spikes (ws1/ws2/ws3) ran, all primary-source-verified, and two new ADRs are written:
 
 | | Workstream | State |
 |---|---|---|
-| WS1 | web durability — ADR-0017 Worker + SQLite-WASM | ratified, not started |
-| WS2 | reactive facade → all 9 — ADR-0024 generalization | ratified, not started |
-| WS3 | CRDT tier — new ADR, wire change, D7 benchmark gate | ratified, not started |
-| WS4 | sign-out + local wipe — `clear()` on `Storage`/`Outbox` | ratified, not started |
+| WS1 | web durability — ADR-0017 Worker + SQLite-WASM | **DESIGNED** (executes existing ADR-0017; protocol below) |
+| WS2 | reactive facade → all 9 — ADR-0024 generalization | **DESIGNED**; kotlin thin-slice IN FLIGHT (worktree) |
+| WS3 | CRDT tier | **DESIGNED → ADR-0030 Proposed**; scope decision pending (below) |
+| WS4 | sign-out + local wipe — `clear()` on `Storage`/`Outbox` | **DESIGNED → ADR-0029 Proposed** |
 
-Also outstanding:
+### WS1 design (executes ADR-0017 — no new ADR; protocol captured here so it survives compact)
 
-- **ADR-0029 is not written.** WS4's 4b (what happens to pending writes) and 4d (the `exp` ordering
-  constraint) are decisions that belong in it, not in a plan file.
-- **`fixtures/` is still empty**; the 228 deletions remain uncommitted per D0.
-- **The sweep boundary is unconfirmed** — "take it all" was applied to Flutter's example + tests
-  only. The other 8 SDKs' `test/`/`e2e/` dirs and `crates/*/examples/` were left alone because they
-  are wired into the 9 surviving slices; taking those too would zero the suite.
+- **Architecture:** one Worker owns the engine + WS transport + `SqliteWasmStorage` (impls
+  `Storage` AND `Outbox`); main thread is a thin `postMessage` proxy. WS must live in the Worker —
+  `createSyncAccessHandle` is Worker-only and the apply loop calls `apply_batch` synchronously
+  against the same DB the WS echo writes into.
+- **Boundary commands (only these cross; the rest — apply_batch, pks_for_table, delete_pks, pending,
+  mark_done, bump_attempts, mark_dead_letter, epoch, save_epoch — run intra-Worker):** `connect`,
+  `write`, `rowsFor`, `checkpoint`, `close`, `clear` (WS4). Push events: `rowsChanged`,
+  `writeResult{client_write_id,ok}`, `status`.
+- **BREAKING `write` change:** today `NostosSocket.write` throws synchronously when the socket isn't
+  OPEN; after WS1 it always enqueues (durable-first via `Outbox::enqueue` + instant row via
+  `apply_local`) and the throw vanishes. `e2e/browser_live.spec.cjs` must be rewritten to assert the
+  async `writeResult{ok}`. On landing the **"live-only" ceiling docs go stale** and must be updated:
+  `sdk/nostos_web/README.md` (Ceiling), `docs/api/web.md`, `docs/api/README.md` (matrix warning).
+- **VFS:** `opfs-sahpool` (no COOP/COEP tax, unlike wa-sqlite; atomicity, unlike raw OPFS). Safari
+  Private Browsing → `InMemoryStorage` + `localStorage` checkpoint fallback (storage-backend-level;
+  correctness preserved, only durability lost).
+- **Marshalling:** RowOp payload crosses as a transferable `Uint8Array` (zero-copy on the echo hot
+  path); `PendingWrite.payload_json` crosses inline (already a string).
+- **Open toolchain decision:** wasm-bindgen dual-entry (main `NostosEngine` + Worker) from one crate
+  — likely a **separate Worker-entrypoint crate**. Validate FIRST (the WS1 thin slice).
+- **Test plan:** Playwright + bundled Chromium (OPFS since 102+), `launchPersistentContext`;
+  durability (offline write → reload → present), drain, Safari-fallback stub. **Open gap: OPFS
+  persistence across reload in HEADLESS Chromium — unverified.** ADR-0017's "no Node path" is about
+  Node, not headless Chrome.
 
-**The next action is WS4's trait design (4a/4b)** — not WS1 — because WS1's `postMessage` protocol
-should not be frozen before it knows `clear()` exists.
+### WS3 design → ADR-0030 — SCOPE DECISION PENDING (the headline)
+
+The design **falsified the workstream's premise**, verified against source (see ADR-0030):
+
+- **Counter → NOT a CRDT.** nostos is server-authoritative (ADR-0013); an `op:"increment"` delta that
+  `WriteBack` translates to `UPDATE SET val=val+?` lets Postgres serialize concurrent +1/+1 → +2.
+  Zero wire cost. **The "community total pomodoros" use case needs a delta op, not a CRDT.**
+- **Add-wins OR-set → genuine CRDT** (tags/presence). Per-element HLC inside the opaque payload.
+- **WireFrame is unchanged** → the 833k@1k fan-out hot path is unaffected (it doesn't apply rows).
+  Moat risk is **~0 IF no top-level wire fields are added and the bench payload isn't fattened** —
+  both avoidable. Benchmark gate (D7): `make bench --clients 1000`, 3× median,
+  `NOSTOS_FAKE_EPS=0 NOSTOS_FAKE_KEYS=0`; revert if >3% regression (<808k vs 833,307) or any drop.
+- **DECISION NEEDED:** confirm the scope = counter delta-op + OR-set CRDT (recommended, low-risk),
+  NOT a full CRDT tier (PN-counter etc.) the architecture has no use for.
+
+### Also outstanding
+
+- **`fixtures/` is empty by design** (D0); the 228 deletions are committed (`f0f3986`).
+- **The sweep boundary** — "take it all" covered Flutter's example+tests only; the other 8 SDKs'
+  test/e2e dirs and `crates/*/examples/` were left alone (wired into the 9 surviving slices).
+
+**Next actions:** (1) operator confirms WS3 scope; (2) kotlin thin-slice returns → fan out the WS2
+native reactive ports (worktree-isolated + commit coordinator); (3) WS1 thin slice = validate the
+Worker-entrypoint crate decision; (4) WS4/WS3 implementation follows their ADRs.
