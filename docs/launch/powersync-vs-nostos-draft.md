@@ -41,7 +41,7 @@ that.
 
 | Metric | Nostos | PowerSync | Same denominator? |
 |--------|-------|-----------|-------------------|
-| **1k-client fan-out** | **833,308 ops/sec @ 0% drops** | ~2–4k ops/sec (their published server ceiling) | ✅ both are server-process replication rates |
+| **1k-client fan-out** | **833,307 ops/sec @ 0% drops** | ~2–4k ops/sec (their published server ceiling) | ✅ both are server-process replication rates |
 | 5k-client fan-out | 660k ops/sec @ 0.91% drops | not published | Nostos-only |
 | 10k-client fan-out (probe) | ~483k ops/sec @ ~61.4% drops | not published | Nostos-only |
 | Predicate eval (microbench) | ~1.5M evals/sec through 10k predicates | not published | eval-only — **never** compared to PowerSync's end-to-end number |

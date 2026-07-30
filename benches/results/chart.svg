@@ -12,7 +12,7 @@
 <line x1="64" y1="40" x2="680" y2="40" stroke="#eee"/>
 <text x="56" y="44" text-anchor="end" fill="#666">958303</text>
 <rect x="187" y="82" width="369" height="278" fill="#7c3aed"/>
-<text x="371" y="76" text-anchor="middle" font-weight="bold">833,308</text>
+<text x="371" y="76" text-anchor="middle" font-weight="bold">833,307</text>
 <text x="371" y="382" text-anchor="middle" fill="#444">1000 clients</text>
 <line x1="64" y1="358" x2="680" y2="358" stroke="#dc2626" stroke-width="2" stroke-dasharray="6,4"/>
 <text x="676" y="352" fill="#dc2626" font-weight="bold">PowerSync ceiling ~4000 ops/sec</text>

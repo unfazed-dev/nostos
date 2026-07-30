@@ -12,7 +12,7 @@ depends on. Flutter / WASM client SDKs are out of scope here.
 ## 1. `nostos-server` environment
 
 Every knob is a clap `#[arg]` with both a `--long` flag and a `NOSTOS_*` env
-var (defined in `crates/nostos-server/src/main.rs:33-167`). Env wins when the
+var (defined in `crates/nostos-server/src/main.rs:33-205`). Env wins when the
 flag is absent; flag wins when present.
 
 | var | default | effect |
@@ -61,7 +61,7 @@ or unset NOSTOS_PG_URL.
 
 The server **refuses to start** (non-zero exit). This is deliberate (C10,
 2026-07-20): the guard previously only `warn!`ed and let the server start
-degraded — the `snapshotter` field stayed `None` (`main.rs:488-494`), so a
+degraded — the `snapshotter` field stayed `None` (`main.rs:520-534`), so a
 freshly-subscribing client received **zero** of the table's pre-existing rows
 ("connected but lists empty" / "5 in Postgres, only live inserts show"). The
 bail makes the misconfiguration undiscoverable-by-accident. Fix: set
@@ -71,21 +71,24 @@ bail makes the misconfiguration undiscoverable-by-accident. Fix: set
 client's perspective until you read the rejection frame: the transport rejects
 every `ClientMessage::Write` with `"table not writable: '<t>' — add it to
 NOSTOS_WRITE_TABLES"` (`crates/nostos-infra/src/transport.rs:792`,
-`crates/nostos-server/src/main.rs:94`). Defense-in-depth at the SQL-injection
+`crates/nostos-server/src/main.rs:112`). Defense-in-depth at the SQL-injection
 trust boundary (ADR-0013); empty-by-default is deliberate. Fix: add the table,
 e.g. `NOSTOS_WRITE_TABLES=tasks,notes`.
 
 **(c) `NOSTOS_REPLICATOR=pg` but `NOSTOS_PG_URL` empty.** Two bails fire,
 both with actionable messages:
 
-- `main.rs:370` — replicator cannot start: `"NOSTOS_REPLICATOR=pg requires NOSTOS_PG_URL ..."`.
-- `main.rs:457` — write-back cannot start: `"NOSTOS_REPLICATOR=pg but NOSTOS_PG_URL is not set (required for write-back) ..."`.
+- `main.rs:406` — replicator cannot start: `"NOSTOS_REPLICATOR=pg but NOSTOS_PG_URL is not set ..."`.
+- `main.rs:497` — write-back cannot start: `"NOSTOS_REPLICATOR=pg but NOSTOS_PG_URL is not set (required for write-back) ..."`.
+
+> Line numbers in this document are hints, not anchors — they drift whenever
+> `main.rs` gains a line. **Grep the quoted error string**, which is stable.
 
 Fix: `docker compose -f docker/docker-compose.yml up -d` then
 `NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn`.
 
 **(d) `NOSTOS_SYNC_AUTH=supabase-jwt` with neither secret nor JWKS.** Bails at
-`main.rs:258`: `"NOSTOS_SYNC_AUTH=supabase-jwt requires at least one of
+`main.rs:277`: `"NOSTOS_SYNC_AUTH=supabase-jwt requires at least one of
 NOSTOS_SUPABASE_JWT_SECRET (legacy HS256) or NOSTOS_SUPABASE_URL /
 NOSTOS_SUPABASE_JWKS_URL"`. Fix: set one of the three.
 
@@ -220,7 +223,7 @@ Run this in order. Each line is **symptom → check → fix**.
 5. **Did the client receive a snapshot?**
    Symptom: client acks subscribe, then nothing; no error server-side.
    Check: server log for `snapshot-on-subscribe: PgSnapshotter (real source)`
-   at startup (`main.rs:493`) — if absent, snapshotter is `None` (back to
+   at startup (`main.rs:526`) — if absent, snapshotter is `None` (back to
    line 1). Under `pg`, also confirm the publication actually contains the
    table: `SELECT * FROM pg_publication_tables WHERE pubname='cairn_pub';`.
    Fix: re-run `nostos init` (it reconciles the publication's table set).
@@ -288,7 +291,7 @@ see the deploy guide (TBD).
 not used to operate the server. Documented for completeness; see
 ADR-0023.
 
-### 4.2 `nostos-server` (crates/nostos-server/src/main.rs:33-167)
+### 4.2 `nostos-server` (crates/nostos-server/src/main.rs:33-205)
 
 The sync server binary. Every flag has an env-var equivalent (see §1 table).
 

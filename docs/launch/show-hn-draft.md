@@ -48,7 +48,7 @@ We measured server fan-out against PowerSync's **published** server ceiling of
 
 | Tier | Nostos | Drops | vs PowerSync ceiling |
 |------|-------|-------|----------------------|
-| **1k clients** | **833,308 ops/sec** | **0%** | **208× their high ceiling** (417× their low) |
+| **1k clients** | **833,307 ops/sec** | **0%** | **208× their high ceiling** (417× their low) |
 | 5k clients | 660k ops/sec | 0.91% | still dramatically faster |
 | 10k clients (probe) | ~483k ops/sec | ~61.4% | throughput high, drops NOT under 1% |
 
