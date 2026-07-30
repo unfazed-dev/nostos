@@ -19,16 +19,34 @@ cargo run -p nostos-server   # ws://127.0.0.1:8800/sync
 ```dart
 import 'package:nostos_flutter/nostos_flutter.dart';
 
-final nostos = await Nostos.connect(url: 'ws://127.0.0.1:8800/sync');
-await nostos.subscribe('tasks'); // optional: where: "status = 'open'"
+// NostosDatabase is the entry point. It fetches the server schema for you, so
+// `SELECT * FROM tasks` works immediately — no hand-written Schema.
+final db = await NostosDatabase.connect(
+  url: 'ws://127.0.0.1:8800/sync',
+  sqlitePath: '${(await getApplicationSupportDirectory()).path}/cairn.db',
+);
+await db.subscribe('tasks'); // optional: where: "status = 'open'"
 
-nostos.watch('tasks').listen((rows) {
-  // rows: List<Map<String, dynamic>> — the full current row set for
-  // 'tasks', re-emitted after every applied change.
+db.watch('SELECT * FROM tasks ORDER BY _pk').listen((rows) {
+  // rows: List<Map<String, dynamic>>, re-emitted after every applied change.
 });
 
-await nostos.write('tasks', op: 'upsert', pk: '1', payload: {'title': 'buy milk'});
+await db.write(table: 'tasks', op: 'upsert', pk: '1', payload: {'title': 'buy milk'});
 ```
+
+`db.watch` takes SQL; `db.collection<T>(…)` gives you a typed handle with
+`watch` / `count` / `upsert` / `patch` / `delete`
+([ADR-0024](../../docs/adr/0024-client-reactive-facade-and-query-primitive.md)).
+Reads run against one SQLite **VIEW** per synced table, projected from the
+server schema ([ADR-0028](../../docs/adr/0028-client-read-views-over-opaque-payload.md)),
+which is why `execute` is **read-only** — route writes through `write` or a
+`Collection`.
+
+> **`Nostos` vs `NostosDatabase`.** `Nostos` is the low-level engine handle and is
+> still exported as an escape hatch, but `NostosDatabase` is the supported path and
+> the only one documented here. This README taught `Nostos.connect` until
+> 2026-07-30 while `USAGE.md` taught `NostosDatabase` — if you followed an older
+> copy of this file, `NostosDatabase.open` is the drop-in replacement.
 
 **Multiple tables share one socket.** `subscribe(table)` is the single-table
 convenience; `subscribeTables` takes a list and multiplexes them over the same
@@ -58,24 +76,64 @@ background connection and watch pumps). `watch(table)` throws a `StateError` if
 ### Supabase
 
 ```dart
-final session = Supabase.instance.client.auth.currentSession!;
-final nostos = await NostosSupabase.connect(
+// Supabase.initialize(...) must already have run and a user must be signed in —
+// this factory reads Supabase.instance's current session itself. It throws a
+// StateError naming the fix if there is no live session.
+final db = await NostosDatabase.supabase(
   nostosUrl: 'ws://127.0.0.1:8800/sync', // your `nostos dev` URL
-  supabaseUrl: 'https://<project-ref>.supabase.co',
-  accessToken: session.accessToken,
+  sqlitePath: '${(await getApplicationSupportDirectory()).path}/cairn.db',
 );
 ```
 
-`NostosSupabase.connect` does **not** depend on the `supabase_flutter`
-package — pass `accessToken` from whatever auth source you use. It's a thin
-wrapper over `Nostos.connect`; `supabaseUrl` is accepted for
-forward-compatibility (see ponytail in `lib/src/nostos.dart`) but not yet used
-to derive anything — point `nostosUrl` at wherever your `nostos-server`
-actually runs. `supabase_flutter`'s session token auto-refreshes; re-call
-`connect`/`subscribe` with the new token when `onAuthStateChange` fires
-(transparent pass-through of a refreshed token is not yet wired — v1).
+Config-driven alternative, if you keep `assets/nostos.json` + `nostos.g.dart`
+(`nostos pull && nostos gen`) — this is what `example/` uses:
+
+```dart
+final db = await NostosDatabase.open(
+  config: config,          // NostosConfig, incl. an optional supabase block
+  schema: nostosSchema,     // generated; omit to fetch from the server
+  sqliteDir: dir.path,
+);
+```
+
+> ### ⚠️ You must re-connect when the token refreshes
+>
+> **Sync stops when the access token expires — about an hour after login on
+> Supabase's default TTL — and does not recover on its own.** The token is fixed
+> when you connect: `ClientConfig.token` is immutable, the reconnect loop re-sends
+> the same value on every attempt, and the server enforces `exp`. So the client
+> retries a dead token indefinitely while your UI shows stale data.
+>
+> Until this is wired transparently, listen to `onAuthStateChange` and re-connect
+> with the new token on `tokenRefreshed`. Watch `SyncStatus.lastWriteError` /
+> connection state to see it happen.
+>
+> Tracked as an open P1 with the agreed fix (a pure-Dart auto-wire inside
+> `NostosDatabase.supabase`) in
+> [`docs/plans/nostos-flutter-powersync-connection-redesign.md`](../../docs/plans/nostos-flutter-powersync-connection-redesign.md).
+
+`NostosDatabase.supabase` does **not** depend on the `supabase_flutter`
+package — pass `accessToken` from whatever auth source you use. `supabaseUrl` is
+accepted for forward-compatibility (see ponytail in `lib/src/nostos.dart`) but not
+yet used to derive anything — point `nostosUrl` at wherever your `nostos-server`
+actually runs.
 
 ## API
+
+**Entry points** (`NostosDatabase` — use these):
+
+- `NostosDatabase.connect({required String url, String? token, NostosSchema? schema, required String sqlitePath})`
+  → `Future<NostosDatabase>`. Fetches `GET {base}/schema` unless `schema` is passed.
+- `NostosDatabase.supabase({required String nostosUrl, NostosSchema? schema, required String sqlitePath})`
+  → reads the live session from `Supabase.instance`; throws `StateError` if none.
+- `NostosDatabase.open({required NostosConfig config, NostosSchema? schema, required String sqliteDir})`
+  → config/codegen-driven; what `example/` uses.
+- Then: `subscribe` / `subscribeTables`, `watch(sql)` / `getAll(sql)`,
+  `write(table:, op:, pk:, payload:)`, `collection<T>(…)`, `syncStatus`,
+  `disconnect` / `resume` / `close`. `execute(sql)` is a **read-only** alias of
+  `getAll` — see its dartdoc before reaching for it.
+
+**Low-level handle** (escape hatch; `NostosDatabase` wraps this):
 
 - `Nostos.connect({required String url, String? token, String? sqlitePath})`
   → `Future<Nostos>`. Opens the durable local store; no network yet.

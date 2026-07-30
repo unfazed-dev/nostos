@@ -34,7 +34,7 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 
 | plan | topic | basis |
 |---|---|---|
-| `nostos-flutter-powersync-connection-redesign.md` | PowerSync-style Dart API (Schema/Connector/NostosDatabase). **See the caveat below** — the diagnosis that motivated it was falsified, but the API-shape decisions were separately ratified. | verified |
+| `nostos-flutter-powersync-connection-redesign.md` | PowerSync-style Dart API (Schema/NostosDatabase). **AS-BUILT RECORD** as of 2026-07-30 — D2–D6 shipped, D1's typed tables rejected (ADR-0028), D7 settled differently, one open P1 (token refresh). **See the caveat below.** | verified |
 | `nostos-ai-privacy-and-runner-roadmap.md` | AI-privacy moat: zero-knowledge E2EE + WYSIWYS egress, decoupled nostos-AI layer. | inferred |
 | `dart-dev-api-reactive-facade-2026-07-19.md` | `Collection<T>` + `SyncStatus` reactive facade (ADR-0024). Header: "Proposed (awaiting go)". | inferred |
 | `nostos-provider-dashboard-multitable.md` | Multi-table offline-first demo; would supersede the single-table Tasks example. Header: "proposed (awaiting operator sign-off)". | inferred |
@@ -67,12 +67,24 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 
 ### Caveat on the Flutter connection redesign
 
-`nostos-flutter-powersync-connection-redesign.md` is filed GATED-ON-GO, not SUPERSEDED, and the
-distinction matters. The **bug diagnosis that motivated it was falsified**: "add does nothing"
-was a `PgWriteBack` TEXT-vs-`TIMESTAMPTZ` bind, and "5 rows → 1 shows" was a config bug
-(`NOSTOS_REPLICATOR != pg`, so the snapshotter was `None`). Neither is fixed by the redesign.
-But the seven API-shape decisions in it were ratified separately on 2026-07-13, so the plan is
-live **as an API proposal** and dead **as a bug fix**. Do not cite its problem statement.
+`nostos-flutter-powersync-connection-redesign.md` is an **AS-BUILT RECORD** (rewritten
+2026-07-30). This entry previously called it GATED-ON-GO, and before that the plan's own header
+said "no implementation without explicit operator go" — **both understated reality: six of the
+seven decisions had already shipped** and were exported from `nostos_flutter`. A doc claiming
+"not implemented" about implemented code misleads exactly as badly as the reverse, so it now
+carries a per-decision ledger verified against `lib/` and `crates/`.
+
+Current state: D2–D6 shipped; **D1's materialized typed tables are rejected**
+([ADR-0028](../adr/0028-client-read-views-over-opaque-payload.md)) — the client read model is
+SQLite VIEWs over the opaque payload, and a slow query gets a partial expression index, not a
+storage rewrite; D7 settled differently (`Nostos` and `NostosDatabase` both exported, only
+`NostosDatabase` taught); and **one open P1** — no token refresh, so a Supabase app stops syncing
+about an hour after login.
+
+The **bug diagnosis that motivated the plan is still dead**: "add does nothing" was a
+`PgWriteBack` TEXT-vs-`TIMESTAMPTZ` bind, and "5 rows → 1 shows" was a config bug
+(`NOSTOS_REPLICATOR != pg`, so the snapshotter was `None`). Both since fixed, neither by the
+redesign. Do not cite its problem statement.
 
 ---
 

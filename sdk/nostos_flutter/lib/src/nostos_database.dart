@@ -243,15 +243,24 @@ class NostosDatabase {
       (jsonDecode(await _nostos.query(sql)) as List<dynamic>)
           .cast<Map<String, dynamic>>();
 
-  /// Raw-SQL execute. Currently a READ-ONLY alias of [getAll].
+  /// Raw-SQL execute. A READ-ONLY alias of [getAll] — **by convention, not by
+  /// enforcement.**
   ///
-  /// ponytail: writes through raw SQL are a deliberate fast-follow ceiling
-  /// — the demo's add/delete/edit flows all route through [write] (which
-  /// enqueues into the durable outbox and round-trips the applied row back
-  /// through [watch]). Accepting arbitrary INSERT/UPDATE/DELETE here would
-  /// bypass the outbox and desync the local view from the server's
-  /// replication stream. Parse raw SQL for writes in a follow-up and route
-  /// them into [write]; until then, [execute] is SELECT-only.
+  /// Nothing here parses your SQL. `SqliteStorage::query` runs whatever it is
+  /// handed, so a `DELETE` reaches SQLite and returns an empty result set.
+  /// Two things keep that from corrupting state, and it is worth knowing which
+  /// is which: statements aimed at a **synced table** fail loudly, with SQLite's
+  /// `cannot modify ... because it is a view` (the read surface is a VIEW —
+  /// ADR-0028), but statements aimed at an **internal** table are not
+  /// protected, and `DELETE FROM cairn_outbox` would silently destroy queued
+  /// writes. Do not route DML through here.
+  ///
+  /// ponytail: writes through raw SQL are a deliberate ceiling — add/delete/edit
+  /// route through [write] / [Collection.upsert] / [Collection.patch] /
+  /// [Collection.delete], which apply locally at once and round-trip the applied
+  /// row back through [watch]. Accepting arbitrary INSERT/UPDATE/DELETE would
+  /// bypass the outbox and desync local state from the replication stream.
+  /// Upgrade path: parse raw SQL and route writes into [write].
   Future<List<Map<String, dynamic>>> execute(String sql) => getAll(sql);
 
   /// Reactive typed-record watch (WS6): like [watch] but maps each row to a

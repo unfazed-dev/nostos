@@ -1,17 +1,74 @@
-> **Read this first (2026-07-30). Live as an API proposal; DEAD as a bug fix.**
-> The problem statement below — "add does nothing", "5 rows → 1 shows" — was **falsified by
-> real-Postgres repro on 2026-07-13**. Actual causes: a `PgWriteBack`
-> TEXT-vs-`TIMESTAMPTZ` bind (chrono fix), and a config bug (`NOSTOS_REPLICATOR != pg`, so the
-> snapshotter was `None`). **Neither is fixed by this redesign.** Both are since fixed.
-> The seven API-shape decisions here were ratified separately and remain GATED-ON-GO, so the
-> plan stands as an API proposal. Do not cite its diagnosis as motivation.
+> **Read this first — this is an AS-BUILT RECORD, not a proposal (rewritten 2026-07-30).**
+>
+> Two earlier headers were both wrong. It first read "PLAN — no implementation without
+> explicit operator go"; a 2026-07-30 revision downgraded that to "live as an API proposal,
+> GATED-ON-GO". **Both understated reality: six of the seven decisions had already shipped**
+> and were exported from `nostos_flutter`. A doc that says "not implemented" about implemented
+> code is as harmful as the reverse — the next agent either rebuilds what exists or treats the
+> genuine gaps as done. Ratified as an as-built record by the operator on 2026-07-30.
+>
+> **The diagnosis remains dead.** "add does nothing" / "5 rows → 1 shows" was **falsified by
+> real-Postgres repro on 2026-07-13**: a `PgWriteBack` TEXT-vs-`TIMESTAMPTZ` bind (chrono fix)
+> and a config bug (`NOSTOS_REPLICATOR != pg`, so the snapshotter was `None`). Both since
+> fixed, neither by anything here. Do not cite the "Why" section as motivation for future work.
+>
+> **One decision was reversed, not shipped:** D1's *materialized typed tables* are now
+> **rejected** — [ADR-0028](../adr/0028-client-read-views-over-opaque-payload.md).
 > Index: [`README.md`](README.md).
 
 # Nostos Flutter — PowerSync-Style Connection Redesign
 
-**Started:** 2026-07-13. **Owner:** Claude (tech lead). **Status:** PLAN — no
-implementation without explicit operator go (standing scope rule: plans only,
-nostos tree only).
+**Started:** 2026-07-13. **Owner:** Claude (tech lead).
+**Status:** AS-BUILT — D2–D6 shipped; D1 shipped in a different form (views, not typed
+tables, ADR-0028); D7 settled differently (both classes exported, one taught).
+
+## As-built ledger (2026-07-30)
+
+Verified against `sdk/nostos_flutter/lib/` and `crates/` on 2026-07-30, not from memory.
+
+| # | Decision | State | Evidence |
+|---|---|---|---|
+| D1 | PowerSync-shaped API, collapsed writes | ✅ **surface** / ❌ **storage** | `NostosDatabase.watch/getAll/write/collection`; storage is VIEWs over `cairn_data`, **not** typed tables — ADR-0028 |
+| D2 | Hybrid schema (auto-fetch + override) | ✅ shipped | `GET /schema` (ADR-0021) + `NostosSchema`; `NostosDatabase._fetchSchema` |
+| D3 | Instant-local writes + reconcile | ✅ shipped | `client.rs:407` `apply_local`; tests `apply_local_renders_instantly_and_echo_reconciles`, `apply_local_patch_merges_fields_and_renders_offline` |
+| D4 | Per-field last-write-wins | ✅ shipped | PATCH targeted `UPDATE SET`, ordered by WAL arrival |
+| D5 | DX edges (auto-schema, no `uploadData`, one-liner, codegen) | ✅ shipped | `NostosDatabase.supabase(…)`; `nostos gen` → `example/lib/nostos.g.dart` |
+| D6 | Supabase first-class | ⚠️ **partial** | `NostosSupabase` + `.supabase(…)` shipped; **no connector / no token refresh — open P1, below** |
+| D7 | Rollout = replace `Nostos` | ⚠️ **settled differently** | Both exported; `NostosDatabase` is the only *taught* surface. No `@Deprecated` |
+
+### D6's open P1 — token refresh
+
+`NostosConnector` **does not exist** anywhere in `lib/` or `crates/`. The plan's
+"implement `NostosConnector` (`fetchCredentials` → token, refresh)" was never built;
+`NostosDatabase.connect` takes a static `String? token`. `ClientConfig.token` is immutable
+after construction, `run_with_reconnect` → `run_once` → `connect_url()` re-sends it every
+attempt, and the server enforces `exp` (`jwks.rs:90`). **A Supabase-backed app therefore
+stops syncing roughly an hour after login and never recovers**, unless the developer
+manually re-connects on `onAuthStateChange` — which today is disclosed only in a dartdoc
+at `nostos.dart:458`.
+
+**Fix to build (operator-ratified 2026-07-30):** a pure-Dart auto-wire inside
+`NostosDatabase.supabase(…)` — listen to `onAuthStateChange`, reconnect with the fresh
+token on `tokenRefreshed`. No Rust/FFI change. `ponytail:` ceiling = Supabase only.
+**Upgrade path when a non-Supabase user asks:** thread a
+`Future<String> Function()? tokenProvider` through FRB into `ClientConfig` so
+`connect_url()` re-resolves per attempt. Not the plan's `NostosConnector` class — its
+`uploadData` half is precisely the boilerplate nostos's write-back exists to delete.
+
+### Corrections to the spec below
+
+The "Target DX" and "Architecture changes" sections are kept for the record but are
+**not** buildable as written:
+
+1. `await db.execute('INSERT INTO tasks …')` / `'DELETE …'` — shipped `execute` is a
+   **read-only alias of `getAll`**. Those samples cannot work. Writes go through
+   `write` / `Collection.upsert` / `patch` / `delete`. (A raw `INSERT` against a synced
+   table name fails loudly — it's a view — which is the point; ADR-0028.)
+2. `Schema([Table('tasks', [Column.text('title')])])` — `Table` and `Column` collide with
+   `material.dart`'s widgets and are deliberately **not** re-exported. Canonical names are
+   `NostosSchema` / `NostosTable` / `NostosColumn`.
+3. "Replace the opaque `cairn_data(table, pk, BLOB)` model with **real typed tables**" —
+   rejected, ADR-0028. A slow query gets a partial expression index, not a rewrite.
 
 Supersedes the "keep the SDK light / defer P6 schema-materialization" stance in
 `docs/plans/<powersync-sdk-parity-plan>`. Shipped parity work (P1 SQL `watchQuery`,
