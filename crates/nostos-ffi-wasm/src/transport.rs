@@ -25,7 +25,7 @@
 //! `ClientMessage`'s `#[serde(tag="type", rename_all="lowercase")]` tag exactly
 //! (a hand-rolled JSON string would drift silently and close the server socket).
 
-use nostos_core::{Frame as CoreFrame, Operation};
+use nostos_core::{Frame as CoreFrame, Operation, Outbox};
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{closure::Closure, prelude::*};
@@ -391,6 +391,38 @@ pub(crate) struct SocketInner {
     pub(crate) table: String,
 }
 
+/// Drain the outbox over an OPEN socket: send each pending write frame and
+/// `mark_done` on success. Called from the `onopen` handler so writes captured
+/// while disconnected ship as soon as the connection (re)establishes — the
+/// "flush loop drains pending writes when connected" half of the WS1 write
+/// contract. A send failure (socket closed mid-drain) leaves the write pending
+/// for the next open. ponytail: WS glue untested in CI; covered by the manual /
+/// E3 path (the live path that exercises this needs a disconnect-mid-write
+/// harness, out of scope for slice 2).
+fn flush_pending(inner: &Rc<SocketInner>) {
+    // Snapshot the pending list (owned Vec) so the RefCell borrow is released
+    // before we re-borrow for mark_done inside the loop.
+    let Ok(pending) = inner.engine.borrow_mut().storage_mut().pending() else {
+        return;
+    };
+    for (id, write) in pending {
+        if inner.ws.ready_state() != 1 {
+            break; // closed mid-drain — leave the rest pending for next open
+        }
+        let sent = build_write_frame(
+            &write.table,
+            write.op.as_wire_str(),
+            &write.pk,
+            write.payload_json.as_deref(),
+            &id.to_string(),
+        )
+        .is_ok_and(|f| inner.ws.send_with_str(&f).is_ok());
+        if sent {
+            let _ = inner.engine.borrow_mut().storage_mut().mark_done(id);
+        }
+    }
+}
+
 /// Connect to `url`, await the browser's `open`, then resolve. Called by the
 /// `#[wasm_bindgen] async fn` `NostosSocket::connect`. ponytail: WS glue
 /// untested in CI; covered by the E3 demo page manual check.
@@ -446,6 +478,13 @@ pub(crate) async fn connect(
         // Sending can fail only if the socket closed between open + send; ignore
         // — onclose will run.
         let _ = inner_open.ws.send_with_str(&frame);
+        // Flush loop (WS1): drain writes enqueued while the socket was closed.
+        // They were apply_local'd on enqueue (instant local row); this only
+        // ships them. mark_done on send success. ponytail: PendingWrite carries
+        // no client_write_id field, so the wire id is synthesized from the
+        // outbox id here — the caller's id is preserved only on the live send
+        // path (NostosSocket::write).
+        flush_pending(&inner_open);
     });
 
     // --- onmessage: the pure frame-pump → idle-flush → persist checkpoint → ack. ---
