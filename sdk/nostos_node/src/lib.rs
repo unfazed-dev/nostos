@@ -24,13 +24,14 @@
 //! reject the macro-expanded FFI. Do NOT add hand-written `unsafe` here.
 //!
 //! # ponytail: deferred surfaces (upgrade path)
-//! - **Row-tick callback**: the Flutter glue hands Dart a `StreamSink<String>`
-//!   per applied batch. The napi equivalent is a `ThreadsafeFunction`. Not
-//!   wired here — callers poll `query()` for now. Upgrade: add a
-//!   `subscribe(table, whereSql, onRows)` overload taking a
-//!   `ThreadsafeFunction`.
+//! - **Reactive row-tick callback**: WIRED. `watch(table, onSnapshot)` is the
+//!   Node port of Flutter's `watch(table, rows_sink)` / kotlin's
+//!   `watch(table, SnapshotSink)` — a TRUE Rust→JS push via a napi
+//!   `ThreadsafeFunction` (callable from any thread, incl. a tokio worker),
+//!   NOT a poll. The pump drains `SyncClient::subscribe_changes()` on this
+//!   handle's owned runtime and schedules `(jsonString)` on the JS thread.
 //! - **Connection-state stream**: Flutter emits `NostosConnectionState`
-//!   transitions. Deferred (same ThreadsafeFunction reason).
+//!   transitions. Deferred (same ThreadsafeFunction seam, a second pump).
 //! - **`.d.ts` generation**: plain `cargo build` does not emit TS types; use
 //!   `npm run build:napi` (`@napi-rs/cli build`) for `.d.ts` + cross-triple
 //!   packaging when shipping.
@@ -38,7 +39,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex as AsyncMutex;
 
 use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig};
@@ -67,12 +70,28 @@ pub struct NostosClient {
 }
 
 /// The active session. Dropping this — including via `subscribe()`/`connect()`
-/// replacing it — aborts the background run loop so a superseded session's
-/// WebSocket + reconnect loop actually stops instead of leaking.
+/// replacing it — aborts the background run loop AND every `watch()` pump so a
+/// superseded session's WebSocket + reconnect loop + reactive pumps actually
+/// stop instead of leaking. Mirrors kotlin's `Session` shape (Flutter's
+/// `session.watch_tasks`).
 struct Session {
     client: Arc<SyncClient<SqliteStorage>>,
     table: String,
     run_task: Option<tokio::task::JoinHandle<()>>,
+    /// One pump per `watch()` call. Each owns its own `subscribe_changes()`
+    /// receiver. Aborted on session teardown (Drop) so a watch's lifecycle is
+    /// tied to the sync session — cancels on `subscribe()`/`connect()` replacing
+    /// the session or client GC. No per-watch cancel handle today (the floor; a
+    /// `stop_watch(table)` is the mechanical follow-on).
+    watch_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Replay cache (kotlin's `last_snapshot` port): the last snapshot JSON
+    /// emitted for this session's table. The no-replay Rust broadcast
+    /// (`broadcast::channel(64)` in nostos-client) means a LATE subscriber's own
+    /// `subscribe_changes()` receiver can't see prior ticks — this cache lets a
+    /// late `watch()` replay the last emitted snapshot instantly (no storage
+    /// round-trip). The first subscriber (empty cache) falls back to a live
+    /// storage query (source of truth), which is then cached for the next.
+    last_snapshot: Arc<AsyncMutex<Option<String>>>,
 }
 
 impl Drop for Session {
@@ -80,6 +99,52 @@ impl Drop for Session {
         if let Some(task) = self.run_task.take() {
             task.abort();
         }
+        // Abort every reactive pump too — the watches are tied to this session,
+        // so they must not outlive it. (A pump whose receiver goes Closed on
+        // client drop would exit anyway, but abort is immediate + explicit and
+        // guards against a pump mid-storage-query.)
+        for task in self.watch_tasks.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+/// Internal reactive-emitter seam. The napi `watch()` wraps a
+/// `ThreadsafeFunction` in a [`TsfnEmitter`] impl of this trait; a host test
+/// implements it with a recording channel. This seam is what lets the pump /
+/// replay / subscribe-before-snapshot ordering / teardown logic be PROVEN in
+/// pure-Rust host tests WITHOUT a JS runtime — a napi `ThreadsafeFunction`
+/// cannot be constructed without a live `Env`, so the test drives the SAME
+/// [`NostosClient::watch_internal`] core with a `RecordingEmitter` instead.
+/// (kotlin's `#[uniffi::export(with_foreign)] trait SnapshotSink` gets this for
+/// free — `with_foreign` permits a Rust host impl; napi has no analogue, so the
+/// seam is introduced explicitly. The trait shape mirrors kotlin's
+/// fire-and-forget sync `on_snapshot`, not an async callback.)
+trait SnapshotEmitter: Send + Sync {
+    /// Fire-and-forget snapshot delivery. Synchronous because napi's
+    /// `ThreadsafeFunction::call` is itself a scheduling primitive (it posts to
+    /// the JS thread and returns immediately, NOT an await point), and because
+    /// kotlin's `SnapshotSink::on_snapshot` is sync for the same reason. Errors
+    /// are best-effort swallowed: a Closing/aborted status just means the JS
+    /// side is tearing down, and `Session::Drop` ends the pump regardless.
+    fn emit(&self, json: String);
+}
+
+/// napi production emitter: wraps a `ThreadsafeFunction<String>` and forwards
+/// each snapshot by scheduling the JS callback on the JS thread.
+/// `ThreadsafeFunction::call` is `Send + Sync` + callable from any thread
+/// (including this handle's tokio workers) — the textbook napi
+/// background-callback pattern, and the feasibility gate that PASSES: a tokio
+/// pump CAN invoke a JS callback via `ThreadsafeFunction`.
+struct TsfnEmitter(ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>);
+
+impl SnapshotEmitter for TsfnEmitter {
+    fn emit(&self, json: String) {
+        // Best-effort: Ok/Closing both mean "scheduled or tearing-down"; the
+        // pump keeps running until `Session::Drop` aborts it.
+        let _ = self
+            .0
+            .call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
     }
 }
 
@@ -122,8 +187,8 @@ impl NostosClient {
         if guard.is_some() {
             return Ok(());
         }
-        let storage =
-            SqliteStorage::open(&self.db_path).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let storage = SqliteStorage::open(&self.db_path)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let config = SyncClientConfig {
             table: "tasks".to_owned(),
             token: self.token.clone(),
@@ -135,6 +200,8 @@ impl NostosClient {
             client,
             table: "tasks".to_owned(),
             run_task: None,
+            watch_tasks: Vec::new(),
+            last_snapshot: Arc::new(AsyncMutex::new(None)),
         });
         Ok(())
     }
@@ -149,17 +216,13 @@ impl NostosClient {
     /// ponytail: no row-tick callback is delivered yet (ThreadsafeFunction
     /// deferred — see module docs). Poll `query()` to observe applied rows.
     #[napi]
-    pub async fn subscribe(
-        &self,
-        table: String,
-        where_sql: Option<String>,
-    ) -> napi::Result<()> {
+    pub async fn subscribe(&self, table: String, where_sql: Option<String>) -> napi::Result<()> {
         let mut guard = self.session.lock().await;
         // Drop any prior session first — its Drop aborts the prior run_task.
         *guard = None;
 
-        let storage =
-            SqliteStorage::open(&self.db_path).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let storage = SqliteStorage::open(&self.db_path)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let config = SyncClientConfig {
             table: table.clone(),
             token: self.token.clone(),
@@ -182,7 +245,129 @@ impl NostosClient {
             client,
             table,
             run_task: Some(run_task),
+            watch_tasks: Vec::new(),
+            last_snapshot: Arc::new(AsyncMutex::new(None)),
         });
+        Ok(())
+    }
+
+    /// Reactive watch: emit the full-table snapshot to `on_snapshot` immediately,
+    /// and again after every change tick (remote apply or local write). This is
+    /// the Node port of Flutter's `watch(table, rows_sink)` / kotlin's
+    /// `watch(table, SnapshotSink)` — a TRUE Rust→JS push via a napi
+    /// `ThreadsafeFunction`, NOT a poll. The JS consumer passes a callback and
+    /// receives `(jsonString)` calls; it never wall-clock-polls the store.
+    ///
+    /// `on_snapshot` is a `(snapshot: string) => void` JS function; napi wraps
+    /// it in a `ThreadsafeFunction` so the tokio pump (on THIS handle's owned
+    /// runtime) can invoke it from a non-JS thread. `ThreadsafeFunction::call`
+    /// is `Send + Sync` + callable from any thread — the textbook napi
+    /// background-callback pattern (feasibility gate: PASSES — a tokio pump CAN
+    /// invoke a JS callback via tsfn; no JS-side polling fallback needed).
+    ///
+    /// Resolves once the initial snapshot has been emitted and the pump is
+    /// spawned. One pump per call; its lifecycle is tied to the sync session:
+    /// `Session::Drop` (on a `subscribe()`/`connect()` replacing the session or
+    /// client GC) aborts every pump. No per-watch cancel handle today (the
+    /// floor; a `stop_watch(table)` is the mechanical follow-on).
+    ///
+    /// `table` MUST match the active session's table (v1: one table per client).
+    ///
+    /// # Load-bearing ordering: subscribe BEFORE the first snapshot read
+    /// (see kotlin port + nostos-client invariant
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`): the
+    /// nostos-client change broadcast is no-replay (`broadcast::channel(64)`).
+    /// A receiver created AFTER a commit permanently misses that commit — the
+    /// "connected but lists render empty" regression. This port creates the
+    /// receiver FIRST, then reads the initial snapshot; a commit in the residual
+    /// gap just triggers a redundant re-snapshot from the pump (idempotent —
+    /// full snapshot, self-healing on lag).
+    #[napi]
+    pub async fn watch(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "(snapshot: string) => void")] on_snapshot: ThreadsafeFunction<
+            String,
+            ErrorStrategy::CalleeHandled,
+        >,
+    ) -> napi::Result<()> {
+        let emitter = Arc::new(TsfnEmitter(on_snapshot)) as Arc<dyn SnapshotEmitter>;
+        self.watch_internal(&table, emitter).await
+    }
+
+    /// Shared reactive-watch core — the napi `watch()` (tsfn emitter) and the
+    /// host reactivity test (recording emitter) both drive this. Keeping the
+    /// pump / replay / ordering logic here (not in the napi method) is what lets
+    /// the reactivity be PROVEN in pure-Rust host tests without a JS runtime: a
+    /// napi `ThreadsafeFunction` cannot be constructed without a live `Env`, so
+    /// the test passes a `RecordingEmitter` impl instead (the napi adapter is a
+    /// thin, cite-napi-contract wrapper). This mirrors how kotlin's `watch()`
+    /// body is directly exercisable by a host test via its `SnapshotSink` trait.
+    async fn watch_internal(
+        &self,
+        table: &str,
+        emitter: Arc<dyn SnapshotEmitter>,
+    ) -> napi::Result<()> {
+        let mut guard = self.session.lock().await;
+        let session = guard.as_mut().ok_or_else(|| {
+            napi::Error::from_reason("watch() called before connect()/subscribe()")
+        })?;
+        if session.table != table {
+            return Err(napi::Error::from_reason(format!(
+                "watch() table {table:?} does not match active session table {:?} — v1 supports one table per NostosClient",
+                session.table
+            )));
+        }
+
+        // (1) SUBSCRIBE FIRST — load-bearing (see `watch` doc + the nostos-client
+        // invariant cited there). Must precede the initial snapshot read below;
+        // this receiver is the only way to learn of a commit that lands in the
+        // gap before the pump starts. `subscribe_changes` returns an OWNED
+        // `broadcast::Receiver` (holds its own channel handle, no borrow of the
+        // session), so `session` is free again immediately after.
+        let mut changes = session.client.subscribe_changes();
+
+        // (2) Initial snapshot AFTER subscribing. Replay cache first: a late
+        // subscriber (a second `watch()` for the same table after data has
+        // already flowed) gets the last-emitted snapshot instantly without a
+        // storage round-trip. First subscriber (empty cache) falls back to a
+        // live storage query (source of truth), which is then cached.
+        let cached = session.last_snapshot.lock().await.clone();
+        let initial_json = match cached {
+            Some(json) => json,
+            None => {
+                let json = snapshot_json(&session.client, table).await?;
+                *session.last_snapshot.lock().await = Some(json.clone());
+                json
+            }
+        };
+        emitter.emit(initial_json);
+
+        // (3) Pump: re-snapshot on EVERY change tick. Full snapshot per tick
+        // (not a diff — self-healing on lag). Each watch owns its own receiver;
+        // a tick on a different table just re-queries cheaply. `Lagged` (the
+        // receiver fell >64 ticks behind) is treated as a tick — a full snapshot
+        // resyncs. `Closed` (the client dropped its senders) fails the `while
+        // let` and the pump exits.
+        let pump_client = Arc::clone(&session.client);
+        let pump_cache = Arc::clone(&session.last_snapshot);
+        let pump_emitter = Arc::clone(&emitter);
+        let table_owned = table.to_owned();
+        let pump_task = self.rt.spawn(async move {
+            // Ok / Lagged -> re-snapshot + emit. Closed fails the `while let`
+            // and the pump exits. Snapshot read failure (transient) is
+            // best-effort: skip this tick, the next one retries.
+            while let Ok(_) | Err(RecvError::Lagged(_)) = changes.recv().await {
+                if let Ok(json) = snapshot_json(&pump_client, &table_owned).await {
+                    {
+                        let mut cache = pump_cache.lock().await;
+                        *cache = Some(json.clone());
+                    }
+                    pump_emitter.emit(json);
+                }
+            }
+        });
+        session.watch_tasks.push(pump_task);
         Ok(())
     }
 
@@ -221,9 +406,9 @@ impl NostosClient {
             }
         };
         let guard = self.session.lock().await;
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("write() called before connect()/subscribe()"))?;
+        let session = guard.as_ref().ok_or_else(|| {
+            napi::Error::from_reason("write() called before connect()/subscribe()")
+        })?;
         if session.table != table {
             return Err(napi::Error::from_reason(format!(
                 "write() table {table:?} does not match active session table {:?} — v1 supports one table per NostosClient",
@@ -251,9 +436,9 @@ impl NostosClient {
     #[napi]
     pub async fn query(&self, sql: String) -> napi::Result<String> {
         let guard = self.session.lock().await;
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("query() called before connect()/subscribe()"))?;
+        let session = guard.as_ref().ok_or_else(|| {
+            napi::Error::from_reason("query() called before connect()/subscribe()")
+        })?;
         // `with_storage` runs the closure on the client's storage task; `query`
         // is a read on the same `Mutex<Connection>` as the write path (no
         // shared mutation surface — see nostos-core's `Storage::query` doc).
@@ -275,7 +460,211 @@ impl NostosClient {
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
         let mut guard = self.session.lock().await;
-        *guard = None; // Drop aborts run_task.
+        // Drop aborts run_task AND every watch pump (Session::Drop).
+        *guard = None;
         Ok(())
+    }
+}
+
+/// Read the full row snapshot for `table` as a JSON array-of-objects string.
+///
+/// Queries `cairn_data` directly (NOT a `SELECT * FROM {table}` VIEW): the
+/// `tasks`/etc. VIEW is only created by `SqliteStorage::apply_schema` once the
+/// server has shipped a schema, but `cairn_data` exists on every store right
+/// after `open()` (`CREATE TABLE IF NOT EXISTS cairn_data` in
+/// `nostos-client/src/sqlite.rs`). So this snapshot succeeds on a fresh/empty
+/// store (returning `"[]"`) as well as a populated one — the correct
+/// offline-first UX. `table` is the session-validated value (the caller's
+/// `watch()`/`write()` already confirmed it equals the fixed session table), so
+/// the interpolation is injection-safe; the canonical per-table snapshot query
+/// is `SELECT pk, payload FROM cairn_data WHERE table_name = ?1 ...`
+/// (`nostos-client/src/sqlite.rs`).
+async fn snapshot_json(
+    client: &Arc<SyncClient<SqliteStorage>>,
+    table: &str,
+) -> napi::Result<String> {
+    let sql =
+        format!("SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC");
+    // `with_storage` runs the closure on the client's storage task; double-Result
+    // (outer ClientError, inner StorageError) — same shape as `query()`.
+    let rows = client
+        .with_storage(move |s| s.query(&sql))
+        .await
+        .map_err(|e: ClientError| napi::Error::from_reason(e.to_string()))?
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    serde_json::to_string(&rows).map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+
+    /// Test-only [`SnapshotEmitter`] that records every emitted snapshot into a
+    /// `std::sync::mpsc` channel. `mpsc::Sender` is `Send` but not `Sync`, so it
+    /// is wrapped in a `Mutex` (which IS `Send + Sync`) to satisfy the
+    /// `SnapshotEmitter: Send + Sync` bound. The test thread receives via
+    /// `recv_timeout` — a blocking EVENT wait on the callback, NOT a wall-clock
+    /// poll of the SDK. This is the honest reactivity proof. (The napi
+    /// production analogue is `TsfnEmitter`, which wraps a JS callback in the
+    /// SAME `SnapshotEmitter` seam — so the pump path under test IS the
+    /// production path; only the leaf delivery differs.)
+    struct RecordingEmitter(StdMutex<std::sync::mpsc::Sender<String>>);
+
+    impl SnapshotEmitter for RecordingEmitter {
+        fn emit(&self, json: String) {
+            // Best-effort: a dropped receiver (test gone) is fine; the pump
+            // keeps running until Session::Drop aborts it.
+            let _ = self.0.lock().expect("emitter lock").send(json);
+        }
+    }
+
+    /// Drive `watch_internal` on the client's owned runtime, returning a channel
+    /// that receives every emitted snapshot. `watch_internal` is the SAME core
+    /// the napi `watch()` drives (with a `TsfnEmitter`); the test drives it with
+    /// a `RecordingEmitter` because a `ThreadsafeFunction` cannot exist without
+    /// a live JS `Env`. Blocks until the initial snapshot is emitted + the pump
+    /// is spawned (mirrors kotlin's synchronous `watch()`).
+    fn watch_blocking(client: &NostosClient, table: &str) -> std::sync::mpsc::Receiver<String> {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let emitter = Arc::new(RecordingEmitter(StdMutex::new(tx))) as Arc<dyn SnapshotEmitter>;
+        client
+            .rt
+            .block_on(client.watch_internal(table, emitter))
+            .expect("watch_internal should succeed after connect");
+        rx
+    }
+
+    /// Proof-of-integration: the SAME `SyncClient<SqliteStorage>` the sibling
+    /// SDKs drive constructs + serves an offline query through the napi
+    /// `NostosClient` shape, with no live Node runtime required. Mirrors kotlin's
+    /// / swift's / tauri's offline smoke path (construct + query round-trip).
+    #[test]
+    fn nostos_client_offline_connect_query_round_trip() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.rt.block_on(client.connect()).expect("connect");
+
+        let rows_json = client
+            .rt
+            .block_on(client.query("SELECT 1 AS one".into()))
+            .expect("query");
+        assert!(
+            rows_json.contains("\"one\":1") || rows_json.contains("\"one\": 1"),
+            "expected an one=1 row in the JSON, got: {rows_json}"
+        );
+    }
+
+    /// REACTIVITY PROOF (host, no Node/JS runtime): `watch()` emits the initial
+    /// snapshot, and a local `write()` — which applies a row to `cairn_data` AND
+    /// fires the change broadcast (nostos-client invariant
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
+    /// `rows_applied == 1`) — causes the pump to emit a NEW snapshot, WITHOUT
+    /// the test polling a timer. `recv_timeout` blocks on the callback delivery
+    /// (an event wait), so this is reactive-by-callback, not reactive-by-poll.
+    /// (Production delivery differs only in the leaf: `TsfnEmitter::call` posts
+    /// to the JS thread instead of `mpsc::send`.)
+    ///
+    /// This also covers the subscribe-before-snapshot invariant: if `watch()`
+    /// read the snapshot BEFORE subscribing, a write racing that gap would be
+    /// missed. The engine side is pinned in nostos-client; this test pins the FFI
+    /// port's ordering (initial snapshot emitted, then the post-write snapshot).
+    #[test]
+    fn watch_emits_initial_snapshot_then_refires_on_local_write() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.rt.block_on(client.connect()).expect("connect");
+
+        // watch() subscribes (broadcast receiver created BEFORE the initial
+        // snapshot read — the load-bearing invariant) and emits the initial
+        // snapshot synchronously before returning.
+        let rx = watch_blocking(&client, "tasks");
+
+        // (1) Initial snapshot delivered — empty store -> "[]" (cairn_data has
+        // no rows for tasks yet). No polling: blocking event wait, 5s ceiling.
+        let initial = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initial snapshot should arrive immediately");
+        assert_eq!(
+            initial, "[]",
+            "fresh store tasks snapshot should be empty array"
+        );
+
+        // (2) Local write applies a row to cairn_data AND fires the change
+        // broadcast tick. The pump (on the owned runtime) wakes, re-snapshots,
+        // and fires emit AGAIN — the reactive proof.
+        client
+            .rt
+            .block_on(client.write(
+                "tasks".into(),
+                "upsert".into(),
+                "pk1".into(),
+                Some(r#"{"id":"pk1","title":"reactive"}"#.into()),
+            ))
+            .expect("write");
+
+        // (3) The post-write snapshot arrives without the test polling. The
+        // row's pk is a TEXT column and unambiguously proves the new row is in
+        // the snapshot (it was absent from the initial "[]"). NOTE: cairn_data
+        // stores `payload` as a BLOB, so serde_json renders it hex-encoded
+        // (e.g. 7b22... = `{"id":"pk1"...}`) — the SAME shape the sibling
+        // `query()` emits. Decoding BLOBs to readable JSON is the WS2
+        // typed-read (VIEW-over-cairn_data) layer's job, out of scope for the
+        // reactive port; this test proves the CHANNEL, not the encoding.
+        let after = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("post-write snapshot should arrive on the change tick");
+        assert!(
+            after.contains("pk1"),
+            "post-write snapshot should contain the new row's pk, got: {after}"
+        );
+
+        // Drop the client: Session::Drop aborts the pump. If teardown leaks the
+        // pump, runtime shutdown hangs here.
+        drop(client);
+    }
+
+    /// `watch()` before `connect()` surfaces a clear error rather than
+    /// panicking — the same before-connect contract `write()`/`subscribe()`
+    /// enforce.
+    #[test]
+    fn watch_before_connect_is_an_error() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+
+        let (tx, _rx) = std::sync::mpsc::channel::<String>();
+        let emitter = Arc::new(RecordingEmitter(StdMutex::new(tx))) as Arc<dyn SnapshotEmitter>;
+        let err = client
+            .rt
+            .block_on(client.watch_internal("tasks", emitter))
+            .expect_err("watch before connect should error");
+        assert!(
+            err.reason.contains("before connect"),
+            "expected a before-connect error, got: {}",
+            err.reason
+        );
+    }
+
+    /// `watch()` with a table that doesn't match the session fixed at
+    /// `connect()`/`subscribe()` time surfaces a clear error — the same
+    /// one-table-per-client guard `write()`/`subscribe()` enforce.
+    #[test]
+    fn watch_table_mismatch_is_an_error() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.rt.block_on(client.connect()).expect("connect");
+
+        let (tx, _rx) = std::sync::mpsc::channel::<String>();
+        let emitter = Arc::new(RecordingEmitter(StdMutex::new(tx))) as Arc<dyn SnapshotEmitter>;
+        let err = client
+            .rt
+            .block_on(client.watch_internal("not-tasks", emitter))
+            .expect_err("mismatched-table watch should error");
+        assert!(
+            err.reason.contains("does not match"),
+            "expected a table-mismatch error, got: {}",
+            err.reason
+        );
     }
 }
