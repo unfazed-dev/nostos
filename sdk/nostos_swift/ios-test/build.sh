@@ -40,10 +40,16 @@ export USER LOGNAME
 # the action disagree: guard green, then `simctl install` dies with
 # "Unable to lookup in current state: Shutdown" — reported as a swift FAIL when
 # nothing was wrong with the SDK. Pin a specific device with NOSTOS_SIM_UDID.
+# Filtered to iPhone/iPad deliberately: `simctl list devices booted` also lists
+# booted watchOS/tvOS/visionOS sims, and an unfiltered `head -1` could hand a
+# Watch UDID to `xcodebuild -sdk iphonesimulator` — reintroducing the very
+# guard-vs-action mismatch this block exists to remove (`sdk-e2e.sh:117` greps
+# `(Booted)` across all device types).
 SIM_UDID="${NOSTOS_SIM_UDID:-$(xcrun simctl list devices booted 2>/dev/null \
+  | grep -E '^[[:space:]]+(iPhone|iPad)' \
   | grep -oE '\([0-9A-Fa-f-]{36}\)' | head -1 | tr -d '()')}"
 if [ -z "$SIM_UDID" ]; then
-  echo "no booted iPhone simulator — boot one (\`xcrun simctl boot <device>\`) or set NOSTOS_SIM_UDID" >&2
+  echo "no booted iPhone/iPad simulator — boot one (\`xcrun simctl boot <device>\`) or set NOSTOS_SIM_UDID" >&2
   exit 1
 fi
 BUNDLE_ID="run.nostos.smoke"

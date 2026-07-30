@@ -13,6 +13,11 @@ Four classes:
 - **SUPERSEDED** — a later document owns this topic now, or the premise was falsified. The
   superseding document is named. Read the replacement, not this.
 
+**This index is authoritative; the plan files are not.** Only three plans carry an inline
+banner — `HANDOFF.md`, `sdk-live-e2e-consolidation.md`, and the Flutter connection redesign —
+because those three actively misdirect a reader who opens them cold. **Every other plan is
+unmarked, including SUPERSEDED ones.** So an absent banner means nothing: check this table.
+
 The **Basis** column is deliberate: `verified` means established from the repo or a run this
 session; `inferred` means read off the plan's own header or cross-referenced but not
 re-proven. Treat `inferred` rows as good-faith classification, not fact.
