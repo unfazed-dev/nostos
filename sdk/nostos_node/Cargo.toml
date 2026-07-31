@@ -34,6 +34,11 @@ serde_json = "1.0"
 [build-dependencies]
 napi-build = "2"
 
+[dev-dependencies]
+# Temp-FILE DB for the sign_out wipe proof (`:memory:` is fresh-each-open and
+# would hide a leaked wipe — ADR-0029).
+tempfile = "3"
+
 [profile.release]
 # Smaller artifacts for the napi addon; lto is off by default to keep the
 # scaffolding link fast (this is a feasibility build, not a shipped binary).

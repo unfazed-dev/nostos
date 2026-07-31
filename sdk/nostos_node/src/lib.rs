@@ -37,6 +37,7 @@
 //!   packaging when shipping.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -64,7 +65,11 @@ const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(120);
 pub struct NostosClient {
     rt: tokio::runtime::Runtime,
     url: String,
-    token: Option<String>,
+    /// Cached auth token read at `connect()`/`subscribe()` time to build the
+    /// `SyncClient`. Behind a `StdMutex` so `set_token`/`sign_out` can swap it
+    /// through the napi `&self` receiver (napi methods take `&self`, not
+    /// `&mut self`). Synchronous get/set — no await held across the lock.
+    token: StdMutex<Option<String>>,
     db_path: String,
     session: AsyncMutex<Option<Session>>,
 }
@@ -162,7 +167,7 @@ impl NostosClient {
         Ok(Self {
             rt,
             url,
-            token,
+            token: StdMutex::new(token),
             db_path,
             session: AsyncMutex::new(None),
         })
@@ -191,7 +196,7 @@ impl NostosClient {
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let config = SyncClientConfig {
             table: "tasks".to_owned(),
-            token: self.token.clone(),
+            token: self.token.lock().expect("token lock poisoned").clone(),
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
             ..SyncClientConfig::default()
         };
@@ -225,7 +230,7 @@ impl NostosClient {
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let config = SyncClientConfig {
             table: table.clone(),
-            token: self.token.clone(),
+            token: self.token.lock().expect("token lock poisoned").clone(),
             where_sql,
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
             ..SyncClientConfig::default()
@@ -464,6 +469,79 @@ impl NostosClient {
         *guard = None;
         Ok(())
     }
+
+    /// Swap the auth token on this handle. Mirrors nostos-client's
+    /// `SyncClient::set_token(Option<String>)` (`client.rs:358`): updates the
+    /// cached handle token (so a subsequent `connect()`/`subscribe()` builds the
+    /// `SyncClient` with the new token) AND, if a live session exists, swaps the
+    /// running client's token in place so a reconnect uses it. Pass `null`/
+    /// `undefined` to clear.
+    ///
+    /// The multi-user sign-out flow is `signOut()` → `setToken(b)` →
+    /// `connect()`: after sign-out there is no live session, so only the cached
+    /// token is set, which is exactly what the next `connect()` reads.
+    /// (ADR-0029.)
+    #[napi]
+    pub async fn set_token(&self, token: Option<String>) -> napi::Result<()> {
+        *self.token.lock().expect("set_token: token lock poisoned") = token.clone();
+        let guard = self.session.lock().await;
+        if let Some(session) = guard.as_ref() {
+            session.client.set_token(token);
+        }
+        Ok(())
+    }
+
+    /// Sign out: stop sync + close the socket, wipe local rows AND the durable
+    /// outbox (so the next principal sees nothing of this one), and clear the
+    /// cached token. Implements ADR-0029.
+    ///
+    /// Ordering is load-bearing: the background connect/apply loop and every
+    /// reactive watch pump are aborted and then AWAITED (quiesced) BEFORE
+    /// `clear_local_state()` runs — a post-clear apply frame would re-populate
+    /// storage ("half a clear is a leak", ADR-0029). Only once no frame can
+    /// race do we wipe `Storage` (rows + checkpoint + epoch) and `Outbox`
+    /// (pending writes + dead-letter) atomically, drop the session, and clear
+    /// the token.
+    ///
+    /// Safe to call with no active session (no-op) and idempotent. Does NOT
+    /// shut down this handle's tokio runtime — a subsequent `connect()` reopens
+    /// a fresh session against the SAME (now wiped) durable store, the intended
+    /// multi-user one-device flow.
+    #[napi]
+    pub async fn sign_out(&self) -> napi::Result<()> {
+        let mut guard = self.session.lock().await;
+        // Take the session out so its client is dropped only AFTER the wipe; the
+        // guard holds `None` for the duration, so concurrent write()/query()
+        // fail fast ("before connect") instead of racing the teardown.
+        if let Some(mut session) = guard.take() {
+            // (1) Abort + AWAIT the run loop and every watch pump = quiesce.
+            // Abort alone is non-blocking (a tokio task runs to its next await);
+            // awaiting the JoinHandle guarantees the task's stack has unwound
+            // and released any engine lock before we clear. The awaited result
+            // is a JoinError (task was aborted) — expected, ignored.
+            let run_task = session.run_task.take();
+            for task in run_task.into_iter().chain(session.watch_tasks.drain(..)) {
+                task.abort();
+                let _ = task.await;
+            }
+            // (2) With no apply frame able to race, wipe rows + checkpoint +
+            // epoch + outbox + dead-letter atomically (one engine lock —
+            // ADR-0029). Storage::clear + Outbox::clear, checkpoint → 0.
+            session
+                .client
+                .clear_local_state()
+                .await
+                .map_err(|e: ClientError| napi::Error::from_reason(e.to_string()))?;
+            // (3) Drop the session (client + storage). Already taken out of the
+            // guard, so it releases here — its Drop would also abort, but the
+            // tasks are already gone.
+        }
+        // (4) Clear the cached token so the next principal starts clean; a
+        // fresh connect()/subscribe() builds its SyncClient with no token until
+        // setToken.
+        *self.token.lock().expect("sign_out: token lock poisoned") = None;
+        Ok(())
+    }
 }
 
 /// Read the full row snapshot for `table` as a JSON array-of-objects string.
@@ -498,7 +576,6 @@ async fn snapshot_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
     /// Test-only [`SnapshotEmitter`] that records every emitted snapshot into a
@@ -666,5 +743,63 @@ mod tests {
             "expected a table-mismatch error, got: {}",
             err.reason
         );
+    }
+
+    /// ADR-0029 sign-out wipe proof: after `signOut()`, the durable store ON
+    /// DISK is wiped — a second principal opening the SAME `db_path` sees none
+    /// of the first's rows. Uses a temp FILE (not `:memory:`, which is
+    /// fresh-each-open and would hide a leaked wipe). Mirrors nostos-client's
+    /// `clear_local_state_wipes_rows_and_outbox` engine-side pin, lifted to the
+    /// FFI seam: proves the abort→quiesce→clear ordering holds through napi.
+    #[test]
+    fn sign_out_wipes_storage_so_next_principal_sees_nothing() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let db_path = tmp.path().to_str().unwrap().to_owned();
+        let client = NostosClient::new(
+            "ws://localhost:0".into(),
+            Some("userA-token".into()),
+            db_path.clone(),
+        )
+        .expect("construct");
+        client.rt.block_on(client.connect()).expect("connect");
+        client
+            .rt
+            .block_on(client.write(
+                "tasks".into(),
+                "upsert".into(),
+                "pk1".into(),
+                Some(r#"{"id":"pk1","title":"A's private row"}"#.into()),
+            ))
+            .expect("write");
+
+        // The local write applies a row to cairn_data immediately (the same
+        // invariant the reactivity proof exercises) — so it is queryable now.
+        let before = client
+            .rt
+            .block_on(client.query("SELECT pk FROM cairn_data".into()))
+            .expect("query before");
+        assert!(
+            before.contains("pk1"),
+            "row should be present before sign-out, got: {before}"
+        );
+
+        client.rt.block_on(client.sign_out()).expect("sign_out");
+
+        // Same handle, SAME file path — a fresh session reads the WIPED store.
+        // (sign_out also cleared the cached token, so this connect builds with
+        // None; fine — no network in this test.)
+        client.rt.block_on(client.connect()).expect("reconnect");
+        let after = client
+            .rt
+            .block_on(client.query("SELECT pk FROM cairn_data".into()))
+            .expect("query after");
+        assert!(
+            !after.contains("pk1"),
+            "sign_out should have wiped cairn_data so the next principal sees nothing, got: {after}"
+        );
+
+        // Drop the client first so it releases the SQLite file; the temp file
+        // (declared before the client) then drops and deletes cleanly.
+        drop(client);
     }
 }
