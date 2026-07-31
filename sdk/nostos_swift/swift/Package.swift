@@ -11,11 +11,17 @@
 // xcframework would slot into.
 //
 // ponytail: this Package currently exposes Nostos as a regular target whose
-// sources are the UniFFI-generated `nostos_swift.swift` (and a thin re-export
-// shim under Sources/Nostos/). To ship, replace the `.target` with a
-// `.binaryTarget(path: "../xcframework/Nostos.xcframework")` once the
-// xcframework is built (cargo build --release for macos + ios targets, then
-// xcodebuild -create-xcframework).
+// source is the hand-written `AsyncStream`-based `watch(table:)` facade in
+// `Sources/Nostos/Nostos.swift` (built on the UniFFI-generated
+// `swift-sources/nostos_swift.swift`, which declares `NostosClient` +
+// `SnapshotSink`). The generated sources + `nostos_swiftFFI` modulemap are NOT
+// wired into this SPM target yet — `swiftc -typecheck …` (see the README gate)
+// is the verification floor; `swift build` here will NOT resolve
+// `NostosClient`/`SnapshotSink` until the binary-target increment lands. To ship,
+// replace the `.target` with a `.binaryTarget(path: "../xcframework/Nostos.xcframework")`
+// once the xcframework is built (cargo build --release for macos + ios targets,
+// then xcodebuild -create-xcframework) and add the generated `.swift` +
+// modulemap as a co-compiled source set.
 
 import PackageDescription
 
