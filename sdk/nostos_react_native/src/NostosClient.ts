@@ -1,12 +1,17 @@
 // @nostos-sync/react-native — TS facade over the NativeNostos TurboModule.
 //
 // Mirrors `@nostos-sync/web`'s PowerSync-shaped API (connect / subscribe / write /
-// query / checkpoint) but Promise-returning and POLL-based (no event emitter):
-// `subscribe(table)` starts the live replication loop on the native side (the
-// UniFFI `run_with_reconnect` loop inside nostos-swift/kotlin), and the JS app
-// polls `pollRows(table)` / `query(sql)` to drain applied rows. This matches
-// nostos-swift/kotlin's poll floor (no row-tick callback yet — Phase-2 upgrade
-// path is a UniFFI callback interface or a NativeNostos event subscription).
+// query / checkpoint), Promise-returning. TWO row-access paths:
+//   • POLL — `subscribe(table)` starts the live replication loop on the native
+//     side (the UniFFI `run_with_reconnect` loop inside nostos-swift/kotlin);
+//     the app polls `pollRows(table)` / `query(sql)` to drain applied rows.
+//   • REACTIVE — `watch(table, onSnapshot)` PUSHES a fresh FULL snapshot
+//     whenever the underlying rows change (initial snapshot + every delta),
+//     built on nostos-client's hot-replay change stream (`subscribe_changes()`)
+//     — NOT a poll. This is the RN port of node's `watch()` (napi
+//     `ThreadsafeFunction`) and kotlin's `watch()` (UniFFI `SnapshotSink`);
+//     the push crosses JSI as a retained TurboModule callback
+//     (`NativeNostos.watchChanges`).
 
 import NativeNostos from "./NativeNostos";
 
@@ -44,6 +49,36 @@ export interface Subscription {
 }
 
 /**
+ * Handle returned by `watch(table, onSnapshot)`. Call `unsubscribe()` to stop
+ * receiving snapshots for this handle; when the last handle for a table goes
+ * away, the facade tears down the native push pump for that table
+ * (`NativeNostos.unwatchChanges`).
+ */
+export interface WatchSubscription {
+  readonly table: string;
+  unsubscribe(): void;
+}
+
+/**
+ * One table's reactive-watch state: the bridge callback the native pump
+ * invokes, plus the set of live JS handles to fan each snapshot out to.
+ * Module-private — the public surface is `WatchSubscription`.
+ */
+interface WatchBundle {
+  /** The retained callback passed to `NativeNostos.watchChanges`. */
+  readonly bridge: (rowsJson: string) => void;
+  /** Live JS handles for this table; fanned out to on every native tick. */
+  readonly handles: Set<WatchHandle>;
+}
+
+/** A single registered `watch()` caller's handle. */
+interface WatchHandle {
+  readonly onSnapshot: (rows: Row[]) => void;
+  /** Set to true on unsubscribe so a late native tick stops forwarding. */
+  closed: boolean;
+}
+
+/**
  * PowerSync-style sync client for React Native. Wraps the NativeNostos
  * TurboModule (which, in Wave B, wraps nostos-swift / nostos-kotlin's UniFFI
  * `NostosClient`, which wraps `nostos_client::SyncClient<SqliteStorage>`).
@@ -61,6 +96,15 @@ export class NostosClient {
   readonly config: Required<Pick<NostosClientConfig, "dbPath">> &
     Pick<NostosClientConfig, "url" | "token">;
   private readonly subscriptions: Map<string, Subscription> = new Map();
+  /**
+   * Active reactive watches, keyed by table. The native push pump is per-table
+   * (one `NativeNostos.watchChanges(table, bridge)` at a time); the facade
+   * multiplexes that single pump across every JS `watch()` caller for the table
+   * and reference-counts teardown — `unwatchChanges(table)` fires only when the
+   * table's last handle unsubscribes. This mirrors the per-table cancel seam
+   * the kotlin/node ports tie to session lifecycle.
+   */
+  private readonly watches: Map<string, WatchBundle> = new Map();
 
   constructor(config: NostosClientConfig = {}) {
     this.config = {
@@ -131,6 +175,86 @@ export class NostosClient {
    */
   async pollRows(table: string): Promise<Row[]> {
     return this.query(`SELECT * FROM ${quoteIdent(table)}`);
+  }
+
+  /**
+   * Subscribe to a PUSH stream of full-table snapshots for `table`.
+   * `onSnapshot` is invoked once with the INITIAL snapshot (the current row
+   * set) and again after every applied change — a push, not a poll. The native
+   * side drains `nostos_client::SyncClient::subscribe_changes()` (the hot-replay
+   * change broadcast) and re-queries storage per tick, so each emission is a
+   * FULL snapshot (self-healing on lag — the same shape kotlin's `SnapshotSink`
+   * / node's `watch()` deliver).
+   *
+   * Multiple `watch()` calls on the same table share ONE native push pump; each
+   * gets its own `WatchSubscription`. The first call starts the pump (and
+   * receives the native-emitted initial snapshot); later calls get an initial
+   * snapshot synthesized from a one-shot `query()` (the sanctioned re-query-
+   * storage pattern — once per late watcher, NOT per-tick polling), then all
+   * subsequent native ticks. `unsubscribe()` stops one handle; the native pump
+   * is torn down (`NativeNostos.unwatchChanges`) when the table's last handle
+   * goes away.
+   */
+  async watch(
+    table: string,
+    onSnapshot: (rows: Row[]) => void,
+  ): Promise<WatchSubscription> {
+    // `table` is a subscription key AND (for late-watcher replay) a SQL
+    // identifier in `SELECT * FROM <table>` — fail fast on unsafe names, the
+    // same defense `pollRows` applies. Returns the validated identifier.
+    const safeTable = quoteIdent(table);
+
+    const handle: WatchHandle = { onSnapshot, closed: false };
+    const existing = this.watches.get(table);
+
+    if (existing === undefined) {
+      // First watcher for this table — start the native push pump. The bridge
+      // decodes the native JSON-rows string (the same shape `query()` returns)
+      // and fans it to every live handle. The native side invokes it on the JS
+      // thread with the initial snapshot, then after each change.
+      const handles = new Set<WatchHandle>();
+      const bridge = (rowsJson: string): void => {
+        const rows = JSON.parse(rowsJson) as Row[];
+        for (const h of handles) {
+          if (!h.closed) h.onSnapshot(rows);
+        }
+      };
+      const bundle: WatchBundle = { bridge, handles };
+      this.watches.set(table, bundle);
+      bundle.handles.add(handle);
+      await NativeNostos.watchChanges(table, bundle.bridge);
+    } else {
+      // Late watcher — the native pump is already running and only ticks on
+      // change, so it will not re-emit an initial snapshot. Synthesize one via
+      // a single `query()` so the "initial snapshot then each change" contract
+      // holds for every watcher (nostos-client's re-query-storage pattern; NOT
+      // per-tick polling — one fetch per late subscriber, then push takes
+      // over). A replay-last-snapshot cache (the kotlin/node `last_snapshot`
+      // seam) is the documented Wave-C follow-on.
+      existing.handles.add(handle);
+      const initial = await this.query(`SELECT * FROM ${safeTable}`);
+      if (!handle.closed) handle.onSnapshot(initial);
+    }
+
+    return {
+      table,
+      unsubscribe: (): void => {
+        // Idempotent — a second call is a no-op (guards double-unsubscribe and
+        // a late native tick after teardown).
+        if (handle.closed) return;
+        handle.closed = true;
+        const bundle = this.watches.get(table);
+        if (bundle === undefined) return;
+        bundle.handles.delete(handle);
+        if (bundle.handles.size === 0) {
+          // Last handle for this table — tear down the native pump and drop the
+          // bundle so a future `watch(table)` restarts cleanly. Best-effort: we
+          // do not await (unsubscribe is sync, matching `Subscription`).
+          this.watches.delete(table);
+          void NativeNostos.unwatchChanges(table);
+        }
+      },
+    };
   }
 
   /**

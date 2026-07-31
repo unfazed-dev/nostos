@@ -22,6 +22,16 @@
 //   write(table, op, pk, pj)  → NostosClient::write(table, op, pk, payload_json: Option<String>) -> Result<u64, NostosError>
 //   query(sql)                → NostosClient::query(sql: String) -> Result<String, NostosError>  (JSON rows)
 //   checkpoint()              → NostosClient::checkpoint() -> Result<u64, NostosError>
+//   watchChanges(table, cb)   → NostosClient::watch(table, sink: SnapshotSink)  (kotlin, UniFFI
+//                              `with_foreign` sync callback) / nostos_node::NostosClient::watch(table, on_snapshot)
+//                              (napi ThreadsafeFunction). Rust→JS PUSH: the native side retains `cb` and invokes
+//                              it on the JS thread with a full-snapshot JSON string for the INITIAL snapshot,
+//                              then again after every applied change (drains subscribe_changes() + re-queries
+//                              storage per tick). The RN analogue of both sibling seams is a Codegen-emitted
+//                              retained JS callback (JSI), invoked from the change pump via a JS-thread hop.
+//   unwatchChanges(table)     → tears the per-table push pump + releases the retained callback. This is the
+//                              `stop_watch(table)` follow-on the kotlin/node ports DEFERRED (their ceiling);
+//                              RN ships it from day 1 so the JS facade can unsubscribe cleanly.
 //
 // Wave-B note: TurboModules are singletons instantiated by RN with a no-arg
 // constructor — there is no JS-visible constructor surface to pass (url, token,
@@ -95,6 +105,34 @@ export interface Spec extends TurboModule {
   query(sql: string): Promise<string>;
   /** Current durable LSN (the resume_lsn on reconnect). */
   checkpoint(): Promise<number>;
+  /**
+   * Subscribe to a stream of full-table snapshots for `table`. The native side
+   * retains `onSnapshot` and invokes it ON THE JS THREAD (the RN analogue of
+   * napi's `ThreadsafeFunction` in nostos_node and the `SnapshotSink` UniFFI
+   * callback in nostos_kotlin): once with the INITIAL snapshot immediately, then
+   * again after every applied change. Each invocation carries a JSON
+   * array-of-objects string — a FULL snapshot per tick (not a diff; self-healing
+   * on lag), the same shape `query()` returns.
+   *
+   * The returned Promise resolves AFTER the initial snapshot has been emitted
+   * to `onSnapshot`, so the caller knows the first frame has fired.
+   *
+   * Wave-B Codegen note: a `(rowsJson: string) => void` param is emitted as a
+   * retained JS callback the native impl invokes repeatedly from the change
+   * pump. NEVER call it from a background thread — marshal onto the JS thread
+   * (the module's owned-runtime → JS-thread hop), exactly as napi's
+   * `ThreadsafeFunction` schedules onto the libuv loop.
+   */
+  watchChanges(
+    table: string,
+    onSnapshot: (rowsJson: string) => void,
+  ): Promise<void>;
+  /**
+   * Tear down the per-table push pump started by `watchChanges(table)` and
+   * release the retained JS callback. After this resolves, `onSnapshot` will
+   * not be invoked again for `table`. Idempotent.
+   */
+  unwatchChanges(table: string): Promise<void>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>("NativeNostos");

@@ -2,7 +2,8 @@
 
 React Native facade over the **nostos-swift** (iOS) and **nostos-kotlin** (Android)
 UniFFI bindings. PowerSync-shaped API (`connect` / `subscribe` / `write` /
-`query` / `checkpoint`), Promise-returning, poll-based. Same Rust
+`query` / `checkpoint`), Promise-returning, with TWO row-access paths — poll
+(`subscribe` + `pollRows`) and **reactive push** (`watch`). Same Rust
 `nostos_client::SyncClient<SqliteStorage>` engine the native, Tauri, Flutter,
 Swift, Kotlin, and Node SDKs drive — no engine/wire changes.
 
@@ -47,11 +48,13 @@ WASM, no new Rust.
 
 - **MUST — Wave A (this package, today):**
   TS facade + Codegen TurboModule spec + OFFLINE Jest smoke. Proves the facade
-  wiring + the spec contract without a device. The Jest test mocks
-  `NativeNostos` and exercises `connect → subscribe → query → write →
-  checkpoint`, asserting the facade maps each call to the right native method
-  with the right args, `query` parses the JSON-rows string, and `write`
-  serializes the payload.
+  wiring + the spec contract without a device. The Jest tests mock
+  `NativeNostos` and exercise `connect → subscribe → query → write →
+  checkpoint` (poll path) AND the reactive `watch()` push path — capturing the
+  retained bridge callback the way the Wave-B change pump holds it, then
+  asserting the facade decodes + fans out the initial snapshot and each
+  change, synthesizes late-watcher initial snapshots, and tears the pump down
+  on the last unsubscribe.
 
 - **SHOULD — Wave B:**
   Android Kotlin TurboModule + instrumented emulator E2E (`connect() →
@@ -89,8 +92,20 @@ const client = new NostosClient({
 await client.connect();
 await client.subscribe("tasks");
 
-// Poll for applied rows — Phase-1 floor is poll-based (matches nostos-swift/
-// kotlin's poll pattern; event-emitter push is a documented Phase-2 upgrade).
+// Two ways to read applied rows:
+
+// (1) REACTIVE — watch() PUSHES a fresh FULL snapshot whenever the underlying
+//     rows change (initial snapshot + every delta), built on nostos-client's
+//     hot-replay change stream — NOT a poll. The RN port of node's watch()
+//     (napi ThreadsafeFunction) and kotlin's watch() (UniFFI SnapshotSink); the
+//     push crosses JSI as a retained TurboModule callback.
+const sub = await client.watch("tasks", (rows) => {
+  console.log("current tasks:", rows); // initial snapshot, then each change
+});
+// …later:
+sub.unsubscribe(); // stops this handle; pump tears down on the last handle
+
+// (2) POLL — drain applied rows yourself (the Phase-1 floor).
 const rows = await client.pollRows("tasks");
 
 // Write: op is "upsert" | "delete" | "patch" (WriteOp wire strings).
@@ -102,9 +117,9 @@ const lsn = await client.checkpoint();
 
 ## Methods (mirror UniFFI `NostosClient`)
 
-The `NativeNostos` spec in `src/NativeNostos.ts` declares EXACTLY the five
-methods the UniFFI `NostosClient` in `sdk/nostos_swift` + `sdk/nostos_kotlin`
-exports — Wave B's native modules must satisfy it byte-for-byte.
+The `NativeNostos` spec in `src/NativeNostos.ts` declares the surface the UniFFI
+`NostosClient` in `sdk/nostos_swift` + `sdk/nostos_kotlin` exports — Wave B's
+native modules must satisfy it byte-for-byte.
 
 | facade                       | NativeNostos spec                              | UniFFI (swift / kotlin)                                            |
 | ---------------------------- | --------------------------------------------- | ------------------------------------------------------------------ |
@@ -114,6 +129,14 @@ exports — Wave B's native modules must satisfy it byte-for-byte.
 | `query(sql)`                 | `query(sql): Promise<string>`                 | `NostosClient::query(sql: String) -> Result<String>` (JSON rows)    |
 | `pollRows(table)`            | (uses `query`)                                | —                                                                  |
 | `checkpoint()`               | `checkpoint(): Promise<number>`               | `NostosClient::checkpoint() -> Result<u64>`                         |
+| `watch(table, onSnapshot)`   | `watchChanges(t, cb): Promise<void>`          | `NostosClient::watch(t, sink: SnapshotSink)` (kotlin) / node `watch` |
+|                              | `unwatchChanges(table): Promise<void>`        | `stop_watch(table)` (the follow-on kotlin/node deferred)           |
+
+`watch()` is the reactive push path (ADR-0024): the native side retains the JS
+callback and invokes it on the JS thread with the initial snapshot, then after
+every applied change — a full snapshot per tick, the same shape `query()`
+returns. The facade multiplexes one native pump per table and reference-counts
+teardown (`unwatchChanges` fires when the table's last handle unsubscribes).
 
 ## `unsafe` policy
 
