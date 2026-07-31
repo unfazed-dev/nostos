@@ -18,13 +18,23 @@
 //     {id, cmd:"rowsFor", table}
 //     {id, cmd:"checkpoint"}
 //     {id, cmd:"close"}
+//     {id, cmd:"watch", table}           reactive subscribe (ADR-0024)
+//     {id, cmd:"unwatch"}                reactive unsubscribe
 //   Worker -> main:
 //     {id, ok:true, ...}                 response to a request
 //     {id, error:"..."}                  response error
 //     {type:"wasm-ready"}                (also {id:0,ok:"wasm-ready"} — slice-1 compat)
 //     {type:"status", connected}
-//     {type:"rowsChanged", count}        engine row count changed (server push / echo)
+//     {type:"rowsChanged", count}        engine row count changed (legacy poll signal)
+//     {type:"snapshot", table, rows}     reactive push: full-table snapshot on each
+//                                        change tick (NostosSocket.onChange — ADR-0024)
 //     {type:"writeResult", client_write_id, ok, error?}  async write outcome
+//
+// Reactive push (ADR-0024): `snapshot` is the TRUE Rust→JS push —
+// `NostosSocket.onChange` is a wasm-bindgen Closure nostos fires synchronously
+// from the onmessage frame-pump on every commit (initial snapshot + deltas).
+// The legacy `rowsChanged` rowCount poll is kept as a compat signal; `snapshot`
+// is the reactive primitive the main-thread `watch()` facade renders from.
 //
 // `unsafe`-free: pure JS. The Rust write path uses the real `Outbox` trait
 // (enqueue + apply_local + flush loop), so a write never throws when the socket
@@ -35,6 +45,21 @@ let wasmReady = false;
 let sock = null;
 let lastRowCount = -1;
 let pollTimer = null;
+// The connected table (single-table v1) + whether the main thread is watching.
+// onChange fires on every commit regardless; `watching` gates the forward so a
+// connected-but-unwatched session doesn't spam the main thread with snapshots.
+let table = null;
+let watching = false;
+
+// Read the engine's current full-table snapshot and push it to the main thread.
+// Used both for the initial snapshot (on `watch`) and for each change tick
+// (onChange → rowsFor). Pure postMessage; safe when sock is null (empty push).
+function postSnapshot() {
+  const rows = sock
+    ? sock.rowsFor(table).map((r) => ({ pk: r.pk, payload: r.payload }))
+    : [];
+  self.postMessage({ type: "snapshot", table, rows });
+}
 
 async function ensureWasm() {
   if (!wasmReady) {
@@ -56,9 +81,11 @@ function startPolling() {
   if (pollTimer) {
     return;
   }
-  // ponytail: rowsChanged is driven by polling rowCount here. The production
-  // version adds a Rust callback fired from the onmessage pump (a later slice);
-  // polling is sufficient + honest for the live E2E (latency ~150ms).
+  // ponytail: rowsChanged is a LEGACY signal driven by polling rowCount here.
+  // The reactive primitive is now NostosSocket.onChange (the `snapshot` push,
+  // registered in `connect`) — that is the TRUE Rust→JS push fired on every
+  // commit. This poll is retained only as a compat signal for the existing E2E
+  // spec; a follow-on can delete it once the spec migrates to `snapshot`.
   pollTimer = setInterval(() => {
     if (!sock) {
       return;
@@ -96,6 +123,7 @@ self.onmessage = async (ev) => {
     switch (m.cmd) {
       case "connect": {
         await ensureWasm();
+        table = m.table;
         sock = await NostosSocket.connect(
           m.url,
           m.token ?? null,
@@ -104,6 +132,20 @@ self.onmessage = async (ev) => {
         );
         lastRowCount = sock.rowCount;
         startPolling();
+        // Reactive push (ADR-0024): register the Rust→JS callback. NostosSocket
+        // fires it synchronously from the onmessage pump on every commit (a
+        // change tick) + once now (initial). Gated by `watching` so a connected
+        // session with no main-thread watcher stays quiet. The tick is the push;
+        // rowsFor is the fresh-snapshot read.
+        sock.onChange(() => {
+          if (watching) {
+            try {
+              postSnapshot();
+            } catch (_) {
+              /* socket torn down between tick + read — ignore */
+            }
+          }
+        });
         self.postMessage({ id: m.id, ok: true, checkpoint: sock.checkpoint });
         self.postMessage({ type: "status", connected: true });
         break;
@@ -141,8 +183,33 @@ self.onmessage = async (ev) => {
         self.postMessage({ id: m.id, ok: true, checkpoint: sock ? sock.checkpoint : 0 });
         break;
       }
+      case "watch": {
+        // Reactive subscribe (ADR-0024). ACK first, then push the INITIAL
+        // snapshot: NostosSocket.onChange already fired its initial tick at
+        // connect (before any watcher existed), so synthesize one here so the
+        // caller renders immediately, before the first delta. Subsequent ticks
+        // (deltas) arrive via the onChange closure registered in `connect`.
+        watching = true;
+        self.postMessage({ id: m.id, ok: true });
+        try {
+          postSnapshot();
+        } catch (_) {
+          /* not yet connected — initial snapshot arrives on connect's tick */
+        }
+        break;
+      }
+      case "unwatch": {
+        watching = false;
+        self.postMessage({ id: m.id, ok: true });
+        break;
+      }
       case "close": {
         if (sock) {
+          try {
+            sock.offChange();
+          } catch (_) {
+            /* noop if never registered */
+          }
           try {
             sock.close();
           } catch (_) {
@@ -151,6 +218,8 @@ self.onmessage = async (ev) => {
           sock = null;
           stopPolling();
         }
+        watching = false;
+        table = null;
         self.postMessage({ id: m.id, ok: true });
         self.postMessage({ type: "status", connected: false });
         break;

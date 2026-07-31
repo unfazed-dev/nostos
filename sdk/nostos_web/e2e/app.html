@@ -23,16 +23,33 @@
       const log = (m) => console.log("[web-e2e] " + m);
       const worker = new Worker("/worker/nostos.worker.js", { type: "module" });
 
-      // Push events (typed: rowsChanged / writeResult / status) accumulate here
-      // for the spec to poll. Request responses carry `id` and resolve a promise.
+      // Push events (typed: rowsChanged / writeResult / status / snapshot)
+      // accumulate here for the spec to poll. Request responses carry `id` and
+      // resolve a promise.
       const events = [];
       const pending = new Map();
       let nextId = 1;
+      // Reactive watch() listeners (ADR-0024): each {table, callback} is
+      // dispatched a `snapshot` push for its table. The Worker's NostosSocket
+      // fires snapshot on every change tick; here we fan it out to watchers.
+      const watchListeners = new Set();
 
       worker.onmessage = (ev) => {
         const d = ev.data || {};
         if (d.type) {
           events.push(d);
+          if (d.type === "snapshot") {
+            // Fan out the reactive push to every watcher of this table.
+            for (const l of watchListeners) {
+              if (l.table === d.table) {
+                try {
+                  l.callback(d.rows);
+                } catch (_) {
+                  /* a throwing watcher must not break the others */
+                }
+              }
+            }
+          }
           if (d.type === "status") {
             document.getElementById("status").textContent =
               "connected=" + !!d.connected;
@@ -82,6 +99,21 @@
         rowsFor: (table) => request("rowsFor", { table }),
         checkpoint: () => request("checkpoint"),
         close: () => request("close"),
+        // Reactive watch (ADR-0024) — the Web port of node/kotlin/Flutter
+        // watch(). Registers a callback that nostos invokes with a fresh
+        // full-table snapshot on every change tick (initial snapshot + deltas),
+        // pushed synchronously from the in-Worker NostosSocket.onChange Closure.
+        // Returns an unsubscribe that detaches the listener + tells the Worker
+        // to stop forwarding snapshots.
+        watch: (table, callback) => {
+          const listener = { table, callback };
+          watchListeners.add(listener);
+          request("watch", { table });
+          return function unsubscribe() {
+            watchListeners.delete(listener);
+            request("unwatch", {});
+          };
+        },
         events,
       };
 

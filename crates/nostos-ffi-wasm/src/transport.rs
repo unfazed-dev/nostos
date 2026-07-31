@@ -317,6 +317,23 @@ pub fn checkpoint_from(result: PumpResult) -> Option<u64> {
     result.ack
 }
 
+/// Reactive emit trigger (ADR-0024): a WS message should push a fresh snapshot
+/// iff its pump OR its trailing idle-flush committed at least one frame. This is
+/// the WASM reactive primitive's pure decision core — the analog of node's
+/// `SnapshotEmitter` / kotlin's `SnapshotSink` "fire on every change tick", but
+/// in the browser the change tick IS the `on_message` pump (single-threaded,
+/// cooperative event loop). nostos-ffi-wasm binds `nostos-core` — NOT
+/// `nostos-client` — so there is no tokio `broadcast` channel to drain
+/// (`SyncClient::subscribe_changes` is unavailable here; ADR-0017). The
+/// `on_message` Closure calls this to decide whether to invoke the registered
+/// snapshot callback, so the push can be proven in pure-Rust host tests without
+/// a JS runtime (a `Closure` cannot be built/invoked without one — same
+/// testability split that motivated node's `SnapshotEmitter` seam). Host-tested.
+#[must_use]
+pub fn pump_committed(pump: &PumpResult, flush_committed: bool) -> bool {
+    pump.ack.is_some() || flush_committed
+}
+
 // -----------------------------------------------------------------------------
 // Checkpoint key + (de)serialization — pure, host-tested.
 // -----------------------------------------------------------------------------
@@ -389,7 +406,22 @@ pub(crate) struct SocketInner {
     pub(crate) engine: Rc<RefCell<NostosEngine>>,
     pub(crate) ws: web_sys::WebSocket,
     pub(crate) table: String,
+    /// Reactive push slot (ADR-0024): a no-arg `Closure` the `on_message` pump
+    /// invokes on every commit ([`pump_committed`]). `None` until
+    /// [`crate::NostosSocket::on_change`] registers one; cleared by
+    /// [`crate::NostosSocket::off_change`] and dropped with the socket — no
+    /// `.forget()`, so no leak (the one wasm-bindgen `Closure` pitfall). The
+    /// callback is a change *tick*; the host re-reads `rows_for` inside it for
+    /// the fresh full-table snapshot (idempotent — self-healing on lag, like the
+    /// node/kotlin ports).
+    pub(crate) on_change: OnChangeSlot,
 }
+
+/// The reactive push slot's type: an optional no-arg `Closure` behind shared
+/// interior mutability. Factored out so the field + [`emit_change`] share one
+/// spelling (clippy `type_complexity`), and so the "drop to detach, no
+/// `.forget()`" ownership contract lives in one named place.
+pub(crate) type OnChangeSlot = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
 /// Drain the outbox over an OPEN socket: send each pending write frame and
 /// `mark_done` on success. Called from the `onopen` handler so writes captured
@@ -420,6 +452,22 @@ fn flush_pending(inner: &Rc<SocketInner>) {
         if sent {
             let _ = inner.engine.borrow_mut().storage_mut().mark_done(id);
         }
+    }
+}
+
+/// Invoke the registered reactive tick callback (if any) — the Rust→JS push.
+/// Fire-and-forget: a JS error (the side tearing down) is swallowed;
+/// `off_change` / socket `Drop` is the only true end. ponytail: WS glue is
+/// untested in CI (`JsValue` is browser-only); the commit trigger
+/// ([`pump_committed`]) + snapshot shape (`NostosEngine::rows_for`) are the
+/// host-tested pure cores this pushes from.
+pub(crate) fn emit_change(slot: &OnChangeSlot) {
+    if let Some(cb) = slot.borrow().as_ref() {
+        // `Closure: AsRef<JsValue>` → `unchecked_ref::<Function>` → `call0`.
+        let _ = cb
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .call0(&JsValue::UNDEFINED);
     }
 }
 
@@ -465,6 +513,7 @@ pub(crate) async fn connect(
         engine: Rc::new(RefCell::new(engine)),
         ws: ws.clone(),
         table: table.clone(),
+        on_change: Rc::new(RefCell::new(None)),
     });
 
     // --- onopen: send the subscribe frame (the server won't stream until it
@@ -509,17 +558,33 @@ pub(crate) async fn connect(
         // each WS message as a discrete, atomic unit. `flush()` is a no-op
         // (returns `None`) when nothing is pending, so unconditional is safe.
         let mut ack_lsn = pump.ack;
+        let mut flush_committed = false;
         if let Ok(Some(outcome)) = engine.flush() {
             // The pump may have already committed mid-message (transaction
             // boundary); the flush is a no-op in that case. Either way, the
             // last checkpoint wins (the engine's high-water is monotonic).
             ack_lsn = Some(outcome.checkpoint() as u64);
+            flush_committed = true;
         }
+        // Release the engine borrow BEFORE persist/ack/emit: none of them need
+        // it, and releasing here lets the reactive callback re-enter the socket
+        // (e.g. rowsFor) without panicking on a double `borrow_mut`.
+        drop(engine);
         if let Some(lsn) = ack_lsn {
             // Persist FIRST (so a crash between ack + persist doesn't lose the
             // checkpoint and force a full replay), then tell the server.
             write_checkpoint_ls(&inner_msg.table, lsn);
             let _ = inner_msg.ws.send_with_str(&build_ack_frame(lsn));
+        }
+        // Reactive push (ADR-0024): on every change tick — a commit detected by
+        // the pump OR the trailing flush — fire the registered callback. This is
+        // the TRUE Rust→JS push (synchronous from the WS frame pump), NOT a
+        // `setInterval` poll. There is no tokio broadcast to drain here (see
+        // `pump_committed`); the `on_message` pump IS the change tick. The
+        // callback is a no-arg tick; the host re-reads `rows_for` for the fresh
+        // full-table snapshot.
+        if pump_committed(&pump, flush_committed) {
+            emit_change(&inner_msg.on_change);
         }
     });
 

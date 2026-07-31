@@ -537,7 +537,11 @@ impl NostosSocket {
             .storage_mut()
             .enqueue(write.clone())
             .map_err(|e| JsValue::from_str(&format!("nostos write: enqueue: {e}")))?;
-        let _ = engine.storage_mut().apply_local(&write);
+        // apply_local renders the row instantly in the store (optimistic UI).
+        let local_applied = engine.storage_mut().apply_local(&write).is_ok();
+        // Release the engine borrow BEFORE the reactive tick + the ship path so
+        // a callback that re-reads rows_for (and the mark_done re-borrow) can't
+        // collide with this borrow_mut.
         drop(engine);
 
         // Ship now if OPEN; mark_done on success so the connected path drains
@@ -545,6 +549,14 @@ impl NostosSocket {
         // pending for the onopen flush loop. Either way, return Ok — captured.
         if self.inner.ws.ready_state() == 1 && self.inner.ws.send_with_str(&frame).is_ok() {
             let _ = self.inner.engine.borrow_mut().storage_mut().mark_done(id);
+        }
+        // Reactive push (ADR-0024): a local write is a change tick too — node's
+        // "remote apply OR local write" contract. apply_local already made the
+        // row visible; fire the tick so a watcher sees its OWN write instantly,
+        // without waiting for the server echo (which fires the remote-apply half
+        // via the on_message pump). No-op when no callback is registered.
+        if local_applied {
+            transport::emit_change(&self.inner.on_change);
         }
         Ok(())
     }
@@ -555,6 +567,63 @@ impl NostosSocket {
         // Code 1000 = "normal closure". Errors here (e.g. already closed) are
         // ignorable — the socket is going away regardless.
         let _ = self.inner.ws.close_with_code(1000);
+    }
+
+    /// Register a reactive callback nostos invokes on EVERY change tick — the
+    /// initial snapshot plus each delta — as the browser applies inbound WS
+    /// frames. This is the Web port of node's `watch(onSnapshot)` / kotlin's
+    /// `watch(SnapshotSink)` / Flutter's `watch(rows_sink)`: a TRUE Rust→JS push
+    /// fired synchronously from the `onmessage` frame-pump on each commit, NOT a
+    /// `setInterval` poll of `rowCount`.
+    ///
+    /// The callback receives NO args — it is a change *tick*. Read the fresh
+    /// full-table snapshot via [`Self::rows_for`] inside the callback (the
+    /// Worker host does exactly this, then forwards the rows to the main
+    /// thread). This mirrors the engine's "full snapshot on every tick,
+    /// self-healing on lag" contract (idempotent) and keeps the FFI boundary
+    /// free of per-row marshalling.
+    ///
+    /// Registering replaces any prior callback (the old `Closure` is dropped →
+    /// its JS function detached). The `Closure` is owned by the socket; call
+    /// [`Self::off_change`] to stop, or simply drop the socket — no `.forget()`,
+    /// so no leak (the one wasm-bindgen `Closure` pitfall).
+    ///
+    /// # Initial snapshot
+    ///
+    /// Fires the tick once on registration so a UI renders before the first WS
+    /// frame commits. There is no subscribe-before-snapshot hazard here (the
+    /// one the node/kotlin ports guard): the WASM pump IS the change tick, so a
+    /// frame committed before registration is already in `rows_for`, and the
+    /// initial tick's read sees it.
+    ///
+    /// JS:
+    /// ```js
+    /// sock.onChange(() => {
+    ///   console.log("rows changed:", sock.rowsFor("tasks"));
+    /// });
+    /// ```
+    #[wasm_bindgen(js_name = onChange)]
+    pub fn on_change(&self, callback: js_sys::Function) {
+        // Wrap the JS function in a no-arg Closure stored on the socket. The
+        // on_message pump invokes it (via transport::emit_change) on every
+        // commit; replacing a prior callback drops its Closure (detaches the JS
+        // fn) — no leak.
+        let cb = Closure::wrap(Box::new(move || {
+            // Fire-and-forget: a JS error (the side tearing down) is swallowed;
+            // the pump keeps running until the socket is dropped / off_change.
+            let _ = callback.call0(&JsValue::UNDEFINED);
+        }) as Box<dyn FnMut()>);
+        *self.inner.on_change.borrow_mut() = Some(cb);
+        // Initial tick: fire once on registration (full snapshot via rows_for
+        // inside the callback).
+        transport::emit_change(&self.inner.on_change);
+    }
+
+    /// Unregister the reactive callback. Drops the wrapped `Closure` (detaches
+    /// the JS function). Idempotent. Dropping the socket also cleans up.
+    #[wasm_bindgen(js_name = offChange)]
+    pub fn off_change(&self) {
+        *self.inner.on_change.borrow_mut() = None;
     }
 }
 
@@ -683,7 +752,7 @@ mod transport_tests {
     use nostos_core::Operation;
     use transport::{
         build_ack_frame, build_subscribe_frame, build_write_frame, checkpoint_from, checkpoint_key,
-        decode_frames, decode_hex, on_message, parse_checkpoint, PumpResult,
+        decode_frames, decode_hex, on_message, parse_checkpoint, pump_committed, PumpResult,
     };
 
     // ---- wire decode (mirror of nostos_infra::wire::decode_frames) ----
@@ -1085,5 +1154,79 @@ mod transport_tests {
         let _ = on_message(&mut eng, batch.as_bytes()).unwrap();
         eng.flush().unwrap();
         assert_eq!(eng.row_count(), 2, "replay did not duplicate");
+    }
+
+    // ---- reactive push trigger (ADR-0024 — the Web watch() port) ----
+    //
+    // The WASM reactive primitive is "fire the snapshot callback iff this
+    // message committed a frame." The decision is pure (`pump_committed`); the
+    // `Closure`/JS wiring is browser-only (`JsValue` panics on a host — same
+    // split as the rest of the WS glue, and the same reason node's
+    // `watch_internal` takes a `SnapshotEmitter` seam: a `ThreadsafeFunction` /
+    // `Closure` cannot be built without a live JS runtime). These pin the
+    // trigger so the push can't silently regress to firing on no-ops (a spurious
+    // snapshot) or staying mute on commits (a missed delta).
+
+    #[test]
+    fn pump_committed_true_when_pump_acked_in_message() {
+        // A transaction boundary commits mid-message → pump.ack is Some → tick.
+        let pump = PumpResult {
+            applied: 1,
+            ack: Some(10),
+        };
+        assert!(pump_committed(&pump, false));
+    }
+
+    #[test]
+    fn pump_committed_true_when_only_trailing_flush_committed() {
+        // A buffered standalone frame: the pump itself didn't commit (ack None),
+        // but the trailing idle-flush did → still a change tick. This is the
+        // common browser path (one Nostos event per WS message → flushed at
+        // message end).
+        let pump = PumpResult {
+            applied: 1,
+            ack: None,
+        };
+        assert!(pump_committed(&pump, true));
+    }
+
+    #[test]
+    fn pump_committed_false_when_nothing_committed() {
+        // A malformed / no-op message: nothing applied, nothing committed → no
+        // tick (no spurious snapshot).
+        let pump = PumpResult {
+            applied: 0,
+            ack: None,
+        };
+        assert!(!pump_committed(&pump, false));
+    }
+
+    #[test]
+    fn reactive_snapshot_after_commit_is_the_full_table() {
+        // The push's payload is `rows_for(table)` read at the tick. Prove the
+        // commit → trigger → full-snapshot chain on the pure core (the part that
+        // can't touch JsValue): a buffered frame does NOT tick until flush, then
+        // does, and the snapshot the callback would forward is the full table
+        // (pk-sorted, the same shape `rows_for` pins).
+        let mut eng = NostosEngine::new();
+        let bytes = frame_json(10, "insert", "tasks", "1", Some("6869"));
+        let pump = on_message(&mut eng, bytes.as_bytes()).unwrap();
+        assert!(
+            !pump_committed(&pump, false),
+            "buffered frame → no in-message commit → no tick"
+        );
+        assert_eq!(eng.row_count(), 0, "not yet flushed → empty snapshot");
+
+        let flush_committed = eng.flush().unwrap().is_some();
+        assert!(flush_committed);
+        assert!(
+            pump_committed(&pump, flush_committed),
+            "flush committed → tick fires"
+        );
+
+        // The snapshot delivered at the tick: full current table.
+        let snapshot = eng.rows_for("tasks");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].pk(), "1");
     }
 }
