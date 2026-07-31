@@ -178,7 +178,15 @@ pub trait SnapshotSink: Send + Sync {
 pub struct NostosClient {
     rt: tokio::runtime::Runtime,
     url: String,
-    token: Option<String>,
+    /// The bearer token the NEXT `connect()` captures into the `SyncClient`,
+    /// and what `signOut()` clears so a fresh session connects unauthenticated.
+    /// Behind a `Mutex` because both `setToken()` and `signOut()` mutate it
+    /// through `&self` — mirrors Flutter's `Mutex<Option<String>>` token on
+    /// `NostosHandle` (nostos.rs). Held only across a clone/assign, never an
+    /// await, and ALWAYS released before the session lock is acquired (see
+    /// `setToken`/`signOut`), so there is no lock-ordering cycle with
+    /// `connect()` (which takes session→token).
+    token: AsyncMutex<Option<String>>,
     db_path: String,
     session: AsyncMutex<Option<Session>>,
 }
@@ -248,7 +256,7 @@ impl NostosClient {
         Ok(Arc::new(Self {
             rt,
             url,
-            token,
+            token: AsyncMutex::new(token),
             db_path,
             session: AsyncMutex::new(None),
         }))
@@ -271,7 +279,7 @@ impl NostosClient {
             let storage = SqliteStorage::open(&self.db_path).map_err(NostosError::wrap)?;
             let config = SyncClientConfig {
                 table: "tasks".to_owned(),
-                token: self.token.clone(),
+                token: self.token.lock().await.clone(),
                 idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
                 ..SyncClientConfig::default()
             };
@@ -553,6 +561,106 @@ impl NostosClient {
             Ok(lsn.0)
         })
     }
+
+    /// Replace the bearer token used by **subsequent** connections / reconnects
+    /// — the Swift port of Flutter's `setToken` and a sibling of
+    /// `nostos_kotlin`'s / `nostos_node`'s. Two effects (ADR-0029 #3):
+    /// - The `NostosClient`-level token is updated, so the next `connect()`
+    ///   builds a `SyncClient` with the new token.
+    /// - If a session is already live, the new token is also forwarded to the
+    ///   `SyncClient` (`SyncClient::set_token`), so an already-running reconnect
+    ///   loop picks it up on the next attempt and an open socket picks it up on
+    ///   the next reconnect. Nothing else is torn down — storage, outbox, and
+    ///   every `watch()` subscriber survive (the whole point vs. rebuilding).
+    ///
+    /// Pass `nil` to clear (e.g. after `signOut()`); the next `connect()` then
+    /// runs unauthenticated.
+    ///
+    /// # Lock ordering
+    /// The token lock is released BEFORE the session lock is acquired, so there
+    /// is no cycle with `connect()` (session→token) — the two are never held
+    /// together here.
+    pub fn set_token(&self, token: Option<String>) {
+        self.rt.block_on(async {
+            {
+                *self.token.lock().await = token.clone();
+            }
+            let client_opt = {
+                let guard = self.session.lock().await;
+                guard.as_ref().map(|s| Arc::clone(&s.client))
+            };
+            if let Some(client) = client_opt {
+                client.set_token(token);
+            }
+        })
+    }
+
+    /// Sign out the current user (ADR-0029 / WS4-D3): stop the live sync,
+    /// wipe ALL local rows (and checkpoint + epoch) plus the durable outbox
+    /// (pending + dead-letter), drop the session, and clear the token — so the
+    /// next user sees an empty store and the next `connect()` runs
+    /// unauthenticated. `signOut` is a first-class SDK lifecycle step, NOT
+    /// "just close the socket."
+    ///
+    /// # Load-bearing ordering: quiesce BEFORE wipe
+    /// `SyncClient::clear_local_state()` runs `Storage::clear` + `Outbox::clear`
+    /// under the engine lock, but it MUST run after the run loop and every
+    /// `watch()` pump have *actually* stopped — not merely been asked to. A
+    /// frame applied by an in-flight task AFTER the wipe re-populates storage:
+    /// "half a clear is a leak" (ADR-0029). So each handle is `abort()`-ed AND
+    /// `await`-ed (the `await` resolves the cancelled `JoinError` and proves the
+    /// task is gone — no in-flight frame can survive to touch the wiped store).
+    /// The session lock is held throughout, so no new pump / run loop can start
+    /// mid-sign-out.
+    ///
+    /// Idempotent: a call with no active session still clears the held token (so
+    /// the next `connect()` is anonymous) and returns `Ok`. Does NOT free the
+    /// `NostosClient` — call `connect()` again to start a fresh session.
+    ///
+    /// # Errors
+    /// `NostosError` if the wipe itself fails (storage error). Token clear and
+    /// session drop happen regardless: a failed wipe still tears down so the
+    /// app can surface the error and the user can retry on a clean session.
+    pub fn sign_out(&self) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let mut guard = self.session.lock().await;
+            let Some(session) = guard.as_mut() else {
+                // No session: still clear the held token so the next connect()
+                // is anonymous. Idempotent for the session half.
+                *self.token.lock().await = None;
+                return Ok(());
+            };
+
+            // (1) QUIESCE — abort the run loop + every watch pump, then AWAIT
+            // each handle so termination is guaranteed before the wipe (see the
+            // method doc: abort() cancels at the next .await, but awaiting
+            // proves the task is actually gone). The cancelled JoinError is
+            // expected and swallowed.
+            if let Some(run) = session.run_task.take() {
+                run.abort();
+                let _ = run.await;
+            }
+            for pump in session.watch_tasks.drain(..) {
+                pump.abort();
+                let _ = pump.await;
+            }
+
+            // (2) WIPE — rows + checkpoint + epoch + outbox (pending +
+            // dead-letter) in one spawn_blocking under the engine lock. Safe
+            // now: the run loop is provably gone, so no post-clear frame can
+            // land.
+            let client = Arc::clone(&session.client);
+            let wipe = client.clear_local_state().await;
+
+            // (3) Drop the session (releases the SyncClient Arc; its Drop
+            // aborts are now no-ops since we took every handle) and clear the
+            // token so the next connect() builds an anonymous client. Both
+            // happen regardless of the wipe outcome (see Errors).
+            *guard = None;
+            *self.token.lock().await = None;
+            wipe.map_err(NostosError::wrap)
+        })
+    }
 }
 
 /// Read the full row snapshot for `table` as a JSON array-of-objects string.
@@ -819,6 +927,143 @@ mod tests {
         assert!(
             msg.contains("does not match"),
             "expected a table-mismatch error, got: {msg}"
+        );
+    }
+
+    // ----- ADR-0029 / WS4-D3: sign_out + set_token -----
+
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Monotonic counter for unique temp-file names within this process (the
+    /// file-backed sign_out test can't use `:memory:` — dropping the session
+    /// destroys an in-memory store, which would mask a sign_out that forgot to
+    /// wipe. A file survives the drop, so the wipe is observable).
+    static SIGNOUT_TEST_UNIQ: AtomicU64 = AtomicU64::new(0);
+
+    /// RAII temp-file remover: the file-backed test would otherwise litter
+    /// `$TMPDIR` on every run. Deletes the file (and its SQLite sidecars) on
+    /// drop, ignoring errors — best-effort cleanup, not load-bearing.
+    struct TempSqlite(PathBuf);
+    impl Drop for TempSqlite {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            // SQLite sidecars (-wal/-shm) under the same stem:
+            for ext in ["-wal", "-shm"] {
+                let mut p = self.0.clone();
+                p.as_mut_os_string().push(ext);
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+
+    /// The headline ADR-0029 test, file-backed so the wipe is observable
+    /// INDEPENDENT of the session drop. With `:memory:`, dropping the
+    /// `SqliteStorage` destroys the data regardless of `clear_local_state` —
+    /// so a buggy `sign_out` that only dropped the session would still pass an
+    /// in-memory test while leaving rows on disk for the next user. A file
+    /// survives the drop: if the wipe ran, reopening the SAME file sees `[]`;
+    /// if it didn't (the bug), the seed row persists. Mirrors the
+    /// `clear_local_state_wipes_rows_and_outbox` seam test in nostos-client.
+    #[test]
+    fn sign_out_wipes_rows_so_reopen_sees_empty_store() {
+        let path = std::env::temp_dir().join(format!(
+            "nostos-swift-signout-{}-{}.sqlite",
+            std::process::id(),
+            SIGNOUT_TEST_UNIQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _cleanup = TempSqlite(path.clone());
+
+        let client = NostosClient::new(
+            "ws://localhost:0".into(),
+            Some("tok".into()),
+            path.to_string_lossy().into_owned(),
+        )
+        .expect("construct");
+        client.connect().expect("connect");
+        client
+            .write(
+                "tasks".into(),
+                "upsert".into(),
+                "t1".into(),
+                Some(r#"{"id":"t1"}"#.into()),
+            )
+            .expect("write");
+        let before = client
+            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .expect("query before signOut");
+        assert!(
+            before.contains("t1"),
+            "seed row must be present before signOut, got: {before}"
+        );
+
+        // Sign out: quiesce -> wipe (rows + checkpoint + epoch + outbox) ->
+        // drop session -> clear token.
+        client.sign_out().expect("signOut");
+
+        // Reopen the SAME file as a fresh (anonymous) client. The row must be
+        // gone — proving clear_local_state ran, not just that the session
+        // dropped. The checkpoint reset to 0 (Storage::clear) is read here too.
+        let client2 = NostosClient::new(
+            "ws://localhost:0".into(),
+            None,
+            path.to_string_lossy().into_owned(),
+        )
+        .expect("construct client2");
+        client2.connect().expect("reopen");
+        let after = client2
+            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .expect("query after reopen");
+        assert_eq!(after, "[]", "row wiped by signOut, got: {after}");
+        assert_eq!(
+            client2.checkpoint().expect("checkpoint"),
+            0,
+            "checkpoint reset to 0 by signOut's Storage::clear"
+        );
+    }
+
+    /// `sign_out()` with no active session is a no-op for the session half but
+    /// still clears the held token (so a stray signOut before any connect still
+    /// leaves the client anonymous). Idempotent across repeated calls.
+    #[test]
+    fn sign_out_before_connect_is_idempotent() {
+        let client = NostosClient::new(
+            "ws://localhost:0".into(),
+            Some("tok".into()),
+            ":memory:".into(),
+        )
+        .expect("construct");
+        client.sign_out().expect("signOut before connect is Ok");
+        client.sign_out().expect("second signOut is Ok");
+        // Session is still None; connect() works and starts fresh.
+        client.connect().expect("connect still works after signOut");
+    }
+
+    /// `set_token()` is callable before and after `connect()` without panicking,
+    /// forwards to the live session's `SyncClient` when one exists (the no-
+    /// session branch is the coverage gap a live-server test would close), and
+    /// leaves the session usable afterward — locking the swap primitive's
+    /// surface that ADR-0029 #3 requires every binding to expose.
+    #[test]
+    fn set_token_swaps_before_and_after_connect() {
+        let client = NostosClient::new(
+            "ws://localhost:0".into(),
+            Some("tok".into()),
+            ":memory:".into(),
+        )
+        .expect("construct");
+        // Before connect: updates the NostosClient-level token only (no session
+        // to forward to). Must not panic / deadlock.
+        client.set_token(Some("rotated".into()));
+        client.connect().expect("connect");
+        // After connect: forwards to the live SyncClient too. The session stays
+        // usable (query still works) — set_token tears nothing down.
+        client.set_token(Some("rotated-2".into()));
+        client.set_token(None);
+        let rows = client.query("SELECT 1 AS one".into()).expect("query");
+        assert!(
+            rows.contains("\"one\":1") || rows.contains("\"one\": 1"),
+            "session usable after set_token, got: {rows}"
         );
     }
 }
