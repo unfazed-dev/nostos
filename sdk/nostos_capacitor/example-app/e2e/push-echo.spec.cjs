@@ -361,6 +361,43 @@ test("capacitor web-only plugin live round-trip against spine (PUSH + ECHO)", as
     console.log("[cap-e2e] WATCH_OK");
     await page.evaluate(() => console.log("[cap-e2e] WATCH_OK"));
 
+    // ---------------- SIGN-OUT (ADR-0029 local-state wipe) ----------------
+    // signOut() wipes the engine's rows + outbox (clearLocalState), closes the
+    // socket, drops every watch listener, and clears the stored token. After
+    // it, the prior user's rows are unreachable: the socket is torn down so
+    // query/rowCount reject ("connect() not called") rather than returning the
+    // previous principal's rows. That is the cross-user leak closed — the next
+    // connect() cold-starts into an empty database.
+    const preSignOutRows = await page.evaluate(() =>
+      window.Nostos.query({ table: "tasks" }),
+    );
+    expect(
+      (preSignOutRows.rows || []).map((r) => r.pk).sort(),
+      "rows present immediately before signOut",
+    ).toEqual(["cap-echo", "cap-push"]);
+
+    await page.evaluate(() => window.Nostos.signOut());
+
+    // The socket is gone: query rejects instead of returning the prior user's
+    // rows. Resolves would be a cross-user data leak.
+    const queryAfterSignOut = await page.evaluate(() =>
+      window.Nostos.query({ table: "tasks" }).then(
+        () => "resolved",
+        (err) =>
+          "rejected:" + (err && err.message ? err.message : String(err)),
+      ),
+    );
+    expect(
+      queryAfterSignOut.startsWith("rejected:"),
+      "query rejects after signOut (socket torn down, no prior rows reachable)",
+    ).toBe(true);
+
+    // signOut is idempotent — calling it again must not throw.
+    await page.evaluate(() => window.Nostos.signOut());
+
+    console.log("[cap-e2e] SIGNOUT_OK");
+    await page.evaluate(() => console.log("[cap-e2e] SIGNOUT_OK"));
+
     // Final assertion: all markers landed on the captured page console.
     expect(
       logs.some((l) => l === "[cap-e2e] PUSH_OK"),
@@ -373,6 +410,10 @@ test("capacitor web-only plugin live round-trip against spine (PUSH + ECHO)", as
     expect(
       logs.some((l) => l === "[cap-e2e] WATCH_OK"),
       "WATCH_OK in page console",
+    ).toBe(true);
+    expect(
+      logs.some((l) => l === "[cap-e2e] SIGNOUT_OK"),
+      "SIGNOUT_OK in page console",
     ).toBe(true);
 
     // Cleanly close the socket so the spine session ends gracefully.

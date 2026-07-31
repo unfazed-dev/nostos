@@ -114,6 +114,19 @@ export interface ConfigureOptions {
   wasmUrl: string;
 }
 
+/** Options for {@link NostosPlugin.setToken}. */
+export interface SetTokenOptions {
+  /**
+   * The new auth token (JWT), or `null`/omitted to clear it. Swapped into the
+   * token used by the next {@link NostosPlugin.connect} — an already-open socket
+   * is NOT hot-swapped, because the wasm `NostosSocket` binds the token at
+   * connect time (browsers cannot re-handshake an open WebSocket). This mirrors
+   * the native `SyncClient::set_token`. Call {@link NostosPlugin.signOut} to
+   * tear down a live session and clear the token together.
+   */
+  token?: string | null;
+}
+
 /**
  * The Nostos Capacitor plugin.
  *
@@ -176,6 +189,25 @@ export interface NostosPlugin {
 
   /** Close the socket. The server treats this as a session end. */
   close(): Promise<void>;
+
+  /**
+   * Swap the auth token used by the next {@link connect}. Does NOT hot-swap an
+   * open socket — the wasm `NostosSocket` binds the token at connect (a browser
+   * cannot re-handshake an open WebSocket), so a refreshed JWT takes effect on
+   * the next {@link connect}. Mirrors the native `SyncClient::set_token`. Use
+   * {@link signOut} to clear the token AND tear down the live session together.
+   */
+  setToken(options: SetTokenOptions): Promise<void>;
+
+  /**
+   * Sign out the current user (ADR-0029): wipe the engine's in-memory rows AND
+   * the pending outbox, close the live socket, drop every reactive listener,
+   * and clear the stored token. After this the plugin holds none of the prior
+   * user's state, so the next {@link connect} (a new principal) cold-starts
+   * into an empty database rather than the previous user's rows. Idempotent —
+   * safe to call when not connected.
+   */
+  signOut(): Promise<void>;
 
   /**
    * Override the wasm glue URL. Must be called before connect. Hosts that

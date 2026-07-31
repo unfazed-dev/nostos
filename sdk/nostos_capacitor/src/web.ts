@@ -33,6 +33,7 @@ import type {
   ConfigureOptions,
   ConnectOptions,
   QueryOptions,
+  SetTokenOptions,
   WatchOptions,
   WriteOptions,
 } from "./definitions";
@@ -75,6 +76,11 @@ interface NostosSocketInstance {
     clientWriteId: string,
   ): void;
   close(): void;
+  /**
+   * ADR-0029 D1: wipe the engine's in-memory rows + outbox. Call before
+   * close() on sign-out so the next principal sees an empty database.
+   */
+  clearLocalState(): void;
   // The wasm NostosSocket is gaining a JS-facing change-callback seam — a
   // no-arg "tick" the host re-reads `rowsFor` inside. The web-SDK port is
   // landing it as Rust `NostosSocket::on_change` (likely JS `onChange`); the
@@ -95,8 +101,16 @@ interface NostosSocketInstance {
  * upgrade path — see README).
  */
 export class NostosWeb extends WebPlugin implements NostosPlugin {
-  /** The active socket, set by connect, cleared by close. */
+  /** The active socket, set by connect, cleared by close/signOut. */
   private sock: NostosSocketInstance | null = null;
+
+  /**
+   * The auth token for the next connect(). Set by connect()/setToken(),
+   * cleared by signOut(). The wasm NostosSocket binds the token at connect (a
+   * browser cannot re-handshake an open WebSocket), so a setToken() swap takes
+   * effect on the NEXT connect() — same shape as SyncClient::set_token.
+   */
+  private token: string | null = null;
 
   /**
    * Per-table reactive listeners, fanned out from the socket's single change
@@ -135,11 +149,16 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
       throw new Error("Nostos.connect: url is required");
     }
     const NostosSocket = await this.loadWasm();
-    // The wasm NostosSocket.connect appends ?token= on the URL itself (browsers
-    // can't set headers on a WS handshake). We pass the raw URL.
+    // A setToken() before connect() supplies the token for this handshake; an
+    // explicit options.token wins. The wasm NostosSocket binds the token at
+    // connect (browsers can't set headers on a WS handshake and can't
+    // re-handshake an open one), so a later setToken() applies on the NEXT
+    // connect — same shape as SyncClient::set_token.
+    const token = options.token ?? this.token;
+    this.token = token ?? null;
     this.sock = await NostosSocket.connect(
       options.url,
-      options.token ?? null,
+      token ?? null,
       options.table ?? "tasks",
       options.whereSql ?? null,
     );
@@ -357,6 +376,39 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
       }
     }
   }
+
+  /** @inheritDoc */
+  async setToken(options: SetTokenOptions): Promise<void> {
+    this.token = options?.token ?? null;
+  }
+
+  /** @inheritDoc */
+  async signOut(): Promise<void> {
+    // Order matters (ADR-0029): wipe the engine's rows + outbox WHILE the
+    // socket is still live (clearLocalState drives the engine the socket
+    // owns), then close the socket, then drop reactive listeners and clear the
+    // stored token. After this the plugin holds none of the prior principal's
+    // state — the next connect() cold-starts into an empty DB (no rows, no
+    // checkpoint, no pending writes, no token). Idempotent.
+    const s = this.sock;
+    this.sock = null;
+    this.watchers.clear();
+    this.snapshotBridgeAttached = false;
+    if (s) {
+      try {
+        s.clearLocalState();
+      } catch {
+        // Engine already gone — close() below still ends the session.
+      }
+      try {
+        s.close();
+      } catch {
+        // Already closed — fine.
+      }
+    }
+    this.token = null;
+  }
+
 
   /**
    * Dynamically import the wasm-pack `--target web` glue and instantiate the

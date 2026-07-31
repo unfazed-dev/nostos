@@ -30,6 +30,7 @@ export type {
   ConfigureOptions,
   ConnectOptions,
   QueryOptions,
+  SetTokenOptions,
   WatchOptions,
   WriteOptions,
 } from "./definitions";
