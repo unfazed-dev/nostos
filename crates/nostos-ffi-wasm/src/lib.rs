@@ -338,6 +338,21 @@ impl NostosEngine {
             .map(|(pk, payload)| RowEntry { pk, payload })
             .collect()
     }
+
+    /// ADR-0029 D1: wipe the in-memory rows AND outbox — the sign-out
+    /// local-state wipe for the browser. The `NostosEngine` has no checkpoint
+    /// file; this clears the live in-memory store so the next user (same
+    /// Worker/page session) does not see the previous user's rows. Call before
+    /// `NostosSocket::close` on sign-out.
+    pub fn clear(&mut self) {
+        let s = self.inner.storage_mut();
+        // Both clears under one borrow — half a clear is a cross-user leak.
+        // ponytail: `let _ =` — `InMemoryStorage::clear` is infallible in
+        // practice (a `HashMap`/`Vec` clear); the `Result` is just the trait
+        // shape, surfaced as infallible here.
+        let _ = <InMemoryStorage as nostos_core::Storage>::clear(s);
+        let _ = <InMemoryStorage as Outbox>::clear(s);
+    }
 }
 
 impl Default for NostosEngine {
@@ -561,6 +576,13 @@ impl NostosSocket {
         Ok(())
     }
 
+    /// ADR-0029 D1: wipe the socket's engine rows + outbox (sign-out). Call
+    /// before [`Self::close`]. Mirrors `nostos_client::SyncClient::clear_local_state`.
+    #[wasm_bindgen(js_name = clearLocalState)]
+    pub fn clear_local_state(&self) {
+        self.inner.engine.borrow_mut().clear();
+    }
+
     /// Close the socket. The server treats this as a session end; the client
     /// keeps its checkpoint so the next `connect` resumes.
     pub fn close(&self) {
@@ -700,6 +722,21 @@ mod tests {
 
         // A table with no rows yields an empty Vec.
         assert!(eng.rows_for("absent").is_empty());
+    }
+
+    #[test]
+    fn clear_wipes_in_memory_rows() {
+        // ADR-0029 D1: the sign-out wipe at the NostosEngine seam. The wipe
+        // semantics are unit-tested in nostos-core; this proves the seam calls
+        // Storage::clear (the outbox clear is the parallel trivial delegation).
+        let mut eng = NostosEngine::new();
+        feed_ins(&mut eng, 10.0, "tasks", "1", b"alice");
+        feed_ins(&mut eng, 20.0, "tasks", "2", b"bob");
+        eng.flush().unwrap();
+        assert_eq!(eng.row_count(), 2, "seeded");
+        eng.clear();
+        assert_eq!(eng.row_count(), 0, "clear wiped rows");
+        assert!(eng.rows_for("tasks").is_empty());
     }
 
     #[test]
