@@ -301,6 +301,79 @@ impl NostosState {
         }
     }
 
+    /// ADR-0029 sign-out: tear the session down so the next principal sees a
+    /// blank device. Order is load-bearing (the `clear_local_state` contract):
+    /// (1) abort the run loop + watch pumps, (2) AWAIT the handles — true
+    /// quiescence, not just the abort signal, so a frame already in flight when
+    /// `abort()` fired can't re-populate storage after the clear ("half a clear
+    /// is a cross-user leak"), (3) `clear_local_state()` wipes rows + outbox +
+    /// resets the checkpoint/epoch under one engine lock, (4) clear the token,
+    /// (5) drop the Session. The run loop's drop closes the WS socket. After
+    /// this the slot is `None`, so the next `connect()` builds a fresh client.
+    ///
+    /// `abort_subscribe()` is NOT reused here: it aborts but does not await, so
+    /// it cannot guarantee the quiescence sign-out requires.
+    ///
+    /// # Errors
+    /// `String` if the local-state wipe itself failed (disk error). A failed
+    /// wipe is surfaced, not swallowed — half a clear is a leak.
+    pub async fn sign_out(&self) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        let Some(session) = guard.take() else {
+            return Ok(()); // idempotent — nothing to sign out
+        };
+        // (1)+(2) Abort AND await the run loop + watch pumps for quiescence.
+        // `abort()` only signals cancellation; awaiting the handle guarantees
+        // the future is actually dropped before we clear, so no post-clear
+        // apply/flush can race the wipe. The awaited handle resolves
+        // `Err(JoinError { is_cancelled: true })` — discarded. The handles live
+        // on `self.rt`; awaiting them from the command-handler runtime is a
+        // cross-runtime await (registers a waker), not a block.
+        if let Some(handle) = session.run_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+        for handle in session.watch_tasks {
+            handle.abort();
+            let _ = handle.await;
+        }
+        // (3) Wipe local rows + outbox under one engine lock. Safe now: the run
+        // loop is quiesced, no apply/flush can re-populate after the clear.
+        session
+            .client
+            .clear_local_state()
+            .await
+            .map_err(|e: ClientError| e.to_string())?;
+        // (4) Clear the token. Defensive — the client drops at (5) with the
+        // session, but clearing here matches the signOut contract and guards a
+        // stray `Arc` clone from re-authing on a reconnect.
+        session.client.set_token(None);
+        // (5) `session` drops here; its handles are already drained and the
+        // session slot is already `None`.
+        Ok(())
+    }
+
+    /// ADR-0029: swap the auth token on the LIVE client without reconnecting.
+    /// A refresh self-heals within one backoff window — the next socket open
+    /// picks the new token up; storage, outbox, and `changes` subscribers all
+    /// survive. Thin wrapper over the sync `SyncClient::set_token`
+    /// (`client.rs:358`). Requires `connect()` to have run.
+    ///
+    /// # Errors
+    /// `String` if no session is active.
+    pub async fn set_token(&self, token: Option<String>) -> Result<(), String> {
+        let client = {
+            let guard = self.session.lock().await;
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| "set_token() called before connect()".to_string())?;
+            Arc::clone(&session.client)
+        };
+        // `set_token` is a sync RwLock swap — no `.await` on the call itself.
+        client.set_token(token);
+        Ok(())
+    }
+
     /// Enqueue a durable write against the active session's table. Resolves
     /// once the write is captured in the local outbox (NOT once the server
     /// acks it — ADR-0013 outbox contract). `op` is `"upsert"` / `"delete"` /
@@ -598,6 +671,23 @@ async fn watch(
     state.watch(table, on_event).await
 }
 
+/// ADR-0029 sign-out: stop sync, close the socket, wipe local rows + outbox,
+/// and clear the token so the next principal sees a blank device. Idempotent.
+#[tauri::command]
+async fn sign_out(state: State<'_, NostosState>) -> Result<(), String> {
+    state.sign_out().await
+}
+
+/// ADR-0029: swap the auth token on the live client (a refresh self-heals
+/// within one backoff window). Requires `connect()` to have run.
+#[tauri::command]
+async fn set_token(
+    state: State<'_, NostosState>,
+    token: Option<String>,
+) -> Result<(), String> {
+    state.set_token(token).await
+}
+
 /// Build the `nostos` Tauri plugin. Generic over `R: Runtime` so a Tauri app
 /// using any runtime (the default `Wry`, or a custom one) can register it via
 /// `tauri::Builder::default().plugin(nostos_tauri::init())`.
@@ -614,6 +704,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             query,
             checkpoint,
             watch,
+            set_token,
+            sign_out,
         ])
         .build()
 }
@@ -681,6 +773,79 @@ mod tests {
             err.contains("before connect"),
             "expected a before-connect error, got: {err}"
         );
+    }
+
+    /// ADR-0029 sign_out: a row written before sign_out is gone after AND the
+    /// session is torn down (a later `query()` is a "before connect" error).
+    /// Uses a temp FILE (not `:memory:`) so re-`connect()` reopens the SAME
+    /// store and the wipe is observable on disk — `:memory:` would hide it
+    /// behind a fresh DB on every open. Also pins idempotency (a second
+    /// sign_out with no session is `Ok`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sign_out_wipes_rows_and_drops_session() {
+        let db = std::env::temp_dir()
+            .join(format!("nostos-tauri-signout-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let path = db.to_str().expect("utf8 db path").to_owned();
+
+        let state = NostosState::new();
+        state
+            .connect("ws://localhost:0".into(), None, path.clone())
+            .await
+            .expect("connect");
+        state
+            .write(
+                "tasks".into(),
+                "upsert".into(),
+                "pk1".into(),
+                Some(r#"{"id":"pk1","title":"before-signout"}"#.into()),
+            )
+            .await
+            .expect("write");
+
+        // Sanity: the write landed in cairn_data (instant-local-apply, WS2).
+        let before = state
+            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .await
+            .expect("query before sign_out");
+        assert!(
+            before.contains("pk1"),
+            "write should land in cairn_data before sign_out, got: {before}"
+        );
+
+        // Sign out: abort + quiesce + clear + clear-token + drop session.
+        state.sign_out().await.expect("sign_out");
+
+        // (1) Session is gone — query() is now a "before connect" error.
+        let err = state
+            .query("SELECT 1 AS one".into())
+            .await
+            .expect_err("query after sign_out should error (no session)");
+        assert!(
+            err.contains("before connect"),
+            "expected before-connect error after sign_out, got: {err}"
+        );
+
+        // (2) The wipe persisted to disk — reopen the SAME file and the row is
+        // gone. This is the cross-user-leak guard from ADR-0029.
+        state
+            .connect("ws://localhost:0".into(), None, path.clone())
+            .await
+            .expect("reconnect");
+        let rows_json = state
+            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .await
+            .expect("query after reconnect");
+        let rows: serde_json::Value =
+            serde_json::from_str(&rows_json).expect("parse rows json");
+        assert!(
+            rows.as_array().is_some_and(|a| a.is_empty()),
+            "tasks table should be empty after sign_out, got: {rows_json}"
+        );
+
+        // Idempotent: a second sign_out is a no-op (Ok).
+        state.sign_out().await.expect("sign_out idempotent");
+        let _ = std::fs::remove_file(&db);
     }
 
     // -------------------------------------------------------------------------

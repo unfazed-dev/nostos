@@ -1,6 +1,6 @@
 ## Default Permission
 
-Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all six commands unconditionally.
+Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all eight commands unconditionally.
 
 #### This default permission set includes the following:
 
@@ -10,6 +10,8 @@ Nostos Tauri plugin — default permissions for the connect/subscribe/write/quer
 - `allow-query`
 - `allow-checkpoint`
 - `allow-watch`
+- `allow-set-token`
+- `allow-sign-out`
 
 ## Permission Table
 
@@ -94,6 +96,58 @@ Enables the query command without any pre-configured scope.
 <td>
 
 Denies the query command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:allow-set-token`
+
+</td>
+<td>
+
+Enables the set_token command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:deny-set-token`
+
+</td>
+<td>
+
+Denies the set_token command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:allow-sign-out`
+
+</td>
+<td>
+
+Enables the sign_out command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:deny-sign-out`
+
+</td>
+<td>
+
+Denies the sign_out command without any pre-configured scope.
 
 </td>
 </tr>
