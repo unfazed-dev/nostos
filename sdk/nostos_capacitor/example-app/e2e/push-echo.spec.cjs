@@ -321,7 +321,47 @@ test("capacitor web-only plugin live round-trip against spine (PUSH + ECHO)", as
     console.log("[cap-e2e] ECHO_OK");
     await page.evaluate(() => console.log("[cap-e2e] ECHO_OK"));
 
-    // Final assertion: both markers landed on the captured page console.
+    // ---------------- WATCH (reactive initial snapshot) ----------------
+    // watch() returns a subscription whose listener fires immediately with the
+    // engine's current rows (kind === "initial"). Delta emits await the wasm
+    // change-callback seam (see README "Reactive watch()" ceiling), so this
+    // assertion covers the initial-snapshot path that ships today.
+    const watchEvents = await page.evaluate(async () => {
+      window.__e2eWatchEvents = [];
+      window.__e2eWatchSub = await window.Nostos.watch(
+        { table: "tasks" },
+        (s) => {
+          window.__e2eWatchEvents.push(s);
+        },
+      );
+      // The initial emit fires synchronously inside watch(); a microtask is
+      // belt-and-braces before we snapshot the collected events.
+      await Promise.resolve();
+      return window.__e2eWatchEvents;
+    });
+    expect(
+      watchEvents.some((s) => s && s.kind === "initial"),
+      "watch() delivered an initial snapshot",
+    ).toBe(true);
+    const initialSnapshot = watchEvents.find((s) => s && s.kind === "initial");
+    expect(
+      (initialSnapshot && initialSnapshot.rows
+        ? initialSnapshot.rows.map((r) => r.pk)
+        : []
+      ).sort(),
+      "initial watch snapshot includes the pushed + echoed rows",
+    ).toEqual(["cap-echo", "cap-push"]);
+
+    // unsubscribe() is idempotent and must not throw.
+    await page.evaluate(() => {
+      window.__e2eWatchSub.unsubscribe();
+      window.__e2eWatchSub.unsubscribe();
+    });
+
+    console.log("[cap-e2e] WATCH_OK");
+    await page.evaluate(() => console.log("[cap-e2e] WATCH_OK"));
+
+    // Final assertion: all markers landed on the captured page console.
     expect(
       logs.some((l) => l === "[cap-e2e] PUSH_OK"),
       "PUSH_OK in page console",
@@ -329,6 +369,10 @@ test("capacitor web-only plugin live round-trip against spine (PUSH + ECHO)", as
     expect(
       logs.some((l) => l === "[cap-e2e] ECHO_OK"),
       "ECHO_OK in page console",
+    ).toBe(true);
+    expect(
+      logs.some((l) => l === "[cap-e2e] WATCH_OK"),
+      "WATCH_OK in page console",
     ).toBe(true);
 
     // Cleanly close the socket so the spine session ends gracefully.

@@ -25,9 +25,12 @@ export type {
   NostosConnectResult,
   NostosPlugin,
   NostosRow,
+  NostosWatchSnapshot,
+  NostosWatchSubscription,
   ConfigureOptions,
   ConnectOptions,
   QueryOptions,
+  WatchOptions,
   WriteOptions,
 } from "./definitions";
 export { NostosWeb } from "./web";
