@@ -68,6 +68,14 @@ Split by data shape:
   (~24 B/element). Impact on 833k@1k with today's small-row workload: ~0.
 - **Regression risk materializes ONLY if top-level wire fields are added or the bench payload is
   fattened — both avoidable.** Adding either is itself a decision that must clear this gate.
+- **VERIFIED 2026-07-31 (post-implementation):** `WireFrame` is byte-unchanged (HLCs live in the
+  opaque payload blob), AND `nostos-bench` provably never imports the CRDT/apply/write code —
+  `grep -rE 'apply_batch|Storage|Outbox|or_set|merge_or_set|WriteBack' crates/nostos-bench/src`
+  returns only `fs::write` (result-file I/O in `report.rs`). The bench is pure fan-out
+  (`FakeReplicator → FanOutService → raw WS clients counting frames`); its clients are NOT
+  `SyncClient`s applying rows. So the CRDT (client apply + HLC) and the Increment op (write path)
+  are in code the bench never executes — the gate is satisfied by construction; the empirical run
+  only confirms 0 drops.
 
 ## Benchmark gate (D7 — binding)
 
@@ -77,6 +85,21 @@ Before/after `make bench --clients 1000`, clean `--release`, 3× median, same ma
 **Revert threshold: >3% ops/sec regression at 1k (i.e. <808k vs RESULTS.md's 833,307) OR any drop% >
 0.00%.** 3% is conservative (the 208× moat tolerates it before rounding toward 200×); any non-zero
 drop directly falsifies the "0.00% drops" headline and is non-negotiable.
+
+**VERDICT 2026-07-31 — PASS.** Empirical before/after on the same dev machine, `--clients 1000
+--events 50000`, `NOSTOS_FAKE_EPS=0 NOSTOS_FAKE_KEYS=0`, 3 runs each:
+
+| | runs (ops/sec) | median | drop% |
+|---|---|---|---|
+| before (`9738a26`, pre-CRDT) | 686 463 / 699 668 / 675 639 | ~686k | 0.00% |
+| after (CRDT, `45fdc70`) | 718 644 / 676 809 / 638 222 | ~677k | 0.00% |
+
+Median delta −1.3% — well inside the ~10% run-to-run machine noise (the ranges overlap heavily;
+after-run-1 actually exceeded every before-run). 0.00% drops both sides (50M/50M delivered each run).
+Both numbers are this dev box's fan-out baseline — ~82% of RESULTS.md's 833,307 (recorded on the
+project's bench machine), a machine gap not a regression. The off-path proof above (nostos-bench never
+imports the CRDT/apply/write code) is the load-bearing reason before≈after; the measurement confirms
+0 drops + no regression within noise. **Gate cleared; no revert.**
 
 ## JSON-debuggability
 
