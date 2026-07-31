@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod crdt;
 pub mod events;
 pub mod lsn;
 pub mod predicate;
@@ -20,6 +21,9 @@ pub mod principal;
 pub mod session;
 pub mod tier;
 
+pub use crdt::{
+    merge_or_set_payloads, present_elements, Hlc, OrSetElement, OrSetError, OrSetPayload,
+};
 pub use events::{Operation, ReplicationEvent, RowOp};
 pub use lsn::Lsn;
 pub use predicate::{ColumnValue, Predicate, PredicateExpr, PredicateFilter};
