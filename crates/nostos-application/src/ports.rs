@@ -357,6 +357,35 @@ pub trait WriteBack: Send + Sync {
         payload_json: &str,
         tenant: Option<TenantScope<'_>>,
     ) -> Result<(), WriteBackError>;
+
+    /// Atomic increment of one numeric column on an existing row (ADR-0030
+    /// Decision 1): `payload_json` is `{"field":"<col>","delta":<i64>}`.
+    /// `PgWriteBack` emits `UPDATE … SET <field> = <field> + $delta WHERE
+    /// id=$pk`, so Postgres serializes concurrent increments — no client
+    /// read-modify-write, no lost update. The `pk` identifies the row (v1
+    /// convention: pk column is `id`).
+    ///
+    /// A increment of a row that does not exist is a success (idempotent —
+    /// 0 rows affected); a row that exists under a different tenant is a
+    /// [`WriteBackError::Forbidden`] rejection, never a silent no-op (same
+    /// existence-disclosure trade-off as [`Self::patch`]). The field may not
+    /// be the primary-key column or, when tenant-scoped, the tenant column.
+    ///
+    /// # Errors
+    /// - [`WriteBackError::TableNotAllowed`] if `table` is not in the allowlist.
+    /// - [`WriteBackError::InvalidPayload`] if `payload_json` is not a JSON
+    ///   object, lacks `field`/`delta`, the field fails identifier validation,
+    ///   or `delta` is not an integer.
+    /// - [`WriteBackError::Forbidden`] if `tenant` is `Some` and the row exists
+    ///   under a different tenant (ADR-0018).
+    /// - [`WriteBackError::Backend`] for any underlying database error.
+    async fn increment(
+        &self,
+        table: &str,
+        pk: &str,
+        payload_json: &str,
+        tenant: Option<TenantScope<'_>>,
+    ) -> Result<(), WriteBackError>;
 }
 
 /// Why a [`WriteBack`] call failed. Surfaced to the client as the `error`

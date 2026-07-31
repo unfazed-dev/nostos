@@ -35,6 +35,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
+use nostos_application::ports::WriteBack;
 use nostos_application::ports::SyncAuth;
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, Principal, ReplicationEvent};
@@ -1045,4 +1046,73 @@ async fn cross_tenant_patch_is_rejected_row_unchanged() {
         stored_title, "acme-owned",
         "the row's content must be UNCHANGED by the rejected patch"
     );
+}
+
+/// ADR-0030 Decision 1: `PgWriteBack::increment` emits
+/// `UPDATE ... SET col = col + $delta WHERE id = $pk`, so Postgres serializes
+/// concurrent increments — no client read-modify-write, no lost update. Direct
+/// adapter test (no server/replication machinery): seeds a row, applies two
+/// +1 deltas, asserts the serialized total; plus the idempotent-absent +
+/// payload-validation branches.
+#[tokio::test]
+async fn increment_serializes_concurrent_deltas_server_side() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    let sql = sql_client().await;
+    let _ = sql
+        .batch_execute(
+            "DROP TABLE IF EXISTS nostosincr; \
+             CREATE TABLE nostosincr (id text PRIMARY KEY, n bigint NOT NULL DEFAULT 0);",
+        )
+        .await;
+
+    let mut allowlist = HashSet::new();
+    allowlist.insert("nostosincr".to_string());
+    let wb = PgWriteBack::new(&pg_url(), allowlist);
+
+    // Seed n=0, then two +1 increments → Postgres serializes to n=2.
+    wb.upsert("nostosincr", "a", r#"{"n":0}"#, None)
+        .await
+        .expect("seed upsert");
+    wb.increment("nostosincr", "a", r#"{"field":"n","delta":1}"#, None)
+        .await
+        .expect("first increment");
+    wb.increment("nostosincr", "a", r#"{"field":"n","delta":1}"#, None)
+        .await
+        .expect("second increment");
+
+    let n: i64 = sql
+        .query_one("SELECT n FROM nostosincr WHERE id = 'a'", &[])
+        .await
+        .expect("seeded row exists")
+        .get(0);
+    assert_eq!(
+        n, 2,
+        "two +1 increments serialize to +2 (no lost update — the whole point)"
+    );
+
+    // Increment of an absent row is idempotent success (0 rows affected),
+    // mirroring patch-of-missing / delete-of-missing.
+    wb.increment("nostosincr", "ghost", r#"{"field":"n","delta":5}"#, None)
+        .await
+        .expect("increment of absent row is idempotent success");
+
+    // Payload validation: missing delta rejected; the pk column is not
+    // incrementable (would corrupt row identity).
+    assert!(
+        wb.increment("nostosincr", "a", r#"{"field":"n"}"#, None)
+            .await
+            .is_err(),
+        "missing delta must be InvalidPayload"
+    );
+    assert!(
+        wb.increment("nostosincr", "a", r#"{"field":"id","delta":1}"#, None)
+            .await
+            .is_err(),
+        "incrementing the pk column must be rejected"
+    );
+
+    let _ = sql.batch_execute("DROP TABLE nostosincr;").await;
 }

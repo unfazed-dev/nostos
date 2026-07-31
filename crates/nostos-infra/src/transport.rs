@@ -832,12 +832,12 @@ async fn handle_decoded_message(
 }
 
 /// Translate a `Write` client message into a `WriteBack` port call. The op
-/// string is `"upsert" | "delete" | "patch"`; anything else is an
+/// string is `"upsert" | "delete" | "patch" | "increment"`; anything else is an
 /// `InvalidPayload`. The payload (a `serde_json::Value`) is rendered back to
-/// JSON text for the upsert/patch paths (the port takes `&str`). `tenant`
-/// (ADR-0018) is forwarded verbatim to the adapter — `dispatch_write` doesn't
-/// interpret it, just relays the scope the caller already computed from the
-/// principal.
+/// JSON text for the upsert/patch/increment paths (the port takes `&str`).
+/// `tenant` (ADR-0018) is forwarded verbatim to the adapter — `dispatch_write`
+/// doesn't interpret it, just relays the scope the caller already computed
+/// from the principal.
 async fn dispatch_write(
     write_back: &Arc<dyn WriteBack>,
     table: &str,
@@ -878,9 +878,24 @@ async fn dispatch_write(
             let json = value.to_string();
             write_back.patch(table, pk, &json, tenant).await
         }
+        "increment" => {
+            // ADR-0030 Decision 1: server-authoritative counter delta. Payload
+            // is `{"field","delta"}`; PgWriteBack emits SET col = col + ?. Same
+            // object-ness guard — the adapter re-validates field/delta.
+            let value = payload.ok_or_else(|| {
+                WriteBackError::InvalidPayload("payload required for increment".into())
+            })?;
+            if !value.is_object() {
+                return Err(WriteBackError::InvalidPayload(
+                    "payload must be a JSON object".into(),
+                ));
+            }
+            let json = value.to_string();
+            write_back.increment(table, pk, &json, tenant).await
+        }
         "delete" => write_back.delete(table, pk, tenant).await,
         other => Err(WriteBackError::InvalidPayload(format!(
-            "unknown op: {other} (expected 'upsert', 'delete', or 'patch')"
+            "unknown op: {other} (expected 'upsert', 'delete', 'patch', or 'increment')"
         ))),
     }
 }

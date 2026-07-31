@@ -641,6 +641,15 @@ impl Storage for SqliteStorage {
                             local_lsn
                         ]);
                     }
+                    WriteOp::Increment => {
+                        // Server-authoritative delta (ADR-0030 Decision 1):
+                        // nothing to replay. Opaque storage can't decode the
+                        // column to compute col+delta, and the local count was
+                        // never bumped optimistically, so a server frame with
+                        // the pre-increment value is consistent until the
+                        // increment flushes to Postgres and its echo lands here
+                        // as an ordinary upsert of the new value.
+                    }
                 }
             }
         }
@@ -971,6 +980,16 @@ impl Outbox for SqliteStorage {
                     rusqlite::params![write.table, write.pk, merged],
                 )
                 .map_err(rusqlite_err)?;
+            }
+            WriteOp::Increment => {
+                // Server-authoritative delta (ADR-0030 Decision 1): opaque
+                // storage can't compute col+delta, so the increment is NOT
+                // reflected optimistically — the local count bumps when the
+                // server's replicated echo lands (apply_batch upserts the new
+                // value). The intent is still durable (it sits in the outbox
+                // until flush). ponytail: instant-local feedback needs a column
+                // decoder (ADR-0012 schema registry); add then if a counter's
+                // round-trip lag is visibly jarring.
             }
         }
         Ok(())

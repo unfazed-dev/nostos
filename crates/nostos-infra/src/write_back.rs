@@ -119,6 +119,18 @@ impl WriteBack for NoWriteBack {
             "write-back requires pg replicator".to_string(),
         ))
     }
+
+    async fn increment(
+        &self,
+        _table: &str,
+        _pk: &str,
+        _payload_json: &str,
+        _tenant: Option<TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
+        Err(WriteBackError::Backend(
+            "write-back requires pg replicator".to_string(),
+        ))
+    }
 }
 
 // ===========================================================================
@@ -673,6 +685,145 @@ mod pg {
             all_values.extend(col_values);
             all_values.push(pk_value);
             all_values.push(tenant_value);
+            let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                all_values.iter().map(SqlValue::as_tosql).collect();
+            match client.query_one(&sql, &params).await {
+                Ok(row) => {
+                    self.return_client(client).await;
+                    let updated_count: i64 = row.get(0);
+                    if updated_count > 0 {
+                        return Ok(());
+                    }
+                    let still_exists: bool = row.get(1);
+                    if still_exists {
+                        return Err(WriteBackError::Forbidden(format!(
+                            "row {pk} in {table} belongs to a different tenant"
+                        )));
+                    }
+                    Ok(()) // idempotent: the row never existed
+                }
+                Err(e) => {
+                    self.drop_client().await;
+                    Err(WriteBackError::Backend(e.to_string()))
+                }
+            }
+        }
+
+        /// Atomic increment (ADR-0030 Decision 1). `payload_json` is
+        /// `{"field":"<col>","delta":<i64>}`; emits
+        /// `UPDATE {table} SET {field} = {field} + $1 WHERE id = $2`. Postgres
+        /// serializes concurrent increments — no client read-modify-write, no lost
+        /// update. Tenant-scoped variant adds the same `AND tenant_col = $t` guard
+        /// + EXISTS probe as `patch` (0 rows → absent/idempotent vs.
+        /// exists-under-different-tenant/Forbidden). The field may not be the pk
+        /// column or, when tenant-scoped, the tenant column — incrementing either
+        /// would corrupt identity/ownership.
+        async fn increment(
+            &self,
+            table: &str,
+            pk: &str,
+            payload_json: &str,
+            tenant: Option<TenantScope<'_>>,
+        ) -> Result<(), WriteBackError> {
+            // 1. ALLOWLIST FIRST (ADR-0013 trust boundary).
+            if !self.allowlist.contains(table) {
+                return Err(WriteBackError::TableNotAllowed(table.to_string()));
+            }
+            if let Err(bad) = validate_ident(table) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad table identifier: {bad}"
+                )));
+            }
+
+            // 2. Parse {field, delta}. `field` is a column name (validated); `delta`
+            //    is an integer. ponytail: i64 covers every real counter (pomodoro
+            //    session/streak counts); generalize to f64 only if a fractional
+            //    counter actually appears — none does today.
+            let payload: serde_json::Value = serde_json::from_str(payload_json)
+                .map_err(|e| WriteBackError::InvalidPayload(format!("not JSON: {e}")))?;
+            let obj = payload.as_object().ok_or_else(|| {
+                WriteBackError::InvalidPayload("payload must be a JSON object".to_string())
+            })?;
+            let field = obj
+                .get("field")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    WriteBackError::InvalidPayload(
+                        "increment needs {\"field\",\"delta\"}".to_string(),
+                    )
+                })?;
+            let delta = obj
+                .get("delta")
+                .and_then(serde_json::Value::as_i64)
+                .ok_or_else(|| {
+                    WriteBackError::InvalidPayload("increment delta must be an integer".to_string())
+                })?;
+            if let Err(bad) = validate_ident(field) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad column identifier: {bad}"
+                )));
+            }
+            // Never allow incrementing the pk (would corrupt row identity).
+            if field == PK_COLUMN {
+                return Err(WriteBackError::InvalidPayload(
+                    "cannot increment the primary-key column".to_string(),
+                ));
+            }
+
+            let quoted_table = quote_ident(table);
+            let quoted_field = quote_ident(field);
+            let quoted_pk = quote_ident(PK_COLUMN);
+            let delta_value = SqlValue::Int(delta);
+            let pk_value = SqlValue::from_pk(pk);
+
+            // 3a. No tenant scoping: plain UPDATE, 0 rows = absent = idempotent
+            //     success (mirrors patch-of-missing). delta binds $1, pk $2.
+            let Some(scope) = tenant else {
+                let sql = format!(
+                "UPDATE {quoted_table} SET {quoted_field} = {quoted_field} + $1 WHERE {quoted_pk} = $2"
+            );
+                let client = self.client().await?;
+                let all_values: Vec<SqlValue> = vec![delta_value, pk_value];
+                let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                    all_values.iter().map(SqlValue::as_tosql).collect();
+                return match client.execute(&sql, &params).await {
+                    Ok(_) => {
+                        self.return_client(client).await;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.drop_client().await;
+                        Err(WriteBackError::Backend(e.to_string()))
+                    }
+                };
+            };
+
+            // 3b. Tenant-scoped increment. Refuse to increment the tenant column
+            //     itself (would orphan the row from its tenant on the next filtered
+            //     read). Same CTE + EXISTS probe as patch.
+            if field == scope.column {
+                return Err(WriteBackError::InvalidPayload(
+                    "cannot increment the tenant column".to_string(),
+                ));
+            }
+            if let Err(bad) = validate_ident(scope.column) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad tenant column identifier: {bad}"
+                )));
+            }
+            let quoted_tenant_col = quote_ident(scope.column);
+            let tenant_value = SqlValue::from_scalar(scope.value);
+            let sql = format!(
+                "WITH updated AS (\
+                 UPDATE {quoted_table} SET {quoted_field} = {quoted_field} + $1 \
+                 WHERE {quoted_pk} = $2 AND {quoted_tenant_col} = $3 \
+                 RETURNING 1\
+             ) \
+             SELECT (SELECT count(*) FROM updated)::bigint AS updated_count, \
+                    EXISTS(SELECT 1 FROM {quoted_table} WHERE {quoted_pk} = $2) AS still_exists"
+            );
+            let client = self.client().await?;
+            let all_values: Vec<SqlValue> = vec![delta_value, pk_value, tenant_value];
             let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
                 all_values.iter().map(SqlValue::as_tosql).collect();
             match client.query_one(&sql, &params).await {

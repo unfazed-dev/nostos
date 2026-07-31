@@ -224,11 +224,13 @@ impl Outbox for InMemoryStorage {
             WriteOp::Delete => {
                 self.rows.remove(&(write.table.clone(), write.pk.clone()));
             }
-            WriteOp::Patch => {
-                // Partial-column; the server PATCH path (P3) is source of truth.
-                // ponytail: instant-local patch needs a read-merge-write; defer
-                // until a client issues one (demo + Supabase use upsert/delete).
-            }
+            // Both no-ops (clippy-fused: identical empty bodies). Patch needs a
+            // read-merge-write the opaque store can't do (ponytail: defer until a
+            // client issues one — demo + Supabase use upsert/delete); Increment
+            // is server-authoritative (ADR-0030 Decision 1 — can't compute
+            // col+delta locally). Both reconcile via the server's replicated
+            // echo (apply_batch upserts the authoritative image).
+            WriteOp::Patch | WriteOp::Increment => {}
         }
         Ok(())
     }

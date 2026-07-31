@@ -154,6 +154,30 @@ impl WriteBack for EchoWriteBack {
         self.emit(ev);
         Ok(())
     }
+
+    async fn increment(
+        &self,
+        table: &str,
+        pk: &str,
+        payload_json: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
+        // ADR-0030 Decision 1: the real PgWriteBack applies col = col + delta
+        // and replicates the full new row; this echo mock forwards the delta-op
+        // as an Update carrying the {field,delta} payload (no row state in the
+        // mock — plumbing round-trip only).
+        let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
+        let ev = ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Update {
+                table: table.to_string(),
+                pk: pk.to_string(),
+                payload: Bytes::copy_from_slice(payload_json.as_bytes()),
+            },
+        );
+        self.emit(ev);
+        Ok(())
+    }
 }
 
 /// The `/push` request body: inject one `tasks` row with the given primary key

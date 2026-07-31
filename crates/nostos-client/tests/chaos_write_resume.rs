@@ -140,6 +140,29 @@ impl WriteBack for RecordingWriteBack {
         self.captured.lock().await.push(ev);
         Ok(())
     }
+
+    async fn increment(
+        &self,
+        table: &str,
+        pk: &str,
+        payload_json: &str,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<(), WriteBackError> {
+        // ADR-0030 Decision 1: record the delta-op as an Update (the real
+        // PgWriteBack applies col = col + delta and replicates the new row;
+        // this recording mock has no row state — plumbing tests only).
+        let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
+        let ev = ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Update {
+                table: table.to_string(),
+                pk: pk.to_string(),
+                payload: Bytes::copy_from_slice(payload_json.as_bytes()),
+            },
+        );
+        self.captured.lock().await.push(ev);
+        Ok(())
+    }
 }
 
 // ===========================================================================
