@@ -141,7 +141,7 @@ mod pg {
     use async_trait::async_trait;
     use nostos_application::ports::{WriteBack, WriteBackError};
     use nostos_domain::TenantScope;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::fmt::Write as _; // ponytail: single write!() for the $n placeholder
     use std::sync::Arc;
     use std::sync::OnceLock;
@@ -201,6 +201,10 @@ mod pg {
     pub struct PgWriteBack {
         pg_url: String,
         allowlist: HashSet<String>,
+        /// ADR-0030 slice 3: table → JSONB column holding its OR-set element
+        /// set. Writes to these tables merge element-wise (read-modify-write)
+        /// instead of clobbering, so concurrent client adds converge server-side.
+        or_set_columns: HashMap<String, String>,
         /// Pool-of-one. `Mutex` (not `OnceCell`) so a dead connection can be
         /// replaced: we take the lock, probe/execute, and on a fatal error
         /// drop the inner `Client` (the next call reconnects).
@@ -216,8 +220,18 @@ mod pg {
             Self {
                 pg_url: pg_url.to_string(),
                 allowlist,
+                or_set_columns: HashMap::new(),
                 client: Arc::new(Mutex::new(None)),
             }
+        }
+
+        /// ADR-0030 slice 3: configure OR-set tables (table → the JSONB column
+        /// holding the element set). Builder, mirroring the client's
+        /// `with_or_set_tables`. Writes to these tables merge element-wise.
+        #[must_use]
+        pub fn with_or_set_columns(mut self, cols: HashMap<String, String>) -> Self {
+            self.or_set_columns = cols;
+            self
         }
 
         /// Obtain a connected client, opening the connection lazily if none is
@@ -251,6 +265,72 @@ mod pg {
             let mut guard = self.client.lock().await;
             *guard = None;
         }
+
+        /// ADR-0030 slice 3: merge a flushed OR-set payload element-wise into the
+        /// configured column (read-modify-write under the pool-of-one connection
+        /// — single writer per row, no extra locking). No-tenant only; the
+        /// tenant + OR-set case falls through to the clobber path in `upsert`
+        /// (tenant-scoped shared sets are fixture co-design; the pomodoro
+        /// community row is the shared, unscoped case).
+        async fn or_set_merge(
+            &self,
+            table: &str,
+            pk: &str,
+            col: &str,
+            payload_json: &str,
+        ) -> Result<(), WriteBackError> {
+            if let Err(bad) = validate_ident(col) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad OR-set column identifier: {bad}"
+                )));
+            }
+            let quoted_table = quote_ident(table);
+            let quoted_pk = quote_ident(PK_COLUMN);
+            let quoted_col = quote_ident(col);
+            let pk_value = SqlValue::from_pk(pk);
+
+            let client = self.client().await?;
+            // Read the existing element-set (NULL / absent row → empty → just the
+            // incoming set). Cast jsonb → text so the bytes round-trip through
+            // serde_json unchanged.
+            let select_sql =
+                format!("SELECT {quoted_col}::text FROM {quoted_table} WHERE {quoted_pk} = $1");
+            let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                vec![pk_value.as_tosql()];
+            let existing: Option<String> = match client.query_opt(&select_sql, &sel_params).await {
+                Ok(Some(row)) => row.get::<_, Option<String>>(0),
+                Ok(None) => None,
+                Err(e) => {
+                    self.drop_client().await;
+                    return Err(WriteBackError::Backend(e.to_string()));
+                }
+            };
+            let existing_bytes = existing.as_deref().map_or(&b""[..], str::as_bytes);
+            let merged = nostos_domain::merge_or_set_or_lww(existing_bytes, payload_json.as_bytes());
+            // Bind merged JSON as jsonb (parse → Value → SqlValue::Json, matching
+            // the clobber path's object/array binding).
+            let merged_value: serde_json::Value =
+                serde_json::from_slice(&merged).unwrap_or(serde_json::Value::Null);
+            let col_value = json_value_to_sql(&merged_value);
+
+            let sql = format!(
+                "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}) \
+                 VALUES ($1, $2) \
+                 ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col}"
+            );
+            let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                vec![pk_value.as_tosql(), col_value.as_tosql()];
+            match client.execute(&sql, &ins_params).await {
+                Ok(_) => {
+                    self.return_client(client).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    self.drop_client().await;
+                    Err(WriteBackError::Backend(e.to_string()))
+                }
+            }
+        }
     }
 
     #[async_trait]
@@ -276,6 +356,21 @@ mod pg {
                 return Err(WriteBackError::InvalidPayload(format!(
                     "bad table identifier: {bad}"
                 )));
+            }
+
+            // ADR-0030 slice 3: OR-set tables merge element-wise into a configured
+            // JSONB column instead of clobbering, so concurrent client adds
+            // converge server-side. No-tenant only — tenant + OR-set falls through
+            // to the clobber path below (tenant-scoped shared sets are fixture
+            // co-design; the pomodoro community row is the shared, unscoped case).
+            if let Some(col) = self.or_set_columns.get(table) {
+                if tenant.is_none() {
+                    return self
+                        .or_set_merge(table, pk, col.as_str(), payload_json)
+                        .await;
+                }
+                // ponytail: tenant + OR-set → clobber (no regression vs today; the
+                // tenant-scoped merge is deferred to the fixture that needs it).
             }
 
             // 3. Parse + validate the payload. Must be a JSON object; every key

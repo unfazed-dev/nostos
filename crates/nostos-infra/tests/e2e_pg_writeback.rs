@@ -35,8 +35,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
-use nostos_application::ports::WriteBack;
 use nostos_application::ports::SyncAuth;
+use nostos_application::ports::WriteBack;
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, Principal, ReplicationEvent};
 use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
@@ -1115,4 +1115,84 @@ async fn increment_serializes_concurrent_deltas_server_side() {
     );
 
     let _ = sql.batch_execute("DROP TABLE nostosincr;").await;
+}
+
+/// ADR-0030 slice 3: `PgWriteBack` must MERGE (not clobber) when applying a
+/// flushed OR-set upsert to a configured table — else a client's add loses
+/// other clients' elements server-side. Direct adapter test (no replication):
+/// two clients each add a distinct element to the same shared row; assert both
+/// survive the second write (a clobber would leave only the second).
+#[tokio::test]
+async fn or_set_writeback_merges_concurrent_client_adds_server_side() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    let sql = sql_client().await;
+    let _ = sql
+        .batch_execute(
+            "DROP TABLE IF EXISTS nostosorset; \
+             CREATE TABLE nostosorset (id text PRIMARY KEY, members jsonb);",
+        )
+        .await;
+
+    let mut allowlist = HashSet::new();
+    allowlist.insert("nostosorset".to_string());
+    let mut or_set_columns = std::collections::HashMap::new();
+    or_set_columns.insert("nostosorset".to_string(), "members".to_string());
+    let wb = PgWriteBack::new(&pg_url(), allowlist).with_or_set_columns(or_set_columns);
+
+    // Two clients each add a distinct element to the shared community row.
+    let alice = nostos_domain::OrSetPayload {
+        elements: vec![nostos_domain::OrSetElement {
+            v: "alice".to_string(),
+            h: nostos_domain::Hlc::mint(None, 1),
+            d: None,
+        }],
+    };
+    let bob = nostos_domain::OrSetPayload {
+        elements: vec![nostos_domain::OrSetElement {
+            v: "bob".to_string(),
+            h: nostos_domain::Hlc::mint(None, 2),
+            d: None,
+        }],
+    };
+    wb.upsert(
+        "nostosorset",
+        "community-1",
+        &serde_json::to_string(&alice).expect("serialize alice"),
+        None,
+    )
+    .await
+    .expect("alice add");
+    wb.upsert(
+        "nostosorset",
+        "community-1",
+        &serde_json::to_string(&bob).expect("serialize bob"),
+        None,
+    )
+    .await
+    .expect("bob add");
+
+    // A merge converges to {alice, bob}; a clobber would leave only {bob}.
+    let id = "community-1".to_string();
+    let row = sql
+        .query_one("SELECT members::text FROM nostosorset WHERE id = $1", &[&id])
+        .await
+        .expect("community row exists after both adds");
+    let members_text: String = row
+        .get::<_, Option<String>>(0)
+        .expect("members column populated");
+    let present =
+        nostos_domain::present_elements(members_text.as_bytes()).expect("parse merged element set");
+    assert!(
+        present.contains(&"alice".to_string()),
+        "alice was clobbered by bob's write: {present:?}"
+    );
+    assert!(
+        present.contains(&"bob".to_string()),
+        "bob missing after his own write: {present:?}"
+    );
+
+    let _ = sql.batch_execute("DROP TABLE nostosorset;").await;
 }
