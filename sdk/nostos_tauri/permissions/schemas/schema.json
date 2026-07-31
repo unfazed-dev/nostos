@@ -343,6 +343,18 @@
           "markdownDescription": "Denies the subscribe command without any pre-configured scope."
         },
         {
+          "description": "Enables the watch command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-watch",
+          "markdownDescription": "Enables the watch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the watch command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-watch",
+          "markdownDescription": "Denies the watch command without any pre-configured scope."
+        },
+        {
           "description": "Enables the write command without any pre-configured scope.",
           "type": "string",
           "const": "allow-write",
@@ -355,10 +367,10 @@
           "markdownDescription": "Denies the write command without any pre-configured scope."
         },
         {
-          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all five commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`",
+          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all six commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all five commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`"
+          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all six commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`"
         }
       ]
     }

@@ -9,5 +9,5 @@ fn main() {
     // tauri-plugin 2.6+ `Builder::new` takes the command-name slice so it can
     // generate the `allow-<cmd>` permission identifiers. Must match the
     // `#[tauri::command]` fns registered in `init()` (src/lib.rs).
-    tauri_plugin::Builder::new(&["connect", "subscribe", "write", "query", "checkpoint"]).build();
+    tauri_plugin::Builder::new(&["connect", "subscribe", "write", "query", "checkpoint", "watch"]).build();
 }
