@@ -105,6 +105,10 @@ pub struct ClientTable {
 #[derive(Debug)]
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
+    /// Tables whose payload is an add-wins OR-set (ADR-0030): applies MERGE
+    /// element-wise by HLC instead of clobbering. Empty by default; the bench's
+    /// `tasks` table is ordinary, so the measured fan-out path is unaffected.
+    or_set_tables: std::collections::HashSet<String>,
 }
 
 impl SqliteStorage {
@@ -129,12 +133,22 @@ impl SqliteStorage {
         Self::init(conn)
     }
 
+    /// Declare which tables hold add-wins OR-sets (ADR-0030). For those tables
+    /// `apply_batch` / `apply_local` / pending-replay merge element-wise by HLC;
+    /// all others stay last-writer-wins. Builder-style.
+    #[must_use]
+    pub fn with_or_set_tables(mut self, tables: std::collections::HashSet<String>) -> Self {
+        self.or_set_tables = tables;
+        self
+    }
+
     fn init(conn: Connection) -> Result<Self, StorageError> {
         conn.execute_batch(SCHEMA).map_err(rusqlite_err)?;
         Self::migrate_outbox_dlq(&conn)?;
         Self::migrate_applied_lsn(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            or_set_tables: std::collections::HashSet::new(),
         })
     }
 
@@ -572,7 +586,32 @@ impl Storage for SqliteStorage {
                 let lsn_i64 = to_i64(*lsn);
                 match op {
                     RowOp::Insert { table, pk, payload } | RowOp::Update { table, pk, payload } => {
-                        if snapshot_tables.contains(table.as_str()) {
+                        if self.or_set_tables.contains(table.as_str()) {
+                            // OR-set: merge element-wise by HLC (ADR-0030). One
+                            // read-merge-write per row — OR-set tables are few +
+                            // low-traffic (community tags/presence), so the cost
+                            // is negligible; ponytail: a bulk-merge statement if a
+                            // hot OR-set ever appears. LSN-gated like the prepared
+                            // path; a malformed OR-set payload degrades to LWW.
+                            let incoming = payload.as_ref();
+                            let row: Option<(Vec<u8>, i64)> = tx
+                                .query_row(
+                                    "SELECT payload, applied_lsn FROM cairn_data \
+                                     WHERE table_name = ?1 AND pk = ?2",
+                                    rusqlite::params![table, pk],
+                                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+                                )
+                                .ok();
+                            let admit = row.as_ref().is_none_or(|(_, l)| lsn_i64 >= *l);
+                            if admit {
+                                let existing: &[u8] =
+                                    row.as_ref().map_or(&[], |(p, _)| p.as_slice());
+                                let merged = nostos_domain::merge_or_set_or_lww(existing, incoming);
+                                upsert_uncond
+                                    .execute(rusqlite::params![table, pk, merged, lsn_i64])
+                                    .map_err(rusqlite_err)?;
+                            }
+                        } else if snapshot_tables.contains(table.as_str()) {
                             upsert_uncond
                                 .execute(rusqlite::params![table, pk, payload.as_ref(), lsn_i64])
                                 .map_err(rusqlite_err)?;
@@ -612,11 +651,29 @@ impl Storage for SqliteStorage {
             for (_, write) in &pending {
                 match write.op {
                     WriteOp::Upsert => {
-                        let payload = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                        let incoming = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                        // OR-set tables MERGE the pending optimistic edit
+                        // element-wise by HLC (ADR-0030) so an offline add
+                        // survives a server frame landing on the same row;
+                        // ordinary tables clobber (blind re-stamp).
+                        let payload_bytes: Vec<u8> =
+                            if self.or_set_tables.contains(write.table.as_str()) {
+                                let existing: Vec<u8> = tx
+                                    .query_row(
+                                        "SELECT payload FROM cairn_data \
+                                         WHERE table_name = ?1 AND pk = ?2",
+                                        rusqlite::params![write.table, write.pk],
+                                        |r| r.get::<_, Vec<u8>>(0),
+                                    )
+                                    .unwrap_or_default();
+                                nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                            } else {
+                                incoming.to_vec()
+                            };
                         let _ = upsert_uncond.execute(rusqlite::params![
                             write.table,
                             write.pk,
-                            payload,
+                            payload_bytes,
                             local_lsn
                         ]);
                     }
@@ -939,12 +996,27 @@ impl Outbox for SqliteStorage {
             WriteOp::Upsert => {
                 // payload_json is the column-named JSON object the Pg path
                 // emits — store its UTF-8 bytes as the BLOB so the view's
-                // json_extract resolves it identically to a server echo.
-                let payload = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                // json_extract resolves it identically to a server echo. For an
+                // OR-set table the optimistic edit MERGES element-wise by HLC
+                // (ADR-0030) instead of clobbering the existing row.
+                let incoming = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                let bytes = if self.or_set_tables.contains(write.table.as_str()) {
+                    let existing: Vec<u8> = conn
+                        .query_row(
+                            "SELECT payload FROM cairn_data \
+                             WHERE table_name = ?1 AND pk = ?2",
+                            rusqlite::params![write.table, write.pk],
+                            |r| r.get::<_, Vec<u8>>(0),
+                        )
+                        .unwrap_or_default();
+                    nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                } else {
+                    incoming.to_vec()
+                };
                 conn.execute(
                     "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload) \
                      VALUES (?1, ?2, ?3)",
-                    rusqlite::params![write.table, write.pk, payload],
+                    rusqlite::params![write.table, write.pk, bytes],
                 )
                 .map_err(rusqlite_err)?;
             }

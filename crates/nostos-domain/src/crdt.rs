@@ -239,6 +239,16 @@ pub fn merge_or_set_payloads(a: &[u8], b: &[u8]) -> Result<Vec<u8>, OrSetError> 
     Ok(serialize_elements(&elements))
 }
 
+/// Merge two OR-set payloads, falling back to `incoming` (a plain LWW clobber)
+/// if either side is malformed. This is the infallible seam the storage apply
+/// loop calls: a row whose payload isn't a valid OR-set image degrades to LWW
+/// rather than erroring the whole apply batch. The merge itself is
+/// [`merge_or_set_payloads`]; only the error handling is added here.
+#[must_use]
+pub fn merge_or_set_or_lww(existing: &[u8], incoming: &[u8]) -> Vec<u8> {
+    merge_or_set_payloads(existing, incoming).unwrap_or_else(|_| incoming.to_vec())
+}
+
 /// The present (non-tombstoned) element values in an OR-set payload — what a
 /// view renders. `add-hlc > remove-hlc` per element; an absent tombstone means
 /// present.

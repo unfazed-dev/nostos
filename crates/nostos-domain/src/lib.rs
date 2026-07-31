@@ -22,7 +22,8 @@ pub mod session;
 pub mod tier;
 
 pub use crdt::{
-    merge_or_set_payloads, present_elements, Hlc, OrSetElement, OrSetError, OrSetPayload,
+    merge_or_set_or_lww, merge_or_set_payloads, present_elements, Hlc, OrSetElement, OrSetError,
+    OrSetPayload,
 };
 pub use events::{Operation, ReplicationEvent, RowOp};
 pub use lsn::Lsn;
