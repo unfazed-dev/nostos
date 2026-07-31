@@ -278,6 +278,45 @@ export class NostosClient {
   async checkpoint(): Promise<number> {
     return NativeNostos.checkpoint();
   }
+
+  /**
+   * Hot-swap the auth bearer WITHOUT tearing down the session (ADR-0029 #3).
+   * Delegates to `NativeNostos.setToken`, which maps to UniFFI
+   * `NostosClient::set_token`: the new token lands in the interior-mutable token
+   * cell and is read on the reconnect loop's NEXT attempt — no forced disconnect,
+   * no teardown. Pass `null` to clear (anonymous).
+   *
+   * `this.config.token` is kept in sync so app-level introspection reflects the
+   * live token. Callable before `connect()` (stages the token for the first
+   * connect) AND on a live session — the native `set_token` is callable in both
+   * states (proven by the `set_token_swaps_before_and_after_connect` UniFFI test
+   * in nostos-swift / nostos-kotlin).
+   */
+  async setToken(token: string | null): Promise<void> {
+    await NativeNostos.setToken(token);
+    this.config.token = token;
+  }
+
+  /**
+   * Sign out (ADR-0029): abort the run loop, await quiescence, wipe local state
+   * (rows + checkpoint + epoch + outbox + dead-letter), drop the session, and
+   * clear the token. Delegates to `NativeNostos.signOut`, which maps to UniFFI
+   * `NostosClient::sign_out` (abort → await → clear_local_state → drop session →
+   * clear token). Idempotent.
+   *
+   * After this resolves the native client's session is GONE and its token
+   * cleared, so the facade drops its JS-side bookkeeping (the `subscriptions`
+   * and `watches` maps) and mirrors the token clear in `config`. A late native
+   * push tick CANNOT arrive — the push pump died with the session — so clearing
+   * the maps is safe WITHOUT per-handle `unwatchChanges` (which would call into
+   * a dead client). The next `connect()` starts from a clean store + clean maps.
+   */
+  async signOut(): Promise<void> {
+    await NativeNostos.signOut();
+    this.config.token = null;
+    this.subscriptions.clear();
+    this.watches.clear();
+  }
 }
 
 /**

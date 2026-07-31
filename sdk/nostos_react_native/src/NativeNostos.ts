@@ -32,6 +32,13 @@
 //   unwatchChanges(table)     → tears the per-table push pump + releases the retained callback. This is the
 //                              `stop_watch(table)` follow-on the kotlin/node ports DEFERRED (their ceiling);
 //                              RN ships it from day 1 so the JS facade can unsubscribe cleanly.
+//   setToken(token)           → NostosClient::set_token(token: Option<String>) (ADR-0029 #3). Hot-swap the
+//                              bearer on the interior-mutable token cell — the reconnect loop reads it on
+//                              its NEXT attempt, so a live session picks up the new token with NO disconnect.
+//                              `null` = clear (anonymous). Callable before connect AND on a live session.
+//   signOut()                 → NostosClient::sign_out() (ADR-0029): abort run loop → await quiesce →
+//                              clear_local_state (rows + checkpoint + epoch + outbox + dead-letter) → drop
+//                              session → clear token. Idempotent; the "B must not see A's rows" wipe.
 //
 // Wave-B note: TurboModules are singletons instantiated by RN with a no-arg
 // constructor — there is no JS-visible constructor surface to pass (url, token,
@@ -133,6 +140,28 @@ export interface Spec extends TurboModule {
    * not be invoked again for `table`. Idempotent.
    */
   unwatchChanges(table: string): Promise<void>;
+  /**
+   * Hot-swap the auth bearer WITHOUT tearing down the live session
+   * (ADR-0029 #3). Maps to UniFFI `NostosClient::set_token(token: Option<String>)`
+   * in nostos-swift / nostos-kotlin: it swaps the interior-mutable token cell the
+   * reconnect loop reads on its NEXT attempt, so an already-running session
+   * picks up the new token without a forced disconnect. Pass `null` to clear
+   * (anonymous).
+   *
+   * Callable before `connect()` (stages the token for the first connect) AND on
+   * a live session. It does NOT force a reconnect or tear anything down — the
+   * same shape `nostos-client`'s `SyncClient::set_token` exposes.
+   */
+  setToken(token: string | null): Promise<void>;
+  /**
+   * Sign out (ADR-0029): abort the run loop, await quiescence, wipe local state
+   * (rows + checkpoint + epoch + outbox + dead-letter), drop the session, and
+   * clear the token. Maps to UniFFI `NostosClient::sign_out()`. The next
+   * principal connecting on the same device sees a clean store — the "B must
+   * not see A's rows, and A's unsynced writes must not be attributed to B"
+   * guarantee. Idempotent — a no-op if no session is live.
+   */
+  signOut(): Promise<void>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>("NativeNostos");
