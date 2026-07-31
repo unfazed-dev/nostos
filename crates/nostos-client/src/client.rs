@@ -598,6 +598,27 @@ where
         .map_err(|e| ClientError::Join(e.to_string()))
     }
 
+    /// ADR-0029 D1: wipe local rows AND the outbox — the sign-out local-state
+    /// wipe. The SDK binding's `signOut()` must abort its run loop FIRST
+    /// (quiescence), then call this: clearing under a live apply/flush loop
+    /// races (a post-clear frame re-populates storage; a post-clear flush
+    /// re-queues the outbox). Half a clear is a cross-user leak, so both
+    /// [`nostos_core::Storage::clear`] AND [`nostos_core::Outbox::clear`] run
+    /// under one engine lock. Idempotent.
+    pub async fn clear_local_state(&self) -> Result<(), ClientError> {
+        let engine = Arc::clone(&self.engine);
+        tokio::task::spawn_blocking(move || -> nostos_core::Result<()> {
+            let mut engine = engine.blocking_lock();
+            let s = engine.storage_mut();
+            <S as nostos_core::Storage>::clear(s)?;
+            <S as nostos_core::Outbox>::clear(s)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ClientError::Join(e.to_string()))?
+        .map_err(ClientError::Storage)
+    }
+
     /// Mark an outbox write done (the server ack'd it with `WriteResult{ok:true}`).
     async fn mark_write_done(&self, id: u64) -> Result<(), ClientError> {
         let engine = Arc::clone(&self.engine);
@@ -1539,6 +1560,61 @@ mod tests {
             "write() must broadcast a change tick so the optimistic row is visible offline",
         );
         assert_eq!(outcome.rows_applied, 1);
+    }
+
+    #[tokio::test]
+    async fn clear_local_state_wipes_rows_and_outbox() {
+        // ADR-0029 D1: the sign-out wipe at the SyncClient seam. The SDK
+        // binding's `signOut()` aborts its run loop first (quiescence), then
+        // calls this. The wipe semantics are unit-tested at the storage layer
+        // (sqlite.rs `clear_*`); this proves the seam invokes BOTH clears.
+        let c = SyncClient::new(
+            "ws://localhost:9999/sync",
+            nostos_core::InMemoryStorage::new(),
+            SyncClientConfig::default(),
+        );
+        c.write(nostos_core::PendingWrite {
+            table: "tasks".into(),
+            op: nostos_core::WriteOp::Upsert,
+            pk: "t1".into(),
+            payload_json: Some(r#"{"id":"t1","title":"seed"}"#.into()),
+        })
+        .await
+        .unwrap();
+
+        // Pre: the optimistic write applied a row AND queued in the outbox.
+        assert_eq!(
+            c.with_storage(nostos_core::InMemoryStorage::row_count)
+                .await
+                .unwrap(),
+            1,
+            "seed row applied"
+        );
+        assert_eq!(
+            c.with_storage(|s| s.pending().map_or(0, |p| p.len()))
+                .await
+                .unwrap(),
+            1,
+            "seed write queued in outbox"
+        );
+
+        c.clear_local_state().await.unwrap();
+
+        // Post: both wiped — half a clear is a cross-user leak (ADR-0029).
+        assert_eq!(
+            c.with_storage(nostos_core::InMemoryStorage::row_count)
+                .await
+                .unwrap(),
+            0,
+            "clear_local_state wiped cairn_data"
+        );
+        assert_eq!(
+            c.with_storage(|s| s.pending().map_or(0, |p| p.len()))
+                .await
+                .unwrap(),
+            0,
+            "clear_local_state drained the outbox"
+        );
     }
 
     #[tokio::test]
