@@ -75,6 +75,33 @@ class NostosTurboModule :
 
     fun checkpointSync(): Double = client().checkpoint().toDouble()
 
+    /**
+     * Hot-swap the bearer on the live session (ADR-0029 #3). Delegates to the
+     * UniFFI `setToken(token: String?)` — the interior-mutable token cell the
+     * reconnect loop reads on its next attempt. `null` clears (anonymous).
+     * Callable before [connect] AND on a live session (the UniFFI method is
+     * infallible in that it does not tear anything down; it throws `NostosError`
+     * only if the underlying client rejects the swap).
+     */
+    fun setTokenSync(token: String?) {
+        client().setToken(token)
+    }
+
+    /**
+     * Sign out (ADR-0029): abort the run loop, await quiescence, wipe local
+     * state (rows + checkpoint + epoch + outbox + dead-letter), drop the
+     * session, and clear the token. Delegates to UniFFI `signOut()`.
+     *
+     * `sign_out(&self)` takes `&self` (not `self`), so the [backing] handle
+     * REMAINS valid after this returns — a subsequent [connect] re-establishes
+     * the session on the SAME handle. The JS facade drops its own bookkeeping
+     * on signOut; nothing here nulls [backing] (connect's `if (backing == null)`
+     * guard intentionally reuses a wiped handle).
+     */
+    fun signOutSync() {
+        client().signOut()
+    }
+
     // ---- @ReactMethod Promise wrappers (the Spec surface JS calls) --------
 
     @ReactMethod
@@ -127,6 +154,26 @@ class NostosTurboModule :
             promise.resolve(checkpointSync())
         } catch (t: Throwable) {
             promise.reject("NostosCheckpointError", t)
+        }
+    }
+
+    @ReactMethod
+    override fun setToken(token: String?, promise: Promise) {
+        try {
+            setTokenSync(token)
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("NostosSetTokenError", t)
+        }
+    }
+
+    @ReactMethod
+    override fun signOut(promise: Promise) {
+        try {
+            signOutSync()
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("NostosSignOutError", t)
         }
     }
 

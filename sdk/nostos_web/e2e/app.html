@@ -2,31 +2,129 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Nostos Web E2E</title>
+    <title>Nostos Web E2E (WS1 Worker proxy)</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
   </head>
   <body>
     <h1>Nostos Web live-replication E2E</h1>
-    <p id="status">Loading WASM…</p>
+    <p id="status">spawning worker…</p>
     <!--
-      The Playwright test (`browser_live.spec.cjs`) serves this page from a
-      tiny static HTTP server rooted at `sdk/nostos_web/`, with `/pkg-web/*`
-      mapped to `crates/nostos-ffi-wasm/pkg-web/`. The ES module init loads
-      the sibling `_bg.wasm` via `import.meta.url` — no bundler needed.
+      WS1: the main thread is a PURE postMessage proxy. It imports NO wasm —
+      `NostosSocket` + the apply engine + `InMemoryStorage` live entirely inside
+      `worker/nostos.worker.js` (the sole wasm host). The Playwright spec drives
+      `window.nostos.*` and watches the `[web-e2e]` console markers + the
+      `window.nostos.events` push stream (writeResult, rowsChanged, status).
+
+      The static server (browser_live.spec.cjs) serves `/worker/*` ->
+      `sdk/nostos_web/worker/*` and `/pkg-web/*` -> the wasm artifact; the Worker
+      loads the wasm via `import.meta.url`, exactly as on the main thread before.
     -->
     <script type="module">
-      import init, { NostosSocket } from "../pkg-web/nostos_ffi_wasm.js";
-      try {
-        await init();
-        window.NostosSocket = NostosSocket;
-        document.getElementById("status").textContent = "WASM ready.";
-        console.log("[web-e2e] WASM_READY");
-      } catch (e) {
-        document.getElementById("status").textContent = "WASM init FAILED.";
-        console.log(
-          "[web-e2e] WASM_INIT_FAILED: " + ((e && e.message) || String(e)),
-        );
+      const log = (m) => console.log("[web-e2e] " + m);
+      const worker = new Worker("/worker/nostos.worker.js", { type: "module" });
+
+      // Push events (typed: rowsChanged / writeResult / status / snapshot)
+      // accumulate here for the spec to poll. Request responses carry `id` and
+      // resolve a promise.
+      const events = [];
+      const pending = new Map();
+      let nextId = 1;
+      // Reactive watch() listeners (ADR-0024): each {table, callback} is
+      // dispatched a `snapshot` push for its table. The Worker's NostosSocket
+      // fires snapshot on every change tick; here we fan it out to watchers.
+      const watchListeners = new Set();
+
+      worker.onmessage = (ev) => {
+        const d = ev.data || {};
+        if (d.type) {
+          events.push(d);
+          if (d.type === "snapshot") {
+            // Fan out the reactive push to every watcher of this table.
+            for (const l of watchListeners) {
+              if (l.table === d.table) {
+                try {
+                  l.callback(d.rows);
+                } catch (_) {
+                  /* a throwing watcher must not break the others */
+                }
+              }
+            }
+          }
+          if (d.type === "status") {
+            document.getElementById("status").textContent =
+              "connected=" + !!d.connected;
+          }
+          return;
+        }
+        // slice-1-compat unsolicited boot signal — surface WASM_READY once.
+        if (d.ok === "wasm-ready") {
+          log("WASM_READY");
+          return;
+        }
+        if (d.id != null && pending.has(d.id)) {
+          const { resolve, reject } = pending.get(d.id);
+          pending.delete(d.id);
+          if (d.error) {
+            reject(new Error(d.error));
+          } else {
+            resolve(d);
+          }
+        }
+      };
+      worker.onerror = (e) => log("WORKER_ERROR " + ((e && e.message) || e));
+
+      function request(cmd, extra) {
+        const id = nextId++;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          worker.postMessage(Object.assign({ id, cmd }, extra));
+        });
       }
+
+      window.nostos = {
+        connect: (url, token, table, where_sql) =>
+          request("connect", { url, token, table, where_sql }),
+        // write is fire-and-forget; the async outcome arrives as a writeResult
+        // push event (polled via window.nostos.events). It never throws on a
+        // closed socket — the Worker's NostosSocket.write captures it offline.
+        write: (table, op, pk, payload_json, client_write_id) =>
+          worker.postMessage({
+            cmd: "write",
+            table,
+            op,
+            pk,
+            payload_json,
+            client_write_id,
+          }),
+        rowsFor: (table) => request("rowsFor", { table }),
+        checkpoint: () => request("checkpoint"),
+        close: () => request("close"),
+        // ADR-0029 WS4-D3: wipe rows+outbox, close the socket, drop the token —
+        // the next user on this Worker session sees none of the prior user's
+        // rows or pending writes. Resolves once the Worker has torn down.
+        signOut: () => request("signOut", {}),
+        // ADR-0029 §3: swap the JWT. The Worker caches it and, if a session is
+        // live, reconnects the socket with the new token (no wasm token swap).
+        setToken: (token) => request("setToken", { token }),
+        // Reactive watch (ADR-0024) — the Web port of node/kotlin/Flutter
+        // watch(). Registers a callback that nostos invokes with a fresh
+        // full-table snapshot on every change tick (initial snapshot + deltas),
+        // pushed synchronously from the in-Worker NostosSocket.onChange Closure.
+        // Returns an unsubscribe that detaches the listener + tells the Worker
+        // to stop forwarding snapshots.
+        watch: (table, callback) => {
+          const listener = { table, callback };
+          watchListeners.add(listener);
+          request("watch", { table });
+          return function unsubscribe() {
+            watchListeners.delete(listener);
+            request("unwatch", {});
+          };
+        },
+        events,
+      };
+
+      log("PROXY_READY");
     </script>
   </body>
 </html>

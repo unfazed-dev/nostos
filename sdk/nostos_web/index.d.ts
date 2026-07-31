@@ -30,6 +30,10 @@ export declare class NostosClient {
   write(table: string, pk: string | number, payload: Uint8Array | number[]): WriteResult;
   query(table: string): Row[];
   watch(table: string, callback: (rows: Row[]) => void): () => void;
+  /** ADR-0029: wipe rows + outbox + cached token. */
+  signOut(): void;
+  /** ADR-0029 §3: cache a new JWT for the next connect. */
+  setToken(newToken: string | null): void;
   readonly checkpoint: number;
   readonly rowCount: number;
 }

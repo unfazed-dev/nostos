@@ -105,6 +105,10 @@ pub struct ClientTable {
 #[derive(Debug)]
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
+    /// Tables whose payload is an add-wins OR-set (ADR-0030): applies MERGE
+    /// element-wise by HLC instead of clobbering. Empty by default; the bench's
+    /// `tasks` table is ordinary, so the measured fan-out path is unaffected.
+    or_set_tables: std::collections::HashSet<String>,
 }
 
 impl SqliteStorage {
@@ -129,12 +133,22 @@ impl SqliteStorage {
         Self::init(conn)
     }
 
+    /// Declare which tables hold add-wins OR-sets (ADR-0030). For those tables
+    /// `apply_batch` / `apply_local` / pending-replay merge element-wise by HLC;
+    /// all others stay last-writer-wins. Builder-style.
+    #[must_use]
+    pub fn with_or_set_tables(mut self, tables: std::collections::HashSet<String>) -> Self {
+        self.or_set_tables = tables;
+        self
+    }
+
     fn init(conn: Connection) -> Result<Self, StorageError> {
         conn.execute_batch(SCHEMA).map_err(rusqlite_err)?;
         Self::migrate_outbox_dlq(&conn)?;
         Self::migrate_applied_lsn(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            or_set_tables: std::collections::HashSet::new(),
         })
     }
 
@@ -397,27 +411,12 @@ impl SqliteStorage {
     /// payload — no decoder, no inference, no apply-path change.
     ///
     /// `cairn_data` stays the single source of truth; the apply path is
-    /// UNCHANGED. Zero new storage, zero migration, reversible (`DROP VIEW`).
-    ///
-    /// **This is the decided read model, not a stepping stone** — ADR-0028.
-    /// Materialized typed tables are *rejected*: their motivation (column
-    /// affinity killing the TEXT→timestamptz bug class) was spent when that bug
-    /// was fixed server-side in `PgWriteBack`, and this comment used to name
-    /// them as the fast-follow on a ceiling that isn't real. A slow
-    /// `WHERE col = ?` is fixed **in place** with a partial expression index on
-    /// this table — SQLite indexes expressions, and the planner uses it through
-    /// the view (measured, ADR-0028):
-    ///
-    /// ```sql
-    /// CREATE INDEX ix ON cairn_data(json_extract(payload,'$.title'))
-    ///   WHERE table_name='tasks';
-    /// -- SCAN cairn_data  ->  SEARCH cairn_data USING INDEX ix (<expr>=?)
-    /// ```
-    ///
-    /// Remaining real limitation: no column *affinity* — `json_extract` returns
-    /// the JSON value's own type, so a timestamp arriving as a JSON string sorts
-    /// lexicographically (fine for ISO-8601). FakeReplicator's non-JSON bytes
-    /// degrade to NULL (dev fixture, not production).
+    /// UNCHANGED. This is the lazy cousin of "materialized typed tables": zero
+    /// new storage, zero migration, reversible (`DROP VIEW`). Ceiling: no non-PK
+    /// column indexes (a view computes `json_extract` per row → full scan on
+    /// `WHERE col = ?`). ponytail: fast-follow to real typed tables + indexes
+    /// when a query needs them. FakeReplicator's non-JSON bytes degrade to NULL
+    /// (dev fixture, not production).
     ///
     /// Each view is `DROP VIEW IF EXISTS` + `CREATE VIEW`, so re-applying a
     /// *changed* schema refreshes the projection in place — bumping the
@@ -587,7 +586,32 @@ impl Storage for SqliteStorage {
                 let lsn_i64 = to_i64(*lsn);
                 match op {
                     RowOp::Insert { table, pk, payload } | RowOp::Update { table, pk, payload } => {
-                        if snapshot_tables.contains(table.as_str()) {
+                        if self.or_set_tables.contains(table.as_str()) {
+                            // OR-set: merge element-wise by HLC (ADR-0030). One
+                            // read-merge-write per row — OR-set tables are few +
+                            // low-traffic (community tags/presence), so the cost
+                            // is negligible; ponytail: a bulk-merge statement if a
+                            // hot OR-set ever appears. LSN-gated like the prepared
+                            // path; a malformed OR-set payload degrades to LWW.
+                            let incoming = payload.as_ref();
+                            let row: Option<(Vec<u8>, i64)> = tx
+                                .query_row(
+                                    "SELECT payload, applied_lsn FROM cairn_data \
+                                     WHERE table_name = ?1 AND pk = ?2",
+                                    rusqlite::params![table, pk],
+                                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+                                )
+                                .ok();
+                            let admit = row.as_ref().is_none_or(|(_, l)| lsn_i64 >= *l);
+                            if admit {
+                                let existing: &[u8] =
+                                    row.as_ref().map_or(&[], |(p, _)| p.as_slice());
+                                let merged = nostos_domain::merge_or_set_or_lww(existing, incoming);
+                                upsert_uncond
+                                    .execute(rusqlite::params![table, pk, merged, lsn_i64])
+                                    .map_err(rusqlite_err)?;
+                            }
+                        } else if snapshot_tables.contains(table.as_str()) {
                             upsert_uncond
                                 .execute(rusqlite::params![table, pk, payload.as_ref(), lsn_i64])
                                 .map_err(rusqlite_err)?;
@@ -627,11 +651,29 @@ impl Storage for SqliteStorage {
             for (_, write) in &pending {
                 match write.op {
                     WriteOp::Upsert => {
-                        let payload = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                        let incoming = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                        // OR-set tables MERGE the pending optimistic edit
+                        // element-wise by HLC (ADR-0030) so an offline add
+                        // survives a server frame landing on the same row;
+                        // ordinary tables clobber (blind re-stamp).
+                        let payload_bytes: Vec<u8> =
+                            if self.or_set_tables.contains(write.table.as_str()) {
+                                let existing: Vec<u8> = tx
+                                    .query_row(
+                                        "SELECT payload FROM cairn_data \
+                                         WHERE table_name = ?1 AND pk = ?2",
+                                        rusqlite::params![write.table, write.pk],
+                                        |r| r.get::<_, Vec<u8>>(0),
+                                    )
+                                    .unwrap_or_default();
+                                nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                            } else {
+                                incoming.to_vec()
+                            };
                         let _ = upsert_uncond.execute(rusqlite::params![
                             write.table,
                             write.pk,
-                            payload,
+                            payload_bytes,
                             local_lsn
                         ]);
                     }
@@ -655,6 +697,15 @@ impl Storage for SqliteStorage {
                             merged,
                             local_lsn
                         ]);
+                    }
+                    WriteOp::Increment => {
+                        // Server-authoritative delta (ADR-0030 Decision 1):
+                        // nothing to replay. Opaque storage can't decode the
+                        // column to compute col+delta, and the local count was
+                        // never bumped optimistically, so a server frame with
+                        // the pre-increment value is consistent until the
+                        // increment flushes to Postgres and its echo lands here
+                        // as an ordinary upsert of the new value.
                     }
                 }
             }
@@ -735,6 +786,54 @@ impl Storage for SqliteStorage {
                     .map_err(rusqlite_err)?;
             }
         }
+        tx.commit().map_err(rusqlite_err)?;
+        Ok(())
+    }
+
+    fn clear(&mut self) -> nostos_core::Result<()> {
+        // ADR-0029: sign-out / principal-switch wipe. ONE explicit transaction
+        // so half a clear can never leak across principals — a crash mid-clear
+        // rolls back the whole wipe, leaving the OLD principal's state intact
+        // (the caller retries) rather than a half-wiped store. Deleting rows
+        // alone is insufficient: the checkpoint and epoch MUST reset so the
+        // next principal takes a fresh snapshot instead of resuming past one.
+        let mut conn = self.conn.lock().expect("clear: storage mutex poisoned");
+        let tx = conn.transaction().map_err(rusqlite_err)?;
+
+        // 1. Rows: wipe the opaque data store.
+        tx.execute("DELETE FROM cairn_data", [])
+            .map_err(rusqlite_err)?;
+
+        // 2. Checkpoint → 0. ADR-0029: this is the load-bearing reset — a stale
+        //    checkpoint makes the next principal resume from the old LSN, skip
+        //    the snapshot, and see an empty DB PERMANENTLY (resume-without-
+        //    snapshot unsoundness class). The 'checkpoint' row always exists
+        //    (the schema seeds it on open), so UPDATE is correct here.
+        tx.execute(
+            "UPDATE cairn_meta SET value = '0' WHERE key = ?1",
+            rusqlite::params![CHECKPOINT_KEY],
+        )
+        .map_err(rusqlite_err)?;
+
+        // 3. Epoch → 0. The reconnect-resume gate (ADR-0025) compares the
+        //    client's epoch to the server's slot epoch; a stale epoch would let
+        //    the new principal resume-by-replay against the OLD slot. INSERT OR
+        //    REPLACE matches `save_epoch` and covers the fresh-DB case where the
+        //    epoch row was never written.
+        tx.execute(
+            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, '0')",
+            rusqlite::params![EPOCH_KEY],
+        )
+        .map_err(rusqlite_err)?;
+
+        // 4. Outbox: pending writes AND dead-letter rows (ADR-0027) both live in
+        //    `cairn_outbox` (a dead-lettered row is `dlq = 1`, same table), so
+        //    one DELETE covers both. Bundling this into the storage transaction
+        //    makes the sign-out wipe truly atomic on the single-file backend;
+        //    `Outbox::clear` is the standalone outbox-only surface.
+        tx.execute("DELETE FROM cairn_outbox", [])
+            .map_err(rusqlite_err)?;
+
         tx.commit().map_err(rusqlite_err)?;
         Ok(())
     }
@@ -897,12 +996,27 @@ impl Outbox for SqliteStorage {
             WriteOp::Upsert => {
                 // payload_json is the column-named JSON object the Pg path
                 // emits — store its UTF-8 bytes as the BLOB so the view's
-                // json_extract resolves it identically to a server echo.
-                let payload = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                // json_extract resolves it identically to a server echo. For an
+                // OR-set table the optimistic edit MERGES element-wise by HLC
+                // (ADR-0030) instead of clobbering the existing row.
+                let incoming = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                let bytes = if self.or_set_tables.contains(write.table.as_str()) {
+                    let existing: Vec<u8> = conn
+                        .query_row(
+                            "SELECT payload FROM cairn_data \
+                             WHERE table_name = ?1 AND pk = ?2",
+                            rusqlite::params![write.table, write.pk],
+                            |r| r.get::<_, Vec<u8>>(0),
+                        )
+                        .unwrap_or_default();
+                    nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                } else {
+                    incoming.to_vec()
+                };
                 conn.execute(
                     "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload) \
                      VALUES (?1, ?2, ?3)",
-                    rusqlite::params![write.table, write.pk, payload],
+                    rusqlite::params![write.table, write.pk, bytes],
                 )
                 .map_err(rusqlite_err)?;
             }
@@ -939,7 +1053,36 @@ impl Outbox for SqliteStorage {
                 )
                 .map_err(rusqlite_err)?;
             }
+            WriteOp::Increment => {
+                // Server-authoritative delta (ADR-0030 Decision 1): opaque
+                // storage can't compute col+delta, so the increment is NOT
+                // reflected optimistically — the local count bumps when the
+                // server's replicated echo lands (apply_batch upserts the new
+                // value). The intent is still durable (it sits in the outbox
+                // until flush). ponytail: instant-local feedback needs a column
+                // decoder (ADR-0012 schema registry); add then if a counter's
+                // round-trip lag is visibly jarring.
+            }
         }
+        Ok(())
+    }
+
+    fn clear(&mut self) -> nostos_core::Result<()> {
+        // ponytail: 4b per-principal retention layers above this (ADR-0029
+        // §Decision-2, pending ratification). Today sign-out discards ALL
+        // pending writes — correct for cross-user isolation (no write is
+        // attributed to the new principal), but it loses the outgoing
+        // principal's unsynced offline work. The ratified §4b policy will tag
+        // each row with a principal id and refuse-on-mismatch instead of
+        // deleting, layered OUTBOX-INTERNALLY (no trait change). A single
+        // DELETE covers pending writes AND dead-letter rows (ADR-0027) — both
+        // live in `cairn_outbox`, a dead-lettered row being `dlq = 1`.
+        let conn = self
+            .conn
+            .lock()
+            .expect("clear(outbox): storage mutex poisoned");
+        conn.execute("DELETE FROM cairn_outbox", [])
+            .map_err(rusqlite_err)?;
         Ok(())
     }
 }
@@ -1886,6 +2029,144 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("authoritative"),
             "after the outbox drains, apply_batch stops replaying — server wins",
+        );
+    }
+
+    /// ADR-0029 sign-out wipe. `Storage::clear` is the full atomic reset; the
+    /// checkpoint-reset test is the guard against the empty-DB-forever
+    /// (resume-without-snapshot) bug.
+    #[test]
+    fn clear_empties_cairn_data() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"alice"), 100)],
+            Lsn::new(100),
+            &HashSet::new(),
+        )
+        .unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "precondition: row landed");
+        }
+        Storage::clear(&mut s).unwrap();
+        let conn = s.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "clear() emptied cairn_data");
+    }
+
+    #[test]
+    fn clear_resets_checkpoint_and_epoch_to_zero() {
+        // THE guard against the empty-DB-forever bug (ADR-0029): a stale
+        // checkpoint makes the next principal resume from the old LSN, skip the
+        // snapshot, and see an empty database PERMANENTLY. clear() MUST reset
+        // both the checkpoint and the epoch so the next session is treated as a
+        // brand-new client (full snapshot).
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"x"), 100)],
+            Lsn::new(100),
+            &HashSet::new(),
+        )
+        .unwrap();
+        s.save_epoch(7).unwrap(); // a non-zero server slot epoch
+        assert_eq!(s.checkpoint().unwrap(), Lsn::new(100), "precondition");
+        assert_eq!(s.epoch().unwrap(), 7, "precondition: epoch advanced");
+
+        Storage::clear(&mut s).unwrap();
+
+        assert_eq!(s.checkpoint().unwrap(), Lsn::ZERO, "checkpoint reset to 0");
+        assert_eq!(s.epoch().unwrap(), 0, "epoch reset to 0");
+    }
+
+    #[test]
+    fn clear_empties_outbox_and_dead_letter() {
+        // Storage::clear is the full sign-out wipe: pending writes AND
+        // dead-lettered rows (ADR-0027) both drain. Both live in cairn_outbox
+        // (a dead-lettered row is dlq=1), so the single DELETE covers them.
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.enqueue(PendingWrite {
+            table: "tasks".into(),
+            op: WriteOp::Upsert,
+            pk: "1".into(),
+            payload_json: Some(r#"{"title":"pending"}"#.into()),
+        })
+        .unwrap();
+        let id_dlq = s
+            .enqueue(PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "2".into(),
+                payload_json: Some(r#"{"title":"poison"}"#.into()),
+            })
+            .unwrap();
+        // Quarantine id_dlq: bump attempts to the threshold, then dead-letter
+        // (mirrors the flush loop's DLQ wiring in client.rs).
+        let max = 3_u32;
+        for _ in 0..max {
+            if s.bump_attempts(id_dlq).unwrap() >= max {
+                s.mark_dead_letter(id_dlq).unwrap();
+            }
+        }
+        assert_eq!(s.pending().unwrap().len(), 1, "precondition: one pending");
+        assert_eq!(
+            s.dead_letter_entries().unwrap().len(),
+            1,
+            "precondition: one dead-lettered"
+        );
+
+        Storage::clear(&mut s).unwrap();
+
+        assert!(
+            s.pending().unwrap().is_empty(),
+            "clear() drained pending writes"
+        );
+        assert!(
+            s.dead_letter_entries().unwrap().is_empty(),
+            "clear() drained dead-letter rows"
+        );
+    }
+
+    #[test]
+    fn outbox_clear_drains_queue_but_leaves_rows_and_checkpoint() {
+        // Outbox::clear is the standalone outbox surface: it drains the queue
+        // but MUST NOT touch cairn_data or the checkpoint (those belong to the
+        // Storage surface). This keeps the two trait surfaces separable.
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"x"), 100)],
+            Lsn::new(100),
+            &HashSet::new(),
+        )
+        .unwrap();
+        s.enqueue(PendingWrite {
+            table: "tasks".into(),
+            op: WriteOp::Upsert,
+            pk: "2".into(),
+            payload_json: Some(r#"{"title":"q"}"#.into()),
+        })
+        .unwrap();
+        assert_eq!(s.pending().unwrap().len(), 1, "precondition");
+
+        Outbox::clear(&mut s).unwrap();
+
+        assert!(s.pending().unwrap().is_empty(), "outbox drained");
+        // cairn_data + checkpoint are the Storage surface's responsibility —
+        // Outbox::clear leaves them untouched.
+        let conn = s.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "Outbox::clear did not touch cairn_data");
+        drop(conn);
+        assert_eq!(
+            s.checkpoint().unwrap(),
+            Lsn::new(100),
+            "Outbox::clear did not touch the checkpoint",
         );
     }
 }

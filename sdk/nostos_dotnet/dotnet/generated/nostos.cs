@@ -682,6 +682,23 @@ static class _UniFFILib {
     public delegate void UniffiForeignFutureCompleteVoid(
         ulong @callbackData,_UniFFILib.UniffiForeignFutureStructVoid @result
     );
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void UniffiCallbackInterfaceSnapshotSinkMethod0(
+        ulong @uniffiHandle,RustBuffer @json,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err
+    );
+    [StructLayout(LayoutKind.Sequential)]
+    public struct UniffiVTableCallbackInterfaceSnapshotSink
+    {
+        public IntPtr @onSnapshot;
+        public IntPtr @uniffiFree;
+    }
+    
+    
+    
+    
+    
+    
+    
     
     
     
@@ -758,6 +775,7 @@ static class _UniFFILib {
         _UniFFILib.uniffiCheckContractApiVersion();
         _UniFFILib.uniffiCheckApiChecksums();
         
+        UniffiCallbackInterfaceSnapshotSink.Register();
         }
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
@@ -789,7 +807,27 @@ static class _UniFFILib {
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_nostosclient_watch(IntPtr @ptr,RustBuffer @table,IntPtr @sink,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
     public static extern ulong uniffi_nostos_dotnet_fn_method_nostosclient_write(IntPtr @ptr,RustBuffer @table,RustBuffer @op,RustBuffer @pk,RustBuffer @payloadJson,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr uniffi_nostos_dotnet_fn_clone_snapshotsink(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_free_snapshotsink(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_init_callback_vtable_snapshotsink(IntPtr /*_UniFFILib.UniffiVTableCallbackInterfaceSnapshotSink*/ @vtable
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_snapshotsink_on_snapshot(IntPtr @ptr,RustBuffer @json,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
@@ -1033,7 +1071,15 @@ static class _UniFFILib {
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_watch(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_write(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_snapshotsink_on_snapshot(
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
@@ -1074,14 +1120,26 @@ static class _UniFFILib {
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_subscribe();
-            if (checksum != 39669) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_subscribe` checksum `39669`, library returned `{checksum}`");
+            if (checksum != 47415) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_subscribe` checksum `47415`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_watch();
+            if (checksum != 4020) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_watch` checksum `4020`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_write();
             if (checksum != 34919) {
                 throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_write` checksum `34919`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_snapshotsink_on_snapshot();
+            if (checksum != 7450) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_snapshotsink_on_snapshot` checksum `7450`, library returned `{checksum}`");
             }
         }
         {
@@ -1233,14 +1291,15 @@ internal interface INostosClient {
     /// table is fixed at `connect()` time (default `"tasks"`); a mismatched
     /// `table` here is a programming error.
     ///
-    /// # ponytail: poll-only
-    /// UniFFI 0.28's async-callback path (the natural fit for a row-tick
-    /// callback into .NET) is fiddly enough to defer; the run loop applies
-    /// rows to storage as they arrive, and .NET polls `query()` until the
-    /// expected row appears (same shape as the Rust E2E template and the
-    /// Swift / Kotlin SDKs). A future `poll_new_rows()` draining
-    /// `SyncClient::subscribe_changes()`'s broadcast channel is the upgrade
-    /// path if `query()` polling proves too coarse.
+    /// # Reactive push vs poll
+    /// `subscribe()` itself stays the run-loop driver (it does NOT push row
+    /// ticks into .NET). Reactive push is a SEPARATE call — `watch(table,
+    /// sink)` — which drains `SyncClient::subscribe_changes()`'s broadcast on
+    /// the owned runtime and invokes a `SnapshotSink` callback per tick (the
+    /// .NET port of Flutter's `rows_sink` / Kotlin's `SnapshotSink`, commit
+    /// 41265fd). Callers who want push implement `SnapshotSink`; callers who
+    /// want poll still have `query()`. `subscribe()` + `watch()` compose:
+    /// `subscribe()` keeps the store fed, `watch()` fans ticks out.
     ///
     /// # Errors
     /// `NostosError` if no session is active (call `connect()` first) or the
@@ -1248,6 +1307,41 @@ internal interface INostosClient {
     /// </summary>
     /// <exception cref="NostosException"></exception>
     void Subscribe(string @table);
+    /// <summary>
+    /// Reactive watch: emit the full-table snapshot to `sink` immediately, and
+    /// again after every change tick (remote apply or local write). This is
+    /// the .NET port of Flutter's `watch(table, rows_sink)` and Kotlin's
+    /// `watch(table, sink)` (commit 41265fd) — a TRUE Rust→.NET push via a
+    /// UniFFI callback interface, not a poll. The .NET consumer implements
+    /// [`SnapshotSink`] and receives `on_snapshot(json)` calls; it never
+    /// wall-clock-polls the store. The natural C# adapter is an
+    /// `IObservable<string>` / `Channel<string>` fed from `OnSnapshot`.
+    ///
+    /// One pump per call. The pump's lifecycle is tied to the sync session:
+    /// `Session::Drop` (on a session-replacing `connect()` or client drop)
+    /// aborts every pump. There is no per-watch handle to cancel today (the
+    /// floor; a `stop_watch(table)` is the mechanical follow-on if a caller
+    /// needs to unsubscribe mid-session).
+    ///
+    /// `table` MUST match the active session's table (v1: one table per client).
+    ///
+    /// # Load-bearing ordering: subscribe BEFORE the first snapshot read
+    /// The nostos-client change broadcast is no-replay
+    /// (`broadcast::channel(64)`). A receiver created AFTER a commit permanently
+    /// misses that commit — the "connected but lists render empty" regression.
+    /// The invariant is encoded directly in nostos-client at
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`, and this
+    /// port honors it: the broadcast receiver is created FIRST, the initial
+    /// snapshot is read AFTER. A commit in the residual gap just triggers a
+    /// redundant re-snapshot from the pump (idempotent — full snapshot,
+    /// self-healing on lag).
+    ///
+    /// # Errors
+    /// `NostosError` if `connect()` hasn't run or `table` doesn't match the
+    /// session fixed at `connect()` time.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    void Watch(string @table, SnapshotSink @sink);
     /// <summary>
     /// Enqueue a durable write against the active session's table. Resolves
     /// once the write is captured in the local outbox (NOT once the server
@@ -1447,14 +1541,15 @@ internal class NostosClient : INostosClient, IDisposable {
     /// table is fixed at `connect()` time (default `"tasks"`); a mismatched
     /// `table` here is a programming error.
     ///
-    /// # ponytail: poll-only
-    /// UniFFI 0.28's async-callback path (the natural fit for a row-tick
-    /// callback into .NET) is fiddly enough to defer; the run loop applies
-    /// rows to storage as they arrive, and .NET polls `query()` until the
-    /// expected row appears (same shape as the Rust E2E template and the
-    /// Swift / Kotlin SDKs). A future `poll_new_rows()` draining
-    /// `SyncClient::subscribe_changes()`'s broadcast channel is the upgrade
-    /// path if `query()` polling proves too coarse.
+    /// # Reactive push vs poll
+    /// `subscribe()` itself stays the run-loop driver (it does NOT push row
+    /// ticks into .NET). Reactive push is a SEPARATE call — `watch(table,
+    /// sink)` — which drains `SyncClient::subscribe_changes()`'s broadcast on
+    /// the owned runtime and invokes a `SnapshotSink` callback per tick (the
+    /// .NET port of Flutter's `rows_sink` / Kotlin's `SnapshotSink`, commit
+    /// 41265fd). Callers who want push implement `SnapshotSink`; callers who
+    /// want poll still have `query()`. `subscribe()` + `watch()` compose:
+    /// `subscribe()` keeps the store fed, `watch()` fans ticks out.
     ///
     /// # Errors
     /// `NostosError` if no session is active (call `connect()` first) or the
@@ -1465,6 +1560,49 @@ internal class NostosClient : INostosClient, IDisposable {
         CallWithPointer(thisPtr =>
     _UniffiHelpers.RustCallWithError(FfiConverterTypeNostosError.INSTANCE, (ref UniffiRustCallStatus _status) =>
     _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_subscribe(thisPtr, FfiConverterString.INSTANCE.Lower(@table), ref _status)
+));
+    }
+    
+    
+    
+    /// <summary>
+    /// Reactive watch: emit the full-table snapshot to `sink` immediately, and
+    /// again after every change tick (remote apply or local write). This is
+    /// the .NET port of Flutter's `watch(table, rows_sink)` and Kotlin's
+    /// `watch(table, sink)` (commit 41265fd) — a TRUE Rust→.NET push via a
+    /// UniFFI callback interface, not a poll. The .NET consumer implements
+    /// [`SnapshotSink`] and receives `on_snapshot(json)` calls; it never
+    /// wall-clock-polls the store. The natural C# adapter is an
+    /// `IObservable<string>` / `Channel<string>` fed from `OnSnapshot`.
+    ///
+    /// One pump per call. The pump's lifecycle is tied to the sync session:
+    /// `Session::Drop` (on a session-replacing `connect()` or client drop)
+    /// aborts every pump. There is no per-watch handle to cancel today (the
+    /// floor; a `stop_watch(table)` is the mechanical follow-on if a caller
+    /// needs to unsubscribe mid-session).
+    ///
+    /// `table` MUST match the active session's table (v1: one table per client).
+    ///
+    /// # Load-bearing ordering: subscribe BEFORE the first snapshot read
+    /// The nostos-client change broadcast is no-replay
+    /// (`broadcast::channel(64)`). A receiver created AFTER a commit permanently
+    /// misses that commit — the "connected but lists render empty" regression.
+    /// The invariant is encoded directly in nostos-client at
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`, and this
+    /// port honors it: the broadcast receiver is created FIRST, the initial
+    /// snapshot is read AFTER. A commit in the residual gap just triggers a
+    /// redundant re-snapshot from the pump (idempotent — full snapshot,
+    /// self-healing on lag).
+    ///
+    /// # Errors
+    /// `NostosError` if `connect()` hasn't run or `table` doesn't match the
+    /// session fixed at `connect()` time.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    public void Watch(string @table, SnapshotSink @sink) {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeNostosError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_watch(thisPtr, FfiConverterString.INSTANCE.Lower(@table), FfiConverterTypeSnapshotSink.INSTANCE.Lower(@sink), ref _status)
 ));
     }
     
@@ -1515,6 +1653,291 @@ class FfiConverterTypeNostosClient: FfiConverter<NostosClient, IntPtr> {
     }
 
     public override void Write(NostosClient value, BigEndianStream stream) {
+        stream.WriteLong(Lower(value).ToInt64());
+    }
+}
+
+
+
+/// <summary>
+/// Reactive push channel: .NET implements this interface, Rust invokes it.
+///
+/// This is the .NET port of the Kotlin SDK's `SnapshotSink` (commit 41265fd)
+/// and Flutter's `rows_sink: StreamSink<String>` — a TRUE Rust→foreign PUSH
+/// (the app consumer does NOT poll). Chosen over a C#-side poll over
+/// `subscribe_changes` because it is the faithful reactive port and the
+/// Nord UniFFI-CS bindgen (v0.9.2+v0.28.3) supports the `with_foreign`
+/// callback-interface the same way mainline UniFFI does for Kotlin/Swift
+/// (verified empirically — bindgen generates a C# `ISnapshotSink` interface
+/// + the foreign-callback vtable).
+///
+/// # Why a SYNC callback (UniFFI 0.28)
+/// UniFFI 0.28's **async**-foreign-callback path (a foreign-implemented
+/// method that returns a `Future`) is genuinely awkward — that is NOT what we
+/// use. A fire-and-forget `on_snapshot(json) -> ()` is a SYNCHRONOUS foreign
+/// callback (`#[uniffi::export(with_foreign)]`), the stable, well-supported
+/// path in UniFFI 0.28: the Rust pump task invokes the callback through
+/// UniFFI's vtable (callable from any Rust thread, including a tokio worker),
+/// blocking that worker only for the duration of the C# method body (which a
+/// sink just forwards to a `Channel<T>` / `IObservable<T>` — microseconds).
+/// `with_foreign` (vs the legacy `callback_interface`) ALSO permits a RUST
+/// impl, which is what the host reactivity test exercises without a .NET
+/// runtime.
+///
+/// # Snapshot shape
+/// `json` is a JSON array-of-objects string: one object per row of the watched
+/// table's rows in `cairn_data`, full snapshot per tick (NOT a diff —
+/// self-healing on lag, mirrors Flutter's `emit_snapshot`).
+/// </summary>
+internal interface SnapshotSink {
+    /// <summary>
+    /// Receive a full-table snapshot. Invoked once with the initial snapshot
+    /// (immediately after `watch()` subscribes) and again after every change
+    /// tick (remote apply or local write).
+    /// </summary>
+    void OnSnapshot(string @json);
+}
+/// <summary>
+/// Reactive push channel: .NET implements this interface, Rust invokes it.
+///
+/// This is the .NET port of the Kotlin SDK's `SnapshotSink` (commit 41265fd)
+/// and Flutter's `rows_sink: StreamSink<String>` — a TRUE Rust→foreign PUSH
+/// (the app consumer does NOT poll). Chosen over a C#-side poll over
+/// `subscribe_changes` because it is the faithful reactive port and the
+/// Nord UniFFI-CS bindgen (v0.9.2+v0.28.3) supports the `with_foreign`
+/// callback-interface the same way mainline UniFFI does for Kotlin/Swift
+/// (verified empirically — bindgen generates a C# `ISnapshotSink` interface
+/// + the foreign-callback vtable).
+///
+/// # Why a SYNC callback (UniFFI 0.28)
+/// UniFFI 0.28's **async**-foreign-callback path (a foreign-implemented
+/// method that returns a `Future`) is genuinely awkward — that is NOT what we
+/// use. A fire-and-forget `on_snapshot(json) -> ()` is a SYNCHRONOUS foreign
+/// callback (`#[uniffi::export(with_foreign)]`), the stable, well-supported
+/// path in UniFFI 0.28: the Rust pump task invokes the callback through
+/// UniFFI's vtable (callable from any Rust thread, including a tokio worker),
+/// blocking that worker only for the duration of the C# method body (which a
+/// sink just forwards to a `Channel<T>` / `IObservable<T>` — microseconds).
+/// `with_foreign` (vs the legacy `callback_interface`) ALSO permits a RUST
+/// impl, which is what the host reactivity test exercises without a .NET
+/// runtime.
+///
+/// # Snapshot shape
+/// `json` is a JSON array-of-objects string: one object per row of the watched
+/// table's rows in `cairn_data`, full snapshot per tick (NOT a diff —
+/// self-healing on lag, mirrors Flutter's `emit_snapshot`).
+/// </summary>
+internal class SnapshotSinkImpl : SnapshotSink, IDisposable {
+    protected IntPtr pointer;
+    private int _wasDestroyed = 0;
+    private long _callCounter = 1;
+
+    public SnapshotSinkImpl(IntPtr pointer) {
+        this.pointer = pointer;
+    }
+
+    ~SnapshotSinkImpl() {
+        Destroy();
+    }
+
+    protected void FreeRustArcPtr() {
+        _UniffiHelpers.RustCall((ref UniffiRustCallStatus status) => {
+            _UniFFILib.uniffi_nostos_dotnet_fn_free_snapshotsink(this.pointer, ref status);
+        });
+    }
+
+    protected IntPtr CloneRustArcPtr() {
+        return _UniffiHelpers.RustCall((ref UniffiRustCallStatus status) => {
+            return _UniFFILib.uniffi_nostos_dotnet_fn_clone_snapshotsink(this.pointer, ref status);
+        });
+    }
+
+    public void Destroy()
+    {
+        // Only allow a single call to this method.
+        if (Interlocked.CompareExchange(ref _wasDestroyed, 1, 0) == 0)
+        {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (Interlocked.Decrement(ref _callCounter) == 0)
+            {
+                FreeRustArcPtr();
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        Destroy();
+        GC.SuppressFinalize(this); // Suppress finalization to avoid unnecessary GC overhead.
+    }
+
+    private void IncrementCallCounter() 
+    {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        long count;
+        do
+        {
+            count = Interlocked.Read(ref _callCounter);
+            if (count == 0L) throw new System.ObjectDisposedException(String.Format("'{0}' object has already been destroyed", this.GetType().Name));
+            if (count == long.MaxValue) throw new System.OverflowException(String.Format("'{0}' call counter would overflow", this.GetType().Name));
+
+        } while (Interlocked.CompareExchange(ref _callCounter, count + 1, count) != count);
+    }
+
+    private void DecrementCallCounter() 
+    {
+        // This decrement always matches the increment we performed above.
+        if (Interlocked.Decrement(ref _callCounter) == 0) {
+            FreeRustArcPtr();
+        }
+    }
+
+    internal void CallWithPointer(Action<IntPtr> action)
+    {
+        IncrementCallCounter();
+        try {
+            action(CloneRustArcPtr());
+        }
+        finally {
+            DecrementCallCounter();
+        }
+    }
+
+    internal T CallWithPointer<T>(Func<IntPtr, T> func)
+    {   
+        IncrementCallCounter();
+        try {
+            return func(CloneRustArcPtr());
+        }
+        finally {
+            DecrementCallCounter();
+        }
+    }
+
+    
+    /// <summary>
+    /// Receive a full-table snapshot. Invoked once with the initial snapshot
+    /// (immediately after `watch()` subscribes) and again after every change
+    /// tick (remote apply or local write).
+    /// </summary>
+    public void OnSnapshot(string @json) {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCall( (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_snapshotsink_on_snapshot(thisPtr, FfiConverterString.INSTANCE.Lower(@json), ref _status)
+));
+    }
+    
+    
+    
+
+    
+}
+class UniffiCallbackInterfaceSnapshotSink {
+    static void OnSnapshot(ulong @uniffiHandle,RustBuffer @json,IntPtr @uniffiOutReturn,ref UniffiRustCallStatus _uniffi_out_err) {
+        var handle = @uniffiHandle;
+        if (FfiConverterTypeSnapshotSink.INSTANCE.handleMap.TryGet(handle, out var uniffiObject)) {
+            uniffiObject.OnSnapshot(
+                FfiConverterString.INSTANCE.Lift(@json));
+        } else {
+            throw new InternalException($"No callback in handlemap '{handle}'");
+        }
+    }
+
+    static void UniffiFree(ulong @handle) {
+        FfiConverterTypeSnapshotSink.INSTANCE.handleMap.Remove(@handle);
+    }
+    static _UniFFILib.UniffiCallbackInterfaceSnapshotSinkMethod0 _m0 = new _UniFFILib.UniffiCallbackInterfaceSnapshotSinkMethod0(OnSnapshot);
+    static _UniFFILib.UniffiCallbackInterfaceFree _callback_interface_free = new _UniFFILib.UniffiCallbackInterfaceFree(UniffiFree);
+
+    public static void Register() {
+        _UniFFILib.UniffiVTableCallbackInterfaceSnapshotSink _vtable = new _UniFFILib.UniffiVTableCallbackInterfaceSnapshotSink {
+            @onSnapshot = Marshal.GetFunctionPointerForDelegate(_m0),
+            @uniffiFree = Marshal.GetFunctionPointerForDelegate(_callback_interface_free)
+        };
+
+        // Pin vtable to ensure GC does not move the vtable across the heap
+        _UniFFILib.uniffi_nostos_dotnet_fn_init_callback_vtable_snapshotsink(GCHandle.Alloc(_vtable, GCHandleType.Pinned).AddrOfPinnedObject());
+    }
+}
+
+class ConcurrentHandleMap<T> where T: notnull {
+    Dictionary<ulong, T> map = new Dictionary<ulong, T>();
+
+    Object lock_ = new Object();
+    ulong currentHandle = 0;
+
+    public ulong Insert(T obj) {
+        lock (lock_) {
+            currentHandle += 1;
+            map[currentHandle] = obj;
+            return currentHandle;
+        }
+    }
+
+    public bool TryGet(ulong handle, out T result) {
+        lock (lock_) {
+            #pragma warning disable 8601 // Possible null reference assignment
+            return map.TryGetValue(handle, out result);
+            #pragma warning restore 8601
+        }
+    }
+
+    public T Get(ulong handle) {
+        if (TryGet(handle, out var result)) {
+            return result;
+        } else {
+            throw new InternalException("ConcurrentHandleMap: Invalid handle");
+        }
+    }
+
+    public bool Remove(ulong handle) {
+        return Remove(handle, out T result);
+    }
+
+    public bool Remove(ulong handle, out T result) {
+        lock (lock_) {
+            // Possible null reference assignment
+            #pragma warning disable 8601
+            if (map.TryGetValue(handle, out result)) {
+            #pragma warning restore 8601
+                map.Remove(handle);
+                return true;
+            } else {
+                return false;
+            }
+        }
+    }
+}
+static class UniffiCallbackResponseStatus {
+    public static sbyte SUCCESS = 0;
+    public static sbyte ERROR = 1;
+    public static sbyte UNEXPECTED_ERROR = 2;
+}
+
+class FfiConverterTypeSnapshotSink: FfiConverter<SnapshotSink, IntPtr> {
+    public ConcurrentHandleMap<SnapshotSink> handleMap = new ConcurrentHandleMap<SnapshotSink>();
+    
+    public static FfiConverterTypeSnapshotSink INSTANCE = new FfiConverterTypeSnapshotSink();
+
+
+    public override IntPtr Lower(SnapshotSink value) {
+        return (IntPtr)handleMap.Insert(value);
+    }
+
+    public override SnapshotSink Lift(IntPtr value) {
+        return new SnapshotSinkImpl(value);
+    }
+
+    public override SnapshotSink Read(BigEndianStream stream) {
+        return Lift(new IntPtr(stream.ReadLong()));
+    }
+
+    public override int AllocationSize(SnapshotSink value) {
+        return 8;
+    }
+
+    public override void Write(SnapshotSink value, BigEndianStream stream) {
         stream.WriteLong(Lower(value).ToInt64());
     }
 }

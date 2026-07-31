@@ -43,6 +43,21 @@ if (!syncUrl) {
     // Expose the plugin to the Playwright evaluate() calls so the spec can
     // drive write/query without re-importing.
     window.Nostos = Nostos;
+
+    // Reactive watch(): the listener fires immediately with the engine's
+    // current rows (kind === "initial"). See README "Reactive watch()" for the
+    // delta ceiling — the wasm change-callback seam is not yet wired.
+    window.__nostosWatchSub = await Nostos.watch(
+      { table: "tasks" },
+      ({ kind, rows }) => {
+        console.log(
+          "[cap-e2e] WATCH_" +
+            kind.toUpperCase() +
+            " count=" +
+            (rows ? rows.length : 0),
+        );
+      },
+    );
   } catch (e) {
     setStatus("Init FAILED: " + ((e && e.message) || String(e)));
     console.log(

@@ -24,6 +24,8 @@ import com.facebook.react.module.annotations.ReactModule
  *   write(table, op, pk, pj)    → .write(table, op, pk, payloadJson)  (ULong → JS Double)
  *   query(sql)                  → .query(sql)                          (JSON-rows String)
  *   checkpoint()                → .checkpoint()                        (ULong → JS Double)
+ *   setToken(token)             → .setToken(token)  (ADR-0029 #3; Option<String> ↔ Kotlin String?)
+ *   signOut()                   → .signOut()        (ADR-0029 wipe; abort→await→clear→drop→clear-token)
  *
  * `payloadJson: String?` mirrors UniFFI's `Option<String>`: `null` = None
  * (delete shape — no row image), a JSON string = Some(...). The Kotlin `?`
@@ -60,6 +62,8 @@ abstract class NativeNostosSpec :
     )
     abstract fun query(sql: String, promise: Promise)
     abstract fun checkpoint(promise: Promise)
+    abstract fun setToken(token: String?, promise: Promise)
+    abstract fun signOut(promise: Promise)
 
     companion object {
         const val NAME = "NativeNostos"

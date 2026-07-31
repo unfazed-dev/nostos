@@ -53,7 +53,10 @@
     clippy::cast_precision_loss
 )]
 
-use nostos_core::{ApplyEngine, ApplyOutcome, Frame as CoreFrame, InMemoryStorage, Lsn, Operation};
+use nostos_core::{
+    ApplyEngine, ApplyOutcome, Frame as CoreFrame, InMemoryStorage, Lsn, Operation, Outbox,
+    PendingWrite, WriteOp,
+};
 use wasm_bindgen::prelude::*;
 
 /// The operation kind, as a JS-friendly string. Matches `nostos_domain::Operation`.
@@ -300,6 +303,14 @@ impl NostosEngine {
         self.inner.storage().row_count()
     }
 
+    /// Mutable access to the backing `InMemoryStorage` — the outbox flush path
+    /// (`Outbox::enqueue` / `apply_local` / `pending` / `mark_done`) reaches the
+    /// store through this. `pub(crate)` because the JS surface never mutates
+    /// storage directly; only [`NostosSocket`]'s write/flush path (WS1) does.
+    pub(crate) fn storage_mut(&mut self) -> &mut InMemoryStorage {
+        self.inner.storage_mut()
+    }
+
     /// Enumerate the `(pk, payload)` pairs the engine currently holds for
     /// `table`, sorted by pk. The readback the browser demo renders from: each
     /// entry's `payload` is a `Uint8Array` (the opaque tuple image the engine
@@ -326,6 +337,21 @@ impl NostosEngine {
             .into_iter()
             .map(|(pk, payload)| RowEntry { pk, payload })
             .collect()
+    }
+
+    /// ADR-0029 D1: wipe the in-memory rows AND outbox — the sign-out
+    /// local-state wipe for the browser. The `NostosEngine` has no checkpoint
+    /// file; this clears the live in-memory store so the next user (same
+    /// Worker/page session) does not see the previous user's rows. Call before
+    /// `NostosSocket::close` on sign-out.
+    pub fn clear(&mut self) {
+        let s = self.inner.storage_mut();
+        // Both clears under one borrow — half a clear is a cross-user leak.
+        // ponytail: `let _ =` — `InMemoryStorage::clear` is infallible in
+        // practice (a `HashMap`/`Vec` clear); the `Result` is just the trait
+        // shape, surfaced as infallible here.
+        let _ = <InMemoryStorage as nostos_core::Storage>::clear(s);
+        let _ = <InMemoryStorage as Outbox>::clear(s);
     }
 }
 
@@ -467,30 +493,28 @@ impl NostosSocket {
         self.inner.engine.borrow().rows_for(table)
     }
 
-    /// Send a client write to the server over the open WS. The server's echo
-    /// `WriteBack` re-emits the row through the fan-out; the writer receives
-    /// its own write back as a `WireFrame` on this same socket, which the
-    /// `onmessage` pump applies to the engine — so the row lands in
-    /// `rowsFor(table)` after a round-trip, the same shape every SDK E2E
-    /// proves. JS:
+    /// Send a client write. WS1 contract: this NEVER throws because the socket
+    /// is closed — a write while disconnected is captured into the `Outbox`
+    /// (`enqueue`) and rendered locally right away (`apply_local`), so the row
+    /// is visible INSTANTLY and the write ships on the next (re)connect via the
+    /// `onopen` flush loop. The synchronous "socket not OPEN" throw is gone
+    /// (ADR-0017 WS1; reviewer note #1).
     ///
-    /// ```js
-    /// sock.write("tasks", "upsert", "row-1",
-    ///            JSON.stringify({ title: "x", status: "open" }), "w1");
-    /// // poll sock.rowsFor("tasks") for pk === "row-1" — appears after echo.
-    /// ```
+    /// The call is still `Err` for a *caller bug* — a malformed / non-object
+    /// `payload_json`, or an `op` outside `"upsert" | "delete" | "patch"`. Those
+    /// return BEFORE anything is enqueued (an invalid write is not captured).
     ///
-    /// `op` is `"upsert" | "delete" | "patch"`. `payload_json` is the
-    /// COLUMN→value tuple image as a JSON string for upsert / patch, or
-    /// `null` / empty for delete (the server's `ClientMessage::Write` rejects
-    /// non-object payloads as `InvalidPayload`; `build_write_frame` validates
-    /// locally so the error surfaces here rather than as a closed socket).
-    /// `client_write_id` is the caller's correlation id, echoed in the
-    /// matching `WriteResult` frame.
+    /// When the socket IS open, the write ships immediately and is
+    /// `mark_done`'d, so the connected path keeps the outbox drained. The
+    /// caller learns the outcome asynchronously: the Worker host turns the
+    /// `Ok(())` into a `writeResult{client_write_id, ok:true}` push (Rust can't
+    /// `postMessage` to the main thread itself).
     ///
-    /// # Errors
-    /// `Err(JsValue)` if `payload_json` is malformed / non-object, or the
-    /// underlying `WebSocket.send_with_str` fails (socket not OPEN).
+    /// `client_write_id` is the caller's correlation id, put on the wire when
+    /// the write ships now. The offline flush loop synthesizes one from the
+    /// outbox id (ponytail: `PendingWrite` — a `nostos-core` domain type —
+    /// carries no `client_write_id` field, so the caller's id is lost across an
+    /// offline gap; the live path preserves it).
     #[wasm_bindgen(js_name = write)]
     #[allow(clippy::needless_pass_by_value)] // wasm-bindgen JS boundary: owned Option<String>
     pub fn write(
@@ -501,12 +525,62 @@ impl NostosSocket {
         payload_json: Option<String>,
         client_write_id: &str,
     ) -> Result<(), JsValue> {
+        // Validate payload + build the wire frame FIRST (caller bug → Err, and
+        // nothing is enqueued). `op` is validated just below.
         let frame =
             transport::build_write_frame(table, op, pk, payload_json.as_deref(), client_write_id)?;
-        self.inner
-            .ws
-            .send_with_str(&frame)
-            .map_err(|_| JsValue::from_str("nostos write: WebSocket send failed (socket not OPEN)"))
+        let op_enum = WriteOp::from_wire_str(op).ok_or_else(|| {
+            JsValue::from_str("nostos write: invalid op (expected upsert|delete|patch)")
+        })?;
+        let normalized_payload = payload_json
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let write = PendingWrite {
+            table: table.to_owned(),
+            op: op_enum,
+            pk: pk.to_owned(),
+            payload_json: normalized_payload,
+        };
+
+        // Outbox: durable intent (enqueue) + instant local row (apply_local).
+        // apply_local is best-effort by contract — an Err delays visibility to
+        // the server echo, never loses the write (the entry is durable first).
+        let mut engine = self.inner.engine.borrow_mut();
+        let id = engine
+            .storage_mut()
+            .enqueue(write.clone())
+            .map_err(|e| JsValue::from_str(&format!("nostos write: enqueue: {e}")))?;
+        // apply_local renders the row instantly in the store (optimistic UI).
+        let local_applied = engine.storage_mut().apply_local(&write).is_ok();
+        // Release the engine borrow BEFORE the reactive tick + the ship path so
+        // a callback that re-reads rows_for (and the mark_done re-borrow) can't
+        // collide with this borrow_mut.
+        drop(engine);
+
+        // Ship now if OPEN; mark_done on success so the connected path drains
+        // the outbox immediately. If the socket is NOT open, leave the write
+        // pending for the onopen flush loop. Either way, return Ok — captured.
+        if self.inner.ws.ready_state() == 1 && self.inner.ws.send_with_str(&frame).is_ok() {
+            let _ = self.inner.engine.borrow_mut().storage_mut().mark_done(id);
+        }
+        // Reactive push (ADR-0024): a local write is a change tick too — node's
+        // "remote apply OR local write" contract. apply_local already made the
+        // row visible; fire the tick so a watcher sees its OWN write instantly,
+        // without waiting for the server echo (which fires the remote-apply half
+        // via the on_message pump). No-op when no callback is registered.
+        if local_applied {
+            transport::emit_change(&self.inner.on_change);
+        }
+        Ok(())
+    }
+
+    /// ADR-0029 D1: wipe the socket's engine rows + outbox (sign-out). Call
+    /// before [`Self::close`]. Mirrors `nostos_client::SyncClient::clear_local_state`.
+    #[wasm_bindgen(js_name = clearLocalState)]
+    pub fn clear_local_state(&self) {
+        self.inner.engine.borrow_mut().clear();
     }
 
     /// Close the socket. The server treats this as a session end; the client
@@ -515,6 +589,63 @@ impl NostosSocket {
         // Code 1000 = "normal closure". Errors here (e.g. already closed) are
         // ignorable — the socket is going away regardless.
         let _ = self.inner.ws.close_with_code(1000);
+    }
+
+    /// Register a reactive callback nostos invokes on EVERY change tick — the
+    /// initial snapshot plus each delta — as the browser applies inbound WS
+    /// frames. This is the Web port of node's `watch(onSnapshot)` / kotlin's
+    /// `watch(SnapshotSink)` / Flutter's `watch(rows_sink)`: a TRUE Rust→JS push
+    /// fired synchronously from the `onmessage` frame-pump on each commit, NOT a
+    /// `setInterval` poll of `rowCount`.
+    ///
+    /// The callback receives NO args — it is a change *tick*. Read the fresh
+    /// full-table snapshot via [`Self::rows_for`] inside the callback (the
+    /// Worker host does exactly this, then forwards the rows to the main
+    /// thread). This mirrors the engine's "full snapshot on every tick,
+    /// self-healing on lag" contract (idempotent) and keeps the FFI boundary
+    /// free of per-row marshalling.
+    ///
+    /// Registering replaces any prior callback (the old `Closure` is dropped →
+    /// its JS function detached). The `Closure` is owned by the socket; call
+    /// [`Self::off_change`] to stop, or simply drop the socket — no `.forget()`,
+    /// so no leak (the one wasm-bindgen `Closure` pitfall).
+    ///
+    /// # Initial snapshot
+    ///
+    /// Fires the tick once on registration so a UI renders before the first WS
+    /// frame commits. There is no subscribe-before-snapshot hazard here (the
+    /// one the node/kotlin ports guard): the WASM pump IS the change tick, so a
+    /// frame committed before registration is already in `rows_for`, and the
+    /// initial tick's read sees it.
+    ///
+    /// JS:
+    /// ```js
+    /// sock.onChange(() => {
+    ///   console.log("rows changed:", sock.rowsFor("tasks"));
+    /// });
+    /// ```
+    #[wasm_bindgen(js_name = onChange)]
+    pub fn on_change(&self, callback: js_sys::Function) {
+        // Wrap the JS function in a no-arg Closure stored on the socket. The
+        // on_message pump invokes it (via transport::emit_change) on every
+        // commit; replacing a prior callback drops its Closure (detaches the JS
+        // fn) — no leak.
+        let cb = Closure::wrap(Box::new(move || {
+            // Fire-and-forget: a JS error (the side tearing down) is swallowed;
+            // the pump keeps running until the socket is dropped / off_change.
+            let _ = callback.call0(&JsValue::UNDEFINED);
+        }) as Box<dyn FnMut()>);
+        *self.inner.on_change.borrow_mut() = Some(cb);
+        // Initial tick: fire once on registration (full snapshot via rows_for
+        // inside the callback).
+        transport::emit_change(&self.inner.on_change);
+    }
+
+    /// Unregister the reactive callback. Drops the wrapped `Closure` (detaches
+    /// the JS function). Idempotent. Dropping the socket also cleans up.
+    #[wasm_bindgen(js_name = offChange)]
+    pub fn off_change(&self) {
+        *self.inner.on_change.borrow_mut() = None;
     }
 }
 
@@ -594,6 +725,21 @@ mod tests {
     }
 
     #[test]
+    fn clear_wipes_in_memory_rows() {
+        // ADR-0029 D1: the sign-out wipe at the NostosEngine seam. The wipe
+        // semantics are unit-tested in nostos-core; this proves the seam calls
+        // Storage::clear (the outbox clear is the parallel trivial delegation).
+        let mut eng = NostosEngine::new();
+        feed_ins(&mut eng, 10.0, "tasks", "1", b"alice");
+        feed_ins(&mut eng, 20.0, "tasks", "2", b"bob");
+        eng.flush().unwrap();
+        assert_eq!(eng.row_count(), 2, "seeded");
+        eng.clear();
+        assert_eq!(eng.row_count(), 0, "clear wiped rows");
+        assert!(eng.rows_for("tasks").is_empty());
+    }
+
+    #[test]
     fn rows_for_empty_before_any_flush() {
         // Buffered-but-not-flushed frames are NOT yet in the store, so the
         // readback is empty until a commit lands.
@@ -643,7 +789,7 @@ mod transport_tests {
     use nostos_core::Operation;
     use transport::{
         build_ack_frame, build_subscribe_frame, build_write_frame, checkpoint_from, checkpoint_key,
-        decode_frames, decode_hex, on_message, parse_checkpoint, PumpResult,
+        decode_frames, decode_hex, on_message, parse_checkpoint, pump_committed, PumpResult,
     };
 
     // ---- wire decode (mirror of nostos_infra::wire::decode_frames) ----
@@ -1045,5 +1191,79 @@ mod transport_tests {
         let _ = on_message(&mut eng, batch.as_bytes()).unwrap();
         eng.flush().unwrap();
         assert_eq!(eng.row_count(), 2, "replay did not duplicate");
+    }
+
+    // ---- reactive push trigger (ADR-0024 — the Web watch() port) ----
+    //
+    // The WASM reactive primitive is "fire the snapshot callback iff this
+    // message committed a frame." The decision is pure (`pump_committed`); the
+    // `Closure`/JS wiring is browser-only (`JsValue` panics on a host — same
+    // split as the rest of the WS glue, and the same reason node's
+    // `watch_internal` takes a `SnapshotEmitter` seam: a `ThreadsafeFunction` /
+    // `Closure` cannot be built without a live JS runtime). These pin the
+    // trigger so the push can't silently regress to firing on no-ops (a spurious
+    // snapshot) or staying mute on commits (a missed delta).
+
+    #[test]
+    fn pump_committed_true_when_pump_acked_in_message() {
+        // A transaction boundary commits mid-message → pump.ack is Some → tick.
+        let pump = PumpResult {
+            applied: 1,
+            ack: Some(10),
+        };
+        assert!(pump_committed(&pump, false));
+    }
+
+    #[test]
+    fn pump_committed_true_when_only_trailing_flush_committed() {
+        // A buffered standalone frame: the pump itself didn't commit (ack None),
+        // but the trailing idle-flush did → still a change tick. This is the
+        // common browser path (one Nostos event per WS message → flushed at
+        // message end).
+        let pump = PumpResult {
+            applied: 1,
+            ack: None,
+        };
+        assert!(pump_committed(&pump, true));
+    }
+
+    #[test]
+    fn pump_committed_false_when_nothing_committed() {
+        // A malformed / no-op message: nothing applied, nothing committed → no
+        // tick (no spurious snapshot).
+        let pump = PumpResult {
+            applied: 0,
+            ack: None,
+        };
+        assert!(!pump_committed(&pump, false));
+    }
+
+    #[test]
+    fn reactive_snapshot_after_commit_is_the_full_table() {
+        // The push's payload is `rows_for(table)` read at the tick. Prove the
+        // commit → trigger → full-snapshot chain on the pure core (the part that
+        // can't touch JsValue): a buffered frame does NOT tick until flush, then
+        // does, and the snapshot the callback would forward is the full table
+        // (pk-sorted, the same shape `rows_for` pins).
+        let mut eng = NostosEngine::new();
+        let bytes = frame_json(10, "insert", "tasks", "1", Some("6869"));
+        let pump = on_message(&mut eng, bytes.as_bytes()).unwrap();
+        assert!(
+            !pump_committed(&pump, false),
+            "buffered frame → no in-message commit → no tick"
+        );
+        assert_eq!(eng.row_count(), 0, "not yet flushed → empty snapshot");
+
+        let flush_committed = eng.flush().unwrap().is_some();
+        assert!(flush_committed);
+        assert!(
+            pump_committed(&pump, flush_committed),
+            "flush committed → tick fires"
+        );
+
+        // The snapshot delivered at the tick: full current table.
+        let snapshot = eng.rows_for("tasks");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].pk(), "1");
     }
 }

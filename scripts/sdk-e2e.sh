@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sdk-e2e.sh — run the 10 SDK live-replication E2E slices against the
+# scripts/sdk-e2e.sh — run the 9 SDK live-replication E2E slices against the
 # shared no-docker spine (nostos-infra/examples/e2e_server).
 #
 # Each slice spawns its own spine instance and proves BOTH replication
@@ -17,7 +17,7 @@
 # stopped being true. See docs/plans/sdk-live-e2e-consolidation.md.
 #
 # Usage:
-#   scripts/sdk-e2e.sh            # run all 10
+#   scripts/sdk-e2e.sh            # run all 9
 #   scripts/sdk-e2e.sh rust node  # run a subset (names match the slice keys)
 
 set -uo pipefail
@@ -26,7 +26,7 @@ cd "$(git rev-parse --show-toplevel)"
 GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; RED=$'\033[0;31m'
 BOLD=$'\033[1m';   RESET=$'\033[0m'
 
-ALL_SLICES=(rust node tauri web capacitor dotnet flutter swift kotlin reactnative)
+ALL_SLICES=(rust node tauri web capacitor dotnet swift kotlin reactnative)
 if [ "$#" -gt 0 ]; then
   SLICES=("$@")
 else
@@ -87,34 +87,32 @@ if want dotnet; then
   fi
 fi
 
-# Flutter — packaging + live-sync E2E. nostos_server_test.dart spins up a REAL
-# `cargo run -p nostos-server` (NOSTOS_REPLICATOR=fake, NOSTOS_SYNC_AUTH=none — no
-# Postgres, no docker, no cloud; the same no-DB spine pattern the rust/node/web
-# slices use) and drives the Flutter SDK's connect/subscribe/watch loop inside a
-# genuine app bundle. `-d macos` because the test binds the server on 127.0.0.1
-# (host loopback) — only a host/desktop target reaches it directly (an emulator
-# would need 10.0.2.2). A real Supabase-CLOUD-backed live test is a separate
-# follow-up (needs the cloud project ref — see docs/plans/flutter-supabase-plug-and-play-launch.md).
+# Flutter — NO LIVE SLICE since 2026-07-30. Operator decision: "no example app
+# to live in the SDK", then "archive the tests as well - take it all".
+# `sdk/nostos_flutter/{example,test,test_driver}` moved under `archive/`, so
+# nostos_server_test.dart — a REAL `cargo run -p nostos-server` driven through the
+# SDK's connect/subscribe/watch loop inside a genuine macOS app bundle — has no
+# host app left to build against.
+#
+# `flutter` is OUT of ALL_SLICES: the honest count is 9 live slices, not 10.
+# Deliberately not `skip_slice`d — SDK_E2E_STRICT=1 converts a SKIP into a CI
+# failure, and leaving it listed would claim PUSH+ECHO coverage that no longer
+# exists. Restoring it means a Flutter host app under `fixtures/` (see
+# docs/plans/multi-sdk-pomodoro-fixture-matrix.md).
+#
+# The doc-signature guard that used to ride along here moved to the `flutter`
+# job in .github/workflows/ci.yml. It needs no Flutter SDK, and it is the check
+# that caught README.md and USAGE.md both documenting three
+# `NostosDatabase.supabase` parameters that never existed. Do not let it stop
+# running again.
+#
+# An explicit `sdk-e2e.sh flutter` must fail loudly rather than silently pass:
+# a no-op branch reporting success is the exact false-green this harness guards
+# against everywhere else.
 if want flutter; then
-  if command -v flutter >/dev/null 2>&1; then
-    # Runs from example/, not the plugin dir: nostos_flutter is a PLUGIN package
-    # and `-d macos` needs a runnable host app to build. (Between 9322d83 and
-    # its restore this pointed at the plugin dir and could only ever fail with
-    # "No macOS desktop project configured".)
-    #
-    # If this fails with a flutter_rust_bridge content-hash mismatch, the cached
-    # native lib is older than the generated bindings — run
-    # `cd sdk/nostos_flutter/example && flutter clean && flutter pub get` after
-    # any `flutter_rust_bridge_codegen generate`.
-    # The doc-signature check rides along here because it needs no Flutter SDK
-    # but has no other home that runs: `make ci` is Rust-only and `dart analyze`
-    # does not compile fenced markdown, which is how README.md and USAGE.md both
-    # documented `NostosDatabase.supabase(supabaseUrl:, supabaseAnonKey:)` — three
-    # parameters that never existed — until 2026-07-30.
-    run_slice flutter "python3 sdk/nostos_flutter/scripts/check-doc-signatures.py && cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
-  else
-    skip_slice flutter "(flutter not on PATH)"
-  fi
+  printf '%s\n' "${RED}FAIL${RESET} flutter — slice archived 2026-07-30; host app now at archive/sdk/nostos_flutter/example." >&2
+  printf '%s\n' "       Restore live coverage with a Flutter host app under fixtures/." >&2
+  exit 1
 fi
 
 # Swift — needs a BOOTED iPhone simulator (xcodebuild + simctl). Checking only

@@ -22,6 +22,23 @@
 //   write(table, op, pk, pj)  → NostosClient::write(table, op, pk, payload_json: Option<String>) -> Result<u64, NostosError>
 //   query(sql)                → NostosClient::query(sql: String) -> Result<String, NostosError>  (JSON rows)
 //   checkpoint()              → NostosClient::checkpoint() -> Result<u64, NostosError>
+//   watchChanges(table, cb)   → NostosClient::watch(table, sink: SnapshotSink)  (kotlin, UniFFI
+//                              `with_foreign` sync callback) / nostos_node::NostosClient::watch(table, on_snapshot)
+//                              (napi ThreadsafeFunction). Rust→JS PUSH: the native side retains `cb` and invokes
+//                              it on the JS thread with a full-snapshot JSON string for the INITIAL snapshot,
+//                              then again after every applied change (drains subscribe_changes() + re-queries
+//                              storage per tick). The RN analogue of both sibling seams is a Codegen-emitted
+//                              retained JS callback (JSI), invoked from the change pump via a JS-thread hop.
+//   unwatchChanges(table)     → tears the per-table push pump + releases the retained callback. This is the
+//                              `stop_watch(table)` follow-on the kotlin/node ports DEFERRED (their ceiling);
+//                              RN ships it from day 1 so the JS facade can unsubscribe cleanly.
+//   setToken(token)           → NostosClient::set_token(token: Option<String>) (ADR-0029 #3). Hot-swap the
+//                              bearer on the interior-mutable token cell — the reconnect loop reads it on
+//                              its NEXT attempt, so a live session picks up the new token with NO disconnect.
+//                              `null` = clear (anonymous). Callable before connect AND on a live session.
+//   signOut()                 → NostosClient::sign_out() (ADR-0029): abort run loop → await quiesce →
+//                              clear_local_state (rows + checkpoint + epoch + outbox + dead-letter) → drop
+//                              session → clear token. Idempotent; the "B must not see A's rows" wipe.
 //
 // Wave-B note: TurboModules are singletons instantiated by RN with a no-arg
 // constructor — there is no JS-visible constructor surface to pass (url, token,
@@ -95,6 +112,56 @@ export interface Spec extends TurboModule {
   query(sql: string): Promise<string>;
   /** Current durable LSN (the resume_lsn on reconnect). */
   checkpoint(): Promise<number>;
+  /**
+   * Subscribe to a stream of full-table snapshots for `table`. The native side
+   * retains `onSnapshot` and invokes it ON THE JS THREAD (the RN analogue of
+   * napi's `ThreadsafeFunction` in nostos_node and the `SnapshotSink` UniFFI
+   * callback in nostos_kotlin): once with the INITIAL snapshot immediately, then
+   * again after every applied change. Each invocation carries a JSON
+   * array-of-objects string — a FULL snapshot per tick (not a diff; self-healing
+   * on lag), the same shape `query()` returns.
+   *
+   * The returned Promise resolves AFTER the initial snapshot has been emitted
+   * to `onSnapshot`, so the caller knows the first frame has fired.
+   *
+   * Wave-B Codegen note: a `(rowsJson: string) => void` param is emitted as a
+   * retained JS callback the native impl invokes repeatedly from the change
+   * pump. NEVER call it from a background thread — marshal onto the JS thread
+   * (the module's owned-runtime → JS-thread hop), exactly as napi's
+   * `ThreadsafeFunction` schedules onto the libuv loop.
+   */
+  watchChanges(
+    table: string,
+    onSnapshot: (rowsJson: string) => void,
+  ): Promise<void>;
+  /**
+   * Tear down the per-table push pump started by `watchChanges(table)` and
+   * release the retained JS callback. After this resolves, `onSnapshot` will
+   * not be invoked again for `table`. Idempotent.
+   */
+  unwatchChanges(table: string): Promise<void>;
+  /**
+   * Hot-swap the auth bearer WITHOUT tearing down the live session
+   * (ADR-0029 #3). Maps to UniFFI `NostosClient::set_token(token: Option<String>)`
+   * in nostos-swift / nostos-kotlin: it swaps the interior-mutable token cell the
+   * reconnect loop reads on its NEXT attempt, so an already-running session
+   * picks up the new token without a forced disconnect. Pass `null` to clear
+   * (anonymous).
+   *
+   * Callable before `connect()` (stages the token for the first connect) AND on
+   * a live session. It does NOT force a reconnect or tear anything down — the
+   * same shape `nostos-client`'s `SyncClient::set_token` exposes.
+   */
+  setToken(token: string | null): Promise<void>;
+  /**
+   * Sign out (ADR-0029): abort the run loop, await quiescence, wipe local state
+   * (rows + checkpoint + epoch + outbox + dead-letter), drop the session, and
+   * clear the token. Maps to UniFFI `NostosClient::sign_out()`. The next
+   * principal connecting on the same device sees a clean store — the "B must
+   * not see A's rows, and A's unsynced writes must not be attributed to B"
+   * guarantee. Idempotent — a no-op if no session is live.
+   */
+  signOut(): Promise<void>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>("NativeNostos");

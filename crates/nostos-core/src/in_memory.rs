@@ -10,7 +10,7 @@
 //! The data model mirrors what `SqliteStorage` will persist: a row keyed by
 //! `(table, pk)` holding the opaque payload bytes, plus a single checkpoint LSN.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use nostos_domain::{Lsn, RowOp};
 
@@ -32,6 +32,11 @@ pub struct InMemoryStorage {
     /// to assign is `next_write_id` (monotonic, mirrors AUTOINCREMENT).
     outbox: BTreeMap<u64, PendingWrite>,
     next_write_id: u64,
+    /// Tables whose payload is an add-wins OR-set (ADR-0030): applies MERGE
+    /// element-wise by HLC instead of clobbering. Empty by default — the apply
+    /// path is unchanged for ordinary tables (the bench's `tasks` included), so
+    /// the measured fan-out path is unaffected.
+    or_set_tables: HashSet<String>,
 }
 
 impl InMemoryStorage {
@@ -39,6 +44,15 @@ impl InMemoryStorage {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Declare which tables hold add-wins OR-sets (ADR-0030). For those tables
+    /// `apply_batch` / `apply_local` merge element-wise by HLC; all others stay
+    /// last-writer-wins. Builder-style.
+    #[must_use]
+    pub fn with_or_set_tables(mut self, tables: HashSet<String>) -> Self {
+        self.or_set_tables = tables;
+        self
     }
 
     /// Read back a row's opaque payload (for test assertions).
@@ -107,10 +121,20 @@ impl Storage for InMemoryStorage {
                             .get(&(table.clone(), pk.clone()))
                             .is_none_or(|(_, prev)| *lsn >= *prev);
                     if admit {
-                        shadow.insert(
-                            (table.clone(), pk.clone()),
-                            (payload.as_ref().to_vec(), *lsn),
-                        );
+                        // OR-set tables merge element-wise by HLC (ADR-0030) so
+                        // concurrent adds to the same row converge instead of
+                        // clobbering; ordinary tables keep blind LWW upsert. A
+                        // malformed OR-set payload degrades to the incoming
+                        // bytes (LWW) via `merge_or_set_or_lww`.
+                        let bytes = if self.or_set_tables.contains(table.as_str()) {
+                            let existing: &[u8] = shadow
+                                .get(&(table.clone(), pk.clone()))
+                                .map_or(&[], |(p, _)| p.as_slice());
+                            nostos_domain::merge_or_set_or_lww(existing, payload.as_ref())
+                        } else {
+                            payload.as_ref().to_vec()
+                        };
+                        shadow.insert((table.clone(), pk.clone()), (bytes, *lsn));
                     }
                 }
                 RowOp::Delete { table, pk, .. } => {
@@ -156,6 +180,22 @@ impl Storage for InMemoryStorage {
         }
         Ok(())
     }
+
+    fn clear(&mut self) -> crate::Result<()> {
+        // ADR-0029: reset to fresh-client state for sign-out / principal switch.
+        // `rows.clear()` empties the data store; the checkpoint reset to ZERO is
+        // load-bearing — a stale checkpoint makes the next principal resume from
+        // the old LSN, skip the snapshot, and see an empty DB permanently
+        // (resume-without-snapshot unsoundness). InMemoryStorage does not persist
+        // epoch (the trait default is always 0), so there is no epoch field to
+        // reset. The outbox is cleared here too so a single call wipes the whole
+        // principal's footprint; Outbox::clear covers the outbox-only path.
+        self.rows.clear();
+        // ADR-0029: checkpoint → 0 is load-bearing (resume-without-snapshot guard).
+        self.checkpoint = Lsn::ZERO;
+        self.outbox.clear();
+        Ok(())
+    }
 }
 
 impl Outbox for InMemoryStorage {
@@ -193,27 +233,44 @@ impl Outbox for InMemoryStorage {
         // server-confirmed replication event. The echo's apply_batch reconciles.
         match write.op {
             WriteOp::Upsert => {
-                let payload = write
-                    .payload_json
-                    .as_deref()
-                    .unwrap_or("null")
-                    .as_bytes()
-                    .to_vec();
-                // Optimistic: stamp MAX so the local edit survives any in-flight
-                // server op on this pk until the echo reconciles (mirrors the
-                // unconditional re-stamp SqliteStorage's Piece-B loop does).
+                let incoming = write.payload_json.as_deref().unwrap_or("null").as_bytes();
+                // OR-set tables merge the optimistic edit element-wise by HLC
+                // (ADR-0030); ordinary tables clobber (blind upsert). Optimistic:
+                // stamp MAX so the local edit survives any in-flight server op on
+                // this pk until the echo reconciles.
+                let bytes = if self.or_set_tables.contains(write.table.as_str()) {
+                    let existing: &[u8] = self
+                        .rows
+                        .get(&(write.table.clone(), write.pk.clone()))
+                        .map_or(&[], |(p, _)| p.as_slice());
+                    nostos_domain::merge_or_set_or_lww(existing, incoming)
+                } else {
+                    incoming.to_vec()
+                };
                 self.rows
-                    .insert((write.table.clone(), write.pk.clone()), (payload, u64::MAX));
+                    .insert((write.table.clone(), write.pk.clone()), (bytes, u64::MAX));
             }
             WriteOp::Delete => {
                 self.rows.remove(&(write.table.clone(), write.pk.clone()));
             }
-            WriteOp::Patch => {
-                // Partial-column; the server PATCH path (P3) is source of truth.
-                // ponytail: instant-local patch needs a read-merge-write; defer
-                // until a client issues one (demo + Supabase use upsert/delete).
-            }
+            // Both no-ops (clippy-fused: identical empty bodies). Patch needs a
+            // read-merge-write the opaque store can't do (ponytail: defer until a
+            // client issues one — demo + Supabase use upsert/delete); Increment
+            // is server-authoritative (ADR-0030 Decision 1 — can't compute
+            // col+delta locally). Both reconcile via the server's replicated
+            // echo (apply_batch upserts the authoritative image).
+            WriteOp::Patch | WriteOp::Increment => {}
         }
+        Ok(())
+    }
+
+    fn clear(&mut self) -> crate::Result<()> {
+        // ponytail: 4b per-principal retention layers above this (ADR-0029
+        // §Decision-2, pending ratification) — today sign-out discards ALL
+        // pending writes. InMemoryStorage has no dead-letter state (the
+        // bump_attempts/mark_dead_letter defaults are no-ops here), so draining
+        // the BTreeMap is the complete wipe.
+        self.outbox.clear();
         Ok(())
     }
 }
@@ -551,5 +608,97 @@ mod tests {
             Some(b"snap" as &[u8]),
             "snapshot row applies unconditionally despite lower lsn"
         );
+    }
+
+    #[test]
+    fn clear_resets_to_fresh_client_state() {
+        // ADR-0029: sign-out wipe resets to a fresh-client image — no rows,
+        // checkpoint ZERO (load-bearing — a stale checkpoint makes the next
+        // principal resume past the snapshot and see an empty DB permanently),
+        // and a drained outbox. InMemoryStorage carries no epoch field (the
+        // trait default is always 0), so there is no epoch to reset here.
+        let mut s = InMemoryStorage::new();
+        s.apply_batch(
+            &[(ins("tasks", "1", b"alice"), 100)],
+            Lsn::new(100),
+            &empty_snap(),
+        )
+        .unwrap();
+        s.enqueue(PendingWrite {
+            table: "tasks".into(),
+            op: WriteOp::Upsert,
+            pk: "2".into(),
+            payload_json: Some(r#"{"title":"b"}"#.into()),
+        })
+        .unwrap();
+        assert_eq!(s.row_count(), 1);
+        assert_eq!(s.checkpoint().unwrap(), Lsn::new(100));
+        assert_eq!(s.outbox_len(), 1);
+
+        Storage::clear(&mut s).unwrap();
+
+        assert_eq!(s.row_count(), 0, "rows cleared");
+        assert_eq!(
+            s.checkpoint().unwrap(),
+            Lsn::ZERO,
+            "checkpoint reset to 0 — the resume-without-snapshot guard",
+        );
+        assert_eq!(s.outbox_len(), 0, "outbox cleared");
+    }
+
+    /// A store with one OR-set table ("tags"); all others ordinary.
+    fn or_set_store() -> InMemoryStorage {
+        let tables: HashSet<String> = ["tags".to_string()].into_iter().collect();
+        InMemoryStorage::new().with_or_set_tables(tables)
+    }
+
+    #[test]
+    fn or_set_table_merges_concurrent_adds() {
+        // Two server frames adding DIFFERENT elements to the same OR-set row
+        // must MERGE (both present), not clobber (ADR-0030). The second frame's
+        // LSN exceeds the first so it admits.
+        let mut s = or_set_store();
+        let x = br#"{"elements":[{"v":"x","h":{"wall_ms":10,"ctr":0}}]}"#;
+        let y = br#"{"elements":[{"v":"y","h":{"wall_ms":10,"ctr":1}}]}"#;
+        s.apply_batch(&[(ins("tags", "s1", x), 1)], Lsn::new(1), &empty_snap())
+            .unwrap();
+        s.apply_batch(&[(ins("tags", "s1", y), 2)], Lsn::new(2), &empty_snap())
+            .unwrap();
+        let mut present = nostos_domain::present_elements(s.payload("tags", "s1").unwrap()).unwrap();
+        present.sort();
+        assert_eq!(present, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn or_set_apply_local_merges_optimistic_add() {
+        // A server frame sets {x}; an optimistic local Upsert of {y} MERGES →
+        // {x,y} — the offline-add-meets-server-frame case that plain LWW would
+        // clobber (the whole reason the CRDT tier exists, ADR-0030).
+        let mut s = or_set_store();
+        let x = br#"{"elements":[{"v":"x","h":{"wall_ms":10,"ctr":0}}]}"#;
+        s.apply_batch(&[(ins("tags", "s1", x), 1)], Lsn::new(1), &empty_snap())
+            .unwrap();
+        s.apply_local(&PendingWrite {
+            table: "tags".into(),
+            op: WriteOp::Upsert,
+            pk: "s1".into(),
+            payload_json: Some(r#"{"elements":[{"v":"y","h":{"wall_ms":10,"ctr":1}}]}"#.into()),
+        })
+        .unwrap();
+        let mut present = nostos_domain::present_elements(s.payload("tags", "s1").unwrap()).unwrap();
+        present.sort();
+        assert_eq!(present, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn ordinary_table_still_clobbers_last_wins() {
+        // Sanity: a non-OR-set table does NOT merge — the second Upsert wins,
+        // i.e. the apply path is unchanged for ordinary tables (bench included).
+        let mut s = InMemoryStorage::new();
+        s.apply_batch(&[(ins("tasks", "1", b"v1"), 1)], Lsn::new(1), &empty_snap())
+            .unwrap();
+        s.apply_batch(&[(ins("tasks", "1", b"v2"), 2)], Lsn::new(2), &empty_snap())
+            .unwrap();
+        assert_eq!(s.payload("tasks", "1"), Some(b"v2" as &[u8]));
     }
 }

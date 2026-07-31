@@ -26,18 +26,19 @@
 //! crate's source, so the forbid does not interact with it.
 //!
 //! # ponytail: deferred surfaces (upgrade path)
-//! - **`subscribe` row-tick callback**: the run loop IS wired
-//!   (`NostosState::subscribe` spawns `client.run_once()` on the owned runtime),
-//!   so live replication works end-to-end — but received rows land in the
-//!   on-device SQLite store only; no `tauri::ipc::Channel` fans row-tick
-//!   events to the JS layer yet. Ceiling: JS callers must `query()` to observe
-//!   changes. Upgrade path: add a `Channel<NostosRowEvent>` sink threaded
-//!   through `subscribe`, same shape as the Flutter `rows_sink`.
+//! - **Reactive watch**: IMPLEMENTED — the `watch` command subscribes to
+//!   `SyncClient::subscribe_changes()` and pushes a fresh full-table snapshot
+//!   to the JS frontend over a `tauri::ipc::Channel<NostosSnapshot>` on every
+//!   change tick (remote apply OR local write) — the Tauri port of node's
+//!   `watch()` / Flutter's `rows_sink` (ADR-0024), NOT a poll. Floors: no
+//!   per-watch cancel handle (the pump self-terminates when JS drops the
+//!   channel — the unsubscribe path — and on session teardown); one table per
+//!   `NostosState`.
 //! - **`subscribe` where_sql / resume_lsn**: the `table` arg is accepted for
 //!   API parity; v1 asserts it matches the session's single table (one table
 //!   per `NostosState`, matching the sibling SDKs). Per-call predicate filters
 //!   + `resume_lsn` arrive with the multi-table lift.
-//! - **Permissions**: only the four default command permissions are listed in
+//! - **Permissions**: only the six default command permissions are listed in
 //!   `permissions/default.toml`. A shipped plugin would also publish scoped
 //!   permission sets per table.
 //! - **JS bindings / `.d.ts`**: a shipped plugin runs `tauri-plugin`'s JS
@@ -59,6 +60,7 @@ use nostos_core::{PendingWrite, WriteOp};
 use nostos_domain::Lsn;
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime, State};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex as AsyncMutex;
 
 /// Session-level reconnect backstop — mirrors `sdk/nostos_node`'s
@@ -99,6 +101,85 @@ struct Session {
     // `subscribe()`. `None` until subscribe() is called; aborted on
     // `abort_subscribe()` or session drop. Tied to `NostosState.rt`'s runtime.
     run_handle: Option<tokio::task::JoinHandle<()>>,
+    // `JoinHandle`s for the background `watch()` pumps spawned since the
+    // session opened (one per `watch()` call). Aborted on `abort_subscribe()`
+    // for deterministic teardown; each pump ALSO self-terminates when its Tauri
+    // channel closes (JS unsubscribe) or the client's change broadcast ends.
+    watch_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+// ---------------------------------------------------------------------------
+// Reactive watch facade (ADR-0024) — Tauri port of node's `watch()` / Flutter's
+// `rows_sink`. Pushes a fresh full-table snapshot to the JS frontend over a
+// `tauri::ipc::Channel` on every change tick (remote apply OR local write),
+// draining `SyncClient::subscribe_changes()`. NOT a poll.
+// ---------------------------------------------------------------------------
+
+/// One reactive-watch snapshot pushed to the JS frontend via a Tauri
+/// `ipc::Channel`. The FULL per-table row set, re-queried on every change tick
+/// (not a diff — self-healing on lag). `rows` is one JSON object per row (keyed
+/// by column name) — the SAME shape `query()` returns, so a JS caller reads
+/// each row identically; a `Vec` (not a JSON string) so Tauri serializes the
+/// channel event natively.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NostosSnapshot {
+    /// The session table this snapshot covers.
+    pub table: String,
+    /// One JSON object per row (`pk`, `payload`) read from `cairn_data`.
+    pub rows: Vec<serde_json::Value>,
+}
+
+/// Internal reactive-emitter seam (mirrors `sdk/nostos_node`'s `SnapshotEmitter`):
+/// keeps the pump / ordering logic drivable in pure-Rust host tests WITHOUT a
+/// live Tauri `ipc::Channel` (which needs a Tauri app env to construct). The
+/// production leaf is `ChannelEmitter`; the reactivity test uses a recording
+/// leaf. `emit` returns `false` when the consumer is gone (channel closed =
+/// JS unsubscribed) so the pump can self-terminate for clean teardown.
+trait SnapshotEmitter: Send + Sync {
+    /// Fire-and-forget snapshot delivery. Synchronous: the Tauri
+    /// `Channel::send` (production) and `mpsc::send` (test) are both
+    /// scheduling primitives, not async callbacks — mirroring node's
+    /// `SnapshotEmitter::emit`. Returns `false` iff the consumer is gone.
+    fn emit(&self, snapshot: NostosSnapshot) -> bool;
+}
+
+/// Tauri production emitter: wraps an `ipc::Channel<NostosSnapshot>` and forwards
+/// each snapshot by `send`. `Channel` is `Clone + Send + Sync`, so a tokio pump
+/// on the owned runtime can drive it from any worker. `send` errors when the
+/// frontend has dropped its end (the unsubscribe path); `emit` returns `false`
+/// then, which the pump treats as teardown — no orphan task re-querying forever.
+struct ChannelEmitter(tauri::ipc::Channel<NostosSnapshot>);
+
+impl SnapshotEmitter for ChannelEmitter {
+    fn emit(&self, snapshot: NostosSnapshot) -> bool {
+        self.0.send(snapshot).is_ok()
+    }
+}
+
+/// Snapshot the session table's rows directly from `cairn_data` (NOT a typed
+/// VIEW — mirrors `sdk/nostos_node::snapshot_json`): `cairn_data` exists on every
+/// store right after `open()`, so this works before any server schema ships. The
+/// query is `SELECT pk, payload FROM cairn_data WHERE table_name = '{table}'` —
+/// the same shape `query()` emits, minus the serialize-to-string step (the Tauri
+/// channel serializes `NostosSnapshot` natively).
+///
+/// # Errors
+/// `String` for a `ClientError` (outer) or `StorageError` (inner) from the
+/// storage round-trip — the same double-`map_err` shape `query()` uses.
+async fn snapshot_rows(
+    client: &SyncClient<SqliteStorage>,
+    table: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let sql = format!(
+        "SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC"
+    );
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = client
+        .with_storage(move |s| s.query(&sql))
+        .await
+        .map_err(|e: ClientError| e.to_string())? // outer: ClientError
+        .map_err(|e| e.to_string())?; // inner: StorageError (nested Result)
+    Ok(rows.into_iter().map(serde_json::Value::Object).collect())
 }
 
 impl NostosState {
@@ -148,6 +229,7 @@ impl NostosState {
             client,
             table: "tasks".to_owned(),
             run_handle: None,
+            watch_tasks: Vec::new(),
         });
         Ok(())
     }
@@ -201,17 +283,95 @@ impl NostosState {
         Ok(())
     }
 
-    /// Abort the background run loop spawned by `subscribe()`, if any. No-op if
-    /// `subscribe()` was never called or has already been aborted. The session
-    /// itself stays open — `query()` / `checkpoint()` keep working against the
-    /// on-device store; only live replication pauses.
+    /// Abort the background run loop spawned by `subscribe()`, if any, AND any
+    /// live `watch()` pumps. No-op if neither was started or both have already
+    /// been aborted/finished. The session itself stays open — `query()` /
+    /// `checkpoint()` keep working against the on-device store; only live
+    /// replication + reactive pushes pause. (Each watch pump also self-
+    /// terminates when its Tauri channel closes — the JS unsubscribe path.)
     pub async fn abort_subscribe(&self) {
         let mut guard = self.session.lock().await;
         if let Some(session) = guard.as_mut() {
             if let Some(handle) = session.run_handle.take() {
                 handle.abort();
             }
+            for handle in session.watch_tasks.drain(..) {
+                handle.abort();
+            }
         }
+    }
+
+    /// ADR-0029 sign-out: tear the session down so the next principal sees a
+    /// blank device. Order is load-bearing (the `clear_local_state` contract):
+    /// (1) abort the run loop + watch pumps, (2) AWAIT the handles — true
+    /// quiescence, not just the abort signal, so a frame already in flight when
+    /// `abort()` fired can't re-populate storage after the clear ("half a clear
+    /// is a cross-user leak"), (3) `clear_local_state()` wipes rows + outbox +
+    /// resets the checkpoint/epoch under one engine lock, (4) clear the token,
+    /// (5) drop the Session. The run loop's drop closes the WS socket. After
+    /// this the slot is `None`, so the next `connect()` builds a fresh client.
+    ///
+    /// `abort_subscribe()` is NOT reused here: it aborts but does not await, so
+    /// it cannot guarantee the quiescence sign-out requires.
+    ///
+    /// # Errors
+    /// `String` if the local-state wipe itself failed (disk error). A failed
+    /// wipe is surfaced, not swallowed — half a clear is a leak.
+    pub async fn sign_out(&self) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        let Some(session) = guard.take() else {
+            return Ok(()); // idempotent — nothing to sign out
+        };
+        // (1)+(2) Abort AND await the run loop + watch pumps for quiescence.
+        // `abort()` only signals cancellation; awaiting the handle guarantees
+        // the future is actually dropped before we clear, so no post-clear
+        // apply/flush can race the wipe. The awaited handle resolves
+        // `Err(JoinError { is_cancelled: true })` — discarded. The handles live
+        // on `self.rt`; awaiting them from the command-handler runtime is a
+        // cross-runtime await (registers a waker), not a block.
+        if let Some(handle) = session.run_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+        for handle in session.watch_tasks {
+            handle.abort();
+            let _ = handle.await;
+        }
+        // (3) Wipe local rows + outbox under one engine lock. Safe now: the run
+        // loop is quiesced, no apply/flush can re-populate after the clear.
+        session
+            .client
+            .clear_local_state()
+            .await
+            .map_err(|e: ClientError| e.to_string())?;
+        // (4) Clear the token. Defensive — the client drops at (5) with the
+        // session, but clearing here matches the signOut contract and guards a
+        // stray `Arc` clone from re-authing on a reconnect.
+        session.client.set_token(None);
+        // (5) `session` drops here; its handles are already drained and the
+        // session slot is already `None`.
+        Ok(())
+    }
+
+    /// ADR-0029: swap the auth token on the LIVE client without reconnecting.
+    /// A refresh self-heals within one backoff window — the next socket open
+    /// picks the new token up; storage, outbox, and `changes` subscribers all
+    /// survive. Thin wrapper over the sync `SyncClient::set_token`
+    /// (`client.rs:358`). Requires `connect()` to have run.
+    ///
+    /// # Errors
+    /// `String` if no session is active.
+    pub async fn set_token(&self, token: Option<String>) -> Result<(), String> {
+        let client = {
+            let guard = self.session.lock().await;
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| "set_token() called before connect()".to_string())?;
+            Arc::clone(&session.client)
+        };
+        // `set_token` is a sync RwLock swap — no `.await` on the call itself.
+        client.set_token(token);
+        Ok(())
     }
 
     /// Enqueue a durable write against the active session's table. Resolves
@@ -307,6 +467,115 @@ impl NostosState {
         let lsn: Lsn = client.checkpoint().await.map_err(|e| e.to_string())?;
         Ok(lsn.0)
     }
+
+    /// Reactive watch (ADR-0024): push the session table's full snapshot to the
+    /// JS frontend via `on_event` immediately, and again after every change
+    /// tick (remote apply OR local write). The Tauri port of node's `watch()` /
+    /// Flutter's `watch(table, rows_sink)` — a TRUE Rust→JS push over a Tauri
+    /// `ipc::Channel`, NOT a poll.
+    ///
+    /// `on_event` is a `Channel<NostosSnapshot>` Tauri constructs from the JS
+    /// caller; it is `Clone + Send + Sync`, so the tokio pump (on the owned
+    /// runtime) can `send` from any worker. The pump self-terminates when the
+    /// channel closes (JS drops its end = unsubscribe) — clean teardown without
+    /// an explicit stop — and `abort_subscribe()` aborts any live pump
+    /// deterministically.
+    ///
+    /// # Load-bearing ordering: subscribe BEFORE the first snapshot read
+    /// (nostos-client invariant
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`, same as
+    /// node/kotlin): the change broadcast is no-replay (`broadcast::channel(64)`),
+    /// so a receiver created AFTER a commit permanently misses it — the
+    /// "connected but lists render empty" regression. This port creates the
+    /// receiver FIRST, then reads the initial snapshot; a commit in the residual
+    /// gap just triggers a redundant re-snapshot (idempotent — full snapshot,
+    /// self-healing on lag).
+    ///
+    /// `table` MUST match the active session's table (v1: one table per
+    /// `NostosState`).
+    ///
+    /// # Errors
+    /// `String` if no session is active, the table mismatches, or the initial
+    /// snapshot query fails.
+    pub async fn watch(
+        &self,
+        table: String,
+        on_event: tauri::ipc::Channel<NostosSnapshot>,
+    ) -> Result<(), String> {
+        let emitter = Arc::new(ChannelEmitter(on_event)) as Arc<dyn SnapshotEmitter>;
+        self.watch_internal(table, emitter).await
+    }
+
+    /// Shared reactive-watch core — the Tauri `watch()` (channel emitter) and
+    /// the host reactivity test (recording emitter) both drive this, so the
+    /// pump / ordering logic is provable WITHOUT a Tauri app env (a `Channel`
+    /// can't be constructed in a plain unit test).
+    async fn watch_internal(
+        &self,
+        table: String,
+        emitter: Arc<dyn SnapshotEmitter>,
+    ) -> Result<(), String> {
+        let (client, table) = {
+            let guard = self.session.lock().await;
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| "watch() called before connect()".to_string())?;
+            if session.table != table {
+                return Err(format!(
+                    "watch() table {table:?} does not match active session table {:?} — v1 supports one table per NostosState",
+                    session.table
+                ));
+            }
+            (Arc::clone(&session.client), session.table.clone())
+        };
+
+        // (1) SUBSCRIBE FIRST — load-bearing (see `watch` doc + the nostos-client
+        // invariant). Must precede the initial snapshot read; this owned
+        // receiver is the only way to learn of a commit landing in the gap
+        // before the pump starts. `subscribe_changes` returns an OWNED receiver
+        // (no session borrow).
+        let mut changes = client.subscribe_changes();
+
+        // (2) Initial snapshot AFTER subscribing, emitted immediately.
+        let rows = snapshot_rows(&client, &table).await?;
+        emitter.emit(NostosSnapshot {
+            table: table.clone(),
+            rows,
+        });
+
+        // (3) Pump on the OWNED runtime (NOT the command-handler runtime): re-snapshot
+        // on EVERY change tick. Full snapshot per tick (not a diff — self-healing
+        // on lag). `Lagged` (receiver fell >64 ticks behind) is treated as a tick
+        // — a full snapshot resyncs. `Closed` (client dropped its senders) fails
+        // the `while let` and the pump exits. A `false` emit (channel closed =
+        // JS unsubscribed) also breaks → clean teardown without an explicit stop.
+        let pump_table = table;
+        let pump_emitter = Arc::clone(&emitter);
+        let rt = self
+            .rt
+            .as_ref()
+            .expect("runtime present until NostosState drops");
+        let handle = rt.spawn(async move {
+            while let Ok(_) | Err(RecvError::Lagged(_)) = changes.recv().await {
+                if let Ok(rows) = snapshot_rows(&client, &pump_table).await {
+                    if !pump_emitter.emit(NostosSnapshot {
+                        table: pump_table.clone(),
+                        rows,
+                    }) {
+                        break; // channel closed → unsubscribe teardown
+                    }
+                }
+                // snapshot read failure (transient): skip this tick, next retries.
+            }
+        });
+
+        // Track the pump for deterministic teardown on `abort_subscribe()`.
+        let mut guard = self.session.lock().await;
+        if let Some(session) = guard.as_mut() {
+            session.watch_tasks.push(handle);
+        }
+        Ok(())
+    }
 }
 
 impl Default for NostosState {
@@ -388,6 +657,37 @@ async fn checkpoint(state: State<'_, NostosState>) -> Result<u64, String> {
     state.checkpoint().await
 }
 
+/// Reactive watch: push the full per-table snapshot to `on_event` immediately,
+/// and again after every change tick (ADR-0024). `on_event` is a Tauri
+/// `ipc::Channel<NostosSnapshot>` the JS frontend constructs via
+/// `new Channel()`; the pump sends snapshots from a tokio worker on the owned
+/// runtime. Drop the channel (or call `nostos unsubscribe`) to stop the pump.
+#[tauri::command]
+async fn watch(
+    state: State<'_, NostosState>,
+    table: String,
+    on_event: tauri::ipc::Channel<NostosSnapshot>,
+) -> Result<(), String> {
+    state.watch(table, on_event).await
+}
+
+/// ADR-0029 sign-out: stop sync, close the socket, wipe local rows + outbox,
+/// and clear the token so the next principal sees a blank device. Idempotent.
+#[tauri::command]
+async fn sign_out(state: State<'_, NostosState>) -> Result<(), String> {
+    state.sign_out().await
+}
+
+/// ADR-0029: swap the auth token on the live client (a refresh self-heals
+/// within one backoff window). Requires `connect()` to have run.
+#[tauri::command]
+async fn set_token(
+    state: State<'_, NostosState>,
+    token: Option<String>,
+) -> Result<(), String> {
+    state.set_token(token).await
+}
+
 /// Build the `nostos` Tauri plugin. Generic over `R: Runtime` so a Tauri app
 /// using any runtime (the default `Wry`, or a custom one) can register it via
 /// `tauri::Builder::default().plugin(nostos_tauri::init())`.
@@ -403,6 +703,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             write,
             query,
             checkpoint,
+            watch,
+            set_token,
+            sign_out,
         ])
         .build()
 }
@@ -470,6 +773,170 @@ mod tests {
             err.contains("before connect"),
             "expected a before-connect error, got: {err}"
         );
+    }
+
+    /// ADR-0029 sign_out: a row written before sign_out is gone after AND the
+    /// session is torn down (a later `query()` is a "before connect" error).
+    /// Uses a temp FILE (not `:memory:`) so re-`connect()` reopens the SAME
+    /// store and the wipe is observable on disk — `:memory:` would hide it
+    /// behind a fresh DB on every open. Also pins idempotency (a second
+    /// sign_out with no session is `Ok`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sign_out_wipes_rows_and_drops_session() {
+        let db = std::env::temp_dir()
+            .join(format!("nostos-tauri-signout-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let path = db.to_str().expect("utf8 db path").to_owned();
+
+        let state = NostosState::new();
+        state
+            .connect("ws://localhost:0".into(), None, path.clone())
+            .await
+            .expect("connect");
+        state
+            .write(
+                "tasks".into(),
+                "upsert".into(),
+                "pk1".into(),
+                Some(r#"{"id":"pk1","title":"before-signout"}"#.into()),
+            )
+            .await
+            .expect("write");
+
+        // Sanity: the write landed in cairn_data (instant-local-apply, WS2).
+        let before = state
+            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .await
+            .expect("query before sign_out");
+        assert!(
+            before.contains("pk1"),
+            "write should land in cairn_data before sign_out, got: {before}"
+        );
+
+        // Sign out: abort + quiesce + clear + clear-token + drop session.
+        state.sign_out().await.expect("sign_out");
+
+        // (1) Session is gone — query() is now a "before connect" error.
+        let err = state
+            .query("SELECT 1 AS one".into())
+            .await
+            .expect_err("query after sign_out should error (no session)");
+        assert!(
+            err.contains("before connect"),
+            "expected before-connect error after sign_out, got: {err}"
+        );
+
+        // (2) The wipe persisted to disk — reopen the SAME file and the row is
+        // gone. This is the cross-user-leak guard from ADR-0029.
+        state
+            .connect("ws://localhost:0".into(), None, path.clone())
+            .await
+            .expect("reconnect");
+        let rows_json = state
+            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .await
+            .expect("query after reconnect");
+        let rows: serde_json::Value =
+            serde_json::from_str(&rows_json).expect("parse rows json");
+        assert!(
+            rows.as_array().is_some_and(|a| a.is_empty()),
+            "tasks table should be empty after sign_out, got: {rows_json}"
+        );
+
+        // Idempotent: a second sign_out is a no-op (Ok).
+        state.sign_out().await.expect("sign_out idempotent");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    // -------------------------------------------------------------------------
+    // Reactive watch (ADR-0024) — host reactivity proof, mirroring
+    // `sdk/nostos_node`'s `watch_emits_initial_snapshot_then_refires_on_local_write`.
+    // No Tauri app env (a `ipc::Channel` can't be built in a unit test), so the
+    // test drives `watch_internal` with a recording `SnapshotEmitter` leaf — the
+    // production leaf differs only in `Channel::send` vs `mpsc::send`.
+    // -------------------------------------------------------------------------
+
+    /// REACTIVITY PROOF (host, no Tauri env, no live server): `watch_internal()`
+    /// emits the initial snapshot, and a local `write()` — which applies a row
+    /// to `cairn_data` AND fires the change broadcast (nostos-client invariant
+    /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
+    /// `rows_applied == 1`) — causes the pump to emit a NEW snapshot, WITHOUT
+    /// the test polling a timer. The `mpsc` receiver blocks on the pump's emit
+    /// (an event wait), so this is reactive-by-callback, not reactive-by-poll.
+    ///
+    /// Also pins the subscribe-before-snapshot ordering: initial snapshot first
+    /// (empty), then the post-write snapshot (contains the row).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watch_emits_initial_snapshot_then_refires_on_local_write() {
+        use std::sync::mpsc;
+        use std::sync::Mutex as StdMutex;
+
+        struct RecordingEmitter(StdMutex<mpsc::Sender<NostosSnapshot>>);
+        impl SnapshotEmitter for RecordingEmitter {
+            fn emit(&self, snapshot: NostosSnapshot) -> bool {
+                self.0
+                    .lock()
+                    .expect("recorder lock")
+                    .send(snapshot)
+                    .is_ok()
+            }
+        }
+
+        let state = NostosState::new();
+        state
+            .connect("ws://localhost:0".into(), None, ":memory:".into())
+            .await
+            .expect("connect");
+
+        // watch_internal subscribes (broadcast receiver created BEFORE the
+        // initial snapshot read — the load-bearing invariant) and emits the
+        // initial snapshot before returning.
+        let (tx, rx) = mpsc::channel::<NostosSnapshot>();
+        let emitter = Arc::new(RecordingEmitter(StdMutex::new(tx))) as Arc<dyn SnapshotEmitter>;
+        state
+            .watch_internal("tasks".into(), Arc::clone(&emitter))
+            .await
+            .expect("watch");
+
+        // (1) Initial snapshot delivered — empty store → rows == []. Blocking
+        // event wait, 5s ceiling (no wall-clock polling).
+        let initial = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initial snapshot should arrive immediately");
+        assert!(
+            initial.rows.is_empty(),
+            "fresh store tasks snapshot should be empty, got: {:?}",
+            initial.rows
+        );
+        assert_eq!(initial.table, "tasks");
+
+        // (2) Local write applies a row to cairn_data AND fires the change tick.
+        // The pump (on the owned runtime) wakes, re-snapshots, emits AGAIN.
+        state
+            .write(
+                "tasks".into(),
+                "upsert".into(),
+                "pk1".into(),
+                Some(r#"{"id":"pk1","title":"reactive"}"#.into()),
+            )
+            .await
+            .expect("write");
+
+        // (3) The post-write snapshot arrives — the reactive proof.
+        let after = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("post-write snapshot should arrive");
+        assert!(
+            after
+                .rows
+                .iter()
+                .any(|r| r.get("pk").and_then(|v| v.as_str()) == Some("pk1")),
+            "post-write snapshot should contain pk1, got: {:?}",
+            after.rows
+        );
+
+        // Clean teardown: abort the session's background pumps.
+        state.abort_subscribe().await;
     }
 
     // -------------------------------------------------------------------------

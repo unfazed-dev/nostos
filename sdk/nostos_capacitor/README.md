@@ -19,7 +19,7 @@ webview. The plugin's single `web` implementation is the only implementation.
   ACKs per committed batch, and persists the resume LSN to localStorage so a
   reload resumes from where it left off.
 - Exposes the PowerSync-shaped API in the Capacitor plugin convention:
-  `connect`, `subscribe`, `write`, `query`, `checkpoint`, `rowCount`,
+  `connect`, `subscribe`, `write`, `query`, `watch`, `checkpoint`, `rowCount`,
   `close`, `configure`.
 
 This mirrors the wiring proven by
@@ -72,6 +72,28 @@ await Nostos.write({
 await Nostos.close();
 ```
 
+## Reactive `watch()`
+
+`watch()` pushes the app a fresh row-set whenever the table changes — initial
+snapshot first, then deltas — built on the change stream, not polling.
+
+```ts
+const sub = await Nostos.watch({ table: "tasks" }, ({ kind, rows }) => {
+  // kind === "initial" on the first emit, "delta" after each inbound commit.
+  render(rows);
+});
+// …later
+sub.unsubscribe(); // idempotent
+```
+
+**Ceiling (honest):** the `delta` path needs a JS-facing change-callback seam on
+the wasm `NostosSocket` (Rust `on_change`, landing as JS `onChange` or similar)
+that does not yet exist in the shipped `pkg-web` build — today the socket's only
+callbacks are its internal WS handlers. The web-SDK port has the seam in flight.
+Until it lands, `watch()` delivers the **initial snapshot only** — the same bar
+`@nostos-sync/web`'s own `watch()` sets. The delta hook probes the candidate seam names
+and activates with no API change the moment the seam ships. This is not polling.
+
 ## Storage (ceiling + upgrade path)
 
 Today the wasm engine holds applied rows in an in-memory KV — the same bar
@@ -107,8 +129,8 @@ npm install           # playwright + capacitor-core already hoisted by parent
 npx playwright test --config=playwright.config.cjs
 ```
 
-Success = the run prints `[cap-e2e] PUSH_OK` and `[cap-e2e] ECHO_OK` and
-exits 0. The spine binary must exist at
+Success = the run prints `[cap-e2e] PUSH_OK`, `[cap-e2e] ECHO_OK`, and
+`[cap-e2e] WATCH_OK` and exits 0. The spine binary must exist at
 `target/debug/examples/e2e_server` (build it with
 `cargo build -p nostos-infra --examples`).
 

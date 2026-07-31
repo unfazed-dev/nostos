@@ -2285,6 +2285,7 @@ dependencies = [
  "nostos-client",
  "nostos-core",
  "nostos-domain",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-plugin",

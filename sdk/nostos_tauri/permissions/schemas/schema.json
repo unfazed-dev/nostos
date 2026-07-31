@@ -331,6 +331,30 @@
           "markdownDescription": "Denies the query command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-token",
+          "markdownDescription": "Enables the set_token command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-token",
+          "markdownDescription": "Denies the set_token command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the sign_out command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-sign-out",
+          "markdownDescription": "Enables the sign_out command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the sign_out command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-sign-out",
+          "markdownDescription": "Denies the sign_out command without any pre-configured scope."
+        },
+        {
           "description": "Enables the subscribe command without any pre-configured scope.",
           "type": "string",
           "const": "allow-subscribe",
@@ -341,6 +365,18 @@
           "type": "string",
           "const": "deny-subscribe",
           "markdownDescription": "Denies the subscribe command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the watch command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-watch",
+          "markdownDescription": "Enables the watch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the watch command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-watch",
+          "markdownDescription": "Denies the watch command without any pre-configured scope."
         },
         {
           "description": "Enables the write command without any pre-configured scope.",
@@ -355,10 +391,10 @@
           "markdownDescription": "Denies the write command without any pre-configured scope."
         },
         {
-          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all five commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`",
+          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all eight commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all five commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`"
+          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all eight commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`"
         }
       ]
     }

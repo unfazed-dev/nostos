@@ -36,6 +36,7 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 use nostos_application::ports::SyncAuth;
+use nostos_application::ports::WriteBack;
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, Principal, ReplicationEvent};
 use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
@@ -1045,4 +1046,153 @@ async fn cross_tenant_patch_is_rejected_row_unchanged() {
         stored_title, "acme-owned",
         "the row's content must be UNCHANGED by the rejected patch"
     );
+}
+
+/// ADR-0030 Decision 1: `PgWriteBack::increment` emits
+/// `UPDATE ... SET col = col + $delta WHERE id = $pk`, so Postgres serializes
+/// concurrent increments — no client read-modify-write, no lost update. Direct
+/// adapter test (no server/replication machinery): seeds a row, applies two
+/// +1 deltas, asserts the serialized total; plus the idempotent-absent +
+/// payload-validation branches.
+#[tokio::test]
+async fn increment_serializes_concurrent_deltas_server_side() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    let sql = sql_client().await;
+    let _ = sql
+        .batch_execute(
+            "DROP TABLE IF EXISTS nostosincr; \
+             CREATE TABLE nostosincr (id text PRIMARY KEY, n bigint NOT NULL DEFAULT 0);",
+        )
+        .await;
+
+    let mut allowlist = HashSet::new();
+    allowlist.insert("nostosincr".to_string());
+    let wb = PgWriteBack::new(&pg_url(), allowlist);
+
+    // Seed n=0, then two +1 increments → Postgres serializes to n=2.
+    wb.upsert("nostosincr", "a", r#"{"n":0}"#, None)
+        .await
+        .expect("seed upsert");
+    wb.increment("nostosincr", "a", r#"{"field":"n","delta":1}"#, None)
+        .await
+        .expect("first increment");
+    wb.increment("nostosincr", "a", r#"{"field":"n","delta":1}"#, None)
+        .await
+        .expect("second increment");
+
+    let n: i64 = sql
+        .query_one("SELECT n FROM nostosincr WHERE id = 'a'", &[])
+        .await
+        .expect("seeded row exists")
+        .get(0);
+    assert_eq!(
+        n, 2,
+        "two +1 increments serialize to +2 (no lost update — the whole point)"
+    );
+
+    // Increment of an absent row is idempotent success (0 rows affected),
+    // mirroring patch-of-missing / delete-of-missing.
+    wb.increment("nostosincr", "ghost", r#"{"field":"n","delta":5}"#, None)
+        .await
+        .expect("increment of absent row is idempotent success");
+
+    // Payload validation: missing delta rejected; the pk column is not
+    // incrementable (would corrupt row identity).
+    assert!(
+        wb.increment("nostosincr", "a", r#"{"field":"n"}"#, None)
+            .await
+            .is_err(),
+        "missing delta must be InvalidPayload"
+    );
+    assert!(
+        wb.increment("nostosincr", "a", r#"{"field":"id","delta":1}"#, None)
+            .await
+            .is_err(),
+        "incrementing the pk column must be rejected"
+    );
+
+    let _ = sql.batch_execute("DROP TABLE nostosincr;").await;
+}
+
+/// ADR-0030 slice 3: `PgWriteBack` must MERGE (not clobber) when applying a
+/// flushed OR-set upsert to a configured table — else a client's add loses
+/// other clients' elements server-side. Direct adapter test (no replication):
+/// two clients each add a distinct element to the same shared row; assert both
+/// survive the second write (a clobber would leave only the second).
+#[tokio::test]
+async fn or_set_writeback_merges_concurrent_client_adds_server_side() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    let sql = sql_client().await;
+    let _ = sql
+        .batch_execute(
+            "DROP TABLE IF EXISTS nostosorset; \
+             CREATE TABLE nostosorset (id text PRIMARY KEY, members jsonb);",
+        )
+        .await;
+
+    let mut allowlist = HashSet::new();
+    allowlist.insert("nostosorset".to_string());
+    let mut or_set_columns = std::collections::HashMap::new();
+    or_set_columns.insert("nostosorset".to_string(), "members".to_string());
+    let wb = PgWriteBack::new(&pg_url(), allowlist).with_or_set_columns(or_set_columns);
+
+    // Two clients each add a distinct element to the shared community row.
+    let alice = nostos_domain::OrSetPayload {
+        elements: vec![nostos_domain::OrSetElement {
+            v: "alice".to_string(),
+            h: nostos_domain::Hlc::mint(None, 1),
+            d: None,
+        }],
+    };
+    let bob = nostos_domain::OrSetPayload {
+        elements: vec![nostos_domain::OrSetElement {
+            v: "bob".to_string(),
+            h: nostos_domain::Hlc::mint(None, 2),
+            d: None,
+        }],
+    };
+    wb.upsert(
+        "nostosorset",
+        "community-1",
+        &serde_json::to_string(&alice).expect("serialize alice"),
+        None,
+    )
+    .await
+    .expect("alice add");
+    wb.upsert(
+        "nostosorset",
+        "community-1",
+        &serde_json::to_string(&bob).expect("serialize bob"),
+        None,
+    )
+    .await
+    .expect("bob add");
+
+    // A merge converges to {alice, bob}; a clobber would leave only {bob}.
+    let id = "community-1".to_string();
+    let row = sql
+        .query_one("SELECT members::text FROM nostosorset WHERE id = $1", &[&id])
+        .await
+        .expect("community row exists after both adds");
+    let members_text: String = row
+        .get::<_, Option<String>>(0)
+        .expect("members column populated");
+    let present =
+        nostos_domain::present_elements(members_text.as_bytes()).expect("parse merged element set");
+    assert!(
+        present.contains(&"alice".to_string()),
+        "alice was clobbered by bob's write: {present:?}"
+    );
+    assert!(
+        present.contains(&"bob".to_string()),
+        "bob missing after his own write: {present:?}"
+    );
+
+    let _ = sql.batch_execute("DROP TABLE nostosorset;").await;
 }

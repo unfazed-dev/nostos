@@ -9,6 +9,7 @@ export type {
   NostosClientConfig,
   Row,
   Subscription,
+  WatchSubscription,
   WriteOp,
 } from "./NostosClient";
 export type { Spec as NativeNostosSpec } from "./NativeNostos";

@@ -294,6 +294,12 @@ where
     /// semantics) — a write racing ahead of `run_once`'s own startup flush is
     /// never lost, just picked up by whichever side gets there first.
     write_notify: Notify,
+    /// Client HLC state for optimistic OR-set edits (ADR-0030 Decision 4,
+    /// relaxed): each `or_set_add` / `or_set_remove` mints the next HLC here so a
+    /// local edit is comparable to remote elements on merge. `None` until the
+    /// first mint. Mutex (not atomic) — mints are rare (user edits), and the
+    /// read-modify-write needs the previous value.
+    hlc_state: std::sync::Mutex<Option<nostos_domain::Hlc>>,
 }
 
 impl<S> SyncClient<S>
@@ -330,6 +336,7 @@ where
             changes,
             write_notify: Notify::new(),
             write_status,
+            hlc_state: std::sync::Mutex::new(None),
         }
     }
 
@@ -477,6 +484,77 @@ where
         Ok(id)
     }
 
+    /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030).
+    /// Mints a client HLC for the add, enqueues a merge-upsert, and applies
+    /// optimistically — the element renders locally immediately and converges
+    /// with concurrent remote adds on the server's echo (no clobber). Requires
+    /// the storage to tag `table` as an OR-set ([`SqliteStorage::with_or_set_tables`]
+    /// / [`nostos_core::InMemoryStorage::with_or_set_tables`]).
+    pub async fn or_set_add(
+        &self,
+        table: &str,
+        pk: &str,
+        element: &str,
+    ) -> Result<u64, ClientError> {
+        self.or_set_op(table, pk, element, false).await
+    }
+
+    /// Remove `element` from the OR-set — a tombstone at a fresh HLC. Add-wins:
+    /// a concurrent or later re-add (a higher HLC) re-activates the element.
+    pub async fn or_set_remove(
+        &self,
+        table: &str,
+        pk: &str,
+        element: &str,
+    ) -> Result<u64, ClientError> {
+        self.or_set_op(table, pk, element, true).await
+    }
+
+    /// Shared add/remove builder: mint one client HLC, wrap the single element
+    /// in an [`nostos_domain::OrSetPayload`], and enqueue it as a merge-upsert.
+    /// The optimistic apply (`write` → `apply_local`) merges element-wise by HLC.
+    async fn or_set_op(
+        &self,
+        table: &str,
+        pk: &str,
+        element: &str,
+        remove: bool,
+    ) -> Result<u64, ClientError> {
+        let h = self.mint_hlc();
+        let element = nostos_domain::OrSetElement {
+            v: element.to_string(),
+            // A remove carries no add (`h = ZERO`); its tombstone `d` is the
+            // minted HLC. The merge takes the per-element max, so a real add's
+            // HLC is never reduced and add-wins holds.
+            h: if remove { nostos_domain::Hlc::ZERO } else { h },
+            d: if remove { Some(h) } else { None },
+        };
+        let payload = serde_json::to_string(&nostos_domain::OrSetPayload {
+            elements: vec![element],
+        })
+        .expect("OrSetPayload serializes infallibly");
+        self.write(nostos_core::PendingWrite {
+            table: table.to_string(),
+            op: nostos_core::WriteOp::Upsert,
+            pk: pk.to_string(),
+            payload_json: Some(payload),
+        })
+        .await
+    }
+
+    /// Mint the next client HLC, advancing this client's monotone HLC state
+    /// (ADR-0030 Decision 4). Wall time from the system clock; on clock error
+    /// falls back to 0 (the logical counter still preserves monotonicity).
+    fn mint_hlc(&self) -> nostos_domain::Hlc {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0u64, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let mut state = self.hlc_state.lock().expect("hlc_state lock poisoned");
+        let h = nostos_domain::Hlc::mint(*state, now_ms);
+        *state = Some(h);
+        h
+    }
+
     /// Snapshot the durable outbox (oldest first). Used by the flush loop in
     /// [`Self::run_once`] to send pending writes after a subscribe-ack.
     async fn pending_writes(&self) -> Result<Vec<(u64, PendingWrite)>, ClientError> {
@@ -518,6 +596,27 @@ where
         })
         .await
         .map_err(|e| ClientError::Join(e.to_string()))
+    }
+
+    /// ADR-0029 D1: wipe local rows AND the outbox — the sign-out local-state
+    /// wipe. The SDK binding's `signOut()` must abort its run loop FIRST
+    /// (quiescence), then call this: clearing under a live apply/flush loop
+    /// races (a post-clear frame re-populates storage; a post-clear flush
+    /// re-queues the outbox). Half a clear is a cross-user leak, so both
+    /// [`nostos_core::Storage::clear`] AND [`nostos_core::Outbox::clear`] run
+    /// under one engine lock. Idempotent.
+    pub async fn clear_local_state(&self) -> Result<(), ClientError> {
+        let engine = Arc::clone(&self.engine);
+        tokio::task::spawn_blocking(move || -> nostos_core::Result<()> {
+            let mut engine = engine.blocking_lock();
+            let s = engine.storage_mut();
+            <S as nostos_core::Storage>::clear(s)?;
+            <S as nostos_core::Outbox>::clear(s)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ClientError::Join(e.to_string()))?
+        .map_err(ClientError::Storage)
     }
 
     /// Mark an outbox write done (the server ack'd it with `WriteResult{ok:true}`).
@@ -1461,6 +1560,102 @@ mod tests {
             "write() must broadcast a change tick so the optimistic row is visible offline",
         );
         assert_eq!(outcome.rows_applied, 1);
+    }
+
+    #[tokio::test]
+    async fn clear_local_state_wipes_rows_and_outbox() {
+        // ADR-0029 D1: the sign-out wipe at the SyncClient seam. The SDK
+        // binding's `signOut()` aborts its run loop first (quiescence), then
+        // calls this. The wipe semantics are unit-tested at the storage layer
+        // (sqlite.rs `clear_*`); this proves the seam invokes BOTH clears.
+        let c = SyncClient::new(
+            "ws://localhost:9999/sync",
+            nostos_core::InMemoryStorage::new(),
+            SyncClientConfig::default(),
+        );
+        c.write(nostos_core::PendingWrite {
+            table: "tasks".into(),
+            op: nostos_core::WriteOp::Upsert,
+            pk: "t1".into(),
+            payload_json: Some(r#"{"id":"t1","title":"seed"}"#.into()),
+        })
+        .await
+        .unwrap();
+
+        // Pre: the optimistic write applied a row AND queued in the outbox.
+        assert_eq!(
+            c.with_storage(nostos_core::InMemoryStorage::row_count)
+                .await
+                .unwrap(),
+            1,
+            "seed row applied"
+        );
+        assert_eq!(
+            c.with_storage(|s| s.pending().map_or(0, |p| p.len()))
+                .await
+                .unwrap(),
+            1,
+            "seed write queued in outbox"
+        );
+
+        c.clear_local_state().await.unwrap();
+
+        // Post: both wiped — half a clear is a cross-user leak (ADR-0029).
+        assert_eq!(
+            c.with_storage(nostos_core::InMemoryStorage::row_count)
+                .await
+                .unwrap(),
+            0,
+            "clear_local_state wiped cairn_data"
+        );
+        assert_eq!(
+            c.with_storage(|s| s.pending().map_or(0, |p| p.len()))
+                .await
+                .unwrap(),
+            0,
+            "clear_local_state drained the outbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn or_set_add_merges_concurrent_adds_optimistically() {
+        // ADR-0030 piece 2 slice 4: or_set_add mints a client HLC + enqueues a
+        // merge-upsert; two adds of DIFFERENT elements to the same row MERGE
+        // optimistically (both present) instead of clobbering — the offline-first
+        // OR-set convergence that plain LWW can't do. Then a remove tombstones
+        // one element (add-wins: the later remove HLC beats the earlier add).
+        let storage = nostos_core::InMemoryStorage::new()
+            .with_or_set_tables(["tags".to_string()].into_iter().collect::<HashSet<_>>());
+        let c = SyncClient::new(
+            "ws://localhost:9999/sync",
+            storage,
+            SyncClientConfig::default(),
+        );
+        c.or_set_add("tags", "s1", "x").await.unwrap();
+        c.or_set_add("tags", "s1", "y").await.unwrap();
+
+        let mut present = c
+            .with_storage(|s| {
+                nostos_domain::present_elements(s.payload("tags", "s1").unwrap_or(&[])).unwrap()
+            })
+            .await
+            .unwrap();
+        present.sort();
+        assert_eq!(present, vec!["x".to_string(), "y".to_string()]);
+
+        // Remove x (mints a later HLC than both adds) → x tombstoned, y survives.
+        c.or_set_remove("tags", "s1", "x").await.unwrap();
+        let after = c
+            .with_storage(|s| {
+                nostos_domain::present_elements(s.payload("tags", "s1").unwrap_or(&[])).unwrap()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            after,
+            vec!["y".to_string()],
+            "remove tombstones x; y survives"
+        );
     }
 
     // Regression for the "connected but lists render empty" bug. The FFI

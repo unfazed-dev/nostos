@@ -28,9 +28,13 @@ import type {
   NostosConnectResult,
   NostosPlugin,
   NostosRow,
+  NostosWatchSnapshot,
+  NostosWatchSubscription,
   ConfigureOptions,
   ConnectOptions,
   QueryOptions,
+  SetTokenOptions,
+  WatchOptions,
   WriteOptions,
 } from "./definitions";
 
@@ -72,6 +76,17 @@ interface NostosSocketInstance {
     clientWriteId: string,
   ): void;
   close(): void;
+  /**
+   * ADR-0029 D1: wipe the engine's in-memory rows + outbox. Call before
+   * close() on sign-out so the next principal sees an empty database.
+   */
+  clearLocalState(): void;
+  // The wasm NostosSocket is gaining a JS-facing change-callback seam — a
+  // no-arg "tick" the host re-reads `rowsFor` inside. The web-SDK port is
+  // landing it as Rust `NostosSocket::on_change` (likely JS `onChange`); the
+  // final JS name is not yet finalized. `attachSnapshotBridge` probes an
+  // ordered candidate set so the delta path activates with no code change
+  // here once the seam ships. See the ponytail on `NostosPlugin.watch`.
 }
 
 /**
@@ -86,8 +101,28 @@ interface NostosSocketInstance {
  * upgrade path — see README).
  */
 export class NostosWeb extends WebPlugin implements NostosPlugin {
-  /** The active socket, set by connect, cleared by close. */
+  /** The active socket, set by connect, cleared by close/signOut. */
   private sock: NostosSocketInstance | null = null;
+
+  /**
+   * The auth token for the next connect(). Set by connect()/setToken(),
+   * cleared by signOut(). The wasm NostosSocket binds the token at connect (a
+   * browser cannot re-handshake an open WebSocket), so a setToken() swap takes
+   * effect on the NEXT connect() — same shape as SyncClient::set_token.
+   */
+  private token: string | null = null;
+
+  /**
+   * Per-table reactive listeners, fanned out from the socket's single change
+   * callback (when present). Each watch() call adds a listener here.
+   */
+  private watchers = new Map<
+    string,
+    Set<(snapshot: NostosWatchSnapshot) => void>
+  >();
+
+  /** True once the socket-level onSnapshot bridge has been attached. */
+  private snapshotBridgeAttached = false;
 
   /** Resolves to the wasm NostosSocket ctor once init completes. */
   private wasmPromise: Promise<NostosSocketCtor> | null = null;
@@ -114,14 +149,21 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
       throw new Error("Nostos.connect: url is required");
     }
     const NostosSocket = await this.loadWasm();
-    // The wasm NostosSocket.connect appends ?token= on the URL itself (browsers
-    // can't set headers on a WS handshake). We pass the raw URL.
+    // A setToken() before connect() supplies the token for this handshake; an
+    // explicit options.token wins. The wasm NostosSocket binds the token at
+    // connect (browsers can't set headers on a WS handshake and can't
+    // re-handshake an open one), so a later setToken() applies on the NEXT
+    // connect — same shape as SyncClient::set_token.
+    const token = options.token ?? this.token;
+    this.token = token ?? null;
     this.sock = await NostosSocket.connect(
       options.url,
-      options.token ?? null,
+      token ?? null,
       options.table ?? "tasks",
       options.whereSql ?? null,
     );
+    // New socket: the change-callback bridge must (re)attach on next watch().
+    this.snapshotBridgeAttached = false;
     return {
       rowCount: this.sock.rowCount,
       checkpoint: this.sock.checkpoint,
@@ -180,6 +222,129 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
   }
 
   /** @inheritDoc */
+  async watch(
+    options: WatchOptions,
+    listener: (snapshot: NostosWatchSnapshot) => void,
+  ): Promise<NostosWatchSubscription> {
+    if (!options || !options.table) {
+      throw new Error("Nostos.watch: table is required");
+    }
+    if (typeof listener !== "function") {
+      throw new Error("Nostos.watch: listener is required");
+    }
+    if (!this.sock) {
+      throw new Error("Nostos.watch: connect() not called");
+    }
+    const table = options.table;
+    let listeners = this.watchers.get(table);
+    if (!listeners) {
+      listeners = new Set();
+      this.watchers.set(table, listeners);
+    }
+    listeners.add(listener);
+
+    // Attach the socket-level change bridge once, if the wasm seam is present.
+    this.attachSnapshotBridge();
+
+    // Initial snapshot: the engine's current rows for the table. Fired before
+    // the subscription resolves so the caller's first paint is the live state.
+    this.deliver(listener, "initial", table);
+
+    let unsubscribed = false;
+    return {
+      unsubscribe: (): void => {
+        if (unsubscribed) return;
+        unsubscribed = true;
+        const set = this.watchers.get(table);
+        if (!set) return;
+        set.delete(listener);
+        if (set.size === 0) {
+          this.watchers.delete(table);
+        }
+      },
+    };
+  }
+
+  /**
+   * Read the engine's current rows for `table` as the public {@link NostosRow}
+   * shape. Returns `[]` if the socket is gone (e.g. after close()).
+   */
+  private snapshotRows(table: string): NostosRow[] {
+    const rows = this.sock?.rowsFor(table) ?? [];
+    return rows.map((r) => ({ pk: r.pk, payload: r.payload }));
+  }
+
+  /**
+   * Deliver a snapshot to a single listener, isolating a thrown listener from
+   * the subscription and sibling listeners.
+   */
+  private deliver(
+    listener: (snapshot: NostosWatchSnapshot) => void,
+    kind: "initial" | "delta",
+    table: string,
+  ): void {
+    try {
+      listener({ kind, table, rows: this.snapshotRows(table) });
+    } catch {
+      // A listener throw must not break the subscription or other listeners.
+    }
+  }
+
+  /**
+   * Candidate JS-facing names of the wasm NostosSocket change-callback seam.
+   * The web-SDK port is landing this as Rust `NostosSocket::on_change` (a no-arg
+   * `Closure<dyn FnMut()>` "tick" → likely JS `onChange`). The final exposed
+   * name is not yet finalized, so we probe an ordered set and the delta path
+   * lights up regardless of which name ships. Each candidate is expected to
+   * register a no-arg callback (the host then re-reads `rowsFor`), matching
+   * port-web's `FnMut()` contract.
+   */
+  private static readonly SNAPSHOT_SEAM_NAMES = [
+    "onChange",
+    "setOnChange",
+    "setOnSnapshot",
+    "on_change",
+  ] as const;
+
+  /**
+   * Register a single change-callback on the wasm NostosSocket, if it exposes a
+   * change-tick seam (probed across {@link SNAPSHOT_SEAM_NAMES}). On each
+   * commit, fan out a per-table `delta` snapshot to every registered listener.
+   * Idempotent and reconnect-safe.
+   *
+   * ponytail: the seam is absent on today's pkg-web build (see NostosPlugin.watch
+   * — port-web has it in flight as `on_change`); until it lands AND pkg-web is
+   * rebuilt, this is a no-op and watch() delivers the initial snapshot only.
+   * NOT polling — the fan-out fires only when the socket invokes the callback,
+   * never on a timer.
+   */
+  private attachSnapshotBridge(): void {
+    if (this.snapshotBridgeAttached || !this.sock) return;
+    const sock = this.sock as unknown as Record<string, unknown>;
+    const seamName = NostosWeb.SNAPSHOT_SEAM_NAMES.find(
+      (n) => typeof sock[n] === "function",
+    );
+    if (!seamName) {
+      // Seam not present on this wasm build — delta path stays dormant.
+      return;
+    }
+    this.snapshotBridgeAttached = true;
+    const register = sock[seamName] as (cb: () => void) => void;
+    try {
+      register((): void => {
+        for (const [table, listeners] of this.watchers) {
+          for (const listener of listeners) {
+            this.deliver(listener, "delta", table);
+          }
+        }
+      });
+    } catch {
+      // If registering throws on this build, fall back to initial-snapshot-only.
+      this.snapshotBridgeAttached = false;
+    }
+  }
+
+  /** @inheritDoc */
   async checkpoint(): Promise<{ checkpoint: number }> {
     if (!this.sock) {
       throw new Error("Nostos.checkpoint: connect() not called");
@@ -199,6 +364,10 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
   async close(): Promise<void> {
     const s = this.sock;
     this.sock = null;
+    // Drop all reactive listeners and require the bridge to reattach on a
+    // future connect(); the socket's change callback dies with the socket.
+    this.watchers.clear();
+    this.snapshotBridgeAttached = false;
     if (s) {
       try {
         s.close();
@@ -207,6 +376,39 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
       }
     }
   }
+
+  /** @inheritDoc */
+  async setToken(options: SetTokenOptions): Promise<void> {
+    this.token = options?.token ?? null;
+  }
+
+  /** @inheritDoc */
+  async signOut(): Promise<void> {
+    // Order matters (ADR-0029): wipe the engine's rows + outbox WHILE the
+    // socket is still live (clearLocalState drives the engine the socket
+    // owns), then close the socket, then drop reactive listeners and clear the
+    // stored token. After this the plugin holds none of the prior principal's
+    // state — the next connect() cold-starts into an empty DB (no rows, no
+    // checkpoint, no pending writes, no token). Idempotent.
+    const s = this.sock;
+    this.sock = null;
+    this.watchers.clear();
+    this.snapshotBridgeAttached = false;
+    if (s) {
+      try {
+        s.clearLocalState();
+      } catch {
+        // Engine already gone — close() below still ends the session.
+      }
+      try {
+        s.close();
+      } catch {
+        // Already closed — fine.
+      }
+    }
+    this.token = null;
+  }
+
 
   /**
    * Dynamically import the wasm-pack `--target web` glue and instantiate the

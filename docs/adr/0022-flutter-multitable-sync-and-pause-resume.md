@@ -110,7 +110,8 @@ is clash-free at every layer.
 
 ### Dashboard against the ratified (shipped) API
 
-The Provider Dashboard (`sdk/nostos_flutter/example`) is built against the
+The Provider Dashboard (`archive/sdk/nostos_flutter/example` — archived
+2026-07-30, reference only) is built against the
 **shipped** surface — `NostosDatabase.connect` → `subscribeTables` →
 `watchMapped<T>('SELECT * FROM <table>', fromRow)` → `write` →
 `disconnect`/`resume`. The plan's D5 names belong to the unratified
@@ -176,4 +177,5 @@ the call sites, not a rebuild.
   cancellation-safe `run_once`),
 - `sdk/nostos_flutter/rust/src/api/nostos.rs` (`disconnect`/`resume`, stashed
   config, `Option<JoinHandle>`),
-- `sdk/nostos_flutter/example/` (Provider Dashboard).
+- `archive/sdk/nostos_flutter/example/` (Provider Dashboard — archived 2026-07-30,
+  reference only; see `archive/README.md`).

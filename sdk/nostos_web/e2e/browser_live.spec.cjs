@@ -1,23 +1,26 @@
 // Playwright headless-browser E2E for @nostos-sync/web against the SDK live-E2E spine.
 //
-// Proves the SAME two-direction round-trip the Rust reference template
-// (`crates/nostos-client/tests/e2e_live_replication.rs`) proves, driven through
-// the browser's real `WebSocket` via the wasm `NostosSocket` (the E1 transport
-// in `nostos-ffi-wasm`):
+// WS1: the live path (NostosSocket + apply engine + InMemoryStorage) runs INSIDE
+// a Web Worker; the page (app.html) is a pure postMessage proxy that imports NO
+// wasm. This spec drives the proxy and proves the two-direction round-trip plus
+// the new ASYNC write contract:
 //
-//   1. PUSH: `NostosSocket.connect()` opens the WS + subscribes; Node-side
-//      `POST /push` injects a `tasks` row server-side; the spine fans it out
-//      over the real sync handler → the WASM onmessage pump decodes + applies
-//      it → `sock.rowsFor("tasks")` returns the row → `[web-e2e] PUSH_OK`.
-//   2. ECHO: `sock.write("tasks","upsert","web-echo",...)` sends a write frame;
-//      the spine's echo `WriteBack` re-emits it through the fan-out → the
-//      writer receives its own write back on the same socket → applies →
-//      `rowsFor` returns it → `[web-e2e] ECHO_OK`.
+//   1. PUSH: `connect` over postMessage opens the WS (in-Worker) + subscribes;
+//      Node-side `POST /push` injects a `tasks` row server-side; the spine fans
+//      it out → the in-Worker onmessage pump applies it → `rowsFor("tasks")`
+//      (round-tripped through the Worker) returns the row → `[web-e2e] PUSH_OK`.
+//   2. WRITE (async): `write` posts to the Worker; NostosSocket.write captures it
+//      via the Outbox (enqueue + apply_local) and ships it when OPEN — it does
+//      NOT throw when closed. The Worker emits a `writeResult{client_write_id,
+//      ok:true}` push → `[web-e2e] WRITE_OK`. (Previously the spec asserted the
+//      synchronous throw; that contract is gone — reviewer note #1.)
+//   3. ECHO: the spine's WriteBack re-emits the write through the fan-out → the
+//      in-Worker pump applies it → `rowsFor` returns it → `[web-e2e] ECHO_OK`.
 //
-// Setup: spawn the spine binary, discover its port via `NOSTOS_E2E_PORT`, spawn
-// a tiny static HTTP server that serves `sdk/nostos_web/` with `/pkg-web/*`
-// mapped to `crates/nostos-ffi-wasm/pkg-web/`, then launch headless chromium on
-// `app.html`. The HTTP server + spine are torn down in `finally`.
+// Setup: spawn the spine binary (nostos-infra `e2e_server` example, which prints
+// `NOSTOS_E2E_PORT=` + `NOSTOS_E2E_READY`), spawn a static HTTP server that serves
+// `sdk/nostos_web/*` with `/pkg-web/*` mapped to the wasm artifact, then launch
+// headless chromium on `app.html`. Both are torn down in `finally`.
 
 "use strict";
 
@@ -40,8 +43,8 @@ const WEB_SDK = path.join(REPO_ROOT, "sdk", "nostos_web");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".mjs": "application/javascript; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".wasm": "application/wasm",
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
@@ -161,7 +164,7 @@ async function httpPush(port, bodyJson) {
   return resp.text();
 }
 
-test("web live-replication round-trip against spine (PUSH + ECHO)", async ({
+test("web live-replication round-trip via Worker (PUSH + async write + ECHO)", async ({
   page,
 }) => {
   test.setTimeout(60000);
@@ -179,35 +182,35 @@ test("web live-replication round-trip against spine (PUSH + ECHO)", async ({
   console.log("[web-e2e] spine on port", spine.port, "; static on", staticServer.port);
 
   try {
-    await page.goto(
-      `http://127.0.0.1:${staticServer.port}/e2e/app.html`,
-      { waitUntil: "domcontentloaded" },
-    );
+    await page.goto(`http://127.0.0.1:${staticServer.port}/e2e/app.html`, {
+      waitUntil: "domcontentloaded",
+    });
 
-    // Wait for the WASM to init (the page logs WASM_READY).
+    // The proxy is up, then the Worker boots the wasm.
+    await expect
+      .poll(() => logs.some((l) => l === "[web-e2e] PROXY_READY"), {
+        timeout: 10000,
+        message: "PROXY_READY from app.html",
+      })
+      .toBe(true);
     await expect
       .poll(() => logs.some((l) => l === "[web-e2e] WASM_READY"), {
         timeout: 20000,
-        message: "WASM_READY from app.html",
+        message: "WASM_READY from the Worker",
       })
-      .toBeTruthy();
+      .toBe(true);
 
-    // Connect + subscribe. Store the socket on window so later evaluate calls
-    // can reach it.
+    // Connect + subscribe through the Worker (the WS + engine live there now).
     await page.evaluate(async (url) => {
-      window.__sock = await window.NostosSocket.connect(url, null, "tasks", null);
-      console.log("[web-e2e] CONNECTED rowCount=" + window.__sock.rowCount);
+      await window.nostos.connect(url, null, "tasks", null);
     }, wsUrl);
 
-    // Connect resolves on ready_state==OPEN; the subscribe frame is sent in
-    // the `onopen` callback which fires shortly after on the browser's event
-    // loop. The spine ignores /push for tables that have no live subscriber,
-    // so wait briefly for the subscribe to land server-side before pushing.
-    // (Mirrors the e2e_server_selftest's 200ms drain after subscribe.)
+    // Connect resolves on ready_state==OPEN; the subscribe frame is sent in the
+    // Worker's onopen, which fires shortly after. The spine ignores /push for
+    // tables with no live subscriber, so drain before pushing.
     await page.waitForTimeout(500);
 
     // ---------------- PUSH direction ----------------
-    // Node-side POST /push → server fans out over WS → WASM applies it.
     await httpPush(
       spine.port,
       JSON.stringify({
@@ -219,27 +222,24 @@ test("web live-replication round-trip against spine (PUSH + ECHO)", async ({
     await expect
       .poll(
         async () => {
-          return await page.evaluate(() => {
-            const rows = window.__sock.rowsFor("tasks") || [];
-            return rows.map((r) => r.pk);
-          });
+          const r = await page.evaluate(() => window.nostos.rowsFor("tasks"));
+          return (r && r.rows ? r.rows : []).map((x) => x.pk);
         },
         {
           timeout: 15000,
           intervals: [100, 250, 500],
-          message: "pushed row web-push appears in rowsFor('tasks')",
+          message: "pushed row web-push appears via Worker rowsFor('tasks')",
         },
       )
       .toContain("web-push");
 
-    console.log("[web-e2e] PUSH_OK");
-    // Mirror to page console for capture uniformity.
     await page.evaluate(() => console.log("[web-e2e] PUSH_OK"));
 
-    // ---------------- ECHO direction ----------------
-    // Browser-side write() → spine's echo WriteBack re-emits → applies.
-    await page.evaluate(() => {
-      window.__sock.write(
+    // ---------------- WRITE direction (async contract) ----------------
+    // write() is fire-and-forget over postMessage; the outcome is the
+    // writeResult push. It does NOT throw when closed (the old assertion).
+    await page.evaluate(() =>
+      window.nostos.write(
         "tasks",
         "upsert",
         "web-echo",
@@ -249,49 +249,66 @@ test("web live-replication round-trip against spine (PUSH + ECHO)", async ({
           priority: "5",
         }),
         "w1",
-      );
-    });
+      ),
+    );
 
     await expect
       .poll(
         async () => {
-          return await page.evaluate(() => {
-            const rows = window.__sock.rowsFor("tasks") || [];
-            return rows.map((r) => r.pk);
-          });
+          return await page.evaluate(() =>
+            (window.nostos.events || []).some(
+              (e) =>
+                e.type === "writeResult" &&
+                e.client_write_id === "w1" &&
+                e.ok === true,
+            ),
+          );
         },
         {
           timeout: 15000,
           intervals: [100, 250, 500],
-          message: "echo row web-echo appears in rowsFor('tasks')",
+          message: "writeResult{client_write_id:'w1', ok:true} push arrived",
+        },
+      )
+      .toBe(true);
+
+    await page.evaluate(() => console.log("[web-e2e] WRITE_OK"));
+
+    // ---------------- ECHO direction ----------------
+    // The spine's WriteBack re-emits the write; the in-Worker pump applies it.
+    // (apply_local also rendered it instantly, so this may already be present.)
+    await expect
+      .poll(
+        async () => {
+          const r = await page.evaluate(() => window.nostos.rowsFor("tasks"));
+          return (r && r.rows ? r.rows : []).map((x) => x.pk);
+        },
+        {
+          timeout: 15000,
+          intervals: [100, 250, 500],
+          message: "echo row web-echo appears via Worker rowsFor('tasks')",
         },
       )
       .toContain("web-echo");
 
-    console.log("[web-e2e] ECHO_OK");
     await page.evaluate(() => console.log("[web-e2e] ECHO_OK"));
 
-    // Final assertion: both markers landed on the captured page console.
     expect(
       logs.some((l) => l === "[web-e2e] PUSH_OK"),
       "PUSH_OK in page console",
+    ).toBe(true);
+    expect(
+      logs.some((l) => l === "[web-e2e] WRITE_OK"),
+      "WRITE_OK in page console",
     ).toBe(true);
     expect(
       logs.some((l) => l === "[web-e2e] ECHO_OK"),
       "ECHO_OK in page console",
     ).toBe(true);
 
-    // Cleanly close the socket so the spine session ends gracefully.
-    await page.evaluate(() => {
-      try {
-        window.__sock.close();
-      } catch (_) {
-        /* already closed */
-      }
-    });
+    // Cleanly close so the spine session ends gracefully.
+    await page.evaluate(() => window.nostos.close());
   } finally {
-    // On failure, surface every captured console + pageerror line so the
-    // runner isn't a black box (the spine's stderr is already inherited).
     if (test.info().status !== "passed") {
       console.log("[web-e2e] captured page console:");
       for (const line of logs) {

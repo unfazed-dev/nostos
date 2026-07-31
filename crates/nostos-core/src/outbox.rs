@@ -163,6 +163,25 @@ pub trait Outbox {
         pks.dedup();
         Ok(pks)
     }
+
+    /// Wipe pending writes AND the dead-letter queue (ADR-0029).
+    ///
+    /// On sign-out / principal switch this discards the outgoing principal's
+    /// unsynced writes so they cannot replay under the next principal's token
+    /// (cross-user write attribution). Dead-lettered rows (ADR-0027) are wiped
+    /// too — they are inspectable quarantine state, not durable user data the
+    /// new principal inherits.
+    ///
+    /// **REQUIRED, not defaulted.** A no-op default would leave the prior
+    /// principal's pending writes to flush under the new token — a silent
+    /// cross-user write-attribution leak (the same "defaults degrade" trap as
+    /// [`crate::Storage::clear`]).
+    ///
+    /// **Pending-write disposition (ADR-0029 §Decision-2):** today `clear()`
+    /// discards ALL pending writes. Per-principal retention (persist + refuse on
+    /// mismatch) is a RECOMMENDATION awaiting operator ratification; it will
+    /// layer ABOVE this method (outbox-internal, no trait change).
+    fn clear(&mut self) -> crate::Result<()>;
 }
 
 /// One local write awaiting server ack. The client's *write intent* — distinct
@@ -177,7 +196,7 @@ pub trait Outbox {
 pub struct PendingWrite {
     /// Target table — MUST be in the server's `NOSTOS_WRITE_TABLES` allowlist.
     pub table: String,
-    /// Upsert, delete, or patch.
+    /// Upsert, delete, patch, or increment.
     pub op: WriteOp,
     /// Primary-key value (v1 convention: pk column is `id`).
     pub pk: String,
@@ -187,7 +206,8 @@ pub struct PendingWrite {
 }
 
 /// What the client wants to do to a row. The wire string (`"upsert"` /
-/// `"delete"` / `"patch"`) is derived from this via [`WriteOp::as_wire_str`].
+/// `"delete"` / `"patch"` / `"increment"`) is derived from this via
+/// [`WriteOp::as_wire_str`].
 ///
 /// This is NOT `nostos_domain::Operation` (insert/update/delete) — those are
 /// server-originated replication events. The outbox carries the client's
@@ -213,32 +233,41 @@ pub enum WriteOp {
     /// under tenant scoping (ADR-0018) a patch of a row that exists under a
     /// different tenant is a `Forbidden` rejection, never a silent no-op.
     Patch,
+    /// Atomic server-side increment of one numeric column (ADR-0030 Decision 1).
+    /// The payload is a JSON object `{"field": "<col>", "delta": <i64>}`;
+    /// `PgWriteBack` translates it to `UPDATE … SET <field> = <field> + ?`, so
+    /// Postgres serializes concurrent increments (no client read-modify-write
+    /// → no lost update). The replicated-back row is an ordinary update — same
+    /// frame size, no wire-metadata cost, off the measured fan-out path.
+    Increment,
 }
 
 impl WriteOp {
     /// The wire string the `Write` frame's `op` field carries. Matches the
     /// `dispatch_write` op match in the server transport
-    /// (`"upsert" | "delete" | "patch"`).
+    /// (`"upsert" | "delete" | "patch" | "increment"`).
     #[must_use]
     pub const fn as_wire_str(self) -> &'static str {
         match self {
             WriteOp::Upsert => "upsert",
             WriteOp::Delete => "delete",
             WriteOp::Patch => "patch",
+            WriteOp::Increment => "increment",
         }
     }
 }
 
 impl WriteOp {
     /// Parse a wire `op` string back into the enum. Returns `None` for anything
-    /// other than `"upsert"` / `"delete"` / `"patch"` (the server's
-    /// `dispatch_write` rejects the same set as `InvalidPayload`).
+    /// other than `"upsert"` / `"delete"` / `"patch"` / `"increment"` (the
+    /// server's `dispatch_write` rejects the same set as `InvalidPayload`).
     #[must_use]
     pub fn from_wire_str(s: &str) -> Option<Self> {
         match s {
             "upsert" => Some(WriteOp::Upsert),
             "delete" => Some(WriteOp::Delete),
             "patch" => Some(WriteOp::Patch),
+            "increment" => Some(WriteOp::Increment),
             _ => None,
         }
     }
@@ -250,7 +279,12 @@ mod tests {
 
     #[test]
     fn write_op_wire_roundtrip() {
-        for op in [WriteOp::Upsert, WriteOp::Delete, WriteOp::Patch] {
+        for op in [
+            WriteOp::Upsert,
+            WriteOp::Delete,
+            WriteOp::Patch,
+            WriteOp::Increment,
+        ] {
             let s = op.as_wire_str();
             assert_eq!(WriteOp::from_wire_str(s), Some(op));
         }
