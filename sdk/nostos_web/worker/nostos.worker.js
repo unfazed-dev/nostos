@@ -20,6 +20,8 @@
 //     {id, cmd:"close"}
 //     {id, cmd:"watch", table}           reactive subscribe (ADR-0024)
 //     {id, cmd:"unwatch"}                reactive unsubscribe
+//     {id, cmd:"signOut"}                ADR-0029: clearLocalState + close + drop token
+//     {id, cmd:"setToken", token}        ADR-0029: cache token; if live, reconnect with it
 //   Worker -> main:
 //     {id, ok:true, ...}                 response to a request
 //     {id, error:"..."}                  response error
@@ -50,6 +52,12 @@ let pollTimer = null;
 // connected-but-unwatched session doesn't spam the main thread with snapshots.
 let table = null;
 let watching = false;
+// ADR-0029: cached connection params + token so `setToken` can reconnect the
+// socket with a refreshed JWT and `signOut` can drop them. NostosSocket has no
+// wasm-level token swap (the token is baked into the WS handshake at connect),
+// so a token refresh IS a reconnect at this layer.
+let connParams = null; // { url, table, where_sql } captured on connect
+let token = null;      // opaque JWT; cleared on signOut
 
 // Read the engine's current full-table snapshot and push it to the main thread.
 // Used both for the initial snapshot (on `watch`) and for each change tick
@@ -59,6 +67,25 @@ function postSnapshot() {
     ? sock.rowsFor(table).map((r) => ({ pk: r.pk, payload: r.payload }))
     : [];
   self.postMessage({ type: "snapshot", table, rows });
+}
+
+// Wire a freshly-opened socket's reactive push: seed the legacy row-count
+// baseline, start the compat poll, and register the Rust→JS onChange callback
+// (ADR-0024) that forwards a fresh snapshot on every change tick when a main-
+// thread watcher is attached. Shared by `connect` and `setToken` reconnect so
+// the onChange closure (with its `watching` gate) is defined once.
+function attachChangePush(s) {
+  lastRowCount = s.rowCount;
+  startPolling();
+  s.onChange(() => {
+    if (watching) {
+      try {
+        postSnapshot();
+      } catch (_) {
+        /* socket torn down between tick + read — ignore */
+      }
+    }
+  });
 }
 
 async function ensureWasm() {
@@ -124,28 +151,10 @@ self.onmessage = async (ev) => {
       case "connect": {
         await ensureWasm();
         table = m.table;
-        sock = await NostosSocket.connect(
-          m.url,
-          m.token ?? null,
-          m.table,
-          m.where_sql ?? null,
-        );
-        lastRowCount = sock.rowCount;
-        startPolling();
-        // Reactive push (ADR-0024): register the Rust→JS callback. NostosSocket
-        // fires it synchronously from the onmessage pump on every commit (a
-        // change tick) + once now (initial). Gated by `watching` so a connected
-        // session with no main-thread watcher stays quiet. The tick is the push;
-        // rowsFor is the fresh-snapshot read.
-        sock.onChange(() => {
-          if (watching) {
-            try {
-              postSnapshot();
-            } catch (_) {
-              /* socket torn down between tick + read — ignore */
-            }
-          }
-        });
+        token = m.token ?? null;
+        connParams = { url: m.url, table: m.table, where_sql: m.where_sql ?? null };
+        sock = await NostosSocket.connect(m.url, token, table, connParams.where_sql);
+        attachChangePush(sock);
         self.postMessage({ id: m.id, ok: true, checkpoint: sock.checkpoint });
         self.postMessage({ type: "status", connected: true });
         break;
@@ -222,6 +231,71 @@ self.onmessage = async (ev) => {
         table = null;
         self.postMessage({ id: m.id, ok: true });
         self.postMessage({ type: "status", connected: false });
+        break;
+      }
+      case "signOut": {
+        // ADR-0029 D1 / WS4-D3: wipe the engine's in-memory rows + outbox
+        // (`clearLocalState` clears BOTH under one borrow — half a clear is a
+        // cross-user leak), close the socket, and drop the cached token +
+        // subscription so the next user on this same Worker session sees none
+        // of the previous user's rows or pending writes.
+        if (sock) {
+          try {
+            sock.clearLocalState();
+          } catch (_) {
+            /* engine already torn down — nothing to wipe */
+          }
+          try {
+            sock.offChange();
+          } catch (_) {
+            /* noop if never registered */
+          }
+          try {
+            sock.close();
+          } catch (_) {
+            /* already closed */
+          }
+          sock = null;
+          stopPolling();
+        }
+        watching = false;
+        table = null;
+        connParams = null;
+        token = null;
+        lastRowCount = -1;
+        self.postMessage({ id: m.id, ok: true });
+        self.postMessage({ type: "status", connected: false });
+        break;
+      }
+      case "setToken": {
+        // ADR-0029 §3: swap the auth token. NostosSocket has no wasm-level token
+        // swap (the token is baked into the WS handshake at connect), so a
+        // refresh = cache the new token and, if a session is live, reconnect
+        // the socket with it (same url/table/where_sql). If not yet connected,
+        // just cache it for the next `connect`.
+        token = m.token ?? null;
+        if (sock && connParams) {
+          const rp = connParams;
+          try {
+            sock.offChange();
+          } catch (_) {
+            /* noop if never registered */
+          }
+          try {
+            sock.close();
+          } catch (_) {
+            /* already closed */
+          }
+          sock = null;
+          stopPolling();
+          await ensureWasm();
+          sock = await NostosSocket.connect(rp.url, token, rp.table, rp.where_sql);
+          attachChangePush(sock);
+          self.postMessage({ id: m.id, ok: true, checkpoint: sock.checkpoint });
+          self.postMessage({ type: "status", connected: true });
+        } else {
+          self.postMessage({ id: m.id, ok: true });
+        }
         break;
       }
       default:
