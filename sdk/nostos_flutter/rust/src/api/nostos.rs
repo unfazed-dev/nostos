@@ -562,10 +562,7 @@ impl NostosHandle {
     /// window. Crucially it tears nothing down, so `watch` streams stay open —
     /// rebuilding the handle instead would close every stream the UI holds.
     pub async fn set_token(&self, token: Option<String>) {
-        *self
-            .token
-            .write()
-            .expect("set_token: token lock poisoned") = token.clone();
+        *self.token.write().expect("set_token: token lock poisoned") = token.clone();
         if let Some(session) = self.session.lock().await.as_ref() {
             session.client.set_token(token);
         }
@@ -614,6 +611,59 @@ impl NostosHandle {
             .rt
             .spawn(async move { run_connection_loop(&run_client, &run_config, state_sink).await });
         session.run_task = Some(run_task);
+        Ok(())
+    }
+
+    /// ADR-0029 D3: sign out — stop sync, wipe local rows AND the durable
+    /// outbox (so the next principal on this device sees nothing of this one),
+    /// and clear the seed token. This is the local-state wipe the other 8 SDK
+    /// bindings ship; Flutter was erroneously excluded from ADR-0029 Decision 3
+    /// on a `set_token`-only rationale (amended 2026-08-03) — [`Self::close`]
+    /// alone does NOT wipe, so without this the prior user's rows survive in
+    /// the SQLite file across a principal switch (a cross-user leak).
+    ///
+    /// Ordering is load-bearing and identical to the kotlin/swift ports: the
+    /// connect/apply loop and every watch pump are aborted and then AWAITED
+    /// (quiesced) BEFORE `clear_local_state()` runs — a post-clear apply frame
+    /// would re-populate storage (the cross-user leak `clear_local_state`'s own
+    /// doc warns about). [`Session`]'s `Drop` only `abort()`s these tasks (no
+    /// await), so the explicit abort+await here is what guarantees quiescence
+    /// precedes the wipe. Idempotent: a no-op (token clear) with no active
+    /// subscription.
+    ///
+    /// # Errors
+    /// `String` only if `clear_local_state()` itself fails (a disk error).
+    pub async fn sign_out(&self) -> Result<(), String> {
+        {
+            let mut guard = self.session.lock().await;
+            // `take()` moves the Session out (guard becomes None); the owned
+            // `session` drops at the end of this block, releasing the
+            // `Arc<SyncClient>` once the wipe is done.
+            if let Some(mut session) = guard.take() {
+                // (1) Abort + await the connect/apply loop.
+                if let Some(task) = session.run_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                // (2) Abort + await every watch pump.
+                for task in session.watch_tasks.drain(..) {
+                    task.abort();
+                    let _ = task.await;
+                }
+                // (3) Wipe rows + outbox under one engine lock. Safe only
+                // AFTER the loops above are quiesced (else a racing frame
+                // re-populates storage — the cross-user leak).
+                session
+                    .client
+                    .clear_local_state()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // (4) `session` drops here on block exit.
+            }
+        }
+        // (5) Clear the seed token for the next subscribe(), independent of the
+        // session lock.
+        *self.token.write().expect("sign_out: token lock poisoned") = None;
         Ok(())
     }
 

@@ -340,6 +340,15 @@ class Nostos {
     await _stateController.close();
   }
 
+  /// ADR-0029: sign out — wipe local rows + durable outbox (so the next
+  /// principal sees nothing of this one), stop sync, and clear the seed token.
+  /// Unlike [close], this wipes the on-device SQLite state via
+  /// `clear_local_state` before tearing the session down. Idempotent.
+  Future<void> signOut() async {
+    await _engine.signOut();
+    await _stateController.close();
+  }
+
   /// Pause syncing: abort ONLY the background connect loop, keeping the client,
   /// its on-device SQLite store, and every `watch()` pump alive. Reads, writes
   /// (enqueued to the durable outbox), and the UI keep working offline. Emits

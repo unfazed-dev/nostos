@@ -177,6 +177,48 @@ enum Smoke {
                 exit(1)
             }
 
+            // ---- direction 3: setToken hot-swap (ADR-0029 #3) ----
+            // setToken swaps the interior-mutable bearer WITHOUT tearing down the
+            // live session — it's infallible locally (no I/O; the reconnect loop
+            // reads the new token on its NEXT attempt). Proof at this layer: the
+            // call returns AND the live session + its data stay usable (a query
+            // still resolves with the row still present). Spine-side bearer
+            // validation is a separate concern the e2e_server (anonymous by
+            // default) doesn't exercise.
+            client.setToken(token: "principal-B-bearer")
+            guard (try client.query(sql: echoSql)).contains("swift-echo") else {
+                print("[swift-e2e] FAIL: session/data unusable after setToken")
+                exit(1)
+            }
+            print("[swift-e2e] SETTOKEN_OK (bearer hot-swapped; live session + data intact)")
+
+            // ---- direction 4: signOut wipe (ADR-0029) ----
+            // swift-echo (from direction 2) is the principal-A row on disk.
+            // signOut() aborts the run loop, awaits quiescence, and wipes
+            // cairn_data + checkpoint + epoch + outbox (the same clear_local_state
+            // primitive every other SDK calls). To prove the wipe SURVIVES a
+            // reopen WITHOUT the still-live spine refilling it, reopen the SAME
+            // dbPath against ws://localhost:0 (no server: connect() starts the run
+            // loop, which retries silently; query() reads the LOCAL store and
+            // NOTHING re-replicates). This is the dead-endpoint trick the Rust
+            // `clear_local_state_wipes_on_sign_out` test uses — the "B must not
+            // see A's rows" guarantee signout_test.dart lands for Flutter.
+            let aRowSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='swift-echo'"
+            try client.signOut()
+            print("[swift-e2e] SIGNOUT_OK (run loop aborted + local state wiped)")
+
+            let clientB = try NostosClient(url: "ws://localhost:0/sync", token: nil, dbPath: dbPath)
+            // Dead endpoint: no spine to refill from. connect() lifts the query()
+            // connect-gate (it returns Ok — the run loop retries the unreachable
+            // host in the background); the local wiped store is then readable.
+            try clientB.connect()
+            let rowsAfter = try clientB.query(sql: aRowSql)
+            if rowsAfter.contains("swift-echo") {
+                print("[swift-e2e] FAIL: principal-A row survived signOut — WIPE BROKEN; rows=\(rowsAfter)")
+                exit(1)
+            }
+            print("[swift-e2e] SIGNOUT_WIPE_OK (principal-B reopen sees no A row)")
+
             print("[swift-e2e] SUCCESS")
         } catch {
             print("[swift-e2e] FAIL: \(error)")

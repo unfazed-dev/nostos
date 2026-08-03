@@ -35,9 +35,27 @@ B sees A's rows and A's unsynced writes replay under B's token.
 3. **Expose `setToken` + `signOut`** in the 8 non-Flutter bindings. `set_token` already exists in
    `nostos-client` (`client.rs:351`) and Flutter (`nostos.dart:336`); every other binding takes an
    opaque token with no swap primitive.
+
+   **Amendment (2026-08-03):** the "non-Flutter" scope was unsound on the `signOut` half — the
+   exclusion rationale (`set_token` already existed in Flutter) covered token-swap only, never the
+   local-state wipe. `Nostos.close()` / `NostosDatabase.close()` do NOT wipe (their docstrings say so),
+   so Flutter leaked across a principal switch exactly as the other 8 bindings did before D3.
+   Corrected: Flutter now exposes `signOut` too — `NostosHandle::sign_out`
+   (`sdk/nostos_flutter/rust/src/api/nostos.rs`) mirrors the kotlin/swift abort→quiesce→
+   `clear_local_state`→drop→clear-token ordering, surfaced through `NostosEngine` / `Nostos` /
+   `NostosDatabase.signOut()`. Proven by `sdk/nostos_flutter/test/signout_test.dart` (a file-backed
+   reopen sees no prior-principal row). All 9 SDK bindings now wipe on sign-out.
 4. **Server `exp` enforcement lands AFTER #3, never before.** Enforcing `exp` while only Flutter has
    a refresh trigger disconnects the other 8 SDKs ~1h after login with no recovery — a silent problem
    turned into a loud 8-platform outage.
+
+   **Implemented (2026-08-03):** all 9 SDK bindings now expose `setToken`, so the gate is met and the
+   HS256 auth path enforces `exp` (the JWKS/RS256 path already did, via `jsonwebtoken`). `SupabaseClaims`
+   gains an optional `exp` (`nostos-infra/src/auth.rs`, `nostos-cloud/src/auth.rs`); a token with no `exp`
+   never expires (JWT convention — preserves Phase-0 behavior), a present+past `exp` is rejected at auth
+   with a 60s skew leeway. **Scope note:** enforcement is at (re)connect; an already-open socket is NOT
+   dropped mid-flight when its token expires (auth runs once at WebSocket upgrade) — the SDK's `setToken`
+   + reconnect handles refresh. Live-socket-expiry-drop remains future hardening, not part of this decision.
 
 ## Consequences
 

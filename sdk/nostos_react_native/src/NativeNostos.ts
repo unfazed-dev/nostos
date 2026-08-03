@@ -22,16 +22,21 @@
 //   write(table, op, pk, pj)  → NostosClient::write(table, op, pk, payload_json: Option<String>) -> Result<u64, NostosError>
 //   query(sql)                → NostosClient::query(sql: String) -> Result<String, NostosError>  (JSON rows)
 //   checkpoint()              → NostosClient::checkpoint() -> Result<u64, NostosError>
-//   watchChanges(table, cb)   → NostosClient::watch(table, sink: SnapshotSink)  (kotlin, UniFFI
-//                              `with_foreign` sync callback) / nostos_node::NostosClient::watch(table, on_snapshot)
-//                              (napi ThreadsafeFunction). Rust→JS PUSH: the native side retains `cb` and invokes
-//                              it on the JS thread with a full-snapshot JSON string for the INITIAL snapshot,
-//                              then again after every applied change (drains subscribe_changes() + re-queries
-//                              storage per tick). The RN analogue of both sibling seams is a Codegen-emitted
-//                              retained JS callback (JSI), invoked from the change pump via a JS-thread hop.
-//   unwatchChanges(table)     → tears the per-table push pump + releases the retained callback. This is the
-//                              `stop_watch(table)` follow-on the kotlin/node ports DEFERRED (their ceiling);
-//                              RN ships it from day 1 so the JS facade can unsubscribe cleanly.
+//   resolveDbPath(name)       → native path resolver (no UniFFI analogue). JS has no FS access on RN, so the
+//                              native side maps a bare `name` to a writable per-app path (iOS:
+//                              NSTemporaryDirectory()/name; Android: filesDir/name). Needed so a file-backed
+//                              db survives a signOut-and-reopen — the cross-reopen wipe proof (:memory: gives
+//                              each client its OWN empty store, so the wipe is unobservable across instances).
+//   watchChanges(table, cb)   → NostosClient::watch(table, sink: SnapshotSink). Rust→JS PUSH: the native side
+//                              retains `cb` (a Codegen-emitted RCTResponseSenderBlock, which self-marshals to
+//                              the JS thread — safe to invoke from the nostos tokio worker) and calls it once
+//                              with the INITIAL snapshot, then after every applied change. iOS-verified only
+//                              (Android ships the request/response surface first; watch is iOS-led).
+//   unwatchChanges(table)     → releases the retained JS callback so further ticks are no-ops. BINDING FLOOR:
+//                              nostos_swift has no stop_watch — the Rust pump is tied to the session (it dies
+//                              on connect-replace/signOut/deinit). So unwatch stops DELIVERY to JS, not the
+//                              pump itself; the sink object is retained until session end (avoids a use-after-
+//                              free: UniFFI holds a handle back into the Swift object). Honest ceiling.
 //   setToken(token)           → NostosClient::set_token(token: Option<String>) (ADR-0029 #3). Hot-swap the
 //                              bearer on the interior-mutable token cell — the reconnect loop reads it on
 //                              its NEXT attempt, so a live session picks up the new token with NO disconnect.
@@ -124,22 +129,40 @@ export interface Spec extends TurboModule {
    * The returned Promise resolves AFTER the initial snapshot has been emitted
    * to `onSnapshot`, so the caller knows the first frame has fired.
    *
-   * Wave-B Codegen note: a `(rowsJson: string) => void` param is emitted as a
-   * retained JS callback the native impl invokes repeatedly from the change
-   * pump. NEVER call it from a background thread — marshal onto the JS thread
-   * (the module's owned-runtime → JS-thread hop), exactly as napi's
-   * `ThreadsafeFunction` schedules onto the libuv loop.
+   * Wave-B Codegen note: a `(rowsJson: string) => void` param is emitted as an
+   * `RCTResponseSenderBlock`, which self-marshals onto the JS thread (via the
+   * JSCallInvoker) — so the native impl MAY invoke it from the nostos tokio
+   * worker directly; no explicit JS-thread hop is needed (verified on the iOS
+   * sim: a `SnapshotSink.onSnapshot` firing on the runtime thread reaches JS).
    */
   watchChanges(
     table: string,
     onSnapshot: (rowsJson: string) => void,
   ): Promise<void>;
   /**
-   * Tear down the per-table push pump started by `watchChanges(table)` and
-   * release the retained JS callback. After this resolves, `onSnapshot` will
-   * not be invoked again for `table`. Idempotent.
+   * Release the retained JS callback for `table`; after this resolves,
+   * `onSnapshot` will not be invoked again for `table`. Idempotent.
+   *
+   * BINDING FLOOR: nostos_swift has no `stop_watch` — the underlying Rust pump
+   * is tied to the session lifecycle (it stops on a session-replacing
+   * `connect()`, `signOut()`, or client drop). So this stops DELIVERY to JS
+   * (the callback ref is nil'd), not the pump itself; the sink is retained
+   * until session end so UniFFI's handle into it can't dangle. The honest
+   * ceiling until a `stop_watch(table)` lands in the binding.
    */
   unwatchChanges(table: string): Promise<void>;
+  /**
+   * Resolve a bare `name` to a writable per-app SQLite file path (iOS:
+   * `NSTemporaryDirectory()/name`). RN JS has no filesystem access, so this is
+   * how JS obtains a db path that survives across a signOut-and-reopen — the
+   * precondition for observing the cross-reopen wipe (`:memory:` gives each
+   * client its own empty store, hiding the wipe across instances). The
+   * returned path is passed straight to `connect(url, token, dbPath)`.
+   *
+   * iOS-verified; Android pending (the request/response + signOut/setToken
+   * surface ships first on Android — same drift status as watchChanges).
+   */
+  resolveDbPath(name: string): Promise<string>;
   /**
    * Hot-swap the auth bearer WITHOUT tearing down the live session
    * (ADR-0029 #3). Maps to UniFFI `NostosClient::set_token(token: Option<String>)`
