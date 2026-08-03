@@ -54,3 +54,13 @@ plans/*/.plan-url
 plans/**/.plan-url
 plans/*/.plan-state.json
 plans/**/.plan-state.json
+
+# --- RN-iOS host/example app (verification vehicle, not committed) ---
+# Heavy (node_modules, ios/Pods, build). The SDK example dirs were archived
+# (ADR: sdk-e2e 10→9); this is a local-only harness for iOS TurboModule verify.
+sdk/nostos_react_native/example/
+
+# --- RN-iOS TurboModule: vendored nostos_swift artifacts (regen from sdk/nostos_swift) ---
+sdk/nostos_react_native/ios/nostos_swift.swift
+sdk/nostos_react_native/ios/ffi/
+sdk/nostos_react_native/ios/libnostos_swift.a

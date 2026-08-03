@@ -52,5 +52,10 @@
   "homepage": "https://github.com/unfazed-dev/nostos",
   "bugs": {
     "url": "https://github.com/unfazed-dev/nostos/issues"
+  },
+  "codegenConfig": {
+    "name": "NativeNostos",
+    "type": "modules",
+    "jsSrcsDir": "src"
   }
 }
