@@ -117,6 +117,12 @@ RCT_EXPORT_MODULE(NativeNostos)
   [self.backend bridgeSignOut:resolve reject:reject];
 }
 
+- (void)resolveDbPath:(NSString *)name
+              resolve:(RCTPromiseResolveBlock)resolve
+               reject:(RCTPromiseRejectBlock)reject {
+  [self.backend bridgeResolveDbPath:name resolve:resolve reject:reject];
+}
+
 // THE SEAM: opt this module into its codegen SpecJSI. Without this, the
 // TurboModuleManager wraps NostosTurboModule generically — getEnforcing returns
 // a method-less object (no Spec methodMap_), so `NativeNostos.connect(...)` is

@@ -21,6 +21,13 @@ import React
 
 @objc public final class NostosBackend: NSObject {
     private var backing: NostosClient?
+    // Per-table watch sinks, RETAINED for the session lifetime. UniFFI holds a
+    // handle back into each Swift sink object (the Rust pump calls onSnapshot),
+    // so a sink must outlive the pump — it can't be released at unwatch or the
+    // handle dangles. unwatch nil's the callback (delivery stops) but leaves
+    // the sink here until signOut/deinit. Binding floor: no stop_watch exists.
+    private var sinks: [String: NostosSnapshotSink] = [:]
+    private let sinksLock = NSLock()
 
     @objc(bridgeConnect:token:dbPath:resolve:reject:)
     public func connect(url: String, token: String?, dbPath: String,
@@ -68,14 +75,38 @@ import React
     @objc(bridgeWatch:onSnapshot:resolve:reject:)
     public func watchChanges(table: String, onSnapshot: RCTResponseSenderBlock!,
                       resolve: RCTPromiseResolveBlock!, reject: RCTPromiseRejectBlock!) {
-        // ADR-0024 reactive push pump — deferred on iOS (request/response +
-        // signOut/setToken ship first; the plan's out-of-scope note).
-        reject("NostosWatchPending", "watchChanges reactive push not yet supported on iOS.", nil)
+        do {
+            // Load-bearing ordering (sdk/nostos_swift): subscribe BEFORE the
+            // first snapshot read, or the initial snapshot can miss rows.
+            try backing?.subscribe(table: table)
+            let sink = NostosSnapshotSink(onSnapshot: onSnapshot)
+            sinksLock.lock(); sinks[table] = sink; sinksLock.unlock()
+            // watch() emits the initial snapshot to `sink` synchronously here
+            // (a full-table read of the local store) — so even against a dead
+            // endpoint the JS callback fires once with the current rows.
+            try backing?.watch(table: table, sink: sink)
+            resolve(nil)
+        } catch {
+            reject("NostosWatchError", (error as NSError).localizedDescription, error as NSError)
+        }
     }
 
     @objc(bridgeUnwatch:resolve:reject:)
     public func unwatchChanges(table: String, resolve: RCTPromiseResolveBlock!, reject: RCTPromiseRejectBlock!) {
-        resolve(nil) // nothing started; idempotent no-op
+        // nil the callback (delivery to JS stops); RETAIN the sink (UniFFI
+        // holds a handle into it — see `sinks` comment). Binding floor: no
+        // stop_watch, so the Rust pump itself runs until the session ends.
+        sinksLock.lock(); sinks[table]?.release(); sinksLock.unlock()
+        resolve(nil)
+    }
+
+    @objc(bridgeResolveDbPath:resolve:reject:)
+    public func resolveDbPath(name: String, resolve: RCTPromiseResolveBlock!, reject: RCTPromiseRejectBlock!) {
+        // JS has no FS access on RN; hand it a writable per-app path. The same
+        // `name` across a signOut-and-reopen resolves to the SAME file, so the
+        // cross-reopen wipe is observable (a :memory: store can't prove it).
+        let dir = NSTemporaryDirectory()
+        resolve((dir as NSString).appendingPathComponent(name))
     }
 
     @objc(bridgeSetToken:resolve:reject:)
@@ -87,7 +118,41 @@ import React
 
     @objc(bridgeSignOut:reject:)
     public func signOut(resolve: RCTPromiseResolveBlock!, reject: RCTPromiseRejectBlock!) {
-        do { try backing?.signOut(); resolve(nil) }
+        do {
+            try backing?.signOut()
+            // Drop retained sinks (the session — and its pumps — is gone).
+            sinksLock.lock(); sinks.removeAll(); sinksLock.unlock()
+            resolve(nil)
+        }
         catch { reject("NostosSignOutError", (error as NSError).localizedDescription, error as NSError) }
+    }
+}
+
+/// Bridges the UniFFI `SnapshotSink` callback (synchronous, invoked from the
+/// nostos tokio worker thread) to a retained JS `RCTResponseSenderBlock`.
+/// `onSnapshot` is called by Rust on the runtime thread; `RCTResponseSenderBlock`
+/// self-marshals to the JS thread (via the JSCallInvoker), so this is safe to
+/// invoke off the JS thread — verified on the iOS sim. `release()` nil's the
+/// block under the lock so further ticks are no-ops (unwatch); the object
+/// itself is retained by `NostosBackend.sinks` until session end.
+final class NostosSnapshotSink: SnapshotSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: RCTResponseSenderBlock?
+
+    init(onSnapshot: @escaping RCTResponseSenderBlock) {
+        self.callback = onSnapshot
+    }
+
+    func onSnapshot(json: String) {
+        lock.lock()
+        let cb = callback
+        lock.unlock()
+        // RCTResponseSenderBlock takes an NSArray of the JS-side args.
+        cb?([json])
+    }
+
+    /// Idempotent: nil the retained callback so subsequent ticks are no-ops.
+    func release() {
+        lock.lock(); callback = nil; lock.unlock()
     }
 }

@@ -1,7 +1,27 @@
 # RN-iOS TurboModule — implementation plan (ADR-0029 WS4, the 10th platform)
 
-**Date:** 2026-08-03 · **Branch:** `feat/multi-sdk-fixture-matrix` · **Status:** ✅ COMPLETE — TurboModule builds + JSI round-trip verified on iPhone 17 sim (connect→write→query→setToken→signOut)
+**Date:** 2026-08-03 · **Branch:** `feat/multi-sdk-fixture-matrix` · **Status:** ✅ COMPLETE — TurboModule builds + full JSI round-trip verified on iPhone 17 sim. All four "honest scope notes" from the first pass are now CLOSED (file-backed cross-reopen wipe, watchChanges push to JS, self-contained podspec, fat staticlib).
 **Predecessor:** [WS4-D3 sign-out audit](nostos-ws4-d3-signout-audit-2026-08-03.md). RN has TS + Android (commit 38d76ad); iOS has **no `ios/` dir at all** — this builds the missing platform so `signOut`/`setToken` (and the full `NativeNostos` surface) reach iOS.
+
+## Scope-note closure (2026-08-03, second pass — all verified on iPhone 17 sim)
+
+The first pass shipped the round-trip on `:memory:` and flagged four honest gaps. All four are now closed + verified by a single sim run:
+
+```
+resolveDbPath OK -> .../tmp/nostos-rn-e2e.db          (#1 path helper)
+connect OK → write OK id=1 → query js-A PRESENT
+watchChanges onSnapshot fired (js-A PRESENT) → PUSH-TO-JS OK   (#2 pump reaches JS)
+unwatchChanges OK → setToken OK → signOut OK
+reconnect OK → query (after signOut) js-A GONE — WIPE PROVEN rows=[]   (#1 file-backed cross-reopen wipe)
+SUCCESS TurboModule round-trip green (wipe + push proven)
+```
+
+- **#1 file-backed cross-reopen wipe:** `resolveDbPath(name)` added to `NativeNostos.ts` (iOS-verified; Android pending — same drift as watch). The round-trip writes `js-A` on a file path, `signOut()` wipes, then RECONNECTS on the same path — `connect()` sees the dropped session + re-runs `SqliteStorage::open`, so the second query reads the wiped file: `js-A GONE rows=[]`. This is the wipe proof `:memory:` could never give (each client gets its own empty store).
+- **#2 watchChanges push to JS:** `NostosSnapshotSink: SnapshotSink` holds a retained `RCTResponseSenderBlock`; `onSnapshot` fires on the nostos tokio worker and the block self-marshals to the JS thread (verified — the generated param type IS `RCTResponseSenderBlock`, not a raw `jsi::Function`). `unwatchChanges` nil's the callback (delivery stops); the sink is retained until session end (nostos_swift has NO `stop_watch` — the Rust pump is tied to the session; honest binding-floor ceiling). Initial-snapshot push verified; change-tick uses the identical path (assumed, no live spine).
+- **#3 self-contained podspec:** `s.prepare_command = "bash scripts/build-ios-staticlib.sh"` builds the fat sim staticlib + copies the UniFFI Swift sources + generates the `nostos_swiftFFI` modulemap INTO `ios/` (the gitignored regen cache). VERIFIED: prepare_command does NOT fire for `:path` dev pods (CocoaPods skips it — uses source in-place); it fires for published/git-sourced pods (the publishable case). Local dev runs the script manually (mirrors how Rust-backed RN dev pods work).
+- **#4 fat staticlib:** `scripts/build-ios-staticlib.sh` builds `aarch64-apple-ios-sim` + `x86_64-apple-ios` and `lipo`s them → `ios/libnostos_swift.a` (`x86_64 arm64`, lipo-verified). The arm64 slice links + runs on the sim; the x86_64 slice is present (Intel-host sim link not separately exercised). The `ARCHS=arm64` override the first pass needed is GONE — the fat lib links the default arch.
+
+**Capture method (gotcha for the next session):** RN `console.log` does NOT appear via `simctl launch --console-pty` or in Metro's non-interactive stdout. It DOES hit os_log under subsystem `com.facebook.react.log:javascript`, captured by a LIVE `xcrun simctl spawn <udid> log stream --predicate 'eventMessage CONTAINS "rn-e2e"'` started before (re)launch. Retroactive `log show` with `process ==` missed it (level/predicate).
 
 ## Progress (2026-08-03 session) — verification vehicle built; remaining work is the xcodebuild sim loop
 
