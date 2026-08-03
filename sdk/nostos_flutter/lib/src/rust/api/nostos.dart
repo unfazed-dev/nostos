@@ -146,6 +146,27 @@ abstract class NostosHandle implements RustOpaqueInterface {
   /// rebuilding the handle instead would close every stream the UI holds.
   Future<void> setToken({String? token});
 
+  /// ADR-0029 D3: sign out — stop sync, wipe local rows AND the durable
+  /// outbox (so the next principal on this device sees nothing of this one),
+  /// and clear the seed token. This is the local-state wipe the other 8 SDK
+  /// bindings ship; Flutter was erroneously excluded from ADR-0029 Decision 3
+  /// on a `set_token`-only rationale (amended 2026-08-03) — [`Self::close`]
+  /// alone does NOT wipe, so without this the prior user's rows survive in
+  /// the SQLite file across a principal switch (a cross-user leak).
+  ///
+  /// Ordering is load-bearing and identical to the kotlin/swift ports: the
+  /// connect/apply loop and every watch pump are aborted and then AWAITED
+  /// (quiesced) BEFORE `clear_local_state()` runs — a post-clear apply frame
+  /// would re-populate storage (the cross-user leak `clear_local_state`'s own
+  /// doc warns about). [`Session`]'s `Drop` only `abort()`s these tasks (no
+  /// await), so the explicit abort+await here is what guarantees quiescence
+  /// precedes the wipe. Idempotent: a no-op (token clear) with no active
+  /// subscription.
+  ///
+  /// # Errors
+  /// `String` only if `clear_local_state()` itself fails (a disk error).
+  Future<void> signOut();
+
   /// Subscribe to `tables` over ONE `/sync` WebSocket (D1/ADR-0022 multi-
   /// table-per-handle). The first entry is the primary; the rest are extra
   /// subscriptions on the same socket, all sharing one resume LSN, one

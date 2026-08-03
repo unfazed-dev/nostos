@@ -109,6 +109,11 @@ abstract class NostosEngine {
   /// every watch pump). Safe to call with no active subscription and safe to
   /// call more than once.
   Future<void> close();
+
+  /// ADR-0029: sign out — wipe local rows + durable outbox, stop sync, clear
+  /// the seed token. Unlike [close], the on-device SQLite state is wiped via
+  /// `clear_local_state`. Idempotent.
+  Future<void> signOut();
 }
 
 /// The real engine: wraps the generated `rust.NostosHandle`.
@@ -178,6 +183,9 @@ class RustNostosEngine implements NostosEngine {
 
   @override
   Future<void> close() => _handle.close();
+
+  @override
+  Future<void> signOut() => _handle.signOut();
 
   @override
   Future<void> disconnect() => _handle.disconnect();
