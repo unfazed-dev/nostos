@@ -56,6 +56,17 @@ impl JwtVerifier for Hs256Verifier {
         // Decode the payload and read `sub`.
         let payload = base64url_decode(payload_b64).ok()?;
         let claims: SupabaseClaims = serde_json::from_slice(&payload).ok()?;
+        // ADR-0029 §Decision-4: reject expired tokens (no `exp` = never expires,
+        // matching nostos-infra). 60s leeway mirrors `jsonwebtoken`'s default.
+        if let Some(exp) = claims.exp {
+            let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+                Err(_) => i64::MAX,
+            };
+            if now > exp + 60 {
+                return None;
+            }
+        }
         Some(claims.sub)
     }
 }
@@ -80,6 +91,11 @@ impl JwtVerifier for TestVerifier {
 #[derive(Deserialize)]
 struct SupabaseClaims {
     sub: String,
+    /// Expiry, seconds since the UNIX epoch. Optional (JWT convention: no `exp`
+    /// = never expires). ADR-0029 §Decision-4: the HS256 verifier enforces `exp`
+    /// when present, matching nostos-infra's JWKS/RS256 path.
+    #[serde(default)]
+    exp: Option<i64>,
 }
 
 #[cfg(test)]

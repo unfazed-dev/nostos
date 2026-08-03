@@ -157,6 +157,20 @@ fn verify_supabase_hs256(token: &str, secret: &[u8]) -> Option<Principal> {
     }
     let payload_bytes = decode_base64url_to_bytes(payload)?;
     let claims: SupabaseClaims = serde_json::from_slice(&payload_bytes).ok()?;
+    // ADR-0029 §Decision-4: enforce `exp` when present (the JWKS/RS256 path
+    // already does via jsonwebtoken's `Validation`). A token with no `exp`
+    // never expires (JWT convention) — this preserves the Phase-0 behavior the
+    // existing tests rely on (their tokens carry no `exp`).
+    if let Some(exp) = claims.exp {
+        let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            Err(_) => i64::MAX,
+        };
+        if now > exp + JWT_LEEWAY_SECS {
+            warn!("jwt rejected: expired");
+            return None;
+        }
+    }
     let sub = claims.sub;
     if sub.is_empty() {
         return None;
@@ -166,9 +180,18 @@ fn verify_supabase_hs256(token: &str, secret: &[u8]) -> Option<Principal> {
     Some(Principal::new(sub.clone(), sub))
 }
 
+/// Clock-skew leeway for JWT `exp` enforcement (ADR-0029 §Decision-4). Mirrors
+/// `jsonwebtoken`'s default 60s leeway so a token at the boundary isn't rejected
+/// for trivial clock skew.
+const JWT_LEEWAY_SECS: i64 = 60;
+
 #[derive(serde::Deserialize)]
 struct SupabaseClaims {
     sub: String,
+    /// Expiry, seconds since the UNIX epoch. Optional: a token with no `exp`
+    /// never expires (JWT convention). ADR-0029 §Decision-4.
+    #[serde(default)]
+    exp: Option<i64>,
 }
 
 /// Minimal base64url decode (no padding). Avoids a base64 dependency for the
@@ -254,6 +277,41 @@ mod tests {
         mac.update(signing_input.as_bytes());
         let sig = b64url(&mac.finalize().into_bytes());
         format!("{signing_input}.{sig}")
+    }
+
+    /// Like [`valid_hs256_token`] but carries an `exp` claim (ADR-0029 §Decision-4).
+    fn hs256_token_with_exp(secret: &[u8], sub: &str, exp: i64) -> String {
+        let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = b64url(format!(r#"{{"sub":"{sub}","exp":{exp}}}"#).as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let mut mac = HmacSha256::new_from_slice(secret).expect("hmac key");
+        mac.update(signing_input.as_bytes());
+        let sig = b64url(&mac.finalize().into_bytes());
+        format!("{signing_input}.{sig}")
+    }
+
+    #[tokio::test]
+    async fn hs256_expired_token_rejected() {
+        // ADR-0029 §Decision-4: the HS256 path now enforces `exp`, matching the
+        // JWKS/RS256 path. A token whose `exp` is in the past is rejected.
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec());
+        let expired = hs256_token_with_exp(b"secret", "user-1", 1); // 1970-01-01
+        assert!(
+            auth.authenticate(&expired).await.is_none(),
+            "an expired HS256 token must be rejected at auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn hs256_future_exp_token_accepted() {
+        // A non-expired `exp` is accepted (and the 60s leeway does not reject a
+        // comfortably-future token).
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec());
+        let future = hs256_token_with_exp(b"secret", "user-1", 9_999_999_999); // year ~2286
+        assert!(
+            auth.authenticate(&future).await.is_some(),
+            "a future-exp HS256 token must authenticate"
+        );
     }
 
     #[tokio::test]
