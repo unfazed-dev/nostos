@@ -1,7 +1,9 @@
 # ADR-0029: Sign-out and local-state wipe
 
-**Status:** Proposed — the §Decision-2 pending-write disposition is a tech-lead recommendation
-awaiting operator ratification. The trait surface (`clear()`) is stable regardless of that choice.
+**Status:** Accepted (§Decision-1/3/4 shipped 2026-08-03); §Decision-2 (per-principal outbox
+retention) still a tech-lead recommendation awaiting operator ratification — the shipped interim is
+"discard all pending writes on sign-out" (`crates/nostos-client/src/sqlite.rs:1071`, `ponytail:`
+marker). The trait surface (`clear()`) is stable regardless of the D2 choice.
 **Date:** 2026-07-31. **References:** the [multi-SDK pomodoro fixture matrix
 plan](../plans/multi-sdk-pomodoro-fixture-matrix.md); ADR-0025 (defaulted methods degrade),
 ADR-0027 (dead-letter), ADR-0013 (server-authoritative write-back).

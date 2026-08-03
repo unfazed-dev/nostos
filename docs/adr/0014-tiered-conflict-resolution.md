@@ -1,6 +1,6 @@
 # ADR-0014: Tiered conflict resolution (Front 6 — LWW shipped, CRDT/custom deferred)
 
-- **Status:** Partially shipped (LWW via idempotent apply); CRDT/custom deferred (Phase 4)
+- **Status:** Partially shipped (LWW via idempotent apply + CRDT add-wins OR-set via ADR-0030); custom merge deferred (Phase 4)
 - **Date:** 2026-06-27
 
 ## Context
