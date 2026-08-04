@@ -1,9 +1,18 @@
 # ADR-0029: Sign-out and local-state wipe
 
-**Status:** Accepted (§Decision-1/3/4 shipped 2026-08-03); §Decision-2 (per-principal outbox
-retention) still a tech-lead recommendation awaiting operator ratification — the shipped interim is
-"discard all pending writes on sign-out" (`crates/nostos-client/src/sqlite.rs:1071`, `ponytail:`
-marker). The trait surface (`clear()`) is stable regardless of the D2 choice.
+**Status:** Accepted. §Decision-1/3/4 shipped 2026-08-03. **§Decision-2 RESOLVED 2026-08-05:
+ratified "full-wipe is the v1 cross-principal isolation policy"** — the per-principal outbox
+retention recommended below is **deferred**. Rationale: (a) the current full-wipe (`Storage::clear`
+wipes `cairn_data` + checkpoint + outbox in one transaction) *is* the cross-principal isolation —
+provably no leak; (b) the marker-specified "outbox-internal principal tag" is **inert on the
+sign-out path** because `Storage::clear` already wipes the outbox in that same transaction, so it
+would ship as unobservable dead code; (c) making per-principal retention *meaningful* requires
+decoupling the outbox wipe from `Storage::clear` (changing the deliberate one-transaction
+no-half-clear crash-safety guarantee) + principal column/tagging + a client-side principal flow
+(nostos-client currently holds a token, not a principal) — a real design change that trades the
+provable isolation for a data-preservation benefit on the rare multi-user-device path, where a fresh
+snapshot is cheap and correct anyway. Per-principal retention remains a future enhancement wanting
+its own ADR. The trait surface (`clear()`) is stable regardless.
 **Date:** 2026-07-31. **References:** the [multi-SDK pomodoro fixture matrix
 plan](../plans/multi-sdk-pomodoro-fixture-matrix.md); ADR-0025 (defaulted methods degrade),
 ADR-0027 (dead-letter), ADR-0013 (server-authoritative write-back).
@@ -28,12 +37,16 @@ B sees A's rows and A's unsynced writes replay under B's token.
    - `Outbox::clear()` wipes pending writes AND the dead-letter queue (ADR-0027).
    - **Both are REQUIRED, not defaulted.** A no-op default would be a silent cross-user leak — the
      same "defaults degrade" trap as ADR-0025's other defaulted methods.
-2. **Pending writes on sign-out (RECOMMENDATION, pending ratification):** persist per-principal and
+2. **Pending writes on sign-out (RECOMMENDATION, deferred 2026-08-05):** persist per-principal and
    refuse to replay across a principal change. The alternatives both fail — keep-and-replay =
    cross-user write attribution + tenant violation; discard = silent loss of offline work.
    Per-principal retention is the only option that neither loses data nor misattributes it. It is an
    outbox-internal policy (a principal tag + refuse-on-mismatch), NOT a new trait method — invisible
    to WS1's Worker protocol.
+
+   **Resolution (2026-08-05):** DEFERRED — see the Status line. v1 ships the "discard" interim
+   (full-wipe) as the ratified cross-principal isolation. The recommendation above stays on record
+   as the design for a future ADR that decouples the outbox wipe + adds principal tagging/flow.
 3. **Expose `setToken` + `signOut`** in the 8 non-Flutter bindings. `set_token` already exists in
    `nostos-client` (`client.rs:351`) and Flutter (`nostos.dart:336`); every other binding takes an
    opaque token with no swap primitive.
