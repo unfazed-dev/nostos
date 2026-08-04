@@ -38,7 +38,7 @@
 //!
 //! `unsafe` is forbidden crate-wide (`#![forbid(unsafe_code)]` in lib.rs).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use nostos_application::ports::{WriteBack, WriteBackError};
@@ -55,6 +55,31 @@ pub fn parse_allowlist(raw: &str) -> HashSet<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+        .collect()
+}
+
+/// Parse `NOSTOS_OR_SET_COLUMNS` — a comma-separated list of `table:column`
+/// pairs naming the JSONB columns that hold add-wins OR-sets (ADR-0030). Each
+/// pair maps a table to the single column holding its element set, so
+/// [`PgWriteBack`] knows which writes to merge element-wise server-side instead
+/// of clobbering. Empty/absent ⇒ no OR-set columns (the default); OR-set writes
+/// to unconfigured tables are rejected client-side (`SyncClientConfig`).
+/// Example: `tasks:tags,notes:labels`. Malformed entries (no `:` or an empty
+/// side) are silently skipped — a loud failure belongs at the client API, not
+/// at config parse time.
+pub fn parse_or_set_columns(raw: &str) -> HashMap<String, String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|pair| {
+            let (table, col) = pair.split_once(':')?;
+            let table = table.trim();
+            let col = col.trim();
+            if table.is_empty() || col.is_empty() {
+                return None;
+            }
+            Some((table.to_string(), col.to_string()))
+        })
         .collect()
 }
 
@@ -1175,6 +1200,24 @@ mod tests {
         assert!(al.contains("notes"));
         // whitespace trimmed
         assert!(al.contains("users"));
+    }
+
+    #[test]
+    fn parse_or_set_columns_handles_empty_pairs_and_whitespace() {
+        assert!(parse_or_set_columns("").is_empty());
+        assert!(parse_or_set_columns("   ").is_empty());
+        let cols = parse_or_set_columns("tasks:tags, notes:labels , events:attendees");
+        assert_eq!(cols.len(), 3);
+        assert_eq!(cols.get("tasks"), Some(&"tags".to_string()));
+        assert_eq!(cols.get("notes"), Some(&"labels".to_string()));
+        assert_eq!(cols.get("events"), Some(&"attendees".to_string()));
+        // malformed entries (no colon / empty side) are skipped, not panics
+        assert!(parse_or_set_columns("tasks, :tags, tasks:").is_empty());
+        // duplicate table → last column wins (standard HashMap collect semantics)
+        assert_eq!(
+            parse_or_set_columns("tasks:tags,tasks:labels").get("tasks"),
+            Some(&"labels".to_string())
+        );
     }
 
     #[tokio::test]

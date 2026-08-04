@@ -46,7 +46,7 @@ pub use wire::{
     decode_client_message, encode_event, encode_write_result, ClientMessage, FilterClause,
     WireFrame,
 };
-pub use write_back::{parse_allowlist, NoWriteBack};
+pub use write_back::{parse_allowlist, parse_or_set_columns, NoWriteBack};
 
 #[cfg(feature = "pg")]
 pub use replicator::{PgReplicator, PgReplicatorConfig, PgReplicatorError};

@@ -179,6 +179,17 @@ pub struct SyncClientConfig {
     /// faster failover in test environments; set to `u32::MAX` to effectively
     /// disable dead-lettering (the pre-v2 retry-forever behavior).
     pub dead_letter_max_attempts: u32,
+    /// Tables this client treats as add-wins OR-sets (ADR-0030). An
+    /// `or_set_add` / `or_set_remove` on a table NOT in this set returns
+    /// [`ClientError::OrSetTableNotTagged`] instead of silently storing a raw
+    /// `OrSetPayload` (which the un-tagged storage apply path would write
+    /// verbatim as the row value, clobbering concurrent elements — a verified
+    /// silent-data-corruption defect). This set MUST match the storage's
+    /// `with_or_set_tables` AND the server's `NOSTOS_OR_SET_COLUMNS`: the client
+    /// gate, the storage tag, and the server column map are three views of one
+    /// truth, and a mismatch (e.g. client tags but storage doesn't) still
+    /// clobbers. Empty by default — OR-set opt-in is explicit.
+    pub or_set_tables: HashSet<String>,
 }
 
 impl Default for SyncClientConfig {
@@ -194,6 +205,7 @@ impl Default for SyncClientConfig {
             where_sql: None,
             extra_tables: Vec::new(),
             dead_letter_max_attempts: DEFAULT_DEAD_LETTER_MAX_ATTEMPTS,
+            or_set_tables: HashSet::new(),
         }
     }
 }
@@ -520,6 +532,14 @@ where
         element: &str,
         remove: bool,
     ) -> Result<u64, ClientError> {
+        // Loud-fail gate (ADR-0030): a table the client does not tag as an
+        // OR-set must never reach the enqueue path. Without it the OrSetPayload
+        // is stored verbatim as the row value on an un-tagged storage apply path
+        // → concurrent elements silently clobber. The tag here MUST match the
+        // storage's `with_or_set_tables` AND the server's `NOSTOS_OR_SET_COLUMNS`.
+        if !self.config.or_set_tables.contains(table) {
+            return Err(ClientError::OrSetTableNotTagged(table.to_string()));
+        }
         let h = self.mint_hlc();
         let element = nostos_domain::OrSetElement {
             v: element.to_string(),
@@ -1197,6 +1217,8 @@ pub enum ClientError {
     Join(String),
     #[error(transparent)]
     Storage(#[from] nostos_core::StorageError),
+    #[error("or_set op on table not tagged as an OR-set: {0} — tag it in SyncClientConfig::or_set_tables, SqliteStorage::with_or_set_tables, and NOSTOS_OR_SET_COLUMNS")]
+    OrSetTableNotTagged(String),
 }
 
 /// Decode a hex string to bytes. The wire payload is hex-encoded (see
@@ -1626,11 +1648,9 @@ mod tests {
         // one element (add-wins: the later remove HLC beats the earlier add).
         let storage = nostos_core::InMemoryStorage::new()
             .with_or_set_tables(["tags".to_string()].into_iter().collect::<HashSet<_>>());
-        let c = SyncClient::new(
-            "ws://localhost:9999/sync",
-            storage,
-            SyncClientConfig::default(),
-        );
+        let mut config = SyncClientConfig::default();
+        config.or_set_tables.insert("tags".to_string());
+        let c = SyncClient::new("ws://localhost:9999/sync", storage, config);
         c.or_set_add("tags", "s1", "x").await.unwrap();
         c.or_set_add("tags", "s1", "y").await.unwrap();
 
@@ -1655,6 +1675,47 @@ mod tests {
             after,
             vec!["y".to_string()],
             "remove tombstones x; y survives"
+        );
+    }
+
+    // ADR-0030 loud-fail gate: an or_set op on a table NOT in
+    // SyncClientConfig::or_set_tables must Err up front (not silently enqueue
+    // a raw OrSetPayload that an un-tagged storage apply path would write
+    // verbatim, clobbering concurrent elements). And it must leave the outbox
+    // untouched — no write enqueued, no half-applied state.
+    #[tokio::test]
+    async fn or_set_add_on_untagged_table_errors() {
+        // Storage tags "tags" as an OR-set, but the CLIENT config does not —
+        // the client gate fires first, before the storage tag is even consulted.
+        let storage = nostos_core::InMemoryStorage::new()
+            .with_or_set_tables(["tags".to_string()].into_iter().collect::<HashSet<_>>());
+        let c = SyncClient::new(
+            "ws://localhost:9999/sync",
+            storage,
+            SyncClientConfig::default(), // or_set_tables empty by default
+        );
+
+        let pending_before = c
+            .with_storage(|s| s.pending().map_or(0, |p| p.len()))
+            .await
+            .unwrap();
+
+        let err = c
+            .or_set_add("tags", "s1", "x")
+            .await
+            .expect_err("or_set_add on an un-tagged client table must Err");
+        assert!(
+            matches!(err, ClientError::OrSetTableNotTagged(ref t) if t == "tags"),
+            "expected OrSetTableNotTagged(\"tags\"), got {err:?}"
+        );
+
+        let pending_after = c
+            .with_storage(|s| s.pending().map_or(0, |p| p.len()))
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_before, pending_after,
+            "no write enqueued on a rejected or_set op"
         );
     }
 

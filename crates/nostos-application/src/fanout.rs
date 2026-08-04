@@ -13,7 +13,7 @@
 //!           candidate.sink.deliver(event).await   ← bounded; slow client → Drop
 //!        │
 //!        ▼
-//!   return FanOutOutcome { delivered, dropped, matched }
+//!   return FanOutOutcome { delivered, dropped, faulted, matched }
 //! ```
 //!
 //! Complexity is **O(changed rows × matching sessions)**, not O(all sessions) —
@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use tracing::trace;
+use tracing::{trace, warn};
 
 use nostos_domain::{ColumnValue, ReplicationEvent};
 
@@ -42,6 +42,11 @@ pub struct FanOutOutcome {
     pub delivered: u64,
     /// Events dropped because a sink's bounded buffer was full.
     pub dropped: u64,
+    /// Delivery tasks that faulted (panicked or were cancelled) — a server-side
+    /// problem, NOT slow-client backpressure. Kept distinct from `dropped` so a
+    /// task panic is never mis-attributed as a client drop in the "0% drops"
+    /// moat figure. `delivered + dropped + faulted <= matched`.
+    pub faulted: u64,
 }
 
 impl FanOutOutcome {
@@ -53,6 +58,7 @@ impl FanOutOutcome {
             matched: self.matched.saturating_add(other.matched),
             delivered: self.delivered.saturating_add(other.delivered),
             dropped: self.dropped.saturating_add(other.dropped),
+            faulted: self.faulted.saturating_add(other.faulted),
         }
     }
 }
@@ -83,6 +89,16 @@ pub struct FanOutService {
     /// A `pg` deploy wires a `PgOpLogWriter` to enable in-window reconnect
     /// replay. See [`crate::ports::OpLogWriter`] for the non-blocking contract.
     op_log: Option<Arc<dyn crate::ports::OpLogWriter>>,
+    /// Coalesce the per-event ack-progress scan: recompute the slowest acked
+    /// LSN every `ack_progress_every` events instead of every event. `1` (the
+    /// default) = every event = the exact ADR-0009 cadence (unchanged). `>1`
+    /// trades a bounded slot-advance lag for an N× cut of the O(sessions)
+    /// `min_acked_lsn` scan — the documented 10k bottleneck (`min_acked_lsn` +
+    /// `slowest_session` fold over every session per event). Safe because acks
+    /// are monotonic: a cached min is ≤ the true min, so `advance_progress`
+    /// stays conservative (at most `ack_progress_every` events of extra WAL
+    /// retention). See [`Self::with_ack_progress_every`].
+    ack_progress_every: u32,
 }
 
 impl FanOutService {
@@ -95,6 +111,7 @@ impl FanOutService {
             metrics: None,
             eviction: crate::EvictionPolicy::disabled(),
             op_log: None,
+            ack_progress_every: 1,
         }
     }
 
@@ -133,6 +150,23 @@ impl FanOutService {
     #[must_use]
     pub fn with_op_log(mut self, writer: Arc<dyn crate::ports::OpLogWriter>) -> Self {
         self.op_log = Some(writer);
+        self
+    }
+
+    /// Coalesce the per-event ack-progress scan: recompute the slowest acked
+    /// LSN (which drives `advance_progress` + WAL-bloat eviction) every `every`
+    /// events instead of every event. `1` (the default) is the exact ADR-0009
+    /// per-event cadence — pass `>1` to cut the O(sessions) `min_acked_lsn` scan
+    /// by that factor, at the cost of at most `every` events of extra WAL
+    /// retention (safe: acks are monotonic, so a cached min never overshoots
+    /// the true safe-to-flush LSN). Values < 1 clamp to 1.
+    ///
+    /// This is the lever for the 10k-client stretch goal: at 10k sessions the
+    /// per-event full-store fold is the dominant cost (see the bench's own
+    /// `min_acked_lsn` note); coalescing to ~16–64 events drops it proportionally.
+    #[must_use]
+    pub fn with_ack_progress_every(mut self, every: u32) -> Self {
+        self.ack_progress_every = every.max(1);
         self
     }
 
@@ -175,17 +209,32 @@ impl FanOutService {
         }
         let mut delivered = 0u64;
         let mut dropped = 0u64;
+        let mut faulted = 0u64;
         while let Some(res) = set.join_next().await {
             match res {
                 Ok(DeliveryDecision::Delivered) => delivered += 1,
-                // A drop OR a panicked task both count as "not delivered" → drop.
-                Ok(DeliveryDecision::Dropped) | Err(_) => dropped += 1,
+                // Slow-client backpressure: the sink's bounded buffer was full.
+                Ok(DeliveryDecision::Dropped) => dropped += 1,
+                // A delivery task faulted (panicked or was cancelled). This is a
+                // server-side problem, NOT slow-client backpressure — count it
+                // separately from `dropped` so it is never mis-attributed as a
+                // client drop in the "0% drops" moat figure, and log it (a
+                // panic here should be visible, not silent).
+                Err(e) => {
+                    faulted += 1;
+                    warn!(
+                        error = %e,
+                        is_panic = e.is_panic(),
+                        "delivery task faulted (panic/cancel); counted as faulted, not dropped"
+                    );
+                }
             }
         }
         let outcome = FanOutOutcome {
             matched: matched_count,
             delivered,
             dropped,
+            faulted,
         };
         // Aggregate counters for /metrics (lock-free; no-op when no handle).
         if let Some(m) = &self.metrics {
@@ -193,6 +242,7 @@ impl FanOutService {
             m.matched.fetch_add(outcome.matched, Ordering::Relaxed);
             m.delivered.fetch_add(outcome.delivered, Ordering::Relaxed);
             m.dropped.fetch_add(outcome.dropped, Ordering::Relaxed);
+            m.faulted.fetch_add(outcome.faulted, Ordering::Relaxed);
         }
         trace!(?outcome, "fan_out complete");
         outcome
@@ -218,6 +268,17 @@ impl FanOutService {
         F: Fn(&ReplicationEvent, &str) -> Option<ColumnValue>,
     {
         let mut total = FanOutOutcome::default();
+        // Coalesced ack-progress: the slowest acked LSN drives both
+        // `advance_progress` and WAL-bloat eviction, and they share one scan.
+        // Recompute it every `ack_progress_every` events (1 = every event, the
+        // exact ADR-0009 cadence). Between recomputes we reuse the last value
+        // — safe because acks are monotonic, so a cached min ≤ true min and the
+        // slot never advances past unconfirmed data (at most N events of extra
+        // WAL retention). `since` starts at the threshold so the FIRST event
+        // primes the cache rather than advancing on a stale `None`.
+        let every = self.ack_progress_every;
+        let mut since = every;
+        let mut slowest_acked: Option<nostos_domain::Lsn> = None;
         while let Some(event) = replicator.next_event().await {
             // Op-log (ADR-0025 slice 2): record the event durably for in-window
             // reconnect replay. Non-blocking (the impl enqueues to a bounded
@@ -228,12 +289,15 @@ impl FanOutService {
             }
             total = total.merged(self.fan_out(&event, &column_extractor).await);
             // Ack-driven progress: advance the slot only as far as the slowest
-            // live client has confirmed. None = no session has acked → don't
-            // advance (WAL retained; no data loss). The replicator no-ops if
-            // it has no real slot (FakeReplicator).
-            // Ack-driven progress + WAL-bloat protection share the same scan
-            // (the slowest client's acked LSN), so compute it once.
-            let slowest_acked = self.store.min_acked_lsn().await;
+            // live client has confirmed. Coalesced — see the `since`/`every`
+            // comment above. None = no session has acked (or not yet recomputed
+            // this window) → don't advance (WAL retained; no data loss). The
+            // replicator no-ops if it has no real slot (FakeReplicator).
+            since = since.saturating_add(1);
+            if since >= every {
+                since = 0;
+                slowest_acked = self.store.min_acked_lsn().await;
+            }
             if let Some(safe) = slowest_acked {
                 replicator.advance_progress(safe).await;
             }
@@ -522,17 +586,51 @@ mod tests {
         assert_eq!(events_not.lock().unwrap().len(), 2);
     }
 
+    /// A sink whose `deliver` panics — models a faulting delivery task (the
+    /// `Err(JoinError)` arm of the fan-out join loop).
+    struct PanickingSink;
+
+    #[async_trait]
+    impl EventSink for PanickingSink {
+        async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+            panic!("simulated delivery fault");
+        }
+    }
+
+    #[tokio::test]
+    async fn faulting_delivery_task_is_counted_as_faulted_not_dropped() {
+        let store = make_store();
+        store
+            .add(
+                SyncSession::new(Predicate::all("tasks")),
+                Arc::new(PanickingSink),
+            )
+            .await;
+
+        let svc = FanOutService::new(store);
+        let outcome = svc.fan_out(&insert_event("tasks"), extract_org).await;
+
+        // The panicking delivery task surfaces as a JoinError → `faulted`, NOT
+        // `dropped` (it is a server fault, not slow-client backpressure).
+        assert_eq!(outcome.matched, 1);
+        assert_eq!(outcome.delivered, 0);
+        assert_eq!(outcome.dropped, 0);
+        assert_eq!(outcome.faulted, 1);
+    }
+
     #[tokio::test]
     async fn outcome_merges_accumulate() {
         let a = FanOutOutcome {
             matched: 5,
             delivered: 4,
             dropped: 1,
+            faulted: 2,
         };
         let b = FanOutOutcome {
             matched: 3,
             delivered: 3,
             dropped: 0,
+            faulted: 1,
         };
         let m = a.merged(b);
         assert_eq!(
@@ -540,7 +638,8 @@ mod tests {
             FanOutOutcome {
                 matched: 8,
                 delivered: 7,
-                dropped: 1
+                dropped: 1,
+                faulted: 3
             }
         );
     }

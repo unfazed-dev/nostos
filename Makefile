@@ -56,8 +56,8 @@ build-release: ## Build all crates (release, optimized for benchmarking).
 	$(CARGO) build --workspace --release
 
 .PHONY: test
-test: ## Run the whole test suite.
-	$(CARGO) test --workspace
+test: ## Run the whole test suite (includes #[ignore]'d scale-regression floors).
+	$(CARGO) test --workspace -- --include-ignored
 
 .PHONY: fmt
 fmt: ## Format the codebase.
