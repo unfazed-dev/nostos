@@ -1,6 +1,6 @@
 # ADR-0004: Server-authoritative LWW default, opt-in CRDT-per-field, custom merge
 
-- **Status:** Accepted (default strategy); CRDT-per-field and custom merge ship Phase 4
+- **Status:** Accepted (default strategy); CRDT-per-field shipped via ADR-0030; custom merge ships Phase 4
 - **Date:** 2026-06-26
 
 ## Context

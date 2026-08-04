@@ -182,8 +182,25 @@ fn verify_supabase_hs256(token: &str, secret: &[u8]) -> Option<Principal> {
 
 /// Clock-skew leeway for JWT `exp` enforcement (ADR-0029 §Decision-4). Mirrors
 /// `jsonwebtoken`'s default 60s leeway so a token at the boundary isn't rejected
-/// for trivial clock skew.
-const JWT_LEEWAY_SECS: i64 = 60;
+/// for trivial clock skew. Reused by the transport's live-socket close-on-exp
+/// deadline so a connection is alive for exactly `[handshake, exp + leeway]`.
+pub const JWT_LEEWAY_SECS: i64 = 60;
+
+/// Best-effort decode of a JWT's `exp` claim (seconds since the UNIX epoch), or
+/// `None` if the token is malformed or carries no `exp`. Used by the transport
+/// to arm a live-socket close-on-expiry deadline (ADR-0029 §Decision-4) WITHOUT
+/// threading `exp` through the domain `Principal` — auth lifecycle stays out of
+/// the domain layer. This never accepts or rejects a token; signature
+/// verification remains the [`SyncAuth`] adapter's job.
+#[must_use]
+pub fn token_exp(token: &str) -> Option<i64> {
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    let payload_bytes = decode_base64url_to_bytes(payload)?;
+    let claims: SupabaseClaims = serde_json::from_slice(&payload_bytes).ok()?;
+    claims.exp
+}
 
 #[derive(serde::Deserialize)]
 struct SupabaseClaims {
