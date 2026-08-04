@@ -55,9 +55,12 @@ B sees A's rows and A's unsynced writes replay under B's token.
    HS256 auth path enforces `exp` (the JWKS/RS256 path already did, via `jsonwebtoken`). `SupabaseClaims`
    gains an optional `exp` (`nostos-infra/src/auth.rs`, `nostos-cloud/src/auth.rs`); a token with no `exp`
    never expires (JWT convention — preserves Phase-0 behavior), a present+past `exp` is rejected at auth
-   with a 60s skew leeway. **Scope note:** enforcement is at (re)connect; an already-open socket is NOT
-   dropped mid-flight when its token expires (auth runs once at WebSocket upgrade) — the SDK's `setToken`
-   + reconnect handles refresh. Live-socket-expiry-drop remains future hardening, not part of this decision.
+   with a 60s skew leeway. **Scope note:** enforcement is at (re)connect; an already-open socket is ALSO
+   dropped mid-flight when its token expires — `commit 67eecc3` arms a one-shot `exp` deadline in the
+   `/sync` writer `select!` (close code `4401 "nostos: token expired"`), alg-agnostic via `token_exp()`, so
+   the live socket is torn down at expiry and the SDK's `setToken` + reconnect re-establishes with the
+   refreshed token (test `auth_sync.rs: live_socket_is_closed_after_token_exp`). The "future hardening"
+   caveat that previously appeared here is superseded by `67eecc3`.
 
 ## Consequences
 
