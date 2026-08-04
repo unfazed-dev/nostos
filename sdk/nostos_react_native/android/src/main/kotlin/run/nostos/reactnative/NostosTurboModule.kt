@@ -1,9 +1,12 @@
 package run.nostos.reactnative
 
+import com.facebook.react.bridge.Callback
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactMethod
 import uniffi.nostos_kotlin.NostosClient
+import uniffi.nostos_kotlin.SnapshotSink
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Concrete [NativeNostosSpec] implementation — the Wave-B Kotlin TurboModule
@@ -50,6 +53,16 @@ class NostosTurboModule :
     // RN contract serializes TurboModule calls, so the volatile read is the
     // correct cheap published-read here — no lock needed.
     @Volatile private var backing: NostosClient? = null
+
+    // Per-table retained snapshot sinks (the Kotlin mirror of iOS
+    // `NostosBackend.sinks`). The sink object is KEPT here until the session
+    // ends even after `unwatchChanges` nil's its callback: UniFFI's handle map
+    // + the Rust pump hold a handle into it (nostos_kotlin has no `stop_watch`
+    // — the pump is tied to the session), so dropping it mid-session would
+    // leave a dangling handle. `ConcurrentHashMap` because `watchChanges` /
+    // `unwatchChanges` may be invoked from the RN bridge background thread
+    // while a tick is being delivered on the nostos tokio worker.
+    private val sinks = ConcurrentHashMap<String, NostosSnapshotSink>()
 
     // ---- public synchronous core ------------------------------------------
     // Exposed (non-@ReactMethod) so the instrumented test
@@ -100,6 +113,42 @@ class NostosTurboModule :
      */
     fun signOutSync() {
         client().signOut()
+        // The session — and every watch pump tied to it — is gone; drop the
+        // retained sinks (mirror of iOS `NostosBackend.signOut` removeAll).
+        sinks.clear()
+    }
+
+    /**
+     * Start the native push pump for `table` (the Kotlin mirror of iOS
+     * `NostosBackend.watchChanges`). Load-bearing ordering (nostos_kotlin
+     * `watch()`, lib.rs): `subscribe()` runs BEFORE the first snapshot read so
+     * the initial snapshot can't miss rows — `subscribe()` is idempotent, so a
+     * prior caller-issued `subscribe(table)` is harmless. `watch()` then emits
+     * the initial snapshot to `sink` synchronously here, and again after every
+     * applied change (remote apply or local write) — full snapshot per tick.
+     *
+     * `onSnapshot` is an RN [Callback] (the Codegen mapping of a JS
+     * `(rowsJson) => void` param); it self-marshals onto the JS thread, so the
+     * nostos tokio worker may invoke it directly (the Android analogue of iOS's
+     * self-marshaling `RCTResponseSenderBlock`).
+     */
+    fun watchChangesSync(table: String, onSnapshot: Callback) {
+        client().subscribe(table)
+        val sink = NostosSnapshotSink(onSnapshot)
+        sinks[table] = sink
+        // watch() emits the initial snapshot to `sink` synchronously here.
+        client().watch(table, sink)
+    }
+
+    /**
+     * Stop DELIVERY to JS for `table` (the Kotlin mirror of iOS
+     * `NostosBackend.unwatchChanges`). Nil's the retained callback so further
+     * ticks are no-ops; the sink object stays in [sinks] until the session
+     * ends (UniFFI's handle map holds a reference — no `stop_watch` binding).
+     * Idempotent.
+     */
+    fun unwatchChangesSync(table: String) {
+        sinks[table]?.release()
     }
 
     // ---- @ReactMethod Promise wrappers (the Spec surface JS calls) --------
@@ -177,8 +226,62 @@ class NostosTurboModule :
         }
     }
 
+    @ReactMethod
+    override fun watchChanges(table: String, onSnapshot: Callback, promise: Promise) {
+        try {
+            watchChangesSync(table, onSnapshot)
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("NostosWatchError", t)
+        }
+    }
+
+    @ReactMethod
+    override fun unwatchChanges(table: String, promise: Promise) {
+        try {
+            unwatchChangesSync(table)
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("NostosUnwatchError", t)
+        }
+    }
+
     private fun client(): NostosClient = backing
         ?: throw IllegalStateException(
             "NostosTurboModule: connect(url, token, dbPath) must be called before any other method",
         )
+}
+
+/**
+ * Bridges the UniFFI `SnapshotSink` callback (synchronous, invoked from the
+ * nostos tokio worker thread) to a retained RN JS [Callback] — the Kotlin
+ * mirror of iOS's `NostosSnapshotSink`.
+ *
+ * `Callback.invoke(...)` marshals onto the JS thread (the catalyst instance
+ * posts the args), so it is safe to call from the runtime worker — the Android
+ * analogue of iOS's self-marshaling `RCTResponseSenderBlock`, and the same
+ * shape `nostos_node`'s napi `ThreadsafeFunction` and `nostos_kotlin`'s
+ * `SnapshotSink` validate. [release] nil's the ref so further ticks are no-ops
+ * (`unwatchChanges`); the object itself is retained by
+ * [NostosTurboModule.sinks] until the session ends (UniFFI's handle map holds a
+ * reference — the no-`stop_watch` binding floor).
+ *
+ * `@Volatile` on [callback] gives the release()/onSnapshot() handoff the same
+ * visibility guarantee iOS's `NSLock` provides (read-then-invoke outside the
+ * lock; a tick in flight during release may fire once more — benign, full
+ * snapshot per tick is self-healing).
+ */
+private class NostosSnapshotSink(callback: Callback) : SnapshotSink {
+    @Volatile private var callback: Callback? = callback
+
+    override fun onSnapshot(json: String) {
+        // invoke(json) — Callback takes the JS-side args as varargs; the
+        // facade's bridge expects a single `rowsJson: string` arg.
+        callback?.invoke(json)
+    }
+
+    /** Idempotent: nil the retained callback so subsequent ticks are no-ops. */
+    fun release() {
+        callback = null
+    }
 }

@@ -79,6 +79,7 @@ echo "[harness] 1/6 cargo build --target aarch64-linux-android"
 export ANDROID_NDK_HOME="$NDK"
 export CC_aarch64_linux_android="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android24-clang"
 export AR_aarch64_linux_android="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+export RANLIB_aarch64_linux_android="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ranlib"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
 cargo build --target aarch64-linux-android
 

@@ -1,0 +1,5 @@
+package run.nostos.nostos_flutter_example
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
