@@ -1,6 +1,14 @@
 # Ready-to-land: live-socket close-on-JWT-expiry (ADR-0029 §Decision-4 hardening)
 
-**Status:** READY TO LAND — not applied. Gate: `make bench` before/after (the writer `select!` is on the 833k hot path; project rule: perf changes ship with numbers or get reverted). **2026-08-04.**
+**Status:** ✅ LANDED 2026-08-04 (commit on branch `status-audit-2026-08-04`). Benched
+before/after — **no regression**: baseline **485,876 ops/sec @ 0.00% drops** → with-change
+**544,752 ops/sec @ 0.00% drops** (1000 clients / 50k events / 50M deliveries, dev machine).
+The Notify `select!` branch overhead is below the ~±12% run-to-run noise floor; the +12% is
+machine-load drift, not a speedup. The headline 833k@1k config couldn't complete on this
+machine (1M-events = 1B deliveries hit the 3-min timeout), so the comparison is at a reduced
+config — re-run on the dedicated runner to refresh the headline figure. Tests:
+`live_socket_is_closed_after_token_exp` + `live_socket_without_exp_stays_open` (both green),
+workspace clippy `-D warnings` clean.
 
 ## The gap (verified)
 

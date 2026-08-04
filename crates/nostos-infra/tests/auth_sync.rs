@@ -24,6 +24,8 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use common::spawn_fake_server_with;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -34,6 +36,21 @@ const COLLECT_TIMEOUT: Duration = Duration::from_secs(2);
 fn mint_jwt(sub: &str) -> String {
     let header = b"{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
     let payload = format!("{{\"sub\":\"{sub}\"}}");
+    let h = base64url(header);
+    let p = base64url(payload.as_bytes());
+    let signing_input = format!("{h}.{p}");
+    let mut mac = HmacSha256::new_from_slice(SECRET).unwrap();
+    mac.update(signing_input.as_bytes());
+    let sig = base64url(&mac.finalize().into_bytes());
+    format!("{signing_input}.{sig}")
+}
+
+/// Mint an HS256 JWT carrying `{"sub": sub, "exp": exp}` — a token with an
+/// explicit expiry, to exercise the live-socket close-on-exp path
+/// (ADR-0029 §Decision-4).
+fn mint_jwt_exp(sub: &str, exp: i64) -> String {
+    let header = b"{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    let payload = format!("{{\"sub\":\"{sub}\",\"exp\":{exp}}}");
     let h = base64url(header);
     let p = base64url(payload.as_bytes());
     let signing_input = format!("{h}.{p}");
@@ -246,4 +263,81 @@ fn extract_org_id(e: &ReplicationEvent, col: &str) -> Option<ColumnValue> {
     let rest = &s[start..];
     let end = rest.find('"')?;
     Some(ColumnValue::text(&rest[..end]))
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0029 §Decision-4 (live-socket): a live socket does not outlive its JWT.
+// The handshake already enforces `exp`; these prove the *open* socket is also
+// torn down at exp + leeway, and that no-`exp`/anonymous sockets are untouched.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn live_socket_is_closed_after_token_exp() {
+    let auth: Arc<dyn SyncAuth> = Arc::new(real_auth());
+    let (addr, _server, _mgr, _store) = spawn_fake_server_with(64, auth, Some("org_id")).await;
+
+    // exp = now − 55 ⇒ within the 60s leeway (handshake accepts) and
+    // exp + 60s ≈ now + 5s (the server's close-on-exp deadline).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    let token = mint_jwt_exp("acme-user", now - 55);
+    let url = format!("ws://{addr}/sync?token={token}");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(common::subscribe_frame_with(
+        "tasks",
+        &[],
+        None,
+    )))
+    .await
+    .unwrap();
+
+    // The server should close the socket near exp + leeway (≈5s). Allow 12s.
+    let mut closed = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Close(_))) | None) =
+            tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+        {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "a live socket must be closed by the server after its token exp + leeway"
+    );
+}
+
+#[tokio::test]
+async fn live_socket_without_exp_stays_open() {
+    let auth: Arc<dyn SyncAuth> = Arc::new(real_auth());
+    let (addr, _server, _mgr, _store) = spawn_fake_server_with(64, auth, Some("org_id")).await;
+
+    // No `exp` claim ⇒ no close-on-exp deadline is armed.
+    let token = mint_jwt("acme-user");
+    let url = format!("ws://{addr}/sync?token={token}");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(common::subscribe_frame_with(
+        "tasks",
+        &[],
+        None,
+    )))
+    .await
+    .unwrap();
+
+    // Watch for a spurious close for 3s — there must be none.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Close(_)))) =
+            tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+        {
+            panic!("a no-`exp` token must not be closed by the server");
+        }
+    }
+    // Still open after 3s ⇒ no spurious close. Success.
 }

@@ -235,7 +235,11 @@ pub async fn sync_handler(
     let Some(principal) = principal else {
         return unauthorized();
     };
-    ws.on_upgrade(move |socket| run_session(socket, state, principal))
+    // ADR-0029 §Decision-4 (live-socket): arm the close-on-expiry deadline from
+    // the handshake token's `exp`. `None` ⇒ no deadline — the OSS `sync_auth:
+    // none` default and Phase-0 no-`exp` tokens stay open, exactly as before.
+    let exp = crate::auth::token_exp(&token);
+    ws.on_upgrade(move |socket| run_session(socket, state, principal, exp))
 }
 
 /// Pull a bearer token off the Authorization header (`Bearer <token>`).
@@ -257,7 +261,12 @@ fn unauthorized() -> Response {
 }
 
 /// Drive one WebSocket connection for its lifetime.
-async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: Principal) {
+async fn run_session(
+    mut socket: WebSocket,
+    state: SyncRouterState,
+    principal: Principal,
+    exp: Option<i64>,
+) {
     // 1. Read the subscribe frame.
     let Some(subscribe) = read_subscribe(&mut socket).await else {
         return; // client disconnected without subscribing
@@ -374,6 +383,31 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
     let closed_tx = Arc::clone(&closed);
     let ack_sink = Arc::clone(&sink_concrete);
 
+    // ADR-0029 §Decision-4 (live-socket): a live socket must not outlive its
+    // JWT. Arm a one-shot deadline at `exp + leeway`; when it fires the writer
+    // (below) sends Close(4401) and ends the session — the client's reconnect
+    // loop then reconnects with the refreshed token held via `set_token`. Armed
+    // only when the handshake token carried an `exp` (None ⇒ no-op: the OSS
+    // `sync_auth: none` default and no-`exp` tokens behave exactly as before).
+    let exp_fired = Arc::new(Notify::new());
+    let exp_task = exp.map(|exp_secs| {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(i64::MAX, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let remaining = u64::try_from(
+            (exp_secs + crate::auth::JWT_LEEWAY_SECS)
+                .saturating_sub(now_secs)
+                .max(0),
+        )
+        .unwrap_or(0);
+        let notify = Arc::clone(&exp_fired);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(remaining)).await;
+            notify.notify_one();
+        })
+    });
+    let exp_for_writer = Arc::clone(&exp_fired);
+
     let write_loop = tokio::spawn(async move {
         use futures_util::sink::SinkExt as _;
         let mut writer = writer;
@@ -451,6 +485,19 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
                     if writer.send(Message::Binary(bytes)).await.is_err() {
                         break; // client gone
                     }
+                }
+                // ADR-0029 §Decision-4 (live-socket): token-expiry deadline.
+                // Inert (never notified) for no-`exp`/anonymous sessions.
+                () = exp_for_writer.notified() => {
+                    debug!("closing socket: token expired (ADR-0029 §Decision-4)");
+                    let frame = axum::extract::ws::CloseFrame {
+                        code: 4401,
+                        reason: "nostos: token expired".into(),
+                    };
+                    let _ = writer
+                        .send(axum::extract::ws::Message::Close(Some(frame)))
+                        .await;
+                    break;
                 }
             }
         }
@@ -551,6 +598,11 @@ async fn run_session(mut socket: WebSocket, state: SyncRouterState, principal: P
     let _ = write_loop.await;
     // The reader may still be blocked on recv; abort it so the task reaps.
     read_loop.abort();
+    // ADR-0029 §Decision-4: cancel any pending token-expiry deadline so a
+    // short-lived session doesn't leave a sleeping timer task behind.
+    if let Some(task) = exp_task {
+        task.abort();
+    }
 }
 
 /// Why a subscribe was rejected. Non-fatal for mid-session subscribes (the
