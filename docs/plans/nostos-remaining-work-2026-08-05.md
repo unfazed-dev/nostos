@@ -11,6 +11,34 @@ load-bearing defect claims. Reconciles and extends `docs/plans/nostos-status-aud
 
 ---
 
+## 0. RECONCILED 2026-08-05 (later "close all the gaps" pass — HEAD `42908d6` + working tree)
+
+This audit was written at `67eecc3`. A same-day follow-up pass **closed or
+load-bearing-verified** every code-addressable item below. This section is the
+delta; the body below is left intact as the historical record. Operator-only
+items (cold-stranger stopwatch, W6 publication pipeline) remain the sole gate.
+
+| Item (this doc) | Status now | Evidence |
+|---|---|---|
+| §3 / Tier-2 #7 — "no live Flutter example app" | **CLOSED** — example + `nostos_server_test.dart` restored (`209ec36`); wired as the **10th** sdk-e2e slice (macOS-gated), **PASS** through the harness | `scripts/sdk-e2e.sh`; `sdk/nostos_flutter/example/integration_test/` |
+| §3.1 / §8 #2 — "JWKS/RS256 never hit real Supabase" | **CLOSED** — verified end-to-end vs the real project `ltamqsxxumtusyxswezi`, which is **ES256** (P-256), not RS256; fetch+parse AND signature-verify both pass | `42908d6`; `crates/nostos-infra/tests/jwks_real_supabase.rs` |
+| Tier-3 #8 — "real-PG write-amp never published" | **CLOSED** — measured `amp=1.000`, `oplog_dropped=0`; ADR-0025/0026 + RESULTS.md updated | `42908d6`; `e2e_pg_write_amp.rs` |
+| Tier-2 #4 — dotnet binding lacks signOut/setToken | **CLOSED** (`209ec36`; `nostos.cs:1323,1355`) **and now CI-gated** (dotnet slice added to the `sdk-e2e` CI job) | `.github/workflows/ci.yml` |
+| Tier-2 #5 — RN-Android watch iOS-only | **CLOSED** — real `@ReactMethod` bodies mirroring iOS | `209ec36`; `NostosTurboModule.kt:135` |
+| Tier-2 #6 — OR-set silent clobber | **CLOSED** — `NOSTOS_OR_SET_COLUMNS` + loud `bail!` | `04b7bab` |
+| Tier-3 #9 — fanout_scale not in CI | **CLOSED** — `cargo test --workspace -- --include-ignored` | `04b7bab`; ci.yml:32 |
+| Tier-3 #10 — fan_out panic-as-drop | **CLOSED** — separate `faulted` counter + regression test | `04b7bab`; `fanout.rs:215` |
+| Tier-3 #12 — ADR-0029 §Decision-2 OPEN | **CLOSED (ratified-deferred)** — full-wipe = v1 cross-principal isolation; per-principal outbox deferred | `7ff4496` |
+| Tier-3 #11 — make ci count 431 vs 468 | **CLOSED** — reproduced: **477 passed, 0 failed** | `make ci` |
+| Tier-3 #13 — 6/9 SDKs no CI gate | **PARTIALLY CLOSED** — flutter/capacitor/rn/node + scale + **dotnet** now CI-gated; swift/kotlin/web remain toolchain-heavy follow-ups | `.github/workflows/ci.yml` |
+| Tier-1 #3 — real-PG e2e "assumed green" | **CLOSED (after a fix)** — first run failed `fresh_slot_yields_snapshot_rows_then_live_stream` to **replication-slot exhaustion** (`max_replication_slots=10` + leaked `e2e_*` slots); fixed (bump→20 + prune); now **196 passed, 0 failed** | `docker/docker-compose.yml`; `e2e_pg_snapshot.rs` |
+
+**Still open (operator-only):** Tier-1 #1 cold-stranger ≤5:00 stopwatch (engineering
+prereqs now cleared — JWKS verified, Flutter app live; needs W6 prebuilt binaries);
+Tier-1 #2 publication pipeline (brew / pub.dev / `release.yml` / tag).
+
+---
+
 ## 1. Headline verdict
 
 **Nostos is engineering-complete, and the 08-04 audit *understated* how complete.** The audit named

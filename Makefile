@@ -79,7 +79,7 @@ ci: lint test ## Local mirror of CI: lint + test.
 	@echo "✓ CI clean locally"
 
 .PHONY: sdk-e2e
-sdk-e2e: ## Run all 9 SDK live-replication E2E slices (PUSH+ECHO) vs the shared spine. (flutter archived 2026-07-30)
+sdk-e2e: ## Run all 10 SDK live-replication E2E slices (9 PUSH+ECHO + flutter PUSH-only, macOS). (flutter restored 2026-08-05)
 	@./scripts/sdk-e2e.sh
 
 # ----------------------------------------------------------------------------

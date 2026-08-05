@@ -16,9 +16,15 @@ services:
       - "-c"
       - "wal_level=logical"
       - "-c"
-      - "max_wal_senders=10"
+      - "max_wal_senders=20"
+      # ponytail: headroom for the real-PG e2e suite — `cargo test -p nostos-infra
+      # --features pg` runs multiple test binaries concurrently, each creating its
+      # own logical slot (unique per PID). The PG default of 10 is exhausted in a
+      # few leaky runs (a panicked test skips its drop_slot cleanup); 20 gives
+      # comfortable headroom. Prune leaked `e2e_%` slots if they ever accumulate
+      # (SELECT pg_drop_replication_slot(...) for inactive e2e_* in pg_replication_slots).
       - "-c"
-      - "max_replication_slots=10"
+      - "max_replication_slots=20"
       - "-c"
       - "max_connections=200"
     ports:

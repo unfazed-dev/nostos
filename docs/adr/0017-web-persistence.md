@@ -158,6 +158,21 @@ not merely a current-state observation.
 
 ## Addendum: IndexedDB rejected; the browser is *live-only*, not merely non-durable (2026-07-30)
 
+> **⚠️ CORRECTION (2026-08-05): the "live-only" headline and §1 below are
+> SUPERSEDED by `9004b3c` (2026-07-31, "WS1 slice 2").** That commit shipped an
+> in-memory `Outbox` + optimistic local row on the browser write path
+> (`crates/nostos-ffi-wasm/src/lib.rs:496-566`: `enqueue` → `apply_local` →
+> send-if-open → `mark_done`), so a write while disconnected **queues and flushes
+> on reconnect — it no longer throws**. The browser is therefore **offline-capable
+> within a session**, matching the native client's in-session behavior. This
+> addendum's IndexedDB argument STILL correctly establishes only the
+> *reload-durability* ceiling: nothing survives a browser reload (no IndexedDB/
+> OPFS), because `Storage`/`Outbox` are sync traits and IndexedDB is async. So the
+> accurate one-liner is the inverse of this addendum's title: **"offline-capable
+> within a session; nothing survives a reload."** §1's "no outbox / throws /
+> live-only" text is retained below as the 2026-07-30 historical record — do not
+> act on it.
+
 **Status:** Accepted. The deferral above stands. Its *scope* was wrong, and the
 cheaper IndexedDB alternative floated in
 `docs/plans/adr-and-docs-completion-audit-2026-07-30.md` is **rejected**.

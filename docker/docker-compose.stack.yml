@@ -29,9 +29,11 @@ services:
       - "-c"
       - "wal_level=logical"
       - "-c"
-      - "max_wal_senders=10"
+      - "max_wal_senders=20"
+      # 20 (not PG default 10): the real-PG e2e suite runs concurrent test
+      # binaries, each creating a logical slot; 10 is exhausted across leaky runs.
       - "-c"
-      - "max_replication_slots=10"
+      - "max_replication_slots=20"
       - "-c"
       - "max_connections=200"
     ports:
