@@ -593,6 +593,16 @@ impl PgReplicator {
                 );
                 self.record_health(SlotHealth::Lost);
                 self.record_recreate();
+                // Bump the slot epoch AT THE RECREATE-DECISION POINT, not at the
+                // end of the fresh-create block below. The reconnect-resume gate
+                // (ADR-0025 slice 4) reads `slot_epoch` to decide whether a
+                // reconnecting client must full-snapshot; bumping it only after
+                // the snapshot + COMMIT (the old placement) left a window where a
+                // client reconnecting mid-recreate saw the STALE epoch and the
+                // gate misfired. This Lost branch is the single chute reached by
+                // BOTH first-create (slot missing) and Lost-recreate, so this is
+                // the one bump per slot lineage.
+                self.record_epoch_bump();
                 if slot_existed {
                     // Drop the invalidated slot so the fresh-create path below
                     // succeeds. pg_drop_replication_slot fails if the slot is
@@ -674,13 +684,9 @@ impl PgReplicator {
 
         self.seed_resume(Lsn::new(consistent_lsn.as_u64()));
 
-        // Bump the slot epoch — this fresh-create block is the SINGLE chute
-        // for both first-create and Lost-recreate (the Lost arm above drops
-        // the dead slot then falls through to here). Every (re)creation
-        // starts a new lineage; a client whose last-seen epoch predates this
-        // bump cannot backfill from the op-stream and must full-snapshot on
-        // reconnect. ADR-0025 slice 3 (the gate that consumes this is slice 4).
-        self.record_epoch_bump();
+        // NOTE: the slot-epoch bump lives ABOVE, at the recreate-decision point
+        // in the `SlotProbe::Lost` arm (not here) — see that comment for why a
+        // late bump at end-of-fresh-create left a reconnect-resume gate window.
         Ok(consistent_lsn)
     }
 

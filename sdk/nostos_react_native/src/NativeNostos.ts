@@ -30,8 +30,9 @@
 //   watchChanges(table, cb)   → NostosClient::watch(table, sink: SnapshotSink). Rust→JS PUSH: the native side
 //                              retains `cb` (a Codegen-emitted RCTResponseSenderBlock, which self-marshals to
 //                              the JS thread — safe to invoke from the nostos tokio worker) and calls it once
-//                              with the INITIAL snapshot, then after every applied change. iOS-verified only
-//                              (Android ships the request/response surface first; watch is iOS-led).
+//                              with the INITIAL snapshot, then after every applied change. Verified on iOS
+//                              AND Android (Android mirrors iOS: RN `Callback` wrapped in a UniFFI
+//                              `SnapshotSink` adapter retained per-table in `NostosTurboModule.sinks`).
 //   unwatchChanges(table)     → releases the retained JS callback so further ticks are no-ops. BINDING FLOOR:
 //                              nostos_swift has no stop_watch — the Rust pump is tied to the session (it dies
 //                              on connect-replace/signOut/deinit). So unwatch stops DELIVERY to JS, not the
@@ -159,8 +160,8 @@ export interface Spec extends TurboModule {
    * client its own empty store, hiding the wipe across instances). The
    * returned path is passed straight to `connect(url, token, dbPath)`.
    *
-   * iOS-verified; Android pending (the request/response + signOut/setToken
-   * surface ships first on Android — same drift status as watchChanges).
+   * iOS-verified; Android pending (Android ships watchChanges, but the path
+   * resolver is still iOS-only — see `NostosTurboModule` for the gap).
    */
   resolveDbPath(name: string): Promise<string>;
   /**

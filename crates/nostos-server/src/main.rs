@@ -112,6 +112,24 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_WRITE_TABLES", default_value = "")]
     write_tables: String,
 
+    /// Comma-separated `table:column` pairs naming the JSONB columns that hold
+    /// add-wins OR-sets (ADR-0030). Writes to these tables merge element-wise
+    /// server-side instead of clobbering; an OR-set write to an unconfigured
+    /// table is rejected client-side. Empty (default) = no OR-set columns (LWW
+    /// only). Example: `tasks:tags,notes:labels`. Only meaningful under
+    /// `NOSTOS_REPLICATOR=pg`.
+    #[arg(long, env = "NOSTOS_OR_SET_COLUMNS", default_value = "")]
+    or_set_columns: String,
+
+    /// Coalesce the per-event ack-progress (slot-advance) scan: recompute the
+    /// slowest acked LSN every N events instead of every event. `1` (default) =
+    /// exact ADR-0009 per-event cadence. `>1` cuts the O(sessions) scan N× — the
+    /// lever for >5k-client deploys (safe: acks are monotonic, so a cached min
+    /// never overshoots the safe-to-flush LSN; at most N events of extra WAL
+    /// retention). Example: `16` or `32` for high client counts.
+    #[arg(long, env = "NOSTOS_ACK_PROGRESS_INTERVAL", default_value = "1")]
+    ack_progress_interval: u32,
+
     /// Logical-replication slot name.
     #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "cairn_slot")]
     pg_slot: String,
@@ -357,7 +375,7 @@ async fn main() -> anyhow::Result<()> {
             Some(w) => builder.with_op_log(w),
             None => builder,
         };
-        builder
+        builder.with_ack_progress_every(cfg.ack_progress_interval)
     });
 
     // ---- start the replicator → fan-out driver ----
@@ -490,6 +508,7 @@ async fn main() -> anyhow::Result<()> {
     // a clear "write-back requires pg replicator" error. The allowlist is
     // always set on the state so the transport's gate is uniform.
     let write_tables = nostos_infra::parse_allowlist(&cfg.write_tables);
+    let or_set_columns = nostos_infra::parse_or_set_columns(&cfg.or_set_columns);
     #[cfg(feature = "pg")]
     let write_back: Arc<dyn nostos_application::ports::WriteBack> = if cfg.replicator == "pg" {
         if cfg.pg_url.trim().is_empty() {
@@ -498,11 +517,11 @@ async fn main() -> anyhow::Result<()> {
                  Set NOSTOS_PG_URL, e.g. after: docker compose -f docker/docker-compose.yml up -d"
             );
         }
-        info!(tables = ?write_tables, "write-back: PgWriteBack (real source)");
-        Arc::new(nostos_infra::PgWriteBack::new(
-            &cfg.pg_url,
-            write_tables.clone(),
-        ))
+        info!(tables = ?write_tables, or_set_columns = ?or_set_columns, "write-back: PgWriteBack (real source)");
+        Arc::new(
+            nostos_infra::PgWriteBack::new(&cfg.pg_url, write_tables.clone())
+                .with_or_set_columns(or_set_columns.clone()),
+        )
     } else {
         info!("write-back: NoWriteBack (fake replicator — writes return pg-required error)");
         Arc::new(nostos_infra::NoWriteBack::new())
@@ -510,6 +529,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "pg"))]
     let write_back: Arc<dyn nostos_application::ports::WriteBack> = {
         let _ = &cfg.pg_url; // unused without the pg feature
+        let _ = &or_set_columns; // unused without the pg feature
         info!("write-back: NoWriteBack (binary built without `pg` feature)");
         Arc::new(nostos_infra::NoWriteBack::new())
     };
@@ -716,6 +736,9 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          # HELP cairn_events_dropped_total Events dropped (full buffer / dedup / closed).\n\
          # TYPE cairn_events_dropped_total counter\n\
          cairn_events_dropped_total {dropped}\n\
+         # HELP cairn_events_faulted_total Delivery tasks that faulted (panicked / cancelled) — a server fault, NOT slow-client backpressure. Kept distinct from cairn_events_dropped_total so a panic is never mis-attributed as a client drop in the 0%-drops figure. Alert on any increase.\n\
+         # TYPE cairn_events_faulted_total counter\n\
+         cairn_events_faulted_total {faulted}\n\
          # HELP cairn_live_sessions Current live sync sessions.\n\
          # TYPE cairn_live_sessions gauge\n\
          cairn_live_sessions {sessions}\n\
@@ -743,6 +766,7 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
+        faulted = snap.faulted,
         sessions = sessions,
         slot_wal_status = snap.slot_wal_status.as_gauge_int(),
         replication_lag_bytes = snap.replication_lag_bytes,

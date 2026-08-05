@@ -47,6 +47,10 @@ fn main() {
     let clients: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let events: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
     let window_secs: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
+    // Arg 4: ack-progress coalesce interval (1 = every event = exact ADR-0009;
+    // >1 = the 10k fix, recomputing the slowest acked LSN every N events). Lets
+    // the same binary produce before (1) / after (N) 10k numbers.
+    let ack_interval: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1);
 
     // Raise FD limit — 10k clients need ~20k+ FDs.
     #[cfg(unix)]
@@ -63,7 +67,7 @@ fn main() {
         .build()
         .expect("tokio runtime");
 
-    let result = rt.block_on(run(clients, events, window_secs));
+    let result = rt.block_on(run(clients, events, window_secs, ack_interval));
 
     // Print and exit hard — no graceful teardown (that's what hangs at 10k).
     eprintln!(
@@ -86,14 +90,14 @@ struct ProbeResult {
     elapsed_secs: f64,
 }
 
-async fn run(clients: usize, events: u64, window_secs: u64) -> ProbeResult {
+async fn run(clients: usize, events: u64, window_secs: u64, ack_interval: u32) -> ProbeResult {
     let store: Arc<dyn nostos_application::ports::SessionStore> =
         Arc::new(InMemorySessionStore::new());
     let manager = Arc::new(SessionManager::new(
         store.clone(),
         nostos_domain::Tier::Enterprise,
     ));
-    let fanout = Arc::new(FanOutService::new(store.clone()));
+    let fanout = Arc::new(FanOutService::new(store.clone()).with_ack_progress_every(ack_interval));
 
     let state = SyncRouterState::new(
         Arc::clone(&manager),

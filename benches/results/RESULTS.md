@@ -39,8 +39,16 @@ PowerSync publishes a **server-side ceiling of ~2,000–4,000 ops/sec** for smal
   cost on the fan-out loop is a channel send (~ns), well within the ±5%
   run-to-run noise band. The real-Postgres write-amplification (the actual
   `cairn_oplog` multi-row INSERT, performed off the fan-out loop by a background
-  flush task) is a **separate real-PG measurement, pending slice 6** — it does
-  not regress this fan-out number (it's off-loop); it shows up as PG resource
-  use + potential queue overflow under sustained flood, measured where a real PG
-  exists. The two numbers (fan-out ceiling here; real-PG write-amp in slice 6)
-  are cited with equal prominence per the ADR-0025 honesty contract.
+  flush task) was **ADR-0025 slice 6** and is **MEASURED 2026-08-05** (was
+  "pending"): `crates/nostos-infra/tests/e2e_pg_write_amp.rs` wires the production
+  path (`PgReplicator` → `FanOutService.with_op_log(PgOpLogWriter)`) against real
+  PG, inserts 200 live rows for a fresh tenant, and asserts the op-log grows
+  **exactly 1:1** (`amp=1.000`, one `cairn_oplog` row per source WAL event) with
+  **`oplog_dropped=0`** — no amplification, no drops. The `events/sec` printed by
+  that harness (~42 on the dev machine) is a **test-driver-bound floor**, not an
+  engine ceiling: it is dominated by the harness's 200 sequential per-row INSERT
+  round-trips, not by the replicator/op-log, and it is NOT comparable to the
+  833k fan-out number above (different path — real PG vs eval-only FakeReplicator).
+  It does not regress this fan-out number (the op-log INSERT is off-loop); the
+  two numbers (fan-out ceiling here; real-PG write-amp 1:1 / 0 drops) are cited
+  with equal prominence per the ADR-0025 honesty contract.

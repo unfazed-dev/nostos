@@ -770,6 +770,10 @@ static class _UniFFILib {
     
     
     
+    
+    
+    
+    
 
     static _UniFFILib() {
         _UniFFILib.uniffiCheckContractApiVersion();
@@ -800,6 +804,14 @@ static class _UniFFILib {
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
     public static extern RustBuffer uniffi_nostos_dotnet_fn_method_nostosclient_query(IntPtr @ptr,RustBuffer @sql,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_nostosclient_set_token(IntPtr @ptr,RustBuffer @token,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_nostosclient_sign_out(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
@@ -1067,6 +1079,14 @@ static class _UniFFILib {
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_set_token(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_subscribe(
     );
 
@@ -1116,6 +1136,18 @@ static class _UniFFILib {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_query();
             if (checksum != 35331) {
                 throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_query` checksum `35331`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_set_token();
+            if (checksum != 25798) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_set_token` checksum `25798`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out();
+            if (checksum != 24733) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out` checksum `24733`, library returned `{checksum}`");
             }
         }
         {
@@ -1276,6 +1308,51 @@ internal interface INostosClient {
     /// </summary>
     /// <exception cref="NostosException"></exception>
     string Query(string @sql);
+    /// <summary>
+    /// ADR-0029 D3: swap the bearer token. Updates the stored seed (so a future
+    /// `connect()` builds the `SyncClient` with the new JWT) AND — if a session
+    /// is live — forwards to `SyncClient::set_token`, so the reconnect loop's
+    /// next attempt uses the fresh token. Deliberately does NOT force a
+    /// reconnect: a Supabase JWT refresh self-heals within one backoff window
+    /// (see `SyncClient::set_token`). Before-`connect()` it touches only the
+    /// seed (the field); after, both the seed and the live client.
+    ///
+    /// Pass `None` to clear the token (e.g. on sign-out the FFI port also calls
+    /// this implicitly — `sign_out` clears the seed itself).
+    /// </summary>
+    void SetToken(string? @token);
+    /// <summary>
+    /// ADR-0029 D3: sign out the current principal. Tears down the live
+    /// session in the order the wipe REQUIRES — **quiesce FIRST, then clear**:
+    ///
+    /// 1. Abort the run loop (`run_task`) AND every reactive `watch()` pump,
+    /// then **await** each handle. `abort()` alone only requests
+    /// cancellation; the task keeps applying frames until its next `.await`.
+    /// Awaiting confirms it has STOPPED before we touch storage — a
+    /// post-clear apply/flush frame re-populates `cairn_data` / re-queues
+    /// the outbox, and "half a clear is a cross-user leak" (ADR-0029; the
+    /// `SyncClient::clear_local_state` docstring mandates this exact order).
+    /// 2. `SyncClient::clear_local_state()` — wipes rows AND the outbox AND
+    /// resets the checkpoint to 0 + the epoch, atomically under one engine
+    /// lock. The checkpoint reset is load-bearing: a stale checkpoint makes
+    /// the next principal resume PAST the snapshot and see an empty DB
+    /// permanently (the resume-without-snapshot unsoundness class).
+    /// 3. Drop the session entirely (releases the `SyncClient` Arc → closes the
+    /// WebSocket) so the next `connect()` builds a fresh client for the next
+    /// principal instead of reusing the torn-down one.
+    /// 4. Clear the stored token seed so a stale JWT isn't handed to that next
+    /// `connect()`.
+    ///
+    /// Idempotent: a no-op if no session is active (still clears the token).
+    /// The session lock and the token lock are NEVER held simultaneously — no
+    /// co-holding window, so no deadlock surface.
+    ///
+    /// # Errors
+    /// `NostosError` if the wipe itself failed (disk error mid-clear). The
+    /// teardown steps (1) and (3) are infallible and run regardless.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    void SignOut();
     /// <summary>
     /// Start the live replication loop on the owned runtime. Spawns
     /// `client.run_with_reconnect()` — the loop opens the WS session
@@ -1524,6 +1601,67 @@ internal class NostosClient : INostosClient, IDisposable {
     _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_query(thisPtr, FfiConverterString.INSTANCE.Lower(@sql), ref _status)
 )));
     }
+    
+    
+    /// <summary>
+    /// ADR-0029 D3: swap the bearer token. Updates the stored seed (so a future
+    /// `connect()` builds the `SyncClient` with the new JWT) AND — if a session
+    /// is live — forwards to `SyncClient::set_token`, so the reconnect loop's
+    /// next attempt uses the fresh token. Deliberately does NOT force a
+    /// reconnect: a Supabase JWT refresh self-heals within one backoff window
+    /// (see `SyncClient::set_token`). Before-`connect()` it touches only the
+    /// seed (the field); after, both the seed and the live client.
+    ///
+    /// Pass `None` to clear the token (e.g. on sign-out the FFI port also calls
+    /// this implicitly — `sign_out` clears the seed itself).
+    /// </summary>
+    public void SetToken(string? @token) {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCall( (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_set_token(thisPtr, FfiConverterOptionalString.INSTANCE.Lower(@token), ref _status)
+));
+    }
+    
+    
+    
+    /// <summary>
+    /// ADR-0029 D3: sign out the current principal. Tears down the live
+    /// session in the order the wipe REQUIRES — **quiesce FIRST, then clear**:
+    ///
+    /// 1. Abort the run loop (`run_task`) AND every reactive `watch()` pump,
+    /// then **await** each handle. `abort()` alone only requests
+    /// cancellation; the task keeps applying frames until its next `.await`.
+    /// Awaiting confirms it has STOPPED before we touch storage — a
+    /// post-clear apply/flush frame re-populates `cairn_data` / re-queues
+    /// the outbox, and "half a clear is a cross-user leak" (ADR-0029; the
+    /// `SyncClient::clear_local_state` docstring mandates this exact order).
+    /// 2. `SyncClient::clear_local_state()` — wipes rows AND the outbox AND
+    /// resets the checkpoint to 0 + the epoch, atomically under one engine
+    /// lock. The checkpoint reset is load-bearing: a stale checkpoint makes
+    /// the next principal resume PAST the snapshot and see an empty DB
+    /// permanently (the resume-without-snapshot unsoundness class).
+    /// 3. Drop the session entirely (releases the `SyncClient` Arc → closes the
+    /// WebSocket) so the next `connect()` builds a fresh client for the next
+    /// principal instead of reusing the torn-down one.
+    /// 4. Clear the stored token seed so a stale JWT isn't handed to that next
+    /// `connect()`.
+    ///
+    /// Idempotent: a no-op if no session is active (still clears the token).
+    /// The session lock and the token lock are NEVER held simultaneously — no
+    /// co-holding window, so no deadlock surface.
+    ///
+    /// # Errors
+    /// `NostosError` if the wipe itself failed (disk error mid-clear). The
+    /// teardown steps (1) and (3) are infallible and run regardless.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    public void SignOut() {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeNostosError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_sign_out(thisPtr,  ref _status)
+));
+    }
+    
     
     
     /// <summary>

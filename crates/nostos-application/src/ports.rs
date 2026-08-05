@@ -670,6 +670,11 @@ pub struct Metrics {
     pub delivered: AtomicU64,
     /// Events dropped (full buffer / closed sink / dedup hit).
     pub dropped: AtomicU64,
+    /// Delivery tasks that *faulted* (panicked / were cancelled) — a server-side
+    /// problem, NOT slow-client backpressure. Counted separately from `dropped`
+    /// so a panic is never mis-attributed as a client drop in the "0% drops"
+    /// moat figure or in `/metrics`. See `FanOutService::fan_out`.
+    pub faulted: AtomicU64,
     /// Current live session count (gauge, not counter).
     pub sessions: AtomicUsize,
     /// Replication-slot health gauge (see [`SlotHealth`]). Set by `PgReplicator`
@@ -724,6 +729,7 @@ impl Metrics {
             matched: self.matched.load(Ordering::Relaxed),
             delivered: self.delivered.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            faulted: self.faulted.load(Ordering::Relaxed),
             sessions: self.sessions.load(Ordering::Relaxed),
             slot_wal_status: SlotHealth::from_u8(self.slot_wal_status.load(Ordering::Relaxed)),
             replication_lag_bytes: self.replication_lag_bytes.load(Ordering::Relaxed),
@@ -781,6 +787,9 @@ pub struct MetricsSnapshot {
     pub matched: u64,
     pub delivered: u64,
     pub dropped: u64,
+    /// Delivery tasks that faulted (panicked/cancelled) — distinct from
+    /// `dropped` (slow-client backpressure). See [`Metrics::faulted`].
+    pub faulted: u64,
     pub sessions: usize,
     pub slot_wal_status: SlotHealth,
     pub replication_lag_bytes: u64,

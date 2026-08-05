@@ -82,21 +82,23 @@ From `index.js`. `connect()` here does **not** open a socket — see *Ceiling*.
 
 ## Ceiling (ponytail)
 
-**In the browser this is a *live-only* client.** Two limits, both by design and
-both tracked in the [ADR-0017 addendum](../../docs/adr/0017-web-persistence.md):
+**In the browser this is an *in-session offline-capable* client** — writes do not
+require a live socket. `NostosSocket.write` captures the frame into an in-memory
+`Outbox` (`enqueue`) and renders the local row at once (`apply_local`), so a write
+while disconnected **queues** instead of throwing and flushes on reconnect — the
+synchronous "socket not OPEN" throw is gone (shipped `9004b3c`, "WS1 slice 2"; see
+the [ADR-0017 addendum](../../docs/adr/0017-web-persistence.md)). One limit remains,
+by design:
 
-- **Rows do not survive a reload.** They live in an in-memory `BTreeMap`; only the
-  `localStorage` checkpoint persists, so a refresh replays from `resume_lsn`
-  (one re-fetch, no duplicates — ADR-0009's exactly-once holds).
-- **`NostosSocket.write` requires a live socket.** It sends the frame directly and
-  never touches the outbox, so with the socket closed it **throws** instead of
-  queueing. There is no offline write capture and no optimistic local row —
-  unlike the native client, which enqueues durably *before* any network call.
-  (The `NostosClient.write` on the Node facade below is a different surface: it
-  feeds the apply engine and opens no socket at all.)
+- **Nothing survives a reload.** Rows and pending writes live in an in-memory
+  `BTreeMap`; only the `localStorage` checkpoint persists, so a refresh replays
+  from `resume_lsn` (one re-fetch, no duplicates — ADR-0009's exactly-once holds).
+  A pending offline write that hadn't flushed before the reload is lost.
+  Reload-durability (IndexedDB/OPFS) is the deferred upgrade — deliberate, because
+  `Storage`/`Outbox` are *sync* traits and IndexedDB is async (can't await on the
+  main thread).
 
-Neither is silent — a closed-socket write throws. But do not describe the browser
-build as offline-capable; it is not yet.
+So: offline-capable within a session; nothing survives a reload.
 
 **A third gap is Node-only.** `NostosSocket.connect()` is wired to
 `web-sys::WebSocket` + `Window::localStorage`, which Node lacks, so the

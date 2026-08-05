@@ -45,7 +45,7 @@ Extends slice-6 (`e395dea`). Slice-6 added the shutdown drain; this ADR closes t
 
 ## Open follow-ups
 
-- **Real-PG `cairn_oplog` INSERT write-amplification is still unmeasured.** ADR-0025's "every WAL event also writes a `cairn_oplog` row" consequence (`make bench` must re-measure the 142k ops/sec moat claim) is the slice-6 open item and is **not** closed by this ADR. This ADR is correctness-only — no new writes, only ordering + channel-authority. Slice-6's bench re-measurement is the separate tracked item.
+- **~~Real-PG `cairn_oplog` INSERT write-amplification is still unmeasured.~~** **CLOSED 2026-08-05.** ADR-0025's "every WAL event also writes a `cairn_oplog` row" consequence is measured by `crates/nostos-infra/tests/e2e_pg_write_amp.rs`: amplification **exactly 1:1** (`amp=1.000`), **`oplog_dropped=0`**, no fan-out regression (the INSERT is off-loop; `RESULTS.md`). This ADR remains correctness-only — no new writes, only ordering + channel-authority.
 - **Multi-sender discipline.** Fix B is correct for the single-sender design (the `PgReplicator` task is the only `append` caller). If a future change adds a second `OpLogWriter::append` caller (e.g. a backfill path), the `Mutex<Option<Sender>>` authority still holds — but the `abort()` ordering at `main.rs:615` is producer-specific and would need an analogue for the new caller.
 
 ## References

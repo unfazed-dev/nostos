@@ -7,6 +7,18 @@
 > **POST-INVESTIGATION UPDATE (same day, Wave 2):** the two ❓ load-bearing claims below were then resolved by a deeper 5-subagent investigation + a live `make ci` run:
 > - **Client-side offline-delete orphan → ✅ RESOLVED.** Traced end-to-end on the *client apply path*: server `snapshot_begin`/`snapshot_end` control frames (`transport.rs:717,726`) → client pump intercepts before row-decode, exempting pending outbox PKs (`client.rs:1018`) → apply engine reaps absent PKs (`apply.rs:272-298`) → `SqliteStorage::delete_pks` (`sqlite.rs:766`). Proven by `snapshot_reconcile_removes_orphans_absent_from_snapshot` (`apply.rs:597`), green in the 468-test run. (The original audit's "two subagents conflicted" was a server-oplog-vs-client-apply conflation — resolved.)
 > - **`make ci` → ✅ GREEN @ 468 passed / 0 failed / 1 ignored** (clippy `-D warnings` clean, fmt clean). Resolves the contradictory 188/250/273/431 doc counts.
+
+> **CORRECTIONS (2026-08-05 fix pass — see `docs/plans/nostos-remaining-work-2026-08-05.md`):** three
+> premises in this audit's body are STALE vs HEAD `67eecc3` and should be read with these corrections:
+> - **Token-refresh close-on-exp is now CLOSED** (`67eecc3`: writer `select!` sends `CloseFrame 4401` at
+>   JWT `exp`, alg-agnostic; tests `auth_sync.rs`). The audit's "packaged, NOT applied" (lines 10/50/81)
+>   and the ADR-0029 D4 "future hardening" caveat are superseded — ADR-0029 D4 body corrected in place.
+> - **Web is NOT "live-only / no outbox"** — `9004b3c` shipped an in-session outbox + optimistic row +
+>   flush-on-reconnect (`ffi-wasm/lib.rs:547-565`); only reload-durability is absent (deferred, ADR-0017).
+>   The audit's WS1 premise (§2.9) and `sdk/nostos_web/README.md` understate the shipped capability.
+> - **ADR-0029 is `Accepted`** (its Status line reads "D1/3/4 shipped; D2 interim"), NOT "Proposed / the
+>   only non-Accepted" — the audit's TL;DR/Tier-B lines that say otherwise are the drift. D2 remains the
+>   sole open sub-decision.
 > - **Token-refresh close-on-exp → packaged, NOT applied.** Real gap, ~25-line fix designed + test feasible via the existing `auth_sync.rs` harness; deferred because the writer `select!` is on the 833k hot path and the project rule mandates a `make bench` before/after this session couldn't run. Spec: `docs/plans/token-refresh-close-on-exp-ready-2026-08-04.md`.
 > - **Doc accuracy landed:** ADR-0029 (D1/D3/D4 shipped; D2 interim), ADR-0014 + ADR-0004 (CRDT shipped via ADR-0030), ADR-0025 (offline-delete P0 annotated RESOLVED).
 

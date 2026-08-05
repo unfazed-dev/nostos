@@ -64,3 +64,9 @@ sdk/nostos_react_native/example/
 sdk/nostos_react_native/ios/nostos_swift.swift
 sdk/nostos_react_native/ios/ffi/
 sdk/nostos_react_native/ios/libnostos_swift.a
+
+# --- Local MCP wiring + Supabase CLI scratch (machine/project-local, never commit) ---
+# .mcp.json pins this checkout to one operator's Supabase project; supabase/.temp/
+# is CLI scratch. Neither belongs in the shared OSS repo.
+.mcp.json
+supabase/.temp/

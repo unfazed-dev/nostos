@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# scripts/sdk-e2e.sh — run the 9 SDK live-replication E2E slices against the
-# shared no-docker spine (nostos-infra/examples/e2e_server).
+# scripts/sdk-e2e.sh — run the 10 SDK live-replication E2E slices.
 #
-# Each slice spawns its own spine instance and proves BOTH replication
-# directions through the SDK's real public API:
+# 9 slices (rust, node, tauri, web, capacitor, dotnet, swift, kotlin,
+# reactnative) run against the shared no-docker spine
+# (nostos-infra/examples/e2e_server) and prove BOTH replication directions:
 #   PUSH  — server pushes a row  → SDK applies it → readable on-device
 #   ECHO  — SDK write()s a row   → server's echo WriteBack re-emits it
 #                                 → SDK applies it → readable on-device
+# Flutter is the 10th: it spawns its OWN `cargo run -p nostos-server` (macOS
+# desktop) and proves PUSH only (connect→subscribe→watch); its write()/ECHO
+# path is covered by the facade unit tests in CI (.github/workflows/ci.yml).
 #
 # Host slices (rust, node, tauri, web, capacitor) always run. Toolchain- and
 # device-dependent slices (dotnet, flutter, swift, kotlin, reactnative) SKIP
 # with a reason when their runtime is absent, so the runner is honest on a
 # host-only box. Keep this grouping in step with ALL_SLICES below and the
-# `want <slice>` guards — it said "7 slices / host: rust node tauri web /
-# device: flutter swift kotlin" until 2026-07-30, three slices after that
-# stopped being true. See docs/plans/sdk-live-e2e-consolidation.md.
+# `want <slice>` guards. See docs/plans/sdk-live-e2e-consolidation.md.
 #
 # Usage:
 #   scripts/sdk-e2e.sh            # run all 9
@@ -26,7 +27,7 @@ cd "$(git rev-parse --show-toplevel)"
 GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; RED=$'\033[0;31m'
 BOLD=$'\033[1m';   RESET=$'\033[0m'
 
-ALL_SLICES=(rust node tauri web capacitor dotnet swift kotlin reactnative)
+ALL_SLICES=(rust node tauri web capacitor dotnet flutter swift kotlin reactnative)
 if [ "$#" -gt 0 ]; then
   SLICES=("$@")
 else
@@ -87,32 +88,25 @@ if want dotnet; then
   fi
 fi
 
-# Flutter — NO LIVE SLICE since 2026-07-30. Operator decision: "no example app
-# to live in the SDK", then "archive the tests as well - take it all".
-# `sdk/nostos_flutter/{example,test,test_driver}` moved under `archive/`, so
-# nostos_server_test.dart — a REAL `cargo run -p nostos-server` driven through the
-# SDK's connect/subscribe/watch loop inside a genuine macOS app bundle — has no
-# host app left to build against.
+# Flutter — macOS desktop live integration test (sdk/nostos_flutter/example).
+# Restored 2026-08-05 (commit 209ec36) after the 2026-07-30 archive. Unlike the
+# shared-spine slices it spawns its OWN `cargo run -p nostos-server` at
+# 127.0.0.1:8801 and drives connect/subscribe/watch inside a genuine macOS app
+# bundle. PUSH-only — asserts the server fans out rows that watch() emits; no
+# write()/WriteBack ECHO leg (the SDK write path is covered by the facade unit
+# tests in the CI `flutter` job). macOS-gated: `-d macos` needs a Darwin host
+# with flutter; SKIP honestly elsewhere (matches swift/kotlin).
 #
-# `flutter` is OUT of ALL_SLICES: the honest count is 9 live slices, not 10.
-# Deliberately not `skip_slice`d — SDK_E2E_STRICT=1 converts a SKIP into a CI
-# failure, and leaving it listed would claim PUSH+ECHO coverage that no longer
-# exists. Restoring it means a Flutter host app under `fixtures/` (see
-# docs/plans/multi-sdk-pomodoro-fixture-matrix.md).
-#
-# The doc-signature guard that used to ride along here moved to the `flutter`
-# job in .github/workflows/ci.yml. It needs no Flutter SDK, and it is the check
-# that caught README.md and USAGE.md both documenting three
+# The doc-signature guard that used to live in this block moved to the `flutter`
+# job in .github/workflows/ci.yml — it caught README/USAGE documenting three
 # `NostosDatabase.supabase` parameters that never existed. Do not let it stop
-# running again.
-#
-# An explicit `sdk-e2e.sh flutter` must fail loudly rather than silently pass:
-# a no-op branch reporting success is the exact false-green this harness guards
-# against everywhere else.
+# running.
 if want flutter; then
-  printf '%s\n' "${RED}FAIL${RESET} flutter — slice archived 2026-07-30; host app now at archive/sdk/nostos_flutter/example." >&2
-  printf '%s\n' "       Restore live coverage with a Flutter host app under fixtures/." >&2
-  exit 1
+  if [ "$(uname -s)" = "Darwin" ] && command -v flutter >/dev/null 2>&1; then
+    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
+  else
+    skip_slice flutter "(macOS host + flutter required — \`flutter test -d macos\`)"
+  fi
 fi
 
 # Swift — needs a BOOTED iPhone simulator (xcodebuild + simctl). Checking only

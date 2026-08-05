@@ -1,5 +1,6 @@
 package run.nostos.reactnative
 
+import com.facebook.react.bridge.Callback
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -26,6 +27,14 @@ import com.facebook.react.module.annotations.ReactModule
  *   checkpoint()                → .checkpoint()                        (ULong → JS Double)
  *   setToken(token)             → .setToken(token)  (ADR-0029 #3; Option<String> ↔ Kotlin String?)
  *   signOut()                   → .signOut()        (ADR-0029 wipe; abort→await→clear→drop→clear-token)
+ *   watchChanges(table, cb)     → .subscribe(table) + .watch(table, sink)  (RN Callback wrapped in a
+ *                              UniFFI `SnapshotSink` adapter — the Kotlin mirror of iOS's NostosSnapshotSink.
+ *                              cb is a `Callback` (Codegen mapping of a JS `(rowsJson) => void` param) — the
+ *                              native impl retains it and invokes it on the JS thread with the INITIAL
+ *                              snapshot, then after every applied change.)
+ *   unwatchChanges(table)       → nil the retained Callback. BINDING FLOOR: nostos_kotlin has no stop_watch
+ *                              (the Rust pump is tied to the session). So this stops DELIVERY to JS, not the
+ *                              pump; the sink is retained until session end so UniFFI's handle can't dangle.
  *
  * `payloadJson: String?` mirrors UniFFI's `Option<String>`: `null` = None
  * (delete shape — no row image), a JSON string = Some(...). The Kotlin `?`
@@ -64,6 +73,8 @@ abstract class NativeNostosSpec :
     abstract fun checkpoint(promise: Promise)
     abstract fun setToken(token: String?, promise: Promise)
     abstract fun signOut(promise: Promise)
+    abstract fun watchChanges(table: String, onSnapshot: Callback, promise: Promise)
+    abstract fun unwatchChanges(table: String, promise: Promise)
 
     companion object {
         const val NAME = "NativeNostos"

@@ -29,7 +29,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace -- --include-ignored
 
   e2e-pg:
     name: real-Postgres logical-replication e2e
@@ -102,8 +102,8 @@ jobs:
     # fragile one; it stays covered by the local `make sdk-e2e`. Add it here if
     # the webkit deps ever become worth maintaining.
     #
-    # web/capacitor need Playwright browsers, dotnet needs the .NET SDK, and
-    # flutter/swift/kotlin/reactnative need a booted device — all local-only.
+    # web/capacitor need Playwright browsers, and swift/kotlin/reactnative need
+    # a booted device — all local-only. (dotnet joined this CI job 2026-08-05.)
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -112,14 +112,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0"
       - name: Run host SDK e2e slices
         # SDK_E2E_STRICT=1 makes a SKIP fatal. Naming the slices is not enough
         # on its own: the guards inside the script would still let a slice skip
         # (e.g. a missing toolchain) and the job would pass having proved
         # nothing — the same false-green shape as the self-skipping
         # NOSTOS_E2E_PG suite. Strict mode is what makes this job's green mean
-        # "both round-trips actually ran".
-        run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node
+        # "every named slice's round-trip actually ran". `dotnet` builds the
+        # UniFFI cdylib + C# smoke and runs a live PUSH+ECHO round-trip — the
+        # gate that catches a stale committed nostos.cs (e.g. signOut/setToken
+        # missing, the 2026-08-05 defect).
+        run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node dotnet
       - name: Upload slice logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -161,23 +167,20 @@ jobs:
       - name: flutter analyze
         working-directory: sdk/nostos_flutter
         run: flutter analyze
-      # `flutter test` REMOVED 2026-07-30. `sdk/nostos_flutter/{test,test_driver}`
-      # were moved under `archive/` by operator decision ("archive the tests as
-      # well - take it all"), so no Dart tests remain here to run. Consequence,
-      # stated plainly rather than buried: the Flutter SDK — the flagship — now
-      # has NO automated test coverage of its Dart surface, and the sdk-e2e
-      # flutter slice was archived in the same pass, so it has no live
-      # PUSH+ECHO proof either. Restoring both means Dart tests plus a host app
-      # under `fixtures/` (docs/plans/multi-sdk-pomodoro-fixture-matrix.md).
-      #
-      # The doc-signature guard moved here from that archived sdk-e2e slice,
-      # which was its only home. It needs no Flutter SDK and no device: it
-      # parses the fenced Dart in README.md / USAGE.md / docs/api/flutter.md and
-      # fails when a snippet names a NostosDatabase factory parameter that does
-      # not exist in lib/. README.md and USAGE.md both documented three invented
-      # `NostosDatabase.supabase` parameters for weeks because nothing checks
-      # prose — `make ci` is Rust-only and `dart analyze` does not compile
-      # fenced markdown. This step is now the only thing preventing a repeat.
+      # `flutter test` RESTORED 2026-08-05: the facade + ws6 tests (+ signOut)
+      # were un-archived back into sdk/nostos_flutter/test/, so the Dart surface
+      # has automated coverage again (Collection<T>/SyncStatus/watch + write-
+      # outcome + signOut). Runs via hook/build.dart's cargo-fallback (Rust
+      # toolchain installed above). Closes the "flagship SDK has no Dart test
+      # coverage" gap the 2026-07-30 archive opened.
+      - name: flutter test
+        working-directory: sdk/nostos_flutter
+        run: flutter test
+      # The doc-signature guard: parses the fenced Dart in README.md / USAGE.md
+      # / docs/api/flutter.md and fails when a snippet names a NostosDatabase
+      # factory parameter that does not exist in lib/. `make ci` is Rust-only and
+      # `dart analyze` does not compile fenced markdown, so this is the only
+      # thing preventing prose from drifting from the real factories.
       - name: doc signatures match real factories
         run: python3 sdk/nostos_flutter/scripts/check-doc-signatures.py
       # The glue crate is a deliberate non-workspace member (ADR-0015
@@ -202,3 +205,32 @@ jobs:
         run: |
           cargo run --release --bin nostos-bench -- \
             --clients 1000 --events 10000 --out-dir benches/results-smoke
+
+  # TypeScript SDK typecheck gate (ADR-0015). The Rust workspace `make ci` never
+  # sees the JS/TS SDKs, so a drift like the dotnet `nostos.cs` missing signOut or
+  # RN-Android missing watchChanges can ship silently. This lean job runs the
+  # pure-TS typecheck (tsc --noEmit) for the two SDKs whose gate needs no native
+  # cdylib / device / browser. The native SDKs (swift/kotlin/dotnet) and web
+  # (wasm-pack) need heavier toolchain setup and are a follow-up.
+  sdk-typecheck:
+    name: ${{ matrix.sdk }} — typecheck
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdk: nostos_react_native
+            cmd: npm run typecheck
+          - sdk: nostos_capacitor
+            cmd: npm run build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm ci
+        working-directory: sdk/${{ matrix.sdk }}
+        run: npm ci
+      - name: ${{ matrix.cmd }}
+        working-directory: sdk/${{ matrix.sdk }}
+        run: ${{ matrix.cmd }}
