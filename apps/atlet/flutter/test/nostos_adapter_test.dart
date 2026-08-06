@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:atlet/adapters/nostos_adapter.dart';
 import 'package:atlet/adapters/sync_adapter.dart';
@@ -14,6 +17,39 @@ void main() {
     test('implements SyncAdapter with engine == cairn', () {
       final SyncAdapter adapter = NostosAdapter();
       expect(adapter.engine, 'cairn');
+    });
+  });
+
+  group('wireConnectionState (init() ordering regression)', () {
+    // Fixture reproduces Nostos.connectionState's real contract: a broadcast
+    // stream with nothing emitted until "subscribe" runs, and no replay to a
+    // listener that attaches afterward (StreamController.broadcast drops
+    // .add() calls made with zero current listeners).
+    test('a listener attached AFTER subscribe misses the transition (the bug)', () async {
+      final controller = StreamController<NostosConnectionState>.broadcast();
+      final seen = <bool>[];
+
+      controller.add(NostosConnectionState.connected); // "subscribe" fires
+
+      final sub = wireConnectionState(controller.stream, seen.add);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(seen, isEmpty);
+      await sub.cancel();
+      await controller.close();
+    });
+
+    test('a listener attached BEFORE subscribe surfaces initial connected=true (the fix)', () async {
+      final controller = StreamController<NostosConnectionState>.broadcast();
+      final seen = <bool>[];
+
+      final sub = wireConnectionState(controller.stream, seen.add);
+      controller.add(NostosConnectionState.connected); // "subscribe" fires
+      await Future<void>.delayed(Duration.zero);
+
+      expect(seen, [true]);
+      await sub.cancel();
+      await controller.close();
     });
   });
 

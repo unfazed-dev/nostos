@@ -55,10 +55,25 @@ class NostosAdapter implements SyncAdapter {
     );
     _db = db;
 
+    // Attach BEFORE subscribeTables(): Nostos.connectionState is a
+    // non-replaying broadcast stream that is empty until the engine's
+    // subscribe has run at least once — a listener attached after
+    // subscribeTables() can miss the very first `connected` transition that
+    // fires synchronously inside it, so `connected` would never emit true
+    // until the next disconnect/resume cycle. See wireConnectionState below.
+    _connSub = wireConnectionState(db.connectionState, (isConnected) {
+      _connectedController?.add(isConnected);
+    });
+
     await db.subscribeTables(const [
       NostosTableSub(name: 'sessions'),
       NostosTableSub(name: 'products'),
     ]);
+
+    // Defensive backstop for the same race: if a transition still slipped
+    // past (e.g. a future engine change buffers differently), seed from the
+    // synchronous status snapshot once subscribe has returned.
+    _connectedController?.add(db.currentStatus.connected);
 
     _sessionsSub = db.watch('SELECT * FROM sessions').listen((rows) {
       final sessions = rows.map(sessionFromRow).toList(growable: false);
@@ -69,10 +84,6 @@ class NostosAdapter implements SyncAdapter {
     _productsSub = db.watch('SELECT * FROM products').listen((rows) {
       _productsController
           ?.add(rows.map(productFromRow).toList(growable: false));
-    });
-
-    _connSub = db.connectionState.listen((state) {
-      _connectedController?.add(state == NostosConnectionState.connected);
     });
   }
 
@@ -152,6 +163,22 @@ class NostosAdapter implements SyncAdapter {
   Stream<T> _requireController<T>(StreamController<T>? c, String what) =>
       (c ?? (throw StateError('NostosAdapter: $what'))).stream;
 }
+
+/// Subscribes [onConnected] to [connectionState] and returns the
+/// subscription. Pulled out to a top-level function purely so the
+/// listen-before-subscribe ordering is unit-testable without a live
+/// NostosDatabase — see nostos_adapter_test.dart's "surfaces a transition
+/// fired synchronously by the caller" regression test, which reproduces the
+/// bug this guards against: a broadcast stream that starts emitting only
+/// once some `subscribe()` call runs, and does not replay to a listener that
+/// attaches afterward.
+StreamSubscription<NostosConnectionState> wireConnectionState(
+  Stream<NostosConnectionState> connectionState,
+  void Function(bool isConnected) onConnected,
+) =>
+    connectionState.listen((state) {
+      onConnected(state == NostosConnectionState.connected);
+    });
 
 final NostosSchema _schema = NostosSchema(tables: [
   NostosTable(name: 'sessions', primaryKey: const ['id'], columns: [
