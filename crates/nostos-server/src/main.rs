@@ -857,6 +857,10 @@ async fn watch_rules(
 /// entry — a typo'd origin used to vanish from the allow-list without a log,
 /// which looks identical to (and is easy to mistake for) an all-origins CORS
 /// lockout.
+///
+/// Methods must include `PUT` — the admin panel's own `PUT /rules` save is
+/// otherwise blocked by CORS the moment `NOSTOS_CORS_ORIGINS` is configured,
+/// even though the route itself is reachable and correctly gated.
 fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::CorsLayer> {
     if cors_origins.is_empty() {
         return Ok(tower_http::cors::CorsLayer::permissive());
@@ -877,6 +881,7 @@ fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::Cors
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
+            axum::http::Method::PUT,
             axum::http::Method::OPTIONS,
         ])
         .allow_headers([

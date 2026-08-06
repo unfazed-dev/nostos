@@ -136,6 +136,129 @@ async fn put_rules_over_http_persists_and_swaps() {
     assert_eq!(get_body["sync_mode"], "toggles");
 }
 
+/// Same as `spawn`, plus `NOSTOS_CORS_ORIGINS` — exercises the explicit-
+/// origins CORS branch instead of the empty-default `permissive()` path.
+async fn spawn_with_cors(tag: &str, cors_origin: &str) -> Server {
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!(
+        "nostos-server-put-rules-it-{tag}-{}-{port}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let rules_path = dir.join("nostos_rules.toml");
+
+    let child = std::process::Command::new(server_binary())
+        .env("NOSTOS_BIND", format!("127.0.0.1:{port}"))
+        .env("NOSTOS_REPLICATOR", "fake")
+        .env("NOSTOS_RULES_FILE", &rules_path)
+        .env("NOSTOS_SYNC_AUTH", "none")
+        .env("NOSTOS_LOG", "error")
+        .env("NOSTOS_ADMIN_TOKEN", admin_token())
+        .env("NOSTOS_CORS_ORIGINS", cors_origin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn nostos-server");
+
+    let base = format!("http://127.0.0.1:{port}");
+    let server = Server {
+        child,
+        base,
+        rules_path,
+        dir,
+    };
+
+    let client = reqwest::Client::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if client
+            .get(format!("{}/rules", server.base))
+            .send()
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nostos-server did not become ready in time"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    server
+}
+
+/// C1 follow-up regression: the explicit-origins CORS branch
+/// (`crates/nostos-server/src/main.rs`, `build_cors_layer`) omitted
+/// `Method::PUT` from `allow_methods`, so the moment an operator followed
+/// `docs/OPERATING.md`'s production guidance and set `NOSTOS_CORS_ORIGINS`,
+/// a real browser's preflight for the admin panel's own `PUT /rules` save
+/// would see `PUT` missing from `Access-Control-Allow-Methods` and refuse to
+/// send the real request — even though the route itself is reachable and
+/// correctly gated (see `admin_auth.rs`). This drives the exact preflight a
+/// browser issues before `web/src/routes/admin/rules/+page.svelte`'s Save
+/// button can fire, then the real PUT with the `Origin` header a browser
+/// would attach.
+#[tokio::test]
+async fn put_rules_preflight_allows_put_under_configured_cors_origin() {
+    let origin = "http://admin-panel.example.test";
+    let server = spawn_with_cors("cors-preflight", origin).await;
+    let client = reqwest::Client::new();
+
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, format!("{}/rules", server.base))
+        .header("Origin", origin)
+        .header("Access-Control-Request-Method", "PUT")
+        .header(
+            "Access-Control-Request-Headers",
+            "authorization, content-type",
+        )
+        .send()
+        .await
+        .expect("OPTIONS preflight");
+
+    assert!(
+        preflight.status().is_success(),
+        "preflight rejected: {}",
+        preflight.status()
+    );
+    let allow_methods = preflight
+        .headers()
+        .get("access-control-allow-methods")
+        .expect("Access-Control-Allow-Methods header present")
+        .to_str()
+        .expect("header is ASCII")
+        .to_string();
+    assert!(
+        allow_methods.contains("PUT"),
+        "PUT missing from Access-Control-Allow-Methods: {allow_methods}"
+    );
+
+    // The real PUT, with the Origin header a browser would attach, must both
+    // succeed and come back with CORS headers a browser would accept.
+    let body = serde_json::json!({"sync_mode": "toggles", "tables": []});
+    let put_response = client
+        .put(format!("{}/rules", server.base))
+        .header("Origin", origin)
+        .header("Authorization", format!("Bearer {}", admin_token()))
+        .json(&body)
+        .send()
+        .await
+        .expect("PUT /rules");
+
+    assert_eq!(put_response.status(), 200);
+    assert_eq!(
+        put_response
+            .headers()
+            .get("access-control-allow-origin")
+            .expect("Access-Control-Allow-Origin present")
+            .to_str()
+            .expect("header is ASCII"),
+        origin
+    );
+}
+
 #[tokio::test]
 async fn put_rules_rejects_hand_mode_over_http() {
     let server = spawn("reject-hand").await;
