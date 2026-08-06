@@ -357,6 +357,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ScopeError> {
                     "AND" => Token::And,
                     "OR" => Token::Or,
                     "NOT" => Token::Not,
+                    // Case-insensitive, mirroring predicate_compile.rs's own
+                    // tokenizer: a *bare* TRUE/FALSE (any case) normalizes to
+                    // Bool. A *quoted* 'TRUE' does not — quoting is an
+                    // explicit text intent, so only the exact lowercase
+                    // spelling matches in classify_literal. Without this
+                    // branch, `flag != TRUE` tokenized as Ident("TRUE") and
+                    // classify_literal fell through to Text("TRUE"); against
+                    // a real Bool column, matches_value has no (Bool, Text)
+                    // arm and defaults to non-match, so `!=` wrongly widened
+                    // to true — a widening bug in an access-control grammar.
+                    "TRUE" => Token::Text("true".to_string()),
+                    "FALSE" => Token::Text("false".to_string()),
                     _ if word.contains('.') => match word.strip_prefix("claims.") {
                         Some(field) if !field.is_empty() && !field.contains('.') => {
                             Token::Claim(field.to_string())
@@ -534,6 +546,52 @@ mod tests {
                 PredicateExpr::eq("a", ColumnValue::number(1)),
                 PredicateExpr::eq("b", ColumnValue::number(2)),
             ]))
+        );
+    }
+
+    #[test]
+    fn parses_case_insensitive_bool_literal() {
+        // Mirrors predicate_compile.rs: a bare TRUE/FALSE of any case types
+        // to Bool, matching the module doc's claim that literal typing
+        // matches predicate_compile.rs exactly.
+        let scope = ScopeExpr::parse("flag = TRUE").unwrap();
+        assert_eq!(
+            scope.terms[0].value,
+            ScopeValue::Literal(ColumnValue::boolean(true))
+        );
+        let scope = ScopeExpr::parse("flag = False").unwrap();
+        assert_eq!(
+            scope.terms[0].value,
+            ScopeValue::Literal(ColumnValue::boolean(false))
+        );
+    }
+
+    #[test]
+    fn quoted_uppercase_true_stays_text() {
+        // Quoting is an explicit text intent (same as predicate_compile.rs):
+        // only a bare, unquoted TRUE/FALSE normalizes to Bool.
+        let scope = ScopeExpr::parse("flag = 'TRUE'").unwrap();
+        assert_eq!(
+            scope.terms[0].value,
+            ScopeValue::Literal(ColumnValue::text("TRUE"))
+        );
+    }
+
+    #[test]
+    fn uppercase_bool_literal_does_not_widen_ne_comparison() {
+        // Regression (Task 3 review, Important finding): before the
+        // tokenizer's case-insensitive TRUE/FALSE branch, `flag != TRUE`
+        // mistyped TRUE as Text("TRUE"). PredicateExpr's (Bool, Text)
+        // mismatch defaults to non-equal, so `!=` wrongly matched a row
+        // where flag is really true — a widening bug in an access-control
+        // grammar. This must stay `false` (no match) for a row that IS true.
+        let scope = ScopeExpr::parse("flag != TRUE").unwrap();
+        let principal = principal_with(&[]);
+        let expr = scope.resolve(&principal).expect("no claims referenced");
+        let row_flag_true = |col: &str| (col == "flag").then_some(ColumnValue::boolean(true));
+        assert!(
+            !expr.matches(row_flag_true),
+            "flag != TRUE must not match a row where flag is true"
         );
     }
 
