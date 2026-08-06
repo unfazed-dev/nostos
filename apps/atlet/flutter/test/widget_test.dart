@@ -36,6 +36,8 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Sign in'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Home'), findsOneWidget);
+    // 'Home' now also labels the bottom-nav destination (I-1's tab shell),
+    // so pin this to the app bar title specifically.
+    expect(find.widgetWithText(AppBar, 'Home'), findsOneWidget);
   });
 }

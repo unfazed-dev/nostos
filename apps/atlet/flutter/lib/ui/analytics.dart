@@ -121,9 +121,9 @@ List<MetricRow> latestMetricRows(List<RunRecord> records) {
 /// data never flows through either sync engine under test (decision #5) —
 /// [store]/[uploadRuns]/[runSuite] are all injected so this screen never
 /// needs a live [SyncAdapter] or [SupabaseClient] to be testable, mirroring
-/// shop.dart/detail.dart's adapter-injection pattern. Like shop.dart, this
-/// screen is not wired into a tab bar/bottom nav — none exists in main.dart
-/// and no task in the plan adds one (see task-15-report.md).
+/// shop.dart/detail.dart's adapter-injection pattern. Reached via the
+/// Analytics tab of main.dart's bottom nav (I-1 fix), which supplies the
+/// production store/uploadRuns/runSuite wiring.
 class AnalyticsScreen extends StatefulWidget {
   const AnalyticsScreen({
     super.key,

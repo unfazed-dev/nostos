@@ -1,12 +1,21 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'adapters/nostos_adapter.dart';
+import 'adapters/powersync_adapter.dart';
+import 'adapters/sync_adapter.dart';
+import 'bench/harness.dart';
+import 'bench/store.dart';
+import 'bench/upload.dart';
 import 'design/tokens.dart';
 import 'engine_registry.dart';
+import 'ui/analytics.dart';
 import 'ui/home.dart';
+import 'ui/shop.dart';
 import 'ui/signin.dart';
 
 // ponytail: real values are operator-owned (apps/atlet/services/.env.example
@@ -21,6 +30,10 @@ const _supabaseAnonKey = String.fromEnvironment(
   'SUPABASE_ANON_KEY',
   defaultValue: 'PLACEHOLDER_ANON_KEY',
 );
+
+// ponytail: no package_info_plus dep for one hand-copied version string;
+// wire it in if the bench harness ever needs per-build accuracy.
+const _appVersion = '1.0.0+1'; // mirrors pubspec.yaml's `version:`
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -62,17 +75,31 @@ class AtletApp extends StatelessWidget {
   }
 }
 
-/// Home shell: owns the settings-sheet entry point for the engine toggle
-/// (T11) and hosts the training UI (T12), which renders exclusively from
-/// the active adapter's watchSessions() stream — see ui/home.dart.
+/// Home shell: bottom-nav host for Home / Shop / Analytics (I-1 fix —
+/// final-review-verdict.md). Home hosts the training UI (T12) and the
+/// settings-sheet entry point for the engine toggle (T11); Shop and
+/// Analytics are the other two tabs, built lazily so this screen stays
+/// constructible with no live Supabase session (see widget_test.dart).
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.benchStoreOpener});
+
+  /// Injectable so widget tests never need a live path_provider platform
+  /// channel to reach the Analytics tab — mirrors [AnalyticsScreen]'s own
+  /// store/runSuite/uploadRuns injection (ui/analytics.dart). Defaults to
+  /// the real app-documents JSONL store in production.
+  final Future<BenchStore> Function()? benchStoreOpener;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  int _tabIndex = 0;
+  Future<BenchStore>? _benchStoreFuture;
+
+  Future<BenchStore> _benchStore() => _benchStoreFuture ??=
+      (widget.benchStoreOpener ?? BenchStore.openAppDocuments)();
+
   /// Switches the live sync engine to [target] via [engineRegistry], which
   /// wipes the outgoing adapter (if any) before bringing the new one up
   /// (decision #4). Reads the current Supabase session lazily, on tap, so
@@ -124,8 +151,58 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
+  /// Builds the Nth synthetic bench session — mirrors test/harness_test.dart's
+  /// `_buildSession` fixture. `id` is unused: addSession()/PostgREST both
+  /// assign their own ids (see runner.dart's writeAck/queueDrain).
+  SessionRow _benchSessionRow(int i) => SessionRow(
+        id: 'unused',
+        title: 'Bench $i',
+        type: 'run',
+        metric: 5000 + i,
+        unit: 'm',
+        occurredOn: DateTime.now().toUtc(),
+      );
+
+  /// Production wiring for [AnalyticsScreen.runSuite]: runs the plan's
+  /// two-engine comparison (bench/harness.dart's `runFullSuiteForBothEngines`)
+  /// against fresh Nostos/PowerSync adapters. Deliberately bypasses
+  /// [engineRegistry] — see that function's own doc comment on why a bench
+  /// run's needs (signOut after every suite, two live dbDirs) don't fit the
+  /// registry's single-slot contract (decision #4).
+  Future<void> _runBenchSuite(BenchStore store) async {
+    final client = Supabase.instance.client;
+    final session = client.auth.currentSession;
+    if (session == null) {
+      throw StateError('No active session — sign in again.');
+    }
+    final baseDir = (await getApplicationDocumentsDirectory()).path;
+    // coldSync gates completion on `rows.length == seedSize` (runner.dart) —
+    // has to be the real current row count, not a guess.
+    final existingSessions = await client.from('sessions').select('id');
+    await runFullSuiteForBothEngines(
+      sdk: 'flutter',
+      specVersion: 'v0',
+      seedSize: existingSessions.length,
+      appVersion: _appVersion,
+      device: {'model': 'flutter-app', 'os': Platform.operatingSystem},
+      rootDbDir: '$baseDir/atlet_bench',
+      supabaseUrl: _supabaseUrl,
+      accessToken: session.accessToken,
+      userId: session.user.id,
+      store: store,
+      insertRemoteRow: supabasePostgrestInsert(
+        client,
+        buildRow: _benchSessionRow,
+      ),
+      buildSession: _benchSessionRow,
+      adapterFactories: {
+        Engine.cairn: () => NostosAdapter(),
+        Engine.powersync: () => PowerSyncAdapter(),
+      },
+    );
+  }
+
+  Widget _buildHomeTab(BuildContext context) {
     return Scaffold(
       backgroundColor: AtletTokens.bone,
       appBar: AppBar(
@@ -142,6 +219,70 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       body: TrainingHome(adapter: engineRegistry.current),
+    );
+  }
+
+  Widget _buildAnalyticsTab(BuildContext context) {
+    return FutureBuilder<BenchStore>(
+      future: _benchStore(),
+      builder: (context, snapshot) {
+        final store = snapshot.data;
+        if (store == null) {
+          return const Scaffold(
+            backgroundColor: AtletTokens.bone,
+            body: Center(
+              child: CircularProgressIndicator(color: AtletTokens.accent),
+            ),
+          );
+        }
+        return AnalyticsScreen(
+          store: store,
+          // Lazy: Supabase.instance.client is touched only when Upload is
+          // actually tapped, not merely when this tab is built — keeps the
+          // tab reachable in widget tests with no Supabase.initialize().
+          uploadRuns: (rows) =>
+              supabasePostgrestUpload(Supabase.instance.client)(rows),
+          runSuite: () => _runBenchSuite(store),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      key: const Key('home-shell'),
+      body: switch (_tabIndex) {
+        0 => _buildHomeTab(context),
+        1 => ShopScreen(adapter: engineRegistry.current),
+        _ => _buildAnalyticsTab(context),
+      },
+      bottomNavigationBar: NavigationBar(
+        key: const Key('main-nav-bar'),
+        selectedIndex: _tabIndex,
+        backgroundColor: AtletTokens.bone,
+        onDestinationSelected: (index) => setState(() => _tabIndex = index),
+        destinations: const [
+          NavigationDestination(
+            key: Key('nav-tab-home'),
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home),
+            label: 'Home',
+          ),
+          NavigationDestination(
+            key: Key('nav-tab-shop'),
+            icon: Icon(Icons.storefront_outlined),
+            selectedIcon: Icon(Icons.storefront),
+            label: 'Shop',
+          ),
+          NavigationDestination(
+            key: Key('nav-tab-analytics'),
+            icon: Icon(Icons.analytics_outlined),
+            selectedIcon: Icon(Icons.analytics),
+            label: 'Analytics',
+          ),
+        ],
+      ),
     );
   }
 }
