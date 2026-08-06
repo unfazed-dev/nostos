@@ -113,6 +113,20 @@ class _FakeAdapter implements SyncAdapter {
   @override
   Stream<SyncMark> get marks => _marksController.stream;
 
+  /// Test-only: injects a remoteVisible mark directly, as if a row inserted
+  /// by the harness (via PostgREST, outside SyncAdapter's surface) had just
+  /// become visible. Used by the propagation() regression test below.
+  void emitRemoteVisible(String rowId, DateTime serverCommittedAt) {
+    _marksController.add(
+      SyncMark(
+        MarkKind.remoteVisible,
+        rowId,
+        clock.elapsed,
+        serverCommittedAt: serverCommittedAt,
+      ),
+    );
+  }
+
   Future<void> dispose() async {
     await _sessionsController.close();
     await _connectedController.close();
@@ -195,4 +209,45 @@ void main() {
     expect(record.metrics['n'], 5);
     expect(record.metrics['queue_drain_ms'], greaterThanOrEqualTo(0));
   });
+
+  test(
+    'propagation adds clockOffset back (regression: was subtracting, '
+    'giving true_delay - 2x offset)',
+    () async {
+      // Server clock reads 120ms ahead of the client, so a row committed
+      // ~300ms ago (in true/server time) has a server_committed_at that is
+      // only ~300ms - 120ms = 180ms behind DateTime.now() on the client's
+      // own clock. Runner.propagation must add the 120ms back to recover
+      // the true ~300ms delay, not subtract it (which would give ~60ms).
+      const clockOffset = Duration(milliseconds: 120);
+      const trueDelay = Duration(milliseconds: 300);
+      final serverCommittedAt = DateTime.now().toUtc().subtract(
+        trueDelay - clockOffset,
+      );
+
+      final record = await runner.propagation(
+        adapter,
+        insertRemoteRow: () async {
+          final id = 'remote-row';
+          // Emit asynchronously so propagation()'s buffered-mark path is
+          // exercised the same way a real PostgREST round trip would be.
+          scheduleMicrotask(
+            () => adapter.emitRemoteVisible(id, serverCommittedAt),
+          );
+          return id;
+        },
+        clockOffset: clockOffset,
+        n: 1,
+        timeout: const Duration(seconds: 2),
+      );
+
+      final samples = record.metrics['samples_ms'] as List;
+      expect(samples, hasLength(1));
+      // Tolerance covers the real wall-clock time the test itself takes to
+      // run between constructing serverCommittedAt and propagation()
+      // reading DateTime.now() — typically sub-millisecond, never close to
+      // the 240ms (2x offset) the sign bug would have produced.
+      expect(samples.single, closeTo(300, 30));
+    },
+  );
 }

@@ -224,8 +224,15 @@ class Runner {
           );
         }
         final clientWall = DateTime.now().toUtc();
+        // clockOffset = serverNow - clientMidRtt (clock.dart), positive when
+        // the server clock is ahead. A raw client_wall - server_committed_at
+        // reading is therefore true_delay - clockOffset (the client reads
+        // behind by exactly that skew), so recovering true_delay requires
+        // ADDING the offset back, not subtracting it. Verified: true delay
+        // 500ms, offset 120ms (server ahead) -> raw diff 380ms -> +120 =
+        // 500ms (correct). Subtracting gives 260ms (wrong by 2x offset).
         final ms =
-            clientWall.difference(serverCommittedAt).inMilliseconds -
+            clientWall.difference(serverCommittedAt).inMilliseconds +
             clockOffset.inMilliseconds;
         samplesMs.add(ms);
       }
