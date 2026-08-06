@@ -102,8 +102,9 @@ pub async fn spawn_fake_server_with_tables(
 
 /// Like [`spawn_fake_server_with`] but also configures an active sync-rules
 /// ruleset (ADR-0031, Task 10) — used by the subscribe-time rules-enforcement
-/// contract tests. The `watch::Sender` half is discarded (throwaway channel):
-/// these tests never mutate the ruleset live, that's Task 14's scope.
+/// contract tests. The caller has no handle back to the `watch::Sender` (it's
+/// moved into `state` and never returned): these tests never mutate the
+/// ruleset live, that's Task 14's scope.
 pub async fn spawn_fake_server_with_rules(
     buffer: usize,
     auth: Arc<dyn SyncAuth>,
@@ -122,10 +123,10 @@ pub async fn spawn_fake_server_with_rules(
         nostos_domain::Tier::Enterprise,
     ));
 
-    let (_tx, rules_changed) = tokio::sync::watch::channel(rules.checksum());
+    let (tx, rules_changed) = tokio::sync::watch::channel(rules.checksum());
     let mut state = SyncRouterState::new(Arc::clone(&manager), auth)
         .with_buffer(buffer)
-        .with_rules(Arc::new(tokio::sync::RwLock::new(rules)), rules_changed);
+        .with_rules(Arc::new(tokio::sync::RwLock::new(rules)), rules_changed, tx);
     if let Some(col) = tenant_column {
         state = state.with_tenant_column(col);
     }
@@ -170,7 +171,7 @@ pub async fn spawn_fake_server_with_live_rules(
         tokio::sync::watch::channel(rules_shared.read().await.checksum());
     let mut state = SyncRouterState::new(Arc::clone(&manager), auth)
         .with_buffer(buffer)
-        .with_rules(Arc::clone(&rules_shared), rules_changed);
+        .with_rules(Arc::clone(&rules_shared), rules_changed, rules_tx.clone());
     if let Some(col) = tenant_column {
         state = state.with_tenant_column(col);
     }

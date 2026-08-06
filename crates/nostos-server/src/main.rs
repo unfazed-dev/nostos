@@ -528,7 +528,9 @@ async fn main() -> anyhow::Result<()> {
     let ruleset_mode = ruleset.mode();
     let (rules_tx, rules_changed) = tokio::sync::watch::channel(ruleset.checksum());
     let rules_shared = Arc::new(tokio::sync::RwLock::new(ruleset));
-    state_builder = state_builder.with_rules(Arc::clone(&rules_shared), rules_changed);
+    state_builder = state_builder
+        .with_rules(Arc::clone(&rules_shared), rules_changed, rules_tx.clone())
+        .with_rules_file_path(std::path::PathBuf::from(&cfg.rules_file));
 
     // ---- `all`-mode startup warning (ADR-0031, Task 13) ----
     // sync_mode = "all" means every replicated row reaches every authorised
@@ -698,10 +700,11 @@ async fn main() -> anyhow::Result<()> {
         // WS1: typed schema for client auto-schema. v2: add auth here (and to
         // /rules below) if a managed deploy wants to hide publication metadata.
         .route("/schema", get(schema))
-        // ADR-0031: the active ruleset, read-only. Task 20 adds `.put()` here
-        // behind an admin token; GET stays on the same v1-unauthenticated /
-        // v2-gated-together policy as /schema (see the note above).
-        .route("/rules", get(rules_handler))
+        // ADR-0031: the active ruleset. GET stays on the same
+        // v1-unauthenticated / v2-gated-together policy as /schema (see the
+        // note above); PUT mutates it — Task 21 gates PUT behind an admin
+        // token, not this task's job.
+        .route("/rules", get(rules_handler).put(put_rules_handler))
         .route(
             "/metrics",
             get({
@@ -933,8 +936,15 @@ async fn schema(
 /// row counts.
 async fn rules_handler(State(state): State<SyncRouterState>) -> Json<serde_json::Value> {
     let ruleset = state.rules.read().await;
-    let slot_epoch = state
-        .metrics
+    Json(rules_body(&ruleset, &state.metrics))
+}
+
+/// Shared response shape for `GET /rules` and a successful `PUT /rules`
+/// (Task 20) — the client re-renders from the PUT response without a second
+/// fetch, so both routes must produce byte-identical JSON for the same
+/// `ActiveRuleset`.
+fn rules_body(ruleset: &nostos_application::ActiveRuleset, metrics: &Metrics) -> serde_json::Value {
+    let slot_epoch = metrics
         .slot_epoch
         .load(std::sync::atomic::Ordering::Relaxed);
     let checksum = ruleset.checksum();
@@ -949,12 +959,132 @@ async fn rules_handler(State(state): State<SyncRouterState>) -> Json<serde_json:
             })
         })
         .collect();
-    Json(serde_json::json!({
+    serde_json::json!({
         "sync_mode": ruleset.mode().as_str(),
         "checksum": format!("0x{checksum:x}"),
         "sync_epoch": format!("0x{sync_epoch:x}"),
         "tables": tables,
-    }))
+    })
+}
+
+/// `PUT /rules` request body — the toggle model, not raw TOML: the server
+/// owns serialization so the file shape stays canonical (Task 20).
+#[derive(serde::Deserialize)]
+struct PutRulesRequest {
+    /// `"all" | "toggles" | "hand"` — but `"hand"` is REJECTED here (422).
+    /// Hand-written `[[rules]]` are the CLI's surface; the toggle editor must
+    /// never rewrite a file it cannot faithfully round-trip.
+    sync_mode: String,
+    tables: Vec<PutRulesTable>,
+}
+
+#[derive(serde::Deserialize)]
+struct PutRulesTable {
+    table: String,
+    sync: bool,
+    scope: Option<String>,
+}
+
+fn rules_422(message: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({ "error": message.into() })),
+    )
+}
+
+/// `PUT /rules` — replace the active ruleset (ADR-0031, D5). Operator-only;
+/// see Task 21 for authn/authz. Body is the toggle model, not raw TOML: the
+/// server owns serialization so the file shape stays canonical.
+///
+/// ponytail: no optimistic concurrency between the CLI editor and PUT
+/// /rules — last write wins. Ceiling: a concurrent edit can be silently
+/// overwritten. Upgrade path: ETag from the checksum + `If-Match`.
+///
+/// Ordering (write-then-swap, not the reverse): validate → atomically write
+/// `nostos_rules.toml` → only then swap the in-process `ActiveRuleset` and
+/// notify live sessions. If the process dies between the write and the swap,
+/// the file is truth and startup reloads it — a crash costs a reload, never a
+/// divergence between the file and what's enforced. Swapping first could
+/// enforce a ruleset that was never persisted.
+async fn put_rules_handler(
+    State(state): State<SyncRouterState>,
+    _headers: axum::http::HeaderMap,
+    Json(body): Json<PutRulesRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.sync_mode == "hand" {
+        return Err(rules_422(
+            "PUT /rules cannot write sync_mode \"hand\" — hand-written [[rules]] are the \
+             CLI's surface; the toggle editor must never rewrite a file it cannot faithfully \
+             round-trip. Use `nostos rules edit --mode hand` instead.",
+        ));
+    }
+    let mode = SyncMode::parse(&body.sync_mode).ok_or_else(|| {
+        rules_422(nostos_domain::RulesError::UnknownMode(body.sync_mode.clone()).to_string())
+    })?;
+
+    let tables: Vec<nostos_domain::TableRule> = body
+        .tables
+        .into_iter()
+        .map(|t| nostos_domain::TableRule {
+            table: t.table,
+            sync: t.sync,
+            scope: t.scope,
+        })
+        .collect();
+
+    // Truth-switching must never delete an artifact (rules_file.rs): the
+    // toggle editor only ever owns `[tables.*]`, so any hand-authored
+    // `[[rules]]` already on disk must survive this write untouched.
+    let hand = match nostos_infra::rules_file::load(&state.rules_file_path) {
+        Ok(Some(existing)) => existing.hand,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "reading current {}: {e}",
+                        state.rules_file_path.display()
+                    )
+                })),
+            ));
+        }
+    };
+
+    let rules = nostos_domain::SyncRules {
+        version: nostos_domain::RULES_VERSION,
+        mode,
+        tables,
+        hand,
+    };
+
+    // Step 1: validate via the same compile path `nostos rules check` uses —
+    // invalid → 422 with that exact error text, nothing touched.
+    let compiled =
+        nostos_application::ActiveRuleset::compile(&rules).map_err(|e| rules_422(e.to_string()))?;
+
+    // Step 2: atomically write BEFORE swapping in-process state.
+    if let Err(e) = nostos_infra::rules_file::save(&state.rules_file_path, &rules) {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("writing {}: {e}", state.rules_file_path.display())
+            })),
+        ));
+    }
+
+    // Step 3: only after the write succeeds, swap + notify (Task 14's live-
+    // session invalidation runs off this same `watch::Sender` — swap before
+    // send, exactly like `watch_rules`, so a woken session never reads stale
+    // state). The Task 14 poller dedupes on checksum, so its next tick over
+    // this same file is a no-op — no double invalidation.
+    let new_checksum = compiled.checksum();
+    *state.rules.write().await = compiled;
+    let _ = state.rules_tx.send(new_checksum);
+
+    // Step 4: 200 with the same body shape as GET /rules.
+    let ruleset = state.rules.read().await;
+    Ok(Json(rules_body(&ruleset, &state.metrics)))
 }
 
 /// `GET /metrics` — Prometheus text exposition format, hand-rolled (the
@@ -1300,9 +1430,12 @@ mod rules_handler_tests {
             Arc::new(InMemorySessionStore::new());
         let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
         let auth: Arc<dyn nostos_application::ports::SyncAuth> = Arc::new(AllowAnonymous::new());
-        let (_tx, rx) = tokio::sync::watch::channel(ruleset.checksum());
-        SyncRouterState::new(manager, auth)
-            .with_rules(Arc::new(tokio::sync::RwLock::new(ruleset)), rx)
+        let (tx, rx) = tokio::sync::watch::channel(ruleset.checksum());
+        SyncRouterState::new(manager, auth).with_rules(
+            Arc::new(tokio::sync::RwLock::new(ruleset)),
+            rx,
+            tx,
+        )
     }
 
     #[tokio::test]
@@ -1352,5 +1485,206 @@ mod rules_handler_tests {
 
         assert_eq!(body["sync_mode"], "all");
         assert_eq!(body["tables"], serde_json::json!([]));
+    }
+}
+
+#[cfg(test)]
+mod put_rules_handler_tests {
+    use super::{put_rules_handler, PutRulesRequest, PutRulesTable};
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::Json;
+    use nostos_application::{ActiveRuleset, SessionManager};
+    use nostos_domain::{SyncMode, SyncRules, TableRule, RULES_VERSION};
+    use nostos_infra::store::InMemorySessionStore;
+    use nostos_infra::transport::SyncRouterState;
+    use nostos_infra::AllowAnonymous;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// A fresh path under `std::env::temp_dir()`, unique for this test
+    /// binary's lifetime — mirrors `watch_rules_tests::temp_rules_path`.
+    fn temp_rules_path(tag: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "nostos-put-rules-test-{tag}-{}-{n}.toml",
+            std::process::id()
+        ))
+    }
+
+    fn state_with_file(ruleset: ActiveRuleset, path: std::path::PathBuf) -> SyncRouterState {
+        let store: Arc<dyn nostos_application::ports::SessionStore> =
+            Arc::new(InMemorySessionStore::new());
+        let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
+        let auth: Arc<dyn nostos_application::ports::SyncAuth> = Arc::new(AllowAnonymous::new());
+        let (tx, rx) = tokio::sync::watch::channel(ruleset.checksum());
+        SyncRouterState::new(manager, auth)
+            .with_rules(Arc::new(tokio::sync::RwLock::new(ruleset)), rx, tx)
+            .with_rules_file_path(path)
+    }
+
+    fn req(sync_mode: &str, tables: Vec<(&str, bool, Option<&str>)>) -> PutRulesRequest {
+        PutRulesRequest {
+            sync_mode: sync_mode.to_string(),
+            tables: tables
+                .into_iter()
+                .map(|(table, sync, scope)| PutRulesTable {
+                    table: table.to_string(),
+                    sync,
+                    scope: scope.map(str::to_string),
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn put_rules_writes_file_and_swaps_active() {
+        let path = temp_rules_path("write-and-swap");
+        let state = state_with_file(ActiveRuleset::all_mode(), path.clone());
+
+        let body = req(
+            "toggles",
+            vec![("tasks", true, Some("owner_id = claims.sub"))],
+        );
+        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let Json(response) = result.expect("valid PUT must succeed");
+
+        assert_eq!(response["sync_mode"], "toggles");
+
+        // File on disk reflects the new ruleset.
+        let on_disk = nostos_infra::rules_file::load(&path)
+            .expect("load")
+            .expect("file exists");
+        assert_eq!(on_disk.mode, SyncMode::Toggles);
+        assert_eq!(on_disk.tables.len(), 1);
+        assert_eq!(on_disk.tables[0].table, "tasks");
+
+        // In-process ruleset swapped too.
+        let active = state.rules.read().await;
+        assert_eq!(active.mode(), SyncMode::Toggles);
+        assert_eq!(response["checksum"], format!("0x{:x}", active.checksum()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn put_rules_rejects_hand_mode() {
+        let path = temp_rules_path("reject-hand");
+        let initial = ActiveRuleset::all_mode();
+        let initial_checksum = initial.checksum();
+        let state = state_with_file(initial, path.clone());
+
+        let body = req("hand", vec![]);
+        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let Err((status, Json(err))) = result else {
+            panic!("hand mode must be rejected");
+        };
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(err["error"].as_str().unwrap().contains("hand"));
+
+        // Nothing touched: no file written, active ruleset unchanged.
+        assert!(!path.exists());
+        assert_eq!(state.rules.read().await.checksum(), initial_checksum);
+    }
+
+    #[tokio::test]
+    async fn put_rules_rejects_invalid_scope() {
+        let path = temp_rules_path("reject-invalid-scope");
+        let initial = ActiveRuleset::all_mode();
+        let initial_checksum = initial.checksum();
+        let state = state_with_file(initial, path.clone());
+
+        // Same fixture as the Task 17 CLI test
+        // (`check_flags_invalid_scope_with_table_name`): a top-level `OR`
+        // scope, which the scope compiler rejects.
+        let bad_rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![TableRule {
+                table: "tasks".to_string(),
+                sync: true,
+                scope: Some("a = 1 OR b = 2".to_string()),
+            }],
+            hand: vec![],
+        };
+        let expected_error = ActiveRuleset::compile(&bad_rules)
+            .expect_err("fixture must be invalid")
+            .to_string();
+
+        let body = req("toggles", vec![("tasks", true, Some("a = 1 OR b = 2"))]);
+        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let Err((status, Json(err))) = result else {
+            panic!("invalid scope must be rejected");
+        };
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["error"], expected_error);
+
+        assert!(!path.exists());
+        assert_eq!(state.rules.read().await.checksum(), initial_checksum);
+    }
+
+    #[tokio::test]
+    async fn put_rules_does_not_double_invalidate() {
+        let path = temp_rules_path("no-double-invalidate");
+        let state = state_with_file(ActiveRuleset::all_mode(), path.clone());
+        let mut rules_changed = state.rules_changed.clone();
+        // Mark the current value seen so `changed()` only fires on a real update.
+        rules_changed.borrow_and_update();
+
+        let body = req(
+            "toggles",
+            vec![("tasks", true, Some("owner_id = claims.sub"))],
+        );
+        let _ = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body))
+            .await
+            .expect("valid PUT must succeed");
+
+        // The PUT itself notifies exactly once.
+        assert!(rules_changed.has_changed().unwrap());
+        rules_changed.borrow_and_update();
+
+        // A watcher poll tick over the SAME file (now on disk with the
+        // ruleset the PUT already swapped to) computes the same checksum —
+        // it must dedupe, mirroring `watch_rules`'s own guard (`if
+        // new_checksum == *rules_tx.borrow() { continue; }`) — no second
+        // `send`, so `rules_changed` observes no further change.
+        let checksum_on_disk = nostos_infra::rules_file::load(&path)
+            .expect("load")
+            .expect("file exists")
+            .checksum();
+        assert_eq!(checksum_on_disk, *state.rules_tx.borrow());
+        assert!(!rules_changed.has_changed().unwrap());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn put_rules_write_failure_leaves_active_ruleset_untouched() {
+        // A path under a directory that does not exist: `save` -> `write_mirror`
+        // fails at `File::create` (ENOENT) before ever reaching the swap.
+        let path = std::env::temp_dir()
+            .join(format!(
+                "nostos-put-rules-test-nonexistent-dir-{}",
+                std::process::id()
+            ))
+            .join("nostos_rules.toml");
+        let initial = ActiveRuleset::all_mode();
+        let initial_checksum = initial.checksum();
+        let state = state_with_file(initial, path);
+
+        let body = req(
+            "toggles",
+            vec![("tasks", true, Some("owner_id = claims.sub"))],
+        );
+        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let Err((status, _)) = result else {
+            panic!("write failure must surface as an error");
+        };
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(state.rules.read().await.checksum(), initial_checksum);
     }
 }

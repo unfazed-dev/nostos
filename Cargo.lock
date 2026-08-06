@@ -1559,6 +1559,8 @@ dependencies = [
  "nostos-domain",
  "nostos-infra",
  "nostos-license",
+ "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tower-http 0.5.2",

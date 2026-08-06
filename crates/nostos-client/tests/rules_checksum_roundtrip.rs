@@ -92,12 +92,12 @@ async fn spawn_server(
     ));
     let auth: Arc<dyn SyncAuth> = Arc::new(AllowAnonymous::new());
     let checksum_now = rules.read().await.checksum();
-    let (_tx, rules_changed) = tokio::sync::watch::channel(checksum_now);
+    let (tx, rules_changed) = tokio::sync::watch::channel(checksum_now);
     let state = SyncRouterState::new(manager, auth)
         .with_buffer(64)
         .with_metrics(metrics)
         .with_oplog_reader(reader)
-        .with_rules(rules, rules_changed);
+        .with_rules(rules, rules_changed, tx);
     let app = axum::Router::new()
         .route("/sync", axum::routing::get(sync_handler))
         .with_state(state);
