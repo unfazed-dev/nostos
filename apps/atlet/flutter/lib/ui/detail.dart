@@ -30,7 +30,7 @@ import '../design/tokens.dart';
 /// [SyncAdapter] exposes no update/complete verb and no "done" field on
 /// [SessionRow] — both actions call the only mutator available,
 /// [SyncAdapter.deleteSession]. They differ only in framing: Complete is the
-/// positive, no-confirmation path ("logged"); Delete asks first.
+/// positive, no-confirmation path; Delete asks first.
 class SessionDetail extends StatelessWidget {
   const SessionDetail({super.key, required this.adapter, required this.sessionId});
 
@@ -42,14 +42,21 @@ class SessionDetail extends StatelessWidget {
     return StreamBuilder<List<SessionRow>>(
       stream: adapter.watchSessions(),
       builder: (context, snapshot) {
-        final sessions = snapshot.data ?? const <SessionRow>[];
+        if (!snapshot.hasData) {
+          // Stream hasn't emitted yet — unknown, not absent. Popping here
+          // would bounce straight back out before the first snapshot arrives.
+          return Scaffold(backgroundColor: AtletTokens.bone, body: const SizedBox.shrink());
+        }
+
         SessionRow? session;
-        for (final s in sessions) {
+        for (final s in snapshot.data!) {
           if (s.id == sessionId) session = s;
         }
 
         if (session == null) {
-          // Removed (by this screen's own Complete/Delete, or elsewhere).
+          // The stream has emitted at least once and this id isn't in it —
+          // genuinely removed (by this screen's own Complete/Delete, or
+          // elsewhere).
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (Navigator.of(context).canPop()) Navigator.of(context).pop();
           });
@@ -132,7 +139,7 @@ class SessionDetail extends StatelessWidget {
     await adapter.deleteSession(session.id);
     if (context.mounted) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Session logged.')));
+          .showSnackBar(const SnackBar(content: Text('Session removed.')));
     }
   }
 

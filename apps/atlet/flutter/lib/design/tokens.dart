@@ -15,6 +15,10 @@ abstract final class AtletTokens {
   static const accent2 = Color(0xFFB8431F);
   static const good = Color(0xFF4A7C3A);
   static const warn = Color(0xFFC68D2E);
+  // Glyphs/text sitting ON the accent fill (FAB icon, spinner) — a distinct
+  // semantic token in the source doc (styles.css --text-on-accent), not the
+  // same as a surface color like paper/bone.
+  static const textOnAccent = Color(0xFFFFF8F2);
   // Sans: Lexend 300-700; Mono numerals: JetBrains Mono. HIG: 34/22/17/13.
   // ponytail: font families named, not bundled (brief's dep list has no
   // google_fonts/asset fonts) — falls back to platform default until the

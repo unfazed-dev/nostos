@@ -60,7 +60,7 @@ class TrainingHome extends StatelessWidget {
             key: const Key('add-session-button'),
             backgroundColor: AtletTokens.accent,
             onPressed: () => _openAddSheet(context, adapter),
-            child: const Icon(Icons.add, color: Colors.white),
+            child: const Icon(Icons.add, color: AtletTokens.textOnAccent),
           ),
           body: sessions.isEmpty
               ? const _EmptyState(message: 'No sessions yet.\nTap + to log one.')
@@ -311,7 +311,10 @@ class _AddSessionSheetState extends State<_AddSessionSheet> {
                   ? const SizedBox(
                       height: 18,
                       width: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: AtletTokens.textOnAccent,
+                      ),
                     )
                   : const Text('Save'),
             ),

@@ -135,9 +135,28 @@ void main() {
     addTearDown(adapter.dispose);
     await adapter.addSession(_fixture());
 
+    // SessionDetail must be pushed (not the route's `home:`) for this test to
+    // actually exercise the pop path — canPop() is always false at the root,
+    // so a `home:`-only setup would let the pop code silently never run.
     await tester.pumpWidget(MaterialApp(
-      home: SessionDetail(adapter: adapter, sessionId: 'w1'),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: Center(
+            child: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => SessionDetail(adapter: adapter, sessionId: 'w1'),
+                ),
+              ),
+              child: const Text('open detail'),
+            ),
+          ),
+        ),
+      ),
     ));
+
+    await tester.tap(find.text('open detail'));
+    await tester.pumpAndSettle();
     adapter.flush();
     await tester.pumpAndSettle();
     expect(find.text('Sunrise 5k'), findsOneWidget);
@@ -148,6 +167,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(adapter._sessions.containsKey('w1'), isFalse);
+    // Popped back to the placeholder screen.
+    expect(find.text('open detail'), findsOneWidget);
+    expect(find.text('Sunrise 5k'), findsNothing);
   });
 
   testWidgets('detail: delete asks for confirmation before removing', (tester) async {
