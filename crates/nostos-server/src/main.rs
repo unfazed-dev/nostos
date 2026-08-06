@@ -527,10 +527,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let ruleset_mode = ruleset.mode();
     let (rules_tx, rules_changed) = tokio::sync::watch::channel(ruleset.checksum());
-    // Kept alive for the Task 14 reload watcher, not yet wired up.
-    let _rules_tx = rules_tx;
-    state_builder =
-        state_builder.with_rules(Arc::new(tokio::sync::RwLock::new(ruleset)), rules_changed);
+    let rules_shared = Arc::new(tokio::sync::RwLock::new(ruleset));
+    state_builder = state_builder.with_rules(Arc::clone(&rules_shared), rules_changed);
 
     // ---- `all`-mode startup warning (ADR-0031, Task 13) ----
     // sync_mode = "all" means every replicated row reaches every authorised
@@ -721,6 +719,20 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
+
+    // ---- sync-rules hot reload (ADR-0031 D3, Task 14) ----
+    // No engine restart: the watcher polls the same file loaded at boot and,
+    // on an actual checksum change, swaps the shared ruleset + notifies every
+    // live socket's cheap `watch::Receiver::changed()` arm (transport.rs).
+    let (rules_shutdown_tx, rules_shutdown_rx) = tokio::sync::watch::channel(false);
+    let rules_watch_handle = tokio::spawn(watch_rules(
+        std::path::PathBuf::from(&cfg.rules_file),
+        rules_shared,
+        std::time::Duration::from_secs(5),
+        rules_shutdown_rx,
+        rules_tx,
+    ));
+
     // Graceful drain: on SIGTERM/Ctrl-C, axum stops accepting new connections
     // and waits for in-flight ones. The ack-driven slot model (ADR-0009) means
     // the last confirmed LSN is already what every live client acked — no
@@ -748,7 +760,70 @@ async fn main() -> anyhow::Result<()> {
             w.shutdown().await;
         }
     }
+    let _ = rules_shutdown_tx.send(true);
+    let _ = rules_watch_handle.await;
     Ok(())
+}
+
+/// Poll `path` every `poll_interval` and swap the shared ruleset when its
+/// canonical checksum changes (ADR-0031 D3 — no engine restart). A malformed
+/// or unreadable file is logged and skipped: the previous ruleset stays
+/// authoritative, never silently widened. `rules_tx` both stores the current
+/// checksum (read back each tick to detect no-op reloads) and wakes every
+/// live socket's `write_loop` select arm (`crates/nostos-infra/src/
+/// transport.rs`) so it can re-verify its own subscriptions.
+async fn watch_rules(
+    path: std::path::PathBuf,
+    rules: Arc<tokio::sync::RwLock<nostos_application::ActiveRuleset>>,
+    poll_interval: std::time::Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    rules_tx: tokio::sync::watch::Sender<u64>,
+) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(poll_interval) => {}
+            res = shutdown.changed() => {
+                match res {
+                    Ok(()) if *shutdown.borrow() => return,
+                    Ok(()) => continue,
+                    Err(_) => return, // sender dropped; nothing left to watch for
+                }
+            }
+        }
+        let loaded = match nostos_infra::rules_file::load(&path) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                warn!(path = %path.display(), "nostos_rules.toml missing on reload poll; keeping previous ruleset");
+                continue;
+            }
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "nostos_rules.toml reload failed to load; keeping previous ruleset");
+                continue;
+            }
+        };
+        let compiled = match nostos_application::ActiveRuleset::compile(&loaded) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "nostos_rules.toml reload failed to compile; keeping previous ruleset");
+                continue;
+            }
+        };
+        let new_checksum = compiled.checksum();
+        if new_checksum == *rules_tx.borrow() {
+            continue; // canonical form unchanged (e.g. only whitespace edited)
+        }
+        info!(
+            sync_mode = compiled.mode().as_str(),
+            tables = compiled.synced_tables().len(),
+            old_checksum = format!("{:x}", *rules_tx.borrow()),
+            new_checksum = format!("{:x}", new_checksum),
+            "sync rules reloaded"
+        );
+        // Swap BEFORE notifying: a session woken by `rules_tx.send` must see
+        // the new ruleset when it reads `rules`, never a stale one.
+        *rules.write().await = compiled;
+        let _ = rules_tx.send(new_checksum);
+    }
 }
 
 fn init_tracing(filter: &str) {

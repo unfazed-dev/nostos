@@ -140,6 +140,51 @@ pub async fn spawn_fake_server_with_rules(
     (addr, handle, manager, store)
 }
 
+/// Like [`spawn_fake_server_with_rules`] but keeps both live-mutation handles
+/// instead of discarding them — the `watch::Sender<u64>` and the shared
+/// `RwLock<ActiveRuleset>` — so a test can simulate a live rules reload
+/// (ADR-0031 D3, Task 14) exactly the way `watch_rules` does in production:
+/// swap the `RwLock` contents, then `.send()` the new checksum.
+pub async fn spawn_fake_server_with_live_rules(
+    buffer: usize,
+    auth: Arc<dyn SyncAuth>,
+    tenant_column: Option<&str>,
+    rules: ActiveRuleset,
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<SessionManager>,
+    Arc<dyn nostos_application::ports::SessionStore>,
+    tokio::sync::watch::Sender<u64>,
+    Arc<tokio::sync::RwLock<ActiveRuleset>>,
+) {
+    let store: Arc<dyn nostos_application::ports::SessionStore> =
+        Arc::new(InMemorySessionStore::new());
+    let manager = Arc::new(SessionManager::new(
+        store.clone(),
+        nostos_domain::Tier::Enterprise,
+    ));
+
+    let rules_shared = Arc::new(tokio::sync::RwLock::new(rules));
+    let (rules_tx, rules_changed) =
+        tokio::sync::watch::channel(rules_shared.read().await.checksum());
+    let mut state = SyncRouterState::new(Arc::clone(&manager), auth)
+        .with_buffer(buffer)
+        .with_rules(Arc::clone(&rules_shared), rules_changed);
+    if let Some(col) = tenant_column {
+        state = state.with_tenant_column(col);
+    }
+    let app = axum::Router::new()
+        .route("/sync", get(sync_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    (addr, handle, manager, store, rules_tx, rules_shared)
+}
+
 /// The JSON shape of a client's subscribe frame (matches the `Subscribe`
 /// variant of `ClientMessage`). Sent as a WebSocket **text** message.
 pub fn subscribe_frame(table: &str, filters: &[(&str, &str)]) -> String {

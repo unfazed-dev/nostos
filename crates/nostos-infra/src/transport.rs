@@ -70,6 +70,15 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// enough that 32 × device_cap snapshots is a bounded worst case.
 const MAX_TABLES_PER_SOCKET: usize = 32;
 
+/// Close reason a live session receives when a sync-rules reload (ADR-0031
+/// D3) changes the rule decision for one of its subscribed tables. Swap
+/// verification is per-table and coarse — see the `ponytail:` at the
+/// `run_session` call site — so this fires on a real narrowing AND on any
+/// widen the verification can't prove safe in place; either way the client's
+/// reconnect (Task 11's checksum/epoch path) re-scopes it into the current
+/// ruleset.
+pub(crate) const RULES_CHANGED_CLOSE_REASON: &str = "rules changed; reconnect to re-scope";
+
 /// Shared state injected into the axum router.
 #[derive(Clone)]
 pub struct SyncRouterState {
@@ -340,8 +349,10 @@ async fn run_session(
     let snapshotter = state.snapshotter.clone();
     // ADR-0031: snapshot the active ruleset once per socket. Cloned (cheap —
     // wraps a BTreeMap) rather than holding the RwLock read guard across the
-    // awaits inside register_subscribe. Live re-evaluation of an already-
-    // registered session on a rules reload is Task 14's scope, not this one.
+    // awaits inside register_subscribe. This snapshot becomes `old_ruleset`
+    // in the write_loop below (D3, Task 14) so a live rules reload can be
+    // verified against exactly what this socket's already-registered
+    // subscriptions were granted.
     let ruleset = state.rules.read().await.clone();
 
     // 4. Per-socket multi-table state. `synthetic_cursor` is seeded from the
@@ -460,9 +471,21 @@ async fn run_session(
     });
     let exp_for_writer = Arc::clone(&exp_fired);
 
+    // ADR-0031 D3: live-session re-scoping on a rules reload. `rules_rx` only
+    // wakes when the watcher (crates/nostos-server/src/main.rs::watch_rules)
+    // observes an actual checksum change on the rules file — a
+    // `watch::Receiver` that has already seen the current value never fires,
+    // so this arm costs nothing on the per-event delivery path below until an
+    // operator actually edits `nostos_rules.toml`.
+    let mut rules_rx = state.rules_changed.clone();
+    let rules_shared = Arc::clone(&state.rules);
+    let subs_for_reload = Arc::clone(&subs);
+    let principal_for_reload = principal.clone();
+
     let write_loop = tokio::spawn(async move {
         use futures_util::sink::SinkExt as _;
         let mut writer = writer;
+        let mut old_ruleset = ruleset;
         // C3 batched-writes: the first frame is awaited (no busy-spin, no
         // latency tax when idle). Once one is in hand, drain up to
         // `MAX_BATCH_FRAMES - 1` MORE frames that are *immediately available*
@@ -551,6 +574,47 @@ async fn run_session(
                         .await;
                     break;
                 }
+                // ADR-0031 D3: sync-rules reload. Verification is per-table:
+                // only a subscribed table whose rule decision changed at all
+                // trips this — an edit that never touches this socket's
+                // tables is free.
+                res = rules_rx.changed() => {
+                    if res.is_err() {
+                        continue; // sender dropped (server shutting down)
+                    }
+                    let new_ruleset = rules_shared.read().await.clone();
+                    let narrowed = {
+                        let s = subs_for_reload.lock().await;
+                        s.tables.iter().any(|table| {
+                            old_ruleset.decide(table, &principal_for_reload)
+                                != new_ruleset.decide(table, &principal_for_reload)
+                        })
+                    };
+                    if narrowed {
+                        debug!("closing socket: sync rules changed under a live session (ADR-0031 D3)");
+                        // ponytail: swap verification is coarse — ANY per-table
+                        // rule-decision change (a real narrow, or a widen this
+                        // code can't prove safe) disconnects the whole socket
+                        // rather than re-scoping just the affected subscription
+                        // in place. Ceiling: one reconnect + resnapshot per
+                        // connected client per rules edit that touches one of
+                        // its subscribed tables, including edits that only
+                        // widened. Upgrade path: a real subset/implication
+                        // check on `PredicateExpr` for the Allow-to-Allow case
+                        // so a genuine widen can keep running in place, plus
+                        // per-subscription differential resync instead of
+                        // closing the whole socket.
+                        let frame = axum::extract::ws::CloseFrame {
+                            code: axum::extract::ws::close_code::INVALID,
+                            reason: RULES_CHANGED_CLOSE_REASON.into(),
+                        };
+                        let _ = writer
+                            .send(axum::extract::ws::Message::Close(Some(frame)))
+                            .await;
+                        break;
+                    }
+                    old_ruleset = new_ruleset;
+                }
             }
         }
         let _ = writer;
@@ -577,7 +641,14 @@ async fn run_session(
     // bumps on slot recreate) + the op-log reader for the replay branch.
     let metrics_reader = Arc::clone(&state.metrics);
     let oplog_reader = state.oplog_reader.clone();
-    let ruleset_reader = ruleset.clone();
+    // ADR-0031 D3: read fresh (not a connection-start snapshot) so a
+    // mid-session subscribe issued after a live rules reload is decided
+    // against the CURRENT ruleset, not a stale one — otherwise a table just
+    // denied by the reload could still be granted to a newly-subscribed
+    // table on an existing socket. Cold path (bounded by MAX_TABLES_PER_SOCKET
+    // Subscribe frames per socket, ever), so the extra read costs nothing
+    // that matters.
+    let rules_for_reader = Arc::clone(&state.rules);
     let read_loop = tokio::spawn(async move {
         while let Some(Ok(msg)) = reader.next().await {
             let data: Option<Vec<u8>> = match msg {
@@ -604,6 +675,7 @@ async fn run_session(
                         client_epoch: epoch,
                         client_rules_checksum: rules_checksum,
                     };
+                    let current_ruleset = rules_for_reader.read().await.clone();
                     if let Err(e) = register_subscribe(
                         &req,
                         &subs_reader,
@@ -616,7 +688,7 @@ async fn run_session(
                         &ack_sink,
                         &write_principal,
                         tenant_column_for_writes.as_deref(),
-                        &ruleset_reader,
+                        &current_ruleset,
                     )
                     .await
                     {
