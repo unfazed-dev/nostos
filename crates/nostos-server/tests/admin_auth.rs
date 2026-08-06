@@ -131,6 +131,16 @@ async fn spawn(opts: SpawnOpts<'_>) -> Server {
         .env("NOSTOS_RULES_FILE", &rules_path)
         .env("NOSTOS_SYNC_AUTH", opts.sync_auth)
         .env("NOSTOS_LOG", opts.log)
+        // The parent test process's TERM/COLORTERM leak into the child via
+        // Command's default env inheritance, so tracing_subscriber::fmt()
+        // (init_tracing, main.rs — no .with_ansi(false)) emits ANSI-colored
+        // log lines whenever a contributor's shell is color-capable. That
+        // breaks audit_line_emitted_once_per_mutation's line.contains("x=")
+        // checks (fields get wrapped in separate SGR escapes). NO_COLOR=1
+        // is the documented tracing-subscriber override, and keeping the
+        // fix here — not in init_tracing — is deliberate: it's a test
+        // determinism concern, not a production logging behavior change.
+        .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::inherit());
 
