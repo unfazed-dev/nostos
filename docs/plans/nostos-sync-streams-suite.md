@@ -26,7 +26,7 @@ doc wins — raise it before coding.
 |---|---|---|
 | **D1** | **Full flat claims.** `SupabaseJwtAuth` lifts *all* flat scalar JWT claims into `Principal.extra`. | Task 2, plus a blocking security review in the same task (hostile-JWT tests, size cap, reserved-name collisions). |
 | **D2** | **Explicit wire field.** `rules_checksum` is added to `Subscribe`; the wire stays human-debuggable JSON. | Task 11 rewritten; Task 12 added (nine SDKs + backward compat). Composed epoch (Task 5) is retained as the fallback for clients that omit the field. |
-| **D3** | **In-place predicate swap.** Reload re-scopes live sessions without disconnecting; only sessions whose scope *narrows* are invalidated, and only for the affected subscriptions. | Task 14 rewritten. Disconnect-resync survives as the documented fallback when swap verification fails. |
+| **D3** | **Whole-socket disconnect-and-resync, as shipped.** Reload diffs the old/new decision per subscribed table; any change — narrow **or** widen — closes that session's socket and the client reconnects and re-snapshots under the new ruleset. Table-granular, not row-granular; a session with no subscription to a changed table is untouched. In-place predicate swap (re-scope without disconnecting) was the original proposal but was not built — it is the documented upgrade path, not a fallback. | Task 14 shipped this. See ADR-0031 §Reload for the as-built description and the `ponytail:` upgrade path. |
 | **D4** | **`sync = false` default** in `nostos rules init`; `--sync-all` flips it. | Task 15 unchanged (the plan already took this position). |
 | **D5** | **Web authoring in v1.** An authenticated, config-mutating `PUT /rules` on `nostos-server`; the web panel becomes a real toggle editor. `nostos rules edit` remains. | Tasks 20, 21, 22 added/rewritten. |
 
@@ -1899,7 +1899,7 @@ lost.
 |---|---|---|---|
 | D1 | How much of the JWT reaches `Principal.extra`? | **Full flat scalar claims**, with a blocking security review in the same commit | Task 2 |
 | D2 | Wire change, or ride the existing epoch? | **Explicit `rules_checksum` field**, composed epoch kept as the fallback | Tasks 11, 12 |
-| D3 | How does a reload re-scope live sessions? | **In-place predicate swap**; narrowing scopes get targeted invalidation; disconnect+resync is the documented fallback | Task 14 |
+| D3 | How does a reload re-scope live sessions? | **Whole-socket disconnect-and-resync, as shipped**; any decision change (narrow or widen) closes the socket, table-granular; in-place predicate swap is the documented upgrade path, not what was built | Task 14 |
 | D4 | Default for a fresh toggles file | **`sync = false`**, `--sync-all` flips it | Task 15 |
 | D5 | Web authoring surface in v1? | **Yes** — authenticated `PUT /rules` + a real toggle editor; the CLI editor remains | Tasks 20, 21, 22 |
 

@@ -696,25 +696,7 @@ async fn main() -> anyhow::Result<()> {
 
     // CORS: explicit origins in production, permissive for local dev (the
     // empty-default case). Web clients need this to reach /sync from a browser.
-    let cors = if cfg.cors_origins.is_empty() {
-        tower_http::cors::CorsLayer::permissive()
-    } else {
-        let origins: Vec<_> = cfg
-            .cors_origins
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-        info!(?origins, "CORS: explicit origins");
-        tower_http::cors::CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::OPTIONS,
-            ])
-            .allow_headers(tower_http::cors::Any)
-            .allow_credentials(true)
-    };
+    let cors = build_cors_layer(&cfg.cors_origins)?;
 
     let app = axum::Router::new()
         .route(&cfg.ws_path, get(sync_handler))
@@ -857,6 +839,51 @@ async fn watch_rules(
         *rules.write().await = compiled;
         let _ = rules_tx.send(new_checksum);
     }
+}
+
+/// Builds the `/rules`/`/sync`/`/schema` CORS layer from `NOSTOS_CORS_ORIGINS`.
+///
+/// Empty ⇒ `CorsLayer::permissive()` (local dev, no credentials). Non-empty
+/// ⇒ an explicit origin allow-list with a **fixed** header list, never
+/// `tower_http::cors::Any`: tower-http's `ensure_usable_cors_rules` rejects
+/// `allow_headers(Any)` combined with `allow_credentials(true)` inside
+/// `Layer::layer` — i.e. at router construction / server boot, not on first
+/// request — so that combination panics the server for *any* non-empty
+/// `NOSTOS_CORS_ORIGINS`, independent of whether the origins parse. The admin
+/// panel (`web/src/routes/admin/rules/+page.svelte`) sends `authorization`
+/// and `content-type`; those two are the only headers any route needs.
+///
+/// An origin that fails to parse is a startup error, not a silently dropped
+/// entry — a typo'd origin used to vanish from the allow-list without a log,
+/// which looks identical to (and is easy to mistake for) an all-origins CORS
+/// lockout.
+fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::CorsLayer> {
+    if cors_origins.is_empty() {
+        return Ok(tower_http::cors::CorsLayer::permissive());
+    }
+
+    let mut origins = Vec::new();
+    for raw in cors_origins.split(',') {
+        let trimmed = raw.trim();
+        let origin: axum::http::HeaderValue = trimmed
+            .parse()
+            .with_context(|| format!("NOSTOS_CORS_ORIGINS: invalid origin {trimmed:?}"))?;
+        origins.push(origin);
+    }
+    info!(?origins, "CORS: explicit origins");
+
+    Ok(tower_http::cors::CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ])
+        .allow_credentials(true))
 }
 
 fn init_tracing(filter: &str) {
@@ -1394,6 +1421,55 @@ mod all_mode_warning_tests {
 
         assert!(out.starts_with("WARNING: sync_mode = \"all\""));
         assert!(out.contains("0 tables, ~0 rows estimated."));
+    }
+}
+
+/// C1 regression: tower-http 0.5.2's `ensure_usable_cors_rules` runs inside
+/// `Layer::layer`, i.e. when the layer is attached to a router — server
+/// boot, not first request. Before the fix, `build_cors_layer` returned
+/// `allow_headers(Any)` + `allow_credentials(true)` for any non-empty
+/// `NOSTOS_CORS_ORIGINS`, which panicked as soon as `.layer(cors)` ran.
+/// `non_empty_origins_survive_router_construction` reproduces the exact call
+/// shape (`Router::new()....layer(cors)`) used in `main()`; it panics on the
+/// pre-fix code and passes once `allow_headers` is a fixed list.
+#[cfg(test)]
+mod cors_tests {
+    use super::build_cors_layer;
+
+    #[test]
+    fn non_empty_origins_survive_router_construction() {
+        let cors = build_cors_layer("https://example.com")
+            .expect("a single well-formed origin must build");
+
+        // This is what used to panic: attaching the layer is where
+        // tower-http's `ensure_usable_cors_rules` assert fires, not the
+        // builder chain above.
+        let router: axum::Router = axum::Router::new()
+            .route("/healthz", axum::routing::get(|| async { "ok" }))
+            .layer(cors);
+        drop(router);
+    }
+
+    #[test]
+    fn empty_origins_stay_permissive() {
+        // Local-dev default path must be untouched by the fix.
+        let _cors = build_cors_layer("").expect("empty NOSTOS_CORS_ORIGINS never fails to build");
+    }
+
+    #[test]
+    fn unparseable_origin_fails_loudly_instead_of_vanishing() {
+        // Secondary defect fixed alongside C1: the old
+        // `.filter_map(|s| s.trim().parse().ok())` silently dropped any
+        // origin that failed to parse, so a typo'd operator-supplied origin
+        // produced an empty allow-list with no error and no log line. A
+        // raw control character (not permitted in an HTTP header value) is
+        // enough to make `HeaderValue::from_str` fail.
+        let err = build_cors_layer("https://good.example.com,bad\u{7}origin")
+            .expect_err("an origin that fails HeaderValue parsing must error, not vanish");
+        assert!(
+            err.to_string().contains("NOSTOS_CORS_ORIGINS"),
+            "error should name the offending config, got: {err}"
+        );
     }
 }
 
