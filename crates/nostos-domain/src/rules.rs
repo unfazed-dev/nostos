@@ -20,6 +20,7 @@
 //! running in `hand` mode would trigger a resync of every hand-authored
 //! predicate for no behavioral reason.
 
+use crate::fnv::fnv1a_64;
 use crate::scope::{ScopeError, ScopeExpr};
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -27,21 +28,6 @@ use std::fmt::Write as _;
 /// The rules-file format version this server understands. Bumped whenever
 /// the on-disk shape changes in a way [`SyncRules::validate`] must reject.
 pub const RULES_VERSION: u32 = 1;
-
-/// FNV-1a 64-bit offset basis / prime (Fowler–Noll–Vo). Deliberately
-/// hand-rolled (~10 lines) rather than pulling in a hashing crate for a
-/// single non-cryptographic checksum — see the Task 4 brief.
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET_BASIS;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
 
 /// Which section of `nostos_rules.toml` is authoritative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
