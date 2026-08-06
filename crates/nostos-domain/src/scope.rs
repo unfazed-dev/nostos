@@ -59,7 +59,9 @@ pub enum ScopeError {
 /// `crate::predicate`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScopeValue {
-    /// `claims.org_id` — resolved from the connecting principal at request time.
+    /// `claims.org_id` — resolved from the connecting principal at request
+    /// time. Always resolves to `ColumnValue::Text` (JWT claims are strings),
+    /// so e.g. `age > claims.min_age` compares text, not a number.
     Claim(String),
     /// `'open'`, `3`, `true` — a constant, typed like `predicate_compile.rs`.
     Literal(ColumnValue),
