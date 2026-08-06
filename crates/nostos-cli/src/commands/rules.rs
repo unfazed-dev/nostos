@@ -1,25 +1,23 @@
 //! `nostos rules` — generate, edit, and validate `nostos_rules.toml` (ADR-0031).
 //!
-//! `init` is the only fully-implemented subcommand (Task 15 of the
-//! sync-streams-suite). `edit` (interactive per-table toggles) is a later
-//! task — `.superpowers/sdd/nostos-sync-streams-suite/progress.md` flags it
-//! "Task 15+" and its args shape isn't specified anywhere yet — so it's
-//! stubbed with a clear error rather than guessed at.
-//!
-//! ponytail: `edit` errors instead of prompting; hand-edit the `[tables.*]`
-//! section directly (`rules_file::save` preserves it) until that task lands.
+//! `edit` is a plain-stdout line editor (no raw-mode terminal): each line is
+//! parsed into an [`EditCommand`], applied to the in-memory [`SyncRules`] by
+//! the pure [`apply_edit`], and only written to disk on `w`. `--mode` skips
+//! the loop entirely and reuses `rules_file::set_mode` — the same primitive
+//! `init`'s sibling infra module already proves preserves both sections.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use nostos_domain::{SyncMode, SyncRules, TableRule, RULES_VERSION};
+use nostos_domain::{ScopeExpr, SyncMode, SyncRules, TableRule, RULES_VERSION};
 use nostos_infra::rules_file;
 
 use crate::config::{NostosConfig, DEFAULT_FILE_NAME};
 use crate::dotenv;
 use crate::pg::PgControl;
+use crate::prompt;
 
 #[derive(Debug, Args)]
 pub struct RulesArgs {
@@ -51,9 +49,153 @@ pub struct InitRulesArgs {
     pub sync_all: bool,
 }
 
-/// No fields yet — `nostos rules edit` isn't implemented (see module docs).
 #[derive(Debug, Args)]
-pub struct EditRulesArgs {}
+pub struct EditRulesArgs {
+    /// Switch sync_mode without entering the toggle loop.
+    #[arg(long)]
+    pub mode: Option<String>,
+}
+
+/// One editor command, parsed from a line of stdin. Pure and unit-testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditCommand {
+    Toggle(usize),
+    Scope { index: usize, scope: Option<String> },
+    Mode(SyncMode),
+    Save,
+    Quit,
+    Help,
+    Unknown(String),
+}
+
+const HELP_TEXT: &str =
+    "commands: <n> toggle · s <n> <scope> · mode <all|toggles|hand> · w save · \
+                          q quit · ? help  (s <n> with no scope clears it)";
+
+/// Parse one line of the editor's stdin protocol. Never errors — an
+/// unrecognized line becomes `Unknown(line)` for the caller to report.
+#[must_use]
+pub fn parse_edit_command(line: &str) -> EditCommand {
+    let line = line.trim();
+    let mut parts = line.split_whitespace();
+    let head = parts.next();
+    let rest: Vec<&str> = parts.collect();
+
+    match head {
+        None => EditCommand::Unknown(String::new()),
+        Some("q") if rest.is_empty() => EditCommand::Quit,
+        Some("w") if rest.is_empty() => EditCommand::Save,
+        Some("?") if rest.is_empty() => EditCommand::Help,
+        Some("s") if !rest.is_empty() => match rest[0].parse::<usize>() {
+            Ok(index) => {
+                let scope_words = &rest[1..];
+                let scope = (!scope_words.is_empty()).then(|| scope_words.join(" "));
+                EditCommand::Scope { index, scope }
+            }
+            Err(_) => EditCommand::Unknown(line.to_string()),
+        },
+        Some("mode") if rest.len() == 1 => match SyncMode::parse(rest[0]) {
+            Some(mode) => EditCommand::Mode(mode),
+            None => EditCommand::Unknown(line.to_string()),
+        },
+        Some(tok) if rest.is_empty() => match tok.parse::<usize>() {
+            Ok(index) => EditCommand::Toggle(index),
+            Err(_) => EditCommand::Unknown(line.to_string()),
+        },
+        _ => EditCommand::Unknown(line.to_string()),
+    }
+}
+
+/// Apply one command to the working ruleset. Returns a user-facing message
+/// on success, or an error message on rejection. No disk I/O — the caller
+/// (the interactive loop) writes the file after a successful `Save`.
+pub fn apply_edit(rules: &mut SyncRules, cmd: &EditCommand) -> Result<String, String> {
+    match cmd {
+        EditCommand::Toggle(index) => {
+            require_toggles_mode(rules)?;
+            let table = table_at(&mut rules.tables, *index)?;
+            table.sync = !table.sync;
+            Ok(format!("[{index}] {} sync = {}", table.table, table.sync))
+        }
+        EditCommand::Scope { index, scope } => {
+            require_toggles_mode(rules)?;
+            if let Some(text) = scope {
+                ScopeExpr::parse(text).map_err(|e| e.to_string())?;
+            }
+            let table = table_at(&mut rules.tables, *index)?;
+            table.scope.clone_from(scope);
+            Ok(match scope {
+                Some(text) => format!("[{index}] {} scope = {text}", table.table),
+                None => format!("[{index}] {} scope cleared", table.table),
+            })
+        }
+        EditCommand::Mode(mode) => {
+            rules.mode = *mode;
+            Ok(format!("sync_mode = {}", mode.as_str()))
+        }
+        EditCommand::Save => {
+            rules.validate().map_err(|e| e.to_string())?;
+            Ok(format!(
+                "validated (checksum {:#x}) — writing {}",
+                rules.checksum(),
+                rules_file::RULES_FILE_NAME
+            ))
+        }
+        EditCommand::Quit => Ok("bye".to_string()),
+        EditCommand::Help => Ok(HELP_TEXT.to_string()),
+        EditCommand::Unknown(raw) => Err(format!("unknown command: {raw:?} — try ?")),
+    }
+}
+
+/// `Toggle`/`Scope` mutate the generator-owned `[tables.*]` section, so both
+/// are refused outside `toggles` mode — `all` has no toggles to mean
+/// anything, `hand` has frozen the generator in favor of `[[rules]]`.
+fn require_toggles_mode(rules: &SyncRules) -> Result<(), String> {
+    if rules.mode == SyncMode::Toggles {
+        return Ok(());
+    }
+    Err(format!(
+        "sync_mode is `{}` — the generator is frozen. Run `nostos rules edit --mode toggles` to \
+         hand truth back to the toggle editor.",
+        rules.mode.as_str()
+    ))
+}
+
+/// 1-based lookup matching the rendered `[1] [2] [3]` rows.
+fn table_at(tables: &mut [TableRule], index: usize) -> Result<&mut TableRule, String> {
+    index
+        .checked_sub(1)
+        .and_then(|i| tables.get_mut(i))
+        .ok_or_else(|| format!("no table at index {index}"))
+}
+
+/// Pure render of the editor screen. 1-based row numbers must stay in lock
+/// step with [`table_at`]'s indexing — `render_row_n_matches_toggle_n` pins
+/// that down.
+fn render(rules: &SyncRules) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = format!(
+        "nostos_rules.toml — sync_mode = {}          checksum {:#x}\n",
+        rules.mode.as_str(),
+        rules.checksum()
+    );
+    for (i, table) in rules.tables.iter().enumerate() {
+        let n = i + 1;
+        let mark = if table.sync { "x" } else { " " };
+        let name = &table.table;
+        match &table.scope {
+            Some(scope) => {
+                let _ = writeln!(out, "  [{n}] [{mark}] {name:<8} scope: {scope}");
+            }
+            None => {
+                let _ = writeln!(out, "  [{n}] [{mark}] {name}");
+            }
+        }
+    }
+    out.push_str(HELP_TEXT);
+    out
+}
 
 /// Pure: build the initial ruleset from introspected table names.
 /// Empty input yields a valid ruleset with zero table entries — never an error.
@@ -80,10 +222,7 @@ pub fn rules_from_tables(tables: &[String], mode: SyncMode, sync_default: bool) 
 pub async fn run(args: RulesArgs, cwd: &Path) -> Result<()> {
     match args.command {
         RulesCommand::Init(init_args) => run_init(init_args, cwd).await,
-        RulesCommand::Edit(_) => anyhow::bail!(
-            "`nostos rules edit` is not implemented yet — hand-edit the [tables.*] section of \
-             nostos_rules.toml directly, or use `nostos rules check` to validate it."
-        ),
+        RulesCommand::Edit(edit_args) => run_edit(edit_args, cwd),
         RulesCommand::Check => run_check(cwd),
     }
 }
@@ -182,9 +321,65 @@ fn run_check(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `--mode` rewrites `sync_mode` via `rules_file::set_mode` and returns —
+/// no re-introspection of the database, no toggle loop. Without `--mode`,
+/// loads the existing file and drives [`apply_edit`] off stdin lines until
+/// `q`/`w` (or EOF, which `prompt::prompt_default` turns into `q`).
+fn run_edit(args: EditRulesArgs, cwd: &Path) -> Result<()> {
+    let rules_path = cwd.join(rules_file::RULES_FILE_NAME);
+
+    if let Some(mode_str) = args.mode {
+        let mode = SyncMode::parse(&mode_str).ok_or_else(|| {
+            anyhow::anyhow!("unknown --mode {mode_str:?} (expected all|toggles|hand)")
+        })?;
+        rules_file::set_mode(&rules_path, mode)
+            .with_context(|| format!("switching sync_mode in {}", rules_path.display()))?;
+        println!(
+            "\u{2713} sync_mode = {} ({})",
+            mode.as_str(),
+            rules_path.display()
+        );
+        return Ok(());
+    }
+
+    let loaded = rules_file::load(&rules_path)
+        .with_context(|| format!("reading {}", rules_path.display()))?;
+    let mut rules = loaded.with_context(|| {
+        format!(
+            "{} does not exist — run `nostos rules init` first",
+            rules_path.display()
+        )
+    })?;
+
+    loop {
+        println!("{}", render(&rules));
+        // ponytail: a blank line (including EOF, which read_line also leaves
+        // blank) defaults to `q` so `nostos rules edit < /dev/null` exits
+        // instead of spinning; upgrade to a real EOF signal if that default
+        // ever surprises an interactive user.
+        let line = prompt::prompt_default("> ", "q").context("reading edit command")?;
+        let cmd = parse_edit_command(&line);
+        match apply_edit(&mut rules, &cmd) {
+            Ok(message) => {
+                println!("{message}");
+                if cmd == EditCommand::Save {
+                    rules_file::save(&rules_path, &rules)
+                        .with_context(|| format!("writing {}", rules_path.display()))?;
+                }
+                if cmd == EditCommand::Quit {
+                    break;
+                }
+            }
+            Err(message) => println!("! {message}"),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostos_domain::HandRule;
 
     #[test]
     fn rules_from_tables_defaults_to_sync_false() {
@@ -208,5 +403,153 @@ mod tests {
     fn rules_from_tables_respects_sync_all() {
         let rules = rules_from_tables(&["tasks".to_string()], SyncMode::Toggles, true);
         assert!(rules.tables.iter().all(|t| t.sync));
+    }
+
+    #[test]
+    fn parse_toggle_and_scope_and_mode() {
+        assert_eq!(parse_edit_command("1"), EditCommand::Toggle(1));
+        assert_eq!(
+            parse_edit_command("s 1 owner_id = claims.sub"),
+            EditCommand::Scope {
+                index: 1,
+                scope: Some("owner_id = claims.sub".to_string()),
+            }
+        );
+        assert_eq!(
+            parse_edit_command("s 2"),
+            EditCommand::Scope {
+                index: 2,
+                scope: None,
+            }
+        );
+        assert_eq!(
+            parse_edit_command("mode hand"),
+            EditCommand::Mode(SyncMode::Hand)
+        );
+        assert_eq!(
+            parse_edit_command("mode all"),
+            EditCommand::Mode(SyncMode::All)
+        );
+        assert_eq!(parse_edit_command("w"), EditCommand::Save);
+        assert_eq!(parse_edit_command("q"), EditCommand::Quit);
+        assert_eq!(parse_edit_command("?"), EditCommand::Help);
+        assert_eq!(
+            parse_edit_command("bogus"),
+            EditCommand::Unknown("bogus".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_refuses_toggle_in_hand_mode() {
+        let mut rules = rules_from_tables(&["tasks".to_string()], SyncMode::Hand, false);
+
+        let err = apply_edit(&mut rules, &EditCommand::Toggle(1))
+            .expect_err("hand mode must reject a toggle edit");
+
+        assert_eq!(
+            err,
+            "sync_mode is `hand` — the generator is frozen. Run `nostos rules edit --mode \
+             toggles` to hand truth back to the toggle editor."
+        );
+        assert!(
+            !rules.tables[0].sync,
+            "rejected toggle must not mutate the ruleset"
+        );
+    }
+
+    #[test]
+    fn edit_allows_mode_switch_in_any_mode() {
+        for starting_mode in [SyncMode::All, SyncMode::Toggles, SyncMode::Hand] {
+            let mut rules = rules_from_tables(&["tasks".to_string()], starting_mode, false);
+
+            apply_edit(&mut rules, &EditCommand::Mode(SyncMode::Hand))
+                .expect("mode switch must be allowed regardless of current mode");
+
+            assert_eq!(rules.mode, SyncMode::Hand);
+        }
+    }
+
+    #[test]
+    fn scope_is_validated_on_entry() {
+        let mut rules = rules_from_tables(&["tasks".to_string()], SyncMode::Toggles, false);
+        let before = rules.clone();
+
+        let cmd = parse_edit_command("s 1 owner_id OR x");
+        let err = apply_edit(&mut rules, &cmd).expect_err("`owner_id OR x` is not a valid scope");
+
+        // `owner_id` isn't followed by a comparison operator (`OR` isn't
+        // one), so this is `ScopeError::MissingOperator` rather than
+        // `Unsupported` — either way it's ScopeError text, which is what
+        // the brief requires apply_edit to surface unchanged.
+        assert!(
+            err.contains("comparison operator"),
+            "expected ScopeError text, got: {err}"
+        );
+        assert_eq!(
+            rules, before,
+            "a rejected scope edit must not mutate the ruleset"
+        );
+    }
+
+    #[test]
+    fn render_row_n_matches_toggle_n() {
+        let rules = rules_from_tables(
+            &[
+                "notes".to_string(),
+                "projects".to_string(),
+                "tasks".to_string(),
+            ],
+            SyncMode::Toggles,
+            false,
+        );
+        let screen = render(&rules);
+        assert!(
+            screen.contains("[2] [ ] projects"),
+            "row [2] must be `projects` (rules.tables[1] after sort), got:\n{screen}"
+        );
+
+        let mut edited = rules;
+        apply_edit(&mut edited, &EditCommand::Toggle(2)).expect("toggle row 2");
+        assert!(
+            edited.tables[1].sync,
+            "Toggle(2) must flip the same table the render labeled [2]"
+        );
+    }
+
+    #[test]
+    fn save_preserves_hand_section() {
+        let dir =
+            std::env::temp_dir().join(format!("nostos-rules-edit-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(rules_file::RULES_FILE_NAME);
+
+        let mut rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![TableRule {
+                table: "tasks".to_string(),
+                sync: false,
+                scope: None,
+            }],
+            hand: vec![HandRule {
+                table: "tasks".to_string(),
+                scope: Some("org_id = claims.org_id".to_string()),
+            }],
+        };
+
+        apply_edit(&mut rules, &EditCommand::Toggle(1)).expect("toggle in toggles mode");
+        rules_file::save(&path, &rules).expect("save");
+
+        let loaded = rules_file::load(&path).expect("load").expect("file exists");
+        assert_eq!(
+            loaded.hand, rules.hand,
+            "hand section must round-trip untouched"
+        );
+
+        let text = std::fs::read_to_string(&path).expect("read saved file");
+        assert!(
+            text.contains("org_id = claims.org_id"),
+            "hand scope text must survive a toggles-mode edit + save"
+        );
     }
 }
