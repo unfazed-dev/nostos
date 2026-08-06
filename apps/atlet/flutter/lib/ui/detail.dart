@@ -29,8 +29,13 @@ import '../design/tokens.dart';
 ///
 /// [SyncAdapter] exposes no update/complete verb and no "done" field on
 /// [SessionRow] — both actions call the only mutator available,
-/// [SyncAdapter.deleteSession]. They differ only in framing: Complete is the
-/// positive, no-confirmation path; Delete asks first.
+/// [SyncAdapter.deleteSession]. Team-lead ruling (task-12): this is
+/// "log-and-clear," not "save a done state" — Complete's snackbar names the
+/// actual effect (removal) explicitly rather than implying persistence.
+/// Delete keeps the destructive framing: confirmation dialog first, no
+/// snackbar after. A real completed-state (sessions.completed_at + an
+/// adapter update surface) is a parked, operator-gated future task — see
+/// task-12-report.md Concerns.
 class SessionDetail extends StatelessWidget {
   const SessionDetail({super.key, required this.adapter, required this.sessionId});
 
@@ -138,8 +143,12 @@ class SessionDetail extends StatelessWidget {
   Future<void> _complete(BuildContext context, SessionRow session) async {
     await adapter.deleteSession(session.id);
     if (context.mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Session removed.')));
+      // "Log-and-clear," not "saved as done": SyncAdapter has no completion
+      // field to persist, so the snackbar names the actual effect (removal
+      // from the list) rather than implying state was recorded.
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Logged — session cleared from list')),
+      );
     }
   }
 
