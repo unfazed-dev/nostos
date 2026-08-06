@@ -423,7 +423,60 @@ back to it, so it tells you *whether* a given token was used without ever
 printing the token itself. Compare `mode_before`/`mode_after` and the
 checksums against your own change history to spot anything you didn't make.
 
-## 8. References
+## 8. Sync rules
+
+`nostos_rules.toml` (ADR-0031) decides what each authorised client is allowed
+to read at all — layered *underneath* any client-side `where_sql`, which only
+narrows further, per subscription. It has one `sync_mode`, one of:
+
+- **`all`** — no gating; every replicated table reaches every client. The
+  zero-config default when no `nostos_rules.toml` file exists. A fresh boot in
+  this mode prints a warning naming every table and its estimated row count
+  (`unknown rows (never analyzed)` if Postgres has no stats yet), ending with:
+  ```
+  This is the zero-config development default. For production, run
+  `nostos rules init` and switch sync_mode to "toggles".
+  ```
+- **`toggles`** — per-table on/off plus an optional scope predicate. `nostos
+  rules init` writes this mode with every table `sync = false`
+  (`--sync-all` flips the default).
+- **`hand`** — a raw `[[rules]]` predicate grammar (`column <op>
+  claims.<field>` / `column <op> <literal>`, `AND`-only). Written and edited
+  only via `nostos rules edit --mode hand`; `PUT /rules` refuses to touch it
+  (below).
+
+**Switching truth.** The file on disk is the only truth; `sync_mode` just
+selects which part of it gets read. Switching modes never deletes or rewrites
+the other mode's data — a `[[rules]]` hand section written once survives
+untouched under `toggles` or `all`, so going back to `hand` later picks up
+where you left it.
+
+**What triggers a resync.** Any change to any *subscribed* table's
+rule-decision — narrowing **or widening** — closes that client's socket and
+makes it reconnect and re-snapshot from scratch. There is no in-place
+predicate swap; a `nostos_rules.toml` edit is a coarse, whole-connection
+invalidation, not a live re-scope (`crates/nostos-infra/src/transport.rs`).
+Editing a table nobody has subscribed to costs nothing.
+
+**Two authoring surfaces, one file, last writer wins.** `nostos rules edit`
+(local CLI, terminal UI) and the web panel's `PUT /rules` (gated by
+`NOSTOS_ADMIN_TOKEN`, see §7) both write the same `nostos_rules.toml` on the
+server. There is no locking or optimistic-concurrency check between them: if
+two edits race, whichever write lands last silently wins, full stop — check
+`nostos rules check` (or reload the panel) after any edit made without
+certainty you're the only editor. The web panel holds the admin token in the
+browser tab's memory for that session only; it is never written to
+localStorage or a cookie, closing the tab discards it. Persisting it would
+turn the browser into an XSS target for a credential that can rewrite what
+every client is allowed to read.
+
+**Upgrading existing clients.** The first time any pre-ADR-0031 client
+reconnects to an ADR-0031 server, it doesn't yet send `rules_checksum` in its
+`Subscribe` — the server treats that as a checksum mismatch and forces one
+full re-snapshot per client, one time. This is expected, not a regression;
+say so in release notes so it isn't reported as a bug.
+
+## 9. References
 
 - Setup / install: [QUICKSTART.md](QUICKSTART.md).
 - Architecture / dependency rule: [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -432,8 +485,9 @@ checksums against your own change history to spot anything you didn't make.
 - ADRs cited above: 0006 (license trust boundary), 0009 (ack-driven LSN
   resume), 0010 (sync auth), 0011 (server-enforced tenant predicates), 0013
   (write-back allowlist), 0016 (client WAL-bloat protection),
-  0025 (persisted oplog backfill). See [adr/](adr/).
+  0025 (persisted oplog backfill), 0031 (sync rules modes + checksum
+  resync). See [adr/](adr/).
 - Source code cited above: `crates/nostos-server/src/main.rs`,
   `crates/nostos-infra/src/transport.rs`,
   `crates/nostos-infra/src/replicator/pg.rs`,
-  `crates/nostos-cli/src/{main.rs,commands/{init,doctor,dev}.rs}`.
+  `crates/nostos-cli/src/{main.rs,commands/{init,doctor,dev,rules}.rs}`.

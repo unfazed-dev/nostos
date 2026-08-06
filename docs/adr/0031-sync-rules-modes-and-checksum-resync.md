@@ -1,6 +1,6 @@
 # ADR-0031: Three-mode sync rules and checksum-gated resync
 
-**Status:** Accepted · **Date:** 2026-08-06
+**Status:** Accepted — implemented 2026-08-07 · **Date:** 2026-08-06
 
 ## Context
 
@@ -119,24 +119,25 @@ answering different questions.
 
 ### Reload
 
-Rules reload without an engine restart. v1 mechanism: **in-place predicate
-swap** — a live session's compiled predicate is re-scoped to the new
-ruleset without disconnecting the socket. Only sessions whose scope
-*narrows* under the new ruleset are invalidated, and only for the affected
-subscriptions (a table dropped from `[tables.*]`, or a `[[rules]]` predicate
-that now excludes rows the session was receiving); a session whose scope is
-unaffected or widens keeps running untouched. Task 14 in the sync-streams
-suite wires the swap.
+Rules reload without an engine restart, but **not** via an in-place predicate
+swap — Task 14 shipped a coarser mechanism than this ADR originally proposed,
+and this section now describes what actually runs.
 
-Disconnect-and-resync is the documented **fallback**, not the primary path:
-if swap verification fails for a session, that session is closed with a
-reason and reconnects into the new ruleset, exactly as a full-restart reload
-would behave. `ponytail:` the fallback is coarse — a session that fails
-verification pays for a full resnapshot rather than a targeted one. Ceiling:
-every swap-verification failure costs that client a full snapshot, same as
-today's whole-fleet disconnect would have cost every client. Upgrade path:
-narrow the fallback further (partial resnapshot of only the newly-out-of-scope
-rows) once swap-verification failures are common enough to matter.
+v1 mechanism as shipped: on every rules reload, the server diffs the
+old and new rule-decision for each *subscribed* table. If a decision changed
+at all — narrower **or wider** — that session's socket is closed and the
+client reconnects and re-snapshots under the new ruleset, exactly as a
+full-restart reload would behave. A session with no subscription to any
+changed table is untouched. There is no partial, per-row resnapshot and no
+distinction between narrowing and widening; both pay the same full-socket
+cost. See `crates/nostos-infra/src/transport.rs` (`ponytail:` at the call
+site names this ceiling directly: coarse whole-socket invalidation on any
+decision change, including widen; upgrade path is a real in-place predicate
+swap — re-scoping the live subscription without a disconnect — once resync
+churn from wide fleets makes it worth the added verification-state
+machinery this ADR's original draft assumed).
+
+This is one of the two ponytails this ADR ships with (see Consequences).
 
 ### Admin auth on `PUT /rules` (D5, Task 21)
 
@@ -187,11 +188,25 @@ Two defenses make the property enforceable rather than merely incidental:
   explicit, reviewed, operator-configured origin — never `*`.
 
 Audit: every successful mutation emits exactly one `tracing::info!` line at
-target `nostos::audit` (`rules_mutation actor=<8-hex> source=<web|api>
+target `nostos::audit` (`rules_mutation actor=<8-hex> source=api
 mode_before=... mode_after=... checksum_before=0x... checksum_after=0x...
 tables_changed=N`), success path only. `actor` is the first 8 hex characters
 of SHA-256(token) — enough to distinguish two operators in the log, not
 reversible back to the token. No claim values or row data are ever logged.
+`source` is always `api` as shipped: nothing on the request distinguishes the
+web panel from a direct `curl`/API caller, so the field does not yet do the
+distinguishing work its name implies. `ponytail:` add an `X-Cairn-Source`
+header from the panel if that distinction is ever needed for audit triage
+(`crates/nostos-server/src/main.rs`) — a smaller, uncounted shortcut alongside
+the two below.
+
+`PUT /rules` and `nostos rules edit` write the same file with **no
+optimistic-concurrency check between them** — whichever write lands last
+wins, silently. `ponytail:` last-writer-wins, upgrade path is an `ETag` /
+`If-Match` precondition on `PUT /rules` once concurrent editors are common
+enough to make a silent clobber costly (`crates/nostos-server/src/main.rs`).
+This and the whole-socket-disconnect reload above are the two ceilings this
+ADR ships with (see Consequences).
 
 ## Consequences
 
@@ -202,27 +217,47 @@ reversible back to the token. No claim values or row data are ever logged.
   escape hatch without a third half-measure mode; an explicit `rules_checksum`
   wire field composes cleanly with the resume/resync machinery ADR-0025
   already built (old clients still work via the composed-epoch fallback)
-  instead of forcing every SDK onto the new field at once; in-place predicate
-  swap means most rules edits are invisible to connected clients — no
-  fleet-wide resync on every toggle flip.
-- **Negative:** in-place swap adds a verification step reload must pass
-  before it can avoid disconnecting a session (see `ponytail:` above) — more
-  moving parts than a blanket disconnect-everyone reload would have been.
-  `rules_checksum` is one more field every SDK's wire layer must eventually
-  understand, even though old clients keep working unmodified.
+  instead of forcing every SDK onto the new field at once; a rules edit that
+  touches no table any connected client has subscribed to costs nothing —
+  reload only pays for the sessions actually affected, even though "affected"
+  is table-granular, not row-granular (see Reload above).
+- **Negative:** reload is whole-socket, not in-place — an operator who edits
+  one table's scope disconnects and re-snapshots every session subscribed to
+  that table, widen or narrow alike, where a live predicate swap would have
+  cost nothing for a widen and little for a narrow (see the two `ponytail:`
+  entries under Reload and D5 above). `rules_checksum` is one more field
+  every SDK's wire layer must eventually understand, even though old clients
+  keep working unmodified. The two authoring surfaces (CLI, web panel) have
+  no concurrency control between them — see the last-writer-wins `ponytail:`
+  above.
 - **Non-goals (v1):** `OR`/`NOT` composition, joins across tables, and
   bucket/partition grammar (PowerSync-style bucket checksums, already called
   out as deferred moat machinery in ADR-0025's Divergence section) are out of
   scope — the grammar is intentionally the minimal `AND`-only subset that
-  compiles to `PredicateExpr` today. Full-fleet disconnect-resync on every
-  reload is out of scope in favor of selective in-place scope narrowing; it
-  survives only as the fallback when swap verification fails.
+  compiles to `PredicateExpr` today. A live in-place predicate swap (re-scope
+  a session's subscription without disconnecting it) is out of scope for v1;
+  whole-socket disconnect-and-resync on any subscribed-table decision change
+  is the only mechanism, not a fallback for one.
 - **`NOSTOS_WRITE_TABLES` is not governed by rules in v1.** Writes remain
   gated by the separate allowlist from ADR-0013 (`PgWriteBack`,
   `crates/nostos-infra/src/write_back.rs`). This ADR's `sync_mode`/rules
   system governs what a client can *read* (subscribe/sync); it says nothing
   about what a client can *write* — that stays a distinct gate until a later
   ADR unifies them, if one ever does.
+- **Backward compatibility — the four-quadrant matrix this suite had to
+  prove** (Task 12, D2):
+
+  | | old server | new server |
+  |---|---|---|
+  | **old client** | unchanged | composed-epoch fallback; resyncs on a rules change via the existing `slot_epoch` mechanism (ADR-0025), never parses `rules_checksum` |
+  | **new client** | server ignores the unknown `rules_checksum` key (`crates/nostos-infra/src/wire.rs` has no `deny_unknown_fields`); `resume_info` carries no checksum, so the client stores `0` and its next `Subscribe` omits the field — composed-epoch fallback | explicit `rules_checksum` path |
+
+  Every quadrant degrades to *more snapshots*, never to a wrong or missing
+  row — that invariant is what makes "missing `rules_checksum` = accept,
+  log" (D2) safe. One consequence worth calling out explicitly for release
+  notes: the first time any pre-ADR-0031 client reconnects to an ADR-0031
+  server, it hits the **old client / new server** cell above and pays one
+  full resnapshot — expected, one-time, not a regression.
 
 ## References
 
@@ -232,9 +267,11 @@ reversible back to the token. No claim values or row data are ever logged.
   oplog backfill — `slot_epoch`/`client_epoch` resume-gate mechanism the
   `rules_checksum` field composes with via the composed-epoch fallback)
 - Plan: `docs/plans/nostos-sync-streams-suite.md` — operator rulings D2
-  (explicit `rules_checksum` wire field, Task 11), D3 (in-place predicate
-  swap on reload, Task 14), and D5 (web authoring surface — authenticated
-  `PUT /rules`, `NOSTOS_ADMIN_TOKEN` shape, Tasks 20–21), ratified 2026-08-06
+  (explicit `rules_checksum` wire field, Task 11), D3 (resync-on-reload,
+  shipped as whole-socket disconnect rather than the in-place swap the
+  ruling originally described — see Reload above, Task 14), and D5 (web
+  authoring surface — authenticated `PUT /rules`, `NOSTOS_ADMIN_TOKEN` shape,
+  Tasks 20–21), ratified 2026-08-06
 - Runbook: `docs/OPERATING.md` §7 — setting, rotating, and responding to a
   leaked `NOSTOS_ADMIN_TOKEN`
 - Brief: `.superpowers/sdd/nostos-sync-streams-suite/task-1-brief.md`

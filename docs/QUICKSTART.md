@@ -3,8 +3,10 @@
 Nostos is Postgres logical replication → a Rust fan-out server → on-device
 SQLite: local-first, offline-capable sync for Flutter, Apache-2.0 end to end.
 One control plane (your Postgres/Supabase project + one CLI), no connector
-class, no server-deployed sync-rules DSL, no duplicated client-side schema —
-your Dart predicates (`where_sql`) ARE the sync rules.
+class, no duplicated client-side schema. An optional server-side
+`nostos_rules.toml` (ADR-0031) gates what any client can read at all; your
+Dart predicates (`where_sql`) narrow further, per subscription, on top of
+that.
 
 Two tracks below:
 
@@ -43,6 +45,15 @@ scripted version of everything below).
 | 4. `nostos dev` | `cargo run -p nostos-cli -- dev` — prints the `ws://` URL + a copy-paste Dart snippet | 1:15–1:45 (plus first-run Rust compile — see the timing note) |
 | 5. Add the SDK | `flutter pub add nostos_flutter` (pub.dev, once W6 publishes it — today: a `path:` dependency on `sdk/nostos_flutter`, see `fixtures/flutter/todo/pubspec.yaml`) | 1:45–2:15 |
 | 6. ~10 lines of Dart | see below | 2:15–3:00 |
+
+With no `nostos_rules.toml` present, step 4's `nostos dev` runs `sync_mode =
+"all"` — everything replicated is synced to every authorised client, the
+zero-config default for local dev (a startup warning names the tables and
+row-count estimate). To scope it down to specific tables before you go past
+your own machine: `nostos rules init` (writes `nostos_rules.toml` in
+`toggles` mode, every table `sync = false`) then `nostos rules edit` (toggle
+the tables you want on, `w` to save) — two commands, no restart. See
+[OPERATING.md](OPERATING.md#8-sync-rules) for the full mode reference.
 
 ```dart
 import 'package:nostos_flutter/nostos_flutter.dart';
