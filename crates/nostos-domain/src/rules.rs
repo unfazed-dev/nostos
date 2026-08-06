@@ -118,6 +118,24 @@ pub enum RulesError {
     Scope { table: String, source: ScopeError },
     #[error("duplicate table `{0}`")]
     DuplicateTable(String),
+    #[error(
+        "table name `{0}` contains a control character (tab, newline, or similar); \
+         `canonical()`'s line format uses these as delimiters, so such a name is \
+         indistinguishable from a different rule set with an ordinary name"
+    )]
+    InvalidTableName(String),
+}
+
+/// `canonical()` joins rows as tab-separated fields, one row per newline.
+/// A table name that itself contains a tab/newline/other control byte (`<
+/// 0x20`) is not distinguishable from those delimiters, so two structurally
+/// different `SyncRules` could canonicalize — and therefore checksum — to
+/// the same bytes. `validate()` rejects such names outright rather than
+/// escaping them, since real Postgres identifiers never contain control
+/// characters and only a hand-authored `[[rules]]`/`[tables.*]` entry could
+/// produce one.
+fn table_name_is_valid(name: &str) -> bool {
+    !name.chars().any(char::is_control)
 }
 
 /// A raw scope string is "whole table" when absent or blank; anything else
@@ -139,6 +157,9 @@ impl SyncRules {
             SyncMode::Toggles => {
                 let mut seen = HashSet::with_capacity(self.tables.len());
                 for rule in &self.tables {
+                    if !table_name_is_valid(&rule.table) {
+                        return Err(RulesError::InvalidTableName(rule.table.clone()));
+                    }
                     if !seen.insert(rule.table.as_str()) {
                         return Err(RulesError::DuplicateTable(rule.table.clone()));
                     }
@@ -154,6 +175,9 @@ impl SyncRules {
             SyncMode::Hand => {
                 let mut seen = HashSet::with_capacity(self.hand.len());
                 for rule in &self.hand {
+                    if !table_name_is_valid(&rule.table) {
+                        return Err(RulesError::InvalidTableName(rule.table.clone()));
+                    }
                     if !seen.insert(rule.table.as_str()) {
                         return Err(RulesError::DuplicateTable(rule.table.clone()));
                     }
@@ -374,6 +398,57 @@ mod tests {
             assert_eq!(SyncMode::parse(mode.as_str()), Some(mode));
         }
         assert_eq!(SyncMode::parse("bogus"), None);
+    }
+
+    #[test]
+    fn validate_rejects_control_characters_in_table_name() {
+        // Review finding (Task 4, round 1): a table name embedding the
+        // canonical() format's own delimiters (`\t`, `\n`) used to sail
+        // through validate() and collide with an unrelated, ordinary config.
+        // Regression pair straight from the verdict: Z is two normal tables,
+        // X2 is one table whose name IS the delimiter-shaped bytes of Z's
+        // canonical row content. Both must no longer both validate.
+        let z = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![table("a", true, None), table("b", false, None)],
+            hand: vec![],
+        };
+        let x2 = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![table("a\ttrue\t\nb", false, None)],
+            hand: vec![],
+        };
+
+        assert_eq!(z.validate(), Ok(()));
+        assert_eq!(
+            x2.validate(),
+            Err(RulesError::InvalidTableName("a\ttrue\t\nb".to_string()))
+        );
+
+        // Also cover a bare newline/carriage-return, and the Hand-mode path.
+        let cr_table = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![table("t\rable", true, None)],
+            hand: vec![],
+        };
+        assert_eq!(
+            cr_table.validate(),
+            Err(RulesError::InvalidTableName("t\rable".to_string()))
+        );
+
+        let hand_bad = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Hand,
+            tables: vec![],
+            hand: vec![hand("ta\nble", None)],
+        };
+        assert_eq!(
+            hand_bad.validate(),
+            Err(RulesError::InvalidTableName("ta\nble".to_string()))
+        );
     }
 
     #[test]
