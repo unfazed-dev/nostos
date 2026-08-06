@@ -18,9 +18,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::get;
-use nostos_application::ports::{Metrics, SchemaDescriptor, SchemaSource, SessionStore};
+use nostos_application::ports::{Metrics, SchemaDescriptor, SchemaSource, SessionStore, TableStat};
 use nostos_application::{FanOutService, SessionManager};
-use nostos_domain::{ColumnValue, ReplicationEvent};
+use nostos_domain::{ColumnValue, ReplicationEvent, SyncMode};
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
@@ -525,11 +525,48 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e).context("failed to load nostos_rules.toml"),
     };
+    let ruleset_mode = ruleset.mode();
     let (rules_tx, rules_changed) = tokio::sync::watch::channel(ruleset.checksum());
     // Kept alive for the Task 14 reload watcher, not yet wired up.
     let _rules_tx = rules_tx;
     state_builder =
         state_builder.with_rules(Arc::new(tokio::sync::RwLock::new(ruleset)), rules_changed);
+
+    // ---- `all`-mode startup warning (ADR-0031, Task 13) ----
+    // sync_mode = "all" means every replicated row reaches every authorised
+    // client (still tenant-scoped — see the principal-scoping path — but
+    // unscoped within a tenant). That's the right zero-config default, but an
+    // operator who never opts into narrower rules deserves a loud heads-up
+    // rather than finding out from an OOM. Row counts are estimates
+    // (`pg_class.reltuples`, never `count(*)`) so this stays cheap at boot.
+    if ruleset_mode == SyncMode::All {
+        let stats: Vec<TableStat> = {
+            #[cfg(feature = "pg")]
+            {
+                if cfg.replicator == "pg" {
+                    use nostos_application::ports::TableStatsSource;
+                    let src = nostos_infra::PgTableStats::new(&cfg.pg_url, &cfg.pg_publication);
+                    match src.table_stats().await {
+                        Ok(stats) => stats,
+                        Err(e) => {
+                            // A stats-fetch failure must not abort boot — the
+                            // warning still fires, just without numbers.
+                            warn!("could not estimate table sizes: {e}");
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    // The fake replicator has no database to introspect.
+                    Vec::new()
+                }
+            }
+            #[cfg(not(feature = "pg"))]
+            {
+                Vec::new()
+            }
+        };
+        warn!("{}", format_all_mode_warning(&stats));
+    }
 
     // ---- write-back adapter (ADR-0013) ----
     // The writable-table allowlist is enforced by the transport FIRST (a
@@ -721,6 +758,59 @@ fn init_tracing(filter: &str) {
         .try_init();
 }
 
+// ---- `all`-mode startup warning (ADR-0031, Task 13) ----
+
+/// Render the `sync_mode = "all"` guardrail banner. Pure formatting so it is
+/// testable without a database. `None` row estimates render as "unknown"
+/// (Postgres reports `reltuples = -1` for a never-analyzed table).
+fn format_all_mode_warning(stats: &[TableStat]) -> String {
+    let mut lines = vec![
+        "WARNING: sync_mode = \"all\" — every replicated row reaches every authorised client."
+            .to_string(),
+    ];
+
+    // Unknown estimates are never folded into `total` — a missing planner
+    // stat must not silently masquerade as zero rows.
+    let mut total: u64 = 0;
+    for stat in stats {
+        let table = &stat.table;
+        let line = match stat.estimated_rows {
+            Some(n) => {
+                total += n;
+                let est = format_thousands(n);
+                format!("  {table}    ~{est} rows")
+            }
+            None => format!("  {table}    unknown rows (never analyzed)"),
+        };
+        lines.push(line);
+    }
+
+    let count = stats.len();
+    let plural = if count == 1 { "" } else { "s" };
+    let total_fmt = format_thousands(total);
+    lines.push(format!(
+        "  {count} table{plural}, ~{total_fmt} rows estimated."
+    ));
+    lines.push("  This is the zero-config development default. For production, run".to_string());
+    lines.push("  `nostos rules init` and switch sync_mode to \"toggles\".".to_string());
+
+    lines.join("\n")
+}
+
+/// Thousands-grouped decimal rendering (`12400` → `"12,400"`), for the
+/// `all`-mode startup banner's row-count estimates.
+fn format_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().rev().enumerate() {
+        if i != 0 && i % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    grouped.chars().rev().collect()
+}
+
 // ---- health + metrics endpoints (ADR: operability, T1-6/T1-7) ----
 
 /// `GET /healthz` — liveness/readiness. Returns the live session count and
@@ -830,5 +920,74 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("received Ctrl-C, shutting down"),
         () = terminate => info!("received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod all_mode_warning_tests {
+    use super::{format_all_mode_warning, TableStat};
+
+    #[test]
+    fn warning_lists_tables_and_total() {
+        let stats = vec![
+            TableStat {
+                table: "tasks".to_string(),
+                estimated_rows: Some(12_400),
+            },
+            TableStat {
+                table: "notes".to_string(),
+                estimated_rows: Some(340),
+            },
+        ];
+
+        let out = format_all_mode_warning(&stats);
+
+        assert!(out.starts_with("WARNING: sync_mode = \"all\""));
+        assert!(out.contains("tasks"));
+        assert!(out.contains("~12,400 rows"));
+        assert!(out.contains("notes"));
+        assert!(out.contains("~340 rows"));
+        // 12,400 + 340 = 12,740.
+        assert!(out.contains("2 tables, ~12,740 rows estimated."));
+        assert!(out.contains("nostos rules init"));
+    }
+
+    #[test]
+    fn unknown_estimate_renders_unknown() {
+        let stats = vec![
+            TableStat {
+                table: "tasks".to_string(),
+                estimated_rows: Some(100),
+            },
+            TableStat {
+                table: "audit".to_string(),
+                estimated_rows: None,
+            },
+        ];
+
+        let out = format_all_mode_warning(&stats);
+
+        assert!(out.contains("audit    unknown rows (never analyzed)"));
+        // audit's unknown estimate is excluded from the total — only tasks's
+        // 100 rows are counted, even though both tables are counted.
+        assert!(out.contains("2 tables, ~100 rows estimated."));
+        // No minus sign immediately followed by a digit anywhere (e.g. the
+        // reltuples = -1 "never analyzed" sentinel must never leak through).
+        // The banner's own prose ("zero-config") legitimately contains a
+        // hyphen, so this checks for "-<digit>", not for any hyphen.
+        assert!(
+            !out.chars()
+                .zip(out.chars().skip(1))
+                .any(|(a, b)| a == '-' && b.is_ascii_digit()),
+            "no negative number may appear: {out}"
+        );
+    }
+
+    #[test]
+    fn empty_stats_still_warns() {
+        let out = format_all_mode_warning(&[]);
+
+        assert!(out.starts_with("WARNING: sync_mode = \"all\""));
+        assert!(out.contains("0 tables, ~0 rows estimated."));
     }
 }
