@@ -695,9 +695,13 @@ async fn main() -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route(&cfg.ws_path, get(sync_handler))
         .route("/healthz", get(healthz))
-        // WS1: typed schema for client auto-schema. v2: add auth here if a
-        // managed deploy wants to hide publication metadata.
+        // WS1: typed schema for client auto-schema. v2: add auth here (and to
+        // /rules below) if a managed deploy wants to hide publication metadata.
         .route("/schema", get(schema))
+        // ADR-0031: the active ruleset, read-only. Task 20 adds `.put()` here
+        // behind an admin token; GET stays on the same v1-unauthenticated /
+        // v2-gated-together policy as /schema (see the note above).
+        .route("/rules", get(rules_handler))
         .route(
             "/metrics",
             get({
@@ -913,6 +917,44 @@ async fn schema(
         warn!(error = %e, "schema fetch failed");
         StatusCode::SERVICE_UNAVAILABLE
     })
+}
+
+/// `GET /rules` — what the server is ENFORCING right now (ADR-0031). The read
+/// half of the route; Task 20 adds `.put()` on the same path, so this handler
+/// is read-only, the *route* is not.
+///
+/// Auth parity with `/schema`: v1 is unauthenticated. `/rules` discloses
+/// strictly less than `/schema` already does — table names plus scope column
+/// text, no columns, no types — so it matches `/schema`'s policy exactly; if
+/// `/schema` is ever gated, gate `/rules` identically in the same commit.
+///
+/// Never echoes claim *values* — `scope_text` only ever renders column
+/// names, operators, and `claims.<name>` references. No principal data, no
+/// row counts.
+async fn rules_handler(State(state): State<SyncRouterState>) -> Json<serde_json::Value> {
+    let ruleset = state.rules.read().await;
+    let slot_epoch = state
+        .metrics
+        .slot_epoch
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let checksum = ruleset.checksum();
+    let sync_epoch = nostos_domain::compose_sync_epoch(slot_epoch, checksum);
+    let tables: Vec<_> = ruleset
+        .synced_tables()
+        .into_iter()
+        .map(|table| {
+            serde_json::json!({
+                "table": table,
+                "scope": ruleset.scope_text(table).unwrap_or_default(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "sync_mode": ruleset.mode().as_str(),
+        "checksum": format!("0x{checksum:x}"),
+        "sync_epoch": format!("0x{sync_epoch:x}"),
+        "tables": tables,
+    }))
 }
 
 /// `GET /metrics` — Prometheus text exposition format, hand-rolled (the
@@ -1238,5 +1280,77 @@ mod watch_rules_tests {
             after_checksum,
             "a real reload must swap the shared ruleset to the newly compiled rules"
         );
+    }
+}
+
+#[cfg(test)]
+mod rules_handler_tests {
+    use super::rules_handler;
+    use axum::extract::State;
+    use axum::response::Json;
+    use nostos_application::{ActiveRuleset, SessionManager};
+    use nostos_domain::{SyncMode, SyncRules, TableRule, RULES_VERSION};
+    use nostos_infra::store::InMemorySessionStore;
+    use nostos_infra::transport::SyncRouterState;
+    use nostos_infra::AllowAnonymous;
+    use std::sync::Arc;
+
+    fn state_with(ruleset: ActiveRuleset) -> SyncRouterState {
+        let store: Arc<dyn nostos_application::ports::SessionStore> =
+            Arc::new(InMemorySessionStore::new());
+        let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
+        let auth: Arc<dyn nostos_application::ports::SyncAuth> = Arc::new(AllowAnonymous::new());
+        let (_tx, rx) = tokio::sync::watch::channel(ruleset.checksum());
+        SyncRouterState::new(manager, auth)
+            .with_rules(Arc::new(tokio::sync::RwLock::new(ruleset)), rx)
+    }
+
+    #[tokio::test]
+    async fn rules_handler_reports_mode_and_tables() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![
+                TableRule {
+                    table: "tasks".to_string(),
+                    sync: true,
+                    scope: Some("owner_id = claims.sub".to_string()),
+                },
+                TableRule {
+                    table: "projects".to_string(),
+                    sync: true,
+                    scope: Some("org_id = claims.org_id".to_string()),
+                },
+            ],
+            hand: vec![],
+        };
+        let ruleset = ActiveRuleset::compile(&rules).unwrap();
+        let checksum = ruleset.checksum();
+        let state = state_with(ruleset);
+
+        let Json(body) = rules_handler(State(state)).await;
+
+        assert_eq!(body["sync_mode"], "toggles");
+        assert_eq!(body["checksum"], format!("0x{checksum:x}"));
+        let tables = body["tables"].as_array().unwrap();
+        assert_eq!(tables.len(), 2);
+        assert!(tables.contains(&serde_json::json!({
+            "table": "tasks",
+            "scope": "owner_id = claims.sub",
+        })));
+        assert!(tables.contains(&serde_json::json!({
+            "table": "projects",
+            "scope": "org_id = claims.org_id",
+        })));
+    }
+
+    #[tokio::test]
+    async fn rules_handler_under_all_mode_lists_no_tables() {
+        let state = state_with(ActiveRuleset::all_mode());
+
+        let Json(body) = rules_handler(State(state)).await;
+
+        assert_eq!(body["sync_mode"], "all");
+        assert_eq!(body["tables"], serde_json::json!([]));
     }
 }
