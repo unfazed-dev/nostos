@@ -28,6 +28,7 @@
 pub mod eviction;
 pub mod fanout;
 pub mod ports;
+pub mod rules;
 pub mod session;
 
 pub use eviction::EvictionPolicy;
@@ -37,6 +38,7 @@ pub use ports::{
     SessionStore, SlotHealth, SnapshotError, SnapshotSource, StoreRejection, SyncAuth, WriteBack,
     WriteBackError,
 };
+pub use rules::{ActiveRuleset, RuleDecision};
 pub use session::SessionManager;
 
 // Re-export the domain types the application surface needs so downstream crates
