@@ -121,6 +121,10 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_OR_SET_COLUMNS", default_value = "")]
     or_set_columns: String,
 
+    /// Path to the sync-rules file (ADR-0031). Missing file = `all` mode.
+    #[arg(long, env = "NOSTOS_RULES_FILE", default_value = "nostos_rules.toml")]
+    rules_file: String,
+
     /// Coalesce the per-event ack-progress (slot-advance) scan: recompute the
     /// slowest acked LSN every N events instead of every event. `1` (default) =
     /// exact ADR-0009 per-event cadence. `>1` cuts the O(sessions) scan N× — the
@@ -499,6 +503,33 @@ async fn main() -> anyhow::Result<()> {
     if let Some(col) = tenant_col {
         state_builder = state_builder.with_tenant_column(col);
     }
+
+    // ---- sync-rules ruleset (ADR-0031) ----
+    // A malformed/invalid file must not silently degrade to "sync everything"
+    // — bail loudly instead of falling back.
+    let ruleset = match nostos_infra::rules_file::load(std::path::Path::new(&cfg.rules_file)) {
+        Ok(Some(raw)) => {
+            let compiled = nostos_application::ActiveRuleset::compile(&raw)
+                .context("nostos_rules.toml failed to compile")?;
+            info!(
+                sync_mode = compiled.mode().as_str(),
+                tables = compiled.synced_tables().len(),
+                checksum = format!("{:x}", compiled.checksum()),
+                "sync rules loaded"
+            );
+            compiled
+        }
+        Ok(None) => {
+            info!("no nostos_rules.toml found; sync_mode=all (zero-config default)");
+            nostos_application::ActiveRuleset::all_mode()
+        }
+        Err(e) => return Err(e).context("failed to load nostos_rules.toml"),
+    };
+    let (rules_tx, rules_changed) = tokio::sync::watch::channel(ruleset.checksum());
+    // Kept alive for the Task 14 reload watcher, not yet wired up.
+    let _rules_tx = rules_tx;
+    state_builder =
+        state_builder.with_rules(Arc::new(tokio::sync::RwLock::new(ruleset)), rules_changed);
 
     // ---- write-back adapter (ADR-0013) ----
     // The writable-table allowlist is enforced by the transport FIRST (a

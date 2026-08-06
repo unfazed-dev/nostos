@@ -36,7 +36,7 @@ use nostos_application::ports::{
     EventSink, Metrics, OpLogSource, SchemaSource, SnapshotSource, SyncAuth, WriteBack,
     WriteBackError,
 };
-use nostos_application::SessionManager;
+use nostos_application::{ActiveRuleset, SessionManager};
 use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncSession};
 
 use crate::router::TokioEventSink;
@@ -110,11 +110,25 @@ pub struct SyncRouterState {
     /// `None` (fake mode, or a binary built without feature `pg`) → always
     /// snapshot. Injected under `NOSTOS_REPLICATOR=pg`.
     pub oplog_reader: Option<Arc<dyn OpLogSource>>,
+    /// The active ruleset (ADR-0031). Swapped at runtime by the reload watcher
+    /// (Task 14); read at SUBSCRIBE time only — never per delivered event.
+    /// Defaults to `ActiveRuleset::all_mode()`.
+    pub rules: Arc<tokio::sync::RwLock<ActiveRuleset>>,
+    /// Broadcasts the active ruleset's checksum. A per-connection
+    /// `Receiver::changed()` arm is free while unchanged, so live-session
+    /// invalidation (Task 14) costs nothing on the delivery path.
+    /// Defaults to a channel seeded with `ActiveRuleset::all_mode().checksum()`.
+    pub rules_changed: tokio::sync::watch::Receiver<u64>,
 }
 
 impl SyncRouterState {
     #[must_use]
     pub fn new(manager: Arc<SessionManager>, auth: Arc<dyn SyncAuth>) -> Self {
+        let rules = ActiveRuleset::all_mode();
+        // No reload watcher wired by default — the sender has no consumer
+        // until the composition root creates one (main.rs) and passes the
+        // matching `Receiver` via `with_rules`.
+        let (_rules_tx, rules_changed) = tokio::sync::watch::channel(rules.checksum());
         Self {
             manager,
             session_buffer: DEFAULT_SESSION_BUFFER,
@@ -126,6 +140,8 @@ impl SyncRouterState {
             snapshotter: None,
             schema_source: None,
             oplog_reader: None,
+            rules: Arc::new(tokio::sync::RwLock::new(rules)),
+            rules_changed,
         }
     }
 
@@ -198,6 +214,22 @@ impl SyncRouterState {
     #[must_use]
     pub fn with_oplog_reader(mut self, reader: Arc<dyn OpLogSource>) -> Self {
         self.oplog_reader = Some(reader);
+        self
+    }
+
+    /// Inject the active ruleset (ADR-0031) and its checksum-change receiver.
+    /// The composition root loads `nostos_rules.toml` (or falls back to
+    /// [`ActiveRuleset::all_mode`]) and creates the matching
+    /// `tokio::sync::watch::channel` before calling this; the default in
+    /// [`Self::new`] is a standalone all-mode ruleset with no live sender.
+    #[must_use]
+    pub fn with_rules(
+        mut self,
+        rules: Arc<tokio::sync::RwLock<ActiveRuleset>>,
+        rules_changed: tokio::sync::watch::Receiver<u64>,
+    ) -> Self {
+        self.rules = rules;
+        self.rules_changed = rules_changed;
         self
     }
 }
@@ -1299,5 +1331,17 @@ mod tests {
             "replay was attempted, just empty"
         );
         assert!(subs.lock().await.tables.contains("tasks"));
+    }
+
+    // (ADR-0031) SyncRouterState::new defaults to the permissive zero-config
+    // ruleset so no existing construction site (none of which pass rules)
+    // breaks.
+    #[tokio::test]
+    async fn router_state_defaults_to_all_mode() {
+        let store: Arc<dyn SessionStore> = Arc::new(crate::store::InMemorySessionStore::new());
+        let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
+        let auth: Arc<dyn SyncAuth> = Arc::new(crate::auth::AllowAnonymous::new());
+        let state = SyncRouterState::new(manager, auth);
+        assert_eq!(state.rules.read().await.mode(), nostos_domain::SyncMode::All);
     }
 }
