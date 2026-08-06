@@ -57,3 +57,17 @@ Per-item status for both adapters, against `spec/adapter.md` §Conformance check
 ### Fix round 1 addendum (2026-08-06)
 
 Review of this sign-off found a fifth defect of the same class as retro item 1: `spec/adapter.md`'s Operations list still named `updateSession` as a frozen operation, but it was never implemented in `SyncAdapter`, `NostosAdapter`, or `PowerSyncAdapter` at any point in the pilot — confirmed by grepping `apps/atlet/` for `updateSession` (excluding generated `.g.dart`), which returned exactly the one spec line and nothing else. The retro's own audit method (spec text vs. shipped interface) should have caught this alongside the `syncStatus()`/`connected` mismatch; it didn't, because the audit checked the operation whose *shape* had visibly changed but didn't independently verify every other line in the same list against the interface. Re-audited the full Operations list this round — `init`, `signOut`, `addSession`, `deleteSession`, `watchSessions`, `watchProducts`, `connected`, `setConnected` all confirmed present in `sync_adapter.dart` with the stated shape; `engine` and `marks` also confirmed present (documented under Instrumentation marks, not Operations, and correctly so — they aren't part of the operation surface the checklist drives). `updateSession` dropped from `spec/adapter.md`, which is now **v1.1**. No cross-reference to `updateSession` existed in this file's checklist table — items 1 and 3 reference `addSession`/`setConnected` only, both real — so no correction was needed here beyond this addendum.
+
+### REPLICA IDENTITY caveat (final review, 2026-08-06)
+
+The three Supabase tables this pilot syncs against (per `apps/atlet/spec/adapter.md` / `0001_atlet_schema.sql`) are provisioned with Postgres's default `REPLICA IDENTITY DEFAULT`, not `REPLICA IDENTITY FULL`. Under `DEFAULT`, a `DELETE`'s logical-replication event carries only the primary key, not the row's other pre-delete column values. Nostos's DELETE-replay path has already hit exactly this gap once in the core engine (ADR-0025 finding F1, fixed in `a711df7` by requiring `REPLICA IDENTITY FULL`) — that fix lives in cairn's own e2e schema setup, not in Atlet's, so it does not automatically cover these three tables.
+
+Practical effect for a live conformance run against this pilot: DELETE propagation may appear to silently drop rows on the NostosAdapter side (checklist items 1–4, live) until the operator applies, per table:
+
+```sql
+ALTER TABLE sessions REPLICA IDENTITY FULL;
+ALTER TABLE products REPLICA IDENTITY FULL;
+ALTER TABLE analytics_runs REPLICA IDENTITY FULL;
+```
+
+This is listed as an operator action in the "Recommended live run" section above; do not run a live DELETE-propagation check without first confirming `REPLICA IDENTITY FULL` on all three tables, or an apparent NostosAdapter defect may actually be this schema gap.

@@ -17,7 +17,10 @@ offset estimate (5× PostgREST `select now()` round trips; offset = median of
 4. queue_drain_ms — setConnected(false), 25 writes, setConnected(true); value =
    last serverAcked tMono - reconnect tMono.
 5. db_bytes — engine's local DB file size(s) after cold sync + full drain, same
-   checkpoint state (best effort; journal mode recorded).
+   checkpoint state (best effort; journal mode recorded). Measured as the size
+   of the `dbDir` given to `init()` — outside the frozen `SyncAdapter`
+   contract (adapter.md), a filesystem measurement taken around it, not a
+   value either adapter reports.
 
 Every run records: sdk, engine, profile (local|cloud), seed size, app version,
 spec version, device model/os, timestamp. Label everywhere:
