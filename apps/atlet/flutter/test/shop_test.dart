@@ -7,6 +7,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:atlet/adapters/sync_adapter.dart';
@@ -120,5 +121,16 @@ void main() {
     // GridView.builder is lazy: only near-viewport rows are built, so the
     // tail of a 1k-row list must not be in the tree yet.
     expect(find.text('Product 999'), findsNothing);
+  });
+
+  test('bundled product asset actually resolves (not just Image.errorBuilder-masked)', () async {
+    // _ProductCard's errorBuilder swallows a missing/misdeclared asset
+    // silently, so the widget tests above would pass identically whether
+    // this file loads or not. Load it directly through rootBundle — the
+    // same '../design/img/pN-*.jpg' key _assetPathFor() builds — to prove
+    // the pubspec's `../design/img/` assets entry actually registers the
+    // frozen product photos, not just the directory string.
+    final data = await rootBundle.load('../design/img/p1-protein.jpg');
+    expect(data.lengthInBytes, greaterThan(0));
   });
 }
