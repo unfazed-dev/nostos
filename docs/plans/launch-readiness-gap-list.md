@@ -25,6 +25,8 @@ customer.
 | A2 | Fill `<repo>` placeholders in `docs/launch/show-hn-draft.md`, review both drafts, publish | Drafts are factually consistent with RESULTS.md (833k/208×, 10k drop rate honestly disclosed) |
 | A3 | Show HN timing decision | Per ROADMAP.md footer: operator call |
 
+> **Correction 2026-08-06:** row A2's "833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+
 ## B. Pre-push fixes (Claude-doable, ~1 day total, all Small)
 
 | # | Item | Evidence |
@@ -35,6 +37,8 @@ customer.
 | B4 | Add SECURITY.md (sync engine + write-back trust boundary; HN audience) | none exists |
 | B5 | ADR-0012 status line stale — still says wire/subscribe integration outstanding; Task C1 closed it | ADR-0012:3 vs plan C1 |
 | B6 | STRATEGY.md Front-6 "three tiers" conflict-resolution claim needs shipped/deferred qualifier (only LWW shipped) | STRATEGY.md:122-125 vs ADR-0014 |
+
+> **Correction 2026-08-06:** row B1's "142k/35.6×"/"833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 
 ## C. Hardening before first design partner / paying customer
 

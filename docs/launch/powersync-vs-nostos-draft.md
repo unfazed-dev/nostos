@@ -13,8 +13,10 @@ PowerSync is the incumbent. They have more features, more SDKs, more customers,
 and a great client. We're not pretending otherwise. Nostos exists because three
 things are true at once in July 2026:
 
-1. PowerSync's **server is Node/TS** with a published replication ceiling of
-   ~2,000–4,000 ops/sec for small rows.
+1. PowerSync's **server is Node/TS** with a published replication-ingest rate
+   of ~2,000–4,000 ops/sec for small rows (Postgres → PowerSync Service) and
+   2,000–20,000 ops/sec per-client sync (PowerSync Service → Client) — no
+   published aggregate fan-out figure.
 2. PowerSync's **server is FSL-licensed** (source-available, 2-year conversion
    to Apache, no-competing-use clause).
 3. PowerSync's **write-back is `uploadData()`** — you build it, you host it.
@@ -31,34 +33,40 @@ limit is a **soft default (10k configurable)**, not a hard ceiling. These are
 no longer quoted as Nostos wedges. Anyone who tells you PowerSync can't do
 dynamic sync in July 2026 is reading outdated marketing.
 
-## The numbers, same-denominator
+## The numbers, honest units
 
-PowerSync publishes a **server-side** ceiling of ~2,000–4,000 ops/sec for
-small rows ([source][ps-limits]). We measure Nostos's fan-out path against
-that.
+PowerSync publishes no aggregate multi-client fan-out figure. Its published
+rates are ~2,000–4,000 ops/sec replication ingest (Postgres → PowerSync
+Service, small rows) and 2,000–20,000 ops/sec per-client sync (PowerSync
+Service → Client — a per-client rate, not an aggregate) ([source][ps-limits]).
+We measure Nostos's fan-out path (Service → N clients, aggregate) on its own
+terms; there is no PowerSync figure in the same units to divide against.
 
 [ps-limits]: https://docs.powersync.com/resources/performance-and-limits
 
-| Metric | Nostos | PowerSync | Same denominator? |
-|--------|-------|-----------|-------------------|
-| **1k-client fan-out** | **833,307 ops/sec @ 0% drops** | ~2–4k ops/sec (their published server ceiling) | ✅ both are server-process replication rates |
+| Metric | Nostos | PowerSync | Comparable? |
+|--------|-------|-----------|-------------|
+| **1k-client aggregate fan-out** | **833,307 ops/sec @ 0% drops** | no aggregate fan-out figure published | ❌ different pipeline stage — do not divide |
 | 5k-client fan-out | 660k ops/sec @ 0.91% drops | not published | Nostos-only |
 | 10k-client fan-out (probe) | ~483k ops/sec @ ~61.4% drops | not published | Nostos-only |
 | Predicate eval (microbench) | ~1.5M evals/sec through 10k predicates | not published | eval-only — **never** compared to PowerSync's end-to-end number |
+| replication ingest (for reference) | not yet benchmarked (real-PG ingest harness pending) | 2,000–4,000 ops/sec (small rows) | same pipeline stage — the only valid future comparator |
 
-**The 208× headline is the 1k-client, 0%-drop, server-fan-out number (current,
-2026-07).** That ratio is real. The original Week-1 proof was 142k @ 35.6×; the
-v0.1 WS write-path + router work multiplied the 1k figure ~6×. The 10k-client
-story is honest: throughput stays high but the *current* architecture drops
-~61% of frames at 10k because `FanOutService::run` does a per-event full-store
-scan. The fix (table-sharded router) is scoped for Phase 2; the measurement,
-not the marketing, says so.
+**The headline is the 1k-client, 0%-drop, aggregate server-fan-out number:
+833,307 ops/sec (current, 2026-07/08).** No PowerSync figure measures the same
+thing, so we report it on its own terms rather than as a ratio. The original
+Week-1 proof was 142k ops/sec aggregate fan-out; the v0.1 WS write-path +
+router work multiplied the 1k figure ~6×. The 10k-client story is honest:
+throughput stays high but the *current* architecture drops ~61% of frames at
+10k because `FanOutService::run` does a per-event full-store scan. The fix
+(table-sharded router) is scoped for Phase 2; the measurement, not the
+marketing, says so.
 
 A same-Postgres-source, same-client-count, same-apply-cost live race against
 PowerSync's self-host stack is the next methodological step. Until that
-harness runs, we compare Nostos's labeled fan-out number against PowerSync's
-*published* server ceiling and stop there. **No live delta that mixes
-denominators.**
+harness runs — and until Nostos has its own real-PG replication-ingest number —
+we report Nostos's aggregate fan-out figure on its own terms and compute no
+ratio against any PowerSync figure. **No cross-stage ratio, ever.**
 
 ## Feature matrix
 

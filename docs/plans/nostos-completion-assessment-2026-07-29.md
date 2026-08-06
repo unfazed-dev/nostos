@@ -221,6 +221,8 @@
 > matching what `show-hn-draft.md:51` already said correctly. `CLAUDE.md` gained a standing
 > rule: quote the high multiple, never the low, and never a figure absent from RESULTS.md.
 >
+> **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+>
 > Everything below is the original assessment, unedited.
 
 ---

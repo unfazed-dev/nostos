@@ -190,6 +190,8 @@ highest-leverage structural fix is a CI build/typecheck gate for swift/kotlin/do
 | 6/9 SDK signOut runtime parity | 🟡 | source-verified; runtime only Flutter/Swift/RN-iOS |
 | JWKS/RS256 works vs real Supabase | ❓ | unit-tested via `FixtureJwks` only |
 
+> **Correction 2026-08-06:** row 185's "833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+
 ---
 
 ## 7. What is NOT left (solidly shipped — for calibration)

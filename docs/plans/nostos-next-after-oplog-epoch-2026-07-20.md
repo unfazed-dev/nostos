@@ -68,6 +68,8 @@ Two claims are **unverified post-oplog** and must be measured, not assumed:
 
 **The `unknown`/`assumed` claims (C6, C7, C8, C9) are load-bearing** — they determine whether Tier 1 is real correctness/moat work or just hygiene, and whether the watch-bug is truly closed. The cheapest next actions (test #4, bench #5, `make ci` #3, and re-running the W5 stranger step) exist specifically to collapse them.
 
+> **Correction 2026-08-06:** rows C7/C11's "208.3×"/"833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+
 ## 5. Recommended sequencing
 
 **Severity verdict on the late-append race (C6): P1, conditionally launch-gating — not acceptable as-is.** Reasoning: the slot P0 was prioritized #1 for the *silent data-loss* category; a missed **delete** is the worst op to lose (ghost row, unbounded staleness, no self-heal); and the recovery path for any loss window is a snapshot, which ADR-0025 F2 *disables* on matching-epoch reconnect. So the "narrow trigger" understates it — routine server SIGTERM during deploy + the new optimization removing the self-heal = a real design gap, unguarded by any test. The fix is cheap and test-first.

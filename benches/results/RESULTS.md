@@ -12,15 +12,15 @@
 
 ## Throughput vs PowerSync
 
-PowerSync publishes a **server-side ceiling of ~2,000–4,000 ops/sec** for small rows. Nostos's measurement is of the same logical operation (fanning row-change events to connected clients) with a synthetic replicator on loopback.
+PowerSync publishes no comparable aggregate fan-out figure. Its published rates are 2,000–4,000 ops/sec **replication ingest** (Postgres → PowerSync Service, a different pipeline stage) and 2,000–20,000 ops/sec **per-client sync** (PowerSync Service → Client, not aggregate). Nostos's measurement below is an aggregate fan-out rate (fanning row-change events to connected clients) with a synthetic replicator on loopback — see [Correction](#correction-2026-08-06).
 
-| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | vs PS high |
+| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | PS comparator |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1000 | 833,307 | 0.00% | 0.00 | 0.00 | 99997513 | **208.3×** |
+| 1000 | 833,307 | 0.00% | 0.00 | 0.00 | 99997513 | **none published** |
 
 ## Interpretation
 
-- **Peak sustained throughput: 833,307 ops/sec** — **208.3×** PowerSync's published high ceiling (4,000 ops/sec) and **416.7×** the low (2,000 ops/sec).
+- **Peak sustained throughput: 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
 - **Max drop rate across runs: 0.00%** (lower is better; >1% is flagged as not fully honest throughput in the methodology).
 - The synthetic `FakeReplicator` generates events faster than the router pushes them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. Real `pgoutput` parsing cost is added in Week 2.
 
@@ -52,3 +52,11 @@ PowerSync publishes a **server-side ceiling of ~2,000–4,000 ops/sec** for smal
   It does not regress this fan-out number (the op-log INSERT is off-loop); the
   two numbers (fan-out ceiling here; real-PG write-amp 1:1 / 0 drops) are cited
   with equal prominence per the ADR-0025 honesty contract.
+
+## Correction (2026-08-06)
+
+**What was claimed:** this document previously stated nostos's 833,307 ops/sec aggregate fan-out throughput (@ 1,000 clients, 0.00% drops) was "208.3× PowerSync's published high ceiling (4,000 ops/sec) and 416.7× the low (2,000 ops/sec)."
+
+**Why retired:** the 2,000–4,000 ops/sec figure is PowerSync's **replication-ingest** rate (Postgres → PowerSync Service — a different pipeline stage), not a fan-out or aggregate multi-client figure. PowerSync's fan-out-direction metric (Service → Client) is published as 2,000–20,000 ops/sec **per client**, not an aggregate across clients — PowerSync publishes no aggregate multi-client fan-out ceiling anywhere in its docs, blog, or benchmark repos. Dividing nostos's aggregate fan-out number by PowerSync's per-source ingest number compared two different stages of two different pipelines under the same "ops/sec" label. Verified against docs.powersync.com/resources/performance-and-limits (fetched 2026-08-06). Full verification: [`docs/plans/research-powersync-perf-verification-2026-08-06.md`](../../docs/plans/research-powersync-perf-verification-2026-08-06.md).
+
+**Current framing:** nostos reports 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops (eval-only) on its own terms, with PowerSync's ingest and per-client figures cited for context — no cross-stage multiple.

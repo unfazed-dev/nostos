@@ -108,6 +108,7 @@ the engine is innocent.
 - Asymmetric JWT claim validation: JWKS checks `exp`; HS256 doesn't; `validate_aud=false` on both. `jwks.rs:90`, `auth.rs:74`
 - `apply_local` `WriteOp::Patch` is a no-op (ponytail). `sqlite.rs:660`
 - **Stale positioning docs**: CLAUDE.md + README headline say 142k/35.6×; actual is **833k @ 1k clients/0% drops** (208× PowerSync). Project memory under-sells the moat. `CLAUDE.md`, `README.md:13,23,209` vs `benches/results/RESULTS.md`
+  > **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 - frb 2.13.0-beta.5 dependency (beta tag adds risk; pin + migration path needed pre-launch). `sdk/nostos_flutter`
 
 ---
@@ -168,6 +169,7 @@ differentiator, not a gap.
    ~2–4k server replication ceiling ≈ **35× headroom** (833k current = ~208×).
    No other competitor publishes a comparable end-to-end fan-out number
    (Electric only benches its storage engine; everyone else is TS/Elixir/Go).
+   > **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 2. **Apache-2.0 today, no FSL/AGPL trap** — PowerSync server is FSL (2-yr wait,
    no-compete); Triplit is AGPL-3.0 (network-copyleft); Couchbase SG CE is
    source-available. nostos is the **only** Postgres-native 2-way offline sync

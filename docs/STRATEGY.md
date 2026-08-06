@@ -13,7 +13,7 @@
 
 PowerSync owns local-first sync but still carries four real, current limits Nostos exploits (audited July 2026):
 
-1. **Its server is TypeScript/Node.js, not Rust.** Only the *client* core is Rust. The server — the replicator, the sync router — is a Node process capped at **~2–4k ops/sec, ~5 MB/sec, ~60 txn/sec.** A from-scratch **Rust server** credibly delivers **5–10×** throughput and lower tail latency. Nostos's proven number: **833k ops/sec @ 1k clients, 0.00% drops = 208× PowerSync's published ceiling** (eval-only fan-out — `FakeReplicator` on loopback, same logical op PowerSync measures; real-PG replication + client-side SQLite apply are separate measurements, pending — see [`benches/results/RESULTS.md`](../benches/results/RESULTS.md)). The Week-1 baseline of 142k/35.6× is preserved as historical.
+1. **Its server is TypeScript/Node.js, not Rust.** Only the *client* core is Rust. The server — the replicator, the sync router — is a Node process with a published replication-ingest rate of **~2–4k ops/sec, ~5 MB/sec, ~60 txn/sec**, and per-client sync of 2–20k ops/sec; PowerSync publishes no aggregate multi-client fan-out figure. Nostos's proven number: **833k ops/sec aggregate fan-out @ 1k clients, 0.00% drops** (eval-only — `FakeReplicator` on loopback; real-PG replication + client-side SQLite apply are separate measurements, pending — see [`benches/results/RESULTS.md`](../benches/results/RESULTS.md)). No PowerSync figure is directly comparable to this aggregate fan-out number — see RESULTS.md's Correction section. The Week-1 baseline of 142k/35.6× is preserved as historical.
 2. **Its server license is FSL** (source-available, not OSI-open, 2-year change date, no-compete clause). Enterprise legal hates it. **Nostos is Apache-2.0 today** — no 2-year wait.
 3. **Write-back is on you.** PowerSync's client queues mutations; **you implement and host `uploadData()`** (which calls Supabase's Data API, where your RLS applies). ElectricSQL is read-path only. **Nostos's direct write-back** (ADR-0013) writes to your Postgres for you — no customer-built endpoints. **Honest trade-off:** because nostos writes directly as a least-privilege `BYPASSRLS` role, it **bypasses Supabase RLS** and substitutes its own authz (JWT ADR-0010 + table allowlist ADR-0013 + tenant-scope ADR-0018 — one column, coarser than arbitrary RLS). nostos wins for single-tenant / simple-tenant-scoped apps; for apps whose security model **is** complex per-user RLS, PowerSync's Data-API path is the better fit. See [`docs/SECURITY.md`](SECURITY.md).
 4. **Self-host isn't free-and-clean.** PowerSync Cloud is metered per-op; the FSL "Open Edition" carries the license delay. **Nostos self-host is free, full-featured, and unlimited.**
@@ -105,9 +105,9 @@ PowerSync shipped **Sync Streams (dynamic sync) to GA in May 2026**, so "dynamic
 PowerSync's biggest DX tax: *you* build and host the write-back endpoint (`uploadData()`). **Nostos offers direct write-back:** you give Nostos a Postgres connection + declarative **write rules** (which columns, which auth scope, upsert vs. insert), and Nostos applies queued client mutations to Postgres with **transactional conflict detection** (version/column-etag checks) and applies your chosen merge strategy. A `function` mode remains for anyone who wants full control. Most teams never write a backend mutation endpoint again.
 
 ### Front 3 — **Rust Server Throughput** 🏆 *performance moat*
-> **Claim: *"10× PowerSync's throughput, lower tail latency, a fraction of the memory."***
+> **Claim: *"Faster server, lower tail latency, a fraction of the memory — proven on Nostos's own aggregate fan-out benchmark."***
 
-PowerSync's server is Node.js, capped ~2–4k ops/sec. **Nostos's server is pure Rust (tokio + axum)**, parsing `pgoutput` via `pgwire-replication`, fanning out to thousands of concurrent WebSocket clients with per-connection backpressure. We publish continuous benchmarks against PowerSync's documented ceiling and **make the benchmark repo public** so the claim is auditable. Rust isn't a buzzword here — it's a defensible 5–10× and a smaller infra bill on Cloud.
+PowerSync's server is Node.js, with a published replication-ingest rate of ~2–4k ops/sec and per-client sync of 2–20k ops/sec (no published aggregate fan-out figure). **Nostos's server is pure Rust (tokio + axum)**, parsing `pgoutput` via `pgwire-replication`, fanning out to thousands of concurrent WebSocket clients with per-connection backpressure, measured at 833,307 ops/sec aggregate fan-out @ 1k clients, 0.00% drops (eval-only). We publish continuous benchmarks and **make the benchmark repo public** so the claim is auditable — see [`benches/results/RESULTS.md`](../benches/results/RESULTS.md); no PowerSync figure is directly comparable to this aggregate number.
 
 ### Front 4 — **Truly Open (Apache-2.0)**
 > **Claim: *"Apache-2.0, end to end. Server included. No FSL trap, no 2-year wait, no no-compete clause."***
@@ -289,7 +289,7 @@ This is the cleanest possible land-and-expand: **dev tries OSS locally (5-min se
 ### 8.2 The narrative
 > *"PowerSync works — but it's Node-bottlenecked, FSL-licensed, and makes you build your own write-back endpoints. ElectricSQL gave up on offline writes. Zero is web-only and disabled offline writes. Supabase can't do offline (yet — they bought Triplit). **Nostos is the open, Rust-fast one that does it all — no write-back endpoints, no lock-in, free self-host.**"*
 
-Launch beats: an **auditable public benchmark** vs. PowerSync's published ceiling (5–10× throughput), a **"migrate from PowerSync in 10 minutes"** guide, and a **"migrate from Realm in 1 hour"** guide.
+Launch beats: an **auditable public benchmark** (833k ops/sec aggregate fan-out, honest-units framing — no PowerSync figure is directly comparable), a **"migrate from PowerSync in 10 minutes"** guide, and a **"migrate from Realm in 1 hour"** guide.
 
 ### 8.3 Channels
 - **Show HN + r/Flutter + r/reactnative** at OSS launch (Apache-2.0 is the hook).
@@ -308,6 +308,8 @@ Launch beats: an **auditable public benchmark** vs. PowerSync's published ceilin
 | **4. The DX moat ships** | 7–9 | **Direct write-back (no endpoints);** CRDT-per-field conflict resolution; **dynamic reactive sync GA** (bucket-less). Nostos Cloud GA + pricing live. |
 | **5. Enterprise** | 10–12 | SSO/SAML, audit log, SOC2-in-progress, field-level encryption, RBAC, VPC/on-prem; first paid Enterprise pilots; case studies. |
 
+> **Correction 2026-08-06:** Phase 0's "≥5× over PowerSync's 2–4k ops/sec ceiling" framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+
 ---
 
 ## 9. Risks & de-risking
@@ -325,6 +327,7 @@ Launch beats: an **auditable public benchmark** vs. PowerSync's published ceilin
 ## 10. The 30-day validation sprint (what to do Monday)
 
 1. **Week 1 — prove Front 3 (Rust throughput).** Stand up `nostos-server` reading PG logical replication via `pgwire-replication`; benchmark a pure fan-out to N WebSocket clients vs. PowerSync's documented 2–4k ops/sec. **Goal: a public, auditable ≥5× chart.** This chart funds everything.
+   > **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 2. **Week 2 — prove Front 1 (dynamic predicates).** Prototype the predicate-evaluation engine: feed a synthetic WAL stream, evaluate 10k concurrent authenticated predicates, measure source-DB impact and p99 latency. **Goal: prove no fixed cardinality ceiling and zero source-DB read cost.**
 3. **Week 3 — prove Front 5 (multi-platform).** Get `nostos-core` (minimal) running through FRB on Flutter *and* wasm-bindgen on Web — the two hardest bridges. **Goal: one core, two platforms, one demo.**
 4. **Week 4 — the demo + the post.** A 5-minute "point at Supabase Postgres → offline reads + writes on Flutter and Web, no buckets, no endpoints" demo. Ship the benchmark repo + a "PowerSync vs Nostos" post. **Goal: first 500 GitHub stars + 5 design-partner conversations.**

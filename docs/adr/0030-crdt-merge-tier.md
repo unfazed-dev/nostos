@@ -85,8 +85,10 @@ Before/after `make bench --clients 1000`, clean `--release`, 3× median, same ma
 `ulimit -n`. Record BENCHMARK-METHODOLOGY §6 env; **`NOSTOS_FAKE_EPS=0` and `NOSTOS_FAKE_KEYS=0`**
 (§4.3: they do not apply to bench and must stay 0 = unpaced, or they cap the headline).
 **Revert threshold: >3% ops/sec regression at 1k (i.e. <808k vs RESULTS.md's 833,307) OR any drop% >
-0.00%.** 3% is conservative (the 208× moat tolerates it before rounding toward 200×); any non-zero
+0.00%.** 3% is conservative relative to the 833k-ops/sec headline margin; any non-zero
 drop directly falsifies the "0.00% drops" headline and is non-negotiable.
+
+> **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 
 **VERDICT 2026-07-31 — PASS.** Empirical before/after on the same dev machine, `--clients 1000
 --events 50000`, `NOSTOS_FAKE_EPS=0 NOSTOS_FAKE_KEYS=0`, 3 runs each:
