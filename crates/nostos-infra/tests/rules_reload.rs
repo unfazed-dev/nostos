@@ -300,3 +300,134 @@ async fn malformed_reload_keeps_previous_ruleset() {
         "session must keep receiving events under the untouched original ruleset, got: {frames:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A mid-session Subscribe for a table not yet subscribed on that socket must
+// be evaluated against the CURRENT (post-reload) ruleset, not the one that
+// was live at connection time — the `read_loop` fresh-rules fix this fix
+// round exists to cover. `register_subscribe` no-ops a repeat Subscribe for
+// an already-subscribed table, so this can only be exercised with a
+// first-time Subscribe issued after the reload.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mid_session_subscribe_after_reload_uses_fresh_ruleset() {
+    let initial = toggles_rules(vec![
+        TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        },
+        TableRule {
+            table: "notes".into(),
+            sync: true,
+            scope: None,
+        },
+        TableRule {
+            table: "logs".into(),
+            sync: true,
+            scope: None,
+        },
+    ]);
+    let ruleset = ActiveRuleset::compile(&initial).unwrap();
+    let auth: Arc<dyn SyncAuth> = Arc::new(nostos_infra::AllowAnonymous::new());
+    let (addr, _server, _mgr, store, rules_tx, rules_shared) =
+        spawn_fake_server_with_live_rules(64, auth, None, ruleset).await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(
+        r#"{"type":"subscribe","table":"tasks"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Reload: "notes" narrows to denied, "tasks" and "logs" stay allowed.
+    // Only "tasks" is subscribed at reload time, so write_loop's own
+    // narrow-check (which only inspects already-subscribed tables) sees no
+    // narrowing and does NOT close the socket — isolating this test to
+    // read_loop's fresh-ruleset read on the two Subscribes sent below.
+    let reloaded = toggles_rules(vec![
+        TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        },
+        TableRule {
+            table: "notes".into(),
+            sync: false,
+            scope: None,
+        },
+        TableRule {
+            table: "logs".into(),
+            sync: true,
+            scope: None,
+        },
+    ]);
+    let compiled = ActiveRuleset::compile(&reloaded).unwrap();
+    let checksum = compiled.checksum();
+    *rules_shared.write().await = compiled;
+    rules_tx.send(checksum).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Two first-time, post-reload Subscribes on the same socket: one for the
+    // now-denied table, one for a still-allowed table never subscribed
+    // before.
+    ws.send(Message::Text(
+        r#"{"type":"subscribe","table":"notes"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"subscribe","table":"logs"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let svc = Arc::new(FanOutService::new(store.clone()));
+    svc.fan_out(&insert_event(1, "notes", "N1"), |_, _| {
+        Some(ColumnValue::Any)
+    })
+    .await;
+    svc.fan_out(&insert_event(2, "logs", "L1"), |_, _| {
+        Some(ColumnValue::Any)
+    })
+    .await;
+
+    // Mid-session subscribe rejection is silent (no frame sent to the
+    // client) — collect for a bounded window and assert by presence/absence,
+    // not by an explicit error response. A Close here is itself a failure:
+    // only "tasks" (unaffected by the reload) was live-subscribed when the
+    // reload happened.
+    let mut got = Vec::new();
+    let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                    if common::is_data_frame(&v) {
+                        got.push(v);
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                panic!("session must not close: only 'tasks' (unaffected by the reload) was live-subscribed at reload time, got close frame: {frame:?}");
+            }
+            _ => {} // per-recv timeout — keep waiting
+        }
+    }
+
+    assert!(
+        got.iter().any(|f| f["pk"] == "L1"),
+        "a first-time post-reload subscribe to a still-allowed table must work, got: {got:?}"
+    );
+    assert!(
+        !got.iter().any(|f| f["pk"] == "N1"),
+        "a first-time post-reload subscribe to a table freshly denied by the reload must be \
+         rejected — read_loop must read the CURRENT ruleset, not the connection-start snapshot, \
+         got: {got:?}"
+    );
+}

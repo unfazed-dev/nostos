@@ -1066,3 +1066,177 @@ mod all_mode_warning_tests {
         assert!(out.contains("0 tables, ~0 rows estimated."));
     }
 }
+
+/// `watch_rules`'s own error-handling and swap/notify ordering, exercised
+/// directly (no live socket, no `nostos-infra` test server — that boundary is
+/// covered by `crates/nostos-infra/tests/rules_reload.rs` instead). A short
+/// `poll_interval` plus one bounded sleep gives every case at least one poll
+/// tick before shutdown is signaled; `watch_rules` re-`select!`s the
+/// shutdown channel every loop iteration, so it stops promptly once signaled.
+#[cfg(test)]
+mod watch_rules_tests {
+    use super::watch_rules;
+    use nostos_application::ActiveRuleset;
+    use nostos_domain::{SyncMode, SyncRules, TableRule, RULES_VERSION};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{watch, RwLock};
+
+    fn toggles_rules(tables: Vec<TableRule>) -> SyncRules {
+        SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables,
+            hand: Vec::new(),
+        }
+    }
+
+    /// A fresh path under `std::env::temp_dir()`, unique for this test
+    /// binary's lifetime. `nostos-server` has no `uuid` dependency (only
+    /// `nostos-infra`'s own tests use it) — pid + a monotonic counter is
+    /// enough to avoid collisions here.
+    fn temp_rules_path(tag: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "nostos-watch-rules-test-{tag}-{}-{n}.toml",
+            std::process::id()
+        ))
+    }
+
+    /// Spawn `watch_rules` against `path`, let it run for a handful of
+    /// 5ms poll ticks, then signal shutdown and join.
+    async fn run_a_few_ticks(
+        path: std::path::PathBuf,
+        rules: Arc<RwLock<ActiveRuleset>>,
+        rules_tx: watch::Sender<u64>,
+    ) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(watch_rules(
+            path,
+            rules,
+            Duration::from_millis(5),
+            shutdown_rx,
+            rules_tx,
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn checksum_unchanged_reload_does_not_notify() {
+        let rules = toggles_rules(vec![TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        }]);
+        let path = temp_rules_path("unchanged");
+        nostos_infra::rules_file::save(&path, &rules).unwrap();
+
+        let compiled = ActiveRuleset::compile(&rules).unwrap();
+        let checksum = compiled.checksum();
+        let shared = Arc::new(RwLock::new(compiled));
+        let (tx, rx) = watch::channel(checksum); // seeded to match what's on disk
+                                                 // Keep a sender clone alive in the test: `watch_rules` is handed its
+                                                 // own clone and drops it when it returns, and a `Receiver` can't
+                                                 // distinguish "sender dropped, no notify" from "sender dropped after
+                                                 // notifying" once the channel is fully closed — `has_changed()`
+                                                 // reports `Err` either way. Holding one clone open past that point
+                                                 // keeps the channel open so `has_changed()` reflects the real state.
+        let _tx_keepalive = tx.clone();
+
+        run_a_few_ticks(path.clone(), Arc::clone(&shared), tx).await;
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !rx.has_changed().unwrap_or(false),
+            "an on-disk file whose compiled checksum matches what's already loaded must never notify"
+        );
+        assert_eq!(
+            shared.read().await.checksum(),
+            checksum,
+            "a checksum-unchanged reload must never touch the shared ruleset"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_file_leaves_shared_state_untouched_and_does_not_notify() {
+        let rules = toggles_rules(vec![TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        }]);
+        let compiled = ActiveRuleset::compile(&rules).unwrap();
+        let checksum = compiled.checksum();
+        let shared = Arc::new(RwLock::new(compiled));
+        let (tx, rx) = watch::channel(checksum);
+        let _tx_keepalive = tx.clone(); // see comment in checksum_unchanged_reload_does_not_notify
+
+        let path = temp_rules_path("malformed");
+        std::fs::write(&path, "this is not valid toml [[[").unwrap();
+
+        run_a_few_ticks(path.clone(), Arc::clone(&shared), tx).await;
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !rx.has_changed().unwrap_or(false),
+            "a malformed rules file must never notify"
+        );
+        assert_eq!(
+            shared.read().await.checksum(),
+            checksum,
+            "a malformed rules file must never touch the shared ruleset"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_change_swaps_then_notifies() {
+        let before = toggles_rules(vec![TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        }]);
+        let before_compiled = ActiveRuleset::compile(&before).unwrap();
+        let before_checksum = before_compiled.checksum();
+        let shared = Arc::new(RwLock::new(before_compiled));
+        let (tx, rx) = watch::channel(before_checksum);
+        let _tx_keepalive = tx.clone(); // see comment in checksum_unchanged_reload_does_not_notify
+
+        let after = toggles_rules(vec![
+            TableRule {
+                table: "tasks".into(),
+                sync: true,
+                scope: None,
+            },
+            TableRule {
+                table: "notes".into(),
+                sync: true,
+                scope: None,
+            },
+        ]);
+        let after_compiled = ActiveRuleset::compile(&after).unwrap();
+        let after_checksum = after_compiled.checksum();
+        assert_ne!(
+            before_checksum, after_checksum,
+            "test fixture bug: the two rulesets must actually differ"
+        );
+
+        let path = temp_rules_path("real-change");
+        nostos_infra::rules_file::save(&path, &after).unwrap();
+
+        run_a_few_ticks(path.clone(), Arc::clone(&shared), tx).await;
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            rx.has_changed().unwrap_or(false),
+            "a real checksum change must notify"
+        );
+        assert_eq!(
+            shared.read().await.checksum(),
+            after_checksum,
+            "a real reload must swap the shared ruleset to the newly compiled rules"
+        );
+    }
+}
