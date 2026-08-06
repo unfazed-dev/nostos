@@ -70,11 +70,6 @@ class NostosAdapter implements SyncAdapter {
       NostosTableSub(name: 'products'),
     ]);
 
-    // Defensive backstop for the same race: if a transition still slipped
-    // past (e.g. a future engine change buffers differently), seed from the
-    // synchronous status snapshot once subscribe has returned.
-    _connectedController?.add(db.currentStatus.connected);
-
     _sessionsSub = db.watch('SELECT * FROM sessions').listen((rows) {
       final sessions = rows.map(sessionFromRow).toList(growable: false);
       _deriver.onEmission(sessions);
