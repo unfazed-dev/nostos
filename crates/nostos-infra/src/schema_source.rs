@@ -39,7 +39,8 @@ use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
 
 use nostos_application::ports::{
-    SchemaColumn, SchemaDescriptor, SchemaError, SchemaSource, SchemaTable,
+    SchemaColumn, SchemaDescriptor, SchemaError, SchemaSource, SchemaTable, TableStat,
+    TableStatsSource,
 };
 
 use crate::replicator::pg::catalog_relations;
@@ -147,5 +148,109 @@ impl SchemaSource for PgSchemaSource {
             publication: self.publication.clone(),
             tables,
         })
+    }
+}
+
+/// Row-count estimates for the tables in a publication, for the `all`-mode
+/// startup warning (ADR-0031). Estimates only: reads `pg_class.reltuples`,
+/// never `count(*)` (a full scan at boot is unacceptable). Same lazy-connect
+/// pool-of-one discipline as [`PgSchemaSource`] — this is a boot-time check,
+/// not a hot path, but reconnecting transparently on a dead cached client
+/// costs nothing and keeps the two adapters consistent.
+pub struct PgTableStats {
+    pg_url: String,
+    publication: String,
+    client: Arc<Mutex<Option<tokio_postgres::Client>>>,
+}
+
+impl PgTableStats {
+    /// Construct with a libpq-style URL + the publication name. Does NOT
+    /// connect — the first `table_stats` call opens the connection lazily.
+    #[must_use]
+    pub fn new(pg_url: &str, publication: &str) -> Self {
+        Self {
+            pg_url: pg_url.to_string(),
+            publication: publication.to_string(),
+            client: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn client(&self) -> Result<tokio_postgres::Client, SchemaError> {
+        let mut guard = self.client.lock().await;
+        if let Some(c) = guard.take() {
+            return Ok(c);
+        }
+        let (client, conn) = tokio_postgres::connect(&self.pg_url, NoTls)
+            .await
+            .map_err(|e| SchemaError::Backend(format!("connect: {e}")))?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        Ok(client)
+    }
+
+    async fn return_client(&self, client: tokio_postgres::Client) {
+        let mut guard = self.client.lock().await;
+        *guard = Some(client);
+    }
+
+    async fn drop_client(&self) {
+        let mut guard = self.client.lock().await;
+        *guard = None;
+    }
+}
+
+/// `reltuples < 0` means "never analyzed" (Postgres has no estimate). Any
+/// non-negative value is rounded to the nearest whole row — an estimate, not
+/// an exact count, so sub-row precision is meaningless. The cast is guarded
+/// by the `>= 0.0` check immediately above it, so `cast_sign_loss` cannot
+/// actually fire; `cast_possible_truncation` is inherent to "float estimate
+/// → integer row count" and is the whole point of this function.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+fn reltuples_to_estimate(reltuples: f32) -> Option<u64> {
+    if reltuples < 0.0 {
+        None
+    } else {
+        Some(reltuples.round() as u64)
+    }
+}
+
+#[async_trait]
+impl TableStatsSource for PgTableStats {
+    async fn table_stats(&self) -> Result<Vec<TableStat>, SchemaError> {
+        let client = self.client().await?;
+
+        let rows = client
+            .query(
+                "SELECT c.relname, c.reltuples \
+                   FROM pg_publication_tables t \
+                   JOIN pg_class c ON c.relname = t.tablename \
+                  WHERE t.pubname = $1 \
+                  ORDER BY c.relname",
+                &[&self.publication],
+            )
+            .await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.drop_client().await;
+                return Err(SchemaError::Backend(format!("table_stats query: {e}")));
+            }
+        };
+
+        let stats = rows
+            .into_iter()
+            .map(|row| {
+                let table: String = row.get(0);
+                let reltuples: f32 = row.get(1);
+                TableStat {
+                    table,
+                    estimated_rows: reltuples_to_estimate(reltuples),
+                }
+            })
+            .collect();
+
+        self.return_client(client).await;
+        Ok(stats)
     }
 }

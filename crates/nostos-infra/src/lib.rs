@@ -58,7 +58,7 @@ pub use replicator::{PgReplicator, PgReplicatorConfig, PgReplicatorError};
 pub use snapshot_source::PgSnapshotter;
 
 #[cfg(feature = "pg")]
-pub use schema_source::PgSchemaSource;
+pub use schema_source::{PgSchemaSource, PgTableStats};
 
 #[cfg(feature = "pg")]
 pub use write_back::PgWriteBack;
