@@ -1676,6 +1676,12 @@ Everything before it was read-only or session-scoped. This task exists solely
 to keep that surface honest; it ships in the same release or Task 20 does not
 ship.
 
+> **Shape ratified by the operator 2026-08-06 — do not re-litigate.**
+> `NOSTOS_ADMIN_TOKEN` env var, route **404s when unset** (disabled by default),
+> **no `nostos-cloud` control-plane binding**. This was raised as an open
+> question and explicitly closed; if you think it should live in `nostos-cloud`,
+> that is a new ADR, not a Task 21 edit.
+
 **Files**
 - Modify: `crates/nostos-server/src/main.rs` (extractor + audit line)
 - Create: `crates/nostos-server/src/admin_auth.rs`
