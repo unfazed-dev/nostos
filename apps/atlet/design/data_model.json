@@ -1,0 +1,217 @@
+{
+  "data_model": {
+    "enums": {
+      "id": [
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "structure": [
+        "multi",
+        "single"
+      ],
+      "type": [
+        "distance",
+        "reps",
+        "time"
+      ],
+      "unit": [
+        "km",
+        "reps",
+        "sec"
+      ]
+    },
+    "fields": {
+      "color": {
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "optional": false,
+        "type": "string"
+      },
+      "last": {
+        "optional": false,
+        "type": "string"
+      },
+      "name": {
+        "optional": false,
+        "type": "string"
+      },
+      "notes": {
+        "optional": true,
+        "type": "string"
+      },
+      "paceTarget": {
+        "optional": true,
+        "type": "string"
+      },
+      "streak": {
+        "optional": false,
+        "type": "int"
+      },
+      "structure": {
+        "optional": false,
+        "type": "string"
+      },
+      "target": {
+        "optional": false,
+        "type": "int"
+      },
+      "type": {
+        "optional": false,
+        "type": "string"
+      },
+      "unit": {
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "entities": [
+      {
+        "name": "Session",
+        "table": "session",
+        "fields": [
+          {
+            "name": "id",
+            "type": "string",
+            "notNull": true,
+            "pk": true
+          },
+          {
+            "name": "title",
+            "type": "string",
+            "notNull": true
+          },
+          {
+            "name": "type",
+            "type": "string",
+            "notNull": true
+          },
+          {
+            "name": "metric",
+            "type": "int",
+            "notNull": true
+          },
+          {
+            "name": "unit",
+            "type": "string",
+            "notNull": true
+          },
+          {
+            "name": "note",
+            "type": "string",
+            "optional": true
+          },
+          {
+            "name": "streak",
+            "type": "int",
+            "notNull": true
+          },
+          {
+            "name": "occurred_on",
+            "type": "date",
+            "notNull": true
+          }
+        ],
+        "orderBy": "occurred_on",
+        "seedFrom": {
+          "map": {
+            "id": "id",
+            "title": "name",
+            "type": "type",
+            "metric": "target",
+            "unit": "unit",
+            "note": "notes",
+            "streak": "streak",
+            "occurred_on": "last"
+          }
+        },
+        "seed": [
+          {
+            "id": "w1",
+            "name": "Sunrise 5k",
+            "type": "distance",
+            "target": 5,
+            "unit": "km",
+            "notes": "Steady aerobic, river loop",
+            "last": "2d ago",
+            "streak": 4
+          },
+          {
+            "id": "w2",
+            "name": "Push Day",
+            "type": "reps",
+            "target": 60,
+            "unit": "reps",
+            "notes": "Bodyweight pyramid",
+            "last": "Yesterday",
+            "streak": 7
+          },
+          {
+            "id": "w3",
+            "name": "Tabata Burnout",
+            "type": "time",
+            "target": 240,
+            "unit": "sec",
+            "notes": "8 rounds, 20s on / 10s off",
+            "last": "3d ago",
+            "streak": 2
+          },
+          {
+            "id": "w4",
+            "name": "Mobility Flow",
+            "type": "time",
+            "target": 600,
+            "unit": "sec",
+            "notes": "Hips, shoulders, ankles",
+            "last": "1w ago",
+            "streak": 1
+          },
+          {
+            "id": "w5",
+            "name": "Slow Squats",
+            "type": "reps",
+            "target": 30,
+            "unit": "reps",
+            "notes": "Controlled tempo, 3s eccentric",
+            "last": "4d ago",
+            "streak": 3
+          }
+        ]
+      },
+      {
+        "name": "Profile",
+        "table": "profile",
+        "fields": [
+          {
+            "name": "id",
+            "type": "string",
+            "notNull": true,
+            "pk": true
+          },
+          {
+            "name": "display_name",
+            "type": "string",
+            "optional": true
+          }
+        ]
+      }
+    ]
+  },
+  "state": {
+    "detail": {
+      "_timer": {
+        "init": "w.target",
+        "running": "running",
+        "value": "remaining"
+      },
+      "done": false,
+      "elapsed": 0,
+      "running": false,
+      "remaining": 0
+    }
+  }
+}

@@ -656,6 +656,27 @@ pub trait SchemaSource: Send + Sync {
     async fn fetch(&self) -> Result<SchemaDescriptor, SchemaError>;
 }
 
+/// Estimated size of one replicated table, for the `all`-mode startup warning
+/// (ADR-0031: an operator on `sync_mode = "all"` with a huge table gets no
+/// scoping — warn at boot rather than let them find out from an OOM).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableStat {
+    pub table: String,
+    /// `None` when the source cannot estimate (e.g. Postgres `reltuples = -1`
+    /// on a never-analyzed table). Render as "unknown", never as a number.
+    pub estimated_rows: Option<u64>,
+}
+
+/// Row-count estimates for the synced tables, cheap enough to call at boot.
+/// Reuses [`SchemaError`] — same backend, same failure shape as
+/// [`SchemaSource`].
+#[async_trait]
+pub trait TableStatsSource: Send + Sync {
+    /// # Errors
+    /// [`SchemaError::Backend`] for any underlying database error.
+    async fn table_stats(&self) -> Result<Vec<TableStat>, SchemaError>;
+}
+
 /// Aggregate throughput/accounting counters, updated by the fan-out loop and
 /// read by the `/metrics` endpoint. Lock-free (atomics); rendered to
 /// Prometheus text by the server.

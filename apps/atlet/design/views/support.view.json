@@ -1,0 +1,560 @@
+{
+  "doc": "DERIVED by derive_views.py (W4c-generic) from support.skeleton.json + support.content.json \u2014 do not hand-edit; re-derive. Gaps: see support.derive_report.json.",
+  "entity": "",
+  "root": {
+    "child": {
+      "children": [
+        {
+          "child": {
+            "children": [
+              {
+                "color": "onSurface",
+                "style": "headlineMedium",
+                "type": "text",
+                "value": "Keep Atlet running."
+              },
+              {
+                "size": 12,
+                "type": "vspace"
+              },
+              {
+                "color": "muted",
+                "style": "bodyMedium",
+                "type": "text",
+                "value": "Atlet is free and ad-free. If it helps you train, here's how to give back."
+              },
+              {
+                "size": 18,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "child": {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "color": "onSurface",
+                            "style": "titleMedium",
+                            "type": "text",
+                            "value": "$15.00"
+                          },
+                          {
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "you've tipped"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 2,
+                        "type": "column"
+                      },
+                      {
+                        "children": [
+                          {
+                            "color": "onSurface",
+                            "style": "titleMedium",
+                            "type": "text",
+                            "value": "Free"
+                          },
+                          {
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "your plan"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 2,
+                        "type": "column"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "gap": 33,
+                    "type": "row"
+                  },
+                  "h": 18,
+                  "type": "padding",
+                  "v": 14
+                },
+                "clip": false,
+                "type": "card"
+              }
+            ],
+            "crossAxis": "start",
+            "type": "column"
+          },
+          "h": 4,
+          "type": "padding",
+          "v": 24
+        },
+        {
+          "child": {
+            "children": [
+              {
+                "child": {
+                  "child": {
+                    "color": "onSurface",
+                    "style": "labelLarge",
+                    "type": "text",
+                    "value": "Membership"
+                  },
+                  "h": 14,
+                  "type": "padding",
+                  "v": 7
+                },
+                "clip": false,
+                "type": "card"
+              },
+              {
+                "child": {
+                  "style": "titleSmall",
+                  "type": "text",
+                  "value": "Tip jar"
+                },
+                "h": 14,
+                "type": "padding",
+                "v": 7
+              }
+            ],
+            "gap": 4,
+            "main": "center",
+            "type": "row"
+          },
+          "h": 16,
+          "type": "padding",
+          "v": 16
+        },
+        {
+          "child": {
+            "children": [
+              {
+                "child": {
+                  "all": 2,
+                  "child": {
+                    "children": [
+                      {
+                        "child": {
+                          "child": {
+                            "color": "onSurface",
+                            "style": "labelLarge",
+                            "type": "text",
+                            "value": "Monthly"
+                          },
+                          "h": 10,
+                          "type": "padding",
+                          "v": 9
+                        },
+                        "clip": false,
+                        "type": "card"
+                      },
+                      {
+                        "child": {
+                          "children": [
+                            {
+                              "style": "titleSmall",
+                              "type": "text",
+                              "value": "Yearly"
+                            },
+                            {
+                              "child": {
+                                "child": {
+                                  "style": "labelSmall",
+                                  "type": "text",
+                                  "value": "\u221233%"
+                                },
+                                "h": 6,
+                                "type": "padding",
+                                "v": 2
+                              },
+                              "clip": false,
+                              "type": "card"
+                            }
+                          ],
+                          "crossAxis": "center",
+                          "gap": 6,
+                          "main": "center",
+                          "type": "row"
+                        },
+                        "h": 10,
+                        "type": "padding",
+                        "v": 9
+                      }
+                    ],
+                    "type": "row"
+                  },
+                  "type": "padding"
+                },
+                "clip": false,
+                "type": "card"
+              },
+              {
+                "children": [
+                  {
+                    "all": 14,
+                    "child": {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "titleLarge",
+                                  "type": "text",
+                                  "value": "Free"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "labelSmall",
+                                  "type": "text",
+                                  "value": "Starter"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 3,
+                              "type": "column"
+                            },
+                            {
+                              "color": "onSurface",
+                              "style": "titleLarge",
+                              "type": "text",
+                              "value": "Free"
+                            }
+                          ],
+                          "crossAxis": "start",
+                          "main": "spaceBetween",
+                          "type": "row"
+                        },
+                        {
+                          "size": 10,
+                          "type": "vspace"
+                        },
+                        {
+                          "children": [
+                            {
+                              "style": "bodySmall",
+                              "type": "text",
+                              "value": "3 workouts"
+                            },
+                            {
+                              "style": "bodySmall",
+                              "type": "text",
+                              "value": "Basic tracking"
+                            },
+                            {
+                              "style": "bodySmall",
+                              "type": "text",
+                              "value": "Shop access"
+                            }
+                          ],
+                          "crossAxis": "start",
+                          "gap": 6,
+                          "type": "column"
+                        },
+                        {
+                          "size": 12,
+                          "type": "vspace"
+                        },
+                        {
+                          "child": {
+                            "style": "labelMedium",
+                            "type": "text",
+                            "value": "Current plan"
+                          },
+                          "h": 0,
+                          "type": "padding",
+                          "v": 4
+                        }
+                      ],
+                      "crossAxis": "start",
+                      "type": "column"
+                    },
+                    "type": "padding"
+                  },
+                  {
+                    "child": {
+                      "all": 14,
+                      "child": {
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "children": [
+                                  {
+                                    "color": "onSurface",
+                                    "style": "titleLarge",
+                                    "type": "text",
+                                    "value": "Pro"
+                                  },
+                                  {
+                                    "style": "labelSmall",
+                                    "type": "text",
+                                    "value": "Most popular"
+                                  }
+                                ],
+                                "crossAxis": "start",
+                                "gap": 3,
+                                "type": "column"
+                              },
+                              {
+                                "children": [
+                                  {
+                                    "color": "onSurface",
+                                    "style": "titleLarge",
+                                    "type": "text",
+                                    "value": "$4.99"
+                                  },
+                                  {
+                                    "color": "muted",
+                                    "style": "bodySmall",
+                                    "type": "text",
+                                    "value": "/mo"
+                                  }
+                                ],
+                                "gap": 2,
+                                "type": "row"
+                              }
+                            ],
+                            "crossAxis": "start",
+                            "main": "spaceBetween",
+                            "type": "row"
+                          },
+                          {
+                            "children": [
+                              {
+                                "style": "bodySmall",
+                                "type": "text",
+                                "value": "Unlimited workouts"
+                              },
+                              {
+                                "style": "bodySmall",
+                                "type": "text",
+                                "value": "10% off Shop"
+                              },
+                              {
+                                "style": "bodySmall",
+                                "type": "text",
+                                "value": "Priority support"
+                              }
+                            ],
+                            "crossAxis": "start",
+                            "gap": 6,
+                            "type": "column"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 10,
+                        "type": "column"
+                      },
+                      "type": "padding"
+                    },
+                    "clip": false,
+                    "type": "card"
+                  },
+                  {
+                    "child": {
+                      "all": 14,
+                      "child": {
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "children": [
+                                  {
+                                    "color": "onSurface",
+                                    "style": "titleLarge",
+                                    "type": "text",
+                                    "value": "Supporter"
+                                  },
+                                  {
+                                    "color": "muted",
+                                    "style": "labelSmall",
+                                    "type": "text",
+                                    "value": "Thank you"
+                                  }
+                                ],
+                                "crossAxis": "start",
+                                "gap": 3,
+                                "type": "column"
+                              },
+                              {
+                                "children": [
+                                  {
+                                    "color": "onSurface",
+                                    "style": "titleLarge",
+                                    "type": "text",
+                                    "value": "$9.99"
+                                  },
+                                  {
+                                    "color": "muted",
+                                    "style": "bodySmall",
+                                    "type": "text",
+                                    "value": "/mo"
+                                  }
+                                ],
+                                "gap": 2,
+                                "type": "row"
+                              }
+                            ],
+                            "crossAxis": "start",
+                            "main": "spaceBetween",
+                            "type": "row"
+                          },
+                          {
+                            "children": [
+                              {
+                                "style": "bodySmall",
+                                "type": "text",
+                                "value": "Everything in Pro"
+                              },
+                              {
+                                "style": "bodySmall",
+                                "type": "text",
+                                "value": "15% off + free shipping"
+                              },
+                              {
+                                "style": "bodySmall",
+                                "type": "text",
+                                "value": "Supporter badge"
+                              }
+                            ],
+                            "crossAxis": "start",
+                            "gap": 6,
+                            "type": "column"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 10,
+                        "type": "column"
+                      },
+                      "type": "padding"
+                    },
+                    "clip": false,
+                    "type": "card"
+                  }
+                ],
+                "crossAxis": "start",
+                "gap": 10,
+                "type": "column"
+              },
+              {
+                "child": {
+                  "child": {
+                    "style": "titleMedium",
+                    "type": "text",
+                    "value": "Current plan"
+                  },
+                  "h": 16,
+                  "type": "padding",
+                  "v": 15
+                },
+                "clip": false,
+                "type": "card"
+              },
+              {
+                "child": {
+                  "style": "bodySmall",
+                  "type": "text",
+                  "value": "Cancel anytime. Renews automatically."
+                },
+                "h": 8,
+                "type": "padding",
+                "v": 0
+              }
+            ],
+            "crossAxis": "start",
+            "gap": 14,
+            "type": "column"
+          },
+          "h": 0,
+          "type": "padding",
+          "v": 16
+        },
+        {
+          "child": {
+            "children": [
+              {
+                "child": {
+                  "color": "muted",
+                  "style": "bodySmall",
+                  "type": "text",
+                  "value": "Your tips"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 6
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "color": "onSurface",
+                            "style": "bodyLarge",
+                            "type": "text",
+                            "value": "$5.00"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "bodySmall",
+                            "type": "text",
+                            "value": "\"Love the app!\""
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 1,
+                        "type": "column"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 11
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "color": "onSurface",
+                            "style": "bodyLarge",
+                            "type": "text",
+                            "value": "$10.00"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "bodySmall",
+                            "type": "text",
+                            "value": "2026-06-01"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 1,
+                        "type": "column"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 11
+                    }
+                  ],
+                  "type": "column"
+                },
+                "clip": false,
+                "type": "card"
+              }
+            ],
+            "crossAxis": "start",
+            "gap": 14,
+            "type": "column"
+          },
+          "h": 0,
+          "type": "padding",
+          "v": 16
+        }
+      ],
+      "type": "column"
+    },
+    "h": 20,
+    "type": "padding"
+  },
+  "view": "support"
+}

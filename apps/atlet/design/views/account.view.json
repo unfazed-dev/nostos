@@ -1,0 +1,1098 @@
+{
+  "doc": "DERIVED by derive_views.py (W4c-generic) from account.skeleton.json + account.content.json \u2014 do not hand-edit; re-derive. Gaps: see account.derive_report.json.",
+  "entity": "",
+  "header": {
+    "child": {
+      "color": "onSurface",
+      "style": "labelLarge",
+      "type": "text",
+      "value": "9:41"
+    },
+    "h": 28,
+    "type": "padding",
+    "v": 14
+  },
+  "headerHeight": 38,
+  "root": {
+    "child": {
+      "children": [
+        {
+          "child": {
+            "children": [
+              {
+                "child": {
+                  "color": "onSurface",
+                  "style": "headlineMedium",
+                  "type": "text",
+                  "value": "Account"
+                },
+                "h": 20,
+                "type": "padding",
+                "v": 8
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "style": "headlineSmall",
+                        "type": "text",
+                        "value": "AK"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    },
+                    {
+                      "size": 10,
+                      "type": "vspace"
+                    },
+                    {
+                      "color": "onSurface",
+                      "style": "titleLarge",
+                      "type": "text",
+                      "value": "Alex Kova"
+                    },
+                    {
+                      "size": 6,
+                      "type": "vspace"
+                    },
+                    {
+                      "color": "muted",
+                      "style": "bodyMedium",
+                      "type": "text",
+                      "value": "alex@atlet.app"
+                    },
+                    {
+                      "size": 14,
+                      "type": "vspace"
+                    },
+                    {
+                      "child": {
+                        "child": {
+                          "style": "titleMedium",
+                          "type": "text",
+                          "value": "Edit profile"
+                        },
+                        "h": 18,
+                        "type": "padding",
+                        "v": 8
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "crossAxis": "start",
+                  "type": "column"
+                },
+                "h": 24,
+                "type": "padding",
+                "v": 20
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Plan"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "color": "onSurface",
+                                      "style": "bodyLarge",
+                                      "type": "text",
+                                      "value": "Free"
+                                    },
+                                    {
+                                      "color": "muted",
+                                      "style": "bodySmall",
+                                      "type": "text",
+                                      "value": "Basic tracking \u00b7 Upgrade for more"
+                                    }
+                                  ],
+                                  "crossAxis": "start",
+                                  "gap": 1,
+                                  "type": "column"
+                                },
+                                {
+                                  "child": {
+                                    "child": {
+                                      "color": "muted",
+                                      "style": "labelSmall",
+                                      "type": "text",
+                                      "value": "FREE"
+                                    },
+                                    "h": 7,
+                                    "type": "padding",
+                                    "v": 3
+                                  },
+                                  "clip": false,
+                                  "type": "card"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 14,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Send a tip"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "Support development \u00b7 From $2"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 1,
+                              "type": "column"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Subscriptions"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "child": {
+                          "children": [
+                            {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Pea + Rice Protein"
+                            },
+                            {
+                              "color": "muted",
+                              "style": "bodySmall",
+                              "type": "text",
+                              "value": "$37.80/mo \u00b7 Renews 2026-07-10"
+                            }
+                          ],
+                          "crossAxis": "start",
+                          "gap": 1,
+                          "type": "column"
+                        },
+                        "h": 16,
+                        "type": "padding",
+                        "v": 11
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Orders & History"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "1 order"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "Last: 1042 \u00b7 2026-06-10"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 1,
+                              "type": "column"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Receipts & invoices"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "2 on file"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 1,
+                              "type": "column"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Payment & Shipping"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Shipping addresses"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "Home \u00b7 Portland"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 1,
+                              "type": "column"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Payment methods"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "2 cards \u00b7 \u2022\u2022 4242"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 1,
+                              "type": "column"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Tips"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "child": {
+                          "children": [
+                            {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Tip history"
+                            },
+                            {
+                              "color": "muted",
+                              "style": "bodySmall",
+                              "type": "text",
+                              "value": "2 tips \u00b7 $15.00 given"
+                            }
+                          ],
+                          "crossAxis": "start",
+                          "gap": 1,
+                          "type": "column"
+                        },
+                        "h": 16,
+                        "type": "padding",
+                        "v": 11
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Preferences"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Appearance"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Auto"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 133,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "size": 10,
+                            "type": "vspace"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "all": 2,
+                                "child": {
+                                  "child": {
+                                    "style": "titleSmall",
+                                    "type": "text",
+                                    "value": "Dark"
+                                  },
+                                  "h": 10,
+                                  "type": "padding",
+                                  "v": 8
+                                },
+                                "type": "padding"
+                              },
+                              "clip": false,
+                              "type": "card"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 12
+                          },
+                          {
+                            "child": {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Accent color"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "size": 58,
+                            "type": "vspace"
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Units"
+                                },
+                                {
+                                  "child": {
+                                    "all": 2,
+                                    "child": {
+                                      "children": [
+                                        {
+                                          "child": {
+                                            "child": {
+                                              "color": "onSurface",
+                                              "style": "labelLarge",
+                                              "type": "text",
+                                              "value": "km"
+                                            },
+                                            "h": 12,
+                                            "type": "padding",
+                                            "v": 6
+                                          },
+                                          "clip": false,
+                                          "type": "card"
+                                        },
+                                        {
+                                          "child": {
+                                            "style": "labelMedium",
+                                            "type": "text",
+                                            "value": "mi"
+                                          },
+                                          "h": 12,
+                                          "type": "padding",
+                                          "v": 6
+                                        }
+                                      ],
+                                      "type": "row"
+                                    },
+                                    "type": "padding"
+                                  },
+                                  "clip": false,
+                                  "type": "card"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 141,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Audio & Haptics"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Voice cues"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "Countdown, reps, and rest announcements"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 1,
+                              "type": "column"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Start & end beeps"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Haptic feedback"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    },
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Audio cues and vibrations during workouts."
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Workout Defaults"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Default rest"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "30s"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 148,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Warm-up reminder"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "On"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 92,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "name": "arrow-right",
+                                  "size": 17,
+                                  "type": "icon"
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "color": "onSurface",
+                                      "style": "bodyLarge",
+                                      "type": "text",
+                                      "value": "Auto-advance steps"
+                                    },
+                                    {
+                                      "color": "muted",
+                                      "style": "bodySmall",
+                                      "type": "text",
+                                      "value": "Move to next step automatically on completion"
+                                    }
+                                  ],
+                                  "crossAxis": "start",
+                                  "gap": 1,
+                                  "type": "column"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 16,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Data"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Export history"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "Download as CSV"
+                                }
+                              ],
+                              "crossAxis": "start",
+                              "gap": 1,
+                              "type": "column"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Import workouts"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Clear all history"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "size": 22,
+                "type": "vspace"
+              },
+              {
+                "child": {
+                  "children": [
+                    {
+                      "child": {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "About"
+                      },
+                      "h": 16,
+                      "type": "padding",
+                      "v": 6
+                    },
+                    {
+                      "child": {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Version"
+                                },
+                                {
+                                  "color": "muted",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "1.0.0 \u00b7 b412"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 121,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Terms of Service"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Privacy Policy"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "color": "onSurface",
+                              "style": "bodyLarge",
+                              "type": "text",
+                              "value": "Support"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "name": "star",
+                                  "size": 17,
+                                  "type": "icon"
+                                },
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodyLarge",
+                                  "type": "text",
+                                  "value": "Rate Atlet"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 16,
+                              "type": "row"
+                            },
+                            "h": 16,
+                            "type": "padding",
+                            "v": 11
+                          }
+                        ],
+                        "type": "column"
+                      },
+                      "clip": false,
+                      "type": "card"
+                    }
+                  ],
+                  "type": "column"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 0
+              },
+              {
+                "child": {
+                  "child": {
+                    "child": {
+                      "style": "titleMedium",
+                      "type": "text",
+                      "value": "Sign out"
+                    },
+                    "h": 16,
+                    "type": "padding",
+                    "v": 15
+                  },
+                  "clip": false,
+                  "type": "card"
+                },
+                "h": 16,
+                "type": "padding",
+                "v": 26
+              },
+              {
+                "all": 16,
+                "child": {
+                  "style": "bodySmall",
+                  "type": "text",
+                  "value": "Made with care. Atlet \u00b7 v1.0.0"
+                },
+                "type": "padding"
+              }
+            ],
+            "type": "column"
+          },
+          "h": 0,
+          "type": "padding",
+          "v": 72
+        },
+        {
+          "child": {
+            "child": {
+              "all": 14,
+              "child": {
+                "children": [
+                  {
+                    "color": "onSurface",
+                    "style": "titleLarge",
+                    "type": "text",
+                    "value": "Light"
+                  },
+                  {
+                    "color": "onSurface",
+                    "style": "titleLarge",
+                    "type": "text",
+                    "value": "Auto"
+                  }
+                ],
+                "crossAxis": "start",
+                "main": "spaceBetween",
+                "type": "row"
+              },
+              "type": "padding"
+            },
+            "h": 18,
+            "type": "padding",
+            "v": 22
+          },
+          "clip": false,
+          "type": "card"
+        }
+      ],
+      "crossAxis": "start",
+      "type": "column"
+    },
+    "h": 28,
+    "type": "padding"
+  },
+  "view": "account"
+}

@@ -24,7 +24,8 @@ pub async fn run(cwd: &Path) -> Result<()> {
     let jwt_secret = dotenv_vars
         .get("NOSTOS_SUPABASE_JWT_SECRET")
         .map(String::as_str);
-    let env_pairs = cfg.server_env(&pg_url, jwt_secret);
+    let mut env_pairs = cfg.server_env(&pg_url, jwt_secret);
+    push_rules_file_env(&mut env_pairs, cwd);
 
     let binary = locate_server_binary();
     println!("Starting nostos-server ({})...", binary.describe());
@@ -60,6 +61,19 @@ pub async fn run(cwd: &Path) -> Result<()> {
         .context("waiting for nostos-server to exit")?;
     println!("nostos-server exited: {status}");
     Ok(())
+}
+
+/// `NostosConfig::server_env` knows nothing about the project directory, so
+/// the `nostos_rules.toml` default on the server's `Config` resolves *by
+/// coincidence* (the child inherits our cwd). Make the path explicit instead
+/// of relying on that. Not folded into `server_env` itself — `deploy.rs`
+/// conceptually shares that helper's shape, where the rules file ships
+/// inside the image and the server's own relative default is correct.
+fn push_rules_file_env(env_pairs: &mut Vec<(String, String)>, cwd: &Path) {
+    env_pairs.push((
+        "NOSTOS_RULES_FILE".to_string(),
+        cwd.join("nostos_rules.toml").display().to_string(),
+    ));
 }
 
 async fn ctrl_c_or_pending() {
@@ -144,4 +158,22 @@ fn print_startup_banner(cfg: &NostosConfig) {
     println!("      token: supabaseSession.accessToken,");
     println!("    );");
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_env_includes_absolute_rules_file_path() {
+        let mut env_pairs = Vec::new();
+        let cwd = Path::new("/some/project/dir");
+        push_rules_file_env(&mut env_pairs, cwd);
+        let (_k, v) = env_pairs
+            .iter()
+            .find(|(k, _)| k == "NOSTOS_RULES_FILE")
+            .expect("NOSTOS_RULES_FILE present");
+        assert_eq!(v, &cwd.join("nostos_rules.toml").display().to_string());
+        assert!(Path::new(v).is_absolute());
+    }
 }

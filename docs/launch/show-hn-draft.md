@@ -41,22 +41,24 @@ Postgres logical replication, 2-way offline, free self-host.
 
 ## The honest benchmark
 
-We measured server fan-out against PowerSync's **published** server ceiling of
-~2,000–4,000 ops/sec for small rows ([their docs][ps-limits]).
+We measured server fan-out. PowerSync publishes no comparable aggregate fan-out
+figure — their published rates are ~2,000–4,000 ops/sec replication ingest
+(Postgres → PowerSync Service, a different pipeline stage) and 2,000–20,000
+ops/sec per-client sync ([their docs][ps-limits]).
 
 [ps-limits]: https://docs.powersync.com/resources/performance-and-limits
 
-| Tier | Nostos | Drops | vs PowerSync ceiling |
+| Tier | Nostos | Drops | PowerSync comparator |
 |------|-------|-------|----------------------|
-| **1k clients** | **833,307 ops/sec** | **0%** | **208× their high ceiling** (417× their low) |
-| 5k clients | 660k ops/sec | 0.91% | still dramatically faster |
+| **1k clients** | **833,307 ops/sec** | **0%** | **none published** (no aggregate fan-out figure) |
+| 5k clients | 660k ops/sec | 0.91% | none published |
 | 10k clients (probe) | ~483k ops/sec | ~61.4% | throughput high, drops NOT under 1% |
 
-The **headline is 1k @ 0% drops = 208× PowerSync's published high ceiling.**
+The **headline is 1k @ 0% drops, 833,307 ops/sec aggregate fan-out.**
 That's a real number, end-to-end through the fan-out pipeline (synthetic source
 on loopback, real router, real bounded WS fan-out, real WS client receive). The
-original Week-1 proof was 142k @ 35.6×; the v0.1 WS write-path + router work
-multiplied the 1k figure ~6×.
+original Week-1 proof was 142k ops/sec aggregate fan-out (historical baseline);
+the v0.1 WS write-path + router work multiplied the 1k figure ~6×.
 
 The **10k-client story is honest, not pretty.** Throughput at 10k is still
 ~483k ops/sec, but the current architecture drops ~61% of frames because
@@ -76,7 +78,9 @@ features — Sync Streams GA killed the old "static buckets" attack line and we
 retired it. The defensible wedges are:
 
 1. **Rust server throughput.** PowerSync's server is Node/TS with a published
-   ~2–4k ops/sec replication ceiling. Nostos's is Rust. 35× at 1k clients.
+   ~2–4k ops/sec replication-ingest rate and 2–20k ops/sec per-client sync (no
+   published aggregate fan-out figure). Nostos's is Rust — 833,307 ops/sec
+   aggregate fan-out @ 1k clients, 0% drops.
 2. **Apache-2.0 today.** PowerSync's server is FSL (2-year conversion, no-
    compete). Enterprise legal hates FSL. Nostos is Apache-2.0 now.
 3. **Write-back without endpoints.** Nostos writes to your Postgres for you

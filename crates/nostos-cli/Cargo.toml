@@ -14,6 +14,8 @@ name = "nostos"
 path = "src/main.rs"
 
 [dependencies]
+nostos-domain = { workspace = true }
+nostos-infra = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }

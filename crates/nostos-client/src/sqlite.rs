@@ -80,6 +80,10 @@ const CHECKPOINT_KEY: &str = "checkpoint";
 /// resume gate). Stored as a `u64` decimal alongside the checkpoint.
 const EPOCH_KEY: &str = "epoch";
 
+/// The meta key holding the rules checksum this client last synced under
+/// (ADR-0031 D2). Stored as a `u64` decimal, same pattern as `EPOCH_KEY`.
+const RULES_CHECKSUM_KEY: &str = "rules_checksum";
+
 /// A synced table's schema as the client sees it — the minimal projection of
 /// the server's `SchemaDescriptor` (nostos-application) that the view layer
 /// needs. Defined here (not reusing `SchemaDescriptor`) because nostos-client
@@ -529,6 +533,47 @@ impl Storage for SqliteStorage {
         Ok(())
     }
 
+    fn rules_checksum(&self) -> nostos_core::Result<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("rules_checksum: storage mutex poisoned");
+        // No row yet (fresh DB, or a resume_info that never carried a
+        // checksum) → 0 (client omits rules_checksum on Subscribe → server
+        // uses the composed-epoch fallback, ADR-0031 D2).
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM cairn_meta WHERE key = ?1",
+                rusqlite::params![RULES_CHECKSUM_KEY],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(rusqlite_err)?;
+        match raw {
+            None => Ok(0),
+            Some(s) => s.parse().map_err(|e: std::num::ParseIntError| {
+                StorageError::Backend(format!("corrupt rules_checksum value {s:?}: {e}"))
+            }),
+        }
+    }
+
+    fn save_rules_checksum(&self, checksum: u64) -> nostos_core::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("save_rules_checksum: storage mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![RULES_CHECKSUM_KEY, checksum.to_string()],
+        )
+        .map_err(rusqlite_err)?;
+        Ok(())
+    }
+
     fn apply_batch(
         &mut self,
         ops: &[(RowOp, u64)],
@@ -823,6 +868,16 @@ impl Storage for SqliteStorage {
         tx.execute(
             "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, '0')",
             rusqlite::params![EPOCH_KEY],
+        )
+        .map_err(rusqlite_err)?;
+
+        // 3b. Rules checksum → 0 (ADR-0031 D2). A surviving checksum could
+        //     coincidentally MATCH the live ruleset for the next principal and
+        //     suppress the snapshot that principal needs — same unsoundness
+        //     class as a stale epoch, just gated on a different field.
+        tx.execute(
+            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, '0')",
+            rusqlite::params![RULES_CHECKSUM_KEY],
         )
         .map_err(rusqlite_err)?;
 
@@ -2074,13 +2129,40 @@ mod tests {
         )
         .unwrap();
         s.save_epoch(7).unwrap(); // a non-zero server slot epoch
+        s.save_rules_checksum(99).unwrap(); // a non-zero rules checksum (ADR-0031 D2)
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(100), "precondition");
         assert_eq!(s.epoch().unwrap(), 7, "precondition: epoch advanced");
+        assert_eq!(
+            s.rules_checksum().unwrap(),
+            99,
+            "precondition: rules_checksum advanced"
+        );
 
         Storage::clear(&mut s).unwrap();
 
         assert_eq!(s.checkpoint().unwrap(), Lsn::ZERO, "checkpoint reset to 0");
         assert_eq!(s.epoch().unwrap(), 0, "epoch reset to 0");
+        assert_eq!(
+            s.rules_checksum().unwrap(),
+            0,
+            "rules_checksum reset to 0 — a survivor could coincidentally match \
+             the next principal's live ruleset and suppress its snapshot"
+        );
+    }
+
+    #[test]
+    fn rules_checksum_roundtrips_through_storage() {
+        // Fresh DB: unknown checksum reads back as 0 (composed-epoch fallback).
+        let s = SqliteStorage::open_in_memory().unwrap();
+        assert_eq!(s.rules_checksum().unwrap(), 0, "fresh DB checksum is 0");
+
+        s.save_rules_checksum(42).unwrap();
+        assert_eq!(s.rules_checksum().unwrap(), 42, "checksum persisted");
+
+        // save_rules_checksum overwrites (server may advertise a new checksum
+        // on a rules change), same as save_epoch.
+        s.save_rules_checksum(43).unwrap();
+        assert_eq!(s.rules_checksum().unwrap(), 43, "checksum overwritten");
     }
 
     #[test]

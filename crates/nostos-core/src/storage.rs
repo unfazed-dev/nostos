@@ -75,6 +75,27 @@ pub trait Storage {
         Ok(())
     }
 
+    /// The rules checksum this client last synced under (ADR-0031 D2).
+    /// `0` = unknown (fresh DB, or a storage that does not persist it) → the
+    /// Subscribe omits the field → server uses the composed-epoch fallback.
+    ///
+    /// Default `Ok(0)` — exactly like [`Self::epoch`]: a backend that doesn't
+    /// override this stays on the composed-epoch fallback forever (never
+    /// wrong, just never gets the log-attribution benefit of the explicit
+    /// path).
+    fn rules_checksum(&self) -> crate::Result<u64> {
+        Ok(0)
+    }
+
+    /// Persist the rules checksum advertised in `resume_info`. Non-fatal on
+    /// failure — mirrors [`Self::save_epoch`]: a persist failure costs one
+    /// extra snapshot next reconnect, it must never kill the session. Default
+    /// no-op — backends that don't persist the checksum simply never leave
+    /// the composed-epoch fallback.
+    fn save_rules_checksum(&self, _checksum: u64) -> crate::Result<()> {
+        Ok(())
+    }
+
     /// Atomically apply a batch of row operations and advance the checkpoint.
     ///
     /// **Atomicity contract:** every `op` in `ops` AND the checkpoint advance to

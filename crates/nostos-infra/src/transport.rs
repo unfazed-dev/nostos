@@ -36,8 +36,11 @@ use nostos_application::ports::{
     EventSink, Metrics, OpLogSource, SchemaSource, SnapshotSource, SyncAuth, WriteBack,
     WriteBackError,
 };
-use nostos_application::SessionManager;
-use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncSession};
+use nostos_application::{ActiveRuleset, RuleDecision, SessionManager};
+use nostos_domain::{
+    compose_sync_epoch, ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncMode,
+    SyncSession,
+};
 
 use crate::router::TokioEventSink;
 use crate::wire::{
@@ -66,6 +69,15 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// 32 is generous for real apps (the provider dashboard uses 5) and small
 /// enough that 32 × device_cap snapshots is a bounded worst case.
 const MAX_TABLES_PER_SOCKET: usize = 32;
+
+/// Close reason a live session receives when a sync-rules reload (ADR-0031
+/// D3) changes the rule decision for one of its subscribed tables. Swap
+/// verification is per-table and coarse — see the `ponytail:` at the
+/// `run_session` call site — so this fires on a real narrowing AND on any
+/// widen the verification can't prove safe in place; either way the client's
+/// reconnect (Task 11's checksum/epoch path) re-scopes it into the current
+/// ruleset.
+pub(crate) const RULES_CHANGED_CLOSE_REASON: &str = "rules changed; reconnect to re-scope";
 
 /// Shared state injected into the axum router.
 #[derive(Clone)]
@@ -110,11 +122,25 @@ pub struct SyncRouterState {
     /// `None` (fake mode, or a binary built without feature `pg`) → always
     /// snapshot. Injected under `NOSTOS_REPLICATOR=pg`.
     pub oplog_reader: Option<Arc<dyn OpLogSource>>,
+    /// The active ruleset (ADR-0031). Swapped at runtime by the reload watcher
+    /// (Task 14); read at SUBSCRIBE time only — never per delivered event.
+    /// Defaults to `ActiveRuleset::all_mode()`.
+    pub rules: Arc<tokio::sync::RwLock<ActiveRuleset>>,
+    /// Broadcasts the active ruleset's checksum. A per-connection
+    /// `Receiver::changed()` arm is free while unchanged, so live-session
+    /// invalidation (Task 14) costs nothing on the delivery path.
+    /// Defaults to a channel seeded with `ActiveRuleset::all_mode().checksum()`.
+    pub rules_changed: tokio::sync::watch::Receiver<u64>,
 }
 
 impl SyncRouterState {
     #[must_use]
     pub fn new(manager: Arc<SessionManager>, auth: Arc<dyn SyncAuth>) -> Self {
+        let rules = ActiveRuleset::all_mode();
+        // No reload watcher wired by default — the sender has no consumer
+        // until the composition root creates one (main.rs) and passes the
+        // matching `Receiver` via `with_rules`.
+        let (_rules_tx, rules_changed) = tokio::sync::watch::channel(rules.checksum());
         Self {
             manager,
             session_buffer: DEFAULT_SESSION_BUFFER,
@@ -126,6 +152,8 @@ impl SyncRouterState {
             snapshotter: None,
             schema_source: None,
             oplog_reader: None,
+            rules: Arc::new(tokio::sync::RwLock::new(rules)),
+            rules_changed,
         }
     }
 
@@ -198,6 +226,22 @@ impl SyncRouterState {
     #[must_use]
     pub fn with_oplog_reader(mut self, reader: Arc<dyn OpLogSource>) -> Self {
         self.oplog_reader = Some(reader);
+        self
+    }
+
+    /// Inject the active ruleset (ADR-0031) and its checksum-change receiver.
+    /// The composition root loads `nostos_rules.toml` (or falls back to
+    /// [`ActiveRuleset::all_mode`]) and creates the matching
+    /// `tokio::sync::watch::channel` before calling this; the default in
+    /// [`Self::new`] is a standalone all-mode ruleset with no live sender.
+    #[must_use]
+    pub fn with_rules(
+        mut self,
+        rules: Arc<tokio::sync::RwLock<ActiveRuleset>>,
+        rules_changed: tokio::sync::watch::Receiver<u64>,
+    ) -> Self {
+        self.rules = rules;
+        self.rules_changed = rules_changed;
         self
     }
 }
@@ -303,6 +347,13 @@ async fn run_session(
 
     let manager = Arc::clone(&state.manager);
     let snapshotter = state.snapshotter.clone();
+    // ADR-0031: snapshot the active ruleset once per socket. Cloned (cheap —
+    // wraps a BTreeMap) rather than holding the RwLock read guard across the
+    // awaits inside register_subscribe. This snapshot becomes `old_ruleset`
+    // in the write_loop below (D3, Task 14) so a live rules reload can be
+    // verified against exactly what this socket's already-registered
+    // subscriptions were granted.
+    let ruleset = state.rules.read().await.clone();
 
     // 4. Per-socket multi-table state. `synthetic_cursor` is seeded from the
     //    first subscribe's resume_lsn (0 for a fresh client) and advanced by
@@ -325,15 +376,26 @@ async fn run_session(
     // ADR-0025 F2: advertise the server's current slot epoch ONCE at subscribe
     // (before snapshot/replay frames) on BOTH paths, so the client can persist
     // + resend it on reconnect (the resume gate compares client vs server
-    // epoch). Read fresh here — register_subscribe reads the same value below
-    // for the gate, so the client persists exactly the epoch its resume will be
-    // judged against.
+    // epoch). Read fresh here — register_subscribe reads the same raw value
+    // below for the gate, so the client persists exactly what its resume will
+    // be judged against.
     let server_epoch = state
         .metrics
         .slot_epoch
         .load(std::sync::atomic::Ordering::Relaxed);
+    // ADR-0031 D2: a client that sent `rules_checksum` on its Subscribe frame
+    // gets the raw epoch + the raw checksum advertised back, so its logs can
+    // tell "slot recreated" from "rules changed". A pre-D2 client (no
+    // `rules_checksum` in its Subscribe) gets the old composed value — its
+    // frame is byte-identical to today's.
+    let has_checksum = subscribe.client_rules_checksum.is_some();
+    if !has_checksum {
+        debug!("client omitted rules_checksum; using composed-epoch fallback");
+    }
+    let (advertised_epoch, advertised_checksum) =
+        resume_advertisement(has_checksum, server_epoch, ruleset.checksum());
     let _ = server_frames_tx
-        .send(encode_resume_info(server_epoch))
+        .send(encode_resume_info(advertised_epoch, advertised_checksum))
         .await;
 
     // 5. Register the FIRST table. A where_sql rejection or the global device
@@ -350,12 +412,13 @@ async fn run_session(
         &sink_concrete,
         &principal,
         state.tenant_column.as_deref(),
+        &ruleset,
     )
     .await
     {
         match reject {
-            SubscribeReject::WhereSqlRejected(reason) => {
-                debug!(%reason, "closing socket: first subscribe where_sql rejected");
+            SubscribeReject::Rejected(reason) => {
+                debug!(%reason, "closing socket: first subscribe rejected");
                 let frame = axum::extract::ws::CloseFrame {
                     code: axum::extract::ws::close_code::INVALID,
                     reason: reason.into(),
@@ -408,9 +471,21 @@ async fn run_session(
     });
     let exp_for_writer = Arc::clone(&exp_fired);
 
+    // ADR-0031 D3: live-session re-scoping on a rules reload. `rules_rx` only
+    // wakes when the watcher (crates/nostos-server/src/main.rs::watch_rules)
+    // observes an actual checksum change on the rules file — a
+    // `watch::Receiver` that has already seen the current value never fires,
+    // so this arm costs nothing on the per-event delivery path below until an
+    // operator actually edits `nostos_rules.toml`.
+    let mut rules_rx = state.rules_changed.clone();
+    let rules_shared = Arc::clone(&state.rules);
+    let subs_for_reload = Arc::clone(&subs);
+    let principal_for_reload = principal.clone();
+
     let write_loop = tokio::spawn(async move {
         use futures_util::sink::SinkExt as _;
         let mut writer = writer;
+        let mut old_ruleset = ruleset;
         // C3 batched-writes: the first frame is awaited (no busy-spin, no
         // latency tax when idle). Once one is in hand, drain up to
         // `MAX_BATCH_FRAMES - 1` MORE frames that are *immediately available*
@@ -499,6 +574,47 @@ async fn run_session(
                         .await;
                     break;
                 }
+                // ADR-0031 D3: sync-rules reload. Verification is per-table:
+                // only a subscribed table whose rule decision changed at all
+                // trips this — an edit that never touches this socket's
+                // tables is free.
+                res = rules_rx.changed() => {
+                    if res.is_err() {
+                        continue; // sender dropped (server shutting down)
+                    }
+                    let new_ruleset = rules_shared.read().await.clone();
+                    let narrowed = {
+                        let s = subs_for_reload.lock().await;
+                        s.tables.iter().any(|table| {
+                            old_ruleset.decide(table, &principal_for_reload)
+                                != new_ruleset.decide(table, &principal_for_reload)
+                        })
+                    };
+                    if narrowed {
+                        debug!("closing socket: sync rules changed under a live session (ADR-0031 D3)");
+                        // ponytail: swap verification is coarse — ANY per-table
+                        // rule-decision change (a real narrow, or a widen this
+                        // code can't prove safe) disconnects the whole socket
+                        // rather than re-scoping just the affected subscription
+                        // in place. Ceiling: one reconnect + resnapshot per
+                        // connected client per rules edit that touches one of
+                        // its subscribed tables, including edits that only
+                        // widened. Upgrade path: a real subset/implication
+                        // check on `PredicateExpr` for the Allow-to-Allow case
+                        // so a genuine widen can keep running in place, plus
+                        // per-subscription differential resync instead of
+                        // closing the whole socket.
+                        let frame = axum::extract::ws::CloseFrame {
+                            code: axum::extract::ws::close_code::INVALID,
+                            reason: RULES_CHANGED_CLOSE_REASON.into(),
+                        };
+                        let _ = writer
+                            .send(axum::extract::ws::Message::Close(Some(frame)))
+                            .await;
+                        break;
+                    }
+                    old_ruleset = new_ruleset;
+                }
             }
         }
         let _ = writer;
@@ -525,6 +641,14 @@ async fn run_session(
     // bumps on slot recreate) + the op-log reader for the replay branch.
     let metrics_reader = Arc::clone(&state.metrics);
     let oplog_reader = state.oplog_reader.clone();
+    // ADR-0031 D3: read fresh (not a connection-start snapshot) so a
+    // mid-session subscribe issued after a live rules reload is decided
+    // against the CURRENT ruleset, not a stale one — otherwise a table just
+    // denied by the reload could still be granted to a newly-subscribed
+    // table on an existing socket. Cold path (bounded by MAX_TABLES_PER_SOCKET
+    // Subscribe frames per socket, ever), so the extra read costs nothing
+    // that matters.
+    let rules_for_reader = Arc::clone(&state.rules);
     let read_loop = tokio::spawn(async move {
         while let Some(Ok(msg)) = reader.next().await {
             let data: Option<Vec<u8>> = match msg {
@@ -541,6 +665,7 @@ async fn run_session(
                     where_sql,
                     resume_lsn,
                     epoch,
+                    rules_checksum,
                 }) => {
                     let req = SubscribeRequest {
                         table,
@@ -548,7 +673,9 @@ async fn run_session(
                         where_sql,
                         resume_lsn,
                         client_epoch: epoch,
+                        client_rules_checksum: rules_checksum,
                     };
+                    let current_ruleset = rules_for_reader.read().await.clone();
                     if let Err(e) = register_subscribe(
                         &req,
                         &subs_reader,
@@ -561,6 +688,7 @@ async fn run_session(
                         &ack_sink,
                         &write_principal,
                         tenant_column_for_writes.as_deref(),
+                        &current_ruleset,
                     )
                     .await
                     {
@@ -610,8 +738,10 @@ async fn run_session(
 /// (the socket is closed — see `run_session`).
 #[derive(Debug)]
 enum SubscribeReject {
-    /// `where_sql` failed to compile (ADR-0012). Carries the reason string.
-    WhereSqlRejected(String),
+    /// The predicate could not be built — rules denial (`NotSynced`/
+    /// `MissingClaim`, ADR-0031) or a `where_sql` compile failure (ADR-0012).
+    /// Carries [`SubscribeRejection`]'s rendered message.
+    Rejected(String),
     /// Per-socket table cap exceeded (`MAX_TABLES_PER_SOCKET`) — DoS guard.
     CapExceeded,
     /// Global concurrent-device cap reached (`SessionManager`).
@@ -642,6 +772,23 @@ struct SocketSubs {
     synthetic_cursor: u64,
 }
 
+/// The `(epoch, rules_checksum)` pair to advertise on `resume_info` for a
+/// subscribe (ADR-0031 D2). Shared by the advertise site (`run_session`) and
+/// `register_subscribe`'s resume gate so the two can never drift apart: what
+/// a client is told to persist is byte-for-byte what its next resume is
+/// judged against.
+fn resume_advertisement(
+    client_sent_checksum: bool,
+    server_epoch: u64,
+    rules_checksum: u64,
+) -> (u64, Option<u64>) {
+    if client_sent_checksum {
+        (server_epoch, Some(rules_checksum))
+    } else {
+        (compose_sync_epoch(server_epoch, rules_checksum), None)
+    }
+}
+
 /// Register one table subscription on the socket's shared sink: predicate
 /// build, per-socket cap + idempotency checks, `SessionManager::connect`, and
 /// snapshot-on-subscribe. Called for the first subscribe (pre-split, in
@@ -649,7 +796,7 @@ struct SocketSubs {
 /// Returns `Err` WITHOUT registering on any rejection. Critical sections on
 /// `subs` are short and never span an `.await`; access is serialized anyway
 /// (one reader task; the first subscribe runs before the reader is spawned).
-#[allow(clippy::too_many_arguments)] // 9 params is the genuine subscribe surface; a param-struct would obscure the call sites.
+#[allow(clippy::too_many_arguments)] // 10 params is the genuine subscribe surface; a param-struct would obscure the call sites.
 async fn register_subscribe(
     req: &SubscribeRequest,
     subs: &Arc<Mutex<SocketSubs>>,
@@ -660,6 +807,7 @@ async fn register_subscribe(
     sink_concrete: &Arc<TokioEventSink>,
     principal: &Principal,
     tenant_column: Option<&str>,
+    ruleset: &ActiveRuleset,
 ) -> Result<(), SubscribeReject> {
     // Cap + idempotent-repeat check (short lock, no await).
     {
@@ -673,8 +821,8 @@ async fn register_subscribe(
         }
     }
 
-    let predicate = build_predicate(req, principal, tenant_column)
-        .map_err(SubscribeReject::WhereSqlRejected)?;
+    let predicate = build_predicate(req, principal, tenant_column, ruleset)
+        .map_err(|rejection| SubscribeReject::Rejected(rejection.to_string()))?;
     let session = SyncSession::new_authenticated(predicate, principal.clone());
     // Derive the type-erased clone the store holds; `sink_concrete` stays the
     // concrete handle for snapshot delivery below.
@@ -694,7 +842,23 @@ async fn register_subscribe(
     //    replay, no reader) falls through to the snapshot path below — slice-1
     //    reconcile is the correctness floor.
     let client_epoch = req.client_epoch.unwrap_or(0);
-    if client_epoch == server_epoch && !req.table.is_empty() {
+    // ADR-0031 D2: a D2 client sent `rules_checksum` on Subscribe, so its
+    // epoch and checksum are compared independently against the raw
+    // `server_epoch` and the active ruleset's checksum — same slot epoch but
+    // a rules edit still forces a snapshot.
+    //
+    // ponytail: pre-D2 clients get the rules checksum folded into the
+    // advertised epoch, so their logs cannot distinguish a slot recreate from
+    // a rules edit. Ceiling: log-level attribution only for old clients.
+    // Upgrade path: drop the fallback once the SDK floor is D2-or-newer.
+    let (want_epoch, want_checksum) = resume_advertisement(
+        req.client_rules_checksum.is_some(),
+        server_epoch,
+        ruleset.checksum(),
+    );
+    let epoch_and_checksum_match =
+        client_epoch == want_epoch && req.client_rules_checksum == want_checksum;
+    if epoch_and_checksum_match && !req.table.is_empty() {
         if let (Some(reader), Some(resume)) = (oplog_reader, req.resume_lsn) {
             let in_window = matches!(reader.window_tail().await, Ok(tail) if resume >= tail);
             if in_window {
@@ -952,7 +1116,54 @@ async fn dispatch_write(
     }
 }
 
+/// Why a subscribe was refused. Rendered into the close reason via `Display`
+/// (both `run_session` fatal paths and `register_subscribe`'s
+/// `SubscribeReject::Rejected` wrap the rendered string — the SDKs surface it
+/// verbatim to app developers, ADR-0031).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubscribeRejection {
+    /// The table is unlisted, or listed with `sync = false` (`toggles` mode).
+    /// Fail-closed (ADR-0031 Global Constraint 10): an unlisted table is never
+    /// treated as "everything", only ever as "nothing".
+    NotSynced { table: String, mode: SyncMode },
+    /// The connecting principal lacks a claim the rules' scope for this table
+    /// references (e.g. `org_id = claims.org_id` with no `org_id` claim).
+    MissingClaim { table: String, claim: String },
+    /// `where_sql` failed to compile (ADR-0012) — folded into this enum so
+    /// every subscribe refusal shares one path.
+    InvalidWhereSql(String),
+}
+
+impl std::fmt::Display for SubscribeRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSynced { table, mode } => write!(
+                f,
+                "table `{table}` is not synced by the active rules (sync_mode={})",
+                mode.as_str()
+            ),
+            Self::MissingClaim { table, claim } => write!(
+                f,
+                "missing claim `{claim}` required by the rules for table `{table}`"
+            ),
+            Self::InvalidWhereSql(reason) => write!(f, "invalid where_sql: {reason}"),
+        }
+    }
+}
+
 /// Build the server-enforced predicate from the client's subscribe + principal.
+///
+/// Composition order (ADR-0031), all three ANDed, none skippable:
+/// **rules scope** (this table's compiled scope from the active ruleset — deny
+/// closes the socket before anything else runs) **AND** **tenant scope**
+/// (ADR-0011) **AND** **client filters + `where_sql`** (ADR-0012).
+///
+/// The rules decision runs FIRST and fail-closed: an unlisted/toggled-off
+/// table or a missing scope claim rejects the subscribe outright, never
+/// falling back to match-all. `ActiveRuleset::all_mode()` always allows
+/// (`RuleDecision::Allow(PredicateExpr::any())`) — but tenant scoping below
+/// still applies unconditionally in every mode (ADR-0031 Global Constraint
+/// 11: `all` mode disables rules, not tenancy).
 ///
 /// The client's filters are always intersected with the tenant filter when a
 /// tenant column is configured AND the principal is authenticated — the client
@@ -964,26 +1175,50 @@ async fn dispatch_write(
 ///
 /// The optional `where_sql` (ADR-0012 safe-SQL-subset compiler) is compiled and
 /// ANDed in **before** the tenant clause — so the server-injected tenant scoping
-/// wraps the client expression and a `where_sql` can never shed it. A parse
-/// failure is returned as `Err(reason)`; the caller closes the socket with that
-/// reason (prefixed `"invalid where_sql: "`) before any event flows.
+/// wraps the client expression and a `where_sql` can never shed it or the rules
+/// scope seeded below. A parse failure is `Err(InvalidWhereSql)`; the caller
+/// closes the socket with that reason before any event flows.
 ///
-/// The IF-to-enforce decision is [`Principal::tenant_scope`] — the same seam
-/// the write path (`dispatch_write`, ADR-0018) calls, so the read and write
-/// enforcement conditions cannot drift apart.
+/// The IF-to-enforce-tenant decision is [`Principal::tenant_scope`] — the same
+/// seam the write path (`dispatch_write`, ADR-0018) calls, so the read and
+/// write enforcement conditions cannot drift apart.
 fn build_predicate(
     subscribe: &SubscribeRequest,
     principal: &Principal,
     tenant_column: Option<&str>,
-) -> Result<Predicate, String> {
+    ruleset: &ActiveRuleset,
+) -> Result<Predicate, SubscribeRejection> {
+    // Rules scope FIRST, fail-closed (ADR-0031). No filter/tenant work happens
+    // until the rules allow this table for this principal.
+    let rules_expr = match ruleset.decide(&subscribe.table, principal) {
+        RuleDecision::Allow(expr) => expr,
+        RuleDecision::DeniedTable => {
+            return Err(SubscribeRejection::NotSynced {
+                table: subscribe.table.clone(),
+                mode: ruleset.mode(),
+            });
+        }
+        RuleDecision::DeniedClaim(claim) => {
+            return Err(SubscribeRejection::MissingClaim {
+                table: subscribe.table.clone(),
+                claim,
+            });
+        }
+    };
+
     let scope = principal.tenant_scope(tenant_column);
 
-    // Start match-all, then fold in the client's own filters — EXCLUDING any on
-    // the tenant column, which the server overrides with the principal's real
-    // value (never client-attested). The `and_eq` combinator collapses the
-    // initial match-all down to a bare `Eq` leaf, so a single-filter predicate
-    // is structurally identical to the historical `Predicate::eq` form.
-    let mut p = Predicate::all(&subscribe.table);
+    // Seed the predicate from the rules scope (replaces the historical
+    // match-all start), then fold in the client's own filters — EXCLUDING any
+    // on the tenant column, which the server overrides with the principal's
+    // real value (never client-attested). The `and_eq` combinator collapses an
+    // `Any` root down to a bare `Eq` leaf (all-mode, no rules scope) and
+    // otherwise ANDs onto whatever the rules already seeded — same combinator,
+    // no special-casing needed here.
+    let mut p = Predicate {
+        table: subscribe.table.clone(),
+        expr: rules_expr,
+    };
     for f in &subscribe.filters {
         if scope.is_some_and(|s| f.column == s.column) {
             continue; // server injects the real tenant value below
@@ -993,7 +1228,8 @@ fn build_predicate(
 
     // Compile the optional safe-SQL-subset expression (ADR-0012) and AND it in.
     // Done BEFORE tenant enforcement so the server-injected tenant clause wraps
-    // the client expression — a where_sql can never widen scope past its tenant.
+    // the client expression — a where_sql can never widen scope past its tenant
+    // OR past the rules scope already folded in above.
     if let Some(sql) = &subscribe.where_sql {
         match nostos_domain::parse_predicate_expr(sql) {
             // `Predicate` has no `and(PredicateExpr)` method (only `and_eq`),
@@ -1005,13 +1241,14 @@ fn build_predicate(
                     expr: p.expr.and(expr),
                 }
             }
-            Err(e) => return Err(format!("invalid where_sql: {e}")),
+            Err(e) => return Err(SubscribeRejection::InvalidWhereSql(e.to_string())),
         }
     }
 
     // Server-enforced tenant scoping (ADR-0011). Always injected for an
-    // authenticated principal when a tenant column is configured. This stays
-    // LAST so it wraps everything above (filters + where_sql).
+    // authenticated principal when a tenant column is configured — in every
+    // rules mode, including `all` (ADR-0031 Global Constraint 11). This stays
+    // LAST so it wraps everything above (rules scope + filters + where_sql).
     if let Some(s) = scope {
         p = p.and_eq(s.column, ColumnValue::text(s.value));
     }
@@ -1030,6 +1267,11 @@ struct SubscribeRequest {
     /// The client's last-seen server slot epoch (ADR-0025 slice 4b). `None` on
     /// old clients → the gate treats it as a mismatch → snapshot (safe default).
     client_epoch: Option<u64>,
+    /// The client's last-synced rules checksum (ADR-0031, D2). `Some` marks a
+    /// D2-or-newer client: the gate compares epoch and checksum independently.
+    /// `None` marks a pre-D2 client: the gate falls back to the composed
+    /// epoch (see `register_subscribe`).
+    client_rules_checksum: Option<u64>,
 }
 
 /// Await the first frame, require it to be a `ClientMessage::Subscribe`, and
@@ -1056,12 +1298,14 @@ async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
                 where_sql,
                 resume_lsn,
                 epoch,
+                rules_checksum,
             } => Some(SubscribeRequest {
                 table,
                 filters,
                 where_sql,
                 resume_lsn,
                 client_epoch: epoch,
+                client_rules_checksum: rules_checksum,
             }),
             // An ACK or a Write before subscribing is out of order — reject by
             // closing the socket (same discipline as early ACK). The caller
@@ -1140,6 +1384,9 @@ mod tests {
         (subs, manager, Arc::new(sink), rx)
     }
 
+    // Legacy (pre-D2) request: no `rules_checksum` on the wire, so the gate
+    // takes the composed-epoch fallback. D2 tests build `SubscribeRequest`
+    // directly with `client_rules_checksum: Some(_)`.
     fn req(table: &str, client_epoch: Option<u64>, resume: Option<u64>) -> SubscribeRequest {
         SubscribeRequest {
             table: table.into(),
@@ -1147,6 +1394,7 @@ mod tests {
             where_sql: None,
             resume_lsn: resume,
             client_epoch,
+            client_rules_checksum: None,
         }
     }
 
@@ -1161,8 +1409,14 @@ mod tests {
             replay_calls: Arc::clone(&calls),
         });
         let principal = Principal::new("acct", "tenant-acme");
+        // Legacy (no rules_checksum) client: the gate compares the composed
+        // fallback, so the request must carry the composed value to match.
         register_subscribe(
-            &req("tasks", Some(1), Some(5)),
+            &req(
+                "tasks",
+                Some(compose_sync_epoch(1, ActiveRuleset::all_mode().checksum())),
+                Some(5),
+            ),
             &subs,
             &manager,
             None,
@@ -1171,6 +1425,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1204,6 +1459,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1227,7 +1483,11 @@ mod tests {
         });
         let principal = Principal::new("acct", "tenant-acme");
         register_subscribe(
-            &req("tasks", Some(1), Some(5)),
+            &req(
+                "tasks",
+                Some(compose_sync_epoch(1, ActiveRuleset::all_mode().checksum())),
+                Some(5),
+            ),
             &subs,
             &manager,
             None,
@@ -1236,6 +1496,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1249,7 +1510,11 @@ mod tests {
         let (subs, manager, sink, mut rx) = harness().await;
         let principal = Principal::new("acct", "tenant-acme");
         register_subscribe(
-            &req("tasks", Some(1), Some(5)),
+            &req(
+                "tasks",
+                Some(compose_sync_epoch(1, ActiveRuleset::all_mode().checksum())),
+                Some(5),
+            ),
             &subs,
             &manager,
             None,
@@ -1258,6 +1523,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1277,7 +1543,11 @@ mod tests {
         });
         let principal = Principal::new("acct", "tenant-acme");
         register_subscribe(
-            &req("tasks", Some(1), Some(5)),
+            &req(
+                "tasks",
+                Some(compose_sync_epoch(1, ActiveRuleset::all_mode().checksum())),
+                Some(5),
+            ),
             &subs,
             &manager,
             None,
@@ -1286,6 +1556,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1299,5 +1570,399 @@ mod tests {
             "replay was attempted, just empty"
         );
         assert!(subs.lock().await.tables.contains("tasks"));
+    }
+
+    // ADR-0031 D2 — the resume gate compares epoch and checksum
+    // independently for a client that sent `rules_checksum` on Subscribe.
+
+    // (f) D2 client, epoch AND checksum both match current server state →
+    // replay (not snapshot).
+    #[tokio::test]
+    async fn d2_client_replays_when_epoch_and_checksum_match() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev(10)],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        let ruleset = ActiveRuleset::all_mode();
+        let req = SubscribeRequest {
+            table: "tasks".into(),
+            filters: Vec::new(),
+            where_sql: None,
+            resume_lsn: Some(5),
+            client_epoch: Some(7),
+            client_rules_checksum: Some(ruleset.checksum()),
+        };
+        register_subscribe(
+            &req,
+            &subs,
+            &manager,
+            None,
+            7,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(crate::router::SinkMsg::Event(_))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    // (g) D2 client, same slot epoch but the active ruleset checksum has
+    // moved on (a rules edit, no slot recreate) → snapshot. This is the
+    // entire point of D2: pre-D2 epoch-only comparison would have replayed.
+    #[tokio::test]
+    async fn d2_client_snapshots_when_only_checksum_differs() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev(10)],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        let old_checksum = ActiveRuleset::all_mode().checksum();
+        let current_ruleset = ActiveRuleset::compile(&toggles_rules("tasks", true, None)).unwrap();
+        assert_ne!(
+            old_checksum,
+            current_ruleset.checksum(),
+            "test needs two distinguishable rulesets"
+        );
+        let req = SubscribeRequest {
+            table: "tasks".into(),
+            filters: Vec::new(),
+            where_sql: None,
+            resume_lsn: Some(5),
+            client_epoch: Some(7),
+            client_rules_checksum: Some(old_checksum),
+        };
+        register_subscribe(
+            &req,
+            &subs,
+            &manager,
+            None,
+            7,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+            &current_ruleset,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "checksum mismatch → snapshot, nothing delivered"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "replay never attempted");
+    }
+
+    // (h) legacy (pre-D2) client, no `rules_checksum` on the wire — the
+    // composed-epoch fallback still forces a snapshot when the rules changed,
+    // exactly as it would have folded a slot recreate in before D2.
+    #[tokio::test]
+    async fn legacy_client_snapshots_on_rules_change() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev(10)],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        let current_ruleset = ActiveRuleset::compile(&toggles_rules("tasks", true, None)).unwrap();
+        let stale_composed = compose_sync_epoch(7, ActiveRuleset::all_mode().checksum());
+        register_subscribe(
+            &req("tasks", Some(stale_composed), Some(5)),
+            &subs,
+            &manager,
+            None,
+            7,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+            &current_ruleset,
+        )
+        .await
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    // (i) legacy client, nothing changed (same slot epoch, same rules) →
+    // still replays — the fallback must not regress ADR-0025 for clients that
+    // never adopt D2.
+    #[tokio::test]
+    async fn legacy_client_replays_when_nothing_changed() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev(10)],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        let ruleset = ActiveRuleset::all_mode();
+        let composed = compose_sync_epoch(7, ruleset.checksum());
+        register_subscribe(
+            &req("tasks", Some(composed), Some(5)),
+            &subs,
+            &manager,
+            None,
+            7,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(crate::router::SinkMsg::Event(_))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    // (j) what `resume_info` advertises is exactly what the gate accepts on
+    // the client's next reconnect — both the D2 and the legacy path. Exercises
+    // `resume_advertisement` directly (the single source of truth for both
+    // sites) rather than re-deriving the formula by hand, so this test only
+    // fails if the two call sites actually diverge.
+    #[tokio::test]
+    async fn advertised_values_match_gate_values() {
+        let ruleset = ActiveRuleset::all_mode();
+        let principal = Principal::new("acct", "tenant-acme");
+
+        // D2 path.
+        {
+            let (subs, manager, sink, mut rx) = harness().await;
+            let calls = Arc::new(AtomicU64::new(0));
+            let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+                events: vec![ev(10)],
+                tail: 0,
+                replay_calls: Arc::clone(&calls),
+            });
+            let (adv_epoch, adv_checksum) = resume_advertisement(true, 7, ruleset.checksum());
+            let req = SubscribeRequest {
+                table: "tasks".into(),
+                filters: Vec::new(),
+                where_sql: None,
+                resume_lsn: Some(5),
+                client_epoch: Some(adv_epoch),
+                client_rules_checksum: adv_checksum,
+            };
+            register_subscribe(
+                &req,
+                &subs,
+                &manager,
+                None,
+                7,
+                Some(&reader),
+                &sink,
+                &principal,
+                None,
+                &ruleset,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                rx.recv().await,
+                Some(crate::router::SinkMsg::Event(_))
+            ));
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+
+        // Legacy path.
+        {
+            let (subs, manager, sink, mut rx) = harness().await;
+            let calls = Arc::new(AtomicU64::new(0));
+            let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+                events: vec![ev(10)],
+                tail: 0,
+                replay_calls: Arc::clone(&calls),
+            });
+            let (adv_epoch, adv_checksum) = resume_advertisement(false, 7, ruleset.checksum());
+            assert_eq!(adv_checksum, None, "legacy path omits the checksum key");
+            register_subscribe(
+                &req("tasks", Some(adv_epoch), Some(5)),
+                &subs,
+                &manager,
+                None,
+                7,
+                Some(&reader),
+                &sink,
+                &principal,
+                None,
+                &ruleset,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                rx.recv().await,
+                Some(crate::router::SinkMsg::Event(_))
+            ));
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    // (ADR-0031) SyncRouterState::new defaults to the permissive zero-config
+    // ruleset so no existing construction site (none of which pass rules)
+    // breaks.
+    #[tokio::test]
+    async fn router_state_defaults_to_all_mode() {
+        let store: Arc<dyn SessionStore> = Arc::new(crate::store::InMemorySessionStore::new());
+        let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
+        let auth: Arc<dyn SyncAuth> = Arc::new(crate::auth::AllowAnonymous::new());
+        let state = SyncRouterState::new(manager, auth);
+        assert_eq!(state.rules.read().await.mode(), nostos_domain::SyncMode::All);
+    }
+
+    fn toggles_rules(table: &str, sync: bool, scope: Option<&str>) -> nostos_domain::SyncRules {
+        nostos_domain::SyncRules {
+            version: nostos_domain::RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![nostos_domain::TableRule {
+                table: table.into(),
+                sync,
+                scope: scope.map(str::to_string),
+            }],
+            hand: Vec::new(),
+        }
+    }
+
+    // Task 10: toggles mode, `notes` sync=false → the rules decision is
+    // fail-closed, not "everything" — `build_predicate` refuses before any
+    // filter/tenant work runs.
+    #[test]
+    fn subscribe_to_unsynced_table_is_rejected() {
+        let ruleset = ActiveRuleset::compile(&toggles_rules("notes", false, None)).unwrap();
+        let principal = Principal::new("acct", "tenant-acme");
+        let err =
+            build_predicate(&req("notes", None, None), &principal, None, &ruleset).unwrap_err();
+        assert_eq!(
+            err,
+            SubscribeRejection::NotSynced {
+                table: "notes".into(),
+                mode: SyncMode::Toggles,
+            }
+        );
+    }
+
+    // Task 10: rules scope (`status = 'open'`) AND tenant scope (`org_id`) —
+    // a row must satisfy both, neither alone is enough.
+    #[test]
+    fn rules_scope_is_anded_with_tenant_scope() {
+        let ruleset =
+            ActiveRuleset::compile(&toggles_rules("tasks", true, Some("status = 'open'"))).unwrap();
+        let principal = Principal::new("acct", "tenant-acme");
+        let predicate = build_predicate(
+            &req("tasks", None, None),
+            &principal,
+            Some("org_id"),
+            &ruleset,
+        )
+        .unwrap();
+
+        let row = |status: &'static str, org: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                match col {
+                    "status" => Some(ColumnValue::text(status)),
+                    "org_id" => Some(ColumnValue::text(org)),
+                    _ => None,
+                }
+            }
+        };
+        assert!(predicate.expr.matches(row("open", "tenant-acme")));
+        assert!(
+            !predicate.expr.matches(row("closed", "tenant-acme")),
+            "rules scope must hold"
+        );
+        assert!(
+            !predicate.expr.matches(row("open", "someone-else")),
+            "tenant scope must hold"
+        );
+    }
+
+    // Task 10 / ADR-0031 Global Constraint 11: `all` mode disables rules but
+    // never tenancy — a foreign-tenant row must not match even with no rules
+    // scope in play.
+    #[test]
+    fn all_mode_still_applies_tenant_scope() {
+        let ruleset = ActiveRuleset::all_mode();
+        let principal = Principal::new("acct", "tenant-acme");
+        let predicate = build_predicate(
+            &req("tasks", None, None),
+            &principal,
+            Some("org_id"),
+            &ruleset,
+        )
+        .unwrap();
+
+        let with_org = |org: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                (col == "org_id").then(|| ColumnValue::text(org))
+            }
+        };
+        assert!(predicate.expr.matches(with_org("tenant-acme")));
+        assert!(!predicate.expr.matches(with_org("someone-else")));
+    }
+
+    // Task 10: a scope claim the principal doesn't carry is a denial, not a
+    // silent widen — `claims.sub` (no explicit claim needed, resolves to the
+    // account id) is present, but a table gated on `claims.org_id` with no
+    // `org_id` claim on the principal must reject.
+    #[test]
+    fn missing_claim_rejects_subscribe() {
+        let ruleset = ActiveRuleset::compile(&toggles_rules(
+            "tasks",
+            true,
+            Some("org_id = claims.org_id"),
+        ))
+        .unwrap();
+        let principal = Principal::new("acct", "tenant-acme"); // no org_id claim
+        let err =
+            build_predicate(&req("tasks", None, None), &principal, None, &ruleset).unwrap_err();
+        assert_eq!(
+            err,
+            SubscribeRejection::MissingClaim {
+                table: "tasks".into(),
+                claim: "org_id".into(),
+            }
+        );
+    }
+
+    // Task 10: client `where_sql` is ANDed onto the rules scope, never
+    // substituted for it — `owner_id = claims.sub` (→ "owner1") AND
+    // `owner_id = 'someone_else'` is unsatisfiable, so the composed predicate
+    // matches nothing, proving where_sql cannot widen past the rules scope.
+    #[test]
+    fn where_sql_cannot_widen_past_rules() {
+        let ruleset =
+            ActiveRuleset::compile(&toggles_rules("tasks", true, Some("owner_id = claims.sub")))
+                .unwrap();
+        let principal = Principal::new("owner1", "tenant-acme");
+        let mut subscribe = req("tasks", None, None);
+        subscribe.where_sql = Some("owner_id = 'someone_else'".into());
+        let predicate = build_predicate(&subscribe, &principal, None, &ruleset).unwrap();
+
+        let with_owner = |owner: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                (col == "owner_id").then(|| ColumnValue::text(owner))
+            }
+        };
+        assert!(!predicate.expr.matches(with_owner("someone_else")));
+        assert!(!predicate.expr.matches(with_owner("owner1")));
     }
 }

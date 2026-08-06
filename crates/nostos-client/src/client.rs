@@ -419,6 +419,14 @@ where
         self.engine.lock().await.epoch()
     }
 
+    /// Read the rules checksum this client last synced under (ADR-0031 D2).
+    /// 0 on a fresh DB (or a `resume_info` that never carried a checksum) →
+    /// the Subscribe omits `rules_checksum` → the server uses the composed-
+    /// epoch fallback. Delegates through the engine.
+    pub async fn rules_checksum(&self) -> nostos_core::Result<u64> {
+        self.engine.lock().await.rules_checksum()
+    }
+
     /// Enqueue a local write to the durable outbox. Returns the write's
     /// monotonically increasing id (the correlation key on the wire).
     ///
@@ -842,12 +850,18 @@ where
         // snapshot (mismatch). 0 on a fresh DB → None → server treats as
         // mismatch (correct for a first-ever connect).
         let client_epoch = self.epoch().await?;
+        // ADR-0031 D2: send the last-synced ruleset checksum so the server can
+        // advertise a raw (epoch, checksum) pair in resume_info instead of the
+        // composed fallback — 0 on a fresh DB (or a resume_info that never
+        // carried one) → None → composed-epoch fallback (Task 11).
+        let client_rules_checksum = self.rules_checksum().await?;
         let subscribe = ClientMessage::Subscribe {
             table: self.config.table.clone(),
             filters: vec![],
             where_sql: self.config.where_sql.clone(),
             resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
             epoch: (client_epoch > 0).then_some(client_epoch),
+            rules_checksum: (client_rules_checksum > 0).then_some(client_rules_checksum),
         };
         let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
         write
@@ -865,6 +879,7 @@ where
                 where_sql: sub.where_sql.clone(),
                 resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
                 epoch: (client_epoch > 0).then_some(client_epoch),
+                rules_checksum: (client_rules_checksum > 0).then_some(client_rules_checksum),
             };
             let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
             write
@@ -1000,35 +1015,54 @@ where
                         continue;
                     }
 
-                    // ADR-0025 F2: `resume_info` advertises the server's current
-                    // slot epoch. Persist it so the NEXT reconnect's Subscribe
-                    // carries the epoch this session was gated against (the
-                    // resume gate compares client vs server epoch — a match ⇒
-                    // op-log replay, a mismatch ⇒ full snapshot). Intercepted
-                    // before the row path; never batched with events.
-                    if let Some(epoch) = decode_resume_info(&bytes) {
+                    // ADR-0025 F2 + ADR-0031 D2: `resume_info` advertises the
+                    // server's current slot epoch, and MAY also carry a rules
+                    // checksum (raw pair — see `resume_advertisement` in
+                    // nostos-infra/transport.rs). Persist both so the NEXT
+                    // reconnect's Subscribe carries what this session was gated
+                    // against. Both writes happen in the SAME spawn_blocking
+                    // hop: two hops could interleave and strand a half-updated
+                    // pair (an epoch from one resume_info paired with a
+                    // checksum from a different one). Absent checksum: leave
+                    // the stored value untouched, don't zero it — a stray frame
+                    // without a checksum must not downgrade a client that's
+                    // already on the explicit path back to the composed
+                    // fallback. Intercepted before the row path; never batched
+                    // with events.
+                    if let Some((epoch, rules_checksum)) = decode_resume_info(&bytes) {
                         let engine = Arc::clone(&self.engine);
                         // Non-fatal: a persist failure just means the next
                         // reconnect falls back to snapshot (epoch unknown) — it
                         // must NOT kill this session's data delivery.
-                        match tokio::task::spawn_blocking(move || {
-                            engine.blocking_lock().save_epoch(epoch)
+                        match tokio::task::spawn_blocking(move || -> nostos_core::Result<()> {
+                            let engine = engine.blocking_lock();
+                            engine.save_epoch(epoch)?;
+                            if let Some(checksum) = rules_checksum {
+                                engine.save_rules_checksum(checksum)?;
+                            }
+                            Ok(())
                         })
                         .await
                         .map_err(|e| ClientError::Join(e.to_string()))
                         {
                             Ok(Ok(())) => {
-                                debug!(server_epoch = epoch, "resume_info received — epoch persisted");
+                                debug!(
+                                    server_epoch = epoch,
+                                    rules_checksum = ?rules_checksum,
+                                    "resume_info received — epoch + checksum persisted"
+                                );
                             }
                             Ok(Err(e)) => warn!(
                                 server_epoch = epoch,
+                                rules_checksum = ?rules_checksum,
                                 error = %e,
-                                "save_epoch failed; next reconnect falls back to snapshot"
+                                "save_epoch/save_rules_checksum failed; next reconnect falls back to snapshot"
                             ),
                             Err(e) => warn!(
                                 server_epoch = epoch,
+                                rules_checksum = ?rules_checksum,
                                 error = %e,
-                                "save_epoch task join failed"
+                                "resume_info persist task join failed"
                             ),
                         }
                         last_frame_at = tokio::time::Instant::now();

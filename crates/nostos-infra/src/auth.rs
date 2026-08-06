@@ -31,6 +31,7 @@ use nostos_domain::Principal;
 use hmac::{Hmac, Mac};
 use jsonwebtoken::Algorithm;
 use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing::warn;
 
@@ -42,6 +43,22 @@ type HmacSha256 = Hmac<Sha256>;
 /// `/.well-known/jwks.json` (ADR-0010 addendum). A deploy that wants a
 /// shorter window can be given a config knob later; no one has asked yet.
 pub const DEFAULT_JWKS_TTL: Duration = Duration::from_mins(10);
+
+/// D1 security review (ADR-0031): max number of flat claims lifted from a
+/// verified JWT into `Principal::extra`. Beyond this the token is REJECTED,
+/// not truncated — a silently truncated claim set could drop the one claim a
+/// rules scope depends on and change the meaning of a rule.
+const MAX_EXTRA_CLAIMS: usize = 64;
+/// D1: max byte length of any single lifted claim name or value. Same
+/// rejection rule and same reason as `MAX_EXTRA_CLAIMS`.
+const MAX_CLAIM_LEN: usize = 1024;
+/// D1: claim names that may never enter `Principal::extra`, because
+/// `Principal::claim` resolves them from the typed `account_id`/`tenant_id`
+/// fields and a duplicate in `extra` would be ambiguous — worse, a
+/// legitimately-issued token could smuggle a `tenant_id` claim that never
+/// reaches `extra` (it's filtered here) but must also never overwrite the
+/// server-derived `Principal::tenant_id`.
+const RESERVED_CLAIMS: [&str; 4] = ["sub", "tenant_id", "exp", "iat"];
 
 /// Authenticate nobody — every token becomes the anonymous principal.
 ///
@@ -175,9 +192,15 @@ fn verify_supabase_hs256(token: &str, secret: &[u8]) -> Option<Principal> {
     if sub.is_empty() {
         return None;
     }
+    // ADR-0031, D1: filter+cap the remaining claims before they ever reach a
+    // Principal. `?` here rejects the whole token (never a downgrade to
+    // anonymous) if the claim set or a claim exceeds its size cap.
+    let extra = lift_extra_claims(&claims.rest)?;
     // Phase 0: tenant = account (one tenant per Supabase user). ADR-0011 defers
-    // the real tenant-claim/RLS resolution.
-    Some(Principal::new(sub.clone(), sub))
+    // the real tenant-claim/RLS resolution. `extra` never contains
+    // `tenant_id` (RESERVED_CLAIMS), so a payload-carried tenant_id claim
+    // cannot shadow this derived value.
+    Some(Principal::with_claims(sub.clone(), sub, extra))
 }
 
 /// Clock-skew leeway for JWT `exp` enforcement (ADR-0029 §Decision-4). Mirrors
@@ -209,6 +232,63 @@ struct SupabaseClaims {
     /// never expires (JWT convention). ADR-0029 §Decision-4.
     #[serde(default)]
     exp: Option<i64>,
+    /// Every other claim in the payload (ADR-0031, D1) — `sub`/`exp` are
+    /// matched by the named fields above and never appear here. Filtered to
+    /// flat scalars and size-capped by [`lift_extra_claims`] before it ever
+    /// reaches a [`Principal`].
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Filter a JWT payload's non-`sub`/`exp` claims down to the flat,
+/// string-valued map `Principal::extra` carries (ADR-0031, D1 + security
+/// review). Returns `None` — reject the whole token — when the claim set or
+/// any single claim exceeds the configured caps; the caller propagates that
+/// as an authentication failure via `?`, never a downgrade to anonymous.
+///
+/// `pub(crate)`: reused as-is by `crate::jwks::JwksVerifier::verify` (the
+/// RS256/ES256/EdDSA path) so the security review lives in exactly one place
+/// rather than being duplicated per verifier.
+///
+/// - Reserved names (`RESERVED_CLAIMS`) are dropped silently: they are
+///   resolved from `Principal`'s typed fields, not `extra`, so a payload
+///   value under one of these names must never survive into the map (that is
+///   exactly the tenant-escape shape the review calls out).
+/// - Objects and arrays are dropped, never stringified — a stringified
+///   object would let a rules scope like `col = claims.org` compare against
+///   `{"id":"acme"}` and silently never match.
+/// - `null` is dropped, not turned into `""` — an empty-string claim would
+///   make `col = claims.x` match rows with an empty column, a real widening.
+/// - Numbers and booleans stringify via `serde_json::Value`'s own rendering.
+pub(crate) fn lift_extra_claims(
+    rest: &serde_json::Map<String, serde_json::Value>,
+) -> Option<BTreeMap<String, String>> {
+    let mut extra = BTreeMap::new();
+    for (name, value) in rest {
+        if RESERVED_CLAIMS.contains(&name.as_str()) {
+            continue;
+        }
+        let value = match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null
+            | serde_json::Value::Object(_)
+            | serde_json::Value::Array(_) => {
+                continue;
+            }
+        };
+        if name.len() > MAX_CLAIM_LEN || value.len() > MAX_CLAIM_LEN {
+            warn!(claim = %name, "jwt rejected: claim name or value exceeds size cap");
+            return None;
+        }
+        extra.insert(name.clone(), value);
+    }
+    if extra.len() > MAX_EXTRA_CLAIMS {
+        warn!(count = extra.len(), "jwt rejected: too many claims");
+        return None;
+    }
+    Some(extra)
 }
 
 /// Minimal base64url decode (no padding). Avoids a base64 dependency for the
@@ -305,6 +385,120 @@ mod tests {
         mac.update(signing_input.as_bytes());
         let sig = b64url(&mac.finalize().into_bytes());
         format!("{signing_input}.{sig}")
+    }
+
+    /// Sign an arbitrary JSON payload as an HS256 token (used by the D1
+    /// extra-claims tests below, which need payload shapes
+    /// `valid_hs256_token`/`hs256_token_with_exp` can't express).
+    fn hs256_token_from_payload(secret: &[u8], payload_json: &str) -> String {
+        let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = b64url(payload_json.as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let mut mac = HmacSha256::new_from_slice(secret).expect("hmac key");
+        mac.update(signing_input.as_bytes());
+        let sig = b64url(&mac.finalize().into_bytes());
+        format!("{signing_input}.{sig}")
+    }
+
+    // ---- D1: extra-claims lifting + security review (ADR-0031) ----
+
+    #[tokio::test]
+    async fn jwt_lifts_flat_string_claims() {
+        let secret = b"secret";
+        let payload =
+            serde_json::json!({"sub": "u1", "org_id": "acme", "role": "admin", "n": 7}).to_string();
+        let token = hs256_token_from_payload(secret, &payload);
+        let auth = SupabaseJwtAuth::new(secret.to_vec());
+        let p = auth.authenticate(&token).await.expect("verifies");
+        assert_eq!(p.extra.len(), 3);
+        assert_eq!(p.extra.get("org_id").map(String::as_str), Some("acme"));
+        assert_eq!(p.extra.get("role").map(String::as_str), Some("admin"));
+        assert_eq!(p.extra.get("n").map(String::as_str), Some("7"));
+    }
+
+    #[tokio::test]
+    async fn nested_and_array_claims_are_dropped() {
+        let secret = b"secret";
+        let payload = serde_json::json!({
+            "sub": "u1",
+            "org": {"id": "acme"},
+            "roles": ["a", "b"],
+            "ok": "yes",
+        })
+        .to_string();
+        let token = hs256_token_from_payload(secret, &payload);
+        let auth = SupabaseJwtAuth::new(secret.to_vec());
+        let p = auth.authenticate(&token).await.expect("verifies");
+        assert_eq!(
+            p.extra.len(),
+            1,
+            "objects and arrays must be dropped, not stringified: {:?}",
+            p.extra
+        );
+        assert_eq!(p.extra.get("ok").map(String::as_str), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn null_claims_are_dropped() {
+        let secret = b"secret";
+        let payload = serde_json::json!({"sub": "u1", "x": null}).to_string();
+        let token = hs256_token_from_payload(secret, &payload);
+        let auth = SupabaseJwtAuth::new(secret.to_vec());
+        let p = auth.authenticate(&token).await.expect("verifies");
+        assert!(
+            !p.extra.contains_key("x"),
+            "a null claim must be dropped, not stringified to an empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_claim_set_is_rejected() {
+        let secret = b"secret";
+        let mut map = serde_json::Map::new();
+        map.insert("sub".to_string(), serde_json::json!("u1"));
+        for i in 0..65 {
+            map.insert(format!("c{i}"), serde_json::json!("v"));
+        }
+        let payload = serde_json::Value::Object(map).to_string();
+        let token = hs256_token_from_payload(secret, &payload);
+        let auth = SupabaseJwtAuth::new(secret.to_vec());
+        assert!(
+            auth.authenticate(&token).await.is_none(),
+            "a 65-claim token must be rejected outright, not truncated or downgraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_claim_value_is_rejected() {
+        let secret = b"secret";
+        let big_value = "x".repeat(MAX_CLAIM_LEN + 1);
+        let payload = serde_json::json!({"sub": "u1", "big": big_value}).to_string();
+        let token = hs256_token_from_payload(secret, &payload);
+        let auth = SupabaseJwtAuth::new(secret.to_vec());
+        assert!(
+            auth.authenticate(&token).await.is_none(),
+            "a claim value over {MAX_CLAIM_LEN} bytes must be rejected outright"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_claim_names_cannot_shadow() {
+        let secret = b"secret";
+        // Phase 0 derives tenant_id from sub ("u1"); the payload tries to
+        // smuggle a different tenant_id through the flattened claims map.
+        let payload = serde_json::json!({"sub": "u1", "tenant_id": "evil"}).to_string();
+        let token = hs256_token_from_payload(secret, &payload);
+        let auth = SupabaseJwtAuth::new(secret.to_vec());
+        let p = auth.authenticate(&token).await.expect("verifies");
+        assert_eq!(
+            p.tenant_id, "u1",
+            "a payload-carried tenant_id claim must never overwrite the derived tenant_id"
+        );
+        assert_eq!(
+            p.claim("tenant_id"),
+            Some("u1"),
+            "claim(\"tenant_id\") must resolve the derived value, not the payload's"
+        );
     }
 
     #[tokio::test]

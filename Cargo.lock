@@ -1393,6 +1393,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nostos-domain",
+ "nostos-infra",
  "reqwest",
  "rustls",
  "serde",
@@ -1526,6 +1528,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-tungstenite 0.23.1",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",

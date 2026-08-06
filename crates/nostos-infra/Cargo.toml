@@ -55,6 +55,8 @@ sha2 = { workspace = true }
 jsonwebtoken = { workspace = true }
 # JWKS fetch over HTTPS (same crate nostos-cloud uses for the Stripe REST call).
 reqwest = { workspace = true }
+# nostos_rules.toml load/save (ADR-0031, Task 7) — already a nostos-cli dependency.
+toml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

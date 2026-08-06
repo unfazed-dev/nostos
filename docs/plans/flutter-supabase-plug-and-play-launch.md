@@ -150,7 +150,7 @@ nostos-server — decide at implementation; separate crate keeps server lean).
 - [ ] Keep `make ci` green throughout; new crates join the workspace gates.
 
 ### W7 — Docs, bench, and pre-push hygiene (B-list from gap list)
-- [ ] README rewrite: new headline numbers (833k/208×), Flutter+Supabase
+- [ ] README rewrite: new headline numbers (833k fan-out, honest-units framing), Flutter+Supabase
       quickstart front and center, status banner current.
 - [ ] Fix documented pg-e2e command everywhere to include `NOSTOS_E2E_PG=1`
       (CLAUDE.md, docs) — currently a silent false-pass.

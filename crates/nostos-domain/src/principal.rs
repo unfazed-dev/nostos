@@ -12,6 +12,7 @@
 //! than trusting whatever the client sent.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The authenticated identity of one sync connection.
 ///
@@ -20,20 +21,64 @@ use serde::{Deserialize, Serialize};
 ///   server ANDs into every predicate, e.g. `org_id`). When the deployment does
 ///   not configure a tenant column, this is unused but still carried so the
 ///   type is uniform.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// - `extra` — flat, string-valued JWT claims beyond `sub`/`tenant_id`, keyed
+///   by claim name (ADR-0031, D1). Consulted by the rules grammar's
+///   `claims.<field>` references via [`Self::claim`]. Populated by the auth
+///   adapter (`nostos_infra::auth`), which is also where the size caps and
+///   reserved-name filtering live — this type only stores whatever it is
+///   handed.
+///
+/// `Debug` is hand-implemented (not derived) to print `extra`'s claim *names*
+/// only, never its values — a claim can carry user-controlled secrets and
+/// must never round-trip into a log line via `{:?}`.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Principal {
     pub account_id: String,
     pub tenant_id: String,
+    #[serde(default)]
+    pub extra: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Principal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Names only, never values — `extra` is attacker/user-controlled JWT
+        // claim data and must never leak into a log line via `{:?}`. Already
+        // sorted: `extra` is a `BTreeMap`.
+        let claim_names: Vec<&str> = self.extra.keys().map(String::as_str).collect();
+        f.debug_struct("Principal")
+            .field("account_id", &self.account_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("extra_claim_names", &claim_names)
+            .finish()
+    }
 }
 
 impl Principal {
-    /// Construct a principal from explicit id parts.
+    /// Construct a principal from explicit id parts, with no extra claims.
     #[inline]
     #[must_use]
     pub fn new(account_id: impl Into<String>, tenant_id: impl Into<String>) -> Self {
         Self {
             account_id: account_id.into(),
             tenant_id: tenant_id.into(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    /// Construct a principal carrying additional flat JWT claims (ADR-0031,
+    /// D1). `extra` must already be filtered/validated by the caller — this
+    /// constructor does not re-check reserved names or size caps.
+    #[inline]
+    #[must_use]
+    pub fn with_claims(
+        account_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        extra: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            account_id: account_id.into(),
+            tenant_id: tenant_id.into(),
+            extra,
         }
     }
 
@@ -46,6 +91,7 @@ impl Principal {
         Self {
             account_id: String::new(),
             tenant_id: String::new(),
+            extra: BTreeMap::new(),
         }
     }
 
@@ -56,6 +102,23 @@ impl Principal {
     #[must_use]
     pub fn is_anonymous(&self) -> bool {
         self.account_id.is_empty()
+    }
+
+    /// Resolve a `claims.<field>` reference (ADR-0031's rules grammar).
+    /// `"sub"` resolves from `account_id`, `"tenant_id"` from `tenant_id`,
+    /// anything else from `extra`. `None` means "this principal has no such
+    /// claim" — the caller (rules evaluation) must deny, never fall back to
+    /// an empty-string match. In particular an empty `account_id`/`tenant_id`
+    /// (the anonymous principal) does not resolve `"sub"`/`"tenant_id"` to
+    /// `Some("")`.
+    #[inline]
+    #[must_use]
+    pub fn claim(&self, field: &str) -> Option<&str> {
+        match field {
+            "sub" => (!self.account_id.is_empty()).then_some(self.account_id.as_str()),
+            "tenant_id" => (!self.tenant_id.is_empty()).then_some(self.tenant_id.as_str()),
+            other => self.extra.get(other).map(String::as_str),
+        }
     }
 }
 
@@ -141,5 +204,34 @@ mod tests {
         assert!(!p.is_anonymous());
         assert_eq!(p.account_id, "user-123");
         assert_eq!(p.tenant_id, "org-acme");
+    }
+
+    #[test]
+    fn claim_resolves_sub_tenant_and_extra() {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("org_id".to_string(), "acme".to_string());
+        let p = Principal::with_claims("u1", "t1", extra);
+        assert_eq!(p.claim("sub"), Some("u1"));
+        assert_eq!(p.claim("tenant_id"), Some("t1"));
+        assert_eq!(p.claim("org_id"), Some("acme"));
+        assert_eq!(p.claim("role"), None);
+    }
+
+    #[test]
+    fn anonymous_has_no_claims() {
+        let p = Principal::anonymous();
+        assert_eq!(p.claim("sub"), None);
+    }
+
+    #[test]
+    fn claims_do_not_leak_into_logs() {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("secret_token".to_string(), "hunter2".to_string());
+        let p = Principal::with_claims("u1", "t1", extra);
+        let rendered = format!("{p:?}");
+        assert!(
+            !rendered.contains("hunter2"),
+            "Debug rendering must not leak claim values: {rendered}"
+        );
     }
 }

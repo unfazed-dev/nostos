@@ -18,9 +18,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::get;
-use nostos_application::ports::{Metrics, SchemaDescriptor, SchemaSource, SessionStore};
+use nostos_application::ports::{Metrics, SchemaDescriptor, SchemaSource, SessionStore, TableStat};
 use nostos_application::{FanOutService, SessionManager};
-use nostos_domain::{ColumnValue, ReplicationEvent};
+use nostos_domain::{ColumnValue, ReplicationEvent, SyncMode};
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
@@ -120,6 +120,10 @@ pub struct Config {
     /// `NOSTOS_REPLICATOR=pg`.
     #[arg(long, env = "NOSTOS_OR_SET_COLUMNS", default_value = "")]
     or_set_columns: String,
+
+    /// Path to the sync-rules file (ADR-0031). Missing file = `all` mode.
+    #[arg(long, env = "NOSTOS_RULES_FILE", default_value = "nostos_rules.toml")]
+    rules_file: String,
 
     /// Coalesce the per-event ack-progress (slot-advance) scan: recompute the
     /// slowest acked LSN every N events instead of every event. `1` (default) =
@@ -500,6 +504,68 @@ async fn main() -> anyhow::Result<()> {
         state_builder = state_builder.with_tenant_column(col);
     }
 
+    // ---- sync-rules ruleset (ADR-0031) ----
+    // A malformed/invalid file must not silently degrade to "sync everything"
+    // — bail loudly instead of falling back.
+    let ruleset = match nostos_infra::rules_file::load(std::path::Path::new(&cfg.rules_file)) {
+        Ok(Some(raw)) => {
+            let compiled = nostos_application::ActiveRuleset::compile(&raw)
+                .context("nostos_rules.toml failed to compile")?;
+            info!(
+                sync_mode = compiled.mode().as_str(),
+                tables = compiled.synced_tables().len(),
+                checksum = format!("{:x}", compiled.checksum()),
+                "sync rules loaded"
+            );
+            compiled
+        }
+        Ok(None) => {
+            info!("no nostos_rules.toml found; sync_mode=all (zero-config default)");
+            nostos_application::ActiveRuleset::all_mode()
+        }
+        Err(e) => return Err(e).context("failed to load nostos_rules.toml"),
+    };
+    let ruleset_mode = ruleset.mode();
+    let (rules_tx, rules_changed) = tokio::sync::watch::channel(ruleset.checksum());
+    let rules_shared = Arc::new(tokio::sync::RwLock::new(ruleset));
+    state_builder = state_builder.with_rules(Arc::clone(&rules_shared), rules_changed);
+
+    // ---- `all`-mode startup warning (ADR-0031, Task 13) ----
+    // sync_mode = "all" means every replicated row reaches every authorised
+    // client (still tenant-scoped — see the principal-scoping path — but
+    // unscoped within a tenant). That's the right zero-config default, but an
+    // operator who never opts into narrower rules deserves a loud heads-up
+    // rather than finding out from an OOM. Row counts are estimates
+    // (`pg_class.reltuples`, never `count(*)`) so this stays cheap at boot.
+    if ruleset_mode == SyncMode::All {
+        let stats: Vec<TableStat> = {
+            #[cfg(feature = "pg")]
+            {
+                if cfg.replicator == "pg" {
+                    use nostos_application::ports::TableStatsSource;
+                    let src = nostos_infra::PgTableStats::new(&cfg.pg_url, &cfg.pg_publication);
+                    match src.table_stats().await {
+                        Ok(stats) => stats,
+                        Err(e) => {
+                            // A stats-fetch failure must not abort boot — the
+                            // warning still fires, just without numbers.
+                            warn!("could not estimate table sizes: {e}");
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    // The fake replicator has no database to introspect.
+                    Vec::new()
+                }
+            }
+            #[cfg(not(feature = "pg"))]
+            {
+                Vec::new()
+            }
+        };
+        warn!("{}", format_all_mode_warning(&stats));
+    }
+
     // ---- write-back adapter (ADR-0013) ----
     // The writable-table allowlist is enforced by the transport FIRST (a
     // single trust-boundary gate), then again by PgWriteBack as
@@ -653,6 +719,20 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
+
+    // ---- sync-rules hot reload (ADR-0031 D3, Task 14) ----
+    // No engine restart: the watcher polls the same file loaded at boot and,
+    // on an actual checksum change, swaps the shared ruleset + notifies every
+    // live socket's cheap `watch::Receiver::changed()` arm (transport.rs).
+    let (rules_shutdown_tx, rules_shutdown_rx) = tokio::sync::watch::channel(false);
+    let rules_watch_handle = tokio::spawn(watch_rules(
+        std::path::PathBuf::from(&cfg.rules_file),
+        rules_shared,
+        std::time::Duration::from_secs(5),
+        rules_shutdown_rx,
+        rules_tx,
+    ));
+
     // Graceful drain: on SIGTERM/Ctrl-C, axum stops accepting new connections
     // and waits for in-flight ones. The ack-driven slot model (ADR-0009) means
     // the last confirmed LSN is already what every live client acked — no
@@ -680,7 +760,70 @@ async fn main() -> anyhow::Result<()> {
             w.shutdown().await;
         }
     }
+    let _ = rules_shutdown_tx.send(true);
+    let _ = rules_watch_handle.await;
     Ok(())
+}
+
+/// Poll `path` every `poll_interval` and swap the shared ruleset when its
+/// canonical checksum changes (ADR-0031 D3 — no engine restart). A malformed
+/// or unreadable file is logged and skipped: the previous ruleset stays
+/// authoritative, never silently widened. `rules_tx` both stores the current
+/// checksum (read back each tick to detect no-op reloads) and wakes every
+/// live socket's `write_loop` select arm (`crates/nostos-infra/src/
+/// transport.rs`) so it can re-verify its own subscriptions.
+async fn watch_rules(
+    path: std::path::PathBuf,
+    rules: Arc<tokio::sync::RwLock<nostos_application::ActiveRuleset>>,
+    poll_interval: std::time::Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    rules_tx: tokio::sync::watch::Sender<u64>,
+) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(poll_interval) => {}
+            res = shutdown.changed() => {
+                match res {
+                    Ok(()) if *shutdown.borrow() => return,
+                    Ok(()) => continue,
+                    Err(_) => return, // sender dropped; nothing left to watch for
+                }
+            }
+        }
+        let loaded = match nostos_infra::rules_file::load(&path) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                warn!(path = %path.display(), "nostos_rules.toml missing on reload poll; keeping previous ruleset");
+                continue;
+            }
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "nostos_rules.toml reload failed to load; keeping previous ruleset");
+                continue;
+            }
+        };
+        let compiled = match nostos_application::ActiveRuleset::compile(&loaded) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "nostos_rules.toml reload failed to compile; keeping previous ruleset");
+                continue;
+            }
+        };
+        let new_checksum = compiled.checksum();
+        if new_checksum == *rules_tx.borrow() {
+            continue; // canonical form unchanged (e.g. only whitespace edited)
+        }
+        info!(
+            sync_mode = compiled.mode().as_str(),
+            tables = compiled.synced_tables().len(),
+            old_checksum = format!("{:x}", *rules_tx.borrow()),
+            new_checksum = format!("{:x}", new_checksum),
+            "sync rules reloaded"
+        );
+        // Swap BEFORE notifying: a session woken by `rules_tx.send` must see
+        // the new ruleset when it reads `rules`, never a stale one.
+        *rules.write().await = compiled;
+        let _ = rules_tx.send(new_checksum);
+    }
 }
 
 fn init_tracing(filter: &str) {
@@ -688,6 +831,59 @@ fn init_tracing(filter: &str) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info")))
         .try_init();
+}
+
+// ---- `all`-mode startup warning (ADR-0031, Task 13) ----
+
+/// Render the `sync_mode = "all"` guardrail banner. Pure formatting so it is
+/// testable without a database. `None` row estimates render as "unknown"
+/// (Postgres reports `reltuples = -1` for a never-analyzed table).
+fn format_all_mode_warning(stats: &[TableStat]) -> String {
+    let mut lines = vec![
+        "WARNING: sync_mode = \"all\" — every replicated row reaches every authorised client."
+            .to_string(),
+    ];
+
+    // Unknown estimates are never folded into `total` — a missing planner
+    // stat must not silently masquerade as zero rows.
+    let mut total: u64 = 0;
+    for stat in stats {
+        let table = &stat.table;
+        let line = match stat.estimated_rows {
+            Some(n) => {
+                total += n;
+                let est = format_thousands(n);
+                format!("  {table}    ~{est} rows")
+            }
+            None => format!("  {table}    unknown rows (never analyzed)"),
+        };
+        lines.push(line);
+    }
+
+    let count = stats.len();
+    let plural = if count == 1 { "" } else { "s" };
+    let total_fmt = format_thousands(total);
+    lines.push(format!(
+        "  {count} table{plural}, ~{total_fmt} rows estimated."
+    ));
+    lines.push("  This is the zero-config development default. For production, run".to_string());
+    lines.push("  `nostos rules init` and switch sync_mode to \"toggles\".".to_string());
+
+    lines.join("\n")
+}
+
+/// Thousands-grouped decimal rendering (`12400` → `"12,400"`), for the
+/// `all`-mode startup banner's row-count estimates.
+fn format_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().rev().enumerate() {
+        if i != 0 && i % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    grouped.chars().rev().collect()
 }
 
 // ---- health + metrics endpoints (ADR: operability, T1-6/T1-7) ----
@@ -799,5 +995,248 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("received Ctrl-C, shutting down"),
         () = terminate => info!("received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod all_mode_warning_tests {
+    use super::{format_all_mode_warning, TableStat};
+
+    #[test]
+    fn warning_lists_tables_and_total() {
+        let stats = vec![
+            TableStat {
+                table: "tasks".to_string(),
+                estimated_rows: Some(12_400),
+            },
+            TableStat {
+                table: "notes".to_string(),
+                estimated_rows: Some(340),
+            },
+        ];
+
+        let out = format_all_mode_warning(&stats);
+
+        assert!(out.starts_with("WARNING: sync_mode = \"all\""));
+        assert!(out.contains("tasks"));
+        assert!(out.contains("~12,400 rows"));
+        assert!(out.contains("notes"));
+        assert!(out.contains("~340 rows"));
+        // 12,400 + 340 = 12,740.
+        assert!(out.contains("2 tables, ~12,740 rows estimated."));
+        assert!(out.contains("nostos rules init"));
+    }
+
+    #[test]
+    fn unknown_estimate_renders_unknown() {
+        let stats = vec![
+            TableStat {
+                table: "tasks".to_string(),
+                estimated_rows: Some(100),
+            },
+            TableStat {
+                table: "audit".to_string(),
+                estimated_rows: None,
+            },
+        ];
+
+        let out = format_all_mode_warning(&stats);
+
+        assert!(out.contains("audit    unknown rows (never analyzed)"));
+        // audit's unknown estimate is excluded from the total — only tasks's
+        // 100 rows are counted, even though both tables are counted.
+        assert!(out.contains("2 tables, ~100 rows estimated."));
+        // No minus sign immediately followed by a digit anywhere (e.g. the
+        // reltuples = -1 "never analyzed" sentinel must never leak through).
+        // The banner's own prose ("zero-config") legitimately contains a
+        // hyphen, so this checks for "-<digit>", not for any hyphen.
+        assert!(
+            !out.chars()
+                .zip(out.chars().skip(1))
+                .any(|(a, b)| a == '-' && b.is_ascii_digit()),
+            "no negative number may appear: {out}"
+        );
+    }
+
+    #[test]
+    fn empty_stats_still_warns() {
+        let out = format_all_mode_warning(&[]);
+
+        assert!(out.starts_with("WARNING: sync_mode = \"all\""));
+        assert!(out.contains("0 tables, ~0 rows estimated."));
+    }
+}
+
+/// `watch_rules`'s own error-handling and swap/notify ordering, exercised
+/// directly (no live socket, no `nostos-infra` test server — that boundary is
+/// covered by `crates/nostos-infra/tests/rules_reload.rs` instead). A short
+/// `poll_interval` plus one bounded sleep gives every case at least one poll
+/// tick before shutdown is signaled; `watch_rules` re-`select!`s the
+/// shutdown channel every loop iteration, so it stops promptly once signaled.
+#[cfg(test)]
+mod watch_rules_tests {
+    use super::watch_rules;
+    use nostos_application::ActiveRuleset;
+    use nostos_domain::{SyncMode, SyncRules, TableRule, RULES_VERSION};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{watch, RwLock};
+
+    fn toggles_rules(tables: Vec<TableRule>) -> SyncRules {
+        SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables,
+            hand: Vec::new(),
+        }
+    }
+
+    /// A fresh path under `std::env::temp_dir()`, unique for this test
+    /// binary's lifetime. `nostos-server` has no `uuid` dependency (only
+    /// `nostos-infra`'s own tests use it) — pid + a monotonic counter is
+    /// enough to avoid collisions here.
+    fn temp_rules_path(tag: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "nostos-watch-rules-test-{tag}-{}-{n}.toml",
+            std::process::id()
+        ))
+    }
+
+    /// Spawn `watch_rules` against `path`, let it run for a handful of
+    /// 5ms poll ticks, then signal shutdown and join.
+    async fn run_a_few_ticks(
+        path: std::path::PathBuf,
+        rules: Arc<RwLock<ActiveRuleset>>,
+        rules_tx: watch::Sender<u64>,
+    ) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(watch_rules(
+            path,
+            rules,
+            Duration::from_millis(5),
+            shutdown_rx,
+            rules_tx,
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn checksum_unchanged_reload_does_not_notify() {
+        let rules = toggles_rules(vec![TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        }]);
+        let path = temp_rules_path("unchanged");
+        nostos_infra::rules_file::save(&path, &rules).unwrap();
+
+        let compiled = ActiveRuleset::compile(&rules).unwrap();
+        let checksum = compiled.checksum();
+        let shared = Arc::new(RwLock::new(compiled));
+        let (tx, rx) = watch::channel(checksum); // seeded to match what's on disk
+                                                 // Keep a sender clone alive in the test: `watch_rules` is handed its
+                                                 // own clone and drops it when it returns, and a `Receiver` can't
+                                                 // distinguish "sender dropped, no notify" from "sender dropped after
+                                                 // notifying" once the channel is fully closed — `has_changed()`
+                                                 // reports `Err` either way. Holding one clone open past that point
+                                                 // keeps the channel open so `has_changed()` reflects the real state.
+        let _tx_keepalive = tx.clone();
+
+        run_a_few_ticks(path.clone(), Arc::clone(&shared), tx).await;
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !rx.has_changed().unwrap_or(false),
+            "an on-disk file whose compiled checksum matches what's already loaded must never notify"
+        );
+        assert_eq!(
+            shared.read().await.checksum(),
+            checksum,
+            "a checksum-unchanged reload must never touch the shared ruleset"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_file_leaves_shared_state_untouched_and_does_not_notify() {
+        let rules = toggles_rules(vec![TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        }]);
+        let compiled = ActiveRuleset::compile(&rules).unwrap();
+        let checksum = compiled.checksum();
+        let shared = Arc::new(RwLock::new(compiled));
+        let (tx, rx) = watch::channel(checksum);
+        let _tx_keepalive = tx.clone(); // see comment in checksum_unchanged_reload_does_not_notify
+
+        let path = temp_rules_path("malformed");
+        std::fs::write(&path, "this is not valid toml [[[").unwrap();
+
+        run_a_few_ticks(path.clone(), Arc::clone(&shared), tx).await;
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !rx.has_changed().unwrap_or(false),
+            "a malformed rules file must never notify"
+        );
+        assert_eq!(
+            shared.read().await.checksum(),
+            checksum,
+            "a malformed rules file must never touch the shared ruleset"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_change_swaps_then_notifies() {
+        let before = toggles_rules(vec![TableRule {
+            table: "tasks".into(),
+            sync: true,
+            scope: None,
+        }]);
+        let before_compiled = ActiveRuleset::compile(&before).unwrap();
+        let before_checksum = before_compiled.checksum();
+        let shared = Arc::new(RwLock::new(before_compiled));
+        let (tx, rx) = watch::channel(before_checksum);
+        let _tx_keepalive = tx.clone(); // see comment in checksum_unchanged_reload_does_not_notify
+
+        let after = toggles_rules(vec![
+            TableRule {
+                table: "tasks".into(),
+                sync: true,
+                scope: None,
+            },
+            TableRule {
+                table: "notes".into(),
+                sync: true,
+                scope: None,
+            },
+        ]);
+        let after_compiled = ActiveRuleset::compile(&after).unwrap();
+        let after_checksum = after_compiled.checksum();
+        assert_ne!(
+            before_checksum, after_checksum,
+            "test fixture bug: the two rulesets must actually differ"
+        );
+
+        let path = temp_rules_path("real-change");
+        nostos_infra::rules_file::save(&path, &after).unwrap();
+
+        run_a_few_ticks(path.clone(), Arc::clone(&shared), tx).await;
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            rx.has_changed().unwrap_or(false),
+            "a real checksum change must notify"
+        );
+        assert_eq!(
+            shared.read().await.checksum(),
+            after_checksum,
+            "a real reload must swap the shared ruleset to the newly compiled rules"
+        );
     }
 }

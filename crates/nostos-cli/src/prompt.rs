@@ -21,3 +21,14 @@ pub fn prompt_nonempty(label: &str) -> io::Result<String> {
         println!("  (required)");
     }
 }
+
+/// Prompt with a default; empty input (including EOF, since `read_line`
+/// leaves the buffer empty at EOF too) returns `default`.
+pub fn prompt_default(label: &str, default: &str) -> io::Result<String> {
+    let value = prompt(label)?;
+    if value.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(value)
+    }
+}

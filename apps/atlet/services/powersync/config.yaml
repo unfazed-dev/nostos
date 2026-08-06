@@ -1,0 +1,18 @@
+# PowerSync Service config for the Atlet comparison harness.
+# Schema: https://unpkg.com/@powersync/service-schema@latest/json-schema/powersync-config.json
+# !env tags below resolve from the PS_-prefixed container env vars set in
+# ../docker-compose.atlet.yml (PS_* is a hard requirement of the service,
+# not a naming choice here).
+replication:
+  connections:
+    - type: postgresql
+      uri: !env PS_DATA_SOURCE_URI
+storage:
+  type: postgresql
+  uri: !env PS_DATA_SOURCE_URI
+client_auth:
+  supabase: true
+  supabase_jwt_secret: !env PS_SUPABASE_JWT_SECRET
+sync_rules:
+  path: /config/sync_rules.yaml
+port: 80
