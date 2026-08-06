@@ -18,6 +18,7 @@ pub mod lsn;
 pub mod predicate;
 pub mod predicate_compile;
 pub mod principal;
+pub mod scope;
 pub mod session;
 pub mod tier;
 
@@ -30,6 +31,7 @@ pub use lsn::Lsn;
 pub use predicate::{ColumnValue, Predicate, PredicateExpr, PredicateFilter};
 pub use predicate_compile::{parse_predicate_expr, ParseError};
 pub use principal::{Principal, TenantScope};
+pub use scope::{ScopeError, ScopeExpr, ScopeOp, ScopeTerm, ScopeValue};
 pub use session::{SessionId, SyncSession};
 pub use tier::Tier;
 
