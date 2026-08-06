@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'design/tokens.dart';
 import 'engine_registry.dart';
+import 'ui/home.dart';
 import 'ui/signin.dart';
 
 // ponytail: real values are operator-owned (apps/atlet/services/.env.example
@@ -61,9 +62,9 @@ class AtletApp extends StatelessWidget {
   }
 }
 
-/// Minimal home shell — proves the post-signin route exists. Session/product
-/// views land in later Atlet tasks (T12+). Owns the settings-sheet entry
-/// point for the engine toggle (T11).
+/// Home shell: owns the settings-sheet entry point for the engine toggle
+/// (T11) and hosts the training UI (T12), which renders exclusively from
+/// the active adapter's watchSessions() stream — see ui/home.dart.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -130,7 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         backgroundColor: AtletTokens.bone,
         elevation: 0,
-        title: Text('Atlet', style: TextStyle(color: AtletTokens.ink)),
+        title: Text('Home', style: TextStyle(color: AtletTokens.ink)),
         actions: [
           IconButton(
             key: const Key('settings-button'),
@@ -140,16 +141,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: Center(
-        child: Text(
-          'Home',
-          style: TextStyle(
-            fontSize: AtletTokens.largeTitle,
-            fontWeight: FontWeight.w600,
-            color: AtletTokens.ink,
-          ),
-        ),
-      ),
+      body: TrainingHome(adapter: engineRegistry.current),
     );
   }
 }
