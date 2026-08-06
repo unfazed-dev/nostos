@@ -1,7 +1,8 @@
-# SyncAdapter contract v1 (frozen 2026-08-06 at pilot sign-off/retro — see
-# `conformance-flutter.md` for the results and retro that produced this
-# version. No further amendments without a new version number and a new
-# dated retro entry there.)
+# SyncAdapter contract v1.1 (frozen 2026-08-06 at pilot sign-off/retro,
+# corrected 2026-08-06 in fix round 1 of the same task's review — see
+# `conformance-flutter.md` for the results, retro, and fix-round history that
+# produced this version. No further amendments without a new version number
+# and a new dated entry there.)
 
 One adapter per (SDK, engine). The app and bench runner speak ONLY this surface.
 
@@ -9,7 +10,13 @@ One adapter per (SDK, engine). The app and bench runner speak ONLY this surface.
 - `init(config)` — open local DB + connect engine using the signed-in Supabase
   session's access token. Idempotent.
 - `signOut()` — disconnect + FULL local wipe (engine DB files deleted).
-- `addSession(session) -> id` / `updateSession` / `deleteSession`
+- `addSession(session) -> id` / `deleteSession` (**v1.1 correction** — v1
+  also listed `updateSession` here. It was never implemented in `SyncAdapter`,
+  `NostosAdapter`, or `PowerSyncAdapter` — the pilot's UI has no session-edit
+  flow, so nothing ever called for it. Dropped rather than retained as
+  "reserved": an unimplemented operation on a frozen contract is exactly the
+  defect class this spec exists to prevent, and re-adding it later needs its
+  own version bump and its own reason, not a standing placeholder.)
 - `watchSessions() -> stream of ordered session lists` (normal read path)
 - `watchProducts() -> stream` (read-only bulk table)
 - `connected -> Stream<bool>` (engine-level connectivity signal; **v1
