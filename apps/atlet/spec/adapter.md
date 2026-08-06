@@ -1,4 +1,7 @@
-# SyncAdapter contract v0 (frozen at pilot retro)
+# SyncAdapter contract v1 (frozen 2026-08-06 at pilot sign-off/retro — see
+# `conformance-flutter.md` for the results and retro that produced this
+# version. No further amendments without a new version number and a new
+# dated retro entry there.)
 
 One adapter per (SDK, engine). The app and bench runner speak ONLY this surface.
 
@@ -9,12 +12,23 @@ One adapter per (SDK, engine). The app and bench runner speak ONLY this surface.
 - `addSession(session) -> id` / `updateSession` / `deleteSession`
 - `watchSessions() -> stream of ordered session lists` (normal read path)
 - `watchProducts() -> stream` (read-only bulk table)
-- `syncStatus() -> stream` (connected / syncing / offline, engine's own notion)
+- `connected -> Stream<bool>` (engine-level connectivity signal; **v1
+  correction** — v0 specified a three-state `syncStatus()` stream
+  (connected/syncing/offline). The interface Task 7 actually froze is a
+  boolean `connected` stream; every adapter, the engine toggle, and the
+  bench harness are built against the boolean. This line now matches the
+  shipped code instead of the other way around.)
 - `setConnected(bool)` — engine-level offline toggle for queue-drain runs.
 
 ## Instrumentation marks (externally observable ONLY)
 A mark is legal iff it is derived from data visible through the adapter's normal
 read path. Engine-internal callbacks/private state are forbidden (fairness rule).
+Mark derivation itself (`MarkDeriver`, `lib/bench/marks.dart`) is **one shared,
+audited implementation used unmodified by every adapter** — adapter-specific
+responsibility is limited to correct read-path sequencing (populate the
+in-flight id bookkeeping before the underlying write resolves). Fairness
+between engines depends on this: no adapter reimplements or is trusted to
+reimplement the ordering logic below.
 - `localVisible(rowId, tMono)` — row first appears in `watchSessions` output.
 - `serverAcked(rowId, tMono)` — the row's `server_committed_at` becomes non-null
   in `watchSessions` output (client inserts it as null; the server default fills
@@ -23,6 +37,21 @@ read path. Engine-internal callbacks/private state are forbidden (fairness rule)
   harness (via PostgREST) appears in `watchSessions` output.
 
 ## Conformance checklist (run per implementation)
+**Prerequisites (v1 addition):** items 1–4 require a live, operator-provisioned
+environment — a real Supabase project, `apps/atlet/services/.env` filled from
+`.env.example`, the `docker-compose.atlet.yml` stack up, and a signed-in test
+session. This is explicitly **not** in scope for any implementation task by
+default; six tasks across the pilot (T6, T9, T10, T12, T14, T15) independently
+lacked it, and the pilot's own conformance sign-off (`conformance-flutter.md`)
+still lacked it. A task assigning live conformance work must say so and must
+name which of the 5 items it covers.
+
+"Run per implementation" means **every item, for every adapter**, tracked
+against one running scorecard (`conformance-flutter.md`) — not whichever
+subset an individual task's brief happened to request. (v0's silence on this
+point let item 2 go unassigned to NostosAdapter and item 3 go unassigned to
+both adapters, undetected until sign-off — see the retro.)
+
 1. init → signIn → addSession → serverAcked mark fires < 60s.
 2. Row inserted via PostgREST appears (remoteVisible) < 60s.
 3. setConnected(false) → 25 writes → setConnected(true) → all 25 serverAcked.
