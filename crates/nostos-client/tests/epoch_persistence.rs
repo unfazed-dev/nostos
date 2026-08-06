@@ -17,15 +17,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nostos_application::ports::{Metrics, SyncAuth};
-use nostos_application::SessionManager;
+use nostos_application::{ActiveRuleset, SessionManager};
 use nostos_client::{SqliteStorage, SyncClient, SyncClientConfig};
 use nostos_core::Storage; // trait method `epoch()` on SqliteStorage
+use nostos_domain::compose_sync_epoch;
 use nostos_infra::auth::AllowAnonymous;
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 
-/// The non-zero epoch the server advertises. Must differ from the fresh-DB
-/// default (0) so a passing assertion proves the value flowed
+/// The non-zero slot epoch the server advertises. Must differ from the
+/// fresh-DB default (0) so a passing assertion proves the value flowed
 /// server→resume_info→client→storage (not the trivial default).
 const ADVERTISED_EPOCH: u64 = 7;
 
@@ -91,9 +92,15 @@ async fn sync_client_persists_server_epoch_from_resume_info() {
     // The load-bearing assertion: the advertised epoch is now durable. A 0 here
     // would mean the client never received/intercepted resume_info (the F2
     // wiring is broken), and every reconnect would force a full snapshot.
+    //
+    // ADR-0031 D2: this `SyncClient` is pre-D2 (sends no `rules_checksum` on
+    // Subscribe — see client.rs), so the server advertises the *composed*
+    // (slot_epoch, rules_checksum) value, not the raw slot epoch. The server
+    // defaults to `ActiveRuleset::all_mode()` (no rules configured here).
+    let expected = compose_sync_epoch(ADVERTISED_EPOCH, ActiveRuleset::all_mode().checksum());
     let persisted = client.epoch().await.expect("epoch read after run_once");
     assert_eq!(
-        persisted, ADVERTISED_EPOCH,
-        "client must persist the server's advertised slot epoch from resume_info"
+        persisted, expected,
+        "client must persist the server's advertised (composed) epoch from resume_info"
     );
 }

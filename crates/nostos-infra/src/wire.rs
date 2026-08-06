@@ -67,6 +67,14 @@ pub enum ClientMessage {
         /// as a mismatch → snapshot (the safe default; replay is opt-in).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u64>,
+        /// The rules checksum the client last synced under (ADR-0031, D2).
+        /// `u64`, symmetric with `epoch` directly above it — no SDK parses this
+        /// frame by hand (see the Task 12 survey), so there is no JS-precision
+        /// argument for a string encoding, and an integer keeps
+        /// `skip_serializing_if` behaviour identical to `epoch`.
+        /// `None` = a pre-D2 client → composed-epoch fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rules_checksum: Option<u64>,
     },
     /// Acknowledge applied progress (highest applied LSN).
     Ack { lsn: u64 },
@@ -365,22 +373,30 @@ pub fn decode_control_frame(data: &[u8]) -> Option<(String, bool)> {
 /// snapshot + replay paths so the client can persist + resend its last-seen
 /// epoch on reconnect. Beside [`encode_snapshot_boundary`] / write-acks — its
 /// own wire shape, never batched with replication events.
+///
+/// Advertise the resume epoch, and — for D2 clients — the active rules
+/// checksum. `rules_checksum: None` omits the key entirely, so the frame a
+/// pre-D2 client sees is byte-identical to today's.
 #[must_use]
-pub fn encode_resume_info(epoch: u64) -> Vec<u8> {
+pub fn encode_resume_info(epoch: u64, rules_checksum: Option<u64>) -> Vec<u8> {
     // u64 → decimal; no free-form fields → no escaping needed.
     let mut out = String::from("{\"type\":\"resume_info\",\"epoch\":");
     out.push_str(&epoch.to_string());
+    if let Some(checksum) = rules_checksum {
+        out.push_str(",\"rules_checksum\":");
+        out.push_str(&checksum.to_string());
+    }
     out.push('}');
     out.into_bytes()
 }
 
-/// Decode a `resume_info` control frame. Returns `Some(epoch)` only when the
-/// payload is a single JSON object with `"type":"resume_info"` and a numeric
-/// `epoch`; `None` for everything else (arrays, row frames, snapshot
-/// boundaries, malformed bytes). The client pump calls this BEFORE
-/// [`decode_frames`] so it never enters the row-apply path.
+/// Decode a `resume_info` control frame. Returns the epoch and the checksum
+/// when present; `None` for everything else (arrays, row frames, snapshot
+/// boundaries, malformed bytes). Unknown keys are ignored (forward
+/// compatibility). The client pump calls this BEFORE [`decode_frames`] so it
+/// never enters the row-apply path.
 #[must_use]
-pub fn decode_resume_info(data: &[u8]) -> Option<u64> {
+pub fn decode_resume_info(data: &[u8]) -> Option<(u64, Option<u64>)> {
     let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
     if first != Some(b'{') {
         return None;
@@ -390,7 +406,8 @@ pub fn decode_resume_info(data: &[u8]) -> Option<u64> {
         return None;
     }
     let epoch = v.get("epoch")?.as_u64()?;
-    Some(epoch)
+    let rules_checksum = v.get("rules_checksum").and_then(serde_json::Value::as_u64);
+    Some((epoch, rules_checksum))
 }
 
 #[cfg(test)]
@@ -540,6 +557,7 @@ mod tests {
             where_sql,
             resume_lsn,
             epoch: _,
+            rules_checksum: _,
         } = msg
         else {
             panic!("expected Subscribe");
@@ -563,6 +581,7 @@ mod tests {
             where_sql,
             resume_lsn,
             epoch: _,
+            rules_checksum: _,
         } = msg
         else {
             panic!("expected Subscribe");
@@ -571,6 +590,55 @@ mod tests {
         assert!(filters.is_empty());
         assert_eq!(where_sql, None);
         assert_eq!(resume_lsn, None);
+    }
+
+    // ---- D2: rules_checksum on Subscribe + resume_info (ADR-0031) ----
+
+    #[test]
+    fn subscribe_without_rules_checksum_decodes() {
+        // Today's exact JSON (pre-D2 client) still parses, with
+        // rules_checksum: None — the fallback path.
+        let json = r#"{"type":"subscribe","table":"tasks"}"#;
+        let msg = decode_client_message(json.as_bytes()).expect("valid subscribe");
+        let ClientMessage::Subscribe { rules_checksum, .. } = msg else {
+            panic!("expected Subscribe");
+        };
+        assert_eq!(rules_checksum, None);
+    }
+
+    #[test]
+    fn subscribe_with_rules_checksum_decodes() {
+        let json = r#"{"type":"subscribe","table":"tasks","rules_checksum":777}"#;
+        let msg = decode_client_message(json.as_bytes()).expect("valid subscribe");
+        let ClientMessage::Subscribe { rules_checksum, .. } = msg else {
+            panic!("expected Subscribe");
+        };
+        assert_eq!(rules_checksum, Some(777));
+    }
+
+    #[test]
+    fn resume_info_omits_checksum_when_none() {
+        let bytes = encode_resume_info(5, None);
+        // Assert on the raw bytes: no `rules_checksum` key at all, so a
+        // pre-D2 client sees a frame byte-identical to today's.
+        assert!(!String::from_utf8(bytes.clone())
+            .unwrap()
+            .contains("rules_checksum"));
+        assert_eq!(decode_resume_info(&bytes), Some((5, None)));
+    }
+
+    #[test]
+    fn resume_info_roundtrips_checksum() {
+        let bytes = encode_resume_info(5, Some(999));
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["rules_checksum"], 999);
+        assert_eq!(decode_resume_info(&bytes), Some((5, Some(999))));
+    }
+
+    #[test]
+    fn decode_resume_info_ignores_unknown_keys() {
+        let bytes = br#"{"type":"resume_info","epoch":5,"foo":1}"#;
+        assert_eq!(decode_resume_info(bytes), Some((5, None)));
     }
 
     #[test]
@@ -708,11 +776,11 @@ mod tests {
 
     #[test]
     fn encode_decode_resume_info_roundtrips() {
-        let bytes = encode_resume_info(42);
+        let bytes = encode_resume_info(42, None);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["type"], "resume_info");
         assert_eq!(v["epoch"], 42);
-        assert_eq!(decode_resume_info(&bytes), Some(42));
+        assert_eq!(decode_resume_info(&bytes), Some((42, None)));
     }
 
     #[test]

@@ -34,8 +34,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nostos_application::ports::{Metrics, OpLogWriter, SessionStore};
-use nostos_application::{FanOutService, SessionManager};
-use nostos_domain::{ColumnValue, ReplicationEvent};
+use nostos_application::{ActiveRuleset, FanOutService, SessionManager};
+use nostos_domain::{compose_sync_epoch, ColumnValue, ReplicationEvent};
 use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
@@ -418,7 +418,18 @@ async fn oplog_replay_delivers_offline_gap_including_deletes() {
     let replay = collect_frames(
         h.addr,
         &h.token,
-        &subscribe_frame_with_epoch("tasks", &[], Some(checkpoint), Some(server_epoch)),
+        &subscribe_frame_with_epoch(
+            "tasks",
+            &[],
+            Some(checkpoint),
+            // ADR-0031 D2: this helper never sends `rules_checksum`, so it is a
+            // legacy client — the server compares against the composed
+            // (slot_epoch, rules_checksum) value, not the raw slot epoch.
+            Some(compose_sync_epoch(
+                server_epoch,
+                ActiveRuleset::all_mode().checksum(),
+            )),
+        ),
         Duration::from_secs(4),
     )
     .await;
@@ -532,7 +543,18 @@ async fn aged_out_checkpoint_falls_back_to_snapshot() {
     let frames = collect_frames(
         h.addr,
         &h.token,
-        &subscribe_frame_with_epoch("tasks", &[], Some(checkpoint), Some(server_epoch)),
+        &subscribe_frame_with_epoch(
+            "tasks",
+            &[],
+            Some(checkpoint),
+            // ADR-0031 D2: this helper never sends `rules_checksum`, so it is a
+            // legacy client — the server compares against the composed
+            // (slot_epoch, rules_checksum) value, not the raw slot epoch.
+            Some(compose_sync_epoch(
+                server_epoch,
+                ActiveRuleset::all_mode().checksum(),
+            )),
+        ),
         Duration::from_secs(4),
     )
     .await;

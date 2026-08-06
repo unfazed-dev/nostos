@@ -842,12 +842,17 @@ where
         // snapshot (mismatch). 0 on a fresh DB → None → server treats as
         // mismatch (correct for a first-ever connect).
         let client_epoch = self.epoch().await?;
+        // ponytail: this client is pre-D2 (no `rules_checksum` tracked/sent),
+        // so it always takes the composed-epoch fallback (ADR-0031 D2). Ceiling:
+        // its logs can't distinguish a slot recreate from a rules edit. Upgrade
+        // path: track+send the last-synced ruleset checksum (Task 12 survey).
         let subscribe = ClientMessage::Subscribe {
             table: self.config.table.clone(),
             filters: vec![],
             where_sql: self.config.where_sql.clone(),
             resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
             epoch: (client_epoch > 0).then_some(client_epoch),
+            rules_checksum: None,
         };
         let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
         write
@@ -865,6 +870,7 @@ where
                 where_sql: sub.where_sql.clone(),
                 resume_lsn: (resume_lsn > Lsn::ZERO).then_some(resume_lsn.raw()),
                 epoch: (client_epoch > 0).then_some(client_epoch),
+                rules_checksum: None,
             };
             let sub_json = serde_json::to_string(&subscribe).expect("subscribe serializes");
             write
@@ -1006,7 +1012,12 @@ where
                     // resume gate compares client vs server epoch — a match ⇒
                     // op-log replay, a mismatch ⇒ full snapshot). Intercepted
                     // before the row path; never batched with events.
-                    if let Some(epoch) = decode_resume_info(&bytes) {
+                    // ADR-0031 D2: `resume_info` may also carry a rules
+                    // checksum; this pre-D2 client doesn't track/persist it
+                    // (see the Subscribe-frame comment above), so it's ignored
+                    // here — the server already folded it into `epoch` via the
+                    // composed-epoch fallback.
+                    if let Some((epoch, _rules_checksum)) = decode_resume_info(&bytes) {
                         let engine = Arc::clone(&self.engine);
                         // Non-fatal: a persist failure just means the next
                         // reconnect falls back to snapshot (epoch unknown) — it
