@@ -180,6 +180,16 @@ impl<S: Storage> ApplyEngine<S> {
         self.storage.save_epoch(epoch)
     }
 
+    /// The rules checksum this client last synced under (ADR-0031 D2, delegates to storage).
+    pub fn rules_checksum(&self) -> crate::Result<u64> {
+        self.storage.rules_checksum()
+    }
+
+    /// Persist the rules checksum advertised in `resume_info` (delegates to storage).
+    pub fn save_rules_checksum(&self, checksum: u64) -> crate::Result<()> {
+        self.storage.save_rules_checksum(checksum)
+    }
+
     /// Is there a buffered-but-unflushed batch right now? `true` between a
     /// frame that got admitted (buffered) and the next commit boundary /
     /// explicit [`Self::flush`].

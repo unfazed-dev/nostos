@@ -93,10 +93,13 @@ async fn sync_client_persists_server_epoch_from_resume_info() {
     // would mean the client never received/intercepted resume_info (the F2
     // wiring is broken), and every reconnect would force a full snapshot.
     //
-    // ADR-0031 D2: this `SyncClient` is pre-D2 (sends no `rules_checksum` on
-    // Subscribe — see client.rs), so the server advertises the *composed*
-    // (slot_epoch, rules_checksum) value, not the raw slot epoch. The server
-    // defaults to `ActiveRuleset::all_mode()` (no rules configured here).
+    // ADR-0031 D2: this test's `storage` starts with `rules_checksum() == 0`
+    // (fresh in-memory DB, never persisted a checksum), so the first Subscribe
+    // omits `rules_checksum` and the server advertises the *composed*
+    // (slot_epoch, rules_checksum) value, not the raw slot epoch pair. The
+    // server defaults to `ActiveRuleset::all_mode()` (no rules configured
+    // here). A client that HAD a persisted checksum would instead receive the
+    // raw pair — see `rules_checksum_roundtrip.rs`.
     let expected = compose_sync_epoch(ADVERTISED_EPOCH, ActiveRuleset::all_mode().checksum());
     let persisted = client.epoch().await.expect("epoch read after run_once");
     assert_eq!(
