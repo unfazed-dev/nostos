@@ -1,0 +1,10 @@
+# Mirrors the RLS scope from apps/atlet/supabase/migrations/0001_atlet_schema.sql:
+# sessions.user_id = auth.uid() (per-user), products readable by anyone.
+bucket_definitions:
+  user_sessions:
+    parameters: select request.user_id() as user_id
+    data:
+      - select * from sessions where user_id = bucket.user_id
+  catalog:
+    data:
+      - select * from products
