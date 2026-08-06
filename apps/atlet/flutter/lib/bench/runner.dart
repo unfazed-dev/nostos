@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import '../adapters/sync_adapter.dart';
 
@@ -345,5 +346,35 @@ class Runner {
     } finally {
       await sub.cancel();
     }
+  }
+
+  /// db_bytes (spec/metrics.md item 5): sums every regular file under
+  /// [dbDir], recursively. Deliberately does NOT hard-code an engine-specific
+  /// filename (`cairn.sqlite` vs `powersync.db`) — Runner never imports a
+  /// concrete adapter type (see class doc), and summing the whole directory
+  /// keeps this method correct for either engine's on-disk footprint,
+  /// including WAL/SHM/journal sidecars. Best effort per spec: the caller is
+  /// expected to invoke this only after a cold sync and a full queue-drain
+  /// have put both engines in a comparable checkpoint state. `journal_mode`
+  /// is inferred (best effort, not queried via PRAGMA — SyncAdapter exposes
+  /// no raw-SQL escape hatch) from the presence of a `-wal` sidecar file,
+  /// which sqlite's default WAL journal mode leaves behind.
+  Future<RunRecord> dbBytes(String dbDir) async {
+    final startedAt = DateTime.now().toUtc();
+    final dir = Directory(dbDir);
+    var totalBytes = 0;
+    var sawWalFile = false;
+    if (await dir.exists()) {
+      await for (final entity in dir.list(recursive: true)) {
+        if (entity is File) {
+          totalBytes += await entity.length();
+          if (entity.path.endsWith('-wal')) sawWalFile = true;
+        }
+      }
+    }
+    return _record('db_bytes', {
+      'db_bytes': totalBytes,
+      'journal_mode': sawWalFile ? 'wal' : 'unknown',
+    }, startedAt);
   }
 }

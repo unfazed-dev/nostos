@@ -4,6 +4,7 @@
 // ordering bug would only surface as a 60s test hang, not a compile error,
 // so it needs its own coverage. Flagged to team-lead in task-8-report.md.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/bench/runner.dart';
@@ -250,4 +251,75 @@ void main() {
       expect(samples.single, closeTo(300, 30));
     },
   );
+
+  group('dbBytes', () {
+    late Directory tempDir;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('atlet-dbbytes-test');
+    });
+
+    tearDown(() async {
+      if (await tempDir.exists()) await tempDir.delete(recursive: true);
+    });
+
+    test('sums all regular file sizes under dbDir', () async {
+      await File('${tempDir.path}/cairn.sqlite').writeAsBytes(
+        List.filled(100, 0),
+      );
+      await File('${tempDir.path}/cairn.sqlite-wal').writeAsBytes(
+        List.filled(25, 0),
+      );
+
+      final record = await runner.dbBytes(tempDir.path);
+
+      expect(record.runType, 'db_bytes');
+      expect(record.metrics['db_bytes'], 125);
+    });
+
+    test('records wal journal mode when a -wal sidecar is present', () async {
+      await File('${tempDir.path}/powersync.db').writeAsBytes(
+        List.filled(10, 0),
+      );
+      await File('${tempDir.path}/powersync.db-wal').writeAsBytes(
+        List.filled(5, 0),
+      );
+
+      final record = await runner.dbBytes(tempDir.path);
+
+      expect(record.metrics['journal_mode'], 'wal');
+    });
+
+    test('records a non-wal journal mode when no -wal sidecar exists', () async {
+      await File('${tempDir.path}/cairn.sqlite').writeAsBytes(
+        List.filled(10, 0),
+      );
+
+      final record = await runner.dbBytes(tempDir.path);
+
+      expect(record.metrics['journal_mode'], isNot('wal'));
+    });
+
+    test('returns zero bytes for a directory that does not exist', () async {
+      final missing = '${tempDir.path}/does-not-exist';
+
+      final record = await runner.dbBytes(missing);
+
+      expect(record.metrics['db_bytes'], 0);
+    });
+
+    test('descends into subdirectories (multi-file engine footprints)', () async {
+      final subDir = Directory('${tempDir.path}/nested')..createSync();
+      await File('${subDir.path}/extra.sqlite').writeAsBytes(
+        List.filled(50, 0),
+      );
+      await File('${tempDir.path}/cairn.sqlite').writeAsBytes(
+        List.filled(50, 0),
+      );
+
+      final record = await runner.dbBytes(tempDir.path);
+
+      expect(record.metrics['db_bytes'], 100);
+    });
+  });
 }
