@@ -34,6 +34,8 @@ enum Commands {
     Pull(commands::pull::PullArgs),
     /// App-side: generate per-SDK source from `.nostos/`.
     Gen(commands::gen::GenArgs),
+    /// Generate/edit/validate nostos_rules.toml (per-table sync rules, ADR-0031).
+    Rules(commands::rules::RulesArgs),
 }
 
 #[tokio::main]
@@ -53,5 +55,6 @@ async fn main() -> Result<()> {
         Commands::Link(args) => commands::link::run(args, &cwd).await,
         Commands::Pull(args) => commands::pull::run(args, &cwd).await,
         Commands::Gen(args) => commands::gen::run(args, &cwd).await,
+        Commands::Rules(args) => commands::rules::run(args, &cwd).await,
     }
 }
