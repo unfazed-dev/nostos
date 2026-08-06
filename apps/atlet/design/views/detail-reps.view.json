@@ -1,0 +1,386 @@
+{
+  "doc": "DERIVED by derive_views.py (W4c-generic) from detail-reps.skeleton.json + detail-reps.content.json \u2014 do not hand-edit; re-derive. Gaps: see detail-reps.derive_report.json.",
+  "entity": "Workout",
+  "root": {
+    "child": {
+      "all": 16,
+      "child": {
+        "child": {
+          "children": [
+            {
+              "child": {
+                "color": "onSurface",
+                "style": "labelLarge",
+                "type": "text",
+                "value": "9:41"
+              },
+              "h": 28,
+              "type": "padding",
+              "v": 14
+            },
+            {
+              "children": [
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "name": "chevron-left",
+                        "type": "iconButton"
+                      },
+                      {
+                        "color": "muted",
+                        "style": "labelSmall",
+                        "type": "text",
+                        "value": "Tempo \u00b7 3s/rep"
+                      },
+                      {
+                        "name": "edit",
+                        "type": "iconButton"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "main": "spaceBetween",
+                    "type": "row"
+                  },
+                  "h": 22,
+                  "type": "padding",
+                  "v": 14
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "color": "onSurface",
+                        "style": "headlineMedium",
+                        "type": "text",
+                        "value": "Push Day"
+                      },
+                      {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Push-ups \u00b7 1/4"
+                      }
+                    ],
+                    "crossAxis": "start",
+                    "gap": 6,
+                    "type": "column"
+                  },
+                  "h": 28,
+                  "type": "padding",
+                  "v": 12
+                },
+                {
+                  "size": 22,
+                  "type": "vspace"
+                },
+                {
+                  "child": {
+                    "child": {
+                      "children": [
+                        {
+                          "child": {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Up next"
+                          },
+                          "h": 10,
+                          "type": "padding",
+                          "v": 0
+                        },
+                        {
+                          "children": [
+                            {
+                              "child": {
+                                "child": {
+                                  "style": "labelSmall",
+                                  "type": "text",
+                                  "value": "45s rest"
+                                },
+                                "h": 9,
+                                "type": "padding",
+                                "v": 3
+                              },
+                              "clip": false,
+                              "type": "card"
+                            },
+                            {
+                              "color": "onSurface",
+                              "style": "labelLarge",
+                              "type": "text",
+                              "value": "Pike push-ups"
+                            }
+                          ],
+                          "crossAxis": "center",
+                          "type": "row"
+                        },
+                        {
+                          "child": {
+                            "color": "muted",
+                            "name": "chevron-left",
+                            "size": 12,
+                            "type": "icon"
+                          },
+                          "clip": false,
+                          "type": "card"
+                        }
+                      ],
+                      "crossAxis": "center",
+                      "gap": 12,
+                      "type": "row"
+                    },
+                    "h": 14,
+                    "type": "padding",
+                    "v": 9
+                  },
+                  "clip": false,
+                  "type": "card"
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Time"
+                          },
+                          {
+                            "color": "onSurface",
+                            "style": "titleMedium",
+                            "type": "text",
+                            "value": "00:00"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 2,
+                        "type": "column"
+                      },
+                      {
+                        "children": [
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Done"
+                          },
+                          {
+                            "children": [
+                              {
+                                "color": "onSurface",
+                                "style": "titleMedium",
+                                "type": "text",
+                                "value": "0"
+                              },
+                              {
+                                "style": "titleMedium",
+                                "type": "text",
+                                "value": "/20"
+                              }
+                            ],
+                            "type": "row"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 2,
+                        "type": "column"
+                      },
+                      {
+                        "children": [
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Total"
+                          },
+                          {
+                            "children": [
+                              {
+                                "color": "onSurface",
+                                "style": "titleMedium",
+                                "type": "text",
+                                "value": "0"
+                              },
+                              {
+                                "style": "titleMedium",
+                                "type": "text",
+                                "value": "/60"
+                              }
+                            ],
+                            "type": "row"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 2,
+                        "type": "column"
+                      }
+                    ],
+                    "main": "spaceBetween",
+                    "type": "row"
+                  },
+                  "h": 24,
+                  "type": "padding",
+                  "v": 0
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "name": "chevron-left",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "reset",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "play",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "sound",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "chevron-left",
+                        "type": "iconButton"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "gap": 16,
+                    "main": "center",
+                    "type": "row"
+                  },
+                  "h": 24,
+                  "type": "padding",
+                  "v": 18
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "color": "muted",
+                        "style": "labelSmall",
+                        "type": "text",
+                        "value": "Tempo"
+                      },
+                      {
+                        "children": [
+                          {
+                            "child": {
+                              "child": {
+                                "style": "labelLarge",
+                                "type": "text",
+                                "value": "1s"
+                              },
+                              "h": 12,
+                              "type": "padding",
+                              "v": 8
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "style": "labelLarge",
+                                "type": "text",
+                                "value": "2s"
+                              },
+                              "h": 12,
+                              "type": "padding",
+                              "v": 8
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "style": "labelLarge",
+                                "type": "text",
+                                "value": "3s"
+                              },
+                              "h": 12,
+                              "type": "padding",
+                              "v": 8
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "style": "labelLarge",
+                                "type": "text",
+                                "value": "4s"
+                              },
+                              "h": 12,
+                              "type": "padding",
+                              "v": 8
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "style": "labelLarge",
+                                "type": "text",
+                                "value": "5s"
+                              },
+                              "h": 12,
+                              "type": "padding",
+                              "v": 8
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "style": "labelLarge",
+                                "type": "text",
+                                "value": "6s"
+                              },
+                              "h": 12,
+                              "type": "padding",
+                              "v": 8
+                            },
+                            "clip": false,
+                            "type": "card"
+                          }
+                        ],
+                        "gap": 6,
+                        "type": "row"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "gap": 10,
+                    "type": "row"
+                  },
+                  "h": 24,
+                  "type": "padding",
+                  "v": 16
+                }
+              ],
+              "crossAxis": "start",
+              "type": "column"
+            }
+          ],
+          "crossAxis": "start",
+          "type": "column"
+        },
+        "clip": false,
+        "type": "card"
+      },
+      "type": "padding"
+    },
+    "clip": false,
+    "type": "card"
+  },
+  "view": "detail-reps"
+}

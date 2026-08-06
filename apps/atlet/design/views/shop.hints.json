@@ -1,0 +1,4 @@
+{
+  "doc": "W4c-generic hints seam (per-design SEMANTIC judgment only — never layout): design-chrome classes the emitted app must not render (the OS owns the status bar; HomeShell owns the tab bar; tweak-fab is design tooling).",
+  "exclude": ["statusbar", "tabbar", "tab-item", "tweak-fab", "tweak-panel"]
+}

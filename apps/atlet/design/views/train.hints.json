@@ -1,0 +1,14 @@
+{
+  "doc": "R2b-activation display transforms for train (the live-home slice). SEMANTIC judgment only — the design applies per-type display forms (data.jsx TYPE_META + the rendered mockup) the pure reverse-lookup can't infer from a frozen capture: type's enum .wire is lowercase ('distance') but the card label is title-case ('Distance'); target is whole-seconds in the seed but the card shows minutes for time-type (240 sec -> 4); unit's raw .wire ('sec'/'reps') differs from the per-type label the card shows ('minutes'/'reps total'). The transform expands the reverse-lookup's match cores AND emits a Dart wrapper so the runtime shows the design's display form, not the raw value (without it every card would render w1's frozen 'Distance'/'5'/'km'). Conditional `by: type` branches pick a transform per-row at runtime; '_' is the identity default. Exclude is the chrome-class list (shop's precedent). NEVER layout — only display.",
+  "exclude": ["statusbar", "tabbar", "tab-item", "tweak-fab", "tweak-panel"],
+  "transforms": {
+    "type.wire": {"case": "title"},
+    "target": {"by": "type", "branches": {"time": {"div": 60, "round": true}, "_": {}}},
+    "unit.wire": {"by": "type", "branches": {
+      "distance": {"literal": "km"},
+      "reps": {"literal": "reps total"},
+      "time": {"literal": "minutes"},
+      "_": {}
+    }}
+  }
+}

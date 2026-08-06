@@ -1,0 +1,366 @@
+{
+  "doc": "DERIVED by derive_views.py (W4c-generic) from detail-distance.skeleton.json + detail-distance.content.json \u2014 do not hand-edit; re-derive. Gaps: see detail-distance.derive_report.json.",
+  "entity": "Workout",
+  "root": {
+    "child": {
+      "all": 16,
+      "child": {
+        "child": {
+          "children": [
+            {
+              "child": {
+                "color": "onSurface",
+                "style": "labelLarge",
+                "type": "text",
+                "value": "9:41"
+              },
+              "h": 28,
+              "type": "padding",
+              "v": 14
+            },
+            {
+              "children": [
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "name": "chevron-left",
+                        "type": "iconButton"
+                      },
+                      {
+                        "color": "muted",
+                        "style": "labelSmall",
+                        "type": "text",
+                        "value": "Distance \u00b7 pace"
+                      },
+                      {
+                        "name": "edit",
+                        "type": "iconButton"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "main": "spaceBetween",
+                    "type": "row"
+                  },
+                  "h": 22,
+                  "type": "padding",
+                  "v": 14
+                },
+                {
+                  "child": {
+                    "color": "onSurface",
+                    "style": "headlineMedium",
+                    "type": "text",
+                    "value": "Sunrise 5k"
+                  },
+                  "h": 28,
+                  "type": "padding",
+                  "v": 12
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "child": {
+                              "child": {
+                                "children": [
+                                  {
+                                    "color": "muted",
+                                    "style": "labelSmall",
+                                    "type": "text",
+                                    "value": "Distance"
+                                  },
+                                  {
+                                    "children": [
+                                      {
+                                        "color": "onSurface",
+                                        "style": "titleMedium",
+                                        "type": "text",
+                                        "value": "0.00"
+                                      },
+                                      {
+                                        "color": "muted",
+                                        "style": "labelSmall",
+                                        "type": "text",
+                                        "value": "km"
+                                      }
+                                    ],
+                                    "gap": 4,
+                                    "type": "row"
+                                  }
+                                ],
+                                "gap": 4,
+                                "type": "column"
+                              },
+                              "h": 10,
+                              "type": "padding",
+                              "v": 12
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "children": [
+                                  {
+                                    "color": "muted",
+                                    "style": "labelSmall",
+                                    "type": "text",
+                                    "value": "Time"
+                                  },
+                                  {
+                                    "color": "onSurface",
+                                    "style": "titleMedium",
+                                    "type": "text",
+                                    "value": "00:00"
+                                  }
+                                ],
+                                "gap": 4,
+                                "type": "column"
+                              },
+                              "h": 10,
+                              "type": "padding",
+                              "v": 12
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "child": {
+                              "child": {
+                                "children": [
+                                  {
+                                    "color": "muted",
+                                    "style": "labelSmall",
+                                    "type": "text",
+                                    "value": "Pace"
+                                  },
+                                  {
+                                    "children": [
+                                      {
+                                        "color": "onSurface",
+                                        "style": "titleMedium",
+                                        "type": "text",
+                                        "value": "\u2014:\u2014"
+                                      },
+                                      {
+                                        "color": "muted",
+                                        "style": "labelSmall",
+                                        "type": "text",
+                                        "value": "/km"
+                                      }
+                                    ],
+                                    "gap": 4,
+                                    "type": "row"
+                                  }
+                                ],
+                                "gap": 4,
+                                "type": "column"
+                              },
+                              "h": 10,
+                              "type": "padding",
+                              "v": 12
+                            },
+                            "clip": false,
+                            "type": "card"
+                          }
+                        ],
+                        "crossAxis": "center",
+                        "gap": 8,
+                        "type": "row"
+                      },
+                      {
+                        "size": 16,
+                        "type": "vspace"
+                      },
+                      {
+                        "child": {
+                          "color": "muted",
+                          "style": "labelSmall",
+                          "type": "text",
+                          "value": "Splits"
+                        },
+                        "h": 0,
+                        "type": "padding",
+                        "v": 8
+                      },
+                      {
+                        "children": [
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "1"
+                                },
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "\u2014:\u2014"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 12,
+                              "type": "row"
+                            },
+                            "h": 14,
+                            "type": "padding",
+                            "v": 10
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "2"
+                                },
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "\u2014:\u2014"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 12,
+                              "type": "row"
+                            },
+                            "h": 14,
+                            "type": "padding",
+                            "v": 10
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "3"
+                                },
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "\u2014:\u2014"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 12,
+                              "type": "row"
+                            },
+                            "h": 14,
+                            "type": "padding",
+                            "v": 10
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "4"
+                                },
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "\u2014:\u2014"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 12,
+                              "type": "row"
+                            },
+                            "h": 14,
+                            "type": "padding",
+                            "v": 10
+                          },
+                          {
+                            "child": {
+                              "children": [
+                                {
+                                  "color": "muted",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "5"
+                                },
+                                {
+                                  "color": "onSurface",
+                                  "style": "bodySmall",
+                                  "type": "text",
+                                  "value": "\u2014:\u2014"
+                                }
+                              ],
+                              "crossAxis": "center",
+                              "gap": 12,
+                              "type": "row"
+                            },
+                            "h": 14,
+                            "type": "padding",
+                            "v": 10
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 6,
+                        "type": "column"
+                      }
+                    ],
+                    "type": "column"
+                  },
+                  "h": 22,
+                  "type": "padding",
+                  "v": 8
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "name": "reset",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "play",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "sound",
+                        "type": "iconButton"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "gap": 16,
+                    "main": "center",
+                    "type": "row"
+                  },
+                  "h": 24,
+                  "type": "padding",
+                  "v": 18
+                }
+              ],
+              "crossAxis": "start",
+              "type": "column"
+            }
+          ],
+          "crossAxis": "start",
+          "type": "column"
+        },
+        "clip": false,
+        "type": "card"
+      },
+      "type": "padding"
+    },
+    "clip": false,
+    "type": "card"
+  },
+  "view": "detail-distance"
+}

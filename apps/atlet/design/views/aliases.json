@@ -1,0 +1,4 @@
+{
+  "$doc": "Crosswalk: emitted-view file_stem -> frozen-capture name the deriver keys its <name>.view.json by. Committed design config (like <page>.hints.json), NOT a hand-authored spec. Direct <file_stem>.view.json wins; this is the fallback, consulted only for BOUND views. R2a landed HOME (train) — swipe-action drop fix, on-device boot-clean at 402px AND 375px. The 3 detail views are DERIVED + fixed but NOT wired here: their nav is an R3 interaction (unreachable to eyeball) and detail-distance/reps still carry a multi-card row that is unverified on-device. Add them once R3 wires navigation and they render boot-clean.",
+  "home": "train"
+}

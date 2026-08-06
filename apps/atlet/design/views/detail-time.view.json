@@ -1,0 +1,181 @@
+{
+  "doc": "DERIVED by derive_views.py (W4c-generic) from detail-time.skeleton.json + detail-time.content.json \u2014 do not hand-edit; re-derive. Gaps: see detail-time.derive_report.json.",
+  "entity": "Workout",
+  "root": {
+    "child": {
+      "all": 16,
+      "child": {
+        "child": {
+          "children": [
+            {
+              "child": {
+                "color": "onSurface",
+                "style": "labelLarge",
+                "type": "text",
+                "value": "9:41"
+              },
+              "h": 28,
+              "type": "padding",
+              "v": 14
+            },
+            {
+              "children": [
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "name": "chevron-left",
+                        "type": "iconButton"
+                      },
+                      {
+                        "color": "muted",
+                        "style": "labelSmall",
+                        "type": "text",
+                        "value": "Countdown"
+                      },
+                      {
+                        "name": "edit",
+                        "type": "iconButton"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "main": "spaceBetween",
+                    "type": "row"
+                  },
+                  "h": 22,
+                  "type": "padding",
+                  "v": 14
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "color": "onSurface",
+                        "style": "headlineMedium",
+                        "type": "text",
+                        "value": "Tabata Burnout"
+                      },
+                      {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Step 1 of 15 \u00b7 Work"
+                      }
+                    ],
+                    "crossAxis": "start",
+                    "gap": 6,
+                    "type": "column"
+                  },
+                  "h": 28,
+                  "type": "padding",
+                  "v": 12
+                },
+                {
+                  "size": 22,
+                  "type": "vspace"
+                },
+                {
+                  "child": {
+                    "child": {
+                      "children": [
+                        {
+                          "child": {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Up next"
+                          },
+                          "h": 10,
+                          "type": "padding",
+                          "v": 0
+                        },
+                        {
+                          "size": 12,
+                          "type": "hspace"
+                        },
+                        {
+                          "color": "onSurface",
+                          "style": "labelLarge",
+                          "type": "text",
+                          "value": "Rest"
+                        },
+                        {
+                          "size": 167,
+                          "type": "hspace"
+                        },
+                        {
+                          "child": {
+                            "color": "muted",
+                            "name": "chevron-left",
+                            "size": 12,
+                            "type": "icon"
+                          },
+                          "clip": false,
+                          "type": "card"
+                        }
+                      ],
+                      "crossAxis": "center",
+                      "type": "row"
+                    },
+                    "h": 14,
+                    "type": "padding",
+                    "v": 9
+                  },
+                  "clip": false,
+                  "type": "card"
+                },
+                {
+                  "size": 453,
+                  "type": "vspace"
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "name": "chevron-left",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "reset",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "play",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "sound",
+                        "type": "iconButton"
+                      },
+                      {
+                        "name": "chevron-left",
+                        "type": "iconButton"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "gap": 16,
+                    "main": "center",
+                    "type": "row"
+                  },
+                  "h": 24,
+                  "type": "padding",
+                  "v": 18
+                }
+              ],
+              "crossAxis": "start",
+              "type": "column"
+            }
+          ],
+          "crossAxis": "start",
+          "type": "column"
+        },
+        "clip": false,
+        "type": "card"
+      },
+      "type": "padding"
+    },
+    "clip": false,
+    "type": "card"
+  },
+  "view": "detail-time"
+}

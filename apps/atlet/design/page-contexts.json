@@ -1,0 +1,12 @@
+{
+  "$description": "Strategic-design freeze: page id -> bounded context (null = app-level chrome in lib/ui/, ADR-0009). Design-owned like primitives.json; 12-presentation replays it verbatim. A new design commits its own mapping here.",
+  "splash": null,
+  "support": null,
+  "signin": "identity",
+  "otp": "identity",
+  "welcome": "identity",
+  "account": "identity",
+  "home": "training",
+  "detail": "training",
+  "shop": "commerce"
+}

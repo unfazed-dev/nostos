@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Atlet — Workout app</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // Tweak defaults (4-axis: color/theme, typography, radius, motion — v2 extends v1)
+  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "accentHue": 28,
+    "darkMode": false,
+    "numFont": "mono",
+    "theme": "auto",
+    "radiusScale": 1,
+    "motionScale": 1
+  }/*EDITMODE-END*/;
+  window.__audioOn = true;
+
+  // THEME — resolve a mode ('light'|'dark'|'auto') to an effective theme and
+  // apply it via a data-theme attribute on <html>. One source of truth: CSS
+  // [data-theme="dark"] swaps the full token set. 'auto' defers to the OS
+  // prefers-color-scheme. Module-level so the init script + the App effect
+  // share one definition (GLM-5.2: attribute-driven, not per-var JS recolor).
+  function resolveTheme(mode) {
+    const effective = mode === 'auto'
+      ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : mode;
+    document.documentElement.setAttribute('data-theme', effective);
+  }
+  // FOUC guard — resolve the stored/default theme BEFORE first paint so the
+  // screen never flashes the wrong theme. Runs inline in <head>.
+  try { resolveTheme(TWEAK_DEFAULTS.theme || 'auto'); } catch (e) {}
+</script>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="auth.jsx"></script>
+<script type="text/babel" src="home.jsx"></script>
+<script type="text/babel" src="detail.jsx"></script>
+<script type="text/babel" src="sheet.jsx"></script>
+<script type="text/babel" src="account.jsx"></script>
+<!-- v2 commerce shards (additive; v1 shards above untouched) -->
+<script type="text/babel" src="shop.jsx"></script>
+<script type="text/babel" src="support.jsx"></script>
+<script type="text/babel" src="checkout.jsx"></script>
+
+<script type="text/babel">
+const StatusBar = () => (
+  <div className="statusbar">
+    <span className="num">9:41</span>
+    <div className="right">
+      {/* signal */}
+      <svg width="16" height="10" viewBox="0 0 16 10" fill="currentColor"><rect x="0" y="6" width="3" height="4" rx="0.5"/><rect x="4" y="4" width="3" height="6" rx="0.5"/><rect x="8" y="2" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="10" rx="0.5"/></svg>
+      {/* battery */}
+      <svg width="22" height="10" viewBox="0 0 22 10" fill="none"><rect x="0.5" y="0.5" width="18" height="9" rx="2" stroke="currentColor"/><rect x="2" y="2" width="14" height="6" rx="1" fill="currentColor"/><rect x="19.5" y="3" width="2" height="4" rx="0.5" fill="currentColor"/></svg>
+    </div>
+  </div>
+);
+
+const Toast = ({ msg, show }) => (
+  <div className={`toast ${show ? 'show' : ''}`}>{msg}</div>
+);
+
+// v2: bottom tab bar — the new primary nav (commerce + donations are first-class)
+const TabBar = ({ tab, setTab, cartCount }) => {
+  const TABS = [
+    { id: 'train',   label: 'Train',   icon: 'bolt' },
+    { id: 'shop',    label: 'Shop',    icon: 'shop' },
+    { id: 'support', label: 'Support', icon: 'heart' },
+    { id: 'account', label: 'Account', icon: 'person' },
+  ];
+  return (
+    <div className="tabbar">
+      {TABS.map(t => (
+        <button key={t.id} className={`tab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)} aria-label={t.label}>
+          <div className="tab-icon">
+            <Icon name={t.icon} size={22} stroke={tab === t.id ? 2 : 1.6}/>
+            {t.id === 'shop' && cartCount > 0 && <span className="tab-badge">{cartCount}</span>}
+          </div>
+          <span className="tab-label">{t.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+};
+
+// TweakFab — a draggable floating button (pattern: the roster FAB in
+// pixel_77/business GarrisonHero). setPointerCapture + touch-action:none so the
+// drag never scrolls the page; a 5px dead-zone separates tap from drag; the
+// position is clamped to the viewport so it can't be lost off-screen. Tap opens
+// a STAGGERED panel (each row transitions with a per-index delay, reversed on
+// close) so the reveal reads as motion, not a flash. This is the ONLY visible
+// affordance — the panel is no longer host-postMessage-only (that path is kept
+// for hosts but a standalone browser always shows the FAB). 4 axes mutate the
+// token CSS vars live: color, typography, radius, motion.
+const TweakFab = ({ open, setOpen, state, setState, onSignOut }) => {
+  const fabRef = React.useRef(null);
+  const dragRef = React.useRef(null);
+  const FAB = 48, PAD = 10, PANEL_W = 268, PANEL_GAP = 10;
+  // panelPos — where the panel anchors, recomputed from the FAB center whenever
+  // it opens (GLM-5.2 quadrant logic: FAB in the upper half → panel opens BELOW,
+  // else ABOVE; left half → right-edge-aligned toward center, else left-aligned;
+  // always clamped to the viewport so it never overflows).
+  const [panelPos, setPanelPos] = React.useState(null);
+  const clamp = (x, y) => ({
+    x: Math.min(Math.max(PAD, x), Math.max(PAD, window.innerWidth - FAB - PAD)),
+    y: Math.min(Math.max(PAD, y), Math.max(PAD, window.innerHeight - FAB - PAD)),
+  });
+  // placePanel — deterministic quadrant placement relative to the FAB. Returns
+  // {left, top, origin} where origin is the corner the panel grows from (for the
+  // open animation's transform origin).
+  const placePanel = () => {
+    const el = fabRef.current; if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const openBelow = cy < vh / 2;   // FAB in upper half → grow downward
+    const openRight = cx < vw / 2;   // FAB in left half → open toward right
+    let left, top;
+    if (openRight) { left = Math.min(r.left, vw - PANEL_W - PANEL_GAP); }
+    else           { left = Math.max(PANEL_GAP, r.right - PANEL_W); }
+    if (openBelow) { top = r.bottom + PANEL_GAP; }
+    else           { top = Math.max(PANEL_GAP, r.top - 0); } // measured below after height known
+    // we don't know panel height pre-render; for the "above" case anchor the
+    // BOTTOM edge at r.top - gap and let CSS translate it. Signal via origin.
+    return {
+      left,
+      top: openBelow ? top : null,           // below → top is the y
+      bottom: openBelow ? null : (vh - r.top + PANEL_GAP), // above → bottom-anchored
+      origin: (openBelow ? 'bottom' : 'top') + (openRight ? ' left' : ' right'),
+      below: openBelow, right: openRight,
+    };
+  };
+  // recompute whenever the panel opens (and after a drag, since onMove closes it,
+  // the next open re-derives from the new FAB position). Also recompute on resize
+  // so a rotated viewport re-clamps.
+  React.useEffect(() => {
+    if (open) setPanelPos(placePanel());
+  }, [open]);
+  React.useEffect(() => {
+    const onResize = () => { if (open) setPanelPos(placePanel()); };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [open]);
+
+  const onDown = (e) => {
+    const el = fabRef.current;
+    const fr = el.getBoundingClientRect();
+    dragRef.current = { id: e.pointerId, dx: e.clientX - fr.left, dy: e.clientY - fr.top, sx: e.clientX, sy: e.clientY, moved: false };
+    el.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e) => {
+    const d = dragRef.current;
+    if (!d || e.pointerId !== d.id) return;
+    if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 5) return; // dead-zone
+    d.moved = true;
+    setOpen(false); // dragging dismisses an open panel so it doesn't trail
+    const el = fabRef.current;
+    const p = clamp(e.clientX - d.dx, e.clientY - d.dy);
+    el.style.left = p.x + 'px'; el.style.top = p.y + 'px'; el.style.right = 'auto'; el.style.bottom = 'auto';
+  };
+  const onUp = (e) => {
+    const d = dragRef.current;
+    if (!d || e.pointerId !== d.id) return;
+    const moved = d.moved;
+    dragRef.current = null;
+    if (!moved) setOpen(o => !o); // tap → toggle
+  };
+
+  const accents = [
+    { hue: 28,  name: 'Burnt' },
+    { hue: 12,  name: 'Brick' },
+    { hue: 145, name: 'Forest' },
+    { hue: 220, name: 'Cobalt' },
+    { hue: 280, name: 'Plum' },
+  ];
+  // rows stagger open (i*45ms) and close in reverse — reads as motion, not a flash.
+  const ROWS = 7;
+  const rowDelay = (i) => open ? (i * 45) : ((ROWS - 1 - i) * 25);
+
+  return (
+    <React.Fragment>
+      <div className={`tweak-fab-wrap ${open ? 'open' : ''}`}>
+        {open && (
+          <div className={`tweak-fab-panel ${panelPos ? (panelPos.below ? 'open-below' : 'open-above') : ''}`}
+            style={panelPos ? {
+              left: panelPos.left + 'px',
+              ...(panelPos.below ? { top: panelPos.top + 'px' } : { bottom: panelPos.bottom + 'px' }),
+              transformOrigin: panelPos.origin,
+            } : {}}
+            role="group" aria-label="Design tweaks">
+            <div className="tweak-fab-head">
+              <span className="tweak-fab-title">Tweaks</span>
+              <button className="tweak-fab-x" onClick={() => setOpen(false)} aria-label="Close tweaks">✕</button>
+            </div>
+            <div className="tweak-fab-row" style={{ transitionDelay: rowDelay(0) + 'ms' }}>
+              <div className="lbl">Accent</div>
+              <div className="swatch-row">
+                {accents.map(a => (
+                  <div key={a.hue}
+                    className={`tw-swatch ${state.accentHue === a.hue ? 'active' : ''}`}
+                    style={{background: `oklch(60% 0.16 ${a.hue})`}}
+                    onClick={() => setState({...state, accentHue: a.hue})}
+                    title={a.name}/>
+                ))}
+              </div>
+            </div>
+            <div className="tweak-fab-row" style={{ transitionDelay: rowDelay(1) + 'ms' }}>
+              <div className="lbl">Theme</div>
+              {/* Light / Dark / Auto (system) — resolveTheme() in <head> + the App
+                  effect flips data-theme on <html>; [data-theme="dark"] CSS swaps
+                  the whole token set. 'auto' follows prefers-color-scheme live. */}
+              {(() => {
+                const opts = ['light','dark','auto'];
+                const labels = { light:'Light', dark:'Dark', auto:'Auto' };
+                const cur = opts.indexOf(state.theme || 'auto');
+                return (
+                  <div className="segmented" style={{width: 200, height: 28}}>
+                    {opts.map(v => (
+                      <button key={v}
+                        className={`seg-btn ${(state.theme || 'auto') === v ? 'active' : ''}`}
+                        onClick={() => setState({...state, theme: v})}>
+                        {labels[v]}
+                      </button>
+                    ))}
+                    <div className="seg-indicator" style={{
+                      width: 'calc(33.333% - 4px)',
+                      transform: `translateX(calc(${cur} * 100% + ${cur * 3}px))`
+                    }}/>
+                  </div>
+                );
+              })()}
+            </div>
+            <div className="tweak-fab-row" style={{ transitionDelay: rowDelay(2) + 'ms' }}>
+              <div className="lbl">Number font</div>
+              <div className="segmented" style={{width: 140, height: 28}}>
+                {['mono','sans'].map(f => (
+                  <button key={f}
+                    className={`seg-btn ${state.numFont === f ? 'active' : ''}`}
+                    onClick={() => setState({...state, numFont: f})}
+                    style={{fontFamily: f === 'mono' ? 'var(--mono)' : 'var(--sans)'}}>
+                    01:23
+                  </button>
+                ))}
+                <div className="seg-indicator" style={{
+                  width: 'calc(50% - 4px)',
+                  transform: `translateX(calc(${['mono','sans'].indexOf(state.numFont) * 100}% + 2px))`
+                }}/>
+              </div>
+            </div>
+            <div className="tweak-fab-row" style={{ transitionDelay: rowDelay(3) + 'ms' }}>
+              <div className="lbl">Haptics</div>
+              <button
+                className={`ios-switch ${state.haptics !== false ? 'on' : ''}`}
+                onClick={() => setState({...state, haptics: state.haptics === false ? true : false})}
+                aria-label="Toggle haptics"/>
+            </div>
+            <div className="tweak-fab-row" style={{ transitionDelay: rowDelay(4) + 'ms' }}>
+              <div className="lbl">Corner radius · {(state.radiusScale || 1).toFixed(2)}×</div>
+              <input className="tweak-slider" type="range" min="0.4" max="1.8" step="0.1" value={state.radiusScale || 1} onChange={(e) => setState({...state, radiusScale: Number(e.target.value)})}/>
+            </div>
+            <div className="tweak-fab-row" style={{ transitionDelay: rowDelay(5) + 'ms' }}>
+              <div className="lbl">Motion speed · {(state.motionScale || 1).toFixed(2)}×</div>
+              <input className="tweak-slider" type="range" min="0" max="2" step="0.1" value={state.motionScale || 1} onChange={(e) => setState({...state, motionScale: Number(e.target.value)})}/>
+            </div>
+            <div className="tweak-fab-row" style={{ transitionDelay: rowDelay(6) + 'ms' }}>
+              <div className="lbl">Account</div>
+              <button className="haptic" onClick={onSignOut} style={{
+                padding:'8px 14px', borderRadius:8, border:'1px solid var(--rule)',
+                background:'var(--paper)', color:'var(--ink)', cursor:'pointer',
+                fontSize:'var(--hig-footnote)', fontWeight:600, fontFamily:'var(--sans)'
+              }}>Sign out</button>
+            </div>
+          </div>
+        )}
+      </div>
+      <button ref={fabRef} className="tweak-fab"
+        aria-expanded={open}
+        aria-label={open ? 'Close tweaks' : 'Open tweaks — drag to move'}
+        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}
+        onPointerCancel={() => (dragRef.current = null)}>
+        <span aria-hidden="true">{open ? '✕' : '⚙'}</span>
+      </button>
+    </React.Fragment>
+  );
+};
+
+const App = () => {
+  const [workouts, setWorkouts] = React.useState(SEED_WORKOUTS);
+  // ?demo=1 skips onboarding (design preview / screenshots / the render probe).
+  const DEMO = (() => { try { return new URLSearchParams(window.location.search).get('demo') === '1'; } catch { return false; } })();
+  const [authed, setAuthed] = React.useState(() => {
+    try { return DEMO || localStorage.getItem('atlet.authed') === '1'; } catch { return false; }
+  });
+  const [authStage, setAuthStage] = React.useState(authed ? 'home' : 'splash');
+  const [authEmail, setAuthEmail] = React.useState('');
+  const [authMode, setAuthMode] = React.useState(null);
+  const [view, setView] = React.useState('home'); // 'home' | 'detail'
+  const [active, setActive] = React.useState(null);
+  const [sheet, setSheet] = React.useState({ open: false, editing: null });
+  const [toast, setToast] = React.useState({ show: false, msg: '' });
+  const [tweakOpen, setTweakOpen] = React.useState(false);
+  const [tweakState, setTweakState] = React.useState(TWEAK_DEFAULTS);
+  const [accountOpen, setAccountOpen] = React.useState(false);
+
+  // v2: tab nav + commerce state (additive; v1 training state above untouched)
+  const [tab, setTab] = React.useState(() => {
+    try { const h = window.location.hash.replace('#',''); return ['train','shop','support','account'].includes(h) ? h : 'train'; } catch { return 'train'; }
+  });
+  const [cart, setCart] = React.useState([]);
+  const [addresses, setAddresses] = React.useState(SEED_ADDRESSES);
+  const [orders, setOrders] = React.useState(SEED_ORDERS);
+  const [subscriptions, setSubscriptions] = React.useState(SEED_SUBSCRIPTIONS);
+  const [invoices, setInvoices] = React.useState(SEED_INVOICES);
+  const [donations, setDonations] = React.useState(SEED_DONATIONS);
+  const [paymentMethods, setPaymentMethods] = React.useState(SEED_PAYMENT_METHODS);
+  const [checkout, setCheckout] = React.useState(null);
+
+  const addToCart = (product, qty = 1) => {
+    setCart(c => {
+      const i = c.findIndex(x => x.productId === product.id);
+      if (i >= 0) { return c.map(x => x.productId === product.id ? {...x, qty: x.qty + qty} : x); }
+      return [...c, { productId: product.id, qty }];
+    });
+    showToast(`Added ${product.name}`);
+  };
+  const setQty = (productId, qty) => setCart(c => qty <= 0 ? c.filter(x => x.productId !== productId) : c.map(x => x.productId === productId ? {...x, qty} : x));
+  const cartCount = cart.reduce((n, x) => n + x.qty, 0);
+  const completeCheckout = (result) => {
+    if (checkout.kind === 'cart') {
+      const sub = cartSubtotal(cart); const ship = resolveShipping(sub, result.shipRateId);
+      const order = { id: uid('ord'), number: String(1043 + orders.length), date: new Date().toISOString().slice(0,10), status: 'confirmed', items: cart.map(l => { const p = SEED_PRODUCTS.find(x=>x.id===l.productId); return {name:p.name, qty:l.qty, price:p.price}; }), subtotal: sub, shipping: ship.price, tax: sub*TAX_RATE, total: sub + ship.price + sub*TAX_RATE, paid: true };
+      setOrders(o => [order, ...o]); setCart([]); showToast('Order placed ✓');
+    } else if (checkout.kind === 'subscription') {
+      const plan = APP_PLANS.find(p => p.id === checkout.planId);
+      setSubscriptions(s => [{id: uid('sub'), tier:'app', status:'active', planId:plan.id, planName:plan.name, price: result.billing==='yearly'?plan.priceY:plan.priceM, cadence:result.billing, nextDate:'2026-07-26'}, ...s.filter(x=>x.tier!=='app')]);
+      showToast(`Upgraded to ${plan.name} ✓`);
+    } else if (checkout.kind === 'donation') {
+      setDonations(d => [{id: uid('don'), date: new Date().toISOString().slice(0,10), amount: checkout.amount, message:'', recurring:false, method:'Visa •• 4242'}, ...d]);
+      showToast(`Thank you for ${money(checkout.amount)} ♥`);
+    }
+    setCheckout(null);
+  };
+
+  // Apply accent + the v2 axes (radius/motion/theme) — all 4 axes now live-mutate tokens
+  React.useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--accent', `oklch(60% 0.16 ${tweakState.accentHue})`);
+    root.style.setProperty('--accent-2', `oklch(50% 0.16 ${tweakState.accentHue})`);
+    root.style.setProperty('--accent-soft', `oklch(60% 0.16 ${tweakState.accentHue} / 0.12)`);
+    if (tweakState.numFont === 'sans') {
+      root.style.setProperty('--mono', "'Lexend', system-ui, sans-serif");
+    } else {
+      root.style.setProperty('--mono', "'JetBrains Mono', ui-monospace, monospace");
+    }
+    // v2: radius scale (sharper↔softer)
+    const rb = { sm: 10, md: 16, lg: 24, xl: 32 };
+    const rs = tweakState.radiusScale || 1;
+    root.style.setProperty('--r-sm', Math.round(rb.sm * rs) + 'px');
+    root.style.setProperty('--r-md', Math.round(rb.md * rs) + 'px');
+    root.style.setProperty('--r-lg', Math.round(rb.lg * rs) + 'px');
+    root.style.setProperty('--r-xl', Math.round(rb.xl * rs) + 'px');
+    // v2: motion speed
+    root.style.setProperty('--rise-ms', Math.round(550 * (tweakState.motionScale || 1)));
+
+    // THEME — the fix for the no-op toggle. resolve(theme) flips a data-theme
+    // attribute on <html>; [data-theme="dark"] in CSS swaps the whole token set
+    // via the cascade (one source of truth, O(1) recolor — GLM-5.2). 'auto'
+    // resolves to prefers-color-scheme. A separate effect owns the matchMedia
+    // listener so re-toggling the accent hue doesn't rebind it.
+    const mode = tweakState.theme || 'auto';
+    resolveTheme(mode);
+  }, [tweakState.accentHue, tweakState.numFont, tweakState.radiusScale, tweakState.motionScale, tweakState.theme]);
+
+  // THEME auto-listener — when theme === 'auto', follow OS prefers-color-scheme
+  // changes live (e.g. user flips OS dark mode while the app is open). Bound once.
+  React.useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => { if ((tweakState.theme || 'auto') === 'auto') resolveTheme('auto'); };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [tweakState.theme]);
+
+  // Tweaks protocol
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      if (e.data?.type === '__activate_edit_mode') setTweakOpen(true);
+      if (e.data?.type === '__deactivate_edit_mode') setTweakOpen(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({type: '__edit_mode_available'}, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  React.useEffect(() => {
+    window.parent.postMessage({type: '__edit_mode_set_keys', edits: tweakState}, '*');
+  }, [tweakState]);
+
+  const showToast = (msg) => {
+    setToast({ show: true, msg });
+    setTimeout(() => setToast({ show: false, msg }), 1800);
+  };
+
+  const openDetail = (w) => { setActive(w); setView('detail'); };
+  const playWorkout = (w) => { setActive(w); setView('detail'); };
+  const backHome = () => { setView('home'); setTimeout(() => setActive(null), 300); };
+  const openCreate = () => setSheet({ open: true, editing: null });
+  const openEdit = () => setSheet({ open: true, editing: active });
+  const closeSheet = () => setSheet({ open: false, editing: null });
+
+  const saveWorkout = (w) => {
+    setWorkouts(ws => {
+      const idx = ws.findIndex(x => x.id === w.id);
+      if (idx >= 0) {
+        const next = [...ws];
+        next[idx] = w;
+        if (active && active.id === w.id) setActive(w);
+        showToast('Workout updated');
+        return next;
+      }
+      showToast('Workout created');
+      return [...ws, w];
+    });
+    closeSheet();
+  };
+
+  const deleteWorkout = (w) => {
+    setWorkouts(ws => ws.filter(x => x.id !== w.id));
+    showToast('Workout deleted');
+  };
+
+  const duplicateWorkout = (w) => {
+    const copy = { ...w, id: `w-${Date.now()}`, name: `${w.name} copy` };
+    setWorkouts(ws => [...ws, copy]);
+    showToast('Workout duplicated');
+  };
+
+  const refreshHome = () => new Promise(r => setTimeout(r, 650));
+
+  return (
+    <div className="screen" data-screen-label={
+      authStage === 'splash' ? '01 Splash' :
+      authStage === 'signin' ? '02 Sign in' :
+      authStage === 'otp' ? '03 OTP' :
+      authStage === 'welcome' ? '04 Welcome' :
+      view === 'home' ? '05 Home' : '06 Detail'
+    }>
+      <StatusBar/>
+      <div className="app">
+        {authStage === 'splash' && (
+          <SplashView onReady={() => setAuthStage(authed ? 'home' : 'signin')}/>
+        )}
+        {authStage === 'signin' && (
+          <SignInView onSubmit={(mode, email) => {
+            setAuthMode(mode); setAuthEmail(email);
+            if (mode === 'email') setAuthStage('otp');
+            else setAuthStage('welcome');
+          }}/>
+        )}
+        {authStage === 'otp' && (
+          <OTPView email={authEmail} onBack={() => setAuthStage('signin')} onVerify={() => setAuthStage('welcome')}/>
+        )}
+        {authStage === 'welcome' && (
+          <WelcomeView onDone={() => {
+            try { localStorage.setItem('atlet.authed', '1'); } catch {}
+            setAuthed(true);
+            setAuthStage('home');
+          }}/>
+        )}
+        {authStage === 'home' && view === 'home' && tab === 'train' && (
+          <div className="page has-tabbar"><div className="scrollable">
+            <Home workouts={workouts} onOpen={openDetail} onPlay={playWorkout} onCreate={openCreate} onDelete={deleteWorkout} onDuplicate={duplicateWorkout} onRefresh={refreshHome} onAccount={() => setTab('account')}/>
+          </div></div>
+        )}
+        {authStage === 'home' && view === 'home' && tab === 'shop' && (
+          <Shop cart={cart} cartCount={cartCount} onAdd={addToCart} onSetQty={setQty} onCheckout={() => setCheckout({kind:'cart'})} onUpgrade={() => setTab('support')} profile={SEED_PROFILE}/>
+        )}
+        {authStage === 'home' && view === 'home' && tab === 'support' && (
+          <Support plan={SEED_PROFILE.plan} subscriptions={subscriptions} donations={donations} onSubscribe={(planId) => setCheckout({kind:'subscription', tier:'app', planId})} onDonate={(amount) => setCheckout({kind:'donation', amount})} profile={SEED_PROFILE}/>
+        )}
+        {authStage === 'home' && view === 'home' && tab === 'account' && (
+          <AccountView open={true} onClose={() => setTab('train')} tweakState={tweakState} setTweakState={setTweakState} onSignOut={() => { try { localStorage.removeItem('atlet.authed'); } catch {} setAuthed(false); setAuthStage('splash'); }} showToast={showToast}
+            // v2 commerce state (additive) — orders/subs/addresses/invoices/donations + setters
+            orders={orders} setOrders={setOrders}
+            subscriptions={subscriptions} setSubscriptions={setSubscriptions}
+            addresses={addresses} setAddresses={setAddresses}
+            invoices={invoices} donations={donations}
+            paymentMethods={paymentMethods} setPaymentMethods={setPaymentMethods}
+            profile={SEED_PROFILE}/>
+        )}
+        {authStage === 'home' && view === 'detail' && active && (
+          <Detail w={active} onBack={backHome} onEdit={openEdit}/>
+        )}
+        <CreateSheet open={sheet.open} editing={sheet.editing} onClose={closeSheet} onSave={saveWorkout}/>
+        {/* v2 commerce checkout (additive) */}
+        <Checkout checkout={checkout} onClose={() => setCheckout(null)} onComplete={completeCheckout} cart={cart} addresses={addresses} profile={SEED_PROFILE}/>
+        <Toast msg={toast.msg} show={toast.show}/>
+      </div>
+      {authStage === 'home' && view === 'home' && (
+        <TabBar tab={tab} setTab={setTab} cartCount={cartCount}/>
+      )}
+      <TweakFab open={tweakOpen} setOpen={setTweakOpen} state={tweakState} setState={setTweakState} onSignOut={() => {
+        try { localStorage.removeItem('atlet.authed'); } catch {}
+        setAuthed(false); setAuthStage('splash');
+      }}/>
+    </div>
+  );
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+</script>
+</body>
+</html>

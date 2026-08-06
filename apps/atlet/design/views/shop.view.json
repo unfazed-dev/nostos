@@ -1,0 +1,313 @@
+{
+  "doc": "DERIVED by derive_views.py (W4c-generic) from shop.skeleton.json + shop.content.json \u2014 do not hand-edit; re-derive. Gaps: see shop.derive_report.json.",
+  "entity": "Product",
+  "header": {
+    "child": {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "color": "muted",
+                      "name": "leaf",
+                      "size": 11,
+                      "type": "icon"
+                    },
+                    {
+                      "color": "muted",
+                      "style": "labelSmall",
+                      "type": "text",
+                      "value": "100% plant-based"
+                    }
+                  ],
+                  "type": "row"
+                },
+                {
+                  "color": "onSurface",
+                  "style": "headlineMedium",
+                  "type": "text",
+                  "value": "Fuel."
+                }
+              ],
+              "type": "column"
+            },
+            {
+              "name": "cart",
+              "type": "iconButton"
+            }
+          ],
+          "crossAxis": "start",
+          "main": "spaceBetween",
+          "type": "row"
+        },
+        {
+          "bind": "query",
+          "leading": "search",
+          "placeholder": "Search protein, bars, recovery\u2026",
+          "type": "input"
+        },
+        {
+          "bind": "category.wire",
+          "items": [
+            {
+              "label": "All",
+              "value": null
+            },
+            {
+              "label": "Protein",
+              "value": "protein"
+            },
+            {
+              "label": "Shakes",
+              "value": "rtd"
+            },
+            {
+              "label": "Bars",
+              "value": "bars"
+            },
+            {
+              "label": "Recovery",
+              "value": "recovery"
+            }
+          ],
+          "type": "chips"
+        }
+      ],
+      "gap": 11,
+      "type": "column"
+    },
+    "h": 20,
+    "type": "padding",
+    "v": 12
+  },
+  "headerHeight": 156,
+  "root": {
+    "child": {
+      "children": [
+        {
+          "child": {
+            "child": {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "name": "tag",
+                          "size": 11,
+                          "type": "icon"
+                        },
+                        {
+                          "style": "labelSmall",
+                          "type": "text",
+                          "value": "Save 10\u201315%"
+                        }
+                      ],
+                      "type": "row"
+                    },
+                    {
+                      "color": "onSurface",
+                      "style": "labelLarge",
+                      "type": "text",
+                      "value": "Members save on every order"
+                    }
+                  ],
+                  "gap": 2,
+                  "type": "column"
+                },
+                {
+                  "color": "onSurface",
+                  "name": "arrow-right",
+                  "size": 18,
+                  "type": "icon"
+                }
+              ],
+              "crossAxis": "center",
+              "main": "spaceBetween",
+              "type": "row"
+            },
+            "h": 16,
+            "type": "padding",
+            "v": 14
+          },
+          "clip": false,
+          "type": "card"
+        },
+        {
+          "size": 14,
+          "type": "vspace"
+        },
+        {
+          "bind": "items",
+          "childAspectRatio": 0.61,
+          "columns": 2,
+          "gap": 12,
+          "item": {
+            "child": {
+              "children": [
+                {
+                  "child": {
+                    "aspectRatio": 1.0,
+                    "bind": "img",
+                    "fit": "cover",
+                    "type": "image"
+                  },
+                  "clip": true,
+                  "type": "card"
+                },
+                {
+                  "child": {
+                    "children": [
+                      {
+                        "bind": "brand.wire",
+                        "color": "muted",
+                        "style": "labelSmall",
+                        "type": "text"
+                      },
+                      {
+                        "bind": "name",
+                        "color": "onSurface",
+                        "style": "labelLarge",
+                        "type": "text"
+                      },
+                      {
+                        "children": [
+                          {
+                            "child": {
+                              "child": {
+                                "children": [
+                                  {
+                                    "name": "leaf",
+                                    "size": 10,
+                                    "type": "icon"
+                                  },
+                                  {
+                                    "bind": "protein",
+                                    "style": "labelSmall",
+                                    "suffix": "g",
+                                    "type": "text"
+                                  }
+                                ],
+                                "crossAxis": "center",
+                                "gap": 3,
+                                "type": "row"
+                              },
+                              "h": 6,
+                              "type": "padding",
+                              "v": 2
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "bind": "size",
+                            "style": "labelSmall",
+                            "type": "text"
+                          }
+                        ],
+                        "crossAxis": "center",
+                        "gap": 6,
+                        "type": "row"
+                      },
+                      {
+                        "bind": "price",
+                        "color": "onSurface",
+                        "prefix": "$",
+                        "style": "labelLarge",
+                        "type": "text"
+                      }
+                    ],
+                    "crossAxis": "start",
+                    "gap": 3,
+                    "type": "column"
+                  },
+                  "h": 12,
+                  "type": "padding",
+                  "v": 12
+                }
+              ],
+              "crossAxis": "start",
+              "type": "column"
+            },
+            "clip": true,
+            "type": "card"
+          },
+          "padding": 0,
+          "type": "grid"
+        },
+        {
+          "size": 8,
+          "type": "vspace"
+        },
+        {
+          "all": 20,
+          "child": {
+            "children": [
+              {
+                "children": [
+                  {
+                    "color": "muted",
+                    "style": "bodySmall",
+                    "type": "text",
+                    "value": "Free shipping over $50"
+                  },
+                  {
+                    "children": [
+                      {
+                        "name": "leaf",
+                        "size": 16,
+                        "type": "icon"
+                      },
+                      {
+                        "color": "muted",
+                        "style": "bodySmall",
+                        "type": "text",
+                        "value": "Always plant-based"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "gap": 8,
+                    "type": "row"
+                  }
+                ],
+                "crossAxis": "center",
+                "gap": 0,
+                "type": "row"
+              },
+              {
+                "children": [
+                  {
+                    "color": "muted",
+                    "style": "bodySmall",
+                    "type": "text",
+                    "value": "Subscribe & save 10%"
+                  },
+                  {
+                    "color": "muted",
+                    "style": "bodySmall",
+                    "type": "text",
+                    "value": "30-day returns"
+                  }
+                ],
+                "crossAxis": "center",
+                "gap": 0,
+                "type": "row"
+              }
+            ],
+            "crossAxis": "stretch",
+            "gap": 0,
+            "type": "column"
+          },
+          "type": "padding"
+        }
+      ],
+      "type": "column"
+    },
+    "h": 20,
+    "type": "padding"
+  },
+  "view": "shop"
+}

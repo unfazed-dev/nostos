@@ -1,0 +1,7 @@
+{
+  "$description": "Design startup-ceremony freeze (strategic-design data, not code) — drives the emitted StartupView contents (12-presentation) and the brand raster sizes (freeze_brand/scaffold). The design ships its OWN splash page (auth.jsx SplashView): breakdown.json is structure-only (the splash page decomposes to a null primitive), so its texts live here, replayed forever. Absent file or {} = the design ships no startup page and the asko placeholder (brand logo + spinner) is used. Keys: replacesPage = breakdown page id subsumed by the startup ceremony (dropped from routed screens — no orphan); captions = texts under the logo (rendered uppercased, letter-spaced, per the design splash); loading = the bottom progress loader { label, showPercent }; logoSize = the logo's AUTHORED logical size in the design splash (auth.jsx AtletMark size prop) — the mark renders at exactly this pt/dp size on the native splash, StartupView and web loader, never enlarged.",
+  "replacesPage": "splash",
+  "captions": ["move everyday"],
+  "loading": { "label": "Loading", "showPercent": true },
+  "logoSize": 80
+}

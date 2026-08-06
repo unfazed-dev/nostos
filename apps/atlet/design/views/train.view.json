@@ -1,0 +1,582 @@
+{
+  "doc": "DERIVED by derive_views.py (W4c-generic) from train.skeleton.json + train.content.json \u2014 do not hand-edit; re-derive. Gaps: see train.derive_report.json.",
+  "entity": "Workout",
+  "root": {
+    "b": 72,
+    "child": {
+      "children": [
+        {
+          "b": 12,
+          "child": {
+            "children": [
+              {
+                "children": [
+                  {
+                    "color": "muted",
+                    "style": "labelSmall",
+                    "type": "text",
+                    "value": "Wednesday \u00b7 06:42"
+                  },
+                  {
+                    "color": "onSurface",
+                    "style": "headlineMedium",
+                    "type": "text",
+                    "value": "Morning,\nAlex."
+                  }
+                ],
+                "crossAxis": "start",
+                "gap": 4,
+                "type": "column"
+              },
+              {
+                "child": {
+                  "style": "labelLarge",
+                  "type": "text",
+                  "value": "AK"
+                },
+                "clip": false,
+                "type": "card"
+              }
+            ],
+            "crossAxis": "end",
+            "main": "spaceBetween",
+            "type": "row"
+          },
+          "l": 0,
+          "r": 0,
+          "t": 4,
+          "type": "padding"
+        },
+        {
+          "b": 18,
+          "child": {
+            "children": [
+              {
+                "child": {
+                  "b": 16,
+                  "child": {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "This week"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "bodySmall",
+                            "type": "text",
+                            "value": "+18%"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "main": "spaceBetween",
+                        "type": "row"
+                      },
+                      {
+                        "children": [
+                          {
+                            "color": "onSurface",
+                            "style": "headlineMedium",
+                            "type": "text",
+                            "value": "2:31"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelMedium",
+                            "type": "text",
+                            "value": "hours moved"
+                          }
+                        ],
+                        "gap": 6,
+                        "type": "row"
+                      },
+                      {
+                        "children": [
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "M"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "T"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "W"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "T"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "F"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "S"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "S"
+                          }
+                        ],
+                        "gap": 28,
+                        "type": "row"
+                      }
+                    ],
+                    "crossAxis": "start",
+                    "gap": 12,
+                    "type": "column"
+                  },
+                  "l": 20,
+                  "r": 20,
+                  "t": 18,
+                  "type": "padding"
+                },
+                "clip": false,
+                "type": "card",
+                "width": 274
+              },
+              {
+                "child": {
+                  "b": 16,
+                  "child": {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Consistency"
+                          },
+                          {
+                            "style": "bodySmall",
+                            "type": "text",
+                            "value": "8 weeks"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "main": "spaceBetween",
+                        "type": "row"
+                      },
+                      {
+                        "children": [
+                          {
+                            "style": "headlineMedium",
+                            "type": "text",
+                            "value": "14"
+                          },
+                          {
+                            "style": "labelMedium",
+                            "type": "text",
+                            "value": "day streak"
+                          }
+                        ],
+                        "gap": 6,
+                        "type": "row"
+                      }
+                    ],
+                    "crossAxis": "start",
+                    "gap": 12,
+                    "type": "column"
+                  },
+                  "l": 20,
+                  "r": 20,
+                  "t": 18,
+                  "type": "padding"
+                },
+                "clip": false,
+                "type": "card",
+                "width": 274
+              },
+              {
+                "child": {
+                  "b": 16,
+                  "child": {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Trend \u00b7 7 weeks"
+                          },
+                          {
+                            "style": "bodySmall",
+                            "type": "text",
+                            "value": "\u2191 trending"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "main": "spaceBetween",
+                        "type": "row"
+                      },
+                      {
+                        "children": [
+                          {
+                            "color": "onSurface",
+                            "style": "headlineMedium",
+                            "type": "text",
+                            "value": "155"
+                          },
+                          {
+                            "color": "muted",
+                            "style": "labelMedium",
+                            "type": "text",
+                            "value": "min last week"
+                          }
+                        ],
+                        "gap": 6,
+                        "type": "row"
+                      }
+                    ],
+                    "crossAxis": "start",
+                    "gap": 12,
+                    "type": "column"
+                  },
+                  "l": 20,
+                  "r": 20,
+                  "t": 18,
+                  "type": "padding"
+                },
+                "clip": false,
+                "type": "card",
+                "width": 274
+              },
+              {
+                "child": {
+                  "b": 16,
+                  "child": {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "style": "labelSmall",
+                            "type": "text",
+                            "value": "Today"
+                          },
+                          {
+                            "style": "bodySmall",
+                            "type": "text",
+                            "value": "Wed, Apr 18"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "main": "spaceBetween",
+                        "type": "row"
+                      },
+                      {
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "style": "headlineMedium",
+                                "type": "text",
+                                "value": "2"
+                              },
+                              {
+                                "color": "muted",
+                                "style": "labelMedium",
+                                "type": "text",
+                                "value": "workouts queued"
+                              }
+                            ],
+                            "gap": 6,
+                            "type": "row"
+                          },
+                          {
+                            "style": "labelMedium",
+                            "type": "text",
+                            "value": "Sunrise 5k \u00b7 Tabata Burnout"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 12,
+                        "type": "column"
+                      }
+                    ],
+                    "crossAxis": "start",
+                    "gap": 204,
+                    "type": "column"
+                  },
+                  "l": 20,
+                  "r": 20,
+                  "t": 18,
+                  "type": "padding"
+                },
+                "clip": false,
+                "type": "card",
+                "width": 274
+              }
+            ],
+            "gap": 12,
+            "scroll": true,
+            "type": "row"
+          },
+          "l": 0,
+          "r": 0,
+          "t": 8,
+          "type": "padding"
+        },
+        {
+          "size": 19,
+          "type": "vspace"
+        },
+        {
+          "child": {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "color": "onSurface",
+                        "style": "titleLarge",
+                        "type": "text",
+                        "value": "Your workouts"
+                      },
+                      {
+                        "style": "bodyLarge",
+                        "type": "text",
+                        "value": "5"
+                      }
+                    ],
+                    "gap": 8,
+                    "type": "row"
+                  },
+                  {
+                    "b": 8,
+                    "child": {
+                      "style": "titleMedium",
+                      "type": "text",
+                      "value": "New"
+                    },
+                    "l": 8,
+                    "r": 4,
+                    "t": 8,
+                    "type": "padding"
+                  }
+                ],
+                "crossAxis": "center",
+                "main": "spaceBetween",
+                "type": "row"
+              },
+              {
+                "bind": "type.wire",
+                "items": [
+                  {
+                    "label": "All",
+                    "value": null
+                  },
+                  {
+                    "label": "Reps",
+                    "value": "reps"
+                  },
+                  {
+                    "label": "Distance",
+                    "value": "distance"
+                  },
+                  {
+                    "label": "Time",
+                    "value": "time"
+                  }
+                ],
+                "type": "chips"
+              }
+            ],
+            "crossAxis": "start",
+            "gap": 14,
+            "type": "column"
+          },
+          "h": 0,
+          "type": "padding",
+          "v": 14
+        },
+        {
+          "bind": "items",
+          "childAspectRatio": 2.08,
+          "columns": 1,
+          "gap": 10,
+          "item": {
+            "child": {
+              "child": {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "child": {
+                              "child": {
+                                "bind": "type.wire",
+                                "style": "labelSmall",
+                                "transform": {
+                                  "case": "title"
+                                },
+                                "type": "text"
+                              },
+                              "h": 8,
+                              "type": "padding",
+                              "v": 4
+                            },
+                            "clip": false,
+                            "type": "card"
+                          },
+                          {
+                            "bind": "name",
+                            "color": "onSurface",
+                            "style": "titleLarge",
+                            "type": "text"
+                          }
+                        ],
+                        "crossAxis": "start",
+                        "gap": 6,
+                        "type": "column"
+                      },
+                      {
+                        "children": [
+                          {
+                            "bind": "target",
+                            "color": "onSurface",
+                            "style": "titleLarge",
+                            "transform": {
+                              "branches": {
+                                "_": {},
+                                "time": {
+                                  "div": 60,
+                                  "round": true
+                                }
+                              },
+                              "by": "type"
+                            },
+                            "type": "text"
+                          },
+                          {
+                            "bind": "unit.wire",
+                            "color": "muted",
+                            "style": "labelSmall",
+                            "transform": {
+                              "branches": {
+                                "_": {},
+                                "distance": {
+                                  "literal": "km"
+                                },
+                                "reps": {
+                                  "literal": "reps total"
+                                },
+                                "time": {
+                                  "literal": "minutes"
+                                }
+                              },
+                              "by": "type"
+                            },
+                            "type": "text"
+                          }
+                        ],
+                        "crossAxis": "center",
+                        "gap": 6,
+                        "type": "row"
+                      }
+                    ],
+                    "crossAxis": "center",
+                    "type": "row"
+                  },
+                  {
+                    "b": 0,
+                    "child": {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "color": "muted",
+                              "style": "bodySmall",
+                              "type": "text",
+                              "value": "Steady aerobic, river loop"
+                            },
+                            {
+                              "binds": [
+                                {
+                                  "path": "last",
+                                  "prefix": "Last "
+                                },
+                                {
+                                  "path": "streak",
+                                  "prefix": " \u00b7 ",
+                                  "suffix": "\u00d7 streak"
+                                }
+                              ],
+                              "style": "bodySmall",
+                              "type": "text"
+                            }
+                          ],
+                          "crossAxis": "start",
+                          "gap": 2,
+                          "type": "column"
+                        },
+                        {
+                          "child": {
+                            "child": {
+                              "name": "play",
+                              "size": 14,
+                              "type": "icon"
+                            },
+                            "h": 6,
+                            "type": "padding",
+                            "v": 1
+                          },
+                          "clip": false,
+                          "type": "card"
+                        }
+                      ],
+                      "crossAxis": "center",
+                      "type": "row"
+                    },
+                    "l": 0,
+                    "r": 0,
+                    "t": 12,
+                    "type": "padding"
+                  }
+                ],
+                "crossAxis": "start",
+                "gap": 12,
+                "type": "column"
+              },
+              "h": 18,
+              "type": "padding",
+              "v": 16
+            },
+            "clip": false,
+            "type": "card"
+          },
+          "padding": 0,
+          "type": "grid"
+        }
+      ],
+      "type": "column"
+    },
+    "l": 24,
+    "r": 24,
+    "t": 0,
+    "type": "padding"
+  },
+  "view": "train"
+}
