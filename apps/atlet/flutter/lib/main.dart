@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'design/tokens.dart';
+import 'engine_registry.dart';
 import 'ui/signin.dart';
 
 // ponytail: real values are operator-owned (apps/atlet/services/.env.example
@@ -22,6 +26,12 @@ Future<void> main() async {
   await Supabase.initialize(url: _supabaseUrl, publishableKey: _supabaseAnonKey);
   runApp(const AtletApp());
 }
+
+/// Single registry for the app's lifetime. Owns which sync engine is live
+/// and enforces plan decision #4 (never both engines live at once) — see
+/// lib/engine_registry.dart. Module-level so it survives HomeScreen
+/// rebuilds/route pushes without needing an InheritedWidget for this pilot.
+final EngineRegistry engineRegistry = EngineRegistry();
 
 class AtletApp extends StatelessWidget {
   const AtletApp({super.key});
@@ -52,9 +62,66 @@ class AtletApp extends StatelessWidget {
 }
 
 /// Minimal home shell — proves the post-signin route exists. Session/product
-/// views land in later Atlet tasks (T7+).
-class HomeScreen extends StatelessWidget {
+/// views land in later Atlet tasks (T12+). Owns the settings-sheet entry
+/// point for the engine toggle (T11).
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  /// Switches the live sync engine to [target] via [engineRegistry], which
+  /// wipes the outgoing adapter (if any) before bringing the new one up
+  /// (decision #4). Reads the current Supabase session lazily, on tap, so
+  /// this never touches `Supabase.instance` during build/initState — that
+  /// keeps HomeScreen constructible in widget tests that don't call
+  /// `Supabase.initialize()` (see widget_test.dart).
+  Future<void> _switchEngine(Engine target) async {
+    if (engineRegistry.activeEngine == target) return;
+    final session = Supabase.instance.client.auth.currentSession;
+    if (session == null) {
+      _notify('No active session — sign in again.');
+      return;
+    }
+    _notify('Switching to ${target.name}…');
+    try {
+      final dbDir = (await getApplicationDocumentsDirectory()).path;
+      await engineRegistry.switchTo(
+        target,
+        SyncSession(
+          supabaseUrl: _supabaseUrl,
+          accessToken: session.accessToken,
+          userId: session.user.id,
+          dbDir: dbDir,
+        ),
+      );
+      _notify('Now syncing with ${target.name}.');
+    } catch (e) {
+      _notify('Engine switch failed: $e');
+    }
+    if (mounted) setState(() {}); // refresh the settings sheet's selection
+  }
+
+  void _notify(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _openSettings() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (_) => _EngineSettingsSheet(
+        activeEngine: engineRegistry.activeEngine,
+        onSelect: (engine) {
+          Navigator.of(context).pop();
+          unawaited(_switchEngine(engine));
+        },
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -64,6 +131,14 @@ class HomeScreen extends StatelessWidget {
         backgroundColor: AtletTokens.bone,
         elevation: 0,
         title: Text('Atlet', style: TextStyle(color: AtletTokens.ink)),
+        actions: [
+          IconButton(
+            key: const Key('settings-button'),
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: _openSettings,
+          ),
+        ],
       ),
       body: Center(
         child: Text(
@@ -73,6 +148,61 @@ class HomeScreen extends StatelessWidget {
             fontWeight: FontWeight.w600,
             color: AtletTokens.ink,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Settings-sheet content: the sync-engine toggle. Selecting an engine that
+/// isn't already active runs [EngineRegistry.switchTo] via [onSelect] — a
+/// full wipe of the outgoing adapter (if any) before the incoming one is
+/// constructed and init()'d (decision #4: never both engines live at once).
+class _EngineSettingsSheet extends StatelessWidget {
+  const _EngineSettingsSheet({
+    required this.activeEngine,
+    required this.onSelect,
+  });
+
+  final Engine? activeEngine;
+  final ValueChanged<Engine> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'SYNC ENGINE',
+              style: TextStyle(
+                fontSize: AtletTokens.footnote,
+                letterSpacing: 1.5,
+                color: AtletTokens.ink3,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 16),
+            RadioGroup<Engine>(
+              groupValue: activeEngine,
+              onChanged: (value) {
+                if (value != null) onSelect(value);
+              },
+              child: Column(
+                children: [
+                  for (final engine in Engine.values)
+                    RadioListTile<Engine>(
+                      key: Key('engine-option-${engine.name}'),
+                      title: Text(engine.name),
+                      value: engine,
+                    ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
