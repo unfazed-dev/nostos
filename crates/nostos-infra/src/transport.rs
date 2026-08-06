@@ -36,8 +36,10 @@ use nostos_application::ports::{
     EventSink, Metrics, OpLogSource, SchemaSource, SnapshotSource, SyncAuth, WriteBack,
     WriteBackError,
 };
-use nostos_application::{ActiveRuleset, SessionManager};
-use nostos_domain::{ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncSession};
+use nostos_application::{ActiveRuleset, RuleDecision, SessionManager};
+use nostos_domain::{
+    ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncMode, SyncSession,
+};
 
 use crate::router::TokioEventSink;
 use crate::wire::{
@@ -335,6 +337,11 @@ async fn run_session(
 
     let manager = Arc::clone(&state.manager);
     let snapshotter = state.snapshotter.clone();
+    // ADR-0031: snapshot the active ruleset once per socket. Cloned (cheap —
+    // wraps a BTreeMap) rather than holding the RwLock read guard across the
+    // awaits inside register_subscribe. Live re-evaluation of an already-
+    // registered session on a rules reload is Task 14's scope, not this one.
+    let ruleset = state.rules.read().await.clone();
 
     // 4. Per-socket multi-table state. `synthetic_cursor` is seeded from the
     //    first subscribe's resume_lsn (0 for a fresh client) and advanced by
@@ -382,12 +389,13 @@ async fn run_session(
         &sink_concrete,
         &principal,
         state.tenant_column.as_deref(),
+        &ruleset,
     )
     .await
     {
         match reject {
-            SubscribeReject::WhereSqlRejected(reason) => {
-                debug!(%reason, "closing socket: first subscribe where_sql rejected");
+            SubscribeReject::Rejected(reason) => {
+                debug!(%reason, "closing socket: first subscribe rejected");
                 let frame = axum::extract::ws::CloseFrame {
                     code: axum::extract::ws::close_code::INVALID,
                     reason: reason.into(),
@@ -557,6 +565,7 @@ async fn run_session(
     // bumps on slot recreate) + the op-log reader for the replay branch.
     let metrics_reader = Arc::clone(&state.metrics);
     let oplog_reader = state.oplog_reader.clone();
+    let ruleset_reader = ruleset.clone();
     let read_loop = tokio::spawn(async move {
         while let Some(Ok(msg)) = reader.next().await {
             let data: Option<Vec<u8>> = match msg {
@@ -593,6 +602,7 @@ async fn run_session(
                         &ack_sink,
                         &write_principal,
                         tenant_column_for_writes.as_deref(),
+                        &ruleset_reader,
                     )
                     .await
                     {
@@ -642,8 +652,10 @@ async fn run_session(
 /// (the socket is closed — see `run_session`).
 #[derive(Debug)]
 enum SubscribeReject {
-    /// `where_sql` failed to compile (ADR-0012). Carries the reason string.
-    WhereSqlRejected(String),
+    /// The predicate could not be built — rules denial (`NotSynced`/
+    /// `MissingClaim`, ADR-0031) or a `where_sql` compile failure (ADR-0012).
+    /// Carries [`SubscribeRejection`]'s rendered message.
+    Rejected(String),
     /// Per-socket table cap exceeded (`MAX_TABLES_PER_SOCKET`) — DoS guard.
     CapExceeded,
     /// Global concurrent-device cap reached (`SessionManager`).
@@ -681,7 +693,7 @@ struct SocketSubs {
 /// Returns `Err` WITHOUT registering on any rejection. Critical sections on
 /// `subs` are short and never span an `.await`; access is serialized anyway
 /// (one reader task; the first subscribe runs before the reader is spawned).
-#[allow(clippy::too_many_arguments)] // 9 params is the genuine subscribe surface; a param-struct would obscure the call sites.
+#[allow(clippy::too_many_arguments)] // 10 params is the genuine subscribe surface; a param-struct would obscure the call sites.
 async fn register_subscribe(
     req: &SubscribeRequest,
     subs: &Arc<Mutex<SocketSubs>>,
@@ -692,6 +704,7 @@ async fn register_subscribe(
     sink_concrete: &Arc<TokioEventSink>,
     principal: &Principal,
     tenant_column: Option<&str>,
+    ruleset: &ActiveRuleset,
 ) -> Result<(), SubscribeReject> {
     // Cap + idempotent-repeat check (short lock, no await).
     {
@@ -705,8 +718,8 @@ async fn register_subscribe(
         }
     }
 
-    let predicate = build_predicate(req, principal, tenant_column)
-        .map_err(SubscribeReject::WhereSqlRejected)?;
+    let predicate = build_predicate(req, principal, tenant_column, ruleset)
+        .map_err(|rejection| SubscribeReject::Rejected(rejection.to_string()))?;
     let session = SyncSession::new_authenticated(predicate, principal.clone());
     // Derive the type-erased clone the store holds; `sink_concrete` stays the
     // concrete handle for snapshot delivery below.
@@ -984,7 +997,54 @@ async fn dispatch_write(
     }
 }
 
+/// Why a subscribe was refused. Rendered into the close reason via `Display`
+/// (both `run_session` fatal paths and `register_subscribe`'s
+/// `SubscribeReject::Rejected` wrap the rendered string — the SDKs surface it
+/// verbatim to app developers, ADR-0031).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubscribeRejection {
+    /// The table is unlisted, or listed with `sync = false` (`toggles` mode).
+    /// Fail-closed (ADR-0031 Global Constraint 10): an unlisted table is never
+    /// treated as "everything", only ever as "nothing".
+    NotSynced { table: String, mode: SyncMode },
+    /// The connecting principal lacks a claim the rules' scope for this table
+    /// references (e.g. `org_id = claims.org_id` with no `org_id` claim).
+    MissingClaim { table: String, claim: String },
+    /// `where_sql` failed to compile (ADR-0012) — folded into this enum so
+    /// every subscribe refusal shares one path.
+    InvalidWhereSql(String),
+}
+
+impl std::fmt::Display for SubscribeRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSynced { table, mode } => write!(
+                f,
+                "table `{table}` is not synced by the active rules (sync_mode={})",
+                mode.as_str()
+            ),
+            Self::MissingClaim { table, claim } => write!(
+                f,
+                "missing claim `{claim}` required by the rules for table `{table}`"
+            ),
+            Self::InvalidWhereSql(reason) => write!(f, "invalid where_sql: {reason}"),
+        }
+    }
+}
+
 /// Build the server-enforced predicate from the client's subscribe + principal.
+///
+/// Composition order (ADR-0031), all three ANDed, none skippable:
+/// **rules scope** (this table's compiled scope from the active ruleset — deny
+/// closes the socket before anything else runs) **AND** **tenant scope**
+/// (ADR-0011) **AND** **client filters + `where_sql`** (ADR-0012).
+///
+/// The rules decision runs FIRST and fail-closed: an unlisted/toggled-off
+/// table or a missing scope claim rejects the subscribe outright, never
+/// falling back to match-all. `ActiveRuleset::all_mode()` always allows
+/// (`RuleDecision::Allow(PredicateExpr::any())`) — but tenant scoping below
+/// still applies unconditionally in every mode (ADR-0031 Global Constraint
+/// 11: `all` mode disables rules, not tenancy).
 ///
 /// The client's filters are always intersected with the tenant filter when a
 /// tenant column is configured AND the principal is authenticated — the client
@@ -996,26 +1056,50 @@ async fn dispatch_write(
 ///
 /// The optional `where_sql` (ADR-0012 safe-SQL-subset compiler) is compiled and
 /// ANDed in **before** the tenant clause — so the server-injected tenant scoping
-/// wraps the client expression and a `where_sql` can never shed it. A parse
-/// failure is returned as `Err(reason)`; the caller closes the socket with that
-/// reason (prefixed `"invalid where_sql: "`) before any event flows.
+/// wraps the client expression and a `where_sql` can never shed it or the rules
+/// scope seeded below. A parse failure is `Err(InvalidWhereSql)`; the caller
+/// closes the socket with that reason before any event flows.
 ///
-/// The IF-to-enforce decision is [`Principal::tenant_scope`] — the same seam
-/// the write path (`dispatch_write`, ADR-0018) calls, so the read and write
-/// enforcement conditions cannot drift apart.
+/// The IF-to-enforce-tenant decision is [`Principal::tenant_scope`] — the same
+/// seam the write path (`dispatch_write`, ADR-0018) calls, so the read and
+/// write enforcement conditions cannot drift apart.
 fn build_predicate(
     subscribe: &SubscribeRequest,
     principal: &Principal,
     tenant_column: Option<&str>,
-) -> Result<Predicate, String> {
+    ruleset: &ActiveRuleset,
+) -> Result<Predicate, SubscribeRejection> {
+    // Rules scope FIRST, fail-closed (ADR-0031). No filter/tenant work happens
+    // until the rules allow this table for this principal.
+    let rules_expr = match ruleset.decide(&subscribe.table, principal) {
+        RuleDecision::Allow(expr) => expr,
+        RuleDecision::DeniedTable => {
+            return Err(SubscribeRejection::NotSynced {
+                table: subscribe.table.clone(),
+                mode: ruleset.mode(),
+            });
+        }
+        RuleDecision::DeniedClaim(claim) => {
+            return Err(SubscribeRejection::MissingClaim {
+                table: subscribe.table.clone(),
+                claim,
+            });
+        }
+    };
+
     let scope = principal.tenant_scope(tenant_column);
 
-    // Start match-all, then fold in the client's own filters — EXCLUDING any on
-    // the tenant column, which the server overrides with the principal's real
-    // value (never client-attested). The `and_eq` combinator collapses the
-    // initial match-all down to a bare `Eq` leaf, so a single-filter predicate
-    // is structurally identical to the historical `Predicate::eq` form.
-    let mut p = Predicate::all(&subscribe.table);
+    // Seed the predicate from the rules scope (replaces the historical
+    // match-all start), then fold in the client's own filters — EXCLUDING any
+    // on the tenant column, which the server overrides with the principal's
+    // real value (never client-attested). The `and_eq` combinator collapses an
+    // `Any` root down to a bare `Eq` leaf (all-mode, no rules scope) and
+    // otherwise ANDs onto whatever the rules already seeded — same combinator,
+    // no special-casing needed here.
+    let mut p = Predicate {
+        table: subscribe.table.clone(),
+        expr: rules_expr,
+    };
     for f in &subscribe.filters {
         if scope.is_some_and(|s| f.column == s.column) {
             continue; // server injects the real tenant value below
@@ -1025,7 +1109,8 @@ fn build_predicate(
 
     // Compile the optional safe-SQL-subset expression (ADR-0012) and AND it in.
     // Done BEFORE tenant enforcement so the server-injected tenant clause wraps
-    // the client expression — a where_sql can never widen scope past its tenant.
+    // the client expression — a where_sql can never widen scope past its tenant
+    // OR past the rules scope already folded in above.
     if let Some(sql) = &subscribe.where_sql {
         match nostos_domain::parse_predicate_expr(sql) {
             // `Predicate` has no `and(PredicateExpr)` method (only `and_eq`),
@@ -1037,13 +1122,14 @@ fn build_predicate(
                     expr: p.expr.and(expr),
                 }
             }
-            Err(e) => return Err(format!("invalid where_sql: {e}")),
+            Err(e) => return Err(SubscribeRejection::InvalidWhereSql(e.to_string())),
         }
     }
 
     // Server-enforced tenant scoping (ADR-0011). Always injected for an
-    // authenticated principal when a tenant column is configured. This stays
-    // LAST so it wraps everything above (filters + where_sql).
+    // authenticated principal when a tenant column is configured — in every
+    // rules mode, including `all` (ADR-0031 Global Constraint 11). This stays
+    // LAST so it wraps everything above (rules scope + filters + where_sql).
     if let Some(s) = scope {
         p = p.and_eq(s.column, ColumnValue::text(s.value));
     }
@@ -1203,6 +1289,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1236,6 +1323,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1268,6 +1356,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1290,6 +1379,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1318,6 +1408,7 @@ mod tests {
             &sink,
             &principal,
             None,
+            &ActiveRuleset::all_mode(),
         )
         .await
         .unwrap();
@@ -1343,5 +1434,142 @@ mod tests {
         let auth: Arc<dyn SyncAuth> = Arc::new(crate::auth::AllowAnonymous::new());
         let state = SyncRouterState::new(manager, auth);
         assert_eq!(state.rules.read().await.mode(), nostos_domain::SyncMode::All);
+    }
+
+    fn toggles_rules(table: &str, sync: bool, scope: Option<&str>) -> nostos_domain::SyncRules {
+        nostos_domain::SyncRules {
+            version: nostos_domain::RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![nostos_domain::TableRule {
+                table: table.into(),
+                sync,
+                scope: scope.map(str::to_string),
+            }],
+            hand: Vec::new(),
+        }
+    }
+
+    // Task 10: toggles mode, `notes` sync=false → the rules decision is
+    // fail-closed, not "everything" — `build_predicate` refuses before any
+    // filter/tenant work runs.
+    #[test]
+    fn subscribe_to_unsynced_table_is_rejected() {
+        let ruleset = ActiveRuleset::compile(&toggles_rules("notes", false, None)).unwrap();
+        let principal = Principal::new("acct", "tenant-acme");
+        let err =
+            build_predicate(&req("notes", None, None), &principal, None, &ruleset).unwrap_err();
+        assert_eq!(
+            err,
+            SubscribeRejection::NotSynced {
+                table: "notes".into(),
+                mode: SyncMode::Toggles,
+            }
+        );
+    }
+
+    // Task 10: rules scope (`status = 'open'`) AND tenant scope (`org_id`) —
+    // a row must satisfy both, neither alone is enough.
+    #[test]
+    fn rules_scope_is_anded_with_tenant_scope() {
+        let ruleset =
+            ActiveRuleset::compile(&toggles_rules("tasks", true, Some("status = 'open'"))).unwrap();
+        let principal = Principal::new("acct", "tenant-acme");
+        let predicate = build_predicate(
+            &req("tasks", None, None),
+            &principal,
+            Some("org_id"),
+            &ruleset,
+        )
+        .unwrap();
+
+        let row = |status: &'static str, org: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                match col {
+                    "status" => Some(ColumnValue::text(status)),
+                    "org_id" => Some(ColumnValue::text(org)),
+                    _ => None,
+                }
+            }
+        };
+        assert!(predicate.expr.matches(row("open", "tenant-acme")));
+        assert!(
+            !predicate.expr.matches(row("closed", "tenant-acme")),
+            "rules scope must hold"
+        );
+        assert!(
+            !predicate.expr.matches(row("open", "someone-else")),
+            "tenant scope must hold"
+        );
+    }
+
+    // Task 10 / ADR-0031 Global Constraint 11: `all` mode disables rules but
+    // never tenancy — a foreign-tenant row must not match even with no rules
+    // scope in play.
+    #[test]
+    fn all_mode_still_applies_tenant_scope() {
+        let ruleset = ActiveRuleset::all_mode();
+        let principal = Principal::new("acct", "tenant-acme");
+        let predicate = build_predicate(
+            &req("tasks", None, None),
+            &principal,
+            Some("org_id"),
+            &ruleset,
+        )
+        .unwrap();
+
+        let with_org = |org: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                (col == "org_id").then(|| ColumnValue::text(org))
+            }
+        };
+        assert!(predicate.expr.matches(with_org("tenant-acme")));
+        assert!(!predicate.expr.matches(with_org("someone-else")));
+    }
+
+    // Task 10: a scope claim the principal doesn't carry is a denial, not a
+    // silent widen — `claims.sub` (no explicit claim needed, resolves to the
+    // account id) is present, but a table gated on `claims.org_id` with no
+    // `org_id` claim on the principal must reject.
+    #[test]
+    fn missing_claim_rejects_subscribe() {
+        let ruleset = ActiveRuleset::compile(&toggles_rules(
+            "tasks",
+            true,
+            Some("org_id = claims.org_id"),
+        ))
+        .unwrap();
+        let principal = Principal::new("acct", "tenant-acme"); // no org_id claim
+        let err =
+            build_predicate(&req("tasks", None, None), &principal, None, &ruleset).unwrap_err();
+        assert_eq!(
+            err,
+            SubscribeRejection::MissingClaim {
+                table: "tasks".into(),
+                claim: "org_id".into(),
+            }
+        );
+    }
+
+    // Task 10: client `where_sql` is ANDed onto the rules scope, never
+    // substituted for it — `owner_id = claims.sub` (→ "owner1") AND
+    // `owner_id = 'someone_else'` is unsatisfiable, so the composed predicate
+    // matches nothing, proving where_sql cannot widen past the rules scope.
+    #[test]
+    fn where_sql_cannot_widen_past_rules() {
+        let ruleset =
+            ActiveRuleset::compile(&toggles_rules("tasks", true, Some("owner_id = claims.sub")))
+                .unwrap();
+        let principal = Principal::new("owner1", "tenant-acme");
+        let mut subscribe = req("tasks", None, None);
+        subscribe.where_sql = Some("owner_id = 'someone_else'".into());
+        let predicate = build_predicate(&subscribe, &principal, None, &ruleset).unwrap();
+
+        let with_owner = |owner: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                (col == "owner_id").then(|| ColumnValue::text(owner))
+            }
+        };
+        assert!(!predicate.expr.matches(with_owner("someone_else")));
+        assert!(!predicate.expr.matches(with_owner("owner1")));
     }
 }

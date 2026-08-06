@@ -21,7 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use nostos_application::ports::SyncAuth;
-use nostos_application::SessionManager;
+use nostos_application::{ActiveRuleset, SessionManager};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 use nostos_infra::AllowAnonymous;
@@ -88,6 +88,46 @@ pub async fn spawn_fake_server_with_tables(
     if !write_tables.is_empty() {
         let set: std::collections::HashSet<String> = write_tables.into_iter().collect();
         state = state.with_write_tables(set);
+    }
+    let app = axum::Router::new()
+        .route("/sync", get(sync_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    (addr, handle, manager, store)
+}
+
+/// Like [`spawn_fake_server_with`] but also configures an active sync-rules
+/// ruleset (ADR-0031, Task 10) — used by the subscribe-time rules-enforcement
+/// contract tests. The `watch::Sender` half is discarded (throwaway channel):
+/// these tests never mutate the ruleset live, that's Task 14's scope.
+pub async fn spawn_fake_server_with_rules(
+    buffer: usize,
+    auth: Arc<dyn SyncAuth>,
+    tenant_column: Option<&str>,
+    rules: ActiveRuleset,
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<SessionManager>,
+    Arc<dyn nostos_application::ports::SessionStore>,
+) {
+    let store: Arc<dyn nostos_application::ports::SessionStore> =
+        Arc::new(InMemorySessionStore::new());
+    let manager = Arc::new(SessionManager::new(
+        store.clone(),
+        nostos_domain::Tier::Enterprise,
+    ));
+
+    let (_tx, rules_changed) = tokio::sync::watch::channel(rules.checksum());
+    let mut state = SyncRouterState::new(Arc::clone(&manager), auth)
+        .with_buffer(buffer)
+        .with_rules(Arc::new(tokio::sync::RwLock::new(rules)), rules_changed);
+    if let Some(col) = tenant_column {
+        state = state.with_tenant_column(col);
     }
     let app = axum::Router::new()
         .route("/sync", get(sync_handler))

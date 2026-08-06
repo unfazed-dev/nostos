@@ -21,12 +21,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use nostos_application::FanOutService;
-use nostos_domain::{ColumnValue, Lsn, Operation, Principal, ReplicationEvent, RowOp};
+use nostos_application::{ActiveRuleset, FanOutService};
+use nostos_domain::{
+    ColumnValue, Lsn, Operation, Principal, ReplicationEvent, RowOp, SyncRules, TableRule,
+    RULES_VERSION,
+};
 
 use nostos_application::ports::SyncAuth;
 use common::{
-    decode_payload_hex, spawn_fake_server, spawn_fake_server_with, spawn_fake_server_with_tables,
+    decode_payload_hex, spawn_fake_server, spawn_fake_server_with, spawn_fake_server_with_rules,
+    spawn_fake_server_with_tables,
 };
 
 use async_trait::async_trait;
@@ -344,20 +348,26 @@ async fn subscribe_with_where_sql_token(
     got
 }
 
-/// Subscribe with a `where_sql`, then collect until the socket closes or the
-/// timeout elapses — returning the close reason if the server closed the
-/// connection. Used by the invalid-where_sql rejection test.
+/// Subscribe (optionally with a `where_sql`), then collect until the socket
+/// closes or the timeout elapses — returning the close reason if the server
+/// closed the connection. `where_sql: None` is a plain subscribe, used by the
+/// rules-rejection test (Task 10), which has nothing to do with `where_sql`
+/// but needs the same "collect until close" shape as the invalid-where_sql
+/// rejection test below.
 async fn subscribe_with_where_sql_until_close(
     addr: std::net::SocketAddr,
     table: &str,
-    where_sql: &str,
+    where_sql: Option<&str>,
     timeout: Duration,
 ) -> Result<Vec<serde_json::Value>, String> {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
         .await
         .expect("ws connect");
-    let sub =
-        format!("{{\"type\":\"subscribe\",\"table\":\"{table}\",\"where_sql\":\"{where_sql}\"}}");
+    let where_sql_field = match where_sql {
+        Some(sql) => format!(",\"where_sql\":\"{sql}\""),
+        None => String::new(),
+    };
+    let sub = format!("{{\"type\":\"subscribe\",\"table\":\"{table}\"{where_sql_field}}}");
     ws.send(Message::Text(sub)).await.unwrap();
 
     let mut got = Vec::new();
@@ -461,7 +471,7 @@ async fn subscribe_with_invalid_where_sql_is_rejected_before_events() {
     let res = subscribe_with_where_sql_until_close(
         addr,
         "tasks",
-        "DROP TABLE tasks",
+        Some("DROP TABLE tasks"),
         Duration::from_secs(2),
     )
     .await;
@@ -540,6 +550,56 @@ async fn where_sql_cannot_shed_tenant_enforcement() {
         frames.is_empty(),
         "a tenant-B row must NOT be delivered to tenant A even when where_sql matches \
          it — the server ANDs tenant_id='A' outside the client expression. got: {frames:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 10 (ADR-0031): rules-scope enforcement at subscribe time.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn subscribe_to_unsynced_table_is_rejected_before_events() {
+    // `toggles` mode with only "notes" listed (and synced) — "tasks" is
+    // unlisted, so it's fail-closed DeniedTable, not "everything".
+    let rules = SyncRules {
+        version: RULES_VERSION,
+        mode: nostos_domain::SyncMode::Toggles,
+        tables: vec![TableRule {
+            table: "notes".into(),
+            sync: true,
+            scope: None,
+        }],
+        hand: Vec::new(),
+    };
+    let ruleset = ActiveRuleset::compile(&rules).unwrap();
+    let auth: Arc<dyn SyncAuth> = Arc::new(nostos_infra::AllowAnonymous::new());
+    let (addr, _server, _mgr, store) = spawn_fake_server_with_rules(64, auth, None, ruleset).await;
+
+    // The SDKs surface the close reason verbatim to app developers — assert
+    // the exact rendered `SubscribeRejection::NotSynced` text.
+    let res =
+        subscribe_with_where_sql_until_close(addr, "tasks", None, Duration::from_secs(2)).await;
+    let reason = res.expect_err("socket should close: 'tasks' is not synced by the rules");
+    assert!(
+        reason.contains("table `tasks` is not synced by the active rules (sync_mode=toggles)"),
+        "close reason must match SubscribeRejection::NotSynced's rendered text, got: {reason:?}"
+    );
+
+    // No event could have been delivered anyway: the socket closed before
+    // subscribe registration, so the predicate never entered the store.
+    let svc = Arc::new(FanOutService::new(store.clone()));
+    let event = ReplicationEvent::new(
+        Lsn::new(1),
+        RowOp::Insert {
+            table: "tasks".into(),
+            pk: "1".into(),
+            payload: Bytes::from_static(b"{}"),
+        },
+    );
+    let outcome = svc.fan_out(&event, |_, _| Some(ColumnValue::Any)).await;
+    assert_eq!(
+        outcome.delivered, 0,
+        "no event may be delivered — the rejected subscribe was never registered"
     );
 }
 
