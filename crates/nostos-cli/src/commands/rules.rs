@@ -72,6 +72,14 @@ const HELP_TEXT: &str =
     "commands: <n> toggle · s <n> <scope> · mode <all|toggles|hand> · w save · \
                           q quit · ? help  (s <n> with no scope clears it)";
 
+/// Switching back to `toggles` reactivates whatever `[tables.*]` is already
+/// on disk — it does not re-query Postgres, so a table added/dropped since
+/// the last `init` won't appear/disappear here. Named per team-lead ruling
+/// (2026-08-06): no DB access in `edit`, discoverability hint only.
+const TOGGLES_REFRESH_HINT: &str =
+    " (reactivated the existing [tables.*] section — run `nostos rules init --force` to \
+       re-detect tables from the publication if the schema has drifted)";
+
 /// Parse one line of the editor's stdin protocol. Never errors — an
 /// unrecognized line becomes `Unknown(line)` for the caller to report.
 #[must_use]
@@ -131,7 +139,11 @@ pub fn apply_edit(rules: &mut SyncRules, cmd: &EditCommand) -> Result<String, St
         }
         EditCommand::Mode(mode) => {
             rules.mode = *mode;
-            Ok(format!("sync_mode = {}", mode.as_str()))
+            let mut message = format!("sync_mode = {}", mode.as_str());
+            if *mode == SyncMode::Toggles {
+                message.push_str(TOGGLES_REFRESH_HINT);
+            }
+            Ok(message)
         }
         EditCommand::Save => {
             rules.validate().map_err(|e| e.to_string())?;
@@ -334,8 +346,13 @@ fn run_edit(args: EditRulesArgs, cwd: &Path) -> Result<()> {
         })?;
         rules_file::set_mode(&rules_path, mode)
             .with_context(|| format!("switching sync_mode in {}", rules_path.display()))?;
+        let hint = if mode == SyncMode::Toggles {
+            TOGGLES_REFRESH_HINT
+        } else {
+            ""
+        };
         println!(
-            "\u{2713} sync_mode = {} ({})",
+            "\u{2713} sync_mode = {} ({}){hint}",
             mode.as_str(),
             rules_path.display()
         );
@@ -467,6 +484,26 @@ mod tests {
 
             assert_eq!(rules.mode, SyncMode::Hand);
         }
+    }
+
+    #[test]
+    fn mode_switch_to_toggles_includes_refresh_hint() {
+        let mut rules = rules_from_tables(&["tasks".to_string()], SyncMode::Hand, false);
+
+        let message = apply_edit(&mut rules, &EditCommand::Mode(SyncMode::Toggles))
+            .expect("switching to toggles must succeed");
+
+        assert!(
+            message.contains("nostos rules init"),
+            "switching back to toggles must hint at re-detection, got: {message}"
+        );
+
+        let to_hand = apply_edit(&mut rules, &EditCommand::Mode(SyncMode::Hand))
+            .expect("switching to hand must succeed");
+        assert!(
+            !to_hand.contains("nostos rules init"),
+            "the refresh hint is toggles-specific, got: {to_hand}"
+        );
     }
 
     #[test]
