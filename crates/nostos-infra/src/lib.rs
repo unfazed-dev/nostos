@@ -23,6 +23,9 @@ mod jwks;
 pub mod oplog;
 pub mod replicator;
 pub mod router;
+/// `nostos_rules.toml` load/save (ADR-0031, Task 7). No `pg` feature gate —
+/// the TOML shape and `SyncRules` domain type are usable without Postgres.
+pub mod rules_file;
 /// `#[cfg(feature = "pg")]` — the typed-schema endpoint adapter (WS1). Absent
 /// without the `pg` feature (the server leaves `schema_source = None` then).
 #[cfg(feature = "pg")]
