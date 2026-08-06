@@ -71,8 +71,13 @@ impl JwksVerifier {
     /// Verify a token whose header algorithm is RS256/ES256/EdDSA and lift its
     /// `sub` into a [`Principal`] — mirrored into both `account_id` and
     /// `tenant_id`, identical to the HS256 path (ADR-0010 Phase 0: tenant =
-    /// account; ADR-0011 defers real tenant-claim resolution). `None` on any
-    /// failure: unknown `kid`, bad/expired signature, or unreachable JWKS.
+    /// account; ADR-0011 defers real tenant-claim resolution). Flat scalar
+    /// claims beyond `sub`/`exp` are lifted into `Principal::extra` via
+    /// `crate::auth::lift_extra_claims` — the SAME size-capped,
+    /// reserved-name-filtered function the HS256 path uses (ADR-0031, D1),
+    /// so this path gets the security review for free rather than
+    /// duplicating it. `None` on any failure: unknown `kid`, bad/expired
+    /// signature, unreachable JWKS, or a claim set that fails the D1 caps.
     pub(crate) async fn verify(&self, token: &str, header: &Header) -> Option<Principal> {
         let kid = header.kid.as_deref()?;
         let key = self.resolve_key(kid).await?;
@@ -95,7 +100,10 @@ impl JwksVerifier {
         if sub.is_empty() {
             return None;
         }
-        Some(Principal::new(sub.clone(), sub))
+        // ADR-0031, D1: same reject-the-whole-token-on-cap-violation rule as
+        // the HS256 path — `?` here never downgrades to anonymous.
+        let extra = crate::auth::lift_extra_claims(&data.claims.rest)?;
+        Some(Principal::with_claims(sub.clone(), sub, extra))
     }
 
     async fn resolve_key(&self, kid: &str) -> Option<CachedKey> {
@@ -202,13 +210,20 @@ impl std::fmt::Display for JwksFetchError {
 
 impl std::error::Error for JwksFetchError {}
 
-/// The subset of JWT claims we read — identical to the HS256 path's
-/// `SupabaseClaims`, kept as a separate (private) type per module rather than
+/// The subset of JWT claims we read — the typed fields mirror the HS256
+/// path's `SupabaseClaims` (kept as a separate type per module rather than
 /// shared, matching this codebase's existing preference for a small
-/// duplication over a cross-module dependency (ADR-0010).
+/// duplication over a cross-module dependency — ADR-0010), but `rest` is fed
+/// into the SAME `crate::auth::lift_extra_claims` the HS256 path uses, so the
+/// D1 filtering/size-cap logic itself is not duplicated.
 #[derive(serde::Deserialize)]
 struct SupabaseClaims {
     sub: String,
+    /// Every other claim in the payload (ADR-0031, D1). `exp` is validated by
+    /// `jsonwebtoken` itself (required by `Validation`'s defaults) and never
+    /// needs to be read back out here, unlike the HS256 path's `token_exp`.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Test-only fixtures shared with `auth.rs`'s tests: mint RSA/EC keypairs +
@@ -335,6 +350,21 @@ pub(crate) mod test_support {
         encode(&header, &claims, encoding_key).expect("mint token")
     }
 
+    /// Like [`mint_token`] but signs an arbitrary claims object — used by the
+    /// D1 extra-claims tests, which need payload shapes `mint_token` can't
+    /// express (nested objects, arrays, nulls, a payload-carried
+    /// `tenant_id`).
+    pub(crate) fn mint_token_with_claims(
+        encoding_key: &EncodingKey,
+        alg: Algorithm,
+        kid: &str,
+        claims: &serde_json::Value,
+    ) -> String {
+        let mut header = JwtHeader::new(alg);
+        header.kid = Some(kid.to_string());
+        encode(&header, claims, encoding_key).expect("mint token")
+    }
+
     pub(crate) fn expired_token(
         encoding_key: &EncodingKey,
         alg: Algorithm,
@@ -422,6 +452,73 @@ mod tests {
         assert_eq!(principal.account_id, "user-1");
         assert_eq!(principal.tenant_id, "user-1");
         assert_eq!(fixture.hit_count(), 1);
+    }
+
+    // ---- D1: extra-claims lifting applies on the JWKS path too (ADR-0031) ----
+    //
+    // `JwksVerifier::verify` reuses `crate::auth::lift_extra_claims` rather
+    // than reimplementing the filter, so these two tests exercise the reuse
+    // end-to-end rather than re-proving every property `auth.rs`'s own D1
+    // suite already covers directly.
+
+    #[tokio::test]
+    async fn jwks_verified_principal_lifts_claims_and_resists_tenant_shadow() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let now = jsonwebtoken::get_current_timestamp();
+        let claims = serde_json::json!({
+            "sub": "user-1",
+            "exp": now + 3600,
+            "tenant_id": "evil", // reserved: must not shadow the derived tenant_id
+            "org_id": "acme",    // scalar: lifts
+            "org": {"id": "acme"}, // object: dropped, never stringified
+            "roles": ["a", "b"], // array: dropped
+            "note": null,        // null: dropped, never ""
+        });
+        let token = mint_token_with_claims(&enc, Algorithm::RS256, "k1", &claims);
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        let principal = verifier.verify(&token, &header).await.expect("verified");
+
+        assert_eq!(principal.account_id, "user-1");
+        assert_eq!(
+            principal.tenant_id, "user-1",
+            "payload tenant_id must not shadow the derived value"
+        );
+        assert_eq!(principal.claim("tenant_id"), Some("user-1"));
+        assert_eq!(
+            principal.extra.get("org_id").map(String::as_str),
+            Some("acme")
+        );
+        assert!(!principal.extra.contains_key("tenant_id"));
+        assert!(!principal.extra.contains_key("org"));
+        assert!(!principal.extra.contains_key("roles"));
+        assert!(!principal.extra.contains_key("note"));
+    }
+
+    #[tokio::test]
+    async fn jwks_verified_token_with_oversized_claim_set_is_rejected() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let now = jsonwebtoken::get_current_timestamp();
+        let mut claims = serde_json::Map::new();
+        claims.insert("sub".to_string(), serde_json::json!("user-1"));
+        claims.insert("exp".to_string(), serde_json::json!(now + 3600));
+        for i in 0..65 {
+            claims.insert(format!("c{i}"), serde_json::json!("x"));
+        }
+        let token = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &serde_json::Value::Object(claims),
+        );
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert!(
+            verifier.verify(&token, &header).await.is_none(),
+            "65 claims exceeds MAX_EXTRA_CLAIMS — the whole token must be rejected, not downgraded"
+        );
     }
 
     #[tokio::test]

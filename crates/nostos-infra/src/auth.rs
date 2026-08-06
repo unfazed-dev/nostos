@@ -246,6 +246,10 @@ struct SupabaseClaims {
 /// any single claim exceeds the configured caps; the caller propagates that
 /// as an authentication failure via `?`, never a downgrade to anonymous.
 ///
+/// `pub(crate)`: reused as-is by `crate::jwks::JwksVerifier::verify` (the
+/// RS256/ES256/EdDSA path) so the security review lives in exactly one place
+/// rather than being duplicated per verifier.
+///
 /// - Reserved names (`RESERVED_CLAIMS`) are dropped silently: they are
 ///   resolved from `Principal`'s typed fields, not `extra`, so a payload
 ///   value under one of these names must never survive into the map (that is
@@ -256,7 +260,7 @@ struct SupabaseClaims {
 /// - `null` is dropped, not turned into `""` — an empty-string claim would
 ///   make `col = claims.x` match rows with an empty column, a real widening.
 /// - Numbers and booleans stringify via `serde_json::Value`'s own rendering.
-fn lift_extra_claims(
+pub(crate) fn lift_extra_claims(
     rest: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<BTreeMap<String, String>> {
     let mut extra = BTreeMap::new();
