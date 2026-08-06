@@ -20,8 +20,9 @@ double percentile(List<num> values, num p) {
   final highIndex = rank.ceil();
   if (lowIndex == highIndex) return sorted[lowIndex].toDouble();
   final fraction = rank - lowIndex;
-  return sorted[lowIndex] +
-      (sorted[highIndex] - sorted[lowIndex]) * fraction;
+  return (sorted[lowIndex] +
+          (sorted[highIndex] - sorted[lowIndex]) * fraction)
+      .toDouble();
 }
 
 double median(List<num> values) => percentile(values, 50);
@@ -312,11 +313,24 @@ class Runner {
         final id = await adapter.addSession(buildSession(i));
         expectedIds.add(id);
       }
-      if (acked.length >= n && !drained.isCompleted) drained.complete();
+      // A compliant adapter acks nothing while offline (spec/adapter.md
+      // conformance #3), so `acked` should already be empty here. Clear it
+      // anyway so a non-compliant adapter's premature acks can't leak into
+      // the post-reconnect measurement; completion then waits strictly for
+      // fresh acks, and a non-compliant adapter that never re-acks times
+      // out loudly instead of reporting a fabricated (possibly negative)
+      // duration.
+      acked.clear();
       final reconnectAt = clock.elapsed;
       await adapter.setConnected(true);
       await drained.future.timeout(timeout);
       final lastAckTMono = acked.values.reduce((a, b) => a > b ? a : b);
+      if (lastAckTMono < reconnectAt) {
+        throw StateError(
+          'queueDrain: serverAcked mark ($lastAckTMono) predates reconnect '
+          '($reconnectAt) — adapter acked while offline',
+        );
+      }
       return _record('queue_drain', {
         'queue_drain_ms': (lastAckTMono - reconnectAt).inMilliseconds,
         'n': n,
