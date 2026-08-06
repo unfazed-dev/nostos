@@ -79,6 +79,7 @@
 <section class="admin">
   <header class="admin-head">
     <a class="brand" href="/"><Nostos size={20} /> <span>Nostos</span></a>
+    <a class="rules-link" href="/admin/rules">Sync rules</a>
     <span class="sync-pill">
       <span class="glyph"><i></i><i></i><i></i></span>
       {#if me}console · {me.email}{:else}signed out{/if}
@@ -159,10 +160,13 @@
 <style>
   .admin { max-width: 880px; margin: 0 auto; padding: 48px var(--gutter) 96px; }
   .admin-head {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex; align-items: center; gap: 20px;
     margin-bottom: 48px;
   }
   .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 800; font-size: var(--t-20); letter-spacing: -0.02em; }
+  .rules-link { color: var(--ink-soft); font-size: var(--t-14); text-decoration: none; }
+  .rules-link:hover { color: var(--mark); }
+  .sync-pill { margin-left: auto; }
 
   .auth {
     max-width: 420px;
