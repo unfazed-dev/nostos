@@ -138,6 +138,61 @@ today's whole-fleet disconnect would have cost every client. Upgrade path:
 narrow the fallback further (partial resnapshot of only the newly-out-of-scope
 rows) once swap-verification failures are common enough to matter.
 
+### Admin auth on `PUT /rules` (D5, Task 21)
+
+`PUT /rules` is the first route in nostos's history that writes operator
+config rather than serving session-scoped reads. It is gated by a separate
+`NOSTOS_ADMIN_TOKEN` bearer token (`crates/nostos-server/src/admin_auth.rs`),
+deliberately **not** `NOSTOS_SYNC_AUTH`: that path authenticates *application
+users* (a Supabase JWT, however valid, however privileged its claims), and no
+application user may ever rewrite the server's rules. The two systems share
+no code and no state — a valid `/sync` JWT presented to `PUT /rules` is
+rejected the same as no credential at all. `NOSTOS_ADMIN_TOKEN` unset means
+the route **404s**, not 401: a default deployment that never opts in has no
+mutable surface to attack. A set-but-short (<32 char) token fails the server
+at startup rather than serving a guessable admin route.
+
+**CSRF stance — stated, not assumed.** The route authenticates with an
+`Authorization: Bearer` header, never a cookie. Browsers do not attach
+`Authorization` headers to cross-site requests the way they attach cookies —
+there is no ambient credential for a cross-site form or image tag to ride on,
+so the classic CSRF forgery (a third-party page causing the victim's browser
+to submit an authenticated request the page itself never possessed) does not
+apply here regardless of how the browser is configured. CSRF tokens are
+therefore unnecessary *because of that credential choice*, not by oversight.
+A future contributor who does not find this reasoning may be tempted to "fix"
+the apparent missing CSRF token by moving the credential into a cookie —
+don't; that would introduce the exact ambient-credential problem this design
+avoids.
+
+Two defenses make the property enforceable rather than merely incidental:
+
+- `PUT /rules` rejects any request whose `Content-Type` is not
+  `application/json` (415) — this closes the one classic simple-form CSRF
+  vector (`<form>` submissions, which the browser restricts to a small set of
+  "simple" content types) even in a hypothetical future where the credential
+  moves to a cookie.
+- Task 21 adds no CORS allowance for this route. **This is narrower than "CORS
+  stays default-deny" for the server as a whole** — `NOSTOS_CORS_ORIGINS`
+  unset already defaults to a permissive `CorsLayer` server-wide (pre-existing
+  behavior, unrelated to this task; see `docs/OPERATING.md` §1). CORS governs
+  whether a browser page running on another origin may *read* a cross-origin
+  response via `fetch`/`XHR`, not whether it can attach ambient credentials —
+  the CSRF argument above holds regardless of the CORS setting, because
+  forging the request still requires the attacker's page to already possess
+  the token to set the `Authorization` header, at which point CSRF is moot. An
+  operator who wants `PUT /rules` responses unreadable by other-origin
+  browser code should still set `NOSTOS_CORS_ORIGINS` explicitly; if a
+  cross-origin allowance is genuinely needed for the web panel, it must be an
+  explicit, reviewed, operator-configured origin — never `*`.
+
+Audit: every successful mutation emits exactly one `tracing::info!` line at
+target `nostos::audit` (`rules_mutation actor=<8-hex> source=<web|api>
+mode_before=... mode_after=... checksum_before=0x... checksum_after=0x...
+tables_changed=N`), success path only. `actor` is the first 8 hex characters
+of SHA-256(token) — enough to distinguish two operators in the log, not
+reversible back to the token. No claim values or row data are ever logged.
+
 ## Consequences
 
 - **Positive:** operators get one declarative surface (`nostos_rules.toml`)
@@ -177,6 +232,9 @@ rows) once swap-verification failures are common enough to matter.
   oplog backfill — `slot_epoch`/`client_epoch` resume-gate mechanism the
   `rules_checksum` field composes with via the composed-epoch fallback)
 - Plan: `docs/plans/nostos-sync-streams-suite.md` — operator rulings D2
-  (explicit `rules_checksum` wire field, Task 11) and D3 (in-place predicate
-  swap on reload, Task 14), ratified 2026-08-06
+  (explicit `rules_checksum` wire field, Task 11), D3 (in-place predicate
+  swap on reload, Task 14), and D5 (web authoring surface — authenticated
+  `PUT /rules`, `NOSTOS_ADMIN_TOKEN` shape, Tasks 20–21), ratified 2026-08-06
+- Runbook: `docs/OPERATING.md` §7 — setting, rotating, and responding to a
+  leaked `NOSTOS_ADMIN_TOKEN`
 - Brief: `.superpowers/sdd/nostos-sync-streams-suite/task-1-brief.md`

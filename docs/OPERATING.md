@@ -42,6 +42,7 @@ flag is absent; flag wins when present.
 | `NOSTOS_TIER` | `enterprise` | Licensing tier when no signed `NOSTOS_LICENSE` is present: `hobby`, `pro`, `scale`, `enterprise`. OSS self-host defaults to unlimited. |
 | `NOSTOS_LICENSE` | _empty_ | Signed license token from Nostos Cloud. Invalid-but-present is fatal — the server refuses to silently downgrade (ADR-0006). |
 | `NOSTOS_LICENSE_SECRET` | _empty_ | **Env-only (NOT a clap flag)** — signs every license a cloud deploy mints, so it must never land on argv / `ps` (`main.rs` constructs it via `std::env::var`). |
+| `NOSTOS_ADMIN_TOKEN` | _empty_ | **Env-only (NOT a clap flag)**, same argv-leak reasoning as `NOSTOS_LICENSE_SECRET`. Bearer token gating `PUT /rules` (Task 21, ADR-0031 D5). Unset → the route **404s** (not mounted). Set → must be ≥32 chars or the server refuses to start (see §1.1(f)). See §7. |
 
 ### 1.1 Startup-failure modes (the ones that have bitten the demo)
 
@@ -96,6 +97,12 @@ NOSTOS_SUPABASE_JWKS_URL"`. Fix: set one of the three.
 (`main.rs`, `nostos_license::resolve_entitlement`): `"NOSTOS_LICENSE
 verification failed — refusing to start"`. Fix: re-issue from Nostos Cloud, or
 unset `NOSTOS_LICENSE` to fall back to `NOSTOS_TIER`.
+
+**(f) `NOSTOS_ADMIN_TOKEN` set but shorter than 32 chars.** Bails at startup
+(`main.rs`, right after `init_tracing`): `"NOSTOS_ADMIN_TOKEN is set but only
+{len} chars (minimum 32) — refusing to start rather than serve a guessable
+admin route on PUT /rules"`. The message reports the length only, never the
+token itself. Fix: generate a longer token (see §7).
 
 ## 2. Logical-replication slot
 
@@ -371,7 +378,52 @@ The bundled stack is for local dev only. Production points `NOSTOS_PG_URL` at
 Supabase direct (see §3 line 3) or a self-hosted Postgres with the same
 `wal_level`/slot settings.
 
-## 7. References
+## 7. Admin token (`PUT /rules`)
+
+`PUT /rules` lets a caller rewrite the server's active sync ruleset — a
+config-mutating route, deliberately gated separately from `/sync`'s
+application-user auth (`NOSTOS_SYNC_AUTH`). See ADR-0031 (D5 addendum) for the
+full reasoning; this section is the day-to-day operator procedure.
+
+**Set it.** Generate 32+ random bytes and export as `NOSTOS_ADMIN_TOKEN`:
+
+```
+export NOSTOS_ADMIN_TOKEN=$(openssl rand -hex 32)
+```
+
+Leave it unset in any deployment that never needs to change rules at
+runtime — the route then 404s, so there is nothing to attack. Set-but-short
+(<32 chars) refuses to boot (§1.1(f)) rather than serve a guessable route.
+
+**Use it.**
+
+```
+curl -X PUT https://your-server/rules \
+  -H "Authorization: Bearer $NOSTOS_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sync_mode": "toggles", "tables": [...]}'
+```
+
+A Supabase (or any `/sync`) JWT is never accepted here, no matter how valid —
+the two auth systems are intentionally unrelated.
+
+**Rotate it.** Generate a new token the same way, update the server's env,
+and restart. There is no overlap window: the old token stops working the
+moment the new process starts. Rotate on any suspected leak (token in a
+committed file, shared over an insecure channel, a departing operator who
+had it) and on a routine schedule if your compliance posture calls for one.
+
+**If it leaks:** rotate immediately (above), then read the audit log —
+every successful mutation emits one `nostos::audit` line
+(`rules_mutation actor=<8-hex> source=api mode_before=... mode_after=...
+checksum_before=0x... checksum_after=0x... tables_changed=N`) — to see what,
+if anything, an attacker changed while the old token was valid. `actor` is
+the first 8 hex chars of SHA-256(token): stable per token, but not reversible
+back to it, so it tells you *whether* a given token was used without ever
+printing the token itself. Compare `mode_before`/`mode_after` and the
+checksums against your own change history to spot anything you didn't make.
+
+## 8. References
 
 - Setup / install: [QUICKSTART.md](QUICKSTART.md).
 - Architecture / dependency rule: [ARCHITECTURE.md](ARCHITECTURE.md).

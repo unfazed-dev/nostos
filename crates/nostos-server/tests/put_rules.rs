@@ -25,6 +25,13 @@ fn server_binary() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_nostos-server"))
 }
 
+/// Task 21 gated `PUT /rules` behind `NOSTOS_ADMIN_TOKEN` — an obviously-fake
+/// placeholder, never a real secret, just long enough to clear the 32-char
+/// startup floor.
+fn admin_token() -> &'static str {
+    "nostos-put-rules-test-admin-token-0000"
+}
+
 struct Server {
     child: std::process::Child,
     base: String,
@@ -57,6 +64,7 @@ async fn spawn(tag: &str) -> Server {
         .env("NOSTOS_RULES_FILE", &rules_path)
         .env("NOSTOS_SYNC_AUTH", "none")
         .env("NOSTOS_LOG", "error")
+        .env("NOSTOS_ADMIN_TOKEN", admin_token())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -102,6 +110,7 @@ async fn put_rules_over_http_persists_and_swaps() {
     });
     let response = client
         .put(format!("{}/rules", server.base))
+        .header("Authorization", format!("Bearer {}", admin_token()))
         .json(&body)
         .send()
         .await
@@ -135,6 +144,7 @@ async fn put_rules_rejects_hand_mode_over_http() {
     let body = serde_json::json!({"sync_mode": "hand", "tables": []});
     let response = client
         .put(format!("{}/rules", server.base))
+        .header("Authorization", format!("Bearer {}", admin_token()))
         .json(&body)
         .send()
         .await

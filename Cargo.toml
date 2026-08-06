@@ -139,6 +139,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+# Constant-time comparisons (Task 21 admin-token gate on PUT /rules). Already
+# present transitively via ed25519-dalek; promoted to a direct workspace dep
+# rather than hand-rolling a timing-safe compare.
+subtle = "2.6"
 # Timestamps for license/subscription expiry & audit.
 time = { version = "0.3", features = ["serde", "serde-human-readable"] }
 # Cookie/session handling for the admin SPA auth.

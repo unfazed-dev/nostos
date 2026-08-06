@@ -10,6 +10,8 @@
 //! a one-line change here, with zero edits to domain/application code. That's
 //! the hexagonal payoff (ADR-0001).
 
+mod admin_auth;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -230,6 +232,26 @@ pub struct Config {
 async fn main() -> anyhow::Result<()> {
     let cfg = Config::parse();
     init_tracing(&cfg.log);
+
+    // ---- admin auth (Task 21, ADR-0031 addendum): NOSTOS_ADMIN_TOKEN gates
+    // PUT /rules. Env-only by design (NOT a clap flag), same reasoning as
+    // NOSTOS_LICENSE_SECRET below: it must never land on argv / `ps`. Unset
+    // -> the route 404s (fail-closed, see admin_auth.rs). Set-but-short ->
+    // refuse to start rather than serve a guessable admin route; the
+    // message reports the length only, never the token itself.
+    if let Some(token) = admin_auth::admin_token_from_env() {
+        let len = token.expose().len();
+        if len < admin_auth::MIN_ADMIN_TOKEN_LEN {
+            anyhow::bail!(
+                "NOSTOS_ADMIN_TOKEN is set but only {len} chars (minimum {}) — refusing to \
+                 start rather than serve a guessable admin route on PUT /rules",
+                admin_auth::MIN_ADMIN_TOKEN_LEN
+            );
+        }
+        info!("admin auth: NOSTOS_ADMIN_TOKEN set — PUT /rules enabled");
+    } else {
+        info!("admin auth: NOSTOS_ADMIN_TOKEN unset — PUT /rules disabled (404)");
+    }
 
     // ---- construct the adapters (the infra ring) ----
     // Coerce to the trait object once so both use-cases share one store.
@@ -702,8 +724,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/schema", get(schema))
         // ADR-0031: the active ruleset. GET stays on the same
         // v1-unauthenticated / v2-gated-together policy as /schema (see the
-        // note above); PUT mutates it — Task 21 gates PUT behind an admin
-        // token, not this task's job.
+        // note above). PUT mutates it and is gated by NOSTOS_ADMIN_TOKEN
+        // (Task 21): the route stays registered here on the same path (axum
+        // has no per-method route table), but `put_rules_handler` returns a
+        // literal 404 — before touching headers or body — whenever the
+        // token is unset, so an unauthenticated caller observes exactly
+        // what a genuinely unmounted route would look like.
         .route("/rules", get(rules_handler).put(put_rules_handler))
         .route(
             "/metrics",
@@ -992,9 +1018,142 @@ fn rules_422(message: impl Into<String>) -> (StatusCode, Json<serde_json::Value>
     )
 }
 
-/// `PUT /rules` — replace the active ruleset (ADR-0031, D5). Operator-only;
-/// see Task 21 for authn/authz. Body is the toggle model, not raw TOML: the
-/// server owns serialization so the file shape stays canonical.
+/// `PUT /rules` — the authenticated entry point (Task 21). Ordering matters
+/// and is deliberate: the admin-token check runs before anything else,
+/// including Content-Type and JSON parsing, using `HeaderMap` + raw `Bytes`
+/// instead of axum's `Json<T>` extractor — `Json<T>` runs before a handler
+/// body even starts, so an unauthenticated caller sending a malformed body
+/// would get a 400/415 from the extractor and learn the route exists before
+/// ever reaching the 404. See `admin_auth.rs` for the gate itself and
+/// `apply_put_rules` below for the actual mutation (unchanged from Task 20).
+async fn put_rules_handler(
+    State(state): State<SyncRouterState>,
+    headers: axum::http::HeaderMap,
+    raw_body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // 1. Token unset -> the route is not mounted. Checked before anything
+    // else touches `headers` or `raw_body`.
+    let Some(admin_token) = admin_auth::admin_token_from_env() else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not found" })),
+        ));
+    };
+
+    // 2. Bearer token mismatch -> 401. Constant-time compare, no logging.
+    if !admin_auth::AdminAuth::check(&headers, &admin_token) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        ));
+    }
+
+    // 3. CSRF stance (ADR-0031 addendum, Task 21 §2): bearer-header auth has
+    // no ambient credential for a cross-site form to ride on, so the one
+    // enforceable defence left is rejecting any body that isn't actually
+    // JSON — it blocks the simple-form vector outright.
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !content_type.starts_with("application/json") {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(serde_json::json!({ "error": "Content-Type must be application/json" })),
+        ));
+    }
+
+    let body: PutRulesRequest = serde_json::from_slice(&raw_body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("invalid JSON body: {e}") })),
+        )
+    })?;
+
+    // Audit "before" snapshot, taken ahead of the mutation. The old-tables
+    // read is a second, non-authoritative load purely for the
+    // `tables_changed` count below — `apply_put_rules` does its own
+    // authoritative load and is the only writer.
+    let mode_before = state.rules.read().await.mode().as_str().to_string();
+    let checksum_before = state.rules.read().await.checksum();
+    let old_tables: Vec<(String, bool, Option<String>)> =
+        nostos_infra::rules_file::load(&state.rules_file_path)
+            .ok()
+            .flatten()
+            .map(|r| {
+                r.tables
+                    .into_iter()
+                    .map(|t| (t.table, t.sync, t.scope))
+                    .collect()
+            })
+            .unwrap_or_default();
+    let new_tables: Vec<(String, bool, Option<String>)> = body
+        .tables
+        .iter()
+        .map(|t| (t.table.clone(), t.sync, t.scope.clone()))
+        .collect();
+
+    let response = apply_put_rules(&state, body).await?;
+
+    // Audit line — success path only (a `?` above returns before this runs
+    // on any error). `actor` is a non-secret fingerprint, never the token;
+    // `source` is always "api" for now: there is no header distinguishing
+    // the web panel from a direct API caller, so both are indistinguishable
+    // here (ponytail: add `X-Cairn-Source` if the panel needs separating).
+    let mode_after = state.rules.read().await.mode().as_str().to_string();
+    let checksum_after = state.rules.read().await.checksum();
+    let tables_changed = count_changed_tables(&old_tables, &new_tables);
+    let actor = admin_auth::actor_id(&admin_token);
+    tracing::info!(
+        target: "nostos::audit",
+        actor = %actor,
+        source = "api",
+        mode_before = %mode_before,
+        mode_after = %mode_after,
+        checksum_before = %format!("0x{checksum_before:x}"),
+        checksum_after = %format!("0x{checksum_after:x}"),
+        tables_changed = %tables_changed,
+        "rules_mutation"
+    );
+
+    Ok(response)
+}
+
+/// Tables whose (sync, scope) differ between `before` and `after`, plus any
+/// table added or removed — a union, not two separate counts, so a table
+/// that appears on both sides with a changed scope is counted once.
+fn count_changed_tables(
+    before: &[(String, bool, Option<String>)],
+    after: &[(String, bool, Option<String>)],
+) -> usize {
+    use std::collections::{BTreeMap, BTreeSet};
+    let before_map: BTreeMap<&str, (bool, Option<&str>)> = before
+        .iter()
+        .map(|(t, s, sc)| (t.as_str(), (*s, sc.as_deref())))
+        .collect();
+    let after_map: BTreeMap<&str, (bool, Option<&str>)> = after
+        .iter()
+        .map(|(t, s, sc)| (t.as_str(), (*s, sc.as_deref())))
+        .collect();
+    let mut changed = BTreeSet::new();
+    for (name, v) in &before_map {
+        if after_map.get(name) != Some(v) {
+            changed.insert(*name);
+        }
+    }
+    for (name, v) in &after_map {
+        if before_map.get(name) != Some(v) {
+            changed.insert(*name);
+        }
+    }
+    changed.len()
+}
+
+/// The actual mutation (Task 20, unchanged): validate → atomically write
+/// `nostos_rules.toml` → only then swap the in-process `ActiveRuleset` and
+/// notify live sessions. Split out from `put_rules_handler` so the Task 20
+/// unit tests below can exercise it directly without going through the
+/// Task 21 auth gate, which has its own dedicated tests.
 ///
 /// ponytail: no optimistic concurrency between the CLI editor and PUT
 /// /rules — last write wins. Ceiling: a concurrent edit can be silently
@@ -1006,10 +1165,9 @@ fn rules_422(message: impl Into<String>) -> (StatusCode, Json<serde_json::Value>
 /// the file is truth and startup reloads it — a crash costs a reload, never a
 /// divergence between the file and what's enforced. Swapping first could
 /// enforce a ruleset that was never persisted.
-async fn put_rules_handler(
-    State(state): State<SyncRouterState>,
-    _headers: axum::http::HeaderMap,
-    Json(body): Json<PutRulesRequest>,
+async fn apply_put_rules(
+    state: &SyncRouterState,
+    body: PutRulesRequest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if body.sync_mode == "hand" {
         return Err(rules_422(
@@ -1490,9 +1648,8 @@ mod rules_handler_tests {
 
 #[cfg(test)]
 mod put_rules_handler_tests {
-    use super::{put_rules_handler, PutRulesRequest, PutRulesTable};
-    use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode};
+    use super::{apply_put_rules, PutRulesRequest, PutRulesTable};
+    use axum::http::StatusCode;
     use axum::response::Json;
     use nostos_application::{ActiveRuleset, SessionManager};
     use nostos_domain::{SyncMode, SyncRules, TableRule, RULES_VERSION};
@@ -1547,7 +1704,7 @@ mod put_rules_handler_tests {
             "toggles",
             vec![("tasks", true, Some("owner_id = claims.sub"))],
         );
-        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let result = apply_put_rules(&state, body).await;
         let Json(response) = result.expect("valid PUT must succeed");
 
         assert_eq!(response["sync_mode"], "toggles");
@@ -1576,7 +1733,7 @@ mod put_rules_handler_tests {
         let state = state_with_file(initial, path.clone());
 
         let body = req("hand", vec![]);
-        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let result = apply_put_rules(&state, body).await;
         let Err((status, Json(err))) = result else {
             panic!("hand mode must be rejected");
         };
@@ -1614,7 +1771,7 @@ mod put_rules_handler_tests {
             .to_string();
 
         let body = req("toggles", vec![("tasks", true, Some("a = 1 OR b = 2"))]);
-        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let result = apply_put_rules(&state, body).await;
         let Err((status, Json(err))) = result else {
             panic!("invalid scope must be rejected");
         };
@@ -1638,7 +1795,7 @@ mod put_rules_handler_tests {
             "toggles",
             vec![("tasks", true, Some("owner_id = claims.sub"))],
         );
-        let _ = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body))
+        let _ = apply_put_rules(&state, body)
             .await
             .expect("valid PUT must succeed");
 
@@ -1679,7 +1836,7 @@ mod put_rules_handler_tests {
             "toggles",
             vec![("tasks", true, Some("owner_id = claims.sub"))],
         );
-        let result = put_rules_handler(State(state.clone()), HeaderMap::new(), Json(body)).await;
+        let result = apply_put_rules(&state, body).await;
         let Err((status, _)) = result else {
             panic!("write failure must surface as an error");
         };
