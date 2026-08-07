@@ -96,14 +96,26 @@ acceptance fixture: if a needed verb is missing, that's a contract gap —
 
 ### 2.1 ADR first
 
-Write the ADR-0017 revision (new ADR, next free number, superseding the
-addendum): durable backend = **wa-sqlite `OPFSCoopSyncVFS`** per the ADR's own
-evaluation table, unless you find disqualifying evidence — in which case stop
-and report before building. Must cover:
-- SharedArrayBuffer / cross-origin-isolation (COOP+COEP) deployment
-  requirement — document it for app developers.
-- Safari Private Browsing (OPFS disallowed): **graceful degrade to today's
-  live-only mode**, surfaced on `SyncStatus`, not a crash.
+ADR-0017 already DECIDED the backend: **official SQLite-WASM with the
+`opfs-sahpool` VFS** (option 1), explicitly rejecting wa-sqlite/`OPFSCoopSyncVFS`
+(option 2) for its COOP/COEP deployment tax. (The prior text here named wa-sqlite
+— a misread of the ADR; corrected 2026-08-08 after operator review.) Do NOT
+re-litigate the backend choice and do NOT add COOP/COEP headers — header-free
+deployment is a *requirement* of the chosen path (ADR-0017).
+
+Write ADR-0033 as the **execution** ADR for ADR-0017's follow-up scope (NOT a
+supersession of its decision): the concrete Worker architecture —
+`SqliteWasmStorage` impl of `Storage`+`Outbox` mirroring `SqliteStorage`'s
+schema, the `postMessage` protocol (decide serde-JSON vs transferable
+`ArrayBuffer`), the Playwright browser harness, the degrade path, and sign-out
+wiping OPFS + the localStorage checkpoint. Update ADR-0017's Status line to
+point at ADR-0033 as the in-progress follow-up. Must cover:
+- **No** SharedArrayBuffer / cross-origin-isolation / COOP+COOP requirement —
+  `opfs-sahpool` uses synchronous `FileSystemSyncAccessHandle` writes. Document
+  header-free deployment as a feature, not a tax.
+- Safari Private Browsing (OPFS disallowed): **graceful degrade to the
+  in-memory backend + localStorage checkpoint** (today's behavior), surfaced on
+  `SyncStatus`, not a crash.
 
 ### 2.2 Implementation shape
 
@@ -118,12 +130,12 @@ and report before building. Must cover:
 
 ### Wave-2 acceptance
 
-- Browser-run test (playwright or wasm-pack headless): write offline → kill
-  page → reload → reconnect → server receives the write; and live-only degrade
+- Browser-run test (Playwright/headless Chrome — NOT Node: `FileSystemSyncAccessHandle` is Worker+browser-only): write offline → kill
+  page → reload → reconnect → server receives the write; and the in-memory degrade
   path exercised.
 - `make ci` green; real-PG e2e green (with `NOSTOS_E2E_PG=1`, see ground rules).
-- `docs/api/web.md` updated; ADR-0017 status line updated to point at the
-  superseding ADR.
+- `docs/api/web.md` updated; ADR-0017 status line updated to point at ADR-0033
+  (the execution follow-up — NOT a supersession of ADR-0017's opfs-sahpool decision).
 
 ---
 

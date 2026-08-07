@@ -147,9 +147,11 @@ today; it gains one via the same nostos-core WASM path the JS SDK uses.
 
 Web today is **live-only** (ADR-0017 as amended 2026-07-30: only `resume_lsn`
 in localStorage; no outbox, no local rows, IndexedDB mirror rejected). Tier-1
-on web therefore **reopens ADR-0017**: a browser-durable `Storage` impl
-(wa-sqlite / `OPFSCoopSyncVFS` per the ADR's own evaluation; Safari Private
-Browsing degrade documented). T3 writes, T5 outbox surfaces, and T6 on web are
+on web therefore **executes ADR-0017's follow-up**: a browser-durable `Storage` impl
+(official SQLite-WASM with the `opfs-sahpool` VFS — ADR-0017's decision, which
+explicitly REJECTED wa-sqlite/`OPFSCoopSyncVFS` for its COOP/COEP deployment tax;
+header-free deployment, no cross-origin isolation required; Safari Private
+Browsing degrades to the in-memory backend). T3 writes, T5 outbox surfaces, and T6 on web are
 all gated on that work. Done in nostos-core behind the `Storage` trait, it is
 paid **once** and serves both JS-web and Flutter-web.
 
