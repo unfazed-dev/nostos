@@ -305,6 +305,106 @@ class Nostos {
     );
   }
 
+  /// Atomic batch enqueue — all ops land in one storage transaction or none do
+  /// (ADR-0032 T3). Validates every op's table is in the active subscription
+  /// and JSON-encodes payloads BEFORE calling the engine, so a bad table fails
+  /// fast with a clear error instead of a rolled-back FFI call. Returns outbox
+  /// ids in the same order as [writes].
+  Future<List<int>> writeBatch(
+    List<({String table, String op, String pk, Map<String, dynamic>? payload})>
+        writes,
+  ) {
+    for (final w in writes) {
+      if (!_subscribedTables.contains(w.table)) {
+        throw StateError(
+          'writeBatch op (${w.table}/${w.op}/${w.pk}) is not in the active '
+          'subscription '
+          '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+        );
+      }
+    }
+    return _engine.writeBatch(
+      ops: writes
+          .map((w) => (
+                table: w.table,
+                op: w.op,
+                pk: w.pk,
+                payloadJson: w.payload == null ? null : jsonEncode(w.payload),
+              ))
+          .toList(),
+    );
+  }
+
+  /// Add [element] to the add-wins OR-set in row [pk] of [table] (ADR-0030 /
+  /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert; the element
+  /// renders locally immediately and converges with concurrent remote adds on
+  /// the server's echo. Requires an active subscription including [table].
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'orSetAdd("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.orSetAdd(table: table, pk: pk, element: element);
+  }
+
+  /// Remove [element] from the OR-set in row [pk] of [table] — a tombstone at
+  /// a fresh HLC. Add-wins: a concurrent or later re-add revives the element.
+  /// Requires an active subscription including [table].
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'orSetRemove("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.orSetRemove(table: table, pk: pk, element: element);
+  }
+
+  /// Increment the PN-Counter in row [pk] of [table] by [delta] (ADR-0030
+  /// addendum). Read-modify-write: reads the current counter payload, applies
+  /// the delta to this replica's entry, and enqueues the result. Converges with
+  /// concurrent remote increments on the server's echo. Requires an active
+  /// subscription including [table].
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'counterIncrement("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.counterIncrement(table: table, pk: pk, delta: delta);
+  }
+
+  /// Decrement the PN-Counter by [delta] (bumps the negative counter `n`).
+  /// Requires an active subscription including [table].
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'counterDecrement("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.counterDecrement(table: table, pk: pk, delta: delta);
+  }
+
   /// Tears down the background sync loop and watch-stream pump for the
   /// active subscription (if any) — call this from a widget's own
   /// `dispose()` lifecycle method so a torn-down UI doesn't leave a

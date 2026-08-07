@@ -63,16 +63,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NostosConnectionState dco_decode_nostos_connection_state(dynamic raw);
 
   @protected
+  NostosWriteInput dco_decode_nostos_write_input(dynamic raw);
+
+  @protected
   ClientTableFfi dco_decode_client_table_ffi(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<NostosWriteInput> dco_decode_list_nostos_write_input(dynamic raw);
+
+  @protected
   List<ClientTableFfi> dco_decode_list_client_table_ffi(dynamic raw);
+
+  @protected
+  Uint64List dco_decode_list_prim_u_64_strict(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -148,18 +160,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  NostosWriteInput sse_decode_nostos_write_input(SseDeserializer deserializer);
+
+  @protected
   ClientTableFfi sse_decode_client_table_ffi(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<NostosWriteInput> sse_decode_list_nostos_write_input(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<ClientTableFfi> sse_decode_list_client_table_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  Uint64List sse_decode_list_prim_u_64_strict(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -248,6 +274,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_nostos_write_input(
+    NostosWriteInput self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_client_table_ffi(
     ClientTableFfi self,
     SseSerializer serializer,
@@ -257,11 +289,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_nostos_write_input(
+    List<NostosWriteInput> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_client_table_ffi(
     List<ClientTableFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_u_64_strict(
+    Uint64List self,
     SseSerializer serializer,
   );
 

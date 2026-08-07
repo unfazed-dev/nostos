@@ -64,6 +64,23 @@ pub trait Outbox {
     /// that to the user (the write was not captured).
     fn enqueue(&mut self, write: PendingWrite) -> crate::Result<u64>;
 
+    /// Enqueue a batch of writes atomically (all-or-nothing). Returns the ids
+    /// in the same order as `writes`. On failure, NO write is enqueued — the
+    /// implementation MUST roll back the entire batch (ADR-0032 T3).
+    ///
+    /// **Default:** loops [`Self::enqueue`]. This is NOT atomic — a failure
+    /// mid-batch leaves earlier writes durable. Backends with transactional
+    /// support (`SqliteStorage`) override with a single transaction so the
+    /// group truly lands or doesn't. `InMemoryStorage` overrides trivially
+    /// (a single `BTreeMap` extend is atomic in-process).
+    fn enqueue_batch(&mut self, writes: Vec<PendingWrite>) -> crate::Result<Vec<u64>> {
+        let mut ids = Vec::with_capacity(writes.len());
+        for w in writes {
+            ids.push(self.enqueue(w)?);
+        }
+        Ok(ids)
+    }
+
     /// All writes not yet acknowledged, oldest first. Each entry is `(id, write)`
     /// so the flush loop can correlate the server's `WriteResult.client_write_id`
     /// back to the queued row (the id is the correlation key on the wire).
@@ -116,6 +133,18 @@ pub trait Outbox {
     /// queue head just doesn't advance past it yet).
     fn mark_dead_letter(&self, _id: u64) -> crate::Result<()> {
         Ok(())
+    }
+
+    /// Mark a write as dead-lettered AND persist the server's error message +
+    /// a timestamp (ADR-0027 / ADR-0032 T5). The error and timestamp surface
+    /// in `deadLetters()` so failures are diagnosable.
+    ///
+    /// **Default:** delegates to [`Self::mark_dead_letter`] (discards the
+    /// error/timestamp — the pre-T5 behavior). Backends that persist error
+    /// metadata (`SqliteStorage`) override to write the `last_error` and
+    /// `dead_lettered_at` columns alongside the `dlq` flag.
+    fn mark_dead_letter_with_error(&self, id: u64, _error: Option<&str>) -> crate::Result<()> {
+        self.mark_dead_letter(id)
     }
 
     /// Apply `write` to the local data store IMMEDIATELY (optimistic), WITHOUT

@@ -272,6 +272,182 @@ fn max_remove(a: Option<Hlc>, b: Option<Hlc>) -> Option<Hlc> {
     }
 }
 
+// ─────────────────────── PN-Counter (ADR-0030 Counter B) ───────────────────────
+//
+// A state-based Positive-Negative Counter CRDT — the counter mirror of the
+// OR-set above. Each replica `r` maintains a pair `(p, n)` (positive and
+// negative counts); the counter's value is Σp − Σn across all replicas. Merge
+// is per-replica elementwise max: commutative, associative, idempotent.
+//
+// Unlike the OR-set (append-only — each element is independent, so the client
+// enqueues a single-element payload without reading state), a counter's
+// increments are CUMULATIVE per replica. Enqueuing `{r:R, p:3}` then `{r:R,
+// p:2}` gives `max(3,2)=3` on merge — the second increment is lost. So the
+// client MUST read-modify-write: read the current payload, add the delta to
+// THIS replica's entry, and enqueue the full result. The per-replica max merge
+// still converges across replicas (a concurrent increment from replica S
+// touches a different key and survives). This is the crux of a state-based
+// PN-counter — not a flaw, the defining property (advisor-confirmed).
+
+/// One replica's contribution to a PN-counter: `p` (increments) and `n`
+/// (decrements), both monotonically non-decreasing. The counter value sums
+/// `p − n` across all replicas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PnEntry {
+    /// The replica/client id (stable per client — see `SyncClientConfig::client_id`).
+    pub r: String,
+    /// Positive count (total increments by this replica).
+    pub p: u64,
+    /// Negative count (total decrements by this replica).
+    pub n: u64,
+}
+
+/// The on-the-wire PN-counter payload shape: `{"entries":[{"r":…,"p":…,"n":…}]}`.
+/// Serialized as the row's opaque payload bytes (same seam as `OrSetPayload`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PnCounterPayload {
+    /// Per-replica counts. Order is not semantically meaningful; merge
+    /// serializes sorted by `r` for deterministic bytes.
+    #[serde(default)]
+    pub entries: Vec<PnEntry>,
+}
+
+/// Why a counter payload operation failed. Same best-effort contract as
+/// [`OrSetError`]: malformed payloads fall back to LWW.
+#[derive(Debug, thiserror::Error)]
+pub enum CounterError {
+    /// The payload was not valid JSON.
+    #[error("counter payload is not valid JSON: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+    /// The payload was valid JSON but not an object with an `entries` array.
+    #[error("counter payload has the wrong shape (expected {{\"entries\":[…]}})")]
+    Malformed,
+}
+
+/// Parse a counter payload into its entries. Empty/`null` bytes parse to an
+/// empty set (a counter with no increments yet).
+fn parse_counter_entries(bytes: &[u8]) -> Result<Vec<PnEntry>, CounterError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    match value {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Object(_) => {
+            let payload: PnCounterPayload = serde_json::from_value(value)?;
+            Ok(payload.entries)
+        }
+        _ => Err(CounterError::Malformed),
+    }
+}
+
+/// Serialize entries as the canonical counter payload, sorted by `r` so two
+/// merges of the same state produce byte-identical output (idempotence).
+fn serialize_counter_entries(entries: &[PnEntry]) -> Vec<u8> {
+    let mut sorted: Vec<PnEntry> = entries.to_vec();
+    sorted.sort_by(|a, b| a.r.cmp(&b.r));
+    serde_json::to_vec(&PnCounterPayload { entries: sorted })
+        .expect("serializing PnCounterPayload is infallible")
+}
+
+/// Merge two counter payloads into one, per-replica elementwise max.
+///
+/// For each replica `r` across both payloads, the merged entry keeps the
+/// maximum `p` and maximum `n`. This is the classic PN-counter merge
+/// (state-based, convergent): idempotent, commutative, associative.
+///
+/// Returns the merged payload bytes. On a malformed payload the caller should
+/// fall back to LWW — the merge is opt-in per counter-tagged table.
+///
+/// # Errors
+/// [`CounterError::InvalidJson`] if either payload is not valid JSON, or
+/// [`CounterError::Malformed`] if either is valid JSON but not an object.
+pub fn merge_counter_payloads(a: &[u8], b: &[u8]) -> Result<Vec<u8>, CounterError> {
+    let a_entries = parse_counter_entries(a)?;
+    let b_entries = parse_counter_entries(b)?;
+
+    // Key by replica: keep the max p and max n per replica.
+    let mut merged: std::collections::BTreeMap<String, (u64, u64)> =
+        std::collections::BTreeMap::new();
+    for e in a_entries.iter().chain(b_entries.iter()) {
+        match merged.get_mut(&e.r) {
+            Some((p, n)) => {
+                *p = (*p).max(e.p);
+                *n = (*n).max(e.n);
+            }
+            None => {
+                merged.insert(e.r.clone(), (e.p, e.n));
+            }
+        }
+    }
+
+    let entries: Vec<PnEntry> = merged
+        .into_iter()
+        .map(|(r, (p, n))| PnEntry { r, p, n })
+        .collect();
+    Ok(serialize_counter_entries(&entries))
+}
+
+/// Merge two counter payloads, falling back to `incoming` (LWW clobber) if
+/// either side is malformed. The infallible seam the storage apply loop calls.
+#[must_use]
+pub fn merge_counter_or_lww(existing: &[u8], incoming: &[u8]) -> Vec<u8> {
+    merge_counter_payloads(existing, incoming).unwrap_or_else(|_| incoming.to_vec())
+}
+
+/// The current counter value: Σp − Σn across all replicas.
+///
+/// # Errors
+/// [`CounterError`] if the payload is malformed.
+pub fn counter_value(bytes: &[u8]) -> Result<i64, CounterError> {
+    let entries = parse_counter_entries(bytes)?;
+    let p_sum: u64 = entries.iter().map(|e| e.p).sum();
+    let n_sum: u64 = entries.iter().map(|e| e.n).sum();
+    // Both sums fit in i64 for any realistic counter (2⁶³ increments per replica
+    // is unreachable). Saturating on the absurd case.
+    let p = i64::try_from(p_sum).unwrap_or(i64::MAX);
+    let n = i64::try_from(n_sum).unwrap_or(i64::MAX);
+    Ok(p.saturating_sub(n))
+}
+
+/// Read-modify-write at the payload level: add `delta` to replica `replica`'s
+/// entry in the counter. A positive delta bumps `p`; a negative delta bumps
+/// `n` by `|delta|`. A zero delta is a no-op (returns the parsed payload
+/// unchanged). Malformed bytes are treated as an empty counter (the replica
+/// starts fresh — losing a corrupt payload is better than erroring the write).
+///
+/// This is the client-side primitive `counter_increment` / `counter_decrement`
+/// call before enqueuing the result as a merge-upsert. The per-replica max
+/// merge on apply converges across replicas; the read-modify-write ensures
+/// this replica's cumulative count survives repeated increments.
+#[must_use]
+pub fn counter_apply_delta(bytes: &[u8], replica: &str, delta: i64) -> Vec<u8> {
+    let mut entries = parse_counter_entries(bytes).unwrap_or_default();
+    // `position` (not `find`) so the mutable borrow ends before the else-push —
+    // the index is a Copy, not a borrow of `entries`.
+    if let Some(idx) = entries.iter().position(|e| e.r == replica) {
+        if delta >= 0 {
+            entries[idx].p = entries[idx]
+                .p
+                .saturating_add(u64::try_from(delta).unwrap_or(u64::MAX));
+        } else {
+            entries[idx].n = entries[idx].n.saturating_add(delta.unsigned_abs());
+        }
+    } else {
+        let (p, n) = if delta >= 0 {
+            (u64::try_from(delta).unwrap_or(u64::MAX), 0)
+        } else {
+            (0, delta.unsigned_abs())
+        };
+        entries.push(PnEntry {
+            r: replica.to_string(),
+            p,
+            n,
+        });
+    }
+    serialize_counter_entries(&entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +617,155 @@ mod tests {
         assert!(el("x", h(10, 0), None).is_present());
         assert!(el("x", h(30, 0), Some(h(20, 0))).is_present()); // add beats remove
         assert!(!el("x", h(10, 0), Some(h(20, 0))).is_present()); // remove beats add
+    }
+
+    // --- PN-Counter ---
+
+    fn ce(r: &str, p: u64, n: u64) -> PnEntry {
+        PnEntry {
+            r: r.to_string(),
+            p,
+            n,
+        }
+    }
+
+    fn cpayload(entries: &[PnEntry]) -> Vec<u8> {
+        serialize_counter_entries(entries)
+    }
+
+    #[test]
+    fn counter_value_sums_p_minus_n() {
+        let p = cpayload(&[ce("a", 5, 1), ce("b", 3, 0)]);
+        assert_eq!(counter_value(&p).unwrap(), 7); // (5+3) - (1+0)
+    }
+
+    #[test]
+    fn counter_value_can_be_negative() {
+        let p = cpayload(&[ce("a", 1, 5)]);
+        assert_eq!(counter_value(&p).unwrap(), -4);
+    }
+
+    #[test]
+    fn counter_merge_is_per_replica_max() {
+        // Two replicas increment concurrently; merge keeps the max per replica.
+        let a = cpayload(&[ce("A", 3, 0), ce("B", 2, 0)]);
+        let b = cpayload(&[ce("A", 3, 0), ce("C", 5, 0)]);
+        let m = merge_counter_payloads(&a, &b).unwrap();
+        assert_eq!(counter_value(&m).unwrap(), 10); // 3+2+5
+                                                    // A replica's count never decreases on merge.
+        let entries = parse_counter_entries(&m).unwrap();
+        let a_entry = entries.iter().find(|e| e.r == "A").unwrap();
+        assert_eq!((a_entry.p, a_entry.n), (3, 0));
+    }
+
+    #[test]
+    fn counter_merge_is_commutative_associative_idempotent() {
+        let a = cpayload(&[ce("A", 3, 1), ce("B", 2, 0)]);
+        let b = cpayload(&[ce("B", 5, 2), ce("C", 1, 0)]);
+        let c = cpayload(&[ce("A", 4, 0)]);
+
+        // Commutative: merge(a,b) == merge(b,a)
+        let ab = merge_counter_payloads(&a, &b).unwrap();
+        let ba = merge_counter_payloads(&b, &a).unwrap();
+        assert_eq!(ab, ba, "commutative");
+
+        // Associative: merge(merge(a,b),c) == merge(a,merge(b,c))
+        let ab_c = merge_counter_payloads(&ab, &c).unwrap();
+        let a_bc = merge_counter_payloads(&a, &merge_counter_payloads(&b, &c).unwrap()).unwrap();
+        assert_eq!(ab_c, a_bc, "associative");
+
+        // Idempotent: merge(a,a) == a
+        let aa = merge_counter_payloads(&a, &a).unwrap();
+        assert_eq!(aa, a, "idempotent");
+    }
+
+    #[test]
+    fn counter_apply_delta_positive_bumps_p() {
+        let p = cpayload(&[ce("A", 3, 0)]);
+        let p2 = counter_apply_delta(&p, "A", 2);
+        assert_eq!(counter_value(&p2).unwrap(), 5);
+        let entries = parse_counter_entries(&p2).unwrap();
+        let a = entries.iter().find(|e| e.r == "A").unwrap();
+        assert_eq!((a.p, a.n), (5, 0));
+    }
+
+    #[test]
+    fn counter_apply_delta_negative_bumps_n() {
+        let p = cpayload(&[ce("A", 5, 0)]);
+        let p2 = counter_apply_delta(&p, "A", -3);
+        assert_eq!(counter_value(&p2).unwrap(), 2); // 5 - 3
+        let entries = parse_counter_entries(&p2).unwrap();
+        let a = entries.iter().find(|e| e.r == "A").unwrap();
+        assert_eq!((a.p, a.n), (5, 3));
+    }
+
+    #[test]
+    fn counter_apply_delta_creates_new_replica() {
+        let p = cpayload(&[ce("A", 1, 0)]);
+        let p2 = counter_apply_delta(&p, "B", 4);
+        assert_eq!(counter_value(&p2).unwrap(), 5); // 1 + 4
+        assert!(parse_counter_entries(&p2)
+            .unwrap()
+            .iter()
+            .any(|e| e.r == "B" && e.p == 4));
+    }
+
+    #[test]
+    fn counter_apply_delta_on_empty_starts_fresh() {
+        let p2 = counter_apply_delta(b"", "A", 7);
+        assert_eq!(counter_value(&p2).unwrap(), 7);
+    }
+
+    #[test]
+    fn counter_concurrent_increments_from_two_replicas_merge_correctly() {
+        // The core convergence test: two replicas independently increment +
+        // decrement, then merge. The result is the correct total regardless of
+        // arrival order (commutative).
+        // Replica A: +3, +2, -1  →  p_A=5, n_A=1
+        let mut a_payload = b"".to_vec();
+        a_payload = counter_apply_delta(&a_payload, "A", 3);
+        a_payload = counter_apply_delta(&a_payload, "A", 2);
+        a_payload = counter_apply_delta(&a_payload, "A", -1);
+
+        // Replica B: +4, -2  →  p_B=4, n_B=2
+        let mut b_payload = b"".to_vec();
+        b_payload = counter_apply_delta(&b_payload, "B", 4);
+        b_payload = counter_apply_delta(&b_payload, "B", -2);
+
+        // Expected total: (5+4) - (1+2) = 6
+        let merged = merge_counter_payloads(&a_payload, &b_payload).unwrap();
+        assert_eq!(
+            counter_value(&merged).unwrap(),
+            6,
+            "merged counter value is the correct total"
+        );
+        // Commutative regardless of arrival order.
+        let merged_rev = merge_counter_payloads(&b_payload, &a_payload).unwrap();
+        assert_eq!(counter_value(&merged_rev).unwrap(), 6);
+        assert_eq!(merged, merged_rev, "byte-identical regardless of order");
+    }
+
+    #[test]
+    fn counter_merge_empty_and_null_payloads() {
+        let a = cpayload(&[ce("A", 3, 0)]);
+        assert_eq!(
+            counter_value(&merge_counter_payloads(&a, b"").unwrap()).unwrap(),
+            3
+        );
+        assert_eq!(
+            counter_value(&merge_counter_payloads(&a, b"null").unwrap()).unwrap(),
+            3
+        );
+        assert_eq!(
+            counter_value(&merge_counter_payloads(b"", b"").unwrap()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn counter_merge_rejects_non_object_payload() {
+        assert!(merge_counter_payloads(b"[1,2,3]", b"{}").is_err());
+        assert!(merge_counter_payloads(b"42", b"{}").is_err());
+        assert!(merge_counter_payloads(b"not-json", b"{}").is_err());
     }
 }

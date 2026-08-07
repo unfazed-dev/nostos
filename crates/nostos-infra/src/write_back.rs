@@ -83,6 +83,16 @@ pub fn parse_or_set_columns(raw: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Parse `NOSTOS_COUNTER_COLUMNS` (same `table:col` format as
+/// [`parse_or_set_columns`]) into the PN-Counter column map (ADR-0030 addendum).
+/// A table maps to the JSONB column that holds its counter payload
+/// `{"entries":[{"r":..,"p":..,"n":..}]}`.
+pub fn parse_counter_columns(raw: &str) -> HashMap<String, String> {
+    // Identical parse format — separate function for doc-clarity + the "three
+    // views of one truth" config audit trail.
+    parse_or_set_columns(raw)
+}
+
 // ===========================================================================
 // NoWriteBack — the fake-mode stub (always available, no feature gate).
 // ===========================================================================
@@ -230,6 +240,11 @@ mod pg {
         /// set. Writes to these tables merge element-wise (read-modify-write)
         /// instead of clobbering, so concurrent client adds converge server-side.
         or_set_columns: HashMap<String, String>,
+        /// ADR-0030 addendum: table → JSONB column holding its PN-Counter
+        /// payload. Writes to these tables merge per-replica elementwise max
+        /// (state-based CRDT), so concurrent client increments converge
+        /// server-side without a server-side read-modify-write race.
+        counter_columns: HashMap<String, String>,
         /// Pool-of-one. `Mutex` (not `OnceCell`) so a dead connection can be
         /// replaced: we take the lock, probe/execute, and on a fatal error
         /// drop the inner `Client` (the next call reconnects).
@@ -246,6 +261,7 @@ mod pg {
                 pg_url: pg_url.to_string(),
                 allowlist,
                 or_set_columns: HashMap::new(),
+                counter_columns: HashMap::new(),
                 client: Arc::new(Mutex::new(None)),
             }
         }
@@ -256,6 +272,15 @@ mod pg {
         #[must_use]
         pub fn with_or_set_columns(mut self, cols: HashMap<String, String>) -> Self {
             self.or_set_columns = cols;
+            self
+        }
+
+        /// ADR-0030 addendum: configure PN-Counter tables (table → the JSONB
+        /// column holding the counter payload). Builder, mirroring the client's
+        /// `with_counter_tables`. Writes to these tables merge per-replica max.
+        #[must_use]
+        pub fn with_counter_columns(mut self, cols: HashMap<String, String>) -> Self {
+            self.counter_columns = cols;
             self
         }
 
@@ -356,6 +381,66 @@ mod pg {
                 }
             }
         }
+
+        /// ADR-0030 addendum: merge a PN-Counter payload per-replica elementwise
+        /// max into the configured JSONB column (read-modify-write under the
+        /// pool-of-one connection — single writer per row, no extra locking).
+        /// Mirrors `or_set_merge` but uses the counter merge primitive.
+        async fn counter_merge(
+            &self,
+            table: &str,
+            pk: &str,
+            col: &str,
+            payload_json: &str,
+        ) -> Result<(), WriteBackError> {
+            if let Err(bad) = validate_ident(col) {
+                return Err(WriteBackError::InvalidPayload(format!(
+                    "bad counter column identifier: {bad}"
+                )));
+            }
+            let quoted_table = quote_ident(table);
+            let quoted_pk = quote_ident(PK_COLUMN);
+            let quoted_col = quote_ident(col);
+            let pk_value = SqlValue::from_pk(pk);
+
+            let client = self.client().await?;
+            let select_sql =
+                format!("SELECT {quoted_col}::text FROM {quoted_table} WHERE {quoted_pk} = $1");
+            let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                vec![pk_value.as_tosql()];
+            let existing: Option<String> = match client.query_opt(&select_sql, &sel_params).await {
+                Ok(Some(row)) => row.get::<_, Option<String>>(0),
+                Ok(None) => None,
+                Err(e) => {
+                    self.drop_client().await;
+                    return Err(WriteBackError::Backend(e.to_string()));
+                }
+            };
+            let existing_bytes = existing.as_deref().map_or(&b""[..], str::as_bytes);
+            let merged =
+                nostos_domain::merge_counter_or_lww(existing_bytes, payload_json.as_bytes());
+            let merged_value: serde_json::Value =
+                serde_json::from_slice(&merged).unwrap_or(serde_json::Value::Null);
+            let col_value = json_value_to_sql(&merged_value);
+
+            let sql = format!(
+                "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}) \
+                 VALUES ($1, $2) \
+                 ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col}"
+            );
+            let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                vec![pk_value.as_tosql(), col_value.as_tosql()];
+            match client.execute(&sql, &ins_params).await {
+                Ok(_) => {
+                    self.return_client(client).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    self.drop_client().await;
+                    Err(WriteBackError::Backend(e.to_string()))
+                }
+            }
+        }
     }
 
     #[async_trait]
@@ -396,6 +481,18 @@ mod pg {
                 }
                 // ponytail: tenant + OR-set → clobber (no regression vs today; the
                 // tenant-scoped merge is deferred to the fixture that needs it).
+            }
+
+            // ADR-0030 addendum: PN-Counter tables merge per-replica elementwise
+            // max into a configured JSONB column, so concurrent client increments
+            // converge server-side (state-based CRDT — no server-side counter
+            // race). No-tenant only, mirroring the OR-set path.
+            if let Some(col) = self.counter_columns.get(table) {
+                if tenant.is_none() {
+                    return self
+                        .counter_merge(table, pk, col.as_str(), payload_json)
+                        .await;
+                }
             }
 
             // 3. Parse + validate the payload. Must be a JSON object; every key

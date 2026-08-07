@@ -161,6 +161,40 @@ class _FakeEngine implements NostosEngine {
   }) async => 0;
 
   @override
+  Future<List<int>> writeBatch({
+    required List<({String table, String op, String pk, String? payloadJson})>
+        ops,
+  }) async => List.filled(ops.length, 0);
+
+  @override
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) async => 0;
+
+  @override
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) async => 0;
+
+  @override
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async => 0;
+
+  @override
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async => 0;
+
+  @override
   void applySchema(List<ClientTableFfi> tables) {}
 
   @override

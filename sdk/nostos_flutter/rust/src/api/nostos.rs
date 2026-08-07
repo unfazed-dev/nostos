@@ -107,6 +107,16 @@ pub struct ClientTableFfi {
     pub columns: Vec<String>,
 }
 
+/// One write op inside a `write_batch` group (ADR-0032 T3). Same fields as
+/// [`NostosHandle::write`]'s params.
+#[derive(Debug, Clone)]
+pub struct NostosWriteInput {
+    pub table: String,
+    pub op: String,
+    pub pk: String,
+    pub payload_json: Option<String>,
+}
+
 impl From<ClientTableFfi> for ClientTable {
     fn from(t: ClientTableFfi) -> Self {
         Self {
@@ -502,6 +512,136 @@ impl NostosHandle {
             .await
             .map_err(|e: ClientError| e.to_string());
         r
+    }
+
+    /// Enqueue a batch of writes atomically (all-or-nothing outbox entry —
+    /// ADR-0032 T3). All ops land in one SQLite transaction or none do. Each
+    /// `NostosWriteInput` has the same fields as [`Self::write`]'s params.
+    /// Returns the outbox ids in the same order as `ops`.
+    ///
+    /// # Errors
+    /// Same preconditions as [`Self::write`] (subscribe first, valid op, table
+    /// in the subscribed set). A failure on ANY op rolls back the ENTIRE batch.
+    pub async fn write_batch(
+        &self,
+        ops: Vec<NostosWriteInput>,
+    ) -> Result<Vec<u64>, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "write_batch() called before subscribe()".to_string())?;
+        // Validate ALL ops first — reject before touching the outbox.
+        let mut writes = Vec::with_capacity(ops.len());
+        for input in &ops {
+            let write_op = match input.op.as_str() {
+                "upsert" => WriteOp::Upsert,
+                "delete" => WriteOp::Delete,
+                "patch" => WriteOp::Patch,
+                other => {
+                    return Err(format!(
+                        "unknown write op {other:?} in batch: expected \"upsert\", \"delete\", or \"patch\""
+                    ))
+                }
+            };
+            if !session.tables.contains(&input.table) {
+                return Err(format!(
+                    "write_batch() table {:?} is not in the subscribed set",
+                    input.table
+                ));
+            }
+            writes.push(PendingWrite {
+                table: input.table.clone(),
+                op: write_op,
+                pk: input.pk.clone(),
+                payload_json: input.payload_json.clone(),
+            });
+        }
+        session
+            .client
+            .write_batch(writes)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030 /
+    /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert. The
+    /// element renders locally immediately and converges with concurrent
+    /// remote adds on the server's echo.
+    ///
+    /// Requires the table to be tagged as an OR-set in the client config.
+    pub async fn or_set_add(
+        &self,
+        table: String,
+        pk: String,
+        element: String,
+    ) -> Result<u64, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "or_set_add() called before subscribe()".to_string())?;
+        session
+            .client
+            .or_set_add(&table, &pk, &element)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// Remove `element` from the OR-set — a tombstone at a fresh HLC. Add-wins:
+    /// a concurrent or later re-add re-activates the element.
+    pub async fn or_set_remove(
+        &self,
+        table: String,
+        pk: String,
+        element: String,
+    ) -> Result<u64, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "or_set_remove() called before subscribe()".to_string())?;
+        session
+            .client
+            .or_set_remove(&table, &pk, &element)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// Increment the PN-Counter in row `pk` of `table` by `delta` (ADR-0030
+    /// addendum). Read-modify-write: reads the current counter payload, applies
+    /// the delta to this replica's entry, and enqueues the result. The per-
+    /// replica max merge converges across replicas.
+    pub async fn counter_increment(
+        &self,
+        table: String,
+        pk: String,
+        delta: i64,
+    ) -> Result<u64, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "counter_increment() called before subscribe()".to_string())?;
+        session
+            .client
+            .counter_increment(&table, &pk, delta)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
+    pub async fn counter_decrement(
+        &self,
+        table: String,
+        pk: String,
+        delta: u64,
+    ) -> Result<u64, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "counter_decrement() called before subscribe()".to_string())?;
+        session
+            .client
+            .counter_decrement(&table, &pk, delta)
+            .await
+            .map_err(|e: ClientError| e.to_string())
     }
 
     /// Run an arbitrary `SELECT` against the on-device SQLite (the synced

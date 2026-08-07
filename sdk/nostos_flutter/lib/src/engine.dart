@@ -75,6 +75,42 @@ abstract class NostosEngine {
     String? payloadJson,
   });
 
+  /// Atomic batch enqueue — all ops land in one storage transaction or none
+  /// do (ADR-0032 T3). Returns outbox ids in the same order as `ops`.
+  Future<List<int>> writeBatch({
+    required List<({String table, String op, String pk, String? payloadJson})> ops,
+  });
+
+  /// Add an element to an OR-set row (ADR-0030 / ADR-0032 T4). Returns the
+  /// outbox id.
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  });
+
+  /// Remove an element from an OR-set row (tombstone). Returns the outbox id.
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  });
+
+  /// Increment the PN-Counter in row [pk] of [table] by [delta] (ADR-0030
+  /// addendum). Returns the outbox id.
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  });
+
+  /// Decrement the PN-Counter by [delta] (bumps the negative counter).
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  });
+
   /// Run an arbitrary SELECT against on-device SQLite. Returns a JSON-array
   /// string (same shape as [watch]'s ticks); decode with jsonDecode. Requires
   /// an active subscription.
@@ -170,6 +206,58 @@ class RustNostosEngine implements NostosEngine {
   }
 
   @override
+  Future<List<int>> writeBatch({
+    required List<({String table, String op, String pk, String? payloadJson})> ops,
+  }) async {
+    final inputs = ops
+        .map((o) => rust.NostosWriteInput(
+              table: o.table,
+              op: o.op,
+              pk: o.pk,
+              payloadJson: o.payloadJson,
+            ))
+        .toList();
+    final ids = await _handle.writeBatch(ops: inputs);
+    return ids.map((b) => b.toInt()).toList();
+  }
+
+  @override
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) =>
+      _handle.orSetAdd(table: table, pk: pk, element: element).then((b) => b.toInt());
+
+  @override
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) =>
+      _handle.orSetRemove(table: table, pk: pk, element: element).then((b) => b.toInt());
+
+  @override
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) =>
+      _handle
+          .counterIncrement(table: table, pk: pk, delta: delta)
+          .then((b) => b.toInt());
+
+  @override
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) =>
+      _handle
+          .counterDecrement(table: table, pk: pk, delta: BigInt.from(delta))
+          .then((b) => b.toInt());
+
+  @override
   Future<String> query({required String sql}) =>
       _handle.query(sql: sql);
 
@@ -177,7 +265,6 @@ class RustNostosEngine implements NostosEngine {
   void applySchema(List<rust.ClientTableFfi> tables) =>
       _handle.applySchema(tables: tables);
 
-  @override
   @override
   Future<void> setToken(String? token) => _handle.setToken(token: token);
 

@@ -123,6 +123,13 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_OR_SET_COLUMNS", default_value = "")]
     or_set_columns: String,
 
+    /// Comma-separated `table:col` pairs naming PN-Counter CRDT columns
+    /// (ADR-0030 addendum). Writes to these tables merge per-replica elementwise
+    /// max server-side (state-based CRDT). Empty (default) = no counter columns.
+    /// Example: `counts:value`. Only meaningful under `NOSTOS_REPLICATOR=pg`.
+    #[arg(long, env = "NOSTOS_COUNTER_COLUMNS", default_value = "")]
+    counter_columns: String,
+
     /// Path to the sync-rules file (ADR-0031). Missing file = `all` mode.
     #[arg(long, env = "NOSTOS_RULES_FILE", default_value = "nostos_rules.toml")]
     rules_file: String,
@@ -610,6 +617,7 @@ async fn main() -> anyhow::Result<()> {
     // always set on the state so the transport's gate is uniform.
     let write_tables = nostos_infra::parse_allowlist(&cfg.write_tables);
     let or_set_columns = nostos_infra::parse_or_set_columns(&cfg.or_set_columns);
+    let counter_columns = nostos_infra::parse_counter_columns(&cfg.counter_columns);
     #[cfg(feature = "pg")]
     let write_back: Arc<dyn nostos_application::ports::WriteBack> = if cfg.replicator == "pg" {
         if cfg.pg_url.trim().is_empty() {
@@ -618,10 +626,11 @@ async fn main() -> anyhow::Result<()> {
                  Set NOSTOS_PG_URL, e.g. after: docker compose -f docker/docker-compose.yml up -d"
             );
         }
-        info!(tables = ?write_tables, or_set_columns = ?or_set_columns, "write-back: PgWriteBack (real source)");
+        info!(tables = ?write_tables, or_set_columns = ?or_set_columns, counter_columns = ?counter_columns, "write-back: PgWriteBack (real source)");
         Arc::new(
             nostos_infra::PgWriteBack::new(&cfg.pg_url, write_tables.clone())
-                .with_or_set_columns(or_set_columns.clone()),
+                .with_or_set_columns(or_set_columns.clone())
+                .with_counter_columns(counter_columns.clone()),
         )
     } else {
         info!("write-back: NoWriteBack (fake replicator — writes return pg-required error)");

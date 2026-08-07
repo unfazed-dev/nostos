@@ -37,6 +37,9 @@ pub struct InMemoryStorage {
     /// path is unchanged for ordinary tables (the bench's `tasks` included), so
     /// the measured fan-out path is unaffected.
     or_set_tables: HashSet<String>,
+    /// Tables whose payload is a PN-Counter CRDT (ADR-0030 addendum): applies
+    /// MERGE per-replica elementwise max. Empty by default.
+    counter_tables: HashSet<String>,
 }
 
 impl InMemoryStorage {
@@ -52,6 +55,15 @@ impl InMemoryStorage {
     #[must_use]
     pub fn with_or_set_tables(mut self, tables: HashSet<String>) -> Self {
         self.or_set_tables = tables;
+        self
+    }
+
+    /// Declare which tables hold PN-Counter CRDTs (ADR-0030 addendum). For those
+    /// tables `apply_batch` / `apply_local` merge per-replica elementwise max;
+    /// all others stay last-writer-wins (or OR-set if tagged). Builder-style.
+    #[must_use]
+    pub fn with_counter_tables(mut self, tables: HashSet<String>) -> Self {
+        self.counter_tables = tables;
         self
     }
 
@@ -131,6 +143,13 @@ impl Storage for InMemoryStorage {
                                 .get(&(table.clone(), pk.clone()))
                                 .map_or(&[], |(p, _)| p.as_slice());
                             nostos_domain::merge_or_set_or_lww(existing, payload.as_ref())
+                        } else if self.counter_tables.contains(table.as_str()) {
+                            // PN-Counter (ADR-0030 addendum): merge per-replica
+                            // elementwise max; a malformed payload degrades to LWW.
+                            let existing: &[u8] = shadow
+                                .get(&(table.clone(), pk.clone()))
+                                .map_or(&[], |(p, _)| p.as_slice());
+                            nostos_domain::merge_counter_or_lww(existing, payload.as_ref())
                         } else {
                             payload.as_ref().to_vec()
                         };
@@ -168,6 +187,13 @@ impl Storage for InMemoryStorage {
             .filter(|((t, _), _)| t == table)
             .map(|((_, pk), _)| pk.clone())
             .collect())
+    }
+
+    fn read_payload(&self, table: &str, pk: &str) -> crate::Result<Option<Vec<u8>>> {
+        Ok(self
+            .rows
+            .get(&(table.to_owned(), pk.to_owned()))
+            .map(|(bytes, _)| bytes.clone()))
     }
 
     fn delete_pks(&mut self, table: &str, pks: &[String]) -> crate::Result<()> {
@@ -210,6 +236,22 @@ impl Outbox for InMemoryStorage {
         Ok(id)
     }
 
+    /// Trivially atomic: all inserts happen synchronously in-process, so the
+    /// group is all-or-nothing by construction (ADR-0032 T3).
+    fn enqueue_batch(&mut self, writes: Vec<PendingWrite>) -> crate::Result<Vec<u64>> {
+        let mut ids = Vec::with_capacity(writes.len());
+        for w in writes {
+            self.next_write_id = self
+                .next_write_id
+                .checked_add(1)
+                .expect("write id space exhausted");
+            let id = self.next_write_id;
+            self.outbox.insert(id, w);
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
     fn pending(&self) -> crate::Result<Vec<(u64, PendingWrite)>> {
         // BTreeMap iterates in ascending key order → oldest first, as the
         // contract requires.
@@ -244,6 +286,14 @@ impl Outbox for InMemoryStorage {
                         .get(&(write.table.clone(), write.pk.clone()))
                         .map_or(&[], |(p, _)| p.as_slice());
                     nostos_domain::merge_or_set_or_lww(existing, incoming)
+                } else if self.counter_tables.contains(write.table.as_str()) {
+                    // PN-Counter (ADR-0030 addendum): merge the optimistic delta
+                    // per-replica max instead of clobbering.
+                    let existing: &[u8] = self
+                        .rows
+                        .get(&(write.table.clone(), write.pk.clone()))
+                        .map_or(&[], |(p, _)| p.as_slice());
+                    nostos_domain::merge_counter_or_lww(existing, incoming)
                 } else {
                     incoming.to_vec()
                 };
@@ -652,6 +702,11 @@ mod tests {
         InMemoryStorage::new().with_or_set_tables(tables)
     }
 
+    fn counter_store() -> InMemoryStorage {
+        let tables: HashSet<String> = ["counts".to_string()].into_iter().collect();
+        InMemoryStorage::new().with_counter_tables(tables)
+    }
+
     #[test]
     fn or_set_table_merges_concurrent_adds() {
         // Two server frames adding DIFFERENT elements to the same OR-set row
@@ -692,13 +747,56 @@ mod tests {
 
     #[test]
     fn ordinary_table_still_clobbers_last_wins() {
-        // Sanity: a non-OR-set table does NOT merge — the second Upsert wins,
-        // i.e. the apply path is unchanged for ordinary tables (bench included).
+        // Sanity: a non-OR-set, non-counter table does NOT merge — the second
+        // Upsert wins, i.e. the apply path is unchanged for ordinary tables.
         let mut s = InMemoryStorage::new();
         s.apply_batch(&[(ins("tasks", "1", b"v1"), 1)], Lsn::new(1), &empty_snap())
             .unwrap();
         s.apply_batch(&[(ins("tasks", "1", b"v2"), 2)], Lsn::new(2), &empty_snap())
             .unwrap();
         assert_eq!(s.payload("tasks", "1"), Some(b"v2" as &[u8]));
+    }
+
+    // ---- PN-Counter CRDT (ADR-0030 addendum) ----
+
+    #[test]
+    fn counter_table_merges_concurrent_increments_from_two_replicas() {
+        // Two server frames from DIFFERENT replicas incrementing the same
+        // counter row must MERGE per-replica max → total = Σp − Σn. Replica A
+        // adds 3 (+1 later), replica B adds 5 and subtracts 2 → total = 3+1+5−2 = 7.
+        let mut s = counter_store();
+        let a = br#"{"entries":[{"r":"A","p":3,"n":0}]}"#;
+        let b = br#"{"entries":[{"r":"B","p":5,"n":2}]}"#;
+        let a2 = br#"{"entries":[{"r":"A","p":4,"n":0}]}"#;
+        s.apply_batch(&[(ins("counts", "c1", a), 1)], Lsn::new(1), &empty_snap())
+            .unwrap();
+        s.apply_batch(&[(ins("counts", "c1", b), 2)], Lsn::new(2), &empty_snap())
+            .unwrap();
+        s.apply_batch(&[(ins("counts", "c1", a2), 3)], Lsn::new(3), &empty_snap())
+            .unwrap();
+        let merged = s.payload("counts", "c1").unwrap();
+        let value = nostos_domain::counter_value(merged).unwrap();
+        assert_eq!(value, 7, "3 (A) + 1 (A bump) + 5 (B) − 2 (B) = 7");
+    }
+
+    #[test]
+    fn counter_apply_local_merges_optimistic_increment() {
+        // A server frame sets replica A's counter to 3; an optimistic local
+        // increment from replica B by 5 MERGES → total 8 (the offline-increment-
+        // meets-server-frame case that plain LWW would clobber).
+        let mut s = counter_store();
+        let a = br#"{"entries":[{"r":"A","p":3,"n":0}]}"#;
+        s.apply_batch(&[(ins("counts", "c1", a), 1)], Lsn::new(1), &empty_snap())
+            .unwrap();
+        s.apply_local(&PendingWrite {
+            table: "counts".into(),
+            op: WriteOp::Upsert,
+            pk: "c1".into(),
+            payload_json: Some(r#"{"entries":[{"r":"B","p":5,"n":0}]}"#.into()),
+        })
+        .unwrap();
+        let merged = s.payload("counts", "c1").unwrap();
+        let value = nostos_domain::counter_value(merged).unwrap();
+        assert_eq!(value, 8, "3 (A server) + 5 (B optimistic) = 8");
     }
 }

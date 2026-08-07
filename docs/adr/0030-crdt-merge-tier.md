@@ -113,9 +113,10 @@ binary framing; "the wire stays human-debuggable JSON until a measurement says o
 
 ## Alternatives
 
-Full PN-counter (rejected — no P2P path); version vector (rejected — O(n) blowup at 1k–10k clients);
-server-LWW-only for sets (rejected — concurrent add/remove mis-serialized); full Loro-style doc CRDT
-(rejected in ADR-0004).
+Full PN-counter (originally rejected — no P2P path; **revisited and shipped** as the Decision 1
+addendum below for offline-first counters); version vector (rejected — O(n) blowup at 1k–10k
+clients); server-LWW-only for sets (rejected — concurrent add/remove mis-serialized); full
+Loro-style doc CRDT (rejected in ADR-0004).
 
 ## Implementation status & slices (2026-07-31)
 
@@ -155,3 +156,37 @@ server-only variant, not defer). Slices:
 **WS3 engine COMPLETE 2026-07-31:** all four CRDT slices + the counter delta-op shipped; `increment`
 and OR-set-merge e2e both green against real Postgres; D7 bench gate passed; `WireFrame`
 byte-unchanged. Remaining = the fixture that exercises it, not engine work.
+
+---
+
+## Addendum: PN-Counter CRDT (2026-08-08)
+
+The operator chose to build a **TRUE state-based PN-Counter CRDT** (Counter B), mirroring the
+OR-set tier. Decision 1's server-authoritative `WriteOp::Increment` (the `UPDATE SET col = col + ?`
+path) remains for **server-serialized** counters; the PN-Counter is the **offline-first** alternative
+that merges client-side — an offline increment survives a server frame landing on the same row.
+
+**Algebra** (pure domain, `nostos-domain::crdt`): per-replica `PnEntry { r, p, n }`; value = Σp − Σn;
+merge = per-replica elementwise max. Commutative, associative, idempotent. 11 algebra tests + 2
+storage-merge correctness tests verify multi-replica convergence.
+
+**Cumulative-increment crux:** unlike OR-set (append-only — enqueue a single element, merge takes
+per-element max), counter increments are cumulative. Two enqueues `{r:R, p:3}` then `{r:R, p:2}`
+would merge to `max(3,2)=3`, losing the second increment. The client solves this via
+**read-modify-write**: `counter_increment` reads the current payload, applies the delta to this
+replica's entry, and enqueues the full result — all under one engine lock so same-replica
+increments serialize.
+
+**Replica id:** `SyncClientConfig::client_id` (default UUID v4). PN-Counter payloads key {p,n} by
+this id; merge takes per-replica max. A persisted id gives cross-session stability.
+
+**Three views of one truth** (same rule as OR-set):
+- Client gate: `SyncClientConfig::counter_tables`
+- Storage tag: `SqliteStorage::with_counter_tables` / `InMemoryStorage::with_counter_tables`
+- Server column map: `NOSTOS_COUNTER_COLUMNS` env (`table:col` pairs)
+
+All three MUST agree — a mismatch (e.g. client tags but storage doesn't) still clobbers.
+
+**Scope (this addendum):** table-level counters (the row payload IS the counter
+`{"entries":[{"r":..,"p":..,"n":..}]}`). Column-level counters (one counter column within a row
+with other data) are deferred — ponytail: column-aware JSON merge within the row payload.
