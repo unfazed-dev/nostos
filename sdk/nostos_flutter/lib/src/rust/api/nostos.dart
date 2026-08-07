@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `emit_snapshot`, `hex_encode`, `row_to_json_object`, `run_connection_loop`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Session`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `drop`, `eq`, `fmt`, `fmt`, `fmt`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NostosHandle>>
 abstract class NostosHandle implements RustOpaqueInterface {
@@ -75,6 +75,26 @@ abstract class NostosHandle implements RustOpaqueInterface {
   );
 
   Future<void> disconnect();
+
+  /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030 /
+  /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert. The
+  /// element renders locally immediately and converges with concurrent
+  /// remote adds on the server's echo.
+  ///
+  /// Requires the table to be tagged as an OR-set in the client config.
+  Future<BigInt> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  });
+
+  /// Remove `element` from the OR-set — a tombstone at a fresh HLC. Add-wins:
+  /// a concurrent or later re-add re-activates the element.
+  Future<BigInt> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  });
 
   /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
   /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
@@ -239,6 +259,16 @@ abstract class NostosHandle implements RustOpaqueInterface {
     required String pk,
     String? payloadJson,
   });
+
+  /// Enqueue a batch of writes atomically (all-or-nothing outbox entry —
+  /// ADR-0032 T3). All ops land in one SQLite transaction or none do. Each
+  /// `NostosWriteInput` has the same fields as [`Self::write`]'s params.
+  /// Returns the outbox ids in the same order as `ops`.
+  ///
+  /// # Errors
+  /// Same preconditions as [`Self::write`] (subscribe first, valid op, table
+  /// in the subscribed set). A failure on ANY op rolls back the ENTIRE batch.
+  Future<Uint64List> writeBatch({required List<NostosWriteInput> ops});
 }
 
 /// Coarse connection-state signal for `Stream<NostosConnectionState>` on the
@@ -258,6 +288,36 @@ abstract class NostosHandle implements RustOpaqueInterface {
 /// `Disconnected`; acceptable for a v1 UI-facing signal. Upgrade path: add a
 /// `connected`/`subscribed` broadcast to `SyncClient` alongside `changes`.
 enum NostosConnectionState { connecting, connected, reconnecting, disconnected }
+
+/// One write op inside a `write_batch` group (ADR-0032 T3). Same fields as
+/// [`NostosHandle::write`]'s params.
+class NostosWriteInput {
+  final String table;
+  final String op;
+  final String pk;
+  final String? payloadJson;
+
+  const NostosWriteInput({
+    required this.table,
+    required this.op,
+    required this.pk,
+    this.payloadJson,
+  });
+
+  @override
+  int get hashCode =>
+      table.hashCode ^ op.hashCode ^ pk.hashCode ^ payloadJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is NostosWriteInput &&
+          runtimeType == other.runtimeType &&
+          table == other.table &&
+          op == other.op &&
+          pk == other.pk &&
+          payloadJson == other.payloadJson;
+}
 
 /// frb-friendly mirror of `nostos_client`'s `ClientTable` — the client-side
 /// schema projection the WS2 view layer consumes. frb generates Dart bindings

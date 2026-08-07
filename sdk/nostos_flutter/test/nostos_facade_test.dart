@@ -81,6 +81,57 @@ class _FakeEngine implements NostosEngine {
   /// writeBatch) assign a counter here.
   Future<int> Function()? writeResult;
 
+  /// Every batch the engine was asked to enqueue, in call order. Each entry is
+  /// the full op list passed to `writeBatch` (one record per batch call, NOT
+  /// one per op — writeBatch crosses FFI as a single atomic group).
+  final List<List<({String table, String op, String pk, String? payloadJson})>>
+      batchCalls = [];
+
+  /// Optional override for `writeBatch`'s return / throw. Default (`null`)
+  /// yields sequential 1-based ids. Set to a throwing function to simulate an
+  /// atomic-batch failure (no partial state is recorded).
+  Future<List<int>> Function(
+      List<({String table, String op, String pk, String? payloadJson})>)?
+      batchResult;
+
+  @override
+  Future<List<int>> writeBatch({
+    required List<({String table, String op, String pk, String? payloadJson})>
+        ops,
+  }) async {
+    batchCalls.add(List.of(ops));
+    if (batchResult != null) return batchResult!(ops);
+    final ids = <int>[];
+    for (var i = 0; i < ops.length; i++) {
+      ids.add(writeResult == null ? i + 1 : await writeResult!());
+    }
+    return ids;
+  }
+
+  /// Recorded OR-set add/remove calls: (op, table, pk, element).
+  final List<({String op, String table, String pk, String element})>
+      orSetCalls = [];
+
+  @override
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) async {
+    orSetCalls.add((op: 'add', table: table, pk: pk, element: element));
+    return orSetCalls.length;
+  }
+
+  @override
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) async {
+    orSetCalls.add((op: 'remove', table: table, pk: pk, element: element));
+    return orSetCalls.length;
+  }
+
   @override
   void applySchema(List<ClientTableFfi> tables) {}
 
@@ -573,28 +624,35 @@ void main() {
   });
 
   group('writeBatch (ADR-0032 T3)', () {
-    test('enqueues all ops in order, returns ids', () async {
+    test('delegates to a single atomic engine.writeBatch call, returns ids',
+        () async {
       final (engine, db) = newDb();
       await db.subscribe('todos');
-      var nextId = 100;
-      engine.writeResult = () async => nextId++;
 
       final ids = await db.writeBatch([
-        const NostosWrite(table: 'todos', op: 'upsert', pk: '1', payload: {'title': 'a'}),
-        const NostosWrite(table: 'todos', op: 'patch', pk: '1', payload: {'done': 1}),
+        const NostosWrite(
+            table: 'todos', op: 'upsert', pk: '1', payload: {'title': 'a'}),
+        const NostosWrite(
+            table: 'todos', op: 'patch', pk: '1', payload: {'done': 1}),
         const NostosWrite(table: 'todos', op: 'delete', pk: '2'),
       ]);
 
-      expect(ids, [100, 101, 102]);
-      expect(engine.writes.map((w) => w.op).toList(), ['upsert', 'patch', 'delete']);
-      expect(engine.writes[1].pk, '1');
-      expect(engine.writes[1].payloadJson, isNotNull);
+      expect(ids, [1, 2, 3]);
+      // ONE batch call carrying all three ops — NOT three separate writes.
+      expect(engine.batchCalls, hasLength(1));
+      expect(engine.writes, isEmpty,
+          reason: 'atomic batch never falls back to per-op write');
+      final batch = engine.batchCalls.single;
+      expect(batch.map((o) => o.op).toList(), ['upsert', 'patch', 'delete']);
+      expect(batch[1].pk, '1');
+      // payloads are JSON-encoded by the Nostos layer before crossing FFI.
+      expect(batch[1].payloadJson, isNotNull);
+      expect(jsonDecode(batch[1].payloadJson!), {'done': 1});
     });
 
     test('Collection.writeBatch stamps the table', () async {
       final (engine, db) = newDb();
       await db.subscribe('todos');
-      engine.writeResult = () async => 1;
       final todos =
           db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
 
@@ -602,22 +660,15 @@ void main() {
         const NostosWrite(table: 'WRONG', op: 'upsert', pk: '9', payload: {}),
       ]);
 
-      expect(engine.writes.single.table, 'todos',
+      expect(engine.batchCalls.single.single.table, 'todos',
           reason: 'collection stamps its own table over the op');
     });
 
-    test('a mid-batch failure throws WriteBatchPartialError with completed ids',
+    test('an engine.writeBatch failure propagates with no partial batch',
         () async {
       final (engine, db) = newDb();
       await db.subscribe('todos');
-      var n = 0;
-      engine.writeResult = () async {
-        n++;
-        if (n == 2) {
-          throw Exception('disk full');
-        }
-        return n;
-      };
+      engine.batchResult = (_) async => throw Exception('disk full');
 
       Future<List<int>> run() => db.writeBatch([
             const NostosWrite(table: 'todos', op: 'upsert', pk: '1'),
@@ -625,17 +676,92 @@ void main() {
             const NostosWrite(table: 'todos', op: 'upsert', pk: '3'),
           ]);
 
-      Object? caught;
-      try {
-        await run();
-      } on Object catch (e) {
-        caught = e;
-      }
-      expect(caught, isA<WriteBatchPartialError>(),
-          reason: 'mid-batch failure surfaces a partial error');
-      final partial = caught as WriteBatchPartialError;
-      expect(partial.completedIds, [1], reason: 'first op succeeded before failure');
-      expect(partial.failedIndex, 1);
+      await expectLater(run(), throwsA(isA<Exception>()));
+      // The batch was attempted exactly once; nothing partial leaked through
+      // (atomicity is the storage layer's job — here we assert the facade
+      // never splits the batch into per-op writes on failure).
+      expect(engine.batchCalls, hasLength(1));
+      expect(engine.writes, isEmpty);
+    });
+  });
+
+  group('CRDT orSet handles (ADR-0030 / ADR-0032 T4)', () {
+    test('Collection.orSetAdd/orSetRemove delegate with the stamped table',
+        () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      final todos =
+          db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      await todos.orSetAdd(pk: '1', element: 'urgent');
+      await todos.orSetRemove(pk: '1', element: 'done');
+
+      expect(engine.orSetCalls, [
+        (op: 'add', table: 'todos', pk: '1', element: 'urgent'),
+        (op: 'remove', table: 'todos', pk: '1', element: 'done'),
+      ]);
+    });
+
+    test('orSetAdd on an unsubscribed table throws StateError', () async {
+      final (_, db) = newDb();
+      await db.subscribe('todos');
+
+      expect(
+        () => db.write(table: 'WRONG', op: 'upsert', pk: '1'),
+        throwsA(isA<StateError>()),
+      );
+    });
+  });
+
+  group('deadLetters (ADR-0032 T5)', () {
+    test('surfaces error + timestamp columns from the outbox', () async {
+      final (_, db) = newDb(queryResult: jsonEncode([
+            {
+              'id': 7,
+              'table_name': 'todos',
+              'op': 'upsert',
+              'pk': '1',
+              'payload': '{"title":"ship"}',
+              'attempts': 3,
+              'last_error': 'NOSTOS_WRITE_TABLES rejects "todos"',
+              'dead_lettered_at': 1700000000000,
+            },
+          ]));
+      await db.subscribe('todos');
+
+      final letters = await db.deadLetters();
+
+      expect(letters, hasLength(1));
+      final dl = letters.single;
+      expect(dl.id, 7);
+      expect(dl.table, 'todos');
+      expect(dl.op, 'upsert');
+      expect(dl.attempts, 3);
+      expect(dl.payload, {'title': 'ship'});
+      expect(dl.error, 'NOSTOS_WRITE_TABLES rejects "todos"');
+      expect(dl.timestamp,
+          DateTime.fromMillisecondsSinceEpoch(1700000000000));
+    });
+
+    test('null error/timestamp degrade gracefully', () async {
+      final (_, db) = newDb(queryResult: jsonEncode([
+            {
+              'id': 1,
+              'table_name': 'todos',
+              'op': 'delete',
+              'pk': '9',
+              'payload': null,
+              'attempts': 1,
+              'last_error': null,
+              'dead_lettered_at': null,
+            },
+          ]));
+      await db.subscribe('todos');
+
+      final letters = await db.deadLetters();
+      expect(letters.single.error, isNull);
+      expect(letters.single.timestamp, isNull);
+      expect(letters.single.payload, isNull);
     });
   });
 

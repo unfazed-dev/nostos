@@ -504,6 +504,49 @@ where
         Ok(id)
     }
 
+    /// Enqueue a batch of writes atomically (all-or-nothing) — ADR-0032 T3.
+    /// All writes land in one storage transaction or none do. Each write is
+    /// also applied optimistically (instant-local). Returns the outbox ids in
+    /// the same order as `writes`.
+    pub async fn write_batch(&self, writes: Vec<PendingWrite>) -> Result<Vec<u64>, ClientError> {
+        let n = writes.len();
+        let engine = Arc::clone(&self.engine);
+        let (ids, local_tick) =
+            tokio::task::spawn_blocking(move || -> nostos_core::Result<(Vec<u64>, Option<ApplyOutcome>)> {
+                let mut engine = engine.blocking_lock();
+                // Atomic enqueue: all-or-nothing at the storage level.
+                let ids = engine.storage_mut().enqueue_batch(writes.clone())?;
+                // Optimistic local apply for each write (same as write()).
+                let mut applied_count = 0usize;
+                for w in &writes {
+                    match engine.storage_mut().apply_local(w) {
+                        Ok(()) => applied_count += 1,
+                        Err(e) => {
+                            warn!(error = %e, "instant-local apply failed in batch; write still queued");
+                        }
+                    }
+                }
+                let local_tick = if applied_count > 0 {
+                    engine
+                        .checkpoint()
+                        .ok()
+                        .map(|checkpoint| ApplyOutcome { checkpoint, rows_applied: applied_count })
+                } else {
+                    None
+                };
+                Ok((ids, local_tick))
+            })
+            .await
+            .map_err(|e| ClientError::Join(e.to_string()))??;
+        debug!(n, "enqueued batch of writes to outbox atomically");
+        self.update_write_status(|s| s.pending += n as u64);
+        if let Some(tick) = local_tick {
+            let _ = self.changes.send(tick);
+        }
+        self.write_notify.notify_one();
+        Ok(ids)
+    }
+
     /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030).
     /// Mints a client HLC for the add, enqueues a merge-upsert, and applies
     /// optimistically — the element renders locally immediately and converges
@@ -692,12 +735,15 @@ where
     ) -> Result<(u32, bool), ClientError> {
         let max = self.config.dead_letter_max_attempts;
         let engine = Arc::clone(&self.engine);
+        let error_owned = server_error.map(str::to_string);
         let (attempts, dld, remaining) =
             tokio::task::spawn_blocking(move || -> nostos_core::Result<(u32, bool, u64)> {
                 let engine = engine.blocking_lock();
                 let count = engine.storage().bump_attempts(id)?;
                 if count >= max {
-                    engine.storage().mark_dead_letter(id)?;
+                    engine
+                        .storage()
+                        .mark_dead_letter_with_error(id, error_owned.as_deref())?;
                     // Same reasoning as mark_write_done: re-count under the
                     // lock so a repeated dead-letter can't double-decrement.
                     let remaining = engine.storage().pending()?.len() as u64;

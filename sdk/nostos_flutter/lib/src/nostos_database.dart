@@ -361,10 +361,10 @@ class NostosDatabase {
   }) =>
       _nostos.write(table, op: op, pk: pk, payload: payload);
 
-  /// Enqueue a group of writes as an all-or-nothing *delivery* batch
-  /// (ADR-0032 T3). Every op in [writes] enters the durable outbox before the
-  /// next flush, so the group uploads together in one round. Returns the local
-  /// outbox ids in the same order as [writes].
+  /// Enqueue a group of writes as an all-or-nothing *entry* batch
+  /// (ADR-0032 T3). Every op enters the durable outbox atomically — all land in
+  /// one SQLite transaction or none do — so the group uploads together in one
+  /// round. Returns the local outbox ids in the same order as [writes].
   ///
   /// **This is NOT a server transaction.** The server applies each row
   /// individually with per-field last-writer-wins (ADR-0014); there is no
@@ -373,14 +373,11 @@ class NostosDatabase {
   /// by the outbox's pk-dedup + the server's idempotent upsert) — exactly what
   /// a sequential `patch`/`upsert` sequence already produces.
   ///
-  /// ponytail: *entry* atomicity is best-effort at this layer. Each op is a
-  /// separate durable enqueue (the engine's `write` FFI commits one outbox row
-  /// per call); if enqueue N fails after N-1 succeeded, the first N-1 rows stay
-  /// in the outbox and the thrown error carries the index. True transactional
-  /// entry needs a Rust `write_batch` FFI that inserts all rows under one
-  /// SQLite transaction — deferred past Wave 1's no-codegen constraint. The
-  /// common case (all ops valid) is indistinguishable from a transactional
-  /// entry; only a mid-batch disk/engine failure exposes the seam.
+  /// *Entry* atomicity IS real (one storage transaction): a mid-batch disk
+  /// failure rolls back the whole batch, leaving zero partial outbox rows. The
+  /// WASM engine (Wave 2) inherits the same contract via the Outbox trait's
+  /// default `enqueue_batch` (sequential, best-effort) until it gains its own
+  /// transactional override.
   Future<List<int>> writeBatch(List<NostosWrite> writes) async {
     if (writes.isEmpty) {
       throw ArgumentError.value(
@@ -389,47 +386,31 @@ class NostosDatabase {
         'writeBatch requires a non-empty list',
       );
     }
-    final ids = <int>[];
-    for (var i = 0; i < writes.length; i++) {
-      final w = writes[i];
-      try {
-        ids.add(await _nostos.write(
-          w.table,
-          op: w.op,
-          pk: w.pk.toString(),
-          payload: w.payload,
-        ));
-      } catch (e) {
-        // N-1 rows are already durable; surface which index failed so the
-        // caller can decide (report, retry the tail, or signOut to wipe).
-        throw WriteBatchPartialError(
-          'writeBatch failed at index $i (${w.table}/${w.op}/${w.pk}): $e',
-          completedIds: ids,
-          failedIndex: i,
-        );
-      }
-    }
-    return ids;
+    return _nostos.writeBatch(
+      writes
+          .map((w) => (
+                table: w.table,
+                op: w.op,
+                pk: w.pk.toString(),
+                payload: w.payload,
+              ))
+          .toList(),
+    );
   }
 
   /// Read-only snapshot of the dead-letter queue (ADR-0032 T5 / ADR-0027):
   /// writes the server permanently rejected and the flush loop quarantined.
   /// Rows stay in `cairn_outbox` with `dlq = 1`; this lists them so failures are
-  /// diagnosable. Order is oldest-first. v1 is read-only —
-  /// `retryDeadLetter(id)` / `discardDeadLetter(id)` are deferred to v1.1.
-  ///
-  /// ponytail: `error` and `timestamp` come back null in v1 — `cairn_outbox`
-  /// carries no per-row error-text or dead-lettered-at column (only `id,
-  /// table_name, op, pk, payload, attempts, dlq`). The aggregate [SyncStatus]
-  /// .lastWriteError carries the most recent reason. Persisting per-row
-  /// `last_error`/`dead_lettered_at` is a `cairn_outbox` schema migration (a
-  /// Rust change) queued for v1.1; until then this list names the rows so an
-  /// operator can find and re-issue them.
+  /// diagnosable. Each row carries the server's per-row reason ([DeadLetter]
+  /// .error) and the quarantine timestamp ([DeadLetter.timestamp]). Order is
+  /// oldest-first. v1 is read-only — `retryDeadLetter(id)` /
+  /// `discardDeadLetter(id)` are deferred to v1.1.
   Future<List<DeadLetter>> deadLetters() async {
     final rows = await getAll(
       // Bare SQLite over the internal outbox table (read-only SELECT; the
       // `execute`-writes-by-convention warning does not apply to a SELECT).
-      'SELECT id, table_name, op, pk, payload, attempts '
+      'SELECT id, table_name, op, pk, payload, attempts, last_error, '
+      'dead_lettered_at '
       'FROM cairn_outbox WHERE dlq = 1 ORDER BY id ASC',
     );
     return rows.map((r) {
@@ -443,6 +424,7 @@ class NostosDatabase {
           payload = null; // Corrupt payload shouldn't hide the rest of the row.
         }
       }
+      final deadLetteredAtMs = r['dead_lettered_at'] as num?;
       return DeadLetter(
         id: (r['id'] as num?)?.toInt() ?? 0,
         table: (r['table_name'] ?? '').toString(),
@@ -450,6 +432,12 @@ class NostosDatabase {
         pk: (r['pk'] ?? '').toString(),
         attempts: (r['attempts'] as num?)?.toInt() ?? 0,
         payload: payload,
+        error: r['last_error'] as String?,
+        timestamp: deadLetteredAtMs == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(
+                deadLetteredAtMs.toInt(),
+              ),
       );
     }).toList(growable: false);
   }
@@ -881,6 +869,36 @@ class Collection<T> {
   Future<int> delete(Object pk) =>
       _db.write(table: table, op: 'delete', pk: pk.toString());
 
+  // ─────────────────── CRDT handles (ADR-0030 / ADR-0032 T4) ───────────────────
+  //
+  // OR-set (add-wins) handles for columns the server tags as an OR-set. Unlike
+  // [upsert]/[patch] (per-field last-writer-wins, ADR-0014), an OR-set column
+  // MERGES: concurrent adds of different elements both survive, and a remove is
+  // a tombstone that a concurrent or later re-add revives (add-wins). Use these
+  // for multi-value fields (tags, collaborators, reactions) where LWW would
+  // clobber concurrent additions.
+  //
+  // Counters (server-authoritative `WriteOp::Increment`, ADR-0030 D1) are NOT
+  // exposed here: the client cannot compute (column, delta) locally without the
+  // server, so there is no offline-first counter handle. Increment a counter
+  // via a `patch` of the absolute value once the server echoes it, or wait for
+  // a future engine-side counter-merge primitive.
+
+  /// Add [element] to the OR-set column in row [pk] of this table (ADR-0030 /
+  /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert; the element
+  /// renders locally immediately and converges with concurrent remote adds on
+  /// the server's echo. Returns the local outbox id.
+  ///
+  /// Requires the column to be tagged as an OR-set in the server/client config.
+  Future<int> orSetAdd({required Object pk, required String element}) =>
+      _db._nostos.orSetAdd(table: table, pk: pk.toString(), element: element);
+
+  /// Remove [element] from the OR-set column in row [pk] — a tombstone at a
+  /// fresh HLC. Add-wins: a concurrent or later re-add revives the element.
+  /// Returns the local outbox id.
+  Future<int> orSetRemove({required Object pk, required String element}) =>
+      _db._nostos.orSetRemove(table: table, pk: pk.toString(), element: element);
+
   /// Single-table [NostosDatabase.writeBatch] convenience (ADR-0032 T3): stamps
   /// this collection's [table] onto every op. Same all-or-nothing-delivery,
   /// NOT-a-server-transaction semantics — see [NostosDatabase.writeBatch].
@@ -989,26 +1007,11 @@ class NostosWrite {
       'NostosWrite(table: $table, op: $op, pk: $pk, payload: $payload)';
 }
 
-/// Thrown by [NostosDatabase.writeBatch] when an op fails partway through. The
-/// [completedIds] are already durable in the outbox (they will flush); the
-/// caller decides whether to retry the tail from [failedIndex] or surface the
-/// error. See `writeBatch`'s ponytail comment on entry atomicity.
-class WriteBatchPartialError implements Exception {
-  const WriteBatchPartialError(this.message,
-      {required this.completedIds, required this.failedIndex});
-  final String message;
-  final List<int> completedIds;
-  final int failedIndex;
-
-  @override
-  String toString() => 'WriteBatchPartialError: $message';
-}
-
 /// One permanently-failed write surfaced by [NostosDatabase.deadLetters]
-/// (ADR-0032 T5 / ADR-0027). v1 is a read-only diagnostic: `error` and
-/// `timestamp` are null until a `cairn_outbox` schema migration persists them
-/// (see `deadLetters()` ponytail). `attempts` is the flush-retry count at the
-/// point the row was quarantined.
+/// (ADR-0032 T5 / ADR-0027). `error` is the server's verbatim per-row reason
+/// and `timestamp` is when the flush loop quarantined it (both persisted since
+/// the `last_error`/`dead_lettered_at` outbox migration). `attempts` is the
+/// flush-retry count at the point the row was quarantined.
 @immutable
 class DeadLetter {
   const DeadLetter({
@@ -1029,11 +1032,10 @@ class DeadLetter {
   final int attempts;
   final Map<String, dynamic>? payload;
 
-  /// Server's per-row reason. Null in v1 (not persisted per-row); the most
-  /// recent reason is on [SyncStatus.lastWriteError].
+  /// Server's per-row reason for the permanent failure (verbatim).
   final String? error;
 
-  /// When the row was quarantined. Null in v1 (no column yet).
+  /// When the row was quarantined (epoch-ms → [DateTime]).
   final DateTime? timestamp;
 
   @override

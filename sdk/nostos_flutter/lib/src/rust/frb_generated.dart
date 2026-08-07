@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0-beta.5';
 
   @override
-  int get rustContentHash => 1298625975;
+  int get rustContentHash => 874483979;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -92,6 +92,20 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<void> crateApiNostosNostosHandleDisconnect({required NostosHandle that});
+
+  Future<BigInt> crateApiNostosNostosHandleOrSetAdd({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required String element,
+  });
+
+  Future<BigInt> crateApiNostosNostosHandleOrSetRemove({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required String element,
+  });
 
   Future<String> crateApiNostosNostosHandleQuery({
     required NostosHandle that,
@@ -129,6 +143,11 @@ abstract class RustLibApi extends BaseApi {
     required String op,
     required String pk,
     String? payloadJson,
+  });
+
+  Future<Uint64List> crateApiNostosNostosHandleWriteBatch({
+    required NostosHandle that,
+    required List<NostosWriteInput> ops,
   });
 
   Future<void> crateApiNostosInitApp();
@@ -282,6 +301,90 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<BigInt> crateApiNostosNostosHandleOrSetAdd({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required String element,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(table, serializer);
+          sse_encode_String(pk, serializer);
+          sse_encode_String(element, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleOrSetAddConstMeta,
+        argValues: [that, table, pk, element],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleOrSetAddConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_or_set_add",
+        argNames: ["that", "table", "pk", "element"],
+      );
+
+  @override
+  Future<BigInt> crateApiNostosNostosHandleOrSetRemove({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required String element,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(table, serializer);
+          sse_encode_String(pk, serializer);
+          sse_encode_String(element, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleOrSetRemoveConstMeta,
+        argValues: [that, table, pk, element],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleOrSetRemoveConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_or_set_remove",
+        argNames: ["that", "table", "pk", "element"],
+      );
+
+  @override
   Future<String> crateApiNostosNostosHandleQuery({
     required NostosHandle that,
     required String sql,
@@ -298,7 +401,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 7,
             port: port_,
           );
         },
@@ -340,7 +443,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 6,
+              funcId: 8,
               port: port_,
             );
           },
@@ -380,7 +483,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 9,
             port: port_,
           );
         },
@@ -414,7 +517,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 10,
             port: port_,
           );
         },
@@ -458,7 +561,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 9,
+              funcId: 11,
               port: port_,
             );
           },
@@ -501,7 +604,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 10,
+              funcId: 12,
               port: port_,
             );
           },
@@ -545,7 +648,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 11,
+              funcId: 13,
               port: port_,
             );
           },
@@ -591,7 +694,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 14,
             port: port_,
           );
         },
@@ -613,6 +716,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<Uint64List> crateApiNostosNostosHandleWriteBatch({
+    required NostosHandle that,
+    required List<NostosWriteInput> ops,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_list_nostos_write_input(ops, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_64_strict,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleWriteBatchConstMeta,
+        argValues: [that, ops],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleWriteBatchConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_write_batch",
+        argNames: ["that", "ops"],
+      );
+
+  @override
   Future<void> crateApiNostosInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -621,7 +762,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 16,
             port: port_,
           );
         },
@@ -713,6 +854,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostosWriteInput dco_decode_nostos_write_input(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return NostosWriteInput(
+      table: dco_decode_String(arr[0]),
+      op: dco_decode_String(arr[1]),
+      pk: dco_decode_String(arr[2]),
+      payloadJson: dco_decode_opt_String(arr[3]),
+    );
+  }
+
+  @protected
   ClientTableFfi dco_decode_client_table_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -738,9 +893,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<NostosWriteInput> dco_decode_list_nostos_write_input(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_nostos_write_input).toList();
+  }
+
+  @protected
   List<ClientTableFfi> dco_decode_list_client_table_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_client_table_ffi).toList();
+  }
+
+  @protected
+  Uint64List dco_decode_list_prim_u_64_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeUint64List(raw);
   }
 
   @protected
@@ -896,6 +1063,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostosWriteInput sse_decode_nostos_write_input(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_table = sse_decode_String(deserializer);
+    var var_op = sse_decode_String(deserializer);
+    var var_pk = sse_decode_String(deserializer);
+    var var_payloadJson = sse_decode_opt_String(deserializer);
+    return NostosWriteInput(
+      table: var_table,
+      op: var_op,
+      pk: var_pk,
+      payloadJson: var_payloadJson,
+    );
+  }
+
+  @protected
   ClientTableFfi sse_decode_client_table_ffi(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_name = sse_decode_String(deserializer);
@@ -927,6 +1109,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<NostosWriteInput> sse_decode_list_nostos_write_input(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <NostosWriteInput>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_nostos_write_input(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<ClientTableFfi> sse_decode_list_client_table_ffi(
     SseDeserializer deserializer,
   ) {
@@ -938,6 +1134,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ans_.add(sse_decode_client_table_ffi(deserializer));
     }
     return ans_;
+  }
+
+  @protected
+  Uint64List sse_decode_list_prim_u_64_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint64List(len_);
   }
 
   @protected
@@ -1139,6 +1342,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_nostos_write_input(
+    NostosWriteInput self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.table, serializer);
+    sse_encode_String(self.op, serializer);
+    sse_encode_String(self.pk, serializer);
+    sse_encode_opt_String(self.payloadJson, serializer);
+  }
+
+  @protected
   void sse_encode_client_table_ffi(
     ClientTableFfi self,
     SseSerializer serializer,
@@ -1165,6 +1380,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_nostos_write_input(
+    List<NostosWriteInput> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_nostos_write_input(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_client_table_ffi(
     List<ClientTableFfi> self,
     SseSerializer serializer,
@@ -1174,6 +1401,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     for (final item in self) {
       sse_encode_client_table_ffi(item, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_list_prim_u_64_strict(
+    Uint64List self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint64List(self);
   }
 
   @protected
@@ -1328,6 +1565,36 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
 
   Future<void> disconnect() =>
       RustLib.instance.api.crateApiNostosNostosHandleDisconnect(that: this);
+
+  /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030 /
+  /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert. The
+  /// element renders locally immediately and converges with concurrent
+  /// remote adds on the server's echo.
+  ///
+  /// Requires the table to be tagged as an OR-set in the client config.
+  Future<BigInt> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) => RustLib.instance.api.crateApiNostosNostosHandleOrSetAdd(
+    that: this,
+    table: table,
+    pk: pk,
+    element: element,
+  );
+
+  /// Remove `element` from the OR-set — a tombstone at a fresh HLC. Add-wins:
+  /// a concurrent or later re-add re-activates the element.
+  Future<BigInt> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) => RustLib.instance.api.crateApiNostosNostosHandleOrSetRemove(
+    that: this,
+    table: table,
+    pk: pk,
+    element: element,
+  );
 
   /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
   /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
@@ -1508,4 +1775,17 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
     pk: pk,
     payloadJson: payloadJson,
   );
+
+  /// Enqueue a batch of writes atomically (all-or-nothing outbox entry —
+  /// ADR-0032 T3). All ops land in one SQLite transaction or none do. Each
+  /// `NostosWriteInput` has the same fields as [`Self::write`]'s params.
+  /// Returns the outbox ids in the same order as `ops`.
+  ///
+  /// # Errors
+  /// Same preconditions as [`Self::write`] (subscribe first, valid op, table
+  /// in the subscribed set). A failure on ANY op rolls back the ENTIRE batch.
+  Future<Uint64List> writeBatch({required List<NostosWriteInput> ops}) => RustLib
+      .instance
+      .api
+      .crateApiNostosNostosHandleWriteBatch(that: this, ops: ops);
 }

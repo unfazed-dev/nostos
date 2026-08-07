@@ -30,10 +30,4 @@ export 'src/nostos_config.dart' show NostosConfig;
 export 'src/schema.dart' show NostosSchema, NostosTable, NostosColumn;
 export 'src/predicate.dart' show Where, Order;
 export 'src/nostos_database.dart'
-    show
-        NostosDatabase,
-        Collection,
-        SyncStatus,
-        NostosWrite,
-        DeadLetter,
-        WriteBatchPartialError;
+    show NostosDatabase, Collection, SyncStatus, NostosWrite, DeadLetter;

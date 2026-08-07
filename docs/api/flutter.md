@@ -80,7 +80,19 @@ as safe SQLite literals — nothing the caller supplies is spliced raw.
 | `upsertRow` | `Future<int> upsertRow(Map<String, dynamic> row)` |
 | `patch` | `Future<int> patch(Object pk, Map<String, dynamic> columns)` — canonical per-field LWW (ADR-0014) |
 | `delete` | `Future<int> delete(Object pk)` |
+| `orSetAdd` | `Future<int> orSetAdd({required Object pk, required String element})` — add-wins merge (ADR-0030/T4) |
+| `orSetRemove` | `Future<int> orSetRemove({required Object pk, required String element})` — tombstone, add-wins |
 | `writeBatch` | `Future<List<int>> writeBatch(List<NostosWrite> writes)` — single-table convenience; stamps this table |
+
+> **`patch`/`upsert` vs `orSetAdd`/`orSetRemove`:** `patch` and `upsert` are
+> per-field **last-writer-wins** (ADR-0014) — a concurrent write clobbers the
+> prior value. `orSetAdd`/`orSetRemove` target a column the server tags as an
+> OR-set and **merge**: concurrent adds of different elements both survive, and
+> a remove is a tombstone a concurrent or later re-add revives (add-wins). Use
+> OR-set handles for multi-value fields (tags, collaborators, reactions) where
+> LWW would silently drop concurrent additions. Counters are server-authoritative
+> (`WriteOp::Increment`, ADR-0030 D1) — there is no offline counter handle; patch
+> the absolute value once the server echoes it.
 
 ## Writing — durable collapsed outbox (ADR-0013)
 
@@ -92,7 +104,7 @@ a server ack — the applied row round-trips back through `watch`. `op` is
 await db.write(table: 'todos', op: 'patch', pk: '7', payload: {'completed': 1});
 ```
 
-### `writeBatch` — all-or-nothing *delivery* (ADR-0032 T3)
+### `writeBatch` — all-or-nothing *entry* (ADR-0032 T3)
 
 ```dart
 await db.writeBatch([
@@ -105,9 +117,9 @@ await db.writeBatch([
 > **`writeBatch` is NOT a server transaction.** The server applies each row
 > individually with per-field LWW; there is no cross-row rollback and no
 > all-or-nothing *apply*. Two ops touching the same row/field collapse to the
-> last value. A mid-batch enqueue failure throws `WriteBatchPartialError`
-> (carrying the ids that already landed); true transactional *entry* needs a
-> Rust `write_batch` FFI, deferred past Wave 1.
+> last value. **Entry atomicity IS real** — all ops land in one SQLite
+> transaction or none do; a mid-batch failure rolls back the whole batch and
+> leaves zero partial outbox rows.
 
 ## Lifecycle — pause/resume/auth
 
@@ -142,10 +154,11 @@ durable outbox (ADR-0027 / ADR-0032 T5).
 | `hasWriteError` / `hasPendingWrites` / `uploading` | `bool` |
 
 `db.deadLetters()` → `Future<List<DeadLetter>>` lists the quarantined rows (id,
-table, op, pk, attempts, payload) so failures are diagnosable. v1 is read-only;
-`retryDeadLetter(id)` / `discardDeadLetter(id)` are deferred to v1.1. `error`
-and `timestamp` on each `DeadLetter` come back null until a `cairn_outbox`
-schema migration persists them (see ADR-0032).
+table, op, pk, attempts, payload, error, timestamp) so failures are diagnosable.
+Each `DeadLetter` carries the server's per-row `error` and a `timestamp` of when
+the flush loop quarantined it (persisted via the `last_error`/`dead_lettered_at`
+outbox columns). v1 is read-only; `retryDeadLetter(id)` / `discardDeadLetter(id)`
+are deferred to v1.1.
 
 ## Schema types
 

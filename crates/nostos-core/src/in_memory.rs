@@ -210,6 +210,22 @@ impl Outbox for InMemoryStorage {
         Ok(id)
     }
 
+    /// Trivially atomic: all inserts happen synchronously in-process, so the
+    /// group is all-or-nothing by construction (ADR-0032 T3).
+    fn enqueue_batch(&mut self, writes: Vec<PendingWrite>) -> crate::Result<Vec<u64>> {
+        let mut ids = Vec::with_capacity(writes.len());
+        for w in writes {
+            self.next_write_id = self
+                .next_write_id
+                .checked_add(1)
+                .expect("write id space exhausted");
+            let id = self.next_write_id;
+            self.outbox.insert(id, w);
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
     fn pending(&self) -> crate::Result<Vec<(u64, PendingWrite)>> {
         // BTreeMap iterates in ascending key order → oldest first, as the
         // contract requires.
