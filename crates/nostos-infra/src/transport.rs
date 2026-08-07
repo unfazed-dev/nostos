@@ -123,14 +123,26 @@ pub struct SyncRouterState {
     /// snapshot. Injected under `NOSTOS_REPLICATOR=pg`.
     pub oplog_reader: Option<Arc<dyn OpLogSource>>,
     /// The active ruleset (ADR-0031). Swapped at runtime by the reload watcher
-    /// (Task 14); read at SUBSCRIBE time only — never per delivered event.
-    /// Defaults to `ActiveRuleset::all_mode()`.
+    /// (Task 14) and by `PUT /rules` (Task 20); read at SUBSCRIBE time only —
+    /// never per delivered event. Defaults to `ActiveRuleset::all_mode()`.
     pub rules: Arc<tokio::sync::RwLock<ActiveRuleset>>,
     /// Broadcasts the active ruleset's checksum. A per-connection
     /// `Receiver::changed()` arm is free while unchanged, so live-session
     /// invalidation (Task 14) costs nothing on the delivery path.
     /// Defaults to a channel seeded with `ActiveRuleset::all_mode().checksum()`.
     pub rules_changed: tokio::sync::watch::Receiver<u64>,
+    /// The send half of the same channel `rules_changed` receives from
+    /// (Task 20). `PUT /rules` swaps `rules` then sends on this — the exact
+    /// swap-then-notify order `watch_rules` uses — so every live session's
+    /// `rules_changed` clone wakes immediately instead of waiting for the
+    /// next poll tick. Must always be the paired sender for `rules_changed`;
+    /// [`Self::with_rules`] sets both together so they can't drift apart.
+    pub rules_tx: tokio::sync::watch::Sender<u64>,
+    /// Path `PUT /rules` atomically writes `nostos_rules.toml` to (Task 20).
+    /// Defaults to `nostos_rules.toml` (relative to cwd); the composition root
+    /// overrides via [`Self::with_rules_file_path`] to match
+    /// `--rules-file`/`NOSTOS_RULES_FILE`.
+    pub rules_file_path: std::path::PathBuf,
 }
 
 impl SyncRouterState {
@@ -140,7 +152,7 @@ impl SyncRouterState {
         // No reload watcher wired by default — the sender has no consumer
         // until the composition root creates one (main.rs) and passes the
         // matching `Receiver` via `with_rules`.
-        let (_rules_tx, rules_changed) = tokio::sync::watch::channel(rules.checksum());
+        let (rules_tx, rules_changed) = tokio::sync::watch::channel(rules.checksum());
         Self {
             manager,
             session_buffer: DEFAULT_SESSION_BUFFER,
@@ -154,6 +166,8 @@ impl SyncRouterState {
             oplog_reader: None,
             rules: Arc::new(tokio::sync::RwLock::new(rules)),
             rules_changed,
+            rules_tx,
+            rules_file_path: std::path::PathBuf::from("nostos_rules.toml"),
         }
     }
 
@@ -229,19 +243,33 @@ impl SyncRouterState {
         self
     }
 
-    /// Inject the active ruleset (ADR-0031) and its checksum-change receiver.
+    /// Inject the active ruleset (ADR-0031), its checksum-change receiver, and
+    /// the paired sender (Task 20's `PUT /rules` sends on it after a swap).
     /// The composition root loads `nostos_rules.toml` (or falls back to
-    /// [`ActiveRuleset::all_mode`]) and creates the matching
-    /// `tokio::sync::watch::channel` before calling this; the default in
-    /// [`Self::new`] is a standalone all-mode ruleset with no live sender.
+    /// [`ActiveRuleset::all_mode`]), creates one
+    /// `tokio::sync::watch::channel`, and passes both halves here — `rules_tx`
+    /// must be the sender that channel's `rules_changed` was subscribed from,
+    /// or `PUT /rules` will notify a channel no live session is listening on.
     #[must_use]
     pub fn with_rules(
         mut self,
         rules: Arc<tokio::sync::RwLock<ActiveRuleset>>,
         rules_changed: tokio::sync::watch::Receiver<u64>,
+        rules_tx: tokio::sync::watch::Sender<u64>,
     ) -> Self {
         self.rules = rules;
         self.rules_changed = rules_changed;
+        self.rules_tx = rules_tx;
+        self
+    }
+
+    /// Set the path `PUT /rules` atomically writes `nostos_rules.toml` to
+    /// (Task 20). The composition root calls this with `--rules-file` /
+    /// `NOSTOS_RULES_FILE` so the HTTP write target matches what `main()`
+    /// loaded at boot and what `watch_rules` polls.
+    #[must_use]
+    pub fn with_rules_file_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.rules_file_path = path.into();
         self
     }
 }
@@ -1032,12 +1060,24 @@ async fn handle_decoded_message(
             // ack is dropped — the writer loop will end on the next failed
             // send anyway. Best-effort; not fatal.
             let _ = server_frames_tx.try_send(frame);
-            debug!(
-                table = %table,
-                op = %op,
-                ok,
-                "write applied (or rejected) — WriteResult queued"
-            );
+            if let Some(err) = error.as_deref() {
+                // Rejections are logged loud with the reason: a silent
+                // ok=false is undiagnosable from the server side (the reason
+                // otherwise travels only in the WriteResult frame).
+                tracing::warn!(
+                    table = %table,
+                    op = %op,
+                    error = %err,
+                    "write rejected"
+                );
+            } else {
+                debug!(
+                    table = %table,
+                    op = %op,
+                    ok,
+                    "write applied — WriteResult queued"
+                );
+            }
         }
         // Subscribe is routed by the reader to `register_subscribe`; reaching
         // here is impossible in the current flow, but stay defensive.

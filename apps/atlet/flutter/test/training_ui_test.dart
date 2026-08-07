@@ -13,12 +13,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/ui/detail.dart';
 import 'package:atlet/ui/home.dart';
+import 'support/fake_cart_orders.dart';
 
 /// Minimal fake: addSession/deleteSession mutate an in-memory map but only
 /// push to the stream when [flush] is called. That gap is the point — it
 /// lets tests assert the UI shows nothing new until the stream actually
 /// emits, i.e. there is no local cache/optimistic render path.
-class _FakeAdapter implements SyncAdapter {
+class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   final _sessions = <String, SessionRow>{};
   final _controller = StreamController<List<SessionRow>>.broadcast();
 

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/engine_registry.dart';
+import 'support/fake_cart_orders.dart';
 
 /// Records init/signOut calls (with start/end markers so tests can prove
 /// ordering, not just that both eventually happened) instead of doing real
@@ -10,7 +11,7 @@ import 'package:atlet/engine_registry.dart';
 /// test explicitly completes it — this is what lets a test observe that
 /// switchTo() has NOT yet constructed the incoming adapter while the
 /// outgoing one's wipe is still in flight.
-class _RecordingAdapter implements SyncAdapter {
+class _RecordingAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   _RecordingAdapter(this.name, this.log, {this.signOutGate});
 
   final String name;

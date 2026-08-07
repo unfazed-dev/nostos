@@ -9,11 +9,12 @@ import 'dart:io';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/bench/runner.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/fake_cart_orders.dart';
 
 /// Minimal, self-contained fake adapter for Runner tests only — not shared
 /// with Task 7's `test/adapter_conformance_test.dart` FakeAdapter, which is
 /// private to that file and covers a different contract surface.
-class _FakeAdapter implements SyncAdapter {
+class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   _FakeAdapter(this.clock);
 
   final Stopwatch clock;

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../adapters/sync_adapter.dart';
 import '../design/tokens.dart';
+import 'player.dart';
 
 /// Display-transform per apps/atlet/design/views/train.hints.json — kept as a
 /// private copy (not shared with home.dart) to avoid a circular import
@@ -117,6 +118,20 @@ class SessionDetail extends StatelessWidget {
                       style: TextStyle(color: AtletTokens.ink, fontSize: AtletTokens.body)),
                 ],
                 const Spacer(),
+                FilledButton(
+                  key: const Key('start-workout-button'),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => WorkoutPlayer(session: session!),
+                    ),
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AtletTokens.ink,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: const Text('Start workout'),
+                ),
+                const SizedBox(height: 12),
                 FilledButton(
                   key: const Key('complete-session-button'),
                   onPressed: () => _complete(context, session!),

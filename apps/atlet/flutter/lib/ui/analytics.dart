@@ -4,6 +4,7 @@ import '../bench/runner.dart';
 import '../bench/store.dart';
 import '../bench/upload.dart';
 import '../design/tokens.dart';
+import 'connectivity_led.dart';
 
 /// Canonical Core-4 + storage run order (spec/metrics.md) — used to sort
 /// [latestMetricRows] so the table reads top-to-bottom the same way
@@ -210,6 +211,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
       appBar: AppBar(
         title: const Text('Analytics'),
         backgroundColor: AtletTokens.bone,
+        actions: const [ConnectivityLed()],
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

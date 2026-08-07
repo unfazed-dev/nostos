@@ -25,6 +25,8 @@ PowerSync is the incumbent — and still carries real, current limits Nostos exp
 | **Write-back** | You build & host the `uploadData()` endpoint; ElectricSQL is read-only | **Direct write-back** — Nostos writes to your Postgres for you, no customer-built endpoints |
 | **Self-host** | PowerSync Cloud is metered per-op; FSL "Open Edition" carries the license delay | **Free, full-featured, unlimited self-host** — no feature gates |
 
+**Sync rules:** an operator-facing `nostos_rules.toml` declares what each client can read — `all` (zero-config dev default), `toggles` (per-table on/off + scope), or `hand` (raw predicate grammar) — with a checksum-gated resync so a rules edit is never silently missed by a connected client. See [ADR-0031](docs/adr/0031-sync-rules-modes-and-checksum-resync.md).
+
 Meanwhile **ElectricSQL abandoned 2-way offline sync (read-path only)**, **Zero is web-only**, **Zero disabled offline writes**, and **Supabase Realtime has no offline layer**. Nostos fills the open cell. (PowerSync shipped dynamic **Sync Streams** to GA in May 2026, so the old "static buckets only" framing no longer holds — see the honest comparison in [`docs/COMPARISON.md`](docs/COMPARISON.md).)
 
 Full strategic brief: [`docs/STRATEGY.md`](docs/STRATEGY.md).

@@ -163,6 +163,22 @@ impl ActiveRuleset {
     pub fn synced_tables(&self) -> Vec<&str> {
         self.scopes.keys().map(String::as_str).collect()
     }
+
+    /// The canonical scope text for a synced table, for `GET /rules`.
+    ///
+    /// Reuses [`ScopeExpr::canonical`] — the same rendering the checksum
+    /// feeds on (`nostos_domain::rules::canonical_scope`) — so this is
+    /// provably safe to disclose: it only ever prints column names,
+    /// operators, and `claims.<name>` references, never a claim's value.
+    ///
+    /// `None` means the table isn't synced (unlisted, toggled off, or the
+    /// ruleset is in `All` mode where `scopes` stays empty — see
+    /// [`Self::synced_tables`]). A synced whole-table entry with no scope
+    /// clause canonicalizes to `Some(String::new())`, not `None`.
+    #[must_use]
+    pub fn scope_text(&self, table: &str) -> Option<String> {
+        self.scopes.get(table).map(ScopeExpr::canonical)
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +321,45 @@ mod tests {
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         assert_eq!(ruleset.checksum(), rules.checksum());
+    }
+
+    #[test]
+    fn scope_text_returns_canonical_rendering_for_synced_table() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![table("tasks", true, Some("owner_id = claims.sub"))],
+            hand: vec![],
+        };
+        let ruleset = ActiveRuleset::compile(&rules).unwrap();
+        assert_eq!(
+            ruleset.scope_text("tasks"),
+            Some("owner_id = claims.sub".to_string())
+        );
+    }
+
+    #[test]
+    fn scope_text_is_empty_string_for_whole_table_entry() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![table("notes", true, None)],
+            hand: vec![],
+        };
+        let ruleset = ActiveRuleset::compile(&rules).unwrap();
+        assert_eq!(ruleset.scope_text("notes"), Some(String::new()));
+    }
+
+    #[test]
+    fn scope_text_is_none_for_unsynced_table() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![table("tasks", true, None)],
+            hand: vec![],
+        };
+        let ruleset = ActiveRuleset::compile(&rules).unwrap();
+        assert_eq!(ruleset.scope_text("nonexistent"), None);
     }
 
     #[test]

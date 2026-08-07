@@ -159,9 +159,49 @@ fn malformed_err(path: &Path, source: toml::de::Error) -> RulesFileError {
     }
 }
 
+/// Atomic write (Task 20, `PUT /rules`): write the full contents to a temp
+/// file in the SAME directory as `path`, `fsync` it, then `rename` over
+/// `path`. Same-directory is required — a temp file under `/tmp` risks a
+/// cross-filesystem `rename`, which fails outright instead of being atomic.
+/// A reader (or the Task 14 poll watcher) never observes a partially-written
+/// file: `rename` is atomic on POSIX, so `path` is either the old contents or
+/// the new ones, never a mix.
+/// Disambiguates concurrent `write_mirror` calls in the same process that
+/// land on the same tmp-file name within the same PID (e.g. two rapid `PUT
+/// /rules` requests) — see [`write_mirror`].
+static TMP_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn write_mirror(path: &Path, mirror: &RulesFileMirror) -> Result<(), RulesFileError> {
+    use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+
     let body = toml::to_string_pretty(mirror)?;
-    std::fs::write(path, format!("{BANNER}{body}")).map_err(|e| io_err(path, e))
+    let contents = format!("{BANNER}{body}");
+
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().map_or_else(
+        || "nostos_rules.toml".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let n = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dir.join(format!(".{file_name}.tmp.{}.{n}", std::process::id()));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    })();
+    let Err(e) = write_result else {
+        return std::fs::rename(&tmp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            io_err(path, e)
+        });
+    };
+    let _ = std::fs::remove_file(&tmp_path);
+    Err(io_err(path, e))
 }
 
 /// Read + validate. `Ok(None)` when the file does not exist (caller falls

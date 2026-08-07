@@ -42,6 +42,7 @@ flag is absent; flag wins when present.
 | `NOSTOS_TIER` | `enterprise` | Licensing tier when no signed `NOSTOS_LICENSE` is present: `hobby`, `pro`, `scale`, `enterprise`. OSS self-host defaults to unlimited. |
 | `NOSTOS_LICENSE` | _empty_ | Signed license token from Nostos Cloud. Invalid-but-present is fatal — the server refuses to silently downgrade (ADR-0006). |
 | `NOSTOS_LICENSE_SECRET` | _empty_ | **Env-only (NOT a clap flag)** — signs every license a cloud deploy mints, so it must never land on argv / `ps` (`main.rs` constructs it via `std::env::var`). |
+| `NOSTOS_ADMIN_TOKEN` | _empty_ | **Env-only (NOT a clap flag)**, same argv-leak reasoning as `NOSTOS_LICENSE_SECRET`. Bearer token gating `PUT /rules` (Task 21, ADR-0031 D5). Unset → the route **404s** (not mounted). Set → must be ≥32 chars or the server refuses to start (see §1.1(f)). See §7. |
 
 ### 1.1 Startup-failure modes (the ones that have bitten the demo)
 
@@ -96,6 +97,12 @@ NOSTOS_SUPABASE_JWKS_URL"`. Fix: set one of the three.
 (`main.rs`, `nostos_license::resolve_entitlement`): `"NOSTOS_LICENSE
 verification failed — refusing to start"`. Fix: re-issue from Nostos Cloud, or
 unset `NOSTOS_LICENSE` to fall back to `NOSTOS_TIER`.
+
+**(f) `NOSTOS_ADMIN_TOKEN` set but shorter than 32 chars.** Bails at startup
+(`main.rs`, right after `init_tracing`): `"NOSTOS_ADMIN_TOKEN is set but only
+{len} chars (minimum 32) — refusing to start rather than serve a guessable
+admin route on PUT /rules"`. The message reports the length only, never the
+token itself. Fix: generate a longer token (see §7).
 
 ## 2. Logical-replication slot
 
@@ -371,7 +378,105 @@ The bundled stack is for local dev only. Production points `NOSTOS_PG_URL` at
 Supabase direct (see §3 line 3) or a self-hosted Postgres with the same
 `wal_level`/slot settings.
 
-## 7. References
+## 7. Admin token (`PUT /rules`)
+
+`PUT /rules` lets a caller rewrite the server's active sync ruleset — a
+config-mutating route, deliberately gated separately from `/sync`'s
+application-user auth (`NOSTOS_SYNC_AUTH`). See ADR-0031 (D5 addendum) for the
+full reasoning; this section is the day-to-day operator procedure.
+
+**Set it.** Generate 32+ random bytes and export as `NOSTOS_ADMIN_TOKEN`:
+
+```
+export NOSTOS_ADMIN_TOKEN=$(openssl rand -hex 32)
+```
+
+Leave it unset in any deployment that never needs to change rules at
+runtime — the route then 404s, so there is nothing to attack. Set-but-short
+(<32 chars) refuses to boot (§1.1(f)) rather than serve a guessable route.
+
+**Use it.**
+
+```
+curl -X PUT https://your-server/rules \
+  -H "Authorization: Bearer $NOSTOS_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sync_mode": "toggles", "tables": [...]}'
+```
+
+A Supabase (or any `/sync`) JWT is never accepted here, no matter how valid —
+the two auth systems are intentionally unrelated.
+
+**Rotate it.** Generate a new token the same way, update the server's env,
+and restart. There is no overlap window: the old token stops working the
+moment the new process starts. Rotate on any suspected leak (token in a
+committed file, shared over an insecure channel, a departing operator who
+had it) and on a routine schedule if your compliance posture calls for one.
+
+**If it leaks:** rotate immediately (above), then read the audit log —
+every successful mutation emits one `nostos::audit` line
+(`rules_mutation actor=<8-hex> source=api mode_before=... mode_after=...
+checksum_before=0x... checksum_after=0x... tables_changed=N`) — to see what,
+if anything, an attacker changed while the old token was valid. `actor` is
+the first 8 hex chars of SHA-256(token): stable per token, but not reversible
+back to it, so it tells you *whether* a given token was used without ever
+printing the token itself. Compare `mode_before`/`mode_after` and the
+checksums against your own change history to spot anything you didn't make.
+
+## 8. Sync rules
+
+`nostos_rules.toml` (ADR-0031) decides what each authorised client is allowed
+to read at all — layered *underneath* any client-side `where_sql`, which only
+narrows further, per subscription. It has one `sync_mode`, one of:
+
+- **`all`** — no gating; every replicated table reaches every client. The
+  zero-config default when no `nostos_rules.toml` file exists. A fresh boot in
+  this mode prints a warning naming every table and its estimated row count
+  (`unknown rows (never analyzed)` if Postgres has no stats yet), ending with:
+  ```
+  This is the zero-config development default. For production, run
+  `nostos rules init` and switch sync_mode to "toggles".
+  ```
+- **`toggles`** — per-table on/off plus an optional scope predicate. `nostos
+  rules init` writes this mode with every table `sync = false`
+  (`--sync-all` flips the default).
+- **`hand`** — a raw `[[rules]]` predicate grammar (`column <op>
+  claims.<field>` / `column <op> <literal>`, `AND`-only). Written and edited
+  only via `nostos rules edit --mode hand`; `PUT /rules` refuses to touch it
+  (below).
+
+**Switching truth.** The file on disk is the only truth; `sync_mode` just
+selects which part of it gets read. Switching modes never deletes or rewrites
+the other mode's data — a `[[rules]]` hand section written once survives
+untouched under `toggles` or `all`, so going back to `hand` later picks up
+where you left it.
+
+**What triggers a resync.** Any change to any *subscribed* table's
+rule-decision — narrowing **or widening** — closes that client's socket and
+makes it reconnect and re-snapshot from scratch. There is no in-place
+predicate swap; a `nostos_rules.toml` edit is a coarse, whole-connection
+invalidation, not a live re-scope (`crates/nostos-infra/src/transport.rs`).
+Editing a table nobody has subscribed to costs nothing.
+
+**Two authoring surfaces, one file, last writer wins.** `nostos rules edit`
+(local CLI, terminal UI) and the web panel's `PUT /rules` (gated by
+`NOSTOS_ADMIN_TOKEN`, see §7) both write the same `nostos_rules.toml` on the
+server. There is no locking or optimistic-concurrency check between them: if
+two edits race, whichever write lands last silently wins, full stop — check
+`nostos rules check` (or reload the panel) after any edit made without
+certainty you're the only editor. The web panel holds the admin token in the
+browser tab's memory for that session only; it is never written to
+localStorage or a cookie, closing the tab discards it. Persisting it would
+turn the browser into an XSS target for a credential that can rewrite what
+every client is allowed to read.
+
+**Upgrading existing clients.** The first time any pre-ADR-0031 client
+reconnects to an ADR-0031 server, it doesn't yet send `rules_checksum` in its
+`Subscribe` — the server treats that as a checksum mismatch and forces one
+full re-snapshot per client, one time. This is expected, not a regression;
+say so in release notes so it isn't reported as a bug.
+
+## 9. References
 
 - Setup / install: [QUICKSTART.md](QUICKSTART.md).
 - Architecture / dependency rule: [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -380,8 +485,9 @@ Supabase direct (see §3 line 3) or a self-hosted Postgres with the same
 - ADRs cited above: 0006 (license trust boundary), 0009 (ack-driven LSN
   resume), 0010 (sync auth), 0011 (server-enforced tenant predicates), 0013
   (write-back allowlist), 0016 (client WAL-bloat protection),
-  0025 (persisted oplog backfill). See [adr/](adr/).
+  0025 (persisted oplog backfill), 0031 (sync rules modes + checksum
+  resync). See [adr/](adr/).
 - Source code cited above: `crates/nostos-server/src/main.rs`,
   `crates/nostos-infra/src/transport.rs`,
   `crates/nostos-infra/src/replicator/pg.rs`,
-  `crates/nostos-cli/src/{main.rs,commands/{init,doctor,dev}.rs}`.
+  `crates/nostos-cli/src/{main.rs,commands/{init,doctor,dev,rules}.rs}`.

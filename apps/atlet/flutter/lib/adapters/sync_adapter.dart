@@ -42,6 +42,44 @@ class ProductRow {
   });
 }
 
+class CartItemRow {
+  final String id;
+  final String productId;
+  final int qty;
+  final DateTime addedAt;
+
+  const CartItemRow({
+    required this.id,
+    required this.productId,
+    required this.qty,
+    required this.addedAt,
+  });
+}
+
+class OrderRow {
+  final String id;
+  final String status; // 'pending' | 'paid' | 'failed'
+  final int subtotalCents;
+  final int taxCents;
+  final int shippingCents;
+  final int totalCents;
+  final String? paymentRef;
+  final String? itemsJson; // snapshot of purchased lines, JSON text
+  final DateTime createdAt;
+
+  const OrderRow({
+    required this.id,
+    required this.status,
+    required this.subtotalCents,
+    required this.taxCents,
+    required this.shippingCents,
+    required this.totalCents,
+    this.paymentRef,
+    this.itemsJson,
+    required this.createdAt,
+  });
+}
+
 enum MarkKind { localVisible, serverAcked, remoteVisible }
 
 class SyncMark {
@@ -58,6 +96,33 @@ class SyncMark {
   });
 }
 
+/// Wraps a broadcast [tail] so each new listener first receives the most
+/// recent value from [latest] (if any), then live events. Adapters feed
+/// their `db.watch(...)` streams into broadcast StreamControllers, which do
+/// NOT replay: a listener attaching after an emission never sees it. For a
+/// read-only table like `products` there is exactly one snapshot emission
+/// (at init(), into the adapter's own central subscription) — so a
+/// ShopScreen built after an engine switch subscribed too late and spun on
+/// its loading state forever. Subscribes to [tail] BEFORE emitting the
+/// cached value so no live event falls in a gap; a duplicate initial
+/// snapshot is possible and harmless (idempotent list re-render).
+/// Top-level (not a private adapter method) so the late-subscriber
+/// regression is unit-testable without a live engine — same rationale as
+/// `wireConnectionState` in nostos_adapter.dart.
+Stream<T> replayLatest<T>(Stream<T> tail, T? Function() latest) =>
+    Stream<T>.multi((controller) {
+      final sub = tail.listen(
+        controller.add,
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+      final v = latest();
+      if (v != null) {
+        controller.add(v);
+      }
+      controller.onCancel = sub.cancel;
+    });
+
 abstract interface class SyncAdapter {
   String get engine; // 'cairn' | 'powersync'
   Future<void> init({
@@ -68,9 +133,18 @@ abstract interface class SyncAdapter {
   });
   Future<void> signOut(); // disconnect + delete local DB files (full wipe)
   Future<String> addSession(SessionRow s); // serverCommittedAt must be null
+  Future<void> updateSession(SessionRow s); // upsert by existing id
   Future<void> deleteSession(String id);
   Stream<List<SessionRow>> watchSessions();
   Stream<List<ProductRow>> watchProducts();
+
+  // Shop flow — cart is per-user server state (tenant-scoped like sessions).
+  Future<void> addToCart(CartItemRow item); // upsert (id may exist: qty edit)
+  Future<void> removeCartItem(String id);
+  Future<void> clearCart();
+  Future<String> placeOrder(OrderRow o);
+  Stream<List<CartItemRow>> watchCart();
+  Stream<List<OrderRow>> watchOrders();
   Stream<bool> get connected;
   Future<void> setConnected(bool up);
   Stream<SyncMark> get marks; // derived ONLY from watchSessions output

@@ -223,8 +223,15 @@ Future<Map<Engine, List<RunRecord>>> runFullSuiteForBothEngines({
       n: n,
       timeout: timeout,
     );
-    results[engine] = await harness.runFullSuite();
-    await adapter.signOut();
+    // signOut in `finally`: a mid-suite failure (e.g. a benchmark timeout)
+    // must not leak a live adapter — a leaked client keeps replaying its
+    // outbox against the server forever (observed as repeating rejected
+    // upserts after a write_ack timeout).
+    try {
+      results[engine] = await harness.runFullSuite();
+    } finally {
+      await adapter.signOut();
+    }
   }
   return results;
 }

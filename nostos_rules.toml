@@ -1,0 +1,26 @@
+# Atlet dev rules (ADR-0031, hand mode).
+# Tenant-column env enforcement is OFF (NOSTOS_TENANT_COLUMN=) because
+# `products` is a global catalog with no user_id column — a connection-wide
+# tenant clause would filter it to zero rows. Per-table scoping instead:
+version = 1
+sync_mode = "hand"
+
+[[rules]]
+table = "sessions"
+scope = "user_id = claims.sub"
+
+[[rules]]
+table = "products"
+# no scope — global catalog, visible to every authenticated client
+
+[[rules]]
+table = "analytics_runs"
+scope = "user_id = claims.sub"
+
+[[rules]]
+table = "cart_items"
+scope = "user_id = claims.sub"
+
+[[rules]]
+table = "orders"
+scope = "user_id = claims.sub"

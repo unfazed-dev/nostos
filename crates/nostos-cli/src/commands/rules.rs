@@ -315,6 +315,135 @@ fn append_template_comment(rules_path: &Path, publication: &str) -> Result<()> {
     std::fs::write(rules_path, text).with_context(|| format!("writing {}", rules_path.display()))
 }
 
+/// The section that is present-on-disk but not authoritative under the
+/// current `mode` — `None` when nothing is being silently ignored. `All`
+/// authorizes neither `[tables.*]` nor `[[rules]]`, but team-lead ruling
+/// (2026-08-06, Task 17) scoped the note to the two modes that actually
+/// freeze a generator; `All` stays unnoted.
+fn inactive_note(rules: &SyncRules) -> Option<&'static str> {
+    match rules.mode {
+        SyncMode::Toggles => (!rules.hand.is_empty()).then_some("hand"),
+        SyncMode::Hand => (!rules.tables.is_empty()).then_some("toggles"),
+        SyncMode::All => None,
+    }
+}
+
+/// The claim names referenced by every currently-active, currently-synced
+/// scope, sorted and deduped. Only scopes `validate()` has already accepted
+/// reach here, so `ScopeExpr::parse` is infallible in practice; a scope that
+/// still fails to parse is skipped rather than panicking, matching
+/// `canonical_scope`'s fallback posture in `nostos-domain`.
+fn referenced_claims(rules: &SyncRules) -> Vec<String> {
+    let scopes: Vec<&str> = match rules.mode {
+        SyncMode::Toggles => rules
+            .tables
+            .iter()
+            .filter(|t| t.sync)
+            .filter_map(|t| active_scope_text(t.scope.as_deref()))
+            .collect(),
+        SyncMode::Hand => rules
+            .hand
+            .iter()
+            .filter_map(|h| active_scope_text(h.scope.as_deref()))
+            .collect(),
+        SyncMode::All => Vec::new(),
+    };
+    let mut claims: Vec<String> = scopes
+        .into_iter()
+        .filter_map(|s| ScopeExpr::parse(s).ok())
+        .flat_map(|expr| {
+            expr.referenced_claims()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    claims.sort();
+    claims.dedup();
+    claims
+}
+
+fn active_scope_text(scope: Option<&str>) -> Option<&str> {
+    scope.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Render the `nostos rules check` report (Task 17). Pure — no disk I/O, no
+/// `println!` — so the shape is unit-testable. `Err` carries the same text
+/// `SyncRules::validate()` produced, so the caller can print it and exit
+/// non-zero without duplicating the validation logic.
+pub fn check_report(rules: &SyncRules) -> Result<String, String> {
+    use std::fmt::Write as _;
+
+    rules.validate().map_err(|e| e.to_string())?;
+
+    let mut out = String::from("nostos_rules.toml — valid\n");
+
+    let note = inactive_note(rules)
+        .map(|name| format!("  ({name} section present but inactive)"))
+        .unwrap_or_default();
+    let _ = writeln!(out, "  {:<10} {}{note}", "sync_mode:", rules.mode.as_str());
+    let _ = writeln!(out, "  {:<10} {:#x}", "checksum:", rules.checksum());
+
+    match rules.mode {
+        SyncMode::Toggles => {
+            let synced: Vec<&TableRule> = rules.tables.iter().filter(|t| t.sync).collect();
+            let _ = writeln!(
+                out,
+                "  {:<10} {} of {} tables",
+                "synced:",
+                synced.len(),
+                rules.tables.len()
+            );
+            for table in synced {
+                match active_scope_text(table.scope.as_deref()) {
+                    Some(scope) => {
+                        let _ = writeln!(out, "    {:<8}  {scope}", table.table);
+                    }
+                    None => {
+                        let _ = writeln!(out, "    {}", table.table);
+                    }
+                }
+            }
+        }
+        SyncMode::Hand => {
+            let _ = writeln!(
+                out,
+                "  {:<10} {} of {} tables",
+                "synced:",
+                rules.hand.len(),
+                rules.hand.len()
+            );
+            for rule in &rules.hand {
+                match active_scope_text(rule.scope.as_deref()) {
+                    Some(scope) => {
+                        let _ = writeln!(out, "    {:<8}  {scope}", rule.table);
+                    }
+                    None => {
+                        let _ = writeln!(out, "    {}", rule.table);
+                    }
+                }
+            }
+        }
+        SyncMode::All => {
+            // Team-lead ruling (2026-08-06, Task 17): `all` still gets a
+            // `synced:` line rather than being omitted — the check
+            // command's job is making sync scope visible, and silence
+            // for the widest scope would invert that.
+            let _ = writeln!(out, "  {:<10} all tables (unscoped)", "synced:");
+        }
+    }
+
+    let claims = referenced_claims(rules);
+    let claims_text = if claims.is_empty() {
+        "(none)".to_string()
+    } else {
+        claims.join(", ")
+    };
+    let _ = write!(out, "  claims referenced: {claims_text}");
+
+    Ok(out)
+}
+
 fn run_check(cwd: &Path) -> Result<()> {
     let rules_path = cwd.join(rules_file::RULES_FILE_NAME);
     match rules_file::load(&rules_path)? {
@@ -323,12 +452,10 @@ fn run_check(cwd: &Path) -> Result<()> {
             rules_file::RULES_FILE_NAME,
             rules_path.display()
         ),
-        Some(rules) => println!(
-            "{}: sync_mode = {}, checksum = {:#x}",
-            rules_path.display(),
-            rules.mode.as_str(),
-            rules.checksum()
-        ),
+        Some(rules) => match check_report(&rules) {
+            Ok(report) => println!("{report}"),
+            Err(message) => anyhow::bail!("{message}"),
+        },
     }
     Ok(())
 }
@@ -587,6 +714,210 @@ mod tests {
         assert!(
             text.contains("org_id = claims.org_id"),
             "hand scope text must survive a toggles-mode edit + save"
+        );
+    }
+
+    #[test]
+    fn check_reports_mode_and_checksum() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![
+                TableRule {
+                    table: "tasks".to_string(),
+                    sync: true,
+                    scope: Some("owner_id = claims.sub".to_string()),
+                },
+                TableRule {
+                    table: "projects".to_string(),
+                    sync: true,
+                    scope: Some("org_id = claims.org_id".to_string()),
+                },
+                TableRule {
+                    table: "logs".to_string(),
+                    sync: false,
+                    scope: None,
+                },
+            ],
+            hand: vec![],
+        };
+
+        let report = check_report(&rules).expect("well-formed rules must report Ok");
+
+        assert!(report.starts_with("nostos_rules.toml — valid"));
+        assert!(report.contains("sync_mode: toggles"), "got:\n{report}");
+        assert!(
+            report.contains(&format!("checksum:  {:#x}", rules.checksum())),
+            "got:\n{report}"
+        );
+        assert!(
+            report.contains("synced:    2 of 3 tables"),
+            "unsynced `logs` must not count, got:\n{report}"
+        );
+        assert!(report.contains("tasks"));
+        assert!(report.contains("owner_id = claims.sub"));
+        assert!(report.contains("projects"));
+        assert!(report.contains("org_id = claims.org_id"));
+        assert!(
+            !report.contains("logs"),
+            "an unsynced table must not appear in the per-table list, got:\n{report}"
+        );
+    }
+
+    #[test]
+    fn check_flags_invalid_scope_with_table_name() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![TableRule {
+                table: "tasks".to_string(),
+                sync: true,
+                scope: Some("a = 1 OR b = 2".to_string()),
+            }],
+            hand: vec![],
+        };
+
+        let err = check_report(&rules).expect_err("an unparseable scope must fail the check");
+
+        assert_eq!(
+            err,
+            rules.validate().unwrap_err().to_string(),
+            "check_report must surface validate()'s own error text unchanged"
+        );
+        assert!(
+            err.contains("tasks"),
+            "the error must name the offending table, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_notes_inactive_section() {
+        let with_hand = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![TableRule {
+                table: "tasks".to_string(),
+                sync: true,
+                scope: None,
+            }],
+            hand: vec![HandRule {
+                table: "tasks".to_string(),
+                scope: Some("org_id = claims.org_id".to_string()),
+            }],
+        };
+        let report = check_report(&with_hand).expect("well-formed rules must report Ok");
+        assert!(
+            report.contains("(hand section present but inactive)"),
+            "got:\n{report}"
+        );
+
+        let without_hand = SyncRules {
+            hand: vec![],
+            ..with_hand
+        };
+        let report = check_report(&without_hand).expect("well-formed rules must report Ok");
+        assert!(
+            !report.contains("section present but inactive"),
+            "an empty hand section must not be noted, got:\n{report}"
+        );
+    }
+
+    /// Beyond the brief's four required tests — team-lead ruling (2026-08-06)
+    /// asked for the `All`-mode branch to get direct coverage since it's the
+    /// one shape the brief's worked example never exercises.
+    #[test]
+    fn check_renders_all_mode_as_unscoped() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::All,
+            tables: vec![],
+            hand: vec![],
+        };
+
+        let report = check_report(&rules).expect("well-formed rules must report Ok");
+
+        assert!(report.contains("sync_mode: all"), "got:\n{report}");
+        assert!(
+            report.contains("synced:    all tables (unscoped)"),
+            "got:\n{report}"
+        );
+        assert!(
+            report.contains("claims referenced: (none)"),
+            "got:\n{report}"
+        );
+        assert!(
+            !report.contains("section present but inactive"),
+            "all mode has nothing to note as inactive, got:\n{report}"
+        );
+    }
+
+    /// Beyond the brief's four required tests — team-lead ruling (2026-08-06)
+    /// asked for the `Hand`-mode branch to get direct coverage, mirroring the
+    /// toggles-mode worked example with roles swapped.
+    #[test]
+    fn check_renders_hand_mode_symmetrically() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Hand,
+            tables: vec![TableRule {
+                table: "logs".to_string(),
+                sync: false,
+                scope: None,
+            }],
+            hand: vec![
+                HandRule {
+                    table: "tasks".to_string(),
+                    scope: Some("owner_id = claims.sub".to_string()),
+                },
+                HandRule {
+                    table: "projects".to_string(),
+                    scope: Some("org_id = claims.org_id".to_string()),
+                },
+            ],
+        };
+
+        let report = check_report(&rules).expect("well-formed rules must report Ok");
+
+        assert!(report.contains("sync_mode: hand"), "got:\n{report}");
+        assert!(
+            report.contains("(toggles section present but inactive)"),
+            "hand mode with a non-empty tables section must note it, got:\n{report}"
+        );
+        assert!(
+            report.contains("synced:    2 of 2 tables"),
+            "got:\n{report}"
+        );
+        assert!(report.contains("tasks"));
+        assert!(report.contains("owner_id = claims.sub"));
+        assert!(report.contains("projects"));
+        assert!(report.contains("org_id = claims.org_id"));
+    }
+
+    #[test]
+    fn check_lists_referenced_claims_sorted_deduped() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![
+                TableRule {
+                    table: "tasks".to_string(),
+                    sync: true,
+                    scope: Some("owner_id = claims.sub".to_string()),
+                },
+                TableRule {
+                    table: "projects".to_string(),
+                    sync: true,
+                    scope: Some("org_id = claims.org_id AND owner_id = claims.sub".to_string()),
+                },
+            ],
+            hand: vec![],
+        };
+
+        let report = check_report(&rules).expect("well-formed rules must report Ok");
+
+        assert!(
+            report.contains("claims referenced: org_id, sub"),
+            "claims must be sorted and deduped, got:\n{report}"
         );
     }
 }

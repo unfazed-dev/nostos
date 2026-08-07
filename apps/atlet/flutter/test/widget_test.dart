@@ -3,7 +3,7 @@
 // PasswordSignIn typedef). This is the honest substitute for the live
 // "sign-in reaches home shell" check task-6-brief Step 4 asks for; a real
 // Supabase round trip needs operator-supplied SUPABASE_URL/ANON_KEY and the
-// flutter@atlet.internal password (not available to this scaffold).
+// flutter@atlet.dev password (not available to this scaffold).
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,7 +29,7 @@ void main() {
 
     expect(find.text('Home'), findsNothing);
 
-    await tester.enterText(find.byKey(const Key('signin-email')), 'flutter@atlet.internal');
+    await tester.enterText(find.byKey(const Key('signin-email')), 'flutter@atlet.dev');
     await tester.enterText(find.byKey(const Key('signin-password')), 'password');
     await tester.pump();
 

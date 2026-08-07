@@ -125,7 +125,21 @@ const CONNECT_GRACE: Duration = Duration::from_millis(250);
 /// `SyncClientConfig::flush_quiesce` (the actual per-batch flush bound): this
 /// is a rare, defense-in-depth reconnect, not the mechanism a real write
 /// depends on for latency.
-const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(120);
+///
+/// 30s is the strict floor, not a tunable to shrink further:
+/// - the server sends **no** idle traffic (no server-initiated pings —
+///   transport.rs only answers ping/pong), so on a genuinely idle session
+///   every backstop expiry forces a reconnect;
+/// - the server compacts its op-log every ~15s
+///   (`NOSTOS_OPLOG_COMPACT_INTERVAL_SECS`), so an idle reconnect usually
+///   finds an empty replay window and falls back to full
+///   snapshot-on-subscribe — below ~2× the compaction interval you pay
+///   whole-table snapshots several times a minute for nothing;
+/// - it must comfortably exceed `max_backoff` (5s) plus
+///   handshake+snapshot time or the loop can chase its own tail.
+/// Fast reaction to *real* network transitions is the app layer's job
+/// (connectivity_plus → `setConnected`), not this timer's.
+const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(30);
 
 /// A live Nostos connection. Owns the tokio runtime the background sync loop
 /// and watch-stream pump run on, plus at most one active subscription.

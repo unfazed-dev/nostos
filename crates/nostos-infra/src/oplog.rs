@@ -465,10 +465,15 @@ mod pg {
     /// effect. A trailing delete IS the max → survives as a tombstone.
     const COLLAPSE_SQL: &str = "DELETE FROM cairn_oplog WHERE op_id NOT IN \
         (SELECT MAX(op_id) FROM cairn_oplog GROUP BY table_name, pk)";
-    /// Retention: age out rows older than the window. `make_interval(secs => $1)`
-    /// binds `$1` as an i64 seconds count (`cairn_oplog.created_at` is TIMESTAMPTZ).
-    const RETENTION_SQL: &str =
-        "DELETE FROM cairn_oplog WHERE created_at < now() - make_interval(secs => $1)";
+    /// Retention: age out rows older than the window. `$1` binds as an i64
+    /// seconds count (`cairn_oplog.created_at` is TIMESTAMPTZ). The explicit
+    /// `$1::bigint` cast matters: `make_interval(secs =>)` declares its
+    /// parameter `double precision`, so an uncast `$1` makes tokio-postgres
+    /// try to serialize the i64 as float8 and every tick fails at bind time
+    /// with "error serializing parameter 0" (found live 2026-08-07 — the SQL
+    /// string was pinned by unit test but never executed against real PG).
+    const RETENTION_SQL: &str = "DELETE FROM cairn_oplog \
+        WHERE created_at < now() - make_interval(secs => ($1::bigint)::double precision)";
 
     /// The periodic compaction loop. Lazily connects; on error drops the client
     /// (reconnect next tick) and carries on — a failed tick is non-fatal (the
@@ -535,10 +540,14 @@ mod pg {
         }
 
         /// Retention ages rows by `created_at` vs the window, never by op_id.
+        /// The `$1::bigint` cast is load-bearing: without it the param is
+        /// declared `double precision` and binding an i64 fails every tick
+        /// ("error serializing parameter 0") — don't simplify it away.
         #[test]
         fn retention_ages_by_created_at_window() {
             assert!(RETENTION_SQL.contains("created_at < now()"));
             assert!(RETENTION_SQL.contains("make_interval"));
+            assert!(RETENTION_SQL.contains("$1::bigint"));
         }
     }
 

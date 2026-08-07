@@ -2,8 +2,9 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/bench/marks.dart';
+import 'support/fake_cart_orders.dart';
 
-class FakeAdapter implements SyncAdapter {
+class FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   late MarkDeriver _markDeriver;
   late Stopwatch _clock;
   late StreamController<List<SessionRow>> _sessionController;
