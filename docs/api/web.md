@@ -1,90 +1,193 @@
 # Web — `@nostos-sync/web`
 
-Extracted from `sdk/nostos_web/index.js`, `index.d.ts`, and `crates/nostos-ffi-wasm/src/lib.rs` on
-2026-07-30. Index: [`README.md`](README.md).
+Extracted from `sdk/nostos_web/` + `crates/nostos-ffi-wasm/src/lib.rs`. Index: [`README.md`](README.md).
 
 **This package has two different APIs and only one of them syncs.** Getting them mixed up is the
 single most likely mistake here.
 
-| Path | Entry | Live WebSocket? | Use for |
+| Path | Entry | Live WebSocket? | Durable? | Use for |
+|---|---|---|---|---|
+| **Browser (Worker)** | `worker/nostos.worker.js` → postMessage proxy → `NostosSocket` | **Yes** — the browser's real `WebSocket` | **Yes** — OPFS/SQLite-WASM (ADR-0033) | shipping a web app |
+| **Node** | `index.js` → `NostosClient` | **No** — apply engine only | No | tests, replaying frames, server-side decode |
+
+If you want a synced browser app, use the Worker architecture (below). If you are in Node and want
+real sync, you want [`@nostos-sync/node`](node.md) instead.
+
+## Browser — the Worker architecture (ADR-0017 / ADR-0024 / ADR-0033)
+
+The browser SDK runs entirely inside a **Web Worker** (`sdk/nostos_web/worker/nostos.worker.js`).
+The main thread is a pure `postMessage` proxy that imports NO wasm. The Worker owns:
+
+1. **The wasm instance** (`NostosSocket` + the apply engine + storage backend).
+2. **The storage backend** — either durable (SQLite-WASM / `opfs-sahpool`) or memory
+   (`InMemoryStorage`), decided at boot.
+3. **The WebSocket** — `web-sys::WebSocket`, opened inside the Worker.
+
+### Storage modes (ADR-0033)
+
+On boot, the Worker async-initializes `@sqlite.org/sqlite-wasm` with the `opfs-sahpool` VFS.
+The mode is pushed to the main thread as `{type:"storage", mode:"durable"|"memory"}` and surfaced
+on `SyncStatus.storageMode`:
+
+| Mode | Backend | Survives reload? | When |
 |---|---|---|---|
-| **Browser** | `pkg-web/nostos_ffi_wasm.js` → `NostosSocket` | **Yes** — the browser's real `WebSocket` | shipping a web app |
-| **Node** | `index.js` → `NostosClient` | **No** — apply engine only | tests, replaying frames, server-side decode |
+| `"durable"` | SQLite-WASM (`opfs-sahpool`) | **Yes** — rows + outbox + checkpoint persist in OPFS | Chrome/Edge/Firefox/Safari 17+ with OPFS enabled |
+| `"memory"` | `InMemoryStorage` | No — everything is lost on reload | Safari Private Browsing, old browsers, OPFS disallowed |
 
-If you want a synced browser app, use `NostosSocket`. If you are in Node and want real sync, you
-want [`@nostos-sync/node`](node.md) instead.
+The memory path is NOT a crash — it is the explicit degrade fallback (ADR-0017 follow-up scope 5).
+The mode is checked at runtime; no user configuration is needed.
 
-## Browser — `NostosSocket` (the live path)
+### Header-free deployment — a feature
 
-A `wasm_bindgen` export from `crates/nostos-ffi-wasm/src/lib.rs:398`.
+`opfs-sahpool` uses synchronous `FileSystemSyncAccessHandle` writes, NOT `SharedArrayBuffer` /
+`Atomics`. Cross-origin isolation (COOP/COEP headers) is **NOT required**. This is a deliberate
+advantage over wa-sqlite's `OPFSCoopSyncVFS` (which forces COOP/COEP onto every deployment,
+breaking OAuth popups, analytics iframes, and non-CORS-clean embeds).
+
+Your `vite.config.ts` / static server ships **zero special headers**. This is a requirement of the
+chosen backend (ADR-0017 Decision), not merely a current-state observation.
+
+### The postMessage protocol (main thread → Worker)
+
+```js
+const worker = new Worker("/worker/nostos.worker.js", { type: "module" });
+
+// Requests (each carries `id`; responses are {id, ok:true, ...} or {id, error:"..."}):
+worker.postMessage({ id: 1, cmd: "connect", url, token, table, where_sql });
+worker.postMessage({ id: 2, cmd: "write", table, op, pk, payload_json, client_write_id }); // no id (fire-and-forget)
+worker.postMessage({ id: 3, cmd: "rowsFor", table });
+worker.postMessage({ id: 4, cmd: "checkpoint" });
+worker.postMessage({ id: 5, cmd: "watch", table });     // reactive subscribe (ADR-0024)
+worker.postMessage({ id: 6, cmd: "unwatch" });
+worker.postMessage({ id: 7, cmd: "signOut" });           // ADR-0029 + ADR-0033: wipe OPFS + localStorage + token
+worker.postMessage({ id: 8, cmd: "setToken", token });   // ADR-0029: token refresh = reconnect
+worker.postMessage({ id: 9, cmd: "close" });
+```
+
+### Push events (Worker → main thread)
+
+```js
+worker.onmessage = (ev) => {
+  const d = ev.data;
+  // Unsolicited pushes (no `id`):
+  if (d.type === "wasm-ready") { ... }
+  if (d.type === "storage") { /* d.mode = "durable"|"memory" */ }
+  if (d.type === "status") { /* d.connected = bool */ }
+  if (d.type === "snapshot") { /* d.table, d.rows = [{pk, payload}] — reactive push (ADR-0024) */ }
+  if (d.type === "writeResult") { /* d.client_write_id, d.ok, d.error? — async write outcome */ }
+  if (d.type === "rowsChanged") { /* d.count — legacy compat poll signal */ }
+  // Response to a request (has `id`):
+  if (d.id != null) { /* resolves the pending promise */ }
+};
+```
+
+### The `write` contract (ADR-0017 WS1 / ADR-0013 outbox)
+
+`write` is **fire-and-forget** over postMessage — it never throws because the socket is closed.
+The Worker's `NostosSocket.write` captures the write via the Rust `Outbox` trait (`enqueue` +
+`apply_local`) before any network round-trip, so:
+
+- The row is visible **instantly** (optimistic local apply).
+- The write ships on the next (re)connect via the onopen flush loop.
+- The async outcome arrives as a `writeResult{client_write_id, ok, error?}` push.
+
+This is the same contract as the native SDKs (durable intent before any network call).
+
+### Sign-out (ADR-0029 + ADR-0033)
+
+`signOut()` wipes:
+1. **OPFS SQLite DB** — `dbHandle.clearAll()` (DELETE rows + outbox + checkpoint reset to '0').
+2. **`localStorage["cairn:checkpoint:*"]`** — cleared from the main thread (Workers cannot access
+   `localStorage`; belt-and-suspenders for any future main-thread checkpoint path).
+3. **The cached token** — dropped so the next `connect` requires re-auth.
+4. **The engine rows + outbox** — `sock.clearLocalState()` (the Rust `Storage::clear` +
+   `Outbox::clear` under one borrow — half a clear is a cross-user leak).
+
+### Durable checkpoint
+
+In durable mode, the checkpoint is read from SQLite (`cairn_meta` key `'checkpoint'`), NOT from
+`localStorage`. The `localStorage` key is retained ONLY as a sign-out wipe target (clearing it
+prevents a stale-LSN resume after OPFS is wiped). In memory mode, the checkpoint lives only in the
+engine's `InMemoryStorage` and is lost on reload.
+
+### Reactive watch (ADR-0024)
+
+The Worker fires a `snapshot` push on every change tick — the initial snapshot plus each delta —
+synchronously from the `onmessage` frame-pump. This is a TRUE Rust→JS push (the `NostosSocket.onChange`
+Closure), NOT a `setInterval` poll of `rowCount`. The main thread fans snapshots to per-table watchers.
+
+## `NostosSocket` — the wasm-bindgen surface
+
+A `wasm_bindgen` export from `crates/nostos-ffi-wasm/src/lib.rs`.
 
 ```js
 import init, { NostosSocket } from "./pkg-web/nostos_ffi_wasm.js";
 await init();
 
-const sock = await NostosSocket.connect("ws://127.0.0.1:8080/sync", null, "tasks", null);
-//                                     url,  token, table,   whereSql
-sock.write("tasks", "1", new TextEncoder().encode(JSON.stringify({ title: "buy milk" })));
-const rows = sock.rowsFor("tasks");          // [{ pk, payload }]
+// In the Worker, dbHandle is the JS wrapper from openNostosDb() (or null in memory mode):
+const sock = await NostosSocket.connect(url, token, table, whereSql, dbHandle);
+//                                     url  token  table   predicate  SQLite handle|null
+
+sock.write("tasks", "upsert", "1", JSON.stringify({ title: "buy milk" }), "cw1");
+//      table     op       pk   payload_json (string|null)            client_write_id
+
+sock.onChange(() => { /* change tick — re-read rowsFor */ });
+const rows = sock.rowsFor("tasks");    // [{ pk, payload }] — payload is Uint8Array
 console.log(sock.checkpoint(), sock.rowCount());
+sock.clearLocalState();                 // ADR-0029 sign-out wipe
+sock.close();
 ```
 
 | Member | Notes |
 |---|---|
-| `NostosSocket.connect(url, token, table, whereSql)` | **static**, returns a `Promise<NostosSocket>`. Opens the socket *and* subscribes |
-| `write(table, pk, payload)` | payload is bytes |
-| `rowsFor(table)` | `RowEntry[]` — each has `pk()` and `payload()` (bytes) |
-| `checkpoint()` | durable LSN as a JS number |
-| `rowCount()` | applied row count |
+| `NostosSocket.connect(url, token?, table, whereSql?, dbHandle?)` | **static**, returns `Promise<NostosSocket>`. `dbHandle` non-null = durable mode |
+| `write(table, op, pk, payload_json?, client_write_id)` | Never throws on closed socket — captures via Outbox + apply_local. `op`: `"upsert"\|"delete"\|"patch"` |
+| `rowsFor(table)` | `RowEntry[]` — each has `.pk` (string) and `.payload` (Uint8Array) |
+| `onChange(callback)` / `offChange()` | Reactive push (ADR-0024) — fires on every commit |
+| `checkpoint` | durable LSN as a JS number (getter) |
+| `rowCount` | applied row count (getter) |
+| `clearLocalState()` | ADR-0029: wipe rows + outbox (half a clear is a leak) |
+| `close()` | Close the socket (code 1000) |
 
 The token goes on the URL as `?token=` because **browsers cannot set headers on a WebSocket
-handshake**. `resume_lsn` is read from `localStorage["cairn:checkpoint:<table>"]`, defaulting to 0 —
-so a reload resumes rather than refetching.
+handshake**.
 
 ## Node — `NostosClient` (apply engine only)
 
-`index.js:184` exports `{ NostosClient, NostosEngine, Frame }`. Typed in `index.d.ts`:
+`index.js` exports `{ NostosClient, NostosEngine, Frame }`. Typed in `index.d.ts`.
 
 | Member | Signature |
 |---|---|
 | constructor | `new NostosClient(config?: { url?, token?, table? })` |
 | `connect` | `connect(): Promise<NostosClient>` — **does not open a socket** |
 | `subscribe` | `subscribe(table, whereSql?): NostosClient` — sets local intent, chainable |
-| `write` | `write(table, pk, payload: Uint8Array \| number[]): WriteResult` — **sync** |
-| `query` | `query(table): Row[]` — **sync**, per-table, not SQL |
-| `watch` | `watch(table, cb): () => void` — invokes `cb` immediately, returns an unsubscribe fn |
+| `write` | `write(table, pk, payload): WriteResult` — **sync**, feeds apply engine |
+| `query` | `query(table): Row[]` — **sync**, per-table |
+| `watch` | `watch(table, cb): () => void` — invokes `cb` immediately, returns unsubscribe |
+| `signOut` | `signOut(): void` — ADR-0029: wipe rows + outbox + token |
+| `setToken` | `setToken(token): void` — ADR-0029: cache for next connect |
 | `checkpoint` / `rowCount` | readonly getters |
-
-`Row` is `{ pk: string, payload: Buffer }`; `WriteResult` is `{ checkpoint, rowsApplied }`.
-
-Lower-level, also exported: `NostosEngine` (`newEngine`/`setWhereSql`/`flush`/`rowsFor`/`checkpoint`/
-`rowCount`) and `Frame`, if you want to drive the apply path frame by frame.
-
-## Reads are a KV store, not SQL
-
-Unlike every SQLite-backed SDK here, the WASM apply engine keeps an **in-memory key-value store**.
-There is no `cairn_data` table and no SQL: you call `rowsFor(table)` / `query(table)` and get
-`{pk, payload}` pairs with the payload as **bytes you decode yourself**. Nothing persists across a
-reload except the `localStorage` checkpoint.
+| `storageMode` | readonly getter — always `"memory"` in Node (no OPFS) |
 
 ## Ceilings
 
-- **Live-only: `NostosSocket.write` needs an open socket.** It sends the frame directly and never
-  touches the outbox, so with the socket closed it **throws** rather than queueing (wasm-bindgen
-  turns the `Err` into a thrown exception). No offline write capture and no optimistic local row —
-  the native SDKs enqueue durably *before* any network call. Combined with the in-memory rows above,
-  do not describe this build as offline-capable. ([ADR-0017
-  addendum](../adr/0017-web-persistence.md))
-  *(`NostosClient.write` on the Node facade is a different surface — it feeds the apply engine and
-  never opens a socket at all; see the Node ceiling above.)*
-- One table per socket.
-- No reactive stream in the browser path — poll `rowsFor` after writes, or wrap the pump yourself.
-- Payloads are bytes both directions; you own encode/decode.
+- **One table per socket** (single-table v1).
+- **Node `NostosClient` has no live transport** — `connect()` does NOT open a WS. It drives the
+  apply engine only. For Node live sync, use [`@nostos-sync/node`](node.md).
+- **Memory mode (degrade path) is not reload-survivable** — when OPFS is unavailable (Safari Private
+  Browsing, old browsers), the store is InMemoryStorage and everything is lost on reload. This is
+  the documented degrade ceiling, surfaced on `SyncStatus.storageMode`.
+- **Payloads are bytes both directions** — you own encode/decode. The browser `write` takes a JSON
+  string (`payload_json`); the apply engine stores opaque bytes.
 
 ## Proven by
 
-Two slices. `web` runs `e2e/browser_live.spec.cjs` under Playwright: a real browser, a real
-`WebSocket`, full PUSH + ECHO against the Rust spine. `smoke.cjs` covers the Node facade and
-**explicitly does not** exercise `NostosSocket.connect()`. A latent flush bug lived here once — the
-WASM `onmessage` pump never flushed standalone frames — fixed with an unconditional
-`engine.flush()` mirroring the native client's per-batch commit.
+| Spec | What it proves |
+|---|---|
+| `e2e/browser_live.spec.cjs` | PUSH + async write + ECHO round-trip via the Worker, under Playwright headless Chromium |
+| `e2e/durable.spec.cjs` | ADR-0033: write survives page reload in durable mode; signOut wipes the OPFS store; degrade path reported correctly |
+| `e2e/worker.spec.cjs` | The Worker boots, responds to ping, and surfaces the postMessage protocol |
+| `smoke.cjs` | The Node `NostosClient` facade (apply engine, no live transport) |
+
+`FileSystemSyncAccessHandle` (the `opfs-sahpool` primitive) is browser+Worker-only — it does not
+exist in Node. The durable-storage spec MUST run in a real browser (Playwright/headless Chromium).

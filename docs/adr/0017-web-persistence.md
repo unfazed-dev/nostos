@@ -1,6 +1,9 @@
 # ADR-0017: Web persistence (Front 5 — browser-durable storage)
 
-- **Status:** Deferred past v0.1 — decision recorded, follow-up scoped.
+- **Status:** Follow-up SHIPPED (ADR-0033) — the opfs-sahpool durable backend
+  (Storage + Outbox in a Worker) is implemented and verified (durable.spec.cjs green:
+  write survives reload, checkpoint survives reload, signOut wipes OPFS).
+  Decision stands: option 1 (SQLite-WASM + `opfs-sahpool`), options 2 and 3 rejected.
   Amended 2026-07-30 (IndexedDB alternative rejected; scope corrected — see the
   addendum at the end).
 - **Date:** 2026-07-04
