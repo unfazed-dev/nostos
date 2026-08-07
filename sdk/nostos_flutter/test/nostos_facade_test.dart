@@ -17,6 +17,7 @@ import 'dart:convert';
 import 'package:nostos_flutter/src/nostos.dart';
 import 'package:nostos_flutter/src/nostos_database.dart';
 import 'package:nostos_flutter/src/engine.dart';
+import 'package:nostos_flutter/src/predicate.dart';
 import 'package:nostos_flutter/src/schema.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -72,8 +73,13 @@ class _FakeEngine implements NostosEngine {
     String? payloadJson,
   }) async {
     writes.add((table: table, op: op, pk: pk, payloadJson: payloadJson));
-    return 1;
+    return writeResult == null ? 1 : await writeResult!();
   }
+
+  /// Optional override for the next outbox id a `write` returns. Default
+  /// (`null`) yields `1` for every call; tests that need distinct ids (e.g.
+  /// writeBatch) assign a counter here.
+  Future<int> Function()? writeResult;
 
   @override
   void applySchema(List<ClientTableFfi> tables) {}
@@ -105,11 +111,20 @@ class _FakeEngine implements NostosEngine {
     setTokenCalls++;
   }
 
-  @override
-  Future<void> disconnect() async {}
+  /// Counters for pauseSync/resumeSync wiring (ADR-0032 T1).
+  int disconnectCalls = 0;
+  int resumeCalls = 0;
 
   @override
-  Stream<NostosConnectionState> resume() => stateController.stream;
+  Future<void> disconnect() async {
+    disconnectCalls++;
+  }
+
+  @override
+  Stream<NostosConnectionState> resume() {
+    resumeCalls++;
+    return stateController.stream;
+  }
 }
 
 /// Tiny typed record for `Collection<Todo>` tests.
@@ -249,16 +264,89 @@ void main() {
       expect(engine.queries, ['SELECT * FROM todos']);
     });
 
-    test('composes "... WHERE <where>" when where: is supplied', () async {
+    test('composes "... WHERE <structured-where>" (ADR-0032 T2)', () async {
       final (engine, db) = newDb();
       await db.subscribe('todos');
       final todos = db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
 
-      final future = todos.watch(where: 'completed = 0').first;
+      final future = todos.watch(where: Where.eq('completed', 0)).first;
       engine.rowsController.add('[]');
       await future;
 
       expect(engine.queries, ['SELECT * FROM todos WHERE completed = 0']);
+    });
+
+    test('structured predicate: and/or/not + ordered ops + inList', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      final todos = db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      final future = todos
+          .watch(where: Where.and([
+            Where.eq('user_id', 'u1'),
+            Where.or([Where.lt('due_at', 100), Where.gte('priority', 3)]),
+            Where.not(Where.eq('archived', 1)),
+            Where.inList('status', ['open', 'wip']),
+          ]))
+          .first;
+      engine.rowsController.add('[]');
+      await future;
+
+      // Combinator children are parenthesized so AND/OR precedence is explicit.
+      expect(
+        engine.queries.single,
+        startsWith('SELECT * FROM todos WHERE '),
+      );
+      expect(engine.queries.single, contains("user_id = 'u1'"));
+      expect(engine.queries.single, contains('due_at < 100'));
+      expect(engine.queries.single, contains('priority >= 3'));
+      expect(engine.queries.single, contains('archived = 1'));
+      expect(engine.queries.single, contains("status IN ('open', 'wip')"));
+    });
+
+    test('orderBy/limit/offset compose (ADR-0032 T2)', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      final todos = db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      final future = todos
+          .watch(
+            orderBy: [Order.desc('created_at'), Order.asc('id')],
+            limit: 50,
+            offset: 10,
+          )
+          .first;
+      engine.rowsController.add('[]');
+      await future;
+
+      expect(engine.queries, [
+        'SELECT * FROM todos ORDER BY created_at DESC, id ASC LIMIT 50 OFFSET 10',
+      ]);
+    });
+
+    test('injection guard: a quote in a column name is rejected', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      final todos = db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      expect(
+        () => todos.watch(where: Where.eq("id'; DROP TABLE todos;--", 1)),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('injection guard: a string value is escaped, not spliced', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      final todos = db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      final future =
+          todos.watch(where: Where.eq('title', "O'Brien")).first;
+      engine.rowsController.add('[]');
+      await future;
+
+      // The single quote is doubled → SQL-safe, no statement break.
+      expect(engine.queries, ["SELECT * FROM todos WHERE title = 'O''Brien'"]);
     });
   });
 
@@ -400,6 +488,232 @@ void main() {
       expect(engine.writes.single.op, 'patch');
       expect(engine.writes.single.pk, '7');
       expect(jsonDecode(engine.writes.single.payloadJson!), {'completed': 1});
+    });
+  });
+
+  group('Collection reads (ADR-0032 T2: get/getAll/fetchById/watchOne/exists)',
+      () {
+    test('getAll maps rows one-shot with structured where', () async {
+      final rows = [
+        {'id': '1', 'title': 'a'},
+        {'id': '2', 'title': 'b'},
+      ];
+      final (engine, db) = newDb(queryResult: jsonEncode(rows));
+      await db.subscribe('todos');
+      final todos =
+          db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      final items = await todos.getAll(
+        where: Where.eq('user_id', 'u1'),
+        orderBy: [Order.asc('id')],
+        limit: 10,
+      );
+
+      expect(items, const [_Todo('1', 'a'), _Todo('2', 'b')]);
+      expect(
+        engine.queries.single,
+        "SELECT * FROM todos WHERE user_id = 'u1' ORDER BY id ASC LIMIT 10",
+      );
+    });
+
+    test('get returns the single row by pk, null when absent', () async {
+      final (engineHit, dbHit) = newDb(queryResult: jsonEncode([
+        {'id': '7', 'title': 'ship'},
+      ]));
+      await dbHit.subscribe('todos');
+      final todosHit =
+          dbHit.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+      final got = await todosHit.get('7');
+      expect(got, const _Todo('7', 'ship'));
+      // fetchById is the alias.
+      expect(await todosHit.fetchById('7'), const _Todo('7', 'ship'));
+
+      final (engineMiss, dbMiss) = newDb(queryResult: jsonEncode([]));
+      await dbMiss.subscribe('todos');
+      final todosMiss =
+          dbMiss.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+      expect(await todosMiss.get('nope'), isNull);
+      // get composes a WHERE eq on the pkColumn + LIMIT 1. The String pk '7'
+      // is emitted as a quoted SQLite literal by _literal (predicate.dart).
+      expect(
+        engineHit.queries.first,
+        "SELECT * FROM todos WHERE id = '7' LIMIT 1",
+      );
+      expect(engineMiss.queries, isNotEmpty);
+    });
+
+    test('watchOne emits the row, then null when it disappears', () async {
+      final (engine, db) =
+          newDb(queryResult: jsonEncode([{'id': '7', 'title': 'ship'}]));
+      await db.subscribe('todos');
+      final todos =
+          db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      final future = todos.watchOne('7').first;
+      engine.rowsController.add('[]'); // table-watch tick → re-query → emit
+      expect(await future, const _Todo('7', 'ship'));
+    });
+
+    test('exists emits a boolean from the EXISTS() projection', () async {
+      final (engine, db) = newDb(queryResult: jsonEncode([
+        {'hit': 1},
+      ]));
+      await db.subscribe('todos');
+      final todos =
+          db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      final future = todos.exists(where: Where.eq('done', 1)).first;
+      engine.rowsController.add('[]'); // tick → re-query → emit
+      expect(await future, isTrue);
+      expect(
+        engine.queries.single,
+        'SELECT EXISTS(SELECT 1 FROM todos WHERE done = 1) AS hit',
+      );
+    });
+  });
+
+  group('writeBatch (ADR-0032 T3)', () {
+    test('enqueues all ops in order, returns ids', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      var nextId = 100;
+      engine.writeResult = () async => nextId++;
+
+      final ids = await db.writeBatch([
+        const NostosWrite(table: 'todos', op: 'upsert', pk: '1', payload: {'title': 'a'}),
+        const NostosWrite(table: 'todos', op: 'patch', pk: '1', payload: {'done': 1}),
+        const NostosWrite(table: 'todos', op: 'delete', pk: '2'),
+      ]);
+
+      expect(ids, [100, 101, 102]);
+      expect(engine.writes.map((w) => w.op).toList(), ['upsert', 'patch', 'delete']);
+      expect(engine.writes[1].pk, '1');
+      expect(engine.writes[1].payloadJson, isNotNull);
+    });
+
+    test('Collection.writeBatch stamps the table', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      engine.writeResult = () async => 1;
+      final todos =
+          db.collection<_Todo>(table: 'todos', fromRow: _Todo.fromRow);
+
+      await todos.writeBatch([
+        const NostosWrite(table: 'WRONG', op: 'upsert', pk: '9', payload: {}),
+      ]);
+
+      expect(engine.writes.single.table, 'todos',
+          reason: 'collection stamps its own table over the op');
+    });
+
+    test('a mid-batch failure throws WriteBatchPartialError with completed ids',
+        () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+      var n = 0;
+      engine.writeResult = () async {
+        n++;
+        if (n == 2) {
+          throw Exception('disk full');
+        }
+        return n;
+      };
+
+      Future<List<int>> run() => db.writeBatch([
+            const NostosWrite(table: 'todos', op: 'upsert', pk: '1'),
+            const NostosWrite(table: 'todos', op: 'upsert', pk: '2'),
+            const NostosWrite(table: 'todos', op: 'upsert', pk: '3'),
+          ]);
+
+      Object? caught;
+      try {
+        await run();
+      } on Object catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<WriteBatchPartialError>(),
+          reason: 'mid-batch failure surfaces a partial error');
+      final partial = caught as WriteBatchPartialError;
+      expect(partial.completedIds, [1], reason: 'first op succeeded before failure');
+      expect(partial.failedIndex, 1);
+    });
+  });
+
+  group('pauseSync/resumeSync (ADR-0032 T1)', () {
+    test('pauseSync delegates to engine.disconnect; resumeSync to resume', () async {
+      final (engine, db) = newDb();
+      await db.subscribe('todos');
+
+      await db.pauseSync();
+      expect(engine.disconnectCalls, 1);
+
+      db.resumeSync();
+      expect(engine.resumeCalls, 1);
+    });
+  });
+
+  group('waitForFirstSync (ADR-0032 T1)', () {
+    test('completes when the first connected transition lands', () async {
+      final (engine, db) = newDb();
+      db.currentStatus; // wire status
+      await db.subscribe('todos');
+
+      final barrier = db.waitForFirstSync();
+      expect(db.currentStatus.hasSynced, isFalse);
+
+      final connectedFuture = db.connectionState
+          .firstWhere((s) => s == NostosConnectionState.connected);
+      engine.stateController.add(NostosConnectionState.connected);
+      await connectedFuture;
+      await pumpEventQueue();
+
+      await barrier.timeout(const Duration(seconds: 1));
+      expect(db.currentStatus.hasSynced, isTrue);
+    });
+
+    test('resolves immediately when already synced', () async {
+      final (engine, db) = newDb();
+      db.currentStatus;
+      await db.subscribe('todos');
+      final f = db.connectionState
+          .firstWhere((s) => s == NostosConnectionState.connected);
+      engine.stateController.add(NostosConnectionState.connected);
+      await f;
+      await pumpEventQueue();
+
+      // Already synced — second call must not hang.
+      await db.waitForFirstSync().timeout(const Duration(seconds: 1));
+    });
+  });
+
+  group('deadLetters (ADR-0032 T5 / ADR-0027)', () {
+    test('lists quarantined rows from cairn_outbox WHERE dlq=1', () async {
+      final rows = [
+        {
+          'id': 5,
+          'table_name': 'todos',
+          'op': 'upsert',
+          'pk': '9',
+          'payload': '{"title":"x"}',
+          'attempts': 3,
+        },
+      ];
+      final (engine, db) = newDb(queryResult: jsonEncode(rows));
+      await db.subscribe('todos');
+
+      final dl = await db.deadLetters();
+
+      expect(dl.length, 1);
+      expect(dl.first.id, 5);
+      expect(dl.first.table, 'todos');
+      expect(dl.first.attempts, 3);
+      expect(dl.first.payload, {'title': 'x'});
+      expect(dl.first.error, isNull, reason: 'not persisted per-row in v1');
+      expect(dl.first.timestamp, isNull);
+      expect(
+        engine.queries.single,
+        contains('FROM cairn_outbox WHERE dlq = 1'),
+      );
     });
   });
 }

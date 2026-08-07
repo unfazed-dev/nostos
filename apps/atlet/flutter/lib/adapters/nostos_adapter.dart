@@ -30,7 +30,7 @@ class NostosAdapter implements SyncAdapter {
 
   NostosDatabase? _db;
   StreamSubscription<List<Map<String, dynamic>>>? _sessionsSub;
-  StreamSubscription<List<Map<String, dynamic>>>? _productsSub;
+  StreamSubscription<List<ProductRow>>? _productsSub;
   StreamSubscription<NostosConnectionState>? _connSub;
   StreamController<List<SessionRow>>? _sessionsController;
   StreamController<List<ProductRow>>? _productsController;
@@ -101,39 +101,47 @@ class NostosAdapter implements SyncAdapter {
       NostosTableSub(name: 'orders'),
     ]);
 
+    // Typed collection handles (ADR-0032 T2): the taught surface for "table,
+    // maybe filter, maybe order" reads. Injection-safe by construction.
+    final sessions = db.collection<SessionRow>(
+        table: 'sessions', fromRow: sessionFromRow);
+    final products = db.collection<ProductRow>(
+        table: 'products', fromRow: productFromRow);
+    final cartItems = db.collection<CartItemRow>(
+        table: 'cart_items', fromRow: cartItemFromRow);
+    final orders =
+        db.collection<OrderRow>(table: 'orders', fromRow: orderFromRow);
+
+    // sessions: the sort needs `(server_committed_at IS NULL) DESC`, an
+    // expression the structured `Order` (field+direction) can't express yet —
+    // contract gap. Routed through the raw-SQL escape hatch [watchSql]; the
+    // other three reads use typed collections. See ADR-0032 "Escape hatch".
     // Newest first: latest day on top; within a day, the just-added row
     // (server_committed_at still NULL until acked) sorts above older ones.
     _sessionsSub = db
-        .watch('SELECT * FROM sessions '
+        .watchSql('SELECT * FROM sessions '
             'ORDER BY occurred_on DESC, '
             '(server_committed_at IS NULL) DESC, server_committed_at DESC')
         .listen((rows) {
-      final sessions = rows.map(sessionFromRow).toList(growable: false);
-      _deriver.onEmission(sessions);
-      _lastSessions = sessions;
-      _sessionsController?.add(sessions);
+      final items = rows.map(sessionFromRow).toList(growable: false);
+      _deriver.onEmission(items);
+      _lastSessions = items;
+      _sessionsController?.add(items);
     });
 
-    _productsSub = db.watch('SELECT * FROM products').listen((rows) {
-      final products = rows.map(productFromRow).toList(growable: false);
-      _lastProducts = products;
-      _productsController?.add(products);
+    _productsSub = products.watch().listen((items) {
+      _lastProducts = items;
+      _productsController?.add(items);
     });
 
-    _cartSub =
-        db.watch('SELECT * FROM cart_items ORDER BY added_at DESC')
-            .listen((rows) {
-      final items = rows.map(cartItemFromRow).toList(growable: false);
+    _cartSub = cartItems.watch(orderBy: [Order.desc('added_at')]).listen((items) {
       _lastCart = items;
       _cartController?.add(items);
     });
 
-    _ordersSub = db
-        .watch('SELECT * FROM orders ORDER BY created_at DESC')
-        .listen((rows) {
-      final orders = rows.map(orderFromRow).toList(growable: false);
-      _lastOrders = orders;
-      _ordersController?.add(orders);
+    _ordersSub = orders.watch(orderBy: [Order.desc('created_at')]).listen((items) {
+      _lastOrders = items;
+      _ordersController?.add(items);
     });
 
     _ready = true;
@@ -232,12 +240,12 @@ class NostosAdapter implements SyncAdapter {
     final db = _db;
     if (db == null || !_ready) return;
     if (up) {
-      // ponytail: NostosDatabase.resume() is fire-and-forget (no Future) —
+      // ponytail: NostosDatabase.resumeSync() is fire-and-forget (no Future) —
       // setConnected(true) does not itself await a reconnect. Record this in
       // RunRecord if the bench needs a reconnect-observed timestamp instead.
-      db.resume();
+      db.resumeSync();
     } else {
-      await db.disconnect();
+      await db.pauseSync();
       // Reflect offline in the UI immediately: disconnect() tears the socket
       // down client-side, but the engine's connectionState stream only emits
       // on *observed* transport transitions, which can lag a forced local
@@ -404,9 +412,10 @@ Map<String, dynamic> orderWritePayload(OrderRow o, {String? userId}) => {
       'created_at': o.createdAt.toUtc().toIso8601String(),
     };
 
-/// Maps a decoded row from `NostosDatabase.watch('SELECT * FROM sessions')`
-/// to [SessionRow]. Top-level and pure so it's testable without the FFI
-/// bridge — see nostos_adapter_test.dart.
+/// Maps a decoded row from a sessions read (the escape-hatch `watchSql` path,
+/// since the structured `Order` can't express the `(server_committed_at IS
+/// NULL) DESC` sort) to [SessionRow]. Top-level and pure so it's testable
+/// without the FFI bridge — see nostos_adapter_test.dart.
 SessionRow sessionFromRow(Map<String, dynamic> row) => SessionRow(
       id: row['id'] as String,
       title: row['title'] as String,
