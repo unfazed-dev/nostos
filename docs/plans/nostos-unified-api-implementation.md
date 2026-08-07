@@ -55,14 +55,22 @@ Files: `lib/src/nostos_database.dart`, `lib/src/schema.dart`, new
   - Predicates as **data**, not strings: `where:` eq/lt/gt/in + and/or,
     `orderBy:` field+direction, `limit`/`offset` — per the contract's
     structured-predicate section. Compile to SQL against the view internally.
-  - Writes: `upsert`, `update` (per-field collapsed-write, ADR-0014 tiers),
-    `delete`, `writeBatch`, `transaction` — collapsed-write semantics through
-    the existing outbox; **no new write path**.
+  - Writes: `upsert`, `patch` (per-field collapsed-write, ADR-0014 tiers),
+    `delete`, `writeBatch` — collapsed-write semantics through the existing
+    outbox; **no new write path**. `writeBatch` enters the outbox **atomically**
+    (all-or-nothing delivery, NOT a server transaction; no cross-row rollback).
+    No separate `transaction()` verb.
   - Write-outcome surface per ADR-0027: `pendingWrites`, `deadLetteredWrites`,
-    `deadLetters` list, `retryDeadLetter(id)`, `discardDeadLetter(id)`,
-    `lastWriteError` — DEAD-LETTER-only surfacing; do not invent per-write acks.
+    `deadLetters` list (`id, table, error, timestamp`), `lastWriteError` —
+    DEAD-LETTER-only surfacing; do not invent per-write acks.
+    (`retryDeadLetter`/`discardDeadLetter` are **v1.1-deferred** per contract T5.)
   - Keep `execute()` / `watchSql()` as the documented escape hatch. Demote in
     docs; do not remove.
+  - CRDT typed surface (contract **T4**; assigned to Wave 1 2026-08-08 — was
+    unassigned in v1.2): `counter(pk, column).increment(n)` / `.decrement(n)`
+    and `orSet(pk, column).add(v)` / `.remove(v)` — typed handles over the
+    WS3-shipped CRDT engine (`nostos-domain/src/crdt.rs`), exposed via FFI. Docs
+    teach the choice: `patch` = last-writer-wins field; `counter`/`orSet` = merge.
 - `pauseSync()` / `resumeSync()` on the top-level client: disconnect/connect
   that retains token, schema, and watch subscriptions; watches re-emit on
   resume without caller re-wiring. No wire-protocol change.
