@@ -29,6 +29,9 @@
       const events = [];
       const pending = new Map();
       let nextId = 1;
+      // ADR-0033: the storage backend mode, pushed by the Worker after init.
+      // "durable" = OPFS/SQLite-WASM; "memory" = InMemoryStorage fallback.
+      let storageMode = "memory";
       // Reactive watch() listeners (ADR-0024): each {table, callback} is
       // dispatched a `snapshot` push for its table. The Worker's NostosSocket
       // fires snapshot on every change tick; here we fan it out to watchers.
@@ -53,6 +56,14 @@
           if (d.type === "status") {
             document.getElementById("status").textContent =
               "connected=" + !!d.connected;
+          }
+          if (d.type === "storage") {
+            // ADR-0033: the Worker reports the storage backend mode after
+            // init. "durable" = OPFS/SQLite-WASM; "memory" = InMemoryStorage
+            // (degrade path). Surfaced on SyncStatus + the [web-e2e] log so
+            // the Playwright spec can assert which mode is active.
+            storageMode = d.mode;
+            log("STORAGE_MODE=" + d.mode);
           }
           return;
         }
@@ -102,7 +113,26 @@
         // ADR-0029 WS4-D3: wipe rows+outbox, close the socket, drop the token —
         // the next user on this Worker session sees none of the prior user's
         // rows or pending writes. Resolves once the Worker has torn down.
-        signOut: () => request("signOut", {}),
+        //
+        // ADR-0033: also clear localStorage checkpoint keys from the main
+        // thread (Workers cannot access localStorage). Belt-and-suspenders: in
+        // the Worker architecture, `write_checkpoint_ls` is a no-op (no window
+        // in the Worker), but clearing here is correct for any future main-
+        // thread checkpoint path.
+        signOut: async () => {
+          const r = await request("signOut", {});
+          try {
+            for (let i = localStorage.length - 1; i >= 0; i--) {
+              const key = localStorage.key(i);
+              if (key && key.startsWith("cairn:checkpoint:")) {
+                localStorage.removeItem(key);
+              }
+            }
+          } catch (_) {
+            /* localStorage disabled — nothing to clear */
+          }
+          return r;
+        },
         // ADR-0029 §3: swap the JWT. The Worker caches it and, if a session is
         // live, reconnects the socket with the new token (no wasm token swap).
         setToken: (token) => request("setToken", { token }),
@@ -122,6 +152,9 @@
           };
         },
         events,
+        get storageMode() {
+          return storageMode;
+        },
       };
 
       log("PROXY_READY");

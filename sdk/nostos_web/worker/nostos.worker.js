@@ -41,6 +41,13 @@
 // `unsafe`-free: pure JS. The Rust write path uses the real `Outbox` trait
 // (enqueue + apply_local + flush loop), so a write never throws when the socket
 // is closed — it is captured + rendered locally and ships on (re)connect.
+//
+// ADR-0033 (browser-durable storage): on boot, the Worker ALSO async-inits
+// sqlite-wasm with opfs-sahpool. On success → durable mode (rows + outbox +
+// checkpoint survive reload). On failure (Safari Private Browsing, old
+// browsers, OPFS disallowed) → degrade to InMemoryStorage (today's behavior),
+// surfaced on SyncStatus. The db_handle is passed to NostosSocket.connect as
+// the 5th arg; the Rust side wraps it in WebStorage::SqliteWasm.
 import init, { NostosSocket } from "../pkg-web/nostos_ffi_wasm.js";
 
 let wasmReady = false;
@@ -58,6 +65,14 @@ let watching = false;
 // so a token refresh IS a reconnect at this layer.
 let connParams = null; // { url, table, where_sql } captured on connect
 let token = null;      // opaque JWT; cleared on signOut
+
+// ADR-0033: the durable SQLite-WASM db handle (or null in memory/degrade mode).
+// Set by initStorage() on boot. Passed to NostosSocket.connect as the 5th arg.
+let dbHandle = null;
+// "durable" (OPFS-backed SQLite-WASM) or "memory" (InMemoryStorage fallback).
+// Reported to the main thread via {type:"storage", mode} so SyncStatus can
+// surface which backend is active.
+let storageMode = "memory";
 
 // Read the engine's current full-table snapshot and push it to the main thread.
 // Used both for the initial snapshot (on `watch`) and for each change tick
@@ -98,11 +113,37 @@ async function ensureWasm() {
   }
 }
 
-// Eager-init on boot so the main thread sees WASM_READY before any command.
-// Failures surface as an unsolicited error (the spec's WASM_READY poll times out).
-void ensureWasm().catch((e) =>
-  self.postMessage({ id: 0, error: "wasm-init: " + String((e && e.message) || e) }),
-);
+// ADR-0033: async-init sqlite-wasm with opfs-sahpool on boot. On success →
+// durable mode (dbHandle set, storageMode="durable"). On failure → degrade to
+// memory mode (dbHandle stays null, InMemoryStorage is the backend). The mode
+// is pushed to the main thread so SyncStatus can surface it. NOT a crash — the
+// memory path is the explicit degrade fallback (ADR-0017 follow-up scope 5).
+async function initStorage() {
+  try {
+    const { openNostosDb } = await import("./sqlite_wasm_glue.js");
+    dbHandle = await openNostosDb();
+    storageMode = "durable";
+  } catch (e) {
+    // OPFS unavailable (Safari Private Browsing, old browsers) or sqlite-wasm
+    // package not installed (Node smoke — but the Worker never runs there).
+    // Degrade to InMemoryStorage: dbHandle stays null, NostosSocket.connect
+    // receives null as the 5th arg → NostosEngine::new() (memory path).
+    console.error("[nostos.worker] storage init failed:", (e && e.message) || e);
+    dbHandle = null;
+    storageMode = "memory";
+  }
+  self.postMessage({ type: "storage", mode: storageMode });
+}
+
+// Eager-init on boot: wasm first (the engine host), then sqlite-wasm (the
+// durable backend). The main thread sees WASM_READY + {type:"storage"} before
+// any command. Wasm init failure is fatal (the spec's WASM_READY poll times
+// out); storage init failure is a graceful degrade (memory mode).
+void ensureWasm()
+  .then(() => initStorage())
+  .catch((e) =>
+    self.postMessage({ id: 0, error: "wasm-init: " + String((e && e.message) || e) }),
+  );
 
 function startPolling() {
   if (pollTimer) {
@@ -153,7 +194,16 @@ self.onmessage = async (ev) => {
         table = m.table;
         token = m.token ?? null;
         connParams = { url: m.url, table: m.table, where_sql: m.where_sql ?? null };
-        sock = await NostosSocket.connect(m.url, token, table, connParams.where_sql);
+        // ADR-0033: pass dbHandle as the 5th arg. When non-null (durable mode),
+        // the Rust side creates WebStorage::SqliteWasm; when null (memory mode),
+        // it creates WebStorage::Memory (the degrade fallback).
+        sock = await NostosSocket.connect(
+          m.url,
+          token,
+          table,
+          connParams.where_sql,
+          dbHandle,
+        );
         attachChangePush(sock);
         self.postMessage({ id: m.id, ok: true, checkpoint: sock.checkpoint });
         self.postMessage({ type: "status", connected: true });
@@ -234,11 +284,17 @@ self.onmessage = async (ev) => {
         break;
       }
       case "signOut": {
-        // ADR-0029 D1 / WS4-D3: wipe the engine's in-memory rows + outbox
+        // ADR-0029 D1 / WS4-D3: wipe the engine's rows + outbox
         // (`clearLocalState` clears BOTH under one borrow — half a clear is a
         // cross-user leak), close the socket, and drop the cached token +
         // subscription so the next user on this same Worker session sees none
         // of the previous user's rows or pending writes.
+        //
+        // ADR-0033: in durable mode, ALSO wipe the OPFS SQLite DB (clearAll
+        // deletes rows + outbox + resets checkpoint to '0'). The main thread
+        // is responsible for clearing localStorage checkpoint keys (Workers
+        // cannot access localStorage). The token is dropped here + in the
+        // main-thread proxy.
         if (sock) {
           try {
             sock.clearLocalState();
@@ -257,6 +313,14 @@ self.onmessage = async (ev) => {
           }
           sock = null;
           stopPolling();
+        }
+        // Wipe the durable OPFS store so the next principal starts fresh.
+        if (dbHandle) {
+          try {
+            dbHandle.clearAll();
+          } catch (_) {
+            /* db already closed — nothing to wipe */
+          }
         }
         watching = false;
         table = null;
@@ -289,7 +353,13 @@ self.onmessage = async (ev) => {
           sock = null;
           stopPolling();
           await ensureWasm();
-          sock = await NostosSocket.connect(rp.url, token, rp.table, rp.where_sql);
+          sock = await NostosSocket.connect(
+            rp.url,
+            token,
+            rp.table,
+            rp.where_sql,
+            dbHandle,
+          );
           attachChangePush(sock);
           self.postMessage({ id: m.id, ok: true, checkpoint: sock.checkpoint });
           self.postMessage({ type: "status", connected: true });

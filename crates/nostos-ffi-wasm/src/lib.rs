@@ -55,9 +55,154 @@
 
 use nostos_core::{
     ApplyEngine, ApplyOutcome, Frame as CoreFrame, InMemoryStorage, Lsn, Operation, Outbox,
-    PendingWrite, WriteOp,
+    PendingWrite, RowOp, Storage, WriteOp,
 };
+use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
+
+/// The SQLite-WASM durable backend (ADR-0017 follow-up / ADR-0033).
+pub mod sqlite_wasm;
+pub use sqlite_wasm::SqliteWasmStorage;
+
+/// The unified storage backend for the WASM bridge — either in-memory (the
+/// node smoke + standalone default) or SQLite-WASM/OPFS (the Worker's durable
+/// path). Both implement [`Storage`] + [`Outbox`]; the enum delegates. This lets
+/// [`NostosEngine`] / [`NostosSocket`] work with either backend without generics
+/// crossing the wasm-bindgen boundary (generics can't be `#[wasm_bindgen]`).
+///
+/// The durable variant is browser-only (the JS sqlite-wasm methods exist only
+/// in a Worker with OPFS). Host cargo tests exercise only `Memory`; the
+/// `SqliteWasm` path is proven by the Playwright browser test (ADR-0033).
+pub(crate) enum WebStorage {
+    /// RAM-only — the node smoke / standalone default + the OPFS-unavailable
+    /// degrade path (ADR-0017 follow-up scope step 5 / ADR-0033).
+    Memory(InMemoryStorage),
+    /// OPFS-backed SQLite-WASM — durable across reloads. The Worker creates this
+    /// after async sqlite-wasm init + `opfs-sahpool`.
+    SqliteWasm(SqliteWasmStorage),
+}
+
+impl Storage for WebStorage {
+    fn checkpoint(&self) -> nostos_core::Result<Lsn> {
+        match self {
+            WebStorage::Memory(s) => s.checkpoint(),
+            WebStorage::SqliteWasm(s) => s.checkpoint(),
+        }
+    }
+    fn epoch(&self) -> nostos_core::Result<u64> {
+        match self {
+            WebStorage::Memory(s) => s.epoch(),
+            WebStorage::SqliteWasm(s) => s.epoch(),
+        }
+    }
+    fn save_epoch(&self, epoch: u64) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.save_epoch(epoch),
+            WebStorage::SqliteWasm(s) => s.save_epoch(epoch),
+        }
+    }
+    fn apply_batch(
+        &mut self,
+        ops: &[(RowOp, u64)],
+        checkpoint: Lsn,
+        snapshot_tables: &HashSet<String>,
+    ) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.apply_batch(ops, checkpoint, snapshot_tables),
+            WebStorage::SqliteWasm(s) => s.apply_batch(ops, checkpoint, snapshot_tables),
+        }
+    }
+    fn pks_for_table(&self, table: &str) -> nostos_core::Result<Vec<String>> {
+        match self {
+            WebStorage::Memory(s) => s.pks_for_table(table),
+            WebStorage::SqliteWasm(s) => s.pks_for_table(table),
+        }
+    }
+    fn delete_pks(&mut self, table: &str, pks: &[String]) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.delete_pks(table, pks),
+            WebStorage::SqliteWasm(s) => s.delete_pks(table, pks),
+        }
+    }
+    fn clear(&mut self) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => Storage::clear(s),
+            WebStorage::SqliteWasm(s) => Storage::clear(s),
+        }
+    }
+}
+
+impl Outbox for WebStorage {
+    fn enqueue(&mut self, write: PendingWrite) -> nostos_core::Result<u64> {
+        match self {
+            WebStorage::Memory(s) => s.enqueue(write),
+            WebStorage::SqliteWasm(s) => s.enqueue(write),
+        }
+    }
+    fn pending(&self) -> nostos_core::Result<Vec<(u64, PendingWrite)>> {
+        match self {
+            WebStorage::Memory(s) => s.pending(),
+            WebStorage::SqliteWasm(s) => s.pending(),
+        }
+    }
+    fn mark_done(&mut self, id: u64) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.mark_done(id),
+            WebStorage::SqliteWasm(s) => s.mark_done(id),
+        }
+    }
+    fn bump_attempts(&self, id: u64) -> nostos_core::Result<u32> {
+        match self {
+            WebStorage::Memory(s) => s.bump_attempts(id),
+            WebStorage::SqliteWasm(s) => s.bump_attempts(id),
+        }
+    }
+    fn mark_dead_letter(&self, id: u64) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.mark_dead_letter(id),
+            WebStorage::SqliteWasm(s) => s.mark_dead_letter(id),
+        }
+    }
+    fn apply_local(&mut self, write: &PendingWrite) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.apply_local(write),
+            WebStorage::SqliteWasm(s) => s.apply_local(write),
+        }
+    }
+    fn clear(&mut self) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => Outbox::clear(s),
+            WebStorage::SqliteWasm(s) => Outbox::clear(s),
+        }
+    }
+}
+
+impl WebStorage {
+    /// Row count (diagnostics — NOT on the `Storage` trait). Delegates to
+    /// whichever backend is active. The SqliteWasm variant queries `COUNT(*)`.
+    pub(crate) fn row_count(&self) -> usize {
+        match self {
+            WebStorage::Memory(s) => s.row_count(),
+            WebStorage::SqliteWasm(s) => s.row_count(),
+        }
+    }
+
+    /// `(pk, payload)` pairs for `table` sorted by pk (diagnostics readback).
+    /// Delegates to whichever backend is active.
+    pub(crate) fn rows_for(&self, table: &str) -> Vec<(String, Vec<u8>)> {
+        match self {
+            WebStorage::Memory(s) => s.rows_for(table),
+            WebStorage::SqliteWasm(s) => s.rows_for(table),
+        }
+    }
+
+    /// Whether this backend is the durable (SqliteWasm) variant. Used by the
+    /// transport to decide whether to read the checkpoint from SQLite (durable)
+    /// or `localStorage` (in-memory degrade path).
+    pub(crate) fn is_durable(&self) -> bool {
+        matches!(self, WebStorage::SqliteWasm(_))
+    }
+}
 
 /// The operation kind, as a JS-friendly string. Matches `nostos_domain::Operation`.
 ///
@@ -201,7 +346,7 @@ impl RowEntry {
 /// at connect time without a separate config object crossing the JS boundary.
 #[wasm_bindgen]
 pub struct NostosEngine {
-    inner: ApplyEngine<InMemoryStorage>,
+    inner: ApplyEngine<WebStorage>,
     /// The optional safe-SQL predicate for the next subscribe. Held here so the
     /// future WASM transport (E1) can read it when sending the subscribe frame;
     /// the in-memory apply path ignores it (the server filters upstream).
@@ -211,11 +356,25 @@ pub struct NostosEngine {
 #[wasm_bindgen]
 impl NostosEngine {
     /// Create an in-memory engine. Data survives the apply loop but NOT a page
-    /// reload — real browser persistence (OPFS) is deferred past v0.1 (ADR-0017).
+    /// reload — durable browser persistence (SQLite-WASM/OPFS) is the Worker's
+    /// durable path (ADR-0017 follow-up / ADR-0033). This is the node-smoke +
+    /// standalone default + the OPFS-unavailable degrade path.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: ApplyEngine::new(InMemoryStorage::new()),
+            inner: ApplyEngine::new(WebStorage::Memory(InMemoryStorage::new())),
+            where_sql: None,
+        }
+    }
+
+    /// Create an engine backed by a durable SQLite-WASM/OPFS store. Called by
+    /// the Worker (via [`NostosSocket::connect`]'s `db_handle` arg) after async
+    /// sqlite-wasm init. The JS `db` is a wrapper around the sqlite-wasm
+    /// instance (see `sdk/nostos_web/worker/sqlite_wasm_glue.js`). Browser-only.
+    #[doc(hidden)]
+    pub(crate) fn with_durable(db: js_sys::Object) -> Self {
+        Self {
+            inner: ApplyEngine::new(WebStorage::SqliteWasm(SqliteWasmStorage::new(db))),
             where_sql: None,
         }
     }
@@ -303,12 +462,18 @@ impl NostosEngine {
         self.inner.storage().row_count()
     }
 
-    /// Mutable access to the backing `InMemoryStorage` — the outbox flush path
+    /// Mutable access to the backing `WebStorage` — the outbox flush path
     /// (`Outbox::enqueue` / `apply_local` / `pending` / `mark_done`) reaches the
     /// store through this. `pub(crate)` because the JS surface never mutates
     /// storage directly; only [`NostosSocket`]'s write/flush path (WS1) does.
-    pub(crate) fn storage_mut(&mut self) -> &mut InMemoryStorage {
+    pub(crate) fn storage_mut(&mut self) -> &mut WebStorage {
         self.inner.storage_mut()
+    }
+
+    /// Read-only access to the backing `WebStorage` — used by the transport to
+    /// check `is_durable()` for the checkpoint-reading decision (ADR-0033).
+    pub(crate) fn storage(&self) -> &WebStorage {
+        self.inner.storage()
     }
 
     /// Enumerate the `(pk, payload)` pairs the engine currently holds for
@@ -347,11 +512,11 @@ impl NostosEngine {
     pub fn clear(&mut self) {
         let s = self.inner.storage_mut();
         // Both clears under one borrow — half a clear is a cross-user leak.
-        // ponytail: `let _ =` — `InMemoryStorage::clear` is infallible in
-        // practice (a `HashMap`/`Vec` clear); the `Result` is just the trait
-        // shape, surfaced as infallible here.
-        let _ = <InMemoryStorage as nostos_core::Storage>::clear(s);
-        let _ = <InMemoryStorage as Outbox>::clear(s);
+        // `Storage::clear` on `WebStorage::SqliteWasm` runs `clearAll()`
+        // (DELETE rows + outbox + reset checkpoint); `Outbox::clear` is the
+        // outbox-only half (redundant after Storage::clear, but correct).
+        let _ = <WebStorage as Storage>::clear(s);
+        let _ = <WebStorage as Outbox>::clear(s);
     }
 }
 
@@ -463,8 +628,9 @@ impl NostosSocket {
         token: Option<String>,
         table: String,
         where_sql: Option<String>,
+        db_handle: Option<js_sys::Object>,
     ) -> Result<NostosSocket, JsValue> {
-        transport::connect(url, token, table, where_sql).await
+        transport::connect(url, token, table, where_sql, db_handle).await
     }
 
     /// The current durable checkpoint (the LSN persisted to `localStorage`).

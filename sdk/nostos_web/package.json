@@ -21,6 +21,9 @@
   "devDependencies": {
     "@playwright/test": "^1.40.0"
   },
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/unfazed-dev/nostos.git",

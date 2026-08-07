@@ -487,6 +487,7 @@ pub(crate) async fn connect(
     token: Option<String>,
     table: String,
     where_sql: Option<String>,
+    db_handle: Option<js_sys::Object>,
 ) -> Result<crate::NostosSocket, JsValue> {
     // Build the connect URL with `?token=` (same convention as the native
     // SyncClient — browsers can't set headers on a WS handshake).
@@ -503,12 +504,30 @@ pub(crate) async fn connect(
     // sends binary frames; text would force a UTF-8 round-trip).
     ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
-    // Resume from the persisted checkpoint (localStorage → 0).
-    let resume_lsn = read_checkpoint_ls(&table);
+    // Resume from the persisted checkpoint. For the durable (SqliteWasm) path,
+    // the engine's storage has the checkpoint from SQLite (survives reload —
+    // ADR-0033). For the in-memory path, read `localStorage` (today's behavior,
+    // the degrade fallback). `db_handle.is_some()` = durable mode.
     let where_sql = where_sql.filter(|s| !s.is_empty());
 
-    let mut engine = NostosEngine::new();
+    let mut engine = match &db_handle {
+        Some(db) => NostosEngine::with_durable(db.clone()),
+        None => NostosEngine::new(),
+    };
     engine.set_where_sql(where_sql.clone());
+
+    // For durable mode, the checkpoint comes from SQLite (the engine already
+    // loaded it at construction). For in-memory, fall back to localStorage.
+    let resume_lsn = if engine.storage().is_durable() {
+        let cp = engine.checkpoint();
+        if cp > 0.0 {
+            Some(cp as u64)
+        } else {
+            None
+        }
+    } else {
+        read_checkpoint_ls(&table)
+    };
     let inner = Rc::new(SocketInner {
         engine: Rc::new(RefCell::new(engine)),
         ws: ws.clone(),
