@@ -26,8 +26,9 @@ pub mod sync_epoch;
 pub mod tier;
 
 pub use crdt::{
-    merge_or_set_or_lww, merge_or_set_payloads, present_elements, Hlc, OrSetElement, OrSetError,
-    OrSetPayload,
+    counter_apply_delta, counter_value, merge_counter_or_lww, merge_counter_payloads,
+    merge_or_set_or_lww, merge_or_set_payloads, present_elements, CounterError, Hlc, OrSetElement,
+    OrSetError, OrSetPayload, PnCounterPayload, PnEntry,
 };
 pub use events::{Operation, ReplicationEvent, RowOp};
 pub use lsn::Lsn;

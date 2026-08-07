@@ -96,6 +96,21 @@ abstract class NostosEngine {
     required String element,
   });
 
+  /// Increment the PN-Counter in row [pk] of [table] by [delta] (ADR-0030
+  /// addendum). Returns the outbox id.
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  });
+
+  /// Decrement the PN-Counter by [delta] (bumps the negative counter).
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  });
+
   /// Run an arbitrary SELECT against on-device SQLite. Returns a JSON-array
   /// string (same shape as [watch]'s ticks); decode with jsonDecode. Requires
   /// an active subscription.
@@ -221,6 +236,26 @@ class RustNostosEngine implements NostosEngine {
     required String element,
   }) =>
       _handle.orSetRemove(table: table, pk: pk, element: element).then((b) => b.toInt());
+
+  @override
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) =>
+      _handle
+          .counterIncrement(table: table, pk: pk, delta: delta)
+          .then((b) => b.toInt());
+
+  @override
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) =>
+      _handle
+          .counterDecrement(table: table, pk: pk, delta: BigInt.from(delta))
+          .then((b) => b.toInt());
 
   @override
   Future<String> query({required String sql}) =>

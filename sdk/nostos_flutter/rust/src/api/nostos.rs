@@ -605,6 +605,45 @@ impl NostosHandle {
             .map_err(|e: ClientError| e.to_string())
     }
 
+    /// Increment the PN-Counter in row `pk` of `table` by `delta` (ADR-0030
+    /// addendum). Read-modify-write: reads the current counter payload, applies
+    /// the delta to this replica's entry, and enqueues the result. The per-
+    /// replica max merge converges across replicas.
+    pub async fn counter_increment(
+        &self,
+        table: String,
+        pk: String,
+        delta: i64,
+    ) -> Result<u64, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "counter_increment() called before subscribe()".to_string())?;
+        session
+            .client
+            .counter_increment(&table, &pk, delta)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
+    pub async fn counter_decrement(
+        &self,
+        table: String,
+        pk: String,
+        delta: u64,
+    ) -> Result<u64, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "counter_decrement() called before subscribe()".to_string())?;
+        session
+            .client
+            .counter_decrement(&table, &pk, delta)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
     /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
     /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
     /// object per row, keyed by column name — which is the SAME shape the

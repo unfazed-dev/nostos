@@ -899,6 +899,23 @@ class Collection<T> {
   Future<int> orSetRemove({required Object pk, required String element}) =>
       _db._nostos.orSetRemove(table: table, pk: pk.toString(), element: element);
 
+  /// Increment the PN-Counter in row [pk] of this table by [delta] (ADR-0030
+  /// addendum). Read-modify-write: reads the current counter payload, applies
+  /// the delta to this replica's entry, and enqueues a merge-upsert. Converges
+  /// with concurrent remote increments on the server's echo. Returns the local
+  /// outbox id.
+  ///
+  /// Requires the table to be tagged as a counter in the server/client config
+  /// (`NOSTOS_COUNTER_COLUMNS` / `SyncClientConfig.counter_tables` /
+  /// `SqliteStorage.with_counter_tables`).
+  Future<int> counterIncrement({required Object pk, required int delta}) =>
+      _db._nostos.counterIncrement(table: table, pk: pk.toString(), delta: delta);
+
+  /// Decrement the PN-Counter by [delta] (bumps the negative counter `n` for
+  /// this replica). Returns the local outbox id.
+  Future<int> counterDecrement({required Object pk, required int delta}) =>
+      _db._nostos.counterDecrement(table: table, pk: pk.toString(), delta: delta);
+
   /// Single-table [NostosDatabase.writeBatch] convenience (ADR-0032 T3): stamps
   /// this collection's [table] onto every op. Same all-or-nothing-delivery,
   /// NOT-a-server-transaction semantics — see [NostosDatabase.writeBatch].

@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0-beta.5';
 
   @override
-  int get rustContentHash => 874483979;
+  int get rustContentHash => -58849922;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -89,6 +89,20 @@ abstract class RustLibApi extends BaseApi {
     required String url,
     String? token,
     required String dbPath,
+  });
+
+  Future<BigInt> crateApiNostosNostosHandleCounterDecrement({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required BigInt delta,
+  });
+
+  Future<BigInt> crateApiNostosNostosHandleCounterIncrement({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required PlatformInt64 delta,
   });
 
   Future<void> crateApiNostosNostosHandleDisconnect({required NostosHandle that});
@@ -267,6 +281,90 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<BigInt> crateApiNostosNostosHandleCounterDecrement({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required BigInt delta,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(table, serializer);
+          sse_encode_String(pk, serializer);
+          sse_encode_u_64(delta, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleCounterDecrementConstMeta,
+        argValues: [that, table, pk, delta],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleCounterDecrementConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_counter_decrement",
+        argNames: ["that", "table", "pk", "delta"],
+      );
+
+  @override
+  Future<BigInt> crateApiNostosNostosHandleCounterIncrement({
+    required NostosHandle that,
+    required String table,
+    required String pk,
+    required PlatformInt64 delta,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(table, serializer);
+          sse_encode_String(pk, serializer);
+          sse_encode_i_64(delta, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleCounterIncrementConstMeta,
+        argValues: [that, table, pk, delta],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleCounterIncrementConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_counter_increment",
+        argNames: ["that", "table", "pk", "delta"],
+      );
+
+  @override
   Future<void> crateApiNostosNostosHandleDisconnect({required NostosHandle that}) {
     return handler.executeNormal(
       NormalTask(
@@ -279,7 +377,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 6,
             port: port_,
           );
         },
@@ -321,7 +419,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 7,
             port: port_,
           );
         },
@@ -363,7 +461,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 8,
             port: port_,
           );
         },
@@ -401,7 +499,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 9,
             port: port_,
           );
         },
@@ -443,7 +541,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 8,
+              funcId: 10,
               port: port_,
             );
           },
@@ -483,7 +581,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 11,
             port: port_,
           );
         },
@@ -517,7 +615,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 12,
             port: port_,
           );
         },
@@ -561,7 +659,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 11,
+              funcId: 13,
               port: port_,
             );
           },
@@ -604,7 +702,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 12,
+              funcId: 14,
               port: port_,
             );
           },
@@ -648,7 +746,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 13,
+              funcId: 15,
               port: port_,
             );
           },
@@ -694,7 +792,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 16,
             port: port_,
           );
         },
@@ -732,7 +830,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 17,
             port: port_,
           );
         },
@@ -762,7 +860,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 18,
             port: port_,
           );
         },
@@ -884,6 +982,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int dco_decode_i_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
+  }
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeI64(raw);
   }
 
   @protected
@@ -1094,6 +1198,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int sse_decode_i_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getPlatformInt64();
   }
 
   @protected
@@ -1371,6 +1481,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
@@ -1562,6 +1678,33 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// lifecycle callback, rather than waiting on GC.
   Future<void> close() =>
       RustLib.instance.api.crateApiNostosNostosHandleClose(that: this);
+
+  /// Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
+  Future<BigInt> counterDecrement({
+    required String table,
+    required String pk,
+    required BigInt delta,
+  }) => RustLib.instance.api.crateApiNostosNostosHandleCounterDecrement(
+    that: this,
+    table: table,
+    pk: pk,
+    delta: delta,
+  );
+
+  /// Increment the PN-Counter in row `pk` of `table` by `delta` (ADR-0030
+  /// addendum). Read-modify-write: reads the current counter payload, applies
+  /// the delta to this replica's entry, and enqueues the result. The per-
+  /// replica max merge converges across replicas.
+  Future<BigInt> counterIncrement({
+    required String table,
+    required String pk,
+    required PlatformInt64 delta,
+  }) => RustLib.instance.api.crateApiNostosNostosHandleCounterIncrement(
+    that: this,
+    table: table,
+    pk: pk,
+    delta: delta,
+  );
 
   Future<void> disconnect() =>
       RustLib.instance.api.crateApiNostosNostosHandleDisconnect(that: this);

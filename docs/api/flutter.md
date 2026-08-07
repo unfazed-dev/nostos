@@ -82,17 +82,27 @@ as safe SQLite literals — nothing the caller supplies is spliced raw.
 | `delete` | `Future<int> delete(Object pk)` |
 | `orSetAdd` | `Future<int> orSetAdd({required Object pk, required String element})` — add-wins merge (ADR-0030/T4) |
 | `orSetRemove` | `Future<int> orSetRemove({required Object pk, required String element})` — tombstone, add-wins |
+| `counterIncrement` | `Future<int> counterIncrement({required Object pk, required int delta})` — PN-Counter merge (ADR-0030 addendum) |
+| `counterDecrement` | `Future<int> counterDecrement({required Object pk, required int delta})` — PN-Counter, bumps negative counter |
 | `writeBatch` | `Future<List<int>> writeBatch(List<NostosWrite> writes)` — single-table convenience; stamps this table |
 
-> **`patch`/`upsert` vs `orSetAdd`/`orSetRemove`:** `patch` and `upsert` are
-> per-field **last-writer-wins** (ADR-0014) — a concurrent write clobbers the
-> prior value. `orSetAdd`/`orSetRemove` target a column the server tags as an
-> OR-set and **merge**: concurrent adds of different elements both survive, and
-> a remove is a tombstone a concurrent or later re-add revives (add-wins). Use
-> OR-set handles for multi-value fields (tags, collaborators, reactions) where
-> LWW would silently drop concurrent additions. Counters are server-authoritative
-> (`WriteOp::Increment`, ADR-0030 D1) — there is no offline counter handle; patch
-> the absolute value once the server echoes it.
+> **Three write semantics — pick by conflict model:**
+>
+> | Method | Semantics | Use when |
+> |--------|-----------|----------|
+> | `patch`/`upsert` | **Last-writer-wins** (ADR-0014) | A concurrent write should replace the prior value (normal fields) |
+> | `counterIncrement`/`counterDecrement` | **PN-Counter merge** (ADR-0030 addendum) | Concurrent increments from different replicas must all count (likes, scores, tallies) |
+> | `orSetAdd`/`orSetRemove` | **OR-set add-wins merge** (ADR-0030/T4) | Concurrent adds of different elements must both survive (tags, collaborators, reactions) |
+>
+> `patch` and `upsert` are per-field **last-writer-wins** — a concurrent write
+> clobbers the prior value. `counterIncrement`/`counterDecrement` target a table
+> the server tags as a PN-Counter and **merge** per-replica elementwise max: an
+> offline increment survives a server frame on the same row, and concurrent
+> increments from different replicas all count. `orSetAdd`/`orSetRemove` target a
+> column the server tags as an OR-set and **merge**: concurrent adds of different
+> elements both survive, and a remove is a tombstone a concurrent or later re-add
+> revives (add-wins). The server-authoritative `WriteOp::Increment` (ADR-0030 D1)
+> remains for server-serialized counters that don't need offline convergence.
 
 ## Writing — durable collapsed outbox (ADR-0013)
 

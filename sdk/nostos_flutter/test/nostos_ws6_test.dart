@@ -181,6 +181,20 @@ class _FakeEngine implements NostosEngine {
   }) async => 0;
 
   @override
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async => 0;
+
+  @override
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async => 0;
+
+  @override
   void applySchema(List<ClientTableFfi> tables) {}
 
   @override

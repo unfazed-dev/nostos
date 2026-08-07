@@ -115,6 +115,10 @@ pub struct SqliteStorage {
     /// element-wise by HLC instead of clobbering. Empty by default; the bench's
     /// `tasks` table is ordinary, so the measured fan-out path is unaffected.
     or_set_tables: std::collections::HashSet<String>,
+    /// Tables whose payload is a PN-Counter CRDT (ADR-0030 addendum): applies
+    /// MERGE per-replica elementwise max instead of clobbering. Empty by default.
+    /// A row's payload IS the counter `{"entries":[{"r":..,"p":..,"n":..}]}`.
+    counter_tables: std::collections::HashSet<String>,
 }
 
 impl SqliteStorage {
@@ -148,6 +152,17 @@ impl SqliteStorage {
         self
     }
 
+    /// Declare which tables hold PN-Counter CRDTs (ADR-0030 addendum). For those
+    /// tables `apply_batch` / `apply_local` / pending-replay merge per-replica
+    /// elementwise max; all others stay last-writer-wins (or OR-set if tagged).
+    /// Builder-style. A table MUST NOT be in both `or_set_tables` and
+    /// `counter_tables` (counter wins the first branch checked).
+    #[must_use]
+    pub fn with_counter_tables(mut self, tables: std::collections::HashSet<String>) -> Self {
+        self.counter_tables = tables;
+        self
+    }
+
     fn init(conn: Connection) -> Result<Self, StorageError> {
         conn.execute_batch(SCHEMA).map_err(rusqlite_err)?;
         Self::migrate_outbox_dlq(&conn)?;
@@ -156,6 +171,7 @@ impl SqliteStorage {
         Ok(Self {
             conn: Mutex::new(conn),
             or_set_tables: std::collections::HashSet::new(),
+            counter_tables: std::collections::HashSet::new(),
         })
     }
 
@@ -682,6 +698,29 @@ impl Storage for SqliteStorage {
                                     .execute(rusqlite::params![table, pk, merged, lsn_i64])
                                     .map_err(rusqlite_err)?;
                             }
+                        } else if self.counter_tables.contains(table.as_str()) {
+                            // PN-Counter: merge per-replica elementwise max
+                            // (ADR-0030 addendum). Same LSN-gated read-merge-write
+                            // as OR-set; a malformed payload degrades to LWW via
+                            // `merge_counter_or_lww`.
+                            let incoming = payload.as_ref();
+                            let row: Option<(Vec<u8>, i64)> = tx
+                                .query_row(
+                                    "SELECT payload, applied_lsn FROM cairn_data \
+                                     WHERE table_name = ?1 AND pk = ?2",
+                                    rusqlite::params![table, pk],
+                                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+                                )
+                                .ok();
+                            let admit = row.as_ref().is_none_or(|(_, l)| lsn_i64 >= *l);
+                            if admit {
+                                let existing: &[u8] =
+                                    row.as_ref().map_or(&[], |(p, _)| p.as_slice());
+                                let merged = nostos_domain::merge_counter_or_lww(existing, incoming);
+                                upsert_uncond
+                                    .execute(rusqlite::params![table, pk, merged, lsn_i64])
+                                    .map_err(rusqlite_err)?;
+                            }
                         } else if snapshot_tables.contains(table.as_str()) {
                             upsert_uncond
                                 .execute(rusqlite::params![table, pk, payload.as_ref(), lsn_i64])
@@ -738,6 +777,19 @@ impl Storage for SqliteStorage {
                                     )
                                     .unwrap_or_default();
                                 nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                            } else if self.counter_tables.contains(write.table.as_str()) {
+                                // PN-Counter (ADR-0030 addendum): merge the
+                                // pending optimistic delta per-replica max so an
+                                // offline increment survives a server frame.
+                                let existing: Vec<u8> = tx
+                                    .query_row(
+                                        "SELECT payload FROM cairn_data \
+                                         WHERE table_name = ?1 AND pk = ?2",
+                                        rusqlite::params![write.table, write.pk],
+                                        |r| r.get::<_, Vec<u8>>(0),
+                                    )
+                                    .unwrap_or_default();
+                                nostos_domain::merge_counter_or_lww(&existing, incoming)
                             } else {
                                 incoming.to_vec()
                             };
@@ -832,6 +884,22 @@ impl Storage for SqliteStorage {
             out.push(r.map_err(rusqlite_err)?);
         }
         Ok(out)
+    }
+
+    fn read_payload(&self, table: &str, pk: &str) -> nostos_core::Result<Option<Vec<u8>>> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("read_payload: storage mutex poisoned");
+        match conn.query_row(
+            "SELECT payload FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+            rusqlite::params![table, pk],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(rusqlite_err(e)),
+        }
     }
 
     fn delete_pks(&mut self, table: &str, pks: &[String]) -> nostos_core::Result<()> {
@@ -1143,6 +1211,18 @@ impl Outbox for SqliteStorage {
                         )
                         .unwrap_or_default();
                     nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                } else if self.counter_tables.contains(write.table.as_str()) {
+                    // PN-Counter (ADR-0030 addendum): merge the optimistic delta
+                    // per-replica max instead of clobbering the existing row.
+                    let existing: Vec<u8> = conn
+                        .query_row(
+                            "SELECT payload FROM cairn_data \
+                             WHERE table_name = ?1 AND pk = ?2",
+                            rusqlite::params![write.table, write.pk],
+                            |r| r.get::<_, Vec<u8>>(0),
+                        )
+                        .unwrap_or_default();
+                    nostos_domain::merge_counter_or_lww(&existing, incoming)
                 } else {
                     incoming.to_vec()
                 };

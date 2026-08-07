@@ -112,6 +112,10 @@ class _FakeEngine implements NostosEngine {
   final List<({String op, String table, String pk, String element})>
       orSetCalls = [];
 
+  /// Recorded counter increment/decrement calls: (op, table, pk, delta).
+  final List<({String op, String table, String pk, int delta})>
+      counterCalls = [];
+
   @override
   Future<int> orSetAdd({
     required String table,
@@ -130,6 +134,26 @@ class _FakeEngine implements NostosEngine {
   }) async {
     orSetCalls.add((op: 'remove', table: table, pk: pk, element: element));
     return orSetCalls.length;
+  }
+
+  @override
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async {
+    counterCalls.add((op: 'increment', table: table, pk: pk, delta: delta));
+    return counterCalls.length;
+  }
+
+  @override
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async {
+    counterCalls.add((op: 'decrement', table: table, pk: pk, delta: delta));
+    return counterCalls.length;
   }
 
   @override
@@ -708,6 +732,36 @@ void main() {
 
       expect(
         () => db.write(table: 'WRONG', op: 'upsert', pk: '1'),
+        throwsA(isA<StateError>()),
+      );
+    });
+  });
+
+  group('CRDT counter handles (ADR-0030 addendum)', () {
+    test('Collection.counterIncrement/counterDecrement delegate with delta',
+        () async {
+      final (engine, db) = newDb();
+      await db.subscribe('counts');
+      final counts =
+          db.collection<_Todo>(table: 'counts', fromRow: _Todo.fromRow);
+
+      await counts.counterIncrement(pk: '1', delta: 5);
+      await counts.counterDecrement(pk: '1', delta: 2);
+
+      expect(engine.counterCalls, [
+        (op: 'increment', table: 'counts', pk: '1', delta: 5),
+        (op: 'decrement', table: 'counts', pk: '1', delta: 2),
+      ]);
+    });
+
+    test('counterIncrement on an unsubscribed table throws StateError',
+        () async {
+      final (_, db) = newDb();
+      await db.subscribe('counts');
+
+      expect(
+        () => db.collection<_Todo>(table: 'WRONG', fromRow: _Todo.fromRow)
+            .counterIncrement(pk: '1', delta: 1),
         throwsA(isA<StateError>()),
       );
     });

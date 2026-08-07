@@ -370,6 +370,41 @@ class Nostos {
     return _engine.orSetRemove(table: table, pk: pk, element: element);
   }
 
+  /// Increment the PN-Counter in row [pk] of [table] by [delta] (ADR-0030
+  /// addendum). Read-modify-write: reads the current counter payload, applies
+  /// the delta to this replica's entry, and enqueues the result. Converges with
+  /// concurrent remote increments on the server's echo. Requires an active
+  /// subscription including [table].
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'counterIncrement("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.counterIncrement(table: table, pk: pk, delta: delta);
+  }
+
+  /// Decrement the PN-Counter by [delta] (bumps the negative counter `n`).
+  /// Requires an active subscription including [table].
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'counterDecrement("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.counterDecrement(table: table, pk: pk, delta: delta);
+  }
+
   /// Tears down the background sync loop and watch-stream pump for the
   /// active subscription (if any) — call this from a widget's own
   /// `dispose()` lifecycle method so a torn-down UI doesn't leave a

@@ -74,6 +74,23 @@ abstract class NostosHandle implements RustOpaqueInterface {
     dbPath: dbPath,
   );
 
+  /// Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
+  Future<BigInt> counterDecrement({
+    required String table,
+    required String pk,
+    required BigInt delta,
+  });
+
+  /// Increment the PN-Counter in row `pk` of `table` by `delta` (ADR-0030
+  /// addendum). Read-modify-write: reads the current counter payload, applies
+  /// the delta to this replica's entry, and enqueues the result. The per-
+  /// replica max merge converges across replicas.
+  Future<BigInt> counterIncrement({
+    required String table,
+    required String pk,
+    required PlatformInt64 delta,
+  });
+
   Future<void> disconnect();
 
   /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030 /

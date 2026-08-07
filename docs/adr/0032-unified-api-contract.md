@@ -63,14 +63,21 @@ in one round. The `Outbox::enqueue_batch` trait method carries a default
 > this verbatim — a batch that merely *looks* transactional is the high-risk
 > advisor-flagged failure mode.
 
-### T4 — CRDT typed surface (engine shipped WS3 @317b4d1; OR-set exposed Wave 1)
+### T4 — CRDT typed surface (OR-set + PN-Counter shipped)
 
 `Collection.orSetAdd(pk, element)` / `orSetRemove(pk, element)` are exposed on
 the Flutter typed surface, wired to the WS3-shipped OR-set engine via FFI
 (`SyncClient::or_set_add`/`or_set_remove` mint a client HLC and enqueue a
-merge-upsert). **Counters are NOT exposed:** `WriteOp::Increment` is
-server-authoritative (ADR-0030 D1) — the client cannot compute (column, delta)
-locally, so there is no offline-first counter handle. See "Coverage gaps" below.
+merge-upsert).
+
+`Collection.counterIncrement(pk, delta)` / `counterDecrement(pk, delta)` are
+exposed on the Flutter typed surface, wired to the PN-Counter CRDT engine
+(ADR-0030 addendum, shipped 2026-08-08) via FFI
+(`SyncClient::counter_increment`/`counter_decrement` read-modify-write the
+per-replica counter payload and enqueue a merge-upsert). This is a TRUE
+state-based CRDT merged client-side — NOT the server-authoritative
+`WriteOp::Increment` (ADR-0030 D1, which remains for server-serialized counters).
+Offline increments survive a server frame landing on the same row.
 
 ### T5 — Outbox observability (ADR-0027)
 
@@ -111,10 +118,13 @@ atlet `sessions` sort uses `watchSql` for exactly this reason — the structured
 
 ## Coverage gaps (reported, not self-resolved)
 
-1. **CRDT counter typed surface (T4)** — OR-set handles shipped (orSetAdd/
-   orSetRemove); counters remain server-authoritative (`WriteOp::Increment`,
-   ADR-0030 D1) with no offline client handle. Exposing a counter needs an
-   engine-side counter-merge primitive (not just an FFI wrapper).
+1. **~~CRDT counter typed surface (T4)~~ — RESOLVED 2026-08-08.** PN-Counter
+   CRDT shipped (ADR-0030 addendum): `counterIncrement`/`counterDecrement` on
+   `Collection<T>`, backed by `SyncClient::counter_increment`/`counter_decrement`
+   (read-modify-write + per-replica max merge). The server-authoritative
+   `WriteOp::Increment` (ADR-0030 D1) remains for server-serialized counters.
+   Column-level counters (one counter within a row with other data) are deferred
+   — current scope is table-level (row payload IS the counter).
 2. **Expression `ORDER BY`** — structured `Order` is field+direction only; the
    `(col IS NULL) DESC` sort atlet needs is routed through the escape hatch.
    If real apps need it often, extend `Order` (contract change), don't widen
