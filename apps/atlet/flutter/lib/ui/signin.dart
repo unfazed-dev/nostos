@@ -46,8 +46,11 @@ enum _Mode { password, otpRequest, otpVerify }
 
 class _SigninScreenState extends State<SigninScreen> {
   _Mode _mode = _Mode.password;
-  final _email = TextEditingController(text: 'flutter@atlet.internal');
-  final _password = TextEditingController();
+  // Prefill the seeded conformance user. NOTE: `.internal` addresses are
+  // rejected by GoTrue's email validation, so the SDK users live under
+  // `@atlet.dev` (see supabase/scripts/create_sdk_users.sh).
+  final _email = TextEditingController(text: 'flutter@atlet.dev');
+  final _password = TextEditingController(text: 'atlet-flutter-2026');
   final _otp = TextEditingController();
   bool _working = false;
   String? _error;
@@ -71,6 +74,10 @@ class _SigninScreenState extends State<SigninScreen> {
     try {
       await widget.passwordSignIn(_email.text, _password.text);
       widget.onSignedIn();
+    } on AuthException catch (e) {
+      // Surface the server's reason (e.g. "Invalid login credentials") —
+      // a generic message here previously masked a wrong-email root cause.
+      setState(() => _error = 'Sign-in failed: ${e.message}');
     } catch (e) {
       setState(() => _error = 'Sign-in failed. Check the password and try again.');
     } finally {

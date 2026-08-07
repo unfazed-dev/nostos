@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'adapters/nostos_adapter.dart';
+import 'connectivity_guard.dart';
 import 'adapters/powersync_adapter.dart';
 import 'adapters/sync_adapter.dart';
 import 'bench/harness.dart';
@@ -14,6 +15,7 @@ import 'bench/upload.dart';
 import 'design/tokens.dart';
 import 'engine_registry.dart';
 import 'ui/analytics.dart';
+import 'ui/connectivity_led.dart';
 import 'ui/home.dart';
 import 'ui/shop.dart';
 import 'ui/signin.dart';
@@ -37,7 +39,10 @@ const _appVersion = '1.0.0+1'; // mirrors pubspec.yaml's `version:`
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Supabase.initialize(url: _supabaseUrl, publishableKey: _supabaseAnonKey);
+  await Supabase.initialize(
+    url: _supabaseUrl,
+    publishableKey: _supabaseAnonKey,
+  );
   runApp(const AtletApp());
 }
 
@@ -66,9 +71,8 @@ class AtletApp extends StatelessWidget {
       initialRoute: '/signin',
       routes: {
         '/signin': (context) => SigninScreen(
-              onSignedIn: () =>
-                  Navigator.of(context).pushReplacementNamed('/home'),
-            ),
+          onSignedIn: () => Navigator.of(context).pushReplacementNamed('/home'),
+        ),
         '/home': (context) => const HomeScreen(),
       },
     );
@@ -96,9 +100,73 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _tabIndex = 0;
   Future<BenchStore>? _benchStoreFuture;
+  ConnectivityGuard? _connectivityGuard;
+
+  /// Drives the offline banner. Sourced from platform connectivity (the
+  /// guard), not the engine's `connected` stream: the banner must show even
+  /// when no engine is live (signed out) and must not flicker on the
+  /// engine's internal reconnect cycles.
 
   Future<BenchStore> _benchStore() => _benchStoreFuture ??=
       (widget.benchStoreOpener ?? BenchStore.openAppDocuments)();
+
+  @override
+  void initState() {
+    super.initState();
+    // Nostos is the default engine: bring it up automatically on entering
+    // Home so the user never has to open Settings to start syncing —
+    // Settings is only for *switching* engines. Post-frame so nothing
+    // touches `Supabase.instance` during initState (widget_test.dart).
+    // The connectivity guard also starts post-frame: platform channels are
+    // unavailable during widget-test initState, and start() is what opens
+    // the connectivity_plus stream.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _autoStartDefaultEngine();
+      _startConnectivityGuard();
+    });
+  }
+
+  /// Instant offline/online reaction (loss → clean disconnect so the UI
+  /// flips offline immediately; regain → resume(), which short-circuits
+  /// reconnect backoff and replays the outbox). Without this the engine only
+  /// notices a silently-dead socket via its 30s idle backstop.
+  void _startConnectivityGuard() {
+    if (_connectivityGuard != null) return;
+    _connectivityGuard = ConnectivityGuard(
+      onOnlineChanged: (online) async {
+        connectivityOnline.value = online; // drives the AppBar LED reactively
+        final adapter = engineRegistry.current;
+        if (adapter == null) return; // signed out / no engine live
+        try {
+          await adapter.setConnected(online);
+        } catch (e) {
+          // Never crash on a connectivity flap mid engine-switch; the engine's
+          // own backoff still covers reconnects if this call loses the race.
+          debugPrint('connectivity guard: setConnected($online) failed: $e');
+        }
+      },
+    )..start();
+  }
+
+  @override
+  void dispose() {
+    _connectivityGuard?.dispose();
+    _connectivityGuard = null;
+    super.dispose();
+  }
+
+  /// Starts [Engine.cairn] if no engine is live yet and a Supabase session
+  /// exists. Silently a no-op in widget tests (no `Supabase.initialize()`)
+  /// and when an engine is already live (hot reload, route re-push).
+  Future<void> _autoStartDefaultEngine() async {
+    if (engineRegistry.activeEngine != null) return;
+    try {
+      if (Supabase.instance.client.auth.currentSession == null) return;
+    } catch (_) {
+      return; // Supabase not initialized (widget tests) — stay engine-less.
+    }
+    await _switchEngine(Engine.cairn);
+  }
 
   /// Switches the live sync engine to [target] via [engineRegistry], which
   /// wipes the outgoing adapter (if any) before bringing the new one up
@@ -134,8 +202,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _notify(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _openSettings() {
@@ -155,13 +224,16 @@ class _HomeScreenState extends State<HomeScreen> {
   /// `_buildSession` fixture. `id` is unused: addSession()/PostgREST both
   /// assign their own ids (see runner.dart's writeAck/queueDrain).
   SessionRow _benchSessionRow(int i) => SessionRow(
-        id: 'unused',
-        title: 'Bench $i',
-        type: 'run',
-        metric: 5000 + i,
-        unit: 'm',
-        occurredOn: DateTime.now().toUtc(),
-      );
+    id: 'unused',
+    title: 'Bench $i',
+    // Must satisfy 0001_atlet_schema.sql's CHECKs: type in
+    // ('distance','reps','time'), unit in ('km','reps','sec') — 'run'/'m'
+    // was rejected by sessions_type_check and failed every bench insert.
+    type: 'distance',
+    metric: 5 + i,
+    unit: 'km',
+    occurredOn: DateTime.now().toUtc(),
+  );
 
   /// Production wiring for [AnalyticsScreen.runSuite]: runs the plan's
   /// two-engine comparison (bench/harness.dart's `runFullSuiteForBothEngines`)
@@ -210,6 +282,7 @@ class _HomeScreenState extends State<HomeScreen> {
         elevation: 0,
         title: Text('Home', style: TextStyle(color: AtletTokens.ink)),
         actions: [
+          const ConnectivityLed(),
           IconButton(
             key: const Key('settings-button'),
             icon: const Icon(Icons.settings_outlined),
@@ -252,11 +325,19 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       key: const Key('home-shell'),
-      body: switch (_tabIndex) {
-        0 => _buildHomeTab(context),
-        1 => ShopScreen(adapter: engineRegistry.current),
-        _ => _buildAnalyticsTab(context),
-      },
+      body: Column(
+        children: [
+          // Offline banner removed — the AppBar ConnectivityLed carries the
+          // online/offline signal now (user request 2026-08-07).
+          Expanded(
+            child: switch (_tabIndex) {
+              0 => _buildHomeTab(context),
+              1 => ShopScreen(adapter: engineRegistry.current),
+              _ => _buildAnalyticsTab(context),
+            },
+          ),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         key: const Key('main-nav-bar'),
         selectedIndex: _tabIndex,

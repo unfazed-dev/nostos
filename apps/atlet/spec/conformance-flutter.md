@@ -39,7 +39,7 @@ Per-item status for both adapters, against `spec/adapter.md` §Conformance check
 
 1. Provision a real Supabase project; fill `apps/atlet/services/.env` from `.env.example`.
 2. `docker compose -f apps/atlet/services/docker-compose.atlet.yml up -d` (`nostos-server` :8080, `powersync` :8081), with `NOSTOS_WRITE_TABLES=sessions`.
-3. Run `create_sdk_users.sh`; sign in as `flutter@atlet.internal`.
+3. Run `create_sdk_users.sh`; sign in as `flutter@atlet.dev`.
 4. Drive **all five** items against **both** adapters. In particular: item 2 has no prior coverage for NostosAdapter, and item 3 has no prior coverage for either adapter — do not treat those as "already done elsewhere."
 5. Record results in a dated addendum appended to this file; do not overwrite the "not run" entries recorded above — they are accurate for 2026-08-06 and should stay legible as history.
 

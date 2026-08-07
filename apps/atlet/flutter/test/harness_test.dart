@@ -12,13 +12,14 @@ import 'package:atlet/bench/runner.dart';
 import 'package:atlet/bench/store.dart';
 import 'package:atlet/engine_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/fake_cart_orders.dart';
 
 /// Self-contained fake, mirrors test/runner_test.dart's `_FakeAdapter` but
 /// adds a settable [engine] name (so two-engine suite tests can distinguish
 /// the two live adapters), a [seedSize]-driven cold-sync seed, and a
 /// [signedOut] flag so runFullSuiteForBothEngines's post-suite signOut()
 /// call is observable.
-class _FakeAdapter implements SyncAdapter {
+class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   _FakeAdapter({required this.engine, this.seedSize = 0});
 
   @override
@@ -30,7 +31,14 @@ class _FakeAdapter implements SyncAdapter {
   final _connectedController = StreamController<bool>.broadcast();
   final _marksController = StreamController<SyncMark>.broadcast();
   bool _connected = true;
+  List<SessionRow>? _lastSessions;
   int _nextId = 0;
+
+  void _emitSessions() {
+    final rows = List<SessionRow>.unmodifiable(_sessions);
+    _lastSessions = rows;
+    _sessionsController.add(rows);
+  }
   Duration ackDelay = Duration.zero;
   bool signedOut = false;
   int initCount = 0;
@@ -62,8 +70,9 @@ class _FakeAdapter implements SyncAdapter {
     // Always emit, even when seedSize is 0: Runner.coldSync's listener
     // completes on the first emission where rows.length == seedSize, so a
     // seedSize-0 suite needs an (empty) emission too, not just a guard for
-    // the non-empty case.
-    _sessionsController.add(List.unmodifiable(_sessions));
+    // the non-empty case. watchSessions() replays this latest snapshot to
+    // late subscribers, matching the real adapters' replayLatest contract.
+    _emitSessions();
   }
 
   @override
@@ -87,7 +96,7 @@ class _FakeAdapter implements SyncAdapter {
         occurredOn: s.occurredOn,
       ),
     );
-    _sessionsController.add(List.unmodifiable(_sessions));
+    _emitSessions();
     _marksController.add(SyncMark(MarkKind.localVisible, id, _clock.elapsed));
     _scheduleAck(id);
     return id;
@@ -111,7 +120,7 @@ class _FakeAdapter implements SyncAdapter {
         occurredOn: row.occurredOn,
         serverCommittedAt: DateTime.now().toUtc(),
       );
-      _sessionsController.add(List.unmodifiable(_sessions));
+      _emitSessions();
       _marksController.add(SyncMark(MarkKind.serverAcked, id, _clock.elapsed));
     });
   }
@@ -119,11 +128,12 @@ class _FakeAdapter implements SyncAdapter {
   @override
   Future<void> deleteSession(String id) async {
     _sessions.removeWhere((r) => r.id == id);
-    _sessionsController.add(List.unmodifiable(_sessions));
+    _emitSessions();
   }
 
   @override
-  Stream<List<SessionRow>> watchSessions() => _sessionsController.stream;
+  Stream<List<SessionRow>> watchSessions() =>
+      replayLatest(_sessionsController.stream, () => _lastSessions);
 
   @override
   Stream<List<ProductRow>> watchProducts() => const Stream.empty();
@@ -291,10 +301,9 @@ void main() {
       final dbDir = '${tempDir.path}/db2';
       await Directory(dbDir).create(recursive: true);
 
-      // watchSessions() is a broadcast stream with no replay (see
-      // runner_test.dart's fake adapter doc) — subscribe now so the
-      // post-suite assertion sees the latest emission instead of hanging
-      // for one that already happened.
+      // watchSessions() replays the latest snapshot on listen (matching the
+      // real adapters' replayLatest contract) — subscribe now so the
+      // post-suite assertion sees the latest emission either way.
       List<SessionRow> latestRows = const [];
       final sub = adapter.watchSessions().listen((rows) => latestRows = rows);
 

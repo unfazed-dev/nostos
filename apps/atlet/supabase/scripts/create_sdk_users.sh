@@ -6,6 +6,6 @@ for sdk in flutter react_native web kotlin swift node capacitor tauri dotnet; do
     -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
     -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"email\":\"$sdk@atlet.internal\",\"password\":\"$ATLET_SDK_USER_PASSWORD\",\"email_confirm\":true}" \
-    && echo " created: $sdk@atlet.internal" || echo " exists/failed: $sdk (check manually)"
+    -d "{\"email\":\"$sdk@atlet.dev\",\"password\":\"$ATLET_SDK_USER_PASSWORD\",\"email_confirm\":true}" \
+    && echo " created: $sdk@atlet.dev" || echo " exists/failed: $sdk (check manually)"
 done

@@ -456,6 +456,41 @@ impl PgReplicator {
                 warn!(error = %e, "could not bootstrap relations from catalog; relying on stream Relation messages");
             }
         }
+        self.audit_replica_identity(sql).await;
+    }
+
+    /// Mechanical enforcement of ADR-0025 F1: every published table must have
+    /// `REPLICA IDENTITY FULL`, or live DELETEs (and UPDATE old-rows) arrive
+    /// without the tenant column and are silently dropped by tenant-scoped
+    /// fan-out. This does NOT fail startup (an app that never deletes still
+    /// works), but it screams once per connect with the exact fix SQL —
+    /// same loud-error convention as the NOSTOS_WRITE_TABLES allowlist.
+    async fn audit_replica_identity(&self, sql: &tokio_postgres::Client) {
+        let q = "SELECT n.nspname || '.' || c.relname \
+                 FROM pg_publication_tables pt \
+                 JOIN pg_class c ON c.relname = pt.tablename \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = pt.schemaname \
+                 WHERE pt.pubname = $1 AND c.relreplident <> 'f' \
+                 ORDER BY 1";
+        match sql.query(q, &[&self.cfg.publication]).await {
+            Ok(rows) if !rows.is_empty() => {
+                let tables: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+                for t in &tables {
+                    error!(
+                        table = %t,
+                        "published table lacks REPLICA IDENTITY FULL: live DELETEs will carry \
+                         only PK columns, so tenant-scoped delete fan-out SILENTLY DROPS them. \
+                         Fix: ALTER TABLE {t} REPLICA IDENTITY FULL;"
+                    );
+                }
+            }
+            Ok(_) => {
+                debug!("replica-identity audit: all published tables are FULL");
+            }
+            Err(e) => {
+                warn!(error = %e, "could not audit replica identity of published tables");
+            }
+        }
     }
 
     /// Create publication + slot if absent, resolve the start LSN. On a FRESH

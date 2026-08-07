@@ -513,12 +513,23 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- build the axum router + transport ----
     // Tenant column is enforced only under supabase-jwt auth — the anonymous
-    // mode has no principal to scope with (see ADR-0011).
-    let tenant_col = if cfg.sync_auth == "supabase-jwt" {
+    // mode has no principal to scope with (see ADR-0011). An *empty*
+    // `NOSTOS_TENANT_COLUMN=` is the explicit opt-out (single-tenant deploys
+    // scoping per-table via nostos_rules.toml instead): before this guard, the
+    // empty string was passed through as a real column name, injecting
+    // `"" = <tenant>` into every predicate — a column no row has, so every
+    // authenticated subscription silently snapshot/streamed zero rows.
+    let tenant_col = if cfg.sync_auth == "supabase-jwt" && !cfg.tenant_column.is_empty() {
         Some(cfg.tenant_column.as_str())
     } else {
         None
     };
+    if cfg.sync_auth == "supabase-jwt" && cfg.tenant_column.is_empty() {
+        tracing::info!(
+            "NOSTOS_TENANT_COLUMN is empty — tenant scoping disabled; \
+             use nostos_rules.toml scopes for per-table row filtering"
+        );
+    }
     let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
         .with_buffer(cfg.session_buffer)
         .with_metrics(Arc::clone(&metrics));

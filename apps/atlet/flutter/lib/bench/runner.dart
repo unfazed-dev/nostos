@@ -160,18 +160,25 @@ class Runner {
     final startedAt = DateTime.now().toUtc();
     final sw = Stopwatch()..start();
     final completer = Completer<Duration>();
+    // init() BEFORE watchSessions(): the adapters create their stream
+    // controllers inside init() and fail fast on pre-init watch calls (the
+    // "watchSessions() before init()" guard — see nostos_adapter.dart). No
+    // emission is missed by listening after init: both adapters replay the
+    // latest row snapshot to late listeners, so a catch-up that completed
+    // between init() returning and listen() attaching still delivers the
+    // seedSize-row set and completes the stopwatch.
+    await adapter.init(
+      supabaseUrl: supabaseUrl,
+      accessToken: accessToken,
+      userId: userId,
+      dbDir: dbDir,
+    );
     final sub = adapter.watchSessions().listen((rows) {
       if (!completer.isCompleted && rows.length == seedSize) {
         completer.complete(sw.elapsed);
       }
     });
     try {
-      await adapter.init(
-        supabaseUrl: supabaseUrl,
-        accessToken: accessToken,
-        userId: userId,
-        dbDir: dbDir,
-      );
       final elapsed = await completer.future.timeout(timeout);
       final ms = elapsed.inMilliseconds;
       return _record('cold_sync', {

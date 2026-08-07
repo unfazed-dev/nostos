@@ -191,20 +191,51 @@ Future<void> _downloadAndVerify({
   }
 }
 
+/// Maps the code-asset target to an explicit Rust `--target` triple for the
+/// cargo fallback, or null to build for the host. Without this, every
+/// cross-compiled target got a HOST (macOS) dylib: dyld then rejects the
+/// embedded framework at runtime — "mach-o file ... incompatible platform
+/// (have 'macOS', need 'iOS-simulator')" — which is exactly how the atlet
+/// iOS-simulator run failed (2026-08-07). macOS stays null (host == target
+/// there, the one case the old behaviour was accidentally correct for).
+/// ponytail: Android is left null — a bare `--target aarch64-linux-android`
+/// fails without the NDK linker env (`cargo ndk` handles it); the W6 release
+/// pipeline's prebuilt artifacts are the upgrade path for Android.
+String? _rustTriple(CodeConfig code) {
+  return switch (code.targetOS) {
+    OS.iOS => switch (code.iOS.targetSdk) {
+      IOSSdk.iPhoneOS => 'aarch64-apple-ios',
+      IOSSdk.iPhoneSimulator => switch (code.targetArchitecture) {
+        Architecture.arm64 => 'aarch64-apple-ios-sim',
+        Architecture.x64 => 'x86_64-apple-ios',
+        _ => null,
+      },
+      _ => null,
+    },
+    _ => null,
+  };
+}
+
 Future<void> _cargoBuildFallback({
   required BuildInput input,
   required File destination,
   required String libFileName,
 }) async {
   final crateDir = Directory.fromUri(input.packageRoot.resolve('rust/')).path;
+  final triple = _rustTriple(input.config.code);
   final result = await Process.run('cargo', [
     'build',
     '--release',
+    if (triple != null) ...['--target', triple],
   ], workingDirectory: crateDir);
   if (result.exitCode != 0) {
     throw Exception('cargo build failed:\n${result.stderr}');
   }
-  final builtFile = File('$crateDir/target/release/$libFileName');
+  final builtFile = File(
+    triple == null
+        ? '$crateDir/target/release/$libFileName'
+        : '$crateDir/target/$triple/release/$libFileName',
+  );
   if (!builtFile.existsSync()) {
     throw Exception('cargo build did not produce ${builtFile.path}');
   }

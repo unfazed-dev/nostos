@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../adapters/sync_adapter.dart';
 import '../design/tokens.dart';
+import '../util/uuid.dart';
 import 'detail.dart';
+import 'stats_deck.dart';
 
 /// Session types per apps/atlet/design/data_model.json's enum. Wire `unit` is
 /// derived from `type` (never user-entered) so stored rows always match the
@@ -67,19 +69,25 @@ class TrainingHome extends StatelessWidget {
               : ListView.separated(
                   key: const Key('session-list'),
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
-                  itemCount: sessions.length,
+                  // Index 0 is the stats deck (design home.jsx StatsDeck);
+                  // sessions follow, shifted by one.
+                  itemCount: sessions.length + 1,
                   separatorBuilder: (_, _) => const SizedBox(height: 12),
-                  itemBuilder: (context, i) => _SessionCard(
-                    session: sessions[i],
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => SessionDetail(
-                          adapter: adapter,
-                          sessionId: sessions[i].id,
+                  itemBuilder: (context, i) {
+                    if (i == 0) return StatsDeck(sessions: sessions);
+                    final session = sessions[i - 1];
+                    return _SessionCard(
+                      session: session,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => SessionDetail(
+                            adapter: adapter,
+                            sessionId: session.id,
+                          ),
                         ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 ),
         );
       },
@@ -223,7 +231,18 @@ class _AddSessionSheetState extends State<_AddSessionSheet> {
     super.dispose();
   }
 
-  bool get _valid => _title.text.trim().isNotEmpty && int.tryParse(_metric.text) != null;
+  /// Upper bound on the metric input. Postgres `sessions.metric` is `int4`
+  /// (max 2_147_483_647) and `time` inputs are multiplied by 60, so an
+  /// unchecked large entry (e.g. 999999999 minutes) overflows the column and
+  /// poisons the offline outbox with a forever-rejected write. 999_999 covers
+  /// any real workout (≈694 days in minutes) with 3 orders of headroom.
+  static const int _maxMetricInput = 999999;
+
+  bool get _valid {
+    if (_title.text.trim().isEmpty) return false;
+    final parsed = int.tryParse(_metric.text);
+    return parsed != null && parsed > 0 && parsed <= _maxMetricInput;
+  }
 
   Future<void> _submit() async {
     final parsed = int.parse(_metric.text);
@@ -231,7 +250,9 @@ class _AddSessionSheetState extends State<_AddSessionSheet> {
     setState(() => _saving = true);
     await widget.adapter.addSession(
       SessionRow(
-        id: 's-${DateTime.now().microsecondsSinceEpoch}',
+        // sessions.id is a Postgres `uuid` — a non-UUID client id is
+        // rejected by the server write-back (invalid input syntax).
+        id: uuidV4(),
         title: _title.text.trim(),
         type: _type,
         metric: metric,
@@ -290,6 +311,11 @@ class _AddSessionSheetState extends State<_AddSessionSheet> {
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
                 labelText: _type == 'time' ? 'Minutes' : (_type == 'distance' ? 'Km' : 'Reps'),
+                errorText: (_metric.text.isNotEmpty &&
+                        ((int.tryParse(_metric.text) ?? -1) <= 0 ||
+                            (int.tryParse(_metric.text) ?? 0) > _maxMetricInput))
+                    ? 'Enter 1–$_maxMetricInput'
+                    : null,
               ),
               onChanged: (_) => setState(() {}),
             ),

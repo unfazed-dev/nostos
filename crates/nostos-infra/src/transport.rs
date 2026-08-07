@@ -1060,12 +1060,24 @@ async fn handle_decoded_message(
             // ack is dropped — the writer loop will end on the next failed
             // send anyway. Best-effort; not fatal.
             let _ = server_frames_tx.try_send(frame);
-            debug!(
-                table = %table,
-                op = %op,
-                ok,
-                "write applied (or rejected) — WriteResult queued"
-            );
+            if let Some(err) = error.as_deref() {
+                // Rejections are logged loud with the reason: a silent
+                // ok=false is undiagnosable from the server side (the reason
+                // otherwise travels only in the WriteResult frame).
+                tracing::warn!(
+                    table = %table,
+                    op = %op,
+                    error = %err,
+                    "write rejected"
+                );
+            } else {
+                debug!(
+                    table = %table,
+                    op = %op,
+                    ok,
+                    "write applied — WriteResult queued"
+                );
+            }
         }
         // Subscribe is routed by the reader to `register_subscribe`; reaching
         // here is impossible in the current flow, but stay defensive.

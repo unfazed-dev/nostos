@@ -36,6 +36,31 @@ class NostosAdapter implements SyncAdapter {
   StreamController<List<ProductRow>>? _productsController;
   StreamController<bool>? _connectedController;
 
+  // Latest values, replayed to late subscribers via replayLatest (see
+  // sync_adapter.dart for the full failure mode: broadcast controllers do
+  // not replay, and `products` emits exactly one snapshot, so a ShopScreen
+  // built after an engine switch spun forever). The SDK's watch() replays
+  // hot values; this layer must not discard that property.
+  List<SessionRow>? _lastSessions;
+  List<ProductRow>? _lastProducts;
+  List<CartItemRow>? _lastCart;
+  List<OrderRow>? _lastOrders;
+  bool? _lastConnected;
+  StreamController<List<CartItemRow>>? _cartController;
+  StreamController<List<OrderRow>>? _ordersController;
+  StreamSubscription<dynamic>? _cartSub;
+  StreamSubscription<dynamic>? _ordersSub;
+
+  /// Signed-in user id, stamped into cart/order write payloads because
+  /// those tables are `user_id NOT NULL DEFAULT auth.uid()` and nostos-server
+  /// writes over a direct PG connection where `auth.uid()` is NULL (tenant
+  /// stamping is off — `products` is a global table on the same connection).
+  String? _userId;
+
+  /// True only between the end of a successful init() and signOut().
+  /// setConnected() no-ops outside that window — see its comment.
+  bool _ready = false;
+
   @override
   Future<void> init({
     required String supabaseUrl,
@@ -43,8 +68,11 @@ class NostosAdapter implements SyncAdapter {
     required String userId,
     required String dbDir,
   }) async {
+    _userId = userId;
     _sessionsController = StreamController<List<SessionRow>>.broadcast();
     _productsController = StreamController<List<ProductRow>>.broadcast();
+    _cartController = StreamController<List<CartItemRow>>.broadcast();
+    _ordersController = StreamController<List<OrderRow>>.broadcast();
     _connectedController = StreamController<bool>.broadcast();
 
     final db = await NostosDatabase.connect(
@@ -62,24 +90,53 @@ class NostosAdapter implements SyncAdapter {
     // fires synchronously inside it, so `connected` would never emit true
     // until the next disconnect/resume cycle. See wireConnectionState below.
     _connSub = wireConnectionState(db.connectionState, (isConnected) {
+      _lastConnected = isConnected;
       _connectedController?.add(isConnected);
     });
 
     await db.subscribeTables(const [
       NostosTableSub(name: 'sessions'),
       NostosTableSub(name: 'products'),
+      NostosTableSub(name: 'cart_items'),
+      NostosTableSub(name: 'orders'),
     ]);
 
-    _sessionsSub = db.watch('SELECT * FROM sessions').listen((rows) {
+    // Newest first: latest day on top; within a day, the just-added row
+    // (server_committed_at still NULL until acked) sorts above older ones.
+    _sessionsSub = db
+        .watch('SELECT * FROM sessions '
+            'ORDER BY occurred_on DESC, '
+            '(server_committed_at IS NULL) DESC, server_committed_at DESC')
+        .listen((rows) {
       final sessions = rows.map(sessionFromRow).toList(growable: false);
       _deriver.onEmission(sessions);
+      _lastSessions = sessions;
       _sessionsController?.add(sessions);
     });
 
     _productsSub = db.watch('SELECT * FROM products').listen((rows) {
-      _productsController
-          ?.add(rows.map(productFromRow).toList(growable: false));
+      final products = rows.map(productFromRow).toList(growable: false);
+      _lastProducts = products;
+      _productsController?.add(products);
     });
+
+    _cartSub =
+        db.watch('SELECT * FROM cart_items ORDER BY added_at DESC')
+            .listen((rows) {
+      final items = rows.map(cartItemFromRow).toList(growable: false);
+      _lastCart = items;
+      _cartController?.add(items);
+    });
+
+    _ordersSub = db
+        .watch('SELECT * FROM orders ORDER BY created_at DESC')
+        .listen((rows) {
+      final orders = rows.map(orderFromRow).toList(growable: false);
+      _lastOrders = orders;
+      _ordersController?.add(orders);
+    });
+
+    _ready = true;
   }
 
   @override
@@ -96,24 +153,84 @@ class NostosAdapter implements SyncAdapter {
   }
 
   @override
+  Future<void> updateSession(SessionRow s) => _requireDb().write(
+        table: 'sessions',
+        op: 'upsert',
+        pk: s.id,
+        payload: sessionWritePayload(s),
+      );
+
+  @override
   Future<void> deleteSession(String id) =>
       _requireDb().write(table: 'sessions', op: 'delete', pk: id);
 
   @override
-  Stream<List<SessionRow>> watchSessions() => _requireController(
-      _sessionsController, 'watchSessions() before init()');
+  Future<void> addToCart(CartItemRow item) => _requireDb().write(
+        table: 'cart_items',
+        op: 'upsert',
+        pk: item.id,
+        payload: cartItemWritePayload(item, userId: _userId),
+      );
 
   @override
-  Stream<List<ProductRow>> watchProducts() => _requireController(
-      _productsController, 'watchProducts() before init()');
+  Future<void> removeCartItem(String id) =>
+      _requireDb().write(table: 'cart_items', op: 'delete', pk: id);
 
   @override
-  Stream<bool> get connected =>
-      _requireController(_connectedController, 'connected before init()');
+  Future<void> clearCart() async {
+    final items = _lastCart ?? const <CartItemRow>[];
+    for (final item in items) {
+      await removeCartItem(item.id);
+    }
+  }
+
+  @override
+  Future<String> placeOrder(OrderRow o) async {
+    await _requireDb().write(
+      table: 'orders',
+      op: 'upsert',
+      pk: o.id,
+      payload: orderWritePayload(o, userId: _userId),
+    );
+    await clearCart();
+    return o.id;
+  }
+
+  @override
+  Stream<List<CartItemRow>> watchCart() => replayLatest(
+      _requireController(_cartController, 'watchCart() before init()'),
+      () => _lastCart);
+
+  @override
+  Stream<List<OrderRow>> watchOrders() => replayLatest(
+      _requireController(_ordersController, 'watchOrders() before init()'),
+      () => _lastOrders);
+
+  @override
+  Stream<List<SessionRow>> watchSessions() => replayLatest(
+      _requireController(_sessionsController, 'watchSessions() before init()'),
+      () => _lastSessions);
+
+  @override
+  Stream<List<ProductRow>> watchProducts() => replayLatest(
+      _requireController(_productsController, 'watchProducts() before init()'),
+      () => _lastProducts);
+
+  @override
+  Stream<bool> get connected => replayLatest(
+      _requireController(_connectedController, 'connected before init()'),
+      () => _lastConnected);
 
   @override
   Future<void> setConnected(bool up) async {
-    final db = _requireDb();
+    // Startup race guard: the connectivity guard fires its initial platform
+    // event while init() may still be mid-flight (db connected but
+    // subscribeTables()/watch() wiring incomplete). resume()/disconnect()
+    // during that window trips the engine's "watch() called before
+    // subscribe()" invariant — drop the event instead; init() always
+    // finishes in the connected state anyway.
+    final db = _db;
+    if (db == null || !_ready) return;
     if (up) {
       // ponytail: NostosDatabase.resume() is fire-and-forget (no Future) —
       // setConnected(true) does not itself await a reconnect. Record this in
@@ -121,6 +238,12 @@ class NostosAdapter implements SyncAdapter {
       db.resume();
     } else {
       await db.disconnect();
+      // Reflect offline in the UI immediately: disconnect() tears the socket
+      // down client-side, but the engine's connectionState stream only emits
+      // on *observed* transport transitions, which can lag a forced local
+      // disconnect. The wire listener re-emits truth on reconnect.
+      _lastConnected = false;
+      _connectedController?.add(false);
     }
   }
 
@@ -129,11 +252,16 @@ class NostosAdapter implements SyncAdapter {
 
   @override
   Future<void> signOut() async {
+    _ready = false;
     await _sessionsSub?.cancel();
     await _productsSub?.cancel();
+    await _cartSub?.cancel();
+    await _ordersSub?.cancel();
     await _connSub?.cancel();
     _sessionsSub = null;
     _productsSub = null;
+    _cartSub = null;
+    _ordersSub = null;
     _connSub = null;
 
     await _db?.signOut(); // ADR-0029: full local wipe + client teardown
@@ -141,10 +269,19 @@ class NostosAdapter implements SyncAdapter {
 
     await _sessionsController?.close();
     await _productsController?.close();
+    await _cartController?.close();
+    await _ordersController?.close();
     await _connectedController?.close();
     _sessionsController = null;
     _productsController = null;
+    _cartController = null;
+    _ordersController = null;
     _connectedController = null;
+    _lastSessions = null;
+    _lastProducts = null;
+    _lastCart = null;
+    _lastOrders = null;
+    _lastConnected = null;
 
     _deriver.reset();
     // spec/adapter.md item 4: signOut leaves no live engine session — the
@@ -196,7 +333,76 @@ final NostosSchema _schema = NostosSchema(tables: [
     NostosColumn.integer('plant_based'),
     NostosColumn.text('image_url'),
   ]),
+  NostosTable(name: 'cart_items', primaryKey: const ['id'], columns: [
+    NostosColumn.text('id'),
+    NostosColumn.text('product_id'),
+    NostosColumn.integer('qty'),
+    NostosColumn.text('added_at'),
+  ]),
+  NostosTable(name: 'orders', primaryKey: const ['id'], columns: [
+    NostosColumn.text('id'),
+    NostosColumn.text('status'),
+    NostosColumn.integer('subtotal_cents'),
+    NostosColumn.integer('tax_cents'),
+    NostosColumn.integer('shipping_cents'),
+    NostosColumn.integer('total_cents'),
+    NostosColumn.text('payment_ref'),
+    NostosColumn.text('items_json'),
+    NostosColumn.text('created_at'),
+  ]),
 ]);
+
+/// Maps a decoded `cart_items` row to [CartItemRow]. Top-level and pure —
+/// same testability rationale as [sessionFromRow].
+CartItemRow cartItemFromRow(Map<String, dynamic> row) => CartItemRow(
+      id: row['id'] as String,
+      productId: row['product_id'] as String,
+      qty: _asInt(row['qty']),
+      addedAt: DateTime.parse(row['added_at'] as String),
+    );
+
+/// Maps a decoded `orders` row to [OrderRow].
+OrderRow orderFromRow(Map<String, dynamic> row) => OrderRow(
+      id: row['id'] as String,
+      status: row['status'] as String,
+      subtotalCents: _asInt(row['subtotal_cents']),
+      taxCents: _asInt(row['tax_cents']),
+      shippingCents: _asInt(row['shipping_cents']),
+      totalCents: _asInt(row['total_cents']),
+      paymentRef: row['payment_ref'] as String?,
+      itemsJson: row['items_json'] as String?,
+      createdAt: DateTime.parse(row['created_at'] as String),
+    );
+
+/// Write payload for a cart upsert (snake_case wire keys, like
+/// [sessionWritePayload]).
+///
+/// Includes `user_id` explicitly: cart_items is `user_id NOT NULL DEFAULT
+/// auth.uid()`, and nostos-server's PgWriteBack runs on a direct Postgres
+/// connection where `auth.uid()` is NULL — omitting it fails NOT NULL and
+/// the write is rejected (tenant stamping is off; products is global).
+Map<String, dynamic> cartItemWritePayload(CartItemRow c, {String? userId}) => {
+      'id': c.id,
+      'user_id': ?userId,
+      'product_id': c.productId,
+      'qty': c.qty,
+      'added_at': c.addedAt.toUtc().toIso8601String(),
+    };
+
+/// Write payload for an order insert. Includes `user_id` for the same
+/// reason as [cartItemWritePayload].
+Map<String, dynamic> orderWritePayload(OrderRow o, {String? userId}) => {
+      'id': o.id,
+      'user_id': ?userId,
+      'status': o.status,
+      'subtotal_cents': o.subtotalCents,
+      'tax_cents': o.taxCents,
+      'shipping_cents': o.shippingCents,
+      'total_cents': o.totalCents,
+      'payment_ref': o.paymentRef,
+      'items_json': o.itemsJson,
+      'created_at': o.createdAt.toUtc().toIso8601String(),
+    };
 
 /// Maps a decoded row from `NostosDatabase.watch('SELECT * FROM sessions')`
 /// to [SessionRow]. Top-level and pure so it's testable without the FFI

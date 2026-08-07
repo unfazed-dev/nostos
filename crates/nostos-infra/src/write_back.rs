@@ -532,9 +532,25 @@ mod pg {
             all_values.push(pk_value);
             all_values.extend(col_values);
             let client = self.client().await?;
+            // Prepare first: the statement's server-reported parameter OIDs
+            // are the declared column types — correct the shape-inferred
+            // binds against them (i64→int4, "YYYY-MM-DD"→date, …) before
+            // executing. Without this, any int4/date/float4 column rejects
+            // the write client-side (ADR-0012 follow-on).
+            let stmt = match client.prepare(&sql).await {
+                Ok(s) => s,
+                Err(e) => {
+                    self.drop_client().await;
+                    return Err(WriteBackError::Backend(e.to_string()));
+                }
+            };
+            if let Err(msg) = coerce_params(&stmt, &mut all_values) {
+                self.return_client(client).await;
+                return Err(WriteBackError::InvalidPayload(msg));
+            }
             let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
                 all_values.iter().map(SqlValue::as_tosql).collect();
-            let result = client.execute(&sql, &params).await;
+            let result = client.execute(&stmt, &params).await;
             match result {
                 Ok(rows) => {
                     self.return_client(client).await;
@@ -978,19 +994,35 @@ mod pg {
     /// text "null") — a nullable column accepts it, a NOT NULL column rejects
     /// it with a clear PG error.
     ///
-    /// ponytail: when a schema registry exists (ADR-0012 follow-on), bind by
-    /// the column's declared type instead of inferring from the value.
+    /// Shape-inferred first (JSON carries no column types), then *corrected*
+    /// against the prepared statement's server-reported parameter OIDs by
+    /// [`SqlValue::coerce_to`] — the ADR-0012 "bind by declared type" upgrade.
+    /// The shape guess alone rejects real schemas client-side (i64 vs an
+    /// `integer` column, a date string vs a `date` column: the atlet
+    /// `sessions` table hit both).
     enum SqlValue {
         Null,
         Bool(bool),
         Int(i64),
+        /// 32-bit integer — coerced from `Int` when the column is `int4`.
+        Int4(i32),
+        /// 16-bit integer — coerced from `Int` when the column is `int2`.
+        Int2(i16),
         Float(f64),
+        /// 32-bit float — coerced from `Float` when the column is `float4`.
+        Float4(f32),
         Text(String),
         Uuid(uuid::Uuid),
         /// RFC3339 timestamp — bound as `chrono::DateTime<Utc>` so a
         /// `timestamptz`/`timestamp` column accepts it (a bare `String` is
         /// rejected client-side by tokio-postgres's extended-query bind).
         Timestamp(chrono::DateTime<chrono::Utc>),
+        /// Calendar date — coerced from a `YYYY-MM-DD` text value when the
+        /// column is `date`.
+        Date(chrono::NaiveDate),
+        /// Timezone-less timestamp — coerced from `Timestamp` when the column
+        /// is `timestamp` (tokio-postgres rejects `DateTime<Utc>` there).
+        NaiveTs(chrono::NaiveDateTime),
         Json(serde_json::Value),
     }
 
@@ -1025,14 +1057,114 @@ mod pg {
                 SqlValue::Null => &NULL,
                 SqlValue::Bool(b) => b,
                 SqlValue::Int(i) => i,
+                SqlValue::Int4(i) => i,
+                SqlValue::Int2(i) => i,
                 SqlValue::Float(f) => f,
+                SqlValue::Float4(f) => f,
                 SqlValue::Text(s) => s,
                 SqlValue::Uuid(u) => u,
                 SqlValue::Timestamp(dt) => dt,
+                SqlValue::Date(d) => d,
+                SqlValue::NaiveTs(dt) => dt,
                 // serde_json::Value impls ToSql → jsonb (via with-serde_json-1).
                 SqlValue::Json(v) => v,
             }
         }
+
+        /// Correct a shape-inferred value to the column's *declared* type as
+        /// reported by the prepared statement (ADR-0012 follow-on: the server
+        /// catalog is the schema registry). Only lossless, unambiguous
+        /// corrections are made; anything else is left for Postgres to reject
+        /// with a clear error. This is what lets a JSON `30` land in an
+        /// `integer` column and `"2026-08-07"` land in a `date` column instead
+        /// of failing tokio-postgres's exact-type bind check.
+        fn coerce_to(&mut self, ty: &tokio_postgres::types::Type) {
+            use tokio_postgres::types::Type;
+            let coerced = match (&*self, ty) {
+                (SqlValue::Int(i), &Type::INT4) => i32::try_from(*i).ok().map(SqlValue::Int4),
+                (SqlValue::Int(i), &Type::INT2) => i16::try_from(*i).ok().map(SqlValue::Int2),
+                #[allow(clippy::cast_possible_truncation)]
+                (SqlValue::Float(f), &Type::FLOAT4) => Some(SqlValue::Float4(*f as f32)),
+                (SqlValue::Int(i), &Type::FLOAT8) =>
+                {
+                    #[allow(clippy::cast_precision_loss)]
+                    Some(SqlValue::Float(*i as f64))
+                }
+                // An integral float (Dart `num` often serializes 100 as
+                // 100.0) headed for an integer column: narrow when exact.
+                #[allow(clippy::cast_possible_truncation)]
+                (SqlValue::Float(f), &Type::INT4)
+                    if f.fract() == 0.0
+                        && *f >= f64::from(i32::MIN)
+                        && *f <= f64::from(i32::MAX) =>
+                {
+                    Some(SqlValue::Int4(*f as i32))
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                (SqlValue::Float(f), &Type::INT8)
+                    if f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0 =>
+                {
+                    Some(SqlValue::Int(*f as i64))
+                }
+                (SqlValue::Text(s), &Type::DATE) => {
+                    s.parse::<chrono::NaiveDate>().ok().map(SqlValue::Date)
+                }
+                (SqlValue::Timestamp(dt), &Type::TIMESTAMP) => {
+                    Some(SqlValue::NaiveTs(dt.naive_utc()))
+                }
+                // A uuid-shaped or timestamp-shaped string headed for a plain
+                // text column: undo the shape guess.
+                (SqlValue::Uuid(u), &Type::TEXT | &Type::VARCHAR) => {
+                    Some(SqlValue::Text(u.to_string()))
+                }
+                (SqlValue::Timestamp(dt), &Type::TEXT | &Type::VARCHAR) => {
+                    Some(SqlValue::Text(dt.to_rfc3339()))
+                }
+                // A plain JSON string headed for a jsonb/json column.
+                (SqlValue::Text(s), &Type::JSONB | &Type::JSON) => {
+                    Some(SqlValue::Json(serde_json::Value::String(s.clone())))
+                }
+                _ => None,
+            };
+            if let Some(v) = coerced {
+                *self = v;
+            }
+        }
+    }
+
+    /// Coerce every shape-inferred value to the prepared statement's declared
+    /// parameter types (positional). See [`SqlValue::coerce_to`].
+    ///
+    /// Returns a readable rejection when a numeric value cannot fit its
+    /// declared column type (e.g. `59999999940` into `int4`). Without this,
+    /// the raw bind fails inside tokio-postgres with the opaque
+    /// "error serializing parameter N" and the client retries a permanently
+    /// doomed write.
+    fn coerce_params(
+        stmt: &tokio_postgres::Statement,
+        values: &mut [SqlValue],
+    ) -> Result<(), String> {
+        use tokio_postgres::types::Type;
+        for (idx, (value, ty)) in values.iter_mut().zip(stmt.params()).enumerate() {
+            value.coerce_to(ty);
+            // A residual wide value against a narrower column means the
+            // coercion above declined (out of range / non-integral): reject
+            // with the value and column type spelled out.
+            let doomed = match (&*value, ty) {
+                (SqlValue::Int(i), &Type::INT4 | &Type::INT2) => Some(i.to_string()),
+                (SqlValue::Float(f), &Type::INT2 | &Type::INT4 | &Type::INT8) => {
+                    Some(f.to_string())
+                }
+                _ => None,
+            };
+            if let Some(shown) = doomed {
+                return Err(format!(
+                    "parameter {} value {shown} does not fit column type {ty}",
+                    idx + 1,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Infer the bind type from a JSON value's shape:
@@ -1111,6 +1243,29 @@ mod pg {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn coerce_to_narrows_integral_float_to_int4() {
+            use tokio_postgres::types::Type;
+            let mut v = SqlValue::Float(100.0);
+            v.coerce_to(&Type::INT4);
+            assert!(matches!(v, SqlValue::Int4(100)));
+        }
+
+        #[test]
+        fn coerce_to_declines_out_of_range_int4() {
+            use tokio_postgres::types::Type;
+            // 59999999940 > i32::MAX — the real "DOMINGO" payload. Coercion
+            // must decline (coerce_params then rejects with a readable
+            // reason instead of the opaque tokio-postgres bind error).
+            let mut v = SqlValue::Int(59_999_999_940);
+            v.coerce_to(&Type::INT4);
+            assert!(matches!(v, SqlValue::Int(59_999_999_940)));
+
+            let mut f = SqlValue::Float(1.5);
+            f.coerce_to(&Type::INT4);
+            assert!(matches!(f, SqlValue::Float(_)));
+        }
 
         #[test]
         fn validate_ident_accepts_bare_lowercase() {

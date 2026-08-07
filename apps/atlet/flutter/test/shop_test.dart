@@ -12,8 +12,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/ui/shop.dart';
+import 'support/fake_cart_orders.dart';
 
-class _FakeAdapter implements SyncAdapter {
+class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   final _controller = StreamController<List<ProductRow>>.broadcast();
 
   @override

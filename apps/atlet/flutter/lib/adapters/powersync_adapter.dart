@@ -39,6 +39,20 @@ class PowerSyncAdapter implements SyncAdapter {
   StreamController<List<ProductRow>>? _productsController;
   StreamController<bool>? _connectedController;
 
+  // Latest values, replayed to late subscribers via replayLatest — same
+  // broadcast-no-replay bug as NostosAdapter (see sync_adapter.dart doc):
+  // a screen built after an engine switch subscribes after the read-only
+  // `products` table's single snapshot emission and spins forever.
+  List<SessionRow>? _lastSessions;
+  List<ProductRow>? _lastProducts;
+  List<CartItemRow>? _lastCart;
+  List<OrderRow>? _lastOrders;
+  bool? _lastConnected;
+  StreamController<List<CartItemRow>>? _cartController;
+  StreamController<List<OrderRow>>? _ordersController;
+  StreamSubscription<List<CartItemRow>>? _cartSub;
+  StreamSubscription<List<OrderRow>>? _ordersSub;
+
   @override
   Future<void> init({
     required String supabaseUrl,
@@ -48,6 +62,8 @@ class PowerSyncAdapter implements SyncAdapter {
   }) async {
     _sessionsController = StreamController<List<SessionRow>>.broadcast();
     _productsController = StreamController<List<ProductRow>>.broadcast();
+    _cartController = StreamController<List<CartItemRow>>.broadcast();
+    _ordersController = StreamController<List<OrderRow>>.broadcast();
     _connectedController = StreamController<bool>.broadcast();
     _accessToken = accessToken;
 
@@ -63,23 +79,48 @@ class PowerSyncAdapter implements SyncAdapter {
     // after the awaited connect() call below can miss that first transition.
     _statusSub = wireConnected(
       db.statusStream.map((status) => status.connected),
-      (isConnected) => _connectedController?.add(isConnected),
+      (isConnected) {
+        _lastConnected = isConnected;
+        _connectedController?.add(isConnected);
+      },
     );
 
     await db.connect(connector: _SupabaseConnector(accessToken));
 
     _sessionsSub = db
-        .watch('SELECT * FROM sessions ORDER BY occurred_on DESC')
+        .watch('SELECT * FROM sessions '
+            'ORDER BY occurred_on DESC, '
+            '(server_committed_at IS NULL) DESC, server_committed_at DESC')
         .map((rows) => rows.map(sessionFromRow).toList(growable: false))
         .listen((sessions) {
       _deriver.onEmission(sessions);
+      _lastSessions = sessions;
       _sessionsController?.add(sessions);
     });
 
     _productsSub = db
         .watch('SELECT * FROM products')
         .map((rows) => rows.map(productFromRow).toList(growable: false))
-        .listen((products) => _productsController?.add(products));
+        .listen((products) {
+      _lastProducts = products;
+      _productsController?.add(products);
+    });
+
+    _cartSub = db
+        .watch('SELECT * FROM cart_items ORDER BY added_at DESC')
+        .map((rows) => rows.map(psCartItemFromRow).toList(growable: false))
+        .listen((items) {
+      _lastCart = items;
+      _cartController?.add(items);
+    });
+
+    _ordersSub = db
+        .watch('SELECT * FROM orders ORDER BY created_at DESC')
+        .map((rows) => rows.map(psOrderFromRow).toList(growable: false))
+        .listen((orders) {
+      _lastOrders = orders;
+      _ordersController?.add(orders);
+    });
   }
 
   @override
@@ -97,20 +138,93 @@ class PowerSyncAdapter implements SyncAdapter {
   }
 
   @override
+  Future<void> updateSession(SessionRow s) async {
+    final payload = sessionWritePayload(s);
+    final sets =
+        payload.keys.where((k) => k != 'id').map((k) => '$k = ?').join(', ');
+    final args = [
+      for (final k in payload.keys.where((k) => k != 'id')) payload[k],
+      s.id,
+    ];
+    await _requireDb().execute('UPDATE sessions SET $sets WHERE id = ?', args);
+  }
+
+  @override
   Future<void> deleteSession(String id) =>
       _requireDb().execute('DELETE FROM sessions WHERE id = ?', [id]);
 
   @override
-  Stream<List<SessionRow>> watchSessions() => _requireController(
-      _sessionsController, 'watchSessions() before init()');
+  Future<void> addToCart(CartItemRow item) =>
+      _requireDb().execute(
+        'INSERT INTO cart_items (id, product_id, qty, added_at) '
+        'VALUES (?, ?, ?, ?) '
+        'ON CONFLICT(id) DO UPDATE SET qty = excluded.qty',
+        [
+          item.id,
+          item.productId,
+          item.qty,
+          item.addedAt.toUtc().toIso8601String(),
+        ],
+      );
 
   @override
-  Stream<List<ProductRow>> watchProducts() => _requireController(
-      _productsController, 'watchProducts() before init()');
+  Future<void> removeCartItem(String id) =>
+      _requireDb().execute('DELETE FROM cart_items WHERE id = ?', [id]);
 
   @override
-  Stream<bool> get connected =>
-      _requireController(_connectedController, 'connected before init()');
+  Future<void> clearCart() async {
+    final items = _lastCart ?? const <CartItemRow>[];
+    for (final item in items) {
+      await removeCartItem(item.id);
+    }
+  }
+
+  @override
+  Future<String> placeOrder(OrderRow o) async {
+    await _requireDb().execute(
+      'INSERT INTO orders (id, status, subtotal_cents, tax_cents, '
+      'shipping_cents, total_cents, payment_ref, items_json, created_at) '
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        o.id,
+        o.status,
+        o.subtotalCents,
+        o.taxCents,
+        o.shippingCents,
+        o.totalCents,
+        o.paymentRef,
+        o.itemsJson,
+        o.createdAt.toUtc().toIso8601String(),
+      ],
+    );
+    await clearCart();
+    return o.id;
+  }
+
+  @override
+  Stream<List<CartItemRow>> watchCart() => replayLatest(
+      _requireController(_cartController, 'watchCart() before init()'),
+      () => _lastCart);
+
+  @override
+  Stream<List<OrderRow>> watchOrders() => replayLatest(
+      _requireController(_ordersController, 'watchOrders() before init()'),
+      () => _lastOrders);
+
+  @override
+  Stream<List<SessionRow>> watchSessions() => replayLatest(
+      _requireController(_sessionsController, 'watchSessions() before init()'),
+      () => _lastSessions);
+
+  @override
+  Stream<List<ProductRow>> watchProducts() => replayLatest(
+      _requireController(_productsController, 'watchProducts() before init()'),
+      () => _lastProducts);
+
+  @override
+  Stream<bool> get connected => replayLatest(
+      _requireController(_connectedController, 'connected before init()'),
+      () => _lastConnected);
 
   @override
   Future<void> setConnected(bool up) async {
@@ -134,9 +248,13 @@ class PowerSyncAdapter implements SyncAdapter {
   Future<void> signOut() async {
     await _sessionsSub?.cancel();
     await _productsSub?.cancel();
+    await _cartSub?.cancel();
+    await _ordersSub?.cancel();
     await _statusSub?.cancel();
     _sessionsSub = null;
     _productsSub = null;
+    _cartSub = null;
+    _ordersSub = null;
     _statusSub = null;
 
     final db = _db;
@@ -164,10 +282,19 @@ class PowerSyncAdapter implements SyncAdapter {
 
     await _sessionsController?.close();
     await _productsController?.close();
+    await _cartController?.close();
+    await _ordersController?.close();
     await _connectedController?.close();
     _sessionsController = null;
     _productsController = null;
+    _cartController = null;
+    _ordersController = null;
     _connectedController = null;
+    _lastCart = null;
+    _lastOrders = null;
+    _lastSessions = null;
+    _lastProducts = null;
+    _lastConnected = null;
 
     _deriver.reset();
     // spec/adapter.md item 4: signOut leaves no live engine session — the
@@ -253,7 +380,46 @@ final Schema _schema = Schema([
     Column.integer('plant_based'),
     Column.text('image_url'),
   ]),
+  Table('cart_items', [
+    Column.text('product_id'),
+    Column.integer('qty'),
+    Column.text('added_at'),
+    Column.text('user_id'),
+  ]),
+  Table('orders', [
+    Column.text('status'),
+    Column.integer('subtotal_cents'),
+    Column.integer('tax_cents'),
+    Column.integer('shipping_cents'),
+    Column.integer('total_cents'),
+    Column.text('payment_ref'),
+    Column.text('items_json'),
+    Column.text('created_at'),
+    Column.text('user_id'),
+  ]),
 ]);
+
+/// Maps a `cart_items` row to [CartItemRow] — pure, mirrors the nostos
+/// adapter's cartItemFromRow.
+CartItemRow psCartItemFromRow(Map<String, dynamic> row) => CartItemRow(
+      id: row['id'] as String,
+      productId: row['product_id'] as String,
+      qty: (row['qty'] as num).toInt(),
+      addedAt: DateTime.parse(row['added_at'] as String),
+    );
+
+/// Maps an `orders` row to [OrderRow].
+OrderRow psOrderFromRow(Map<String, dynamic> row) => OrderRow(
+      id: row['id'] as String,
+      status: row['status'] as String,
+      subtotalCents: (row['subtotal_cents'] as num).toInt(),
+      taxCents: (row['tax_cents'] as num).toInt(),
+      shippingCents: (row['shipping_cents'] as num).toInt(),
+      totalCents: (row['total_cents'] as num).toInt(),
+      paymentRef: row['payment_ref'] as String?,
+      itemsJson: row['items_json'] as String?,
+      createdAt: DateTime.parse(row['created_at'] as String),
+    );
 
 /// Maps a row from `db.watch('SELECT * FROM sessions')` to [SessionRow].
 /// Top-level and pure so it's testable without a live sync connection — see
