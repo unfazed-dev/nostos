@@ -211,8 +211,107 @@ materializing tables (ADR-0028 has the measurement). Columns have no SQLite *aff
 timestamp arriving as a JSON string sorts lexicographically — fine for ISO-8601); a
 non-`public` Postgres schema is **untested** against the view naming.
 
+## Attachments — two-plane blob sync (T6 / ADR-0034)
+
+Blobs (images, files) **never transit the Nostos server** — that would pollute the fan-out
+throughput that is Nostos's headline advantage and make the server stateful. Instead two planes:
+
+- a **metadata plane** — an ordinary synced `attachments` table (`id, filename, size, media_type,
+  state, timestamp`) — synced through replication + the collapsed outbox like any business table; and
+- a **blob plane** — a developer-supplied `AttachmentStorageAdapter` (your Supabase Storage / S3 /
+  … bucket) plus a local blob cache.
+
+### Setup — `NOSTOS_WRITE_TABLES` (the #1 foot-gun)
+
+The metadata table is writable through the same collapsed outbox as any business table, so the
+server's empty-default allowlist **MUST include `attachments`** (ADR-0013). A forgotten entry
+surfaces loudly at the transport:
+
+```
+table not writable: 'attachments' — add it to NOSTOS_WRITE_TABLES
+```
+
+```bash
+export NOSTOS_WRITE_TABLES=attachments,tasks,…   # comma-separated; empty by default
+```
+
+The app also declares `attachments` in its `NostosSchema` (it is a normal table).
+
+### API
+
+```dart
+import 'package:nostos_flutter/nostos_flutter.dart';
+// SupabaseStorageAdapter pulls in supabase_flutter; LocalFileBlobStore uses path_provider.
+
+final attachments = db.attachments(
+  adapter: SupabaseStorageAdapter(bucket: 'uploads'),   // or your own AttachmentStorageAdapter
+  blobStore: LocalFileBlobStore(Directory('${dir.path}/nostos_blobs')),
+  maxAttempts: 5,                                        // default; → archived after
+);
+
+// Pick a blob OFFLINE → cached locally + a queued_upload metadata row enqueued.
+final id = await attachments.queueUpload(
+  filename: 'photo.png', bytes: bytes, mediaType: 'image/png',
+);
+
+// Reconnect → the driver uploads to the bucket and flips state → synced.
+attachments.start();   // self-driving 2s tick; or call pump() yourself / wire to connectivity.
+
+// A second client receives the synced metadata row via replication, then:
+await attachments.queueDownload(id);   // fetches bytes into its local cache on the next pump.
+
+await attachments.remove(id);          // queued_delete → archived (blob gone, metadata retained).
+```
+
+| Member | Signature | Notes |
+|---|---|---|
+| `db.attachments` | `Attachments attachments({required adapter, required blobStore, required isOnline, maxAttempts, clock})` | constructs the driver + registers `blobStore.wipe` as a sign-out hook (ADR-0029) |
+| `queueUpload` | `Future<String> queueUpload({required filename, required bytes, required mediaType, id})` | caches bytes locally, upserts a `queued_upload` row; returns the attachment id |
+| `queueDownload` | `Future<void> queueDownload(String id)` | flips an existing synced row to `queued_download` |
+| `remove` | `Future<void> remove(String id)` | flips to `queued_delete`; the driver deletes from the bucket |
+| `pump` | `Future<void> pump()` | one driver tick: when online, reads queued rows + dispatches blob ops |
+| `start` / `stop` | `void start()` / `void stop()` | self-driving 2s timer that calls `pump()` (start also pumps on connect) |
+| `lastErrorFor` | `String? lastErrorFor(String id)` | the last adapter error (dead-letter reason); local-only, not synced |
+
+`AttachmentStorageAdapter` (`upload(path, bytes, mediaType)` / `download(path)` / `delete(path)`) is
+abstract; methods MUST be idempotent under retry (`delete` on a missing path is success). A
+first-class `SupabaseStorageAdapter` ships (`upsert: true` for upload idempotency; `not-found` on
+delete is swallowed). `BlobStore` (`put`/`get`/`remove`/`wipe`) is the local cache;
+`LocalFileBlobStore` is the filesystem-backed impl (the app supplies the `Directory` —
+`nostos_flutter` deliberately does **not** depend on `path_provider`).
+
+### State machine + dead-letter
+
+```
+queued_upload   ──ok──►  synced
+queued_download ──ok──►  synced
+queued_delete   ──ok──►  archived      (blob gone; metadata tombstone stays)
+any queued_*    ──retries exhausted──►  archived   (dead-letter; ADR-0027 parity)
+synced | archived  ──►  terminal
+```
+
+Failed adapter calls retry on exponential backoff (1s, 2s, 4s … capped 60s). After `maxAttempts`
+the row flips to `archived` and the error is surfaced via `lastErrorFor`. The attempt count is
+**driver-local, not a synced column** — a process restart resets it, which is fine because the
+metadata row stays `queued_*` across a restart (its state IS synced) and the driver retries fresh.
+
+### Ordering
+
+Within a row, `state = synced` is reached **only after** the blob confirms — that is structural.
+Cross-row ordering ("a `tasks` row referencing `attachment_id` must not land until the blob is
+uploaded") is **not enforced**; the app gates the referencing UI by reading `state` reactively
+(`watch`). Strong cross-row ordering would need an outbox dependency mechanism — see ADR-0034 §3
+for the boundary + upgrade path.
+
 ## Proven by
 
 `sdk-e2e` `flutter` slice: a real `cargo run -p nostos-server` spine driven through
 connect/subscribe/watch inside a genuine app bundle (`-d macos`, since the server binds
 loopback).
+
+`sdk/nostos_flutter/test/attachments_test.dart` (ADR-0034): the full
+queue→offline→reconnect→upload→second-client-download→dead-letter→sign-out-wipe path against a
+shared in-memory fake adapter. **The real Supabase-Storage round-trip is untested-environment
+here** — no Supabase project is configured in the dev tree; the `SupabaseStorageAdapter` code path
+compiles against `supabase_flutter` but no live bucket upload/download is exercised. Run that
+round-trip against a configured project before shipping.

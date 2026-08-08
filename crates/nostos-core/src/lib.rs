@@ -36,11 +36,13 @@
 #![forbid(unsafe_code)]
 
 pub mod apply;
+pub mod attachments;
 pub mod in_memory;
 pub mod outbox;
 pub mod storage;
 
 pub use apply::{ApplyEngine, ApplyOutcome, Frame};
+pub use attachments::{retry_after_ms, AttachmentOp, AttachmentState, DEFAULT_MAX_ATTEMPTS};
 pub use in_memory::InMemoryStorage;
 pub use outbox::{Outbox, PendingWrite, WriteOp};
 pub use storage::{Result, Storage, StorageError};

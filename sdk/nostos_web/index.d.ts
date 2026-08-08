@@ -69,3 +69,101 @@ export declare class NostosClient {
   /** Storage backend mode — always "memory" in the node smoke (no OPFS). */
   readonly storageMode: StorageMode;
 }
+
+// ─────────────────── T6 attachments (ADR-0034) ───────────────────
+
+/** Lifecycle wire strings (mirror nostos_core::AttachmentState). */
+export interface AttachmentConstants {
+  TABLE: string;
+  COL: {
+    id: string;
+    filename: string;
+    size: string;
+    mediaType: string;
+    state: string;
+    timestamp: string;
+  };
+  STATE: {
+    queuedUpload: string;
+    queuedDownload: string;
+    queuedDelete: string;
+    synced: string;
+    archived: string;
+  };
+}
+
+/** Remote blob storage — the developer's bucket. Idempotent under retry. */
+export interface AttachmentStorageAdapter {
+  upload(path: string, bytes: Uint8Array, mediaType: string): Promise<void>;
+  download(path: string): Promise<Uint8Array>;
+  delete(path: string): Promise<void>;
+}
+
+/** Local blob cache. wipe() is called on sign-out (ADR-0029). */
+export interface BlobStore {
+  put(id: string, bytes: Uint8Array): Promise<void>;
+  get(id: string): Promise<Uint8Array | null>;
+  remove(id: string): Promise<void>;
+  wipe(): Promise<void>;
+}
+
+/** One attachment metadata row, decoded for the driver. */
+export interface AttachmentRow {
+  id: string;
+  state: string;
+  mediaType: string;
+  filename: string;
+}
+
+/** Metadata-plane access (the synced `attachments` table). */
+export interface AttachmentMetadataGateway {
+  queuedRows(): Promise<AttachmentRow[]>;
+  patchState(id: string, state: string): Promise<void>;
+  upsertRow(row: Record<string, unknown>): Promise<void>;
+  currentState(id: string): Promise<string>;
+}
+
+/** First-class Supabase Storage adapter (@supabase/supabase-js is a peer dep). */
+export declare class SupabaseStorageAdapter implements AttachmentStorageAdapter {
+  constructor(opts: {
+    client?: import("@supabase/supabase-js").SupabaseClient;
+    url?: string;
+    key?: string;
+    bucket: string;
+    pathPrefix?: string;
+  });
+  upload(path: string, bytes: Uint8Array, mediaType: string): Promise<void>;
+  download(path: string): Promise<Uint8Array>;
+  delete(path: string): Promise<void>;
+}
+
+/** Browser OPFS blob cache. Throws in node (no navigator.storage). */
+export declare class OpfsBlobStore implements BlobStore {
+  constructor(dirName: string);
+  put(id: string, bytes: Uint8Array): Promise<void>;
+  get(id: string): Promise<Uint8Array | null>;
+  remove(id: string): Promise<void>;
+  wipe(): Promise<void>;
+}
+
+/** The attachment driver. Call pump() per tick (or wire to the conn signal). */
+export declare class Attachments {
+  constructor(opts: {
+    gateway: AttachmentMetadataGateway;
+    adapter: AttachmentStorageAdapter;
+    blobStore: BlobStore;
+    isOnline: () => Promise<boolean>;
+    maxAttempts?: number;
+    now?: () => Date;
+  });
+  lastErrorFor(id: string): string | null;
+  queueUpload(opts: {
+    filename: string;
+    bytes: Uint8Array;
+    mediaType: string;
+    id?: string;
+  }): Promise<string>;
+  queueDownload(id: string): Promise<void>;
+  remove(id: string): Promise<void>;
+  pump(): Promise<void>;
+}

@@ -154,7 +154,9 @@ handshake**.
 
 ## Node — `NostosClient` (apply engine only)
 
-`index.js` exports `{ NostosClient, NostosEngine, Frame }`. Typed in `index.d.ts`.
+`index.js` exports `{ NostosClient, NostosEngine, Frame }` plus the T6 attachment surface
+(`Attachments`, `SupabaseStorageAdapter`, `OpfsBlobStore`, `AttachmentConstants` — ADR-0034, see
+[Attachments](#attachments--two-plane-blob-sync-t6--adr-0034) below). Typed in `index.d.ts`.
 
 | Member | Signature |
 |---|---|
@@ -168,6 +170,76 @@ handshake**.
 | `setToken` | `setToken(token): void` — ADR-0029: cache for next connect |
 | `checkpoint` / `rowCount` | readonly getters |
 | `storageMode` | readonly getter — always `"memory"` in Node (no OPFS) |
+
+## Attachments — two-plane blob sync (T6 / ADR-0034)
+
+Mirrors the Flutter driver (`sdk/nostos_flutter/lib/src/attachments.dart`) over the **same** pure
+state machine in `nostos-core` (`crates/nostos-core/src/attachments.rs`). Two planes:
+
+- a **metadata plane** — an ordinary synced `attachments` table (`id, filename, size, media_type,
+  state, timestamp`), replicated + outbox-driven like any business table; and
+- a **blob plane** — a developer-supplied `AttachmentStorageAdapter` + a local blob cache.
+
+Blobs **never transit the Nostos server** (moat constraint — would pollute fan-out throughput and
+make the server stateful). `@supabase/supabase-js` is a **peer dep**: the module + tests load
+without it; only `SupabaseStorageAdapter` construction pulls it in.
+
+### Setup — `NOSTOS_WRITE_TABLES` (the #1 foot-gun)
+
+The metadata table is writable through the collapsed outbox, so the server's empty-default
+allowlist **MUST include `attachments`** (ADR-0013). A forgotten entry surfaces loudly:
+
+```
+table not writable: 'attachments' — add it to NOSTOS_WRITE_TABLES
+```
+
+```bash
+export NOSTOS_WRITE_TABLES=attachments,tasks,…   # comma-separated; empty by default
+```
+
+### API (`attachments.js`)
+
+```js
+const { NostosClient } = require("@nostos-sync/web");
+// or for the driver alone: require("@nostos-sync/web/attachments.js")
+const { Attachments, SupabaseStorageAdapter, OpfsBlobStore, AttachmentConstants } = require("@nostos-sync/web");
+
+const driver = new Attachments({
+  gateway,                                            // see below — metadata-plane access
+  adapter: new SupabaseStorageAdapter({ url, key, bucket: "uploads" }),
+  blobStore: new OpfsBlobStore("nostos-blobs"),        // browser OPFS dir; throws in node
+  isOnline: async () => navigator.onLine,
+  maxAttempts: 5,                                     // → archived after
+});
+
+const id = await driver.queueUpload({ filename: "photo.png", bytes, mediaType: "image/png" });
+await driver.pump();                                  // one tick: when online, dispatch blob ops
+await driver.queueDownload(id);
+await driver.remove(id);                              // queued_delete → archived
+```
+
+| Member | Signature | Notes |
+|---|---|---|
+| `queueUpload` | `Promise<string> queueUpload({filename, bytes, mediaType, id?})` | caches bytes locally, upserts a `queued_upload` row |
+| `queueDownload` | `Promise<void> queueDownload(id)` | flips an existing synced row to `queued_download` |
+| `remove` | `Promise<void> remove(id)` | flips to `queued_delete` |
+| `pump` | `Promise<void> pump()` | one driver tick (when online) |
+| `lastErrorFor` | `string|null lastErrorFor(id)` | last adapter error (dead-letter reason); local-only |
+
+`AttachmentStorageAdapter` (`upload(path, bytes, mediaType)` / `download(path)` / `delete(path)`)
+MUST be idempotent under retry. `SupabaseStorageAdapter` ships first-class (`upsert: true`; a
+`not found` on delete is swallowed). `OpfsBlobStore` is the browser OPFS cache (builds on Wave-2
+durable storage, ADR-0033; throws in node — pass an in-memory `BlobStore` in tests). The host
+calls `blobStore.wipe()` on `signOut` (ADR-0029 parity).
+
+The driver depends on a small `AttachmentMetadataGateway` interface (`queuedRows`, `patchState`,
+`upsertRow`, `currentState`) so it is testable in node **without** the browser Worker / live
+transport. In the browser, a Worker-backed gateway will wrap Wave-2's postMessage protocol once
+the live write path lands.
+
+State machine + ordering + dead-letter are identical to the Flutter driver — see the Flutter
+[attachments](flutter.md#attachments--two-plane-blob-sync-t6--adr-0034) section and ADR-0034 for
+the shared contract (weaker cross-row ordering; attempt count is driver-local, not synced).
 
 ## Ceilings
 
@@ -188,6 +260,7 @@ handshake**.
 | `e2e/durable.spec.cjs` | ADR-0033: write survives page reload in durable mode; signOut wipes the OPFS store; degrade path reported correctly |
 | `e2e/worker.spec.cjs` | The Worker boots, responds to ping, and surfaces the postMessage protocol |
 | `smoke.cjs` | The Node `NostosClient` facade (apply engine, no live transport) |
+| `e2e/attachments.spec.cjs` | ADR-0034: the T6 attachment driver — queue→reconnect→upload→second-client-download→dead-letter→wipe, against an in-memory fake adapter (no bucket). Same state machine as the Flutter suite. **Real Supabase-Storage round-trip is untested-environment** (no project configured). |
 
 `FileSystemSyncAccessHandle` (the `opfs-sahpool` primitive) is browser+Worker-only — it does not
 exist in Node. The durable-storage spec MUST run in a real browser (Playwright/headless Chromium).

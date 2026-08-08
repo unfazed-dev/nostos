@@ -216,4 +216,23 @@ class NostosClient {
   }
 }
 
-module.exports = { NostosClient, NostosEngine: () => wasm().NostosEngine, Frame: () => wasm().Frame };
+// T6 attachments (ADR-0034): two-plane blob sync. Re-exported so apps can
+// `const { Attachments, SupabaseStorageAdapter } = require("@nostos-sync/web")`.
+// The module is lazy-friendly: it loads without @supabase/supabase-js installed
+// (SupabaseStorageAdapter pulls it in only at construction).
+const attachments = require("./attachments.js");
+
+module.exports = {
+  NostosClient,
+  NostosEngine: () => wasm().NostosEngine,
+  Frame: () => wasm().Frame,
+  // T6 attachments
+  Attachments: attachments.Attachments,
+  SupabaseStorageAdapter: attachments.SupabaseStorageAdapter,
+  OpfsBlobStore: attachments.OpfsBlobStore,
+  AttachmentConstants: {
+    TABLE: attachments.ATTACHMENTS_TABLE,
+    COL: attachments.COL,
+    STATE: attachments.STATE,
+  },
+};

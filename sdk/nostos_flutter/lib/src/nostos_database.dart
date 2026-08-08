@@ -51,6 +51,15 @@ class NostosDatabase {
   /// listener would call `setToken` on a closed engine on the next refresh.
   StreamSubscription<AuthState>? _authSub;
 
+  /// Sign-out hooks — extra local state to wipe on [signOut] beyond the engine
+  /// + outbox (ADR-0029). The T6 attachments driver registers its [BlobStore]
+  /// wipe here so the next principal sees no blob bytes (consistent with the
+  /// SQLite + outbox wipe). Hooks run AFTER the engine quiesces + wipes, are
+  /// awaited in registration order, and MUST be idempotent (signOut is
+  /// re-callable). A throwing hook is swallowed (best-effort) so one failing
+  /// wipe cannot block the core sign-out.
+  final List<Future<void> Function()> _signOutHooks = <Future<void> Function()>[];
+
   /// Open a [Nostos] connection and resolve the schema.
   ///
   /// [url] is the `nostos-server` `/sync` WebSocket URL (the one `nostos dev`
@@ -258,6 +267,12 @@ class NostosDatabase {
   /// Connection-state transitions for the underlying [Nostos] session.
   Stream<NostosConnectionState> get connectionState =>
       _nostos.connectionState;
+
+  /// Snapshot of whether the session is currently `connected` (best-effort).
+  /// True only after [status] has observed a `connected` transition; false
+  /// before the first wire AND while `disconnected`. Used by the T6 attachment
+  /// driver to gate blob transfers on connectivity (ADR-0034).
+  bool get isOnline => _status?.value.conn == NostosConnectionState.connected;
 
   /// Subscribe to [table], optionally filtered by [where] (a safe-SQL
   /// predicate — see `Nostos.subscribe`). Must be called before [watch] /
@@ -580,10 +595,21 @@ class NostosDatabase {
     await _nostos.close();
   }
 
+  /// Register a hook wiped on [signOut] (ADR-0029). The T6 attachments driver
+  /// uses this to wipe local blobs so the next principal sees none of the
+  /// prior user's bytes. Hooks are awaited AFTER the core wipe, in order, and
+  /// MUST be idempotent. Returns without awaiting the hook.
+  void registerSignOutHook(Future<void> Function() hook) =>
+      _signOutHooks.add(hook);
+
   /// ADR-0029: sign out — wipe the local store + durable outbox (the next
   /// principal sees nothing of this one), stop sync, clear the seed token, and
   /// cancel the auth/status listeners. Unlike [close], the on-device SQLite
   /// state is wiped via `clear_local_state`. Idempotent.
+  ///
+  /// T6 (ADR-0034): registered [_signOutHooks] (e.g. the blob-store wipe) run
+  /// AFTER the core wipe so the engine is already quiesced — a hook never sees
+  /// in-flight apply frames.
   Future<void> signOut() async {
     // Auth listener first (as in close): a surviving refresh would call
     // setToken on a wiped engine.
@@ -592,6 +618,17 @@ class NostosDatabase {
     await _writeStatusSub?.cancel();
     _status?.dispose();
     await _nostos.signOut();
+    // Wipe extra local surfaces (blobs) AFTER the engine is quiesced + wiped.
+    // Best-effort: a failing hook is logged-and-swallowed so it cannot block
+    // the (already-complete) core sign-out. Run a snapshot so a re-entrant
+    // register during wipe cannot mutate the list under us.
+    for (final hook in List<Future<void> Function()>.of(_signOutHooks)) {
+      try {
+        await hook();
+      } on Object {
+        // Swallowed deliberately — see method doc.
+      }
+    }
   }
 
   /// Pause syncing (ADR-0032 T1 canonical name): abort ONLY the background
