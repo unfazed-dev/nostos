@@ -181,15 +181,32 @@ point at ADR-0033 as the in-progress follow-up. Must cover:
 
 ---
 
-## Wave 4 (trailing) — Flutter-web binding
+## Wave 4 — Flutter-web binding (re-scoped 2026-08-08 into 4a + 4b)
 
-**Gated on wave 2. Do not start before wave 2 review passes.**
+**Gated on wave 2 (cleared).** *Premise corrected 2026-08-08: the original plan
+assumed the shared `nostos-ffi-wasm` backend was a full client Flutter-web could
+ride. It was apply-engine-only (13/16 typed verbs absent; the typed verbs live on
+`nostos_client::SyncClient`, which is tokio-based and unreachable from wasm).
+`frb_generated.web.dart` exists but is rejected — it compiles the rusqlite-based
+Flutter Rust crate to wasm and strands Flutter-web without Wave-2 opfs-sahpool
+durability. So Wave 4 became two slices:*
 
-- Same Dart API, second engine path: nostos-core WASM (the wave-2 backend)
-  behind the existing `Engine` abstraction in `lib/src/engine.dart`, selected
-  by platform (conditional import). flutter_rust_bridge native path unchanged.
-- Acceptance: atlet compiled to web runs the wave-1 typed surface + wave-3
-  attachments in a browser; degrade path on Safari Private Browsing.
+- **Wave 4a (shipped `7d40f8b`, ADR-0035):** extend `nostos-ffi-wasm` from
+  apply-engine-only to the full typed Tier-1 surface — a PORT (not a wiring of
+  `SyncClient`, which stays untouched) reusing `nostos-domain` CRDT, plus the 3
+  `SqliteWasmStorage` overrides (transactional `enqueue_batch`, dead-letter cols,
+  counter merge — these were the former "cross-wave web follow-ups," now folded
+  in) and multi-table `subscribe` + `resume`.
+- **Wave 4b (this slice):** the Flutter-web Dart binding — a `WebNostosEngine`
+  implementing the `NostosEngine` abstraction over the now-typed `nostos-ffi-wasm`
+  backend via `dart:js_interop`, selected by platform (conditional import); the
+  `flutter_rust_bridge` native path stays unchanged. Study how `sdk/nostos_web`
+  bootstraps the Worker + WASM glue and replicate that in the Flutter-web context.
+- Acceptance: atlet-web compiles and runs the wave-1 typed surface in a real
+  browser (Playwright — `FileSystemSyncAccessHandle` is Worker+browser-only);
+  degrade path on Safari Private Browsing; `make ci` + `flutter build web` green.
+  (Wave-3 attachments on web remain a follow-up: the metadata plane rides normal
+  sync; the blob-plane adapter wiring is separate.)
 
 ---
 

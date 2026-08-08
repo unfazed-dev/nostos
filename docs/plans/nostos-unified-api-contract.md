@@ -117,7 +117,12 @@ Tiering by SDK replaces the v1 blanket exclusions. The **core contract (T1–T5)
 above applies to all 9 SDKs** unchanged. A **tier-1 extension** applies to two
 SDKs only: **Flutter** and **Web (JS, `sdk/nostos_web`)**. Flutter-compiled-to-web
 is in scope but **trails** (wave 4 below) — `nostos_flutter` has no web target
-today; it gains one via the same nostos-core WASM path the JS SDK uses.
+today; it gains one by **extending the shared `nostos-ffi-wasm` backend**. *(Premise
+corrected 2026-08-08: that backend was apply-engine-only until Wave 4a ported the
+typed verbs onto it — the original "same WASM path the JS SDK uses" wording assumed
+a full client that did not exist. `frb_generated.web.dart` exists but is rejected:
+it compiles the rusqlite-based Flutter Rust crate to wasm and strands Flutter-web
+without Wave-2 opfs-sahpool durability. See ADR-0035.)*
 
 ### Tier-1 verbs (previously "Excluded from v1")
 
