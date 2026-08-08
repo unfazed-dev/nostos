@@ -1491,6 +1491,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "nostos-core",
+ "nostos-domain",
  "serde",
  "serde_json",
  "wasm-bindgen",

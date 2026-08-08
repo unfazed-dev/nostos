@@ -152,6 +152,75 @@ sock.close();
 The token goes on the URL as `?token=` because **browsers cannot set headers on a WebSocket
 handshake**.
 
+## Typed verbs on `NostosEngine` (ADR-0034 / Wave 4a)
+
+The wasm bridge now exposes the full Tier-1 typed surface from ADR-0032, ported
+(not wired) from the native `SyncClient` — which is tokio-based and unreachable
+from wasm. Each verb is thin orchestration on the in-process `ApplyEngine`, and
+the CRDT invariants (`Hlc`, `OrSetElement`, counter merge) come from
+`nostos-domain` directly — **not** re-implemented. See ADR-0034 for the
+port-not-wire decision and the three `SqliteWasmStorage` overrides that mirror
+native `SqliteStorage` (transactional `enqueue_batch`, dead-letter columns,
+counter merge in `apply_local` + `read_payload`).
+
+```js
+import init, { NostosEngine } from "./pkg-web/nostos_ffi_wasm.js";
+await init();
+const eng = new NostosEngine();
+
+// CRDT tables must be tagged BEFORE the first write so apply_local merges
+// instead of clobbering (mirrors native SqliteStorage builder):
+eng.setCrdtTables(["tags"], ["counters"]);
+
+// Single write returns the outbox id (f64 at the JS boundary):
+const id = eng.write("tasks", "upsert", "1", JSON.stringify({ title: "buy milk" }));
+
+// Atomic batch — mid-batch failure rolls back the entire outbox insert:
+const ids = eng.writeBatch([
+  { table: "tasks", op: "upsert", pk: "1", payloadJson: '{"title":"a"}' },
+  { table: "tasks", op: "upsert", pk: "2", payloadJson: '{"title":"b"}' },
+]);
+
+// CRDT verbs — mint HLC internally, merge element-wise (ADR-0030):
+eng.orSetAdd("tags", "row1", "red");
+eng.orSetRemove("tags", "row1", "red");
+eng.counterIncrement("counters", "c1", 5);
+eng.counterDecrement("counters", "c1", 2);
+
+// Read engine primitives:
+eng.applySchema([{ name: "tasks", columns: ["id", "title"] }]);  // SqliteWasm only; Memory no-op
+const rows = JSON.parse(eng.query("SELECT * FROM tasks"));       // SqliteWasm only; Memory → []
+
+// Outbox diagnostics for watchWriteStatus (ADR-0027):
+eng.pendingCount();       // non-dead-lettered writes
+eng.deadLetteredCount();  // writes marked dlq=1
+eng.lastError();         // last dead-letter error string, or null
+```
+
+| Member | Notes |
+|---|---|
+| `setCrdtTables(orSetTables, counterTables)` | Tag tables so `apply_local` merges (ADR-0030). Call before the first write to a CRDT table |
+| `write(table, op, pk, payloadJson?)` | Returns outbox id (`number`). `op`: `"upsert"\|"delete"\|"patch"\|"increment"` |
+| `writeBatch(ops[])` | Atomic — mid-batch failure rolls back. Returns ids in order |
+| `orSetAdd(table, pk, element)` / `orSetRemove(table, pk, element)` | Mints HLC, merges element-wise |
+| `counterIncrement(table, pk, delta)` / `counterDecrement(table, pk, delta)` | Mints HLC, merges per-replica max (PN-counter) |
+| `applySchema(tables[])` | Materialize WS2 read-views. SqliteWasm only; Memory is a no-op |
+| `query(sql)` | Returns JSON string of rows. SqliteWasm only; Memory returns `"[]"` |
+| `pendingCount()` / `deadLetteredCount()` / `lastError()` | Outbox diagnostics for `watchWriteStatus` |
+
+**Multi-table `subscribe` + `resume`** (on `NostosSocket`):
+
+| Member | Notes |
+|---|---|
+| `subscribe(tables[], whereSql?)` | Sends a subscribe frame carrying the full table list (Worker batched push model) |
+| `resume()` | Re-sends the subscribe frame with the persisted checkpoint if the socket is open; otherwise signals the caller to reconnect via `connect()` (engine state preserved in the dbHandle) |
+
+**Testing boundary:** the host `cargo test -p nostos-ffi-wasm` suite (56 tests,
+run in `make ci`) covers the typed-verb orchestration on the `Memory` backend,
+CRDT-merge correctness, HLC monotonicity, and the subscribe/resume frame shapes.
+The three `SqliteWasmStorage` overrides are browser-only code paths — a
+Playwright harness is the open follow-up (ADR-0034).
+
 ## Node — `NostosClient` (apply engine only)
 
 `index.js` exports `{ NostosClient, NostosEngine, Frame }`. Typed in `index.d.ts`.

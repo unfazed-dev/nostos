@@ -23,6 +23,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nostos-core = { workspace = true }
+# Wave 4a: CRDT invariants (Hlc, OrSetElement, counter_apply_delta, merge_*) reused
+# directly — NOT re-implemented in the wasm crate. nostos-domain is pure (zero I/O,
+# zero async) and already a transitive dep via nostos-core; making it explicit lets
+# the typed-verb orchestration name the domain types at the wasm seam.
+nostos-domain = { workspace = true }
 wasm-bindgen = "0.2"
 # E1: the WASM WebSocket transport. `web-sys` is feature-gated per API; the
 # list below is the exact surface the transport touches — anything else pulls

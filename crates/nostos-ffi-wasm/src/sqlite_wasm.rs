@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS cairn_outbox (\
     pk TEXT NOT NULL,\
     payload TEXT,\
     attempts INTEGER NOT NULL DEFAULT 0,\
-    dlq INTEGER NOT NULL DEFAULT 0\
+    dlq INTEGER NOT NULL DEFAULT 0,\
+    last_error TEXT,\
+    dead_lettered_at INTEGER\
 );\
 ";
 
@@ -113,15 +115,65 @@ pub struct SqliteWasmStorage {
     /// `selectValue(sql, bind?)`, `selectRows(sql, bind?)`,
     /// `applyBatch(ops, checkpoint, snapshotTables)`, `clearAll()`, `close()`.
     db: Object,
+    /// Tables whose payload is an add-wins OR-set (ADR-0030): applies MERGE
+    /// element-wise by HLC instead of clobbering. Empty by default. Mirrors
+    /// `SqliteStorage::or_set_tables` (native L117).
+    or_set_tables: HashSet<String>,
+    /// Tables whose payload is a PN-Counter CRDT (ADR-0030 addendum): applies
+    /// MERGE per-replica element-wise max. Mirrors `SqliteStorage::counter_tables`
+    /// (native L121).
+    counter_tables: HashSet<String>,
 }
 
 impl SqliteWasmStorage {
     /// Wrap a pre-initialized JS db wrapper. The Worker calls this after
     /// async sqlite-wasm init + schema migration. The JS wrapper runs
     /// `initSchema()` in its constructor, so the schema is ready on return.
+    ///
+    /// Runs the v3 dead-letter migration (`last_error` + `dead_lettered_at`)
+    /// best-effort — a failure degrades to the old `dlq`-only path (correct,
+    /// just missing the error columns for inspection). Mirrors native
+    /// `SqliteStorage::migrate_outbox_dlq` (sqlite.rs L217).
     #[must_use]
     pub fn new(db: Object) -> Self {
-        Self { db }
+        let storage = Self {
+            db,
+            or_set_tables: HashSet::new(),
+            counter_tables: HashSet::new(),
+        };
+        // Best-effort migration: if the DB predates ADR-0027 v3, ALTER the
+        // columns in. A fresh DB already has them (SCHEMA_SQL). Failure is
+        // non-fatal — mark_dead_letter_with_error falls back to dlq-only.
+        let _ = storage.migrate_outbox_dlq();
+        storage
+    }
+
+    /// Builder: tag tables whose payload is an add-wins OR-set (ADR-0030).
+    /// Mirrors `SqliteStorage::with_or_set_tables` (native L150).
+    #[must_use]
+    pub fn with_or_set_tables(mut self, tables: HashSet<String>) -> Self {
+        self.or_set_tables = tables;
+        self
+    }
+
+    /// Builder: tag tables whose payload is a PN-Counter CRDT (ADR-0030
+    /// addendum). Mirrors `SqliteStorage::with_counter_tables` (native L161).
+    /// A table MUST NOT be in both `or_set_tables` and `counter_tables`
+    /// (counter wins the first branch checked in `apply_local`).
+    #[must_use]
+    pub fn with_counter_tables(mut self, tables: HashSet<String>) -> Self {
+        self.counter_tables = tables;
+        self
+    }
+
+    /// Set the OR-set tables post-construction (Wave 4a).
+    pub(crate) fn set_or_set_tables(&mut self, tables: HashSet<String>) {
+        self.or_set_tables = tables;
+    }
+
+    /// Set the counter tables post-construction (Wave 4a).
+    pub(crate) fn set_counter_tables(&mut self, tables: HashSet<String>) {
+        self.counter_tables = tables;
     }
 
     // ---- JS-call helpers (uniform via Function::apply) ----
@@ -236,6 +288,146 @@ impl SqliteWasmStorage {
     /// Close the underlying sqlite-wasm db handle (for sign-out file removal).
     pub fn close(&self) {
         let _ = self.call_void("close", &[]);
+    }
+
+    // ---- ADR-0027 v3: dead-letter columns migration + read/engine primitives ----
+
+    /// Check whether `cairn_outbox` has a column named `col`. Mirrors native
+    /// `outbox_has_column` (sqlite.rs L201): `PRAGMA table_info` → scan names.
+    fn outbox_has_column(&self, col: &str) -> bool {
+        // PRAGMA table_info returns rows of (cid, name, type, notnull, dflt, pk).
+        // We only need the `name` column (index 1). `selectRows` in array mode.
+        self.select_rows("PRAGMA table_info(cairn_outbox)", None)
+            .is_ok_and(|rows| {
+                (0..rows.length()).any(|i| {
+                    let row = js_sys::Array::from(&rows.get(i));
+                    row.get(1).as_string().is_some_and(|n| n == col)
+                })
+            })
+    }
+
+    /// v3 migration: add `last_error TEXT` and `dead_lettered_at INTEGER` to
+    /// `cairn_outbox` (ADR-0027 / ADR-0032 T5). Idempotent — checks
+    /// `PRAGMA table_info` first, ALTERs only if missing. Mirrors native
+    /// `SqliteStorage::migrate_outbox_dlq` (sqlite.rs L217-233).
+    fn migrate_outbox_dlq(&self) -> Result<(), StorageError> {
+        if !self.outbox_has_column("last_error") {
+            self.exec("ALTER TABLE cairn_outbox ADD COLUMN last_error TEXT", None)?;
+        }
+        if !self.outbox_has_column("dead_lettered_at") {
+            self.exec(
+                "ALTER TABLE cairn_outbox ADD COLUMN dead_lettered_at INTEGER",
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Read the raw payload bytes for `(table, pk)`, or `None` if the row is
+    /// absent. Used by the PN-Counter CRDT's read-modify-write (ADR-0030
+    /// addendum). Mirrors native `SqliteStorage::read_payload` (sqlite.rs
+    /// L889-903).
+    pub fn read_payload(&self, table: &str, pk: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let bind = js_sys::Array::new();
+        bind.push(&JsValue::from_str(table));
+        bind.push(&JsValue::from_str(pk));
+        match self.select_rows(
+            "SELECT payload FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+            Some(&bind),
+        ) {
+            Ok(rows) if rows.length() > 0 => {
+                let row = js_sys::Array::from(&rows.get(0));
+                let payload_val = row.get(0);
+                if payload_val.is_string() {
+                    // TEXT fallback (shouldn't happen for BLOB, but defensive)
+                    Ok(Some(
+                        payload_val.as_string().unwrap_or_default().into_bytes(),
+                    ))
+                } else {
+                    // Uint8Array (the normal path for BLOB columns)
+                    Ok(Some(Uint8Array::new(&payload_val).to_vec()))
+                }
+            }
+            Ok(_) => Ok(None), // zero rows
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Run an arbitrary `SELECT` and return rows as a JSON string. Mirrors
+    /// native `SqliteStorage::query` (sqlite.rs L416-449). The JS sqlite-wasm
+    /// instance supports `db.selectObjects(sql)` which returns `[{col: val}]`
+    /// directly — if the JS glue exposes it, we use it; otherwise we fall back
+    /// to `selectRows` (array mode) and return the raw array.
+    /// ponytail: the JS glue (`sqlite_wasm_glue.js`) should expose
+    /// `selectObjects` for column-named output parity; rewire when convenient.
+    pub fn query_json(&self, sql: &str) -> Result<String, StorageError> {
+        // Try the JS glue's `selectObjects` first (column-named object rows).
+        if let Ok(v) = self.call("selectObjects", &[JsValue::from_str(sql)]) {
+            return js_sys::JSON::stringify(&v)
+                .map(|s| s.as_string().unwrap_or_else(|| "[]".to_string()))
+                .map_err(|e| {
+                    StorageError::Backend(format!("SqliteWasm query_json stringify: {e:?}"))
+                });
+        }
+        // Fallback: `selectRows` (array mode). The caller gets an array-of-
+        // arrays — column names are position-dependent. This is correct for
+        // simple queries where the caller knows the column order.
+        let rows = self.select_rows(sql, None)?;
+        js_sys::JSON::stringify(&rows)
+            .map(|s| s.as_string().unwrap_or_else(|| "[]".to_string()))
+            .map_err(|e| StorageError::Backend(format!("SqliteWasm query_json stringify: {e:?}")))
+    }
+
+    /// Materialize one SQLite `VIEW` per synced table, projected over the
+    /// opaque `cairn_data` BLOB via JSON1 (WS2 read foundation). Mirrors
+    /// native `SqliteStorage::apply_schema` (sqlite.rs L479-514).
+    pub fn apply_schema(&self, tables: &[(String, Vec<String>)]) -> Result<(), StorageError> {
+        for (name, columns) in tables {
+            // Lead with `pk AS _pk` so the view carries the row's replication
+            // key (same as native). Then json_extract per column.
+            let mut cols: Vec<String> = vec!["pk AS _pk".to_string()];
+            for c in columns {
+                cols.push(format!("json_extract(payload, '$.{c}') AS {c}"));
+            }
+            // DROP + CREATE so a changed schema refreshes the projection.
+            self.exec(&format!("DROP VIEW IF EXISTS {name}"), None)?;
+            self.exec(
+                &format!(
+                    "CREATE VIEW {name} AS SELECT {} \
+                     FROM cairn_data WHERE table_name = '{}'",
+                    cols.join(", "),
+                    name.replace('\'', "''")
+                ),
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Count pending (non-dead-lettered) writes. Used by `watchWriteStatus`.
+    pub fn pending_count(&self) -> u64 {
+        self.select_value_str("SELECT COUNT(*) FROM cairn_outbox WHERE dlq = 0", None)
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
+    /// Count dead-lettered writes. Used by `watchWriteStatus`.
+    pub fn dead_letter_count(&self) -> u64 {
+        self.select_value_str("SELECT COUNT(*) FROM cairn_outbox WHERE dlq = 1", None)
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
+    /// The last error from the most recent dead-lettered write. Used by
+    /// `watchWriteStatus`. Returns `None` if no dead-lettered writes or the
+    /// `last_error` column is absent.
+    pub fn last_dead_letter_error(&self) -> Option<String> {
+        self.select_value_str(
+            "SELECT last_error FROM cairn_outbox WHERE dlq = 1 \
+             ORDER BY dead_lettered_at DESC LIMIT 1",
+            None,
+        )
+        .filter(|s| !s.is_empty())
     }
 }
 
@@ -355,6 +547,14 @@ impl Storage for SqliteWasmStorage {
         self.call_void("clearAll", &[])?;
         Ok(())
     }
+
+    /// Override to read the raw payload bytes from `cairn_data` (ADR-0030
+    /// addendum). Mirrors native `SqliteStorage::read_payload` (sqlite.rs
+    /// L889-903). Used by the PN-Counter CRDT's client-side RMW so
+    /// `counter_apply_delta` can read the current value before applying.
+    fn read_payload(&self, table: &str, pk: &str) -> nostos_core::Result<Option<Vec<u8>>> {
+        SqliteWasmStorage::read_payload(self, table, pk)
+    }
 }
 
 // ---- Outbox impl ----
@@ -383,6 +583,60 @@ impl Outbox for SqliteWasmStorage {
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
         Ok(id)
+    }
+
+    /// Transactional enqueue: all writes in one SQLite txn or none. Mirrors
+    /// native `SqliteStorage::enqueue_batch` (sqlite.rs L1015-1038). The
+    /// sequential per-op default the trait provides is NOT atomic — a mid-batch
+    /// failure would leave partial rows, violating ADR-0032 T3.
+    fn enqueue_batch(&mut self, writes: Vec<PendingWrite>) -> nostos_core::Result<Vec<u64>> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        // BEGIN → loop INSERT → COMMIT. On any failure, ROLLBACK so nothing
+        // commits (atomicity contract). The JS sqlite-wasm instance runs
+        // `exec("BEGIN")` / `exec("COMMIT")` / `exec("ROLLBACK")` as DML
+        // statements — same as rusqlite's `transaction()` under the hood.
+        self.exec("BEGIN", None)?;
+        let mut ids = Vec::with_capacity(writes.len());
+        let result: nostos_core::Result<()> = (|| {
+            for w in &writes {
+                let bind = js_sys::Array::new();
+                bind.push(&JsValue::from_str(&w.table));
+                bind.push(&JsValue::from_str(w.op.as_wire_str()));
+                bind.push(&JsValue::from_str(&w.pk));
+                match &w.payload_json {
+                    Some(p) => {
+                        bind.push(&JsValue::from_str(p));
+                    }
+                    None => {
+                        bind.push(&JsValue::NULL);
+                    }
+                }
+                self.exec(
+                    "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
+                    Some(&bind),
+                )?;
+                let id = self
+                    .select_value_str("SELECT last_insert_rowid()", None)
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
+                ids.push(id);
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.exec("COMMIT", None)?;
+                Ok(ids)
+            }
+            Err(e) => {
+                // Best-effort rollback — ignore errors here (the original error
+                // is what matters).
+                let _ = self.exec("ROLLBACK", None);
+                Err(e)
+            }
+        }
     }
 
     fn pending(&self) -> nostos_core::Result<Vec<(u64, PendingWrite)>> {
@@ -453,21 +707,120 @@ impl Outbox for SqliteWasmStorage {
         Ok(())
     }
 
-    fn apply_local(&mut self, write: &PendingWrite) -> nostos_core::Result<()> {
-        // Optimistic instant-local write: store the row NOW (applied_lsn = 0 so
-        // the first server frame at LSN > 0 overwrites it). Deletes are a no-op
-        // here (the server echo removes the row); mirroring SqliteStorage.
-        if let Some(payload) = &write.payload_json {
-            let bind = js_sys::Array::new();
-            bind.push(&JsValue::from_str(&write.table));
-            bind.push(&JsValue::from_str(&write.pk));
-            bind.push(&Uint8Array::from(payload.as_bytes()).into());
+    /// Override to persist the server's error message + a Unix epoch-ms
+    /// timestamp alongside the `dlq` flag (ADR-0032 T5). Mirrors native
+    /// `SqliteStorage::mark_dead_letter_with_error` (sqlite.rs L1168-1185).
+    fn mark_dead_letter_with_error(&self, id: u64, error: Option<&str>) -> nostos_core::Result<()> {
+        let now_ms: i64 = (js_sys::Date::now() * 1000.0) as i64;
+        let bind = js_sys::Array::new();
+        bind.push(&JsValue::from_f64(id as f64));
+        match error {
+            Some(e) => {
+                bind.push(&JsValue::from_str(e));
+            }
+            None => {
+                bind.push(&JsValue::NULL);
+            }
+        }
+        bind.push(&JsValue::from_f64(now_ms as f64));
+        // If the v3 columns don't exist (pre-migration DB), this UPDATE fails;
+        // fall back to the dlq-only path.
+        let result = self.exec(
+            "UPDATE cairn_outbox SET dlq = 1, last_error = ?2, dead_lettered_at = ?3 WHERE id = ?1",
+            Some(&bind),
+        );
+        if result.is_ok() {
+            Ok(())
+        } else {
+            // Fallback: old schema without the columns.
+            let bind2 = js_sys::Array::new();
+            bind2.push(&JsValue::from_f64(id as f64));
             self.exec(
-                "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
-                 VALUES (?1, ?2, ?3, 0) \
-                 ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload",
-                Some(&bind),
-            )?;
+                "UPDATE cairn_outbox SET dlq = 1 WHERE id = ?1",
+                Some(&bind2),
+            )
+        }
+    }
+
+    fn apply_local(&mut self, write: &PendingWrite) -> nostos_core::Result<()> {
+        // Optimistic instant-local write (WS2 slice-2): store the row NOW so
+        // the view reflects the user's write before any server round-trip.
+        // For OR-set/counter tables the optimistic edit MERGES element-wise
+        // by HLC/per-replica max (ADR-0030) instead of clobbering. Mirrors
+        // native `SqliteStorage::apply_local` (sqlite.rs L1191-1242).
+        // ponytail: mirrors SyncClient::write → apply_local; rewire to share
+        // when convenient.
+        match write.op {
+            WriteOp::Upsert => {
+                let incoming = write.payload_json.as_deref().unwrap_or("null");
+                let incoming_bytes = incoming.as_bytes();
+                let bytes = if self.or_set_tables.contains(write.table.as_str()) {
+                    let existing = self
+                        .read_payload(&write.table, &write.pk)?
+                        .unwrap_or_default();
+                    nostos_domain::merge_or_set_or_lww(&existing, incoming_bytes)
+                } else if self.counter_tables.contains(write.table.as_str()) {
+                    let existing = self
+                        .read_payload(&write.table, &write.pk)?
+                        .unwrap_or_default();
+                    nostos_domain::merge_counter_or_lww(&existing, incoming_bytes)
+                } else {
+                    incoming_bytes.to_vec()
+                };
+                let bind = js_sys::Array::new();
+                bind.push(&JsValue::from_str(&write.table));
+                bind.push(&JsValue::from_str(&write.pk));
+                bind.push(&Uint8Array::from(&bytes[..]).into());
+                self.exec(
+                    "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                     VALUES (?1, ?2, ?3, 0) \
+                     ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload",
+                    Some(&bind),
+                )?;
+            }
+            WriteOp::Delete => {
+                let bind = js_sys::Array::new();
+                bind.push(&JsValue::from_str(&write.table));
+                bind.push(&JsValue::from_str(&write.pk));
+                self.exec(
+                    "DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+                    Some(&bind),
+                )?;
+            }
+            WriteOp::Patch => {
+                // Patch is not yet implemented on any backend (native included);
+                // treat as upsert for now (the server path clobbers on patch
+                // too — the PATCH semantic is a server-side feature).
+                let payload = write.payload_json.as_deref().unwrap_or("{}");
+                let bind = js_sys::Array::new();
+                bind.push(&JsValue::from_str(&write.table));
+                bind.push(&JsValue::from_str(&write.pk));
+                bind.push(&Uint8Array::from(payload.as_bytes()).into());
+                self.exec(
+                    "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                     VALUES (?1, ?2, ?3, 0) \
+                     ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload",
+                    Some(&bind),
+                )?;
+            }
+            WriteOp::Increment => {
+                // Increment is handled by the counter CRDT path (counterIncrement
+                // verb) — it should never reach apply_local as a bare Increment
+                // op. If it does, treat as an upsert (the payload carries the
+                // counter value). Mirrors native behavior.
+                if let Some(payload) = &write.payload_json {
+                    let bind = js_sys::Array::new();
+                    bind.push(&JsValue::from_str(&write.table));
+                    bind.push(&JsValue::from_str(&write.pk));
+                    bind.push(&Uint8Array::from(payload.as_bytes()).into());
+                    self.exec(
+                        "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                         VALUES (?1, ?2, ?3, 0) \
+                         ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload",
+                        Some(&bind),
+                    )?;
+                }
+            }
         }
         Ok(())
     }
