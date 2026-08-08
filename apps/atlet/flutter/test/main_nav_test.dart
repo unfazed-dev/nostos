@@ -7,11 +7,26 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:atlet/bench/store.dart';
 import 'package:atlet/main.dart';
 import 'package:atlet/ui/shop.dart';
+
+/// Mock the connectivity_plus EventChannel + MethodChannel so
+/// ConnectivityGuard (created internally by HomeScreen) doesn't hit the
+/// real platform channel under test (MissingPluginException). No events
+/// are emitted; the guard stays in its seeded online state.
+void _mockConnectivityPlus() {
+  const eventChannel = MethodChannel('dev.fluttercommunity.plus/connectivity_status');
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(eventChannel, (MethodCall call) async => null);
+
+  const methodChannel = MethodChannel('dev.fluttercommunity.plus/connectivity');
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(methodChannel, (MethodCall call) async => null);
+}
 
 /// See test/analytics_test.dart's `_settle` for why `pumpAndSettle()` is
 /// wrong here: AnalyticsScreen's indeterminate CircularProgressIndicators
@@ -31,6 +46,7 @@ void main() {
     late BenchStore store;
 
     setUp(() async {
+      _mockConnectivityPlus();
       tempDir = await Directory.systemTemp.createTemp('atlet_nav_test_');
       store = BenchStore(directory: tempDir);
     });

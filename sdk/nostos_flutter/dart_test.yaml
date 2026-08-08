@@ -1,0 +1,9 @@
+# Declares custom test tags (dart.dev/go/test-tags).
+#
+# `integration` marks tests that need a live external service and self-SKIP
+# without operator-provided credentials — e.g.
+# `test/attachments_supabase_real_test.dart` (real Supabase Storage round-trip,
+# gated on SUPABASE_URL + SUPABASE_ANON_KEY). They never run in CI. Exclude
+# them explicitly with `flutter test --exclude-tags integration`.
+tags:
+  integration:

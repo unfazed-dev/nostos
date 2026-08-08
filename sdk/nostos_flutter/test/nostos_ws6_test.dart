@@ -133,13 +133,19 @@ class Task {
 /// canned change-tick stream. Implements the full interface so any [Nostos]
 /// method can be exercised without the FFI.
 class _FakeEngine implements NostosEngine {
+  @override
+  Stream<bool> get webStorageDegraded => const Stream<bool>.empty();
   _FakeEngine({required this.queryResult, required this.rows});
 
   final String queryResult;
   final Stream<String> rows;
 
   @override
-  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables}) =>
+  Stream<NostosConnectionState> subscribe({
+    required List<NostosTableSub> tables,
+    Set<String> orSetTables = const <String>{},
+    Set<String> counterTables = const <String>{},
+  }) =>
       const Stream<NostosConnectionState>.empty();
 
   @override
@@ -158,6 +164,40 @@ class _FakeEngine implements NostosEngine {
     required String op,
     required String pk,
     String? payloadJson,
+  }) async => 0;
+
+  @override
+  Future<List<int>> writeBatch({
+    required List<({String table, String op, String pk, String? payloadJson})>
+        ops,
+  }) async => List.filled(ops.length, 0);
+
+  @override
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) async => 0;
+
+  @override
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) async => 0;
+
+  @override
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async => 0;
+
+  @override
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
   }) async => 0;
 
   @override

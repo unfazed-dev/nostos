@@ -65,6 +65,7 @@ use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 /// One additional table subscription for a [`SyncClientConfig`]: a table name
 /// plus an optional safe-SQL `where_sql` predicate (ADR-0012). A connection
@@ -190,6 +191,18 @@ pub struct SyncClientConfig {
     /// truth, and a mismatch (e.g. client tags but storage doesn't) still
     /// clobbers. Empty by default — OR-set opt-in is explicit.
     pub or_set_tables: HashSet<String>,
+    /// Tables this client treats as PN-Counter CRDTs (ADR-0030 addendum). A
+    /// `counter_increment` / `counter_decrement` on a table NOT in this set
+    /// returns [`ClientError::CounterTableNotTagged`]. This set MUST match the
+    /// storage's `with_counter_tables` AND the server's `NOSTOS_COUNTER_COLUMNS`
+    /// (same three-views-of-one-truth rule as `or_set_tables`). Empty by default.
+    pub counter_tables: HashSet<String>,
+    /// Stable per-replica id for PN-Counter CRDT entries (ADR-0030 addendum).
+    /// Each counter payload keys {p,n} by replica id; merge takes per-replica
+    /// max. Defaults to a fresh UUID v4 — stable for the process lifetime. A
+    /// persisted id (loaded from device storage on startup) gives cross-session
+    /// stability so a restart doesn't seed a new replica entry each time.
+    pub client_id: String,
 }
 
 impl Default for SyncClientConfig {
@@ -206,6 +219,8 @@ impl Default for SyncClientConfig {
             extra_tables: Vec::new(),
             dead_letter_max_attempts: DEFAULT_DEAD_LETTER_MAX_ATTEMPTS,
             or_set_tables: HashSet::new(),
+            counter_tables: HashSet::new(),
+            client_id: Uuid::new_v4().to_string(),
         }
     }
 }
@@ -504,6 +519,49 @@ where
         Ok(id)
     }
 
+    /// Enqueue a batch of writes atomically (all-or-nothing) — ADR-0032 T3.
+    /// All writes land in one storage transaction or none do. Each write is
+    /// also applied optimistically (instant-local). Returns the outbox ids in
+    /// the same order as `writes`.
+    pub async fn write_batch(&self, writes: Vec<PendingWrite>) -> Result<Vec<u64>, ClientError> {
+        let n = writes.len();
+        let engine = Arc::clone(&self.engine);
+        let (ids, local_tick) =
+            tokio::task::spawn_blocking(move || -> nostos_core::Result<(Vec<u64>, Option<ApplyOutcome>)> {
+                let mut engine = engine.blocking_lock();
+                // Atomic enqueue: all-or-nothing at the storage level.
+                let ids = engine.storage_mut().enqueue_batch(writes.clone())?;
+                // Optimistic local apply for each write (same as write()).
+                let mut applied_count = 0usize;
+                for w in &writes {
+                    match engine.storage_mut().apply_local(w) {
+                        Ok(()) => applied_count += 1,
+                        Err(e) => {
+                            warn!(error = %e, "instant-local apply failed in batch; write still queued");
+                        }
+                    }
+                }
+                let local_tick = if applied_count > 0 {
+                    engine
+                        .checkpoint()
+                        .ok()
+                        .map(|checkpoint| ApplyOutcome { checkpoint, rows_applied: applied_count })
+                } else {
+                    None
+                };
+                Ok((ids, local_tick))
+            })
+            .await
+            .map_err(|e| ClientError::Join(e.to_string()))??;
+        debug!(n, "enqueued batch of writes to outbox atomically");
+        self.update_write_status(|s| s.pending += n as u64);
+        if let Some(tick) = local_tick {
+            let _ = self.changes.send(tick);
+        }
+        self.write_notify.notify_one();
+        Ok(ids)
+    }
+
     /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030).
     /// Mints a client HLC for the add, enqueues a merge-upsert, and applies
     /// optimistically — the element renders locally immediately and converges
@@ -568,6 +626,103 @@ where
             payload_json: Some(payload),
         })
         .await
+    }
+
+    /// Increment the PN-Counter in row `pk` of `table` by `delta` (ADR-0030
+    /// addendum). Read-modify-write: reads the current counter payload, applies
+    /// the delta to this replica's entry, and enqueues the full result. The
+    /// per-replica max merge converges across replicas; the read-modify-write
+    /// makes same-replica increments cumulative (not clobbered by a concurrent
+    /// same-replica delta). Requires the storage to tag `table` as a counter
+    /// ([`SqliteStorage::with_counter_tables`] /
+    /// [`nostos_core::InMemoryStorage::with_counter_tables`]).
+    pub async fn counter_increment(
+        &self,
+        table: &str,
+        pk: &str,
+        delta: i64,
+    ) -> Result<u64, ClientError> {
+        self.counter_op(table, pk, delta).await
+    }
+
+    /// Decrement the PN-Counter by `delta` (bumps the negative counter `n` for
+    /// this replica). Same read-modify-write as [`Self::counter_increment`].
+    pub async fn counter_decrement(
+        &self,
+        table: &str,
+        pk: &str,
+        delta: u64,
+    ) -> Result<u64, ClientError> {
+        let neg = i64::try_from(delta).map_or(i64::MIN, |d| -d);
+        self.counter_op(table, pk, neg).await
+    }
+
+    /// Shared counter read-modify-write: read current payload, apply delta to
+    /// this replica's entry, enqueue as a merge-upsert. The read + delta-apply +
+    /// enqueue + optimistic apply all run under ONE engine lock, so two
+    /// concurrent local increments on the same pk serialize (no lost update
+    /// from same-replica races — the crux of PN-Counters).
+    async fn counter_op(&self, table: &str, pk: &str, delta: i64) -> Result<u64, ClientError> {
+        // Loud-fail gate (ADR-0030 addendum): a table the client does not tag
+        // as a counter must never reach the enqueue path. Same three-views-of-
+        // one-truth rule as or_set_tables — this tag MUST match the storage's
+        // `with_counter_tables` AND the server's `NOSTOS_COUNTER_COLUMNS`.
+        if !self.config.counter_tables.contains(table) {
+            return Err(ClientError::CounterTableNotTagged(table.to_string()));
+        }
+        let replica = self.config.client_id.clone();
+        let table_owned = table.to_string();
+        let pk_owned = pk.to_string();
+        let engine = Arc::clone(&self.engine);
+        let (id, local_tick) =
+            tokio::task::spawn_blocking(move || -> nostos_core::Result<(u64, Option<ApplyOutcome>)> {
+                let mut engine = engine.blocking_lock();
+                // Read-modify-write: read the current counter payload, apply the
+                // delta to this replica's entry, produce the new full payload.
+                // The enqueued payload carries the bumped cumulative value, so
+                // the per-replica max merge can't lose a delta to a concurrent
+                // same-replica write (the PN-Counter cumulative-increment crux).
+                let existing = engine
+                    .storage()
+                    .read_payload(&table_owned, &pk_owned)?
+                    .unwrap_or_default();
+                let payload_bytes =
+                    nostos_domain::counter_apply_delta(&existing, &replica, delta);
+                let payload_json = String::from_utf8(payload_bytes)
+                    .expect("counter_apply_delta serializes valid UTF-8 JSON");
+                let write = nostos_core::PendingWrite {
+                    table: table_owned,
+                    op: nostos_core::WriteOp::Upsert,
+                    pk: pk_owned,
+                    payload_json: Some(payload_json),
+                };
+                let id = engine.storage_mut().enqueue(write.clone())?;
+                let applied = match engine.storage_mut().apply_local(&write) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(write_id = id, error = %e, "counter instant-local apply failed; write still queued");
+                        false
+                    }
+                };
+                let local_tick = if applied {
+                    engine
+                        .checkpoint()
+                        .ok()
+                        .map(|checkpoint| ApplyOutcome { checkpoint, rows_applied: 1 })
+                } else {
+                    None
+                };
+                Ok((id, local_tick))
+            })
+            .await
+            .map_err(|e| ClientError::Join(e.to_string()))??;
+        debug!(write_id = id, "enqueued counter write to outbox");
+        self.update_write_status(|s| s.pending += 1);
+        if let Some(tick) = local_tick {
+            let _ = self.changes.send(tick);
+        }
+        self.write_notify.notify_one();
+        Ok(id)
     }
 
     /// Mint the next client HLC, advancing this client's monotone HLC state
@@ -692,12 +847,15 @@ where
     ) -> Result<(u32, bool), ClientError> {
         let max = self.config.dead_letter_max_attempts;
         let engine = Arc::clone(&self.engine);
+        let error_owned = server_error.map(str::to_string);
         let (attempts, dld, remaining) =
             tokio::task::spawn_blocking(move || -> nostos_core::Result<(u32, bool, u64)> {
                 let engine = engine.blocking_lock();
                 let count = engine.storage().bump_attempts(id)?;
                 if count >= max {
-                    engine.storage().mark_dead_letter(id)?;
+                    engine
+                        .storage()
+                        .mark_dead_letter_with_error(id, error_owned.as_deref())?;
                     // Same reasoning as mark_write_done: re-count under the
                     // lock so a repeated dead-letter can't double-decrement.
                     let remaining = engine.storage().pending()?.len() as u64;
@@ -1253,6 +1411,8 @@ pub enum ClientError {
     Storage(#[from] nostos_core::StorageError),
     #[error("or_set op on table not tagged as an OR-set: {0} — tag it in SyncClientConfig::or_set_tables, SqliteStorage::with_or_set_tables, and NOSTOS_OR_SET_COLUMNS")]
     OrSetTableNotTagged(String),
+    #[error("counter op on table not tagged as a PN-Counter: {0} — tag it in SyncClientConfig::counter_tables, SqliteStorage::with_counter_tables, and NOSTOS_COUNTER_COLUMNS")]
+    CounterTableNotTagged(String),
 }
 
 /// Decode a hex string to bytes. The wire payload is hex-encoded (see

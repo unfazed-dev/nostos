@@ -27,6 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 nostos-core = { workspace = true }
@@ -40,7 +41,6 @@ bytes = { workspace = true }
 # uuid binding, matching nostos-infra's own e2e_pg_* tests. The tenant-mode
 # reconnect-replay e2e also needs HMAC/SHA2 to mint Supabase-shape JWTs.
 tokio-postgres = { workspace = true }
-uuid = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 

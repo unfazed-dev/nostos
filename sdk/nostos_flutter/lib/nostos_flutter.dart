@@ -28,4 +28,18 @@ export 'src/nostos_config.dart' show NostosConfig;
 // Declare app schemas with the collision-free aliases `NostosTable` /
 // `NostosColumn` instead (same classes).
 export 'src/schema.dart' show NostosSchema, NostosTable, NostosColumn;
-export 'src/nostos_database.dart' show NostosDatabase, Collection, SyncStatus;
+export 'src/predicate.dart' show Where, Order;
+export 'src/nostos_database.dart'
+    show NostosDatabase, Collection, SyncStatus, NostosWrite, DeadLetter;
+// T6 attachments (ADR-0034): two-plane blob sync. The metadata table syncs
+// through Nostos; the blob plane is the app's AttachmentStorageAdapter.
+export 'src/attachments.dart'
+    show
+        Attachments,
+        AttachmentStorageAdapter,
+        SupabaseStorageAdapter,
+        BlobStore,
+        LocalFileBlobStore,
+        AttachmentRow,
+        AttachmentSchema,
+        AttachmentStateWire;

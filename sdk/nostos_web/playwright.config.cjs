@@ -9,6 +9,10 @@ const { defineConfig } = require("@playwright/test");
 
 module.exports = defineConfig({
   testDir: "./e2e",
+  // attachments.spec.cjs is a `node:test` file (run via `npm run smoke`),
+  // NOT a Playwright spec — exclude it so Playwright doesn't side-effect
+  // execute it during discovery (it would otherwise run twice under `npm test`).
+  testIgnore: ["**/attachments.spec.cjs"],
   timeout: 60000,
   expect: { timeout: 15000 },
   fullyParallel: false,

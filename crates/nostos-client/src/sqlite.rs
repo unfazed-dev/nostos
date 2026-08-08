@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS cairn_outbox (\
     pk TEXT NOT NULL,\
     payload TEXT,\
     attempts INTEGER NOT NULL DEFAULT 0,\
-    dlq INTEGER NOT NULL DEFAULT 0\
+    dlq INTEGER NOT NULL DEFAULT 0,\
+    last_error TEXT,\
+    dead_lettered_at INTEGER\
 );\
 ";
 
@@ -113,6 +115,10 @@ pub struct SqliteStorage {
     /// element-wise by HLC instead of clobbering. Empty by default; the bench's
     /// `tasks` table is ordinary, so the measured fan-out path is unaffected.
     or_set_tables: std::collections::HashSet<String>,
+    /// Tables whose payload is a PN-Counter CRDT (ADR-0030 addendum): applies
+    /// MERGE per-replica elementwise max instead of clobbering. Empty by default.
+    /// A row's payload IS the counter `{"entries":[{"r":..,"p":..,"n":..}]}`.
+    counter_tables: std::collections::HashSet<String>,
 }
 
 impl SqliteStorage {
@@ -146,13 +152,26 @@ impl SqliteStorage {
         self
     }
 
+    /// Declare which tables hold PN-Counter CRDTs (ADR-0030 addendum). For those
+    /// tables `apply_batch` / `apply_local` / pending-replay merge per-replica
+    /// elementwise max; all others stay last-writer-wins (or OR-set if tagged).
+    /// Builder-style. A table MUST NOT be in both `or_set_tables` and
+    /// `counter_tables` (counter wins the first branch checked).
+    #[must_use]
+    pub fn with_counter_tables(mut self, tables: std::collections::HashSet<String>) -> Self {
+        self.counter_tables = tables;
+        self
+    }
+
     fn init(conn: Connection) -> Result<Self, StorageError> {
         conn.execute_batch(SCHEMA).map_err(rusqlite_err)?;
         Self::migrate_outbox_dlq(&conn)?;
+        Self::migrate_outbox_error_cols(&conn)?;
         Self::migrate_applied_lsn(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             or_set_tables: std::collections::HashSet::new(),
+            counter_tables: std::collections::HashSet::new(),
         })
     }
 
@@ -189,6 +208,29 @@ impl SqliteStorage {
         .map_err(rusqlite_err)?;
         conn.execute(
             "ALTER TABLE cairn_outbox ADD COLUMN dlq INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(rusqlite_err)?;
+        Ok(())
+    }
+
+    /// v3 migration: add `last_error TEXT` and `dead_lettered_at INTEGER` to
+    /// `cairn_outbox` for databases created by a pre-T5 binary (ADR-0032 T5 /
+    /// ADR-0027). These columns persist the server's error message and a Unix
+    /// epoch-millisecond timestamp when a write is dead-lettered, so
+    /// `deadLetters()` can surface WHY and WHEN a write permanently failed.
+    /// Same probe-then-ALTER pattern as [`Self::migrate_outbox_dlq`]:
+    /// additive — `ADD COLUMN` with no `NOT NULL` default is constant-time on
+    /// SQLite and leaves existing rows NULL (correct: pre-T5 dead-letters have
+    /// no recorded error/timestamp). Wave 2's `SqliteWasmStorage` mirrors this.
+    fn migrate_outbox_error_cols(conn: &Connection) -> Result<(), StorageError> {
+        if outbox_has_column(conn, "last_error")? {
+            return Ok(());
+        }
+        conn.execute("ALTER TABLE cairn_outbox ADD COLUMN last_error TEXT", [])
+            .map_err(rusqlite_err)?;
+        conn.execute(
+            "ALTER TABLE cairn_outbox ADD COLUMN dead_lettered_at INTEGER",
             [],
         )
         .map_err(rusqlite_err)?;
@@ -656,6 +698,29 @@ impl Storage for SqliteStorage {
                                     .execute(rusqlite::params![table, pk, merged, lsn_i64])
                                     .map_err(rusqlite_err)?;
                             }
+                        } else if self.counter_tables.contains(table.as_str()) {
+                            // PN-Counter: merge per-replica elementwise max
+                            // (ADR-0030 addendum). Same LSN-gated read-merge-write
+                            // as OR-set; a malformed payload degrades to LWW via
+                            // `merge_counter_or_lww`.
+                            let incoming = payload.as_ref();
+                            let row: Option<(Vec<u8>, i64)> = tx
+                                .query_row(
+                                    "SELECT payload, applied_lsn FROM cairn_data \
+                                     WHERE table_name = ?1 AND pk = ?2",
+                                    rusqlite::params![table, pk],
+                                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+                                )
+                                .ok();
+                            let admit = row.as_ref().is_none_or(|(_, l)| lsn_i64 >= *l);
+                            if admit {
+                                let existing: &[u8] =
+                                    row.as_ref().map_or(&[], |(p, _)| p.as_slice());
+                                let merged = nostos_domain::merge_counter_or_lww(existing, incoming);
+                                upsert_uncond
+                                    .execute(rusqlite::params![table, pk, merged, lsn_i64])
+                                    .map_err(rusqlite_err)?;
+                            }
                         } else if snapshot_tables.contains(table.as_str()) {
                             upsert_uncond
                                 .execute(rusqlite::params![table, pk, payload.as_ref(), lsn_i64])
@@ -712,6 +777,19 @@ impl Storage for SqliteStorage {
                                     )
                                     .unwrap_or_default();
                                 nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                            } else if self.counter_tables.contains(write.table.as_str()) {
+                                // PN-Counter (ADR-0030 addendum): merge the
+                                // pending optimistic delta per-replica max so an
+                                // offline increment survives a server frame.
+                                let existing: Vec<u8> = tx
+                                    .query_row(
+                                        "SELECT payload FROM cairn_data \
+                                         WHERE table_name = ?1 AND pk = ?2",
+                                        rusqlite::params![write.table, write.pk],
+                                        |r| r.get::<_, Vec<u8>>(0),
+                                    )
+                                    .unwrap_or_default();
+                                nostos_domain::merge_counter_or_lww(&existing, incoming)
                             } else {
                                 incoming.to_vec()
                             };
@@ -806,6 +884,22 @@ impl Storage for SqliteStorage {
             out.push(r.map_err(rusqlite_err)?);
         }
         Ok(out)
+    }
+
+    fn read_payload(&self, table: &str, pk: &str) -> nostos_core::Result<Option<Vec<u8>>> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("read_payload: storage mutex poisoned");
+        match conn.query_row(
+            "SELECT payload FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+            rusqlite::params![table, pk],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(rusqlite_err(e)),
+        }
     }
 
     fn delete_pks(&mut self, table: &str, pks: &[String]) -> nostos_core::Result<()> {
@@ -914,6 +1008,34 @@ impl Outbox for SqliteStorage {
         // AUTOINCREMENT guarantees monotonicity (never reuses a deleted id), so
         // the returned u64 is a stable correlation key on the wire.
         Ok(u64::try_from(id).expect("rowid is non-negative"))
+    }
+
+    /// Atomic batch enqueue: all rows land in ONE SQLite transaction, or none
+    /// do (ADR-0032 T3). A mid-batch failure rolls back — no partial entries.
+    fn enqueue_batch(&mut self, writes: Vec<PendingWrite>) -> nostos_core::Result<Vec<u64>> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .expect("enqueue_batch: storage mutex poisoned");
+        let tx = conn.transaction().map_err(rusqlite_err)?;
+        let mut ids = Vec::with_capacity(writes.len());
+        for w in &writes {
+            let op_wire = w.op.as_wire_str();
+            tx.execute(
+                "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![w.table, op_wire, w.pk, w.payload_json],
+            )
+            .map_err(rusqlite_err)?;
+            let id: i64 = tx
+                .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+                .map_err(rusqlite_err)?;
+            ids.push(u64::try_from(id).expect("rowid is non-negative"));
+        }
+        tx.commit().map_err(rusqlite_err)?;
+        Ok(ids)
     }
 
     fn pending(&self) -> nostos_core::Result<Vec<(u64, PendingWrite)>> {
@@ -1038,6 +1160,30 @@ impl Outbox for SqliteStorage {
         Ok(())
     }
 
+    /// Override to persist the server's error message + a Unix epoch-ms
+    /// timestamp alongside the `dlq` flag (ADR-0032 T5). Same transactional
+    /// contract as [`Self::mark_dead_letter`]. The timestamp is the current
+    /// time in milliseconds (best-effort — if the system clock is wrong the
+    /// error is still persisted, just with a wrong timestamp).
+    fn mark_dead_letter_with_error(&self, id: u64, error: Option<&str>) -> nostos_core::Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .expect("mark_dead_letter_with_error: storage mutex poisoned");
+        let tx = conn.transaction().map_err(rusqlite_err)?;
+        let now_ms: i64 = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
+            Err(_) => 0,
+        };
+        tx.execute(
+            "UPDATE cairn_outbox SET dlq = 1, last_error = ?2, dead_lettered_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, error, now_ms],
+        )
+        .map_err(rusqlite_err)?;
+        tx.commit().map_err(rusqlite_err)?;
+        Ok(())
+    }
+
     /// Instant-local write (WS2 slice-2): render the row into `cairn_data` NOW
     /// so the view reflects the user's write before any server round-trip,
     /// WITHOUT advancing the checkpoint (the row isn't server-confirmed). The
@@ -1065,6 +1211,18 @@ impl Outbox for SqliteStorage {
                         )
                         .unwrap_or_default();
                     nostos_domain::merge_or_set_or_lww(&existing, incoming)
+                } else if self.counter_tables.contains(write.table.as_str()) {
+                    // PN-Counter (ADR-0030 addendum): merge the optimistic delta
+                    // per-replica max instead of clobbering the existing row.
+                    let existing: Vec<u8> = conn
+                        .query_row(
+                            "SELECT payload FROM cairn_data \
+                             WHERE table_name = ?1 AND pk = ?2",
+                            rusqlite::params![write.table, write.pk],
+                            |r| r.get::<_, Vec<u8>>(0),
+                        )
+                        .unwrap_or_default();
+                    nostos_domain::merge_counter_or_lww(&existing, incoming)
                 } else {
                     incoming.to_vec()
                 };
@@ -1607,6 +1765,145 @@ mod tests {
         let pending = s.pending().unwrap();
         assert_eq!(pending.len(), 1, "head advanced past the dead-letter");
         assert_eq!(pending[0].0, id2, "the new write is at the head");
+    }
+
+    /// enqueue_batch is atomic: a mid-batch failure rolls back the ENTIRE
+    /// transaction, leaving zero partial rows (ADR-0032 T3). The sequential
+    /// per-op path could not promise this. We force a mid-batch ABORT with a
+    /// BEFORE INSERT trigger that rejects one specific pk — it fires on the
+    /// 2nd op, aborting the transaction, and nothing commits.
+    #[test]
+    fn enqueue_batch_is_atomic_mid_batch_failure_leaves_nothing() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+
+        // Seed one row OUTSIDE the batch so we can prove it survives rollback.
+        let seed_id = s
+            .enqueue(PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "seed".into(),
+                payload_json: Some(r#"{"title":"seed"}"#.into()),
+            })
+            .unwrap();
+
+        // Trigger that ABORTs the INSERT for one specific pk — fires mid-tx.
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_bad_pk BEFORE INSERT ON cairn_outbox \
+                 BEGIN \
+                   SELECT CASE WHEN NEW.pk = 'BADPK' \
+                     THEN RAISE(ABORT, 'rejected') END; \
+                 END",
+            )
+            .unwrap();
+        }
+
+        let batch = vec![
+            PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "a".into(),
+                payload_json: Some(r#"{"v":1}"#.into()),
+            },
+            PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "BADPK".into(), // trips the trigger — mid-batch abort
+                payload_json: Some(r#"{"v":2}"#.into()),
+            },
+            PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "c".into(),
+                payload_json: Some(r#"{"v":3}"#.into()),
+            },
+        ];
+
+        let result = s.enqueue_batch(batch);
+        assert!(
+            result.is_err(),
+            "a batch with a mid-batch failure MUST error"
+        );
+
+        // Nothing from the batch landed — only the pre-seeded row survives.
+        let pending = s.pending().unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "no partial batch rows survived the rollback"
+        );
+        assert_eq!(pending[0].0, seed_id, "only the seed row remains");
+    }
+
+    #[test]
+    fn enqueue_batch_happy_path_lands_all_rows_with_sequential_ids() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        let batch = vec![
+            PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "a".into(),
+                payload_json: Some(r#"{"v":1}"#.into()),
+            },
+            PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "b".into(),
+                payload_json: Some(r#"{"v":2}"#.into()),
+            },
+            PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "c".into(),
+                payload_json: Some(r#"{"v":3}"#.into()),
+            },
+        ];
+        let ids = s.enqueue_batch(batch).unwrap();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(s.pending().unwrap().len(), 3);
+        // ids are ascending (AUTOINCREMENT inside the single transaction).
+        assert!(ids[1] > ids[0] && ids[2] > ids[1]);
+    }
+
+    /// mark_dead_letter_with_error persists the server's per-row reason and a
+    /// quarantine timestamp alongside the dlq flag (ADR-0032 T5). This is the
+    /// column set `deadLetters()` surfaces on the Dart side.
+    #[test]
+    fn mark_dead_letter_with_error_persists_error_and_timestamp() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        let id = s
+            .enqueue(PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "1".into(),
+                payload_json: Some(r#"{"title":"x"}"#.into()),
+            })
+            .unwrap();
+
+        s.mark_dead_letter_with_error(id, Some("NOSTOS_WRITE_TABLES rejects tasks"))
+            .unwrap();
+
+        // The row is excluded from pending (dlq=1)...
+        assert!(s.pending().unwrap().is_empty());
+
+        // ...and carries the error text + a non-null quarantine timestamp.
+        let conn = s.conn.lock().unwrap();
+        let (last_error, dead_lettered_at): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT last_error, dead_lettered_at FROM cairn_outbox WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            last_error.as_deref(),
+            Some("NOSTOS_WRITE_TABLES rejects tasks")
+        );
+        assert!(
+            dead_lettered_at.is_some(),
+            "quarantine timestamp was stamped"
+        );
     }
 
     /// Re-opening a pre-DLQ database (the old `cairn_outbox` schema without the

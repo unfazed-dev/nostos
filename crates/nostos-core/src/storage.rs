@@ -143,6 +143,22 @@ pub trait Storage {
     /// read failure surfaces as [`StorageError::Backend`].
     fn pks_for_table(&self, table: &str) -> crate::Result<Vec<String>>;
 
+    /// Read the opaque payload bytes for one row `(table, pk)`, or `None` if the
+    /// row is absent. Used by the PN-Counter CRDT's client-side read-modify-write
+    /// (ADR-0030 addendum): `counter_increment` reads the current counter
+    /// payload, applies the delta to this replica's entry, and enqueues the
+    /// result so the per-replica max merge converges (a bare delta would be
+    /// clobbered by a concurrent delta from the same replica).
+    ///
+    /// Default `Ok(None)` — a backend that doesn't override it has no counter
+    /// read-modify-write (the client's counter methods will treat every
+    /// increment as a first-write, which is correct for a single-replica counter
+    /// but loses same-replica concurrency). `SqliteStorage` and
+    /// `InMemoryStorage` override with a real read.
+    fn read_payload(&self, _table: &str, _pk: &str) -> crate::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Bulk-delete the rows identified by `pks` from `table`. Used by the
     /// snapshot-reconcile `end` step to reap orphans — PKs that were local at
     /// `begin` but absent from the snapshot. Idempotent: deleting a pk that's

@@ -55,9 +55,272 @@
 
 use nostos_core::{
     ApplyEngine, ApplyOutcome, Frame as CoreFrame, InMemoryStorage, Lsn, Operation, Outbox,
-    PendingWrite, WriteOp,
+    PendingWrite, RowOp, Storage, WriteOp,
 };
+use std::cell::Cell;
+use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
+
+// Wave 4a: `js_sys::Reflect` for reading JS object fields in typed-verb
+// orchestration (writeBatch, applySchema parse JS arrays of objects).
+use js_sys::Reflect;
+
+/// The SQLite-WASM durable backend (ADR-0017 follow-up / ADR-0033).
+pub mod sqlite_wasm;
+pub use sqlite_wasm::SqliteWasmStorage;
+
+/// The unified storage backend for the WASM bridge — either in-memory (the
+/// node smoke + standalone default) or SQLite-WASM/OPFS (the Worker's durable
+/// path). Both implement [`Storage`] + [`Outbox`]; the enum delegates. This lets
+/// [`NostosEngine`] / [`NostosSocket`] work with either backend without generics
+/// crossing the wasm-bindgen boundary (generics can't be `#[wasm_bindgen]`).
+///
+/// The durable variant is browser-only (the JS sqlite-wasm methods exist only
+/// in a Worker with OPFS). Host cargo tests exercise only `Memory`; the
+/// `SqliteWasm` path is proven by the Playwright browser test (ADR-0033).
+pub(crate) enum WebStorage {
+    /// RAM-only — the node smoke / standalone default + the OPFS-unavailable
+    /// degrade path (ADR-0017 follow-up scope step 5 / ADR-0033).
+    Memory(InMemoryStorage),
+    /// OPFS-backed SQLite-WASM — durable across reloads. The Worker creates this
+    /// after async sqlite-wasm init + `opfs-sahpool`.
+    SqliteWasm(SqliteWasmStorage),
+}
+
+impl Storage for WebStorage {
+    fn checkpoint(&self) -> nostos_core::Result<Lsn> {
+        match self {
+            WebStorage::Memory(s) => s.checkpoint(),
+            WebStorage::SqliteWasm(s) => s.checkpoint(),
+        }
+    }
+    fn epoch(&self) -> nostos_core::Result<u64> {
+        match self {
+            WebStorage::Memory(s) => s.epoch(),
+            WebStorage::SqliteWasm(s) => s.epoch(),
+        }
+    }
+    fn save_epoch(&self, epoch: u64) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.save_epoch(epoch),
+            WebStorage::SqliteWasm(s) => s.save_epoch(epoch),
+        }
+    }
+    fn apply_batch(
+        &mut self,
+        ops: &[(RowOp, u64)],
+        checkpoint: Lsn,
+        snapshot_tables: &HashSet<String>,
+    ) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.apply_batch(ops, checkpoint, snapshot_tables),
+            WebStorage::SqliteWasm(s) => s.apply_batch(ops, checkpoint, snapshot_tables),
+        }
+    }
+    fn pks_for_table(&self, table: &str) -> nostos_core::Result<Vec<String>> {
+        match self {
+            WebStorage::Memory(s) => s.pks_for_table(table),
+            WebStorage::SqliteWasm(s) => s.pks_for_table(table),
+        }
+    }
+    fn delete_pks(&mut self, table: &str, pks: &[String]) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.delete_pks(table, pks),
+            WebStorage::SqliteWasm(s) => s.delete_pks(table, pks),
+        }
+    }
+    fn clear(&mut self) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => Storage::clear(s),
+            WebStorage::SqliteWasm(s) => Storage::clear(s),
+        }
+    }
+
+    /// Wave 4a: delegate `read_payload` so counter RMW works on BOTH backends.
+    /// `InMemoryStorage` overrides it; `SqliteWasmStorage` overrides it (above).
+    /// Without this delegation, the trait default (`Ok(None)`) would shadow
+    /// both real impls via `WebStorage`.
+    fn read_payload(&self, table: &str, pk: &str) -> nostos_core::Result<Option<Vec<u8>>> {
+        match self {
+            WebStorage::Memory(s) => s.read_payload(table, pk),
+            WebStorage::SqliteWasm(s) => s.read_payload(table, pk),
+        }
+    }
+}
+
+impl Outbox for WebStorage {
+    fn enqueue(&mut self, write: PendingWrite) -> nostos_core::Result<u64> {
+        match self {
+            WebStorage::Memory(s) => s.enqueue(write),
+            WebStorage::SqliteWasm(s) => s.enqueue(write),
+        }
+    }
+    fn pending(&self) -> nostos_core::Result<Vec<(u64, PendingWrite)>> {
+        match self {
+            WebStorage::Memory(s) => s.pending(),
+            WebStorage::SqliteWasm(s) => s.pending(),
+        }
+    }
+    fn mark_done(&mut self, id: u64) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.mark_done(id),
+            WebStorage::SqliteWasm(s) => s.mark_done(id),
+        }
+    }
+    fn bump_attempts(&self, id: u64) -> nostos_core::Result<u32> {
+        match self {
+            WebStorage::Memory(s) => s.bump_attempts(id),
+            WebStorage::SqliteWasm(s) => s.bump_attempts(id),
+        }
+    }
+    fn mark_dead_letter(&self, id: u64) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.mark_dead_letter(id),
+            WebStorage::SqliteWasm(s) => s.mark_dead_letter(id),
+        }
+    }
+    /// Wave 4a: override to persist `last_error` + `dead_lettered_at` (ADR-0032
+    /// T5). Delegates to whichever backend overrides it.
+    fn mark_dead_letter_with_error(&self, id: u64, error: Option<&str>) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.mark_dead_letter_with_error(id, error),
+            WebStorage::SqliteWasm(s) => s.mark_dead_letter_with_error(id, error),
+        }
+    }
+    /// Wave 4a: transactional batch enqueue (ADR-0032 T3). `InMemoryStorage`
+    /// overrides with an atomic BTreeMap extend; `SqliteWasmStorage` overrides
+    /// with BEGIN → loop → COMMIT. Without this delegation, the trait default
+    /// (sequential `enqueue` loop) would shadow both — non-atomic.
+    fn enqueue_batch(&mut self, writes: Vec<PendingWrite>) -> nostos_core::Result<Vec<u64>> {
+        match self {
+            WebStorage::Memory(s) => s.enqueue_batch(writes),
+            WebStorage::SqliteWasm(s) => s.enqueue_batch(writes),
+        }
+    }
+    fn apply_local(&mut self, write: &PendingWrite) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.apply_local(write),
+            WebStorage::SqliteWasm(s) => s.apply_local(write),
+        }
+    }
+    fn clear(&mut self) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => Outbox::clear(s),
+            WebStorage::SqliteWasm(s) => Outbox::clear(s),
+        }
+    }
+}
+
+impl WebStorage {
+    /// Row count (diagnostics — NOT on the `Storage` trait). Delegates to
+    /// whichever backend is active. The SqliteWasm variant queries `COUNT(*)`.
+    pub(crate) fn row_count(&self) -> usize {
+        match self {
+            WebStorage::Memory(s) => s.row_count(),
+            WebStorage::SqliteWasm(s) => s.row_count(),
+        }
+    }
+
+    /// `(pk, payload)` pairs for `table` sorted by pk (diagnostics readback).
+    /// Delegates to whichever backend is active.
+    pub(crate) fn rows_for(&self, table: &str) -> Vec<(String, Vec<u8>)> {
+        match self {
+            WebStorage::Memory(s) => s.rows_for(table),
+            WebStorage::SqliteWasm(s) => s.rows_for(table),
+        }
+    }
+
+    /// Whether this backend is the durable (SqliteWasm) variant. Used by the
+    /// transport to decide whether to read the checkpoint from SQLite (durable)
+    /// or `localStorage` (in-memory degrade path).
+    pub(crate) fn is_durable(&self) -> bool {
+        matches!(self, WebStorage::SqliteWasm(_))
+    }
+
+    // ---- Wave 4a: typed-verb support (CRDT tables, read/query, status) ----
+
+    /// Tag tables as OR-set / counter CRDTs. Propagates to whichever backend
+    /// is active. Mirrors `SqliteStorage::with_or_set_tables` /
+    /// `with_counter_tables` and `InMemoryStorage`'s same builders.
+    pub(crate) fn set_crdt_tables(&mut self, or_set: HashSet<String>, counter: HashSet<String>) {
+        match self {
+            WebStorage::Memory(s) => {
+                s.set_or_set_tables(or_set);
+                s.set_counter_tables(counter);
+            }
+            WebStorage::SqliteWasm(s) => {
+                s.set_or_set_tables(or_set);
+                s.set_counter_tables(counter);
+            }
+        }
+    }
+
+    /// Read the raw payload bytes for `(table, pk)`, or `None`. Wraps the
+    /// `Storage::read_payload` trait delegation.
+    pub(crate) fn read_payload(
+        &self,
+        table: &str,
+        pk: &str,
+    ) -> nostos_core::Result<Option<Vec<u8>>> {
+        Storage::read_payload(self, table, pk)
+    }
+
+    /// Transactional batch enqueue. Wraps the `Outbox::enqueue_batch` trait
+    /// delegation (overridden on both backends for atomicity).
+    pub(crate) fn enqueue_batch(
+        &mut self,
+        writes: Vec<PendingWrite>,
+    ) -> nostos_core::Result<Vec<u64>> {
+        Outbox::enqueue_batch(self, writes)
+    }
+
+    /// Run an arbitrary SELECT, returning JSON. SqliteWasm only (Memory has no
+    /// SQL engine). Returns `[]"` on Memory (no error — the dev shouldn't call
+    /// query on an in-memory engine; it's a diagnostics convenience).
+    pub(crate) fn query_json(&self, sql: &str) -> nostos_core::Result<String> {
+        match self {
+            WebStorage::Memory(_) => Ok("[]".to_string()),
+            WebStorage::SqliteWasm(s) => s
+                .query_json(sql)
+                .map_err(|e| nostos_core::StorageError::Backend(e.to_string())),
+        }
+    }
+
+    /// Materialize WS2 read-views. SqliteWasm only (Memory has no views).
+    /// No-op on Memory (rows are already accessible by table).
+    pub(crate) fn apply_schema(&self, tables: &[(String, Vec<String>)]) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(_) => Ok(()),
+            WebStorage::SqliteWasm(s) => s
+                .apply_schema(tables)
+                .map_err(|e| nostos_core::StorageError::Backend(e.to_string())),
+        }
+    }
+
+    /// Pending (non-dead-lettered) write count.
+    pub(crate) fn pending_count(&self) -> u64 {
+        match self {
+            WebStorage::Memory(s) => s.pending().map_or(0, |p| p.len() as u64),
+            WebStorage::SqliteWasm(s) => s.pending_count(),
+        }
+    }
+
+    /// Dead-lettered write count.
+    pub(crate) fn dead_letter_count(&self) -> u64 {
+        match self {
+            WebStorage::Memory(_) => 0, // InMemoryStorage has no dead-letter column
+            WebStorage::SqliteWasm(s) => s.dead_letter_count(),
+        }
+    }
+
+    /// The last error from the most recent dead-lettered write.
+    pub(crate) fn last_dead_letter_error(&self) -> Option<String> {
+        match self {
+            WebStorage::Memory(_) => None,
+            WebStorage::SqliteWasm(s) => s.last_dead_letter_error(),
+        }
+    }
+}
 
 /// The operation kind, as a JS-friendly string. Matches `nostos_domain::Operation`.
 ///
@@ -69,6 +332,48 @@ fn parse_op(s: &str) -> Operation {
         "update" => Operation::Update,
         "delete" => Operation::Delete,
         _ => Operation::Insert,
+    }
+}
+
+/// Derive a stable per-engine replica id. Uses wall-clock ms + a process-local
+/// counter so two engines constructed in the same ms get distinct ids. Mirrors
+/// `SyncClientConfig::client_id` derivation. Called once at construction.
+/// ponytail: a proper UUID would be more collision-resistant but adds a dep;
+/// the ms-precision timestamp is sufficient for wasm (single-threaded, one
+/// engine per Worker).
+fn derive_replica_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let now = now_ms();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("wasm-{now}-{seq}")
+}
+
+/// Wall-clock time in milliseconds since the Unix epoch. On wasm, uses
+/// `js_sys::Date::now()` (real browser clock); on host (cargo test), uses
+/// `SystemTime` (the host has a real clock). This cfg split keeps host unit
+/// tests panic-free while giving wasm real timestamps for HLC minting.
+fn now_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() as u64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
+/// Read a string field from a JS object. Returns `None` if the field is absent
+/// or not a string. Used by typed-verb parsers (writeBatch, applySchema).
+fn js_get_str(obj: &js_sys::Object, key: &str) -> Option<String> {
+    let val = Reflect::get(obj, &JsValue::from_str(key)).ok()?;
+    if val.is_string() {
+        val.as_string()
+    } else {
+        None
     }
 }
 
@@ -201,22 +506,49 @@ impl RowEntry {
 /// at connect time without a separate config object crossing the JS boundary.
 #[wasm_bindgen]
 pub struct NostosEngine {
-    inner: ApplyEngine<InMemoryStorage>,
+    inner: ApplyEngine<WebStorage>,
     /// The optional safe-SQL predicate for the next subscribe. Held here so the
     /// future WASM transport (E1) can read it when sending the subscribe frame;
     /// the in-memory apply path ignores it (the server filters upstream).
     where_sql: Option<String>,
+    /// Stable per-engine replica id for PN-Counter CRDT (ADR-0030 addendum).
+    /// Derived once at construction. Mirrors `SyncClientConfig::client_id`.
+    replica_id: String,
+    /// Client HLC state for optimistic OR-set edits (ADR-0030 Decision 4,
+    /// relaxed): each `or_set_add` / `or_set_remove` mints the next HLC here so
+    /// a local edit is comparable to remote elements on merge. `Cell` (not
+    /// `Mutex`) — wasm is single-threaded, no lock needed. `None` until the
+    /// first mint. Mirrors native `SyncClient::hlc_state` (client.rs L314).
+    hlc_state: Cell<Option<nostos_domain::Hlc>>,
 }
 
 #[wasm_bindgen]
 impl NostosEngine {
     /// Create an in-memory engine. Data survives the apply loop but NOT a page
-    /// reload — real browser persistence (OPFS) is deferred past v0.1 (ADR-0017).
+    /// reload — durable browser persistence (SQLite-WASM/OPFS) is the Worker's
+    /// durable path (ADR-0017 follow-up / ADR-0033). This is the node-smoke +
+    /// standalone default + the OPFS-unavailable degrade path.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: ApplyEngine::new(InMemoryStorage::new()),
+            inner: ApplyEngine::new(WebStorage::Memory(InMemoryStorage::new())),
             where_sql: None,
+            replica_id: derive_replica_id(),
+            hlc_state: Cell::new(None),
+        }
+    }
+
+    /// Create an engine backed by a durable SQLite-WASM/OPFS store. Called by
+    /// the Worker (via [`NostosSocket::connect`]'s `db_handle` arg) after async
+    /// sqlite-wasm init. The JS `db` is a wrapper around the sqlite-wasm
+    /// instance (see `sdk/nostos_web/worker/sqlite_wasm_glue.js`). Browser-only.
+    #[doc(hidden)]
+    pub(crate) fn with_durable(db: js_sys::Object) -> Self {
+        Self {
+            inner: ApplyEngine::new(WebStorage::SqliteWasm(SqliteWasmStorage::new(db))),
+            where_sql: None,
+            replica_id: derive_replica_id(),
+            hlc_state: Cell::new(None),
         }
     }
 
@@ -303,12 +635,18 @@ impl NostosEngine {
         self.inner.storage().row_count()
     }
 
-    /// Mutable access to the backing `InMemoryStorage` — the outbox flush path
+    /// Mutable access to the backing `WebStorage` — the outbox flush path
     /// (`Outbox::enqueue` / `apply_local` / `pending` / `mark_done`) reaches the
     /// store through this. `pub(crate)` because the JS surface never mutates
     /// storage directly; only [`NostosSocket`]'s write/flush path (WS1) does.
-    pub(crate) fn storage_mut(&mut self) -> &mut InMemoryStorage {
+    pub(crate) fn storage_mut(&mut self) -> &mut WebStorage {
         self.inner.storage_mut()
+    }
+
+    /// Read-only access to the backing `WebStorage` — used by the transport to
+    /// check `is_durable()` for the checkpoint-reading decision (ADR-0033).
+    pub(crate) fn storage(&self) -> &WebStorage {
+        self.inner.storage()
     }
 
     /// Enumerate the `(pk, payload)` pairs the engine currently holds for
@@ -347,11 +685,256 @@ impl NostosEngine {
     pub fn clear(&mut self) {
         let s = self.inner.storage_mut();
         // Both clears under one borrow — half a clear is a cross-user leak.
-        // ponytail: `let _ =` — `InMemoryStorage::clear` is infallible in
-        // practice (a `HashMap`/`Vec` clear); the `Result` is just the trait
-        // shape, surfaced as infallible here.
-        let _ = <InMemoryStorage as nostos_core::Storage>::clear(s);
-        let _ = <InMemoryStorage as Outbox>::clear(s);
+        // `Storage::clear` on `WebStorage::SqliteWasm` runs `clearAll()`
+        // (DELETE rows + outbox + reset checkpoint); `Outbox::clear` is the
+        // outbox-only half (redundant after Storage::clear, but correct).
+        let _ = <WebStorage as Storage>::clear(s);
+        let _ = <WebStorage as Outbox>::clear(s);
+    }
+
+    // ========================================================================
+    // Wave 4a: the typed Tier-1 surface (ADR-0032 T1–T5).
+    // ========================================================================
+    //
+    // These are the wasm counterpart of the native `SyncClient` typed verbs
+    // (writeBatch, orSetAdd/Remove, counterIncrement/Decrement, applySchema,
+    // query, watchWriteStatus). They port only the thin *orchestration*
+    // (read-modify-write → enqueue → apply_local); all CRDT invariants live in
+    // `nostos-domain` (reused, NOT re-implemented). The native `SyncClient` is
+    // NOT touched — it is tokio-based and native-only, unreachable from wasm.
+
+    /// Configure which tables are OR-set / counter CRDTs. Call BEFORE any
+    /// orSet/counter verb — the loud-fail gate checks the tag before minting.
+    /// Mirrors `SyncClientConfig::or_set_tables` / `counter_tables`.
+    #[wasm_bindgen(js_name = setCrdtTables)]
+    pub fn set_crdt_tables(&mut self, or_set: Vec<String>, counter: Vec<String>) {
+        let or_set_set: HashSet<String> = or_set.into_iter().collect();
+        let counter_set: HashSet<String> = counter.into_iter().collect();
+        self.inner
+            .storage_mut()
+            .set_crdt_tables(or_set_set, counter_set);
+    }
+
+    /// Enqueue a batch of writes atomically (ADR-0032 T3). All ops commit in
+    /// one SQLite txn (SqliteWasm) or one BTreeMap extend (Memory) — a
+    /// mid-batch failure rolls back the entire batch. Returns the outbox ids
+    /// in order. Each op is also `apply_local`'d for instant optimistic UI.
+    ///
+    /// JS: `eng.writeBatch([{table, op, pk, payloadJson?}, ...])` → `[id1, id2, …]`
+    #[wasm_bindgen(js_name = writeBatch)]
+    #[allow(clippy::needless_pass_by_value)] // wasm_bindgen requires owned Vec<JsValue> (no RefFromWasmAbi for [JsValue])
+    pub fn write_batch(&mut self, ops: Vec<JsValue>) -> Result<Vec<f64>, JsValue> {
+        let mut writes = Vec::with_capacity(ops.len());
+        for op in &ops {
+            let obj = js_sys::Object::from(op.clone());
+            let table = js_get_str(&obj, "table")
+                .ok_or_else(|| JsValue::from_str("writeBatch: missing table"))?;
+            let op_str = js_get_str(&obj, "op")
+                .ok_or_else(|| JsValue::from_str("writeBatch: missing op"))?;
+            let pk = js_get_str(&obj, "pk")
+                .ok_or_else(|| JsValue::from_str("writeBatch: missing pk"))?;
+            let payload_json = js_get_str(&obj, "payloadJson");
+            let op_enum = WriteOp::from_wire_str(&op_str).ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "writeBatch: invalid op '{op_str}' (expected upsert|delete|patch)"
+                ))
+            })?;
+            writes.push(PendingWrite {
+                table,
+                op: op_enum,
+                pk,
+                payload_json,
+            });
+        }
+        let s = self.inner.storage_mut();
+        let ids = s
+            .enqueue_batch(writes.clone())
+            .map_err(|e| JsValue::from_str(&format!("writeBatch: enqueue: {e}")))?;
+        // apply_local each write for optimistic UI (best-effort).
+        for w in &writes {
+            let _ = s.apply_local(w);
+        }
+        Ok(ids.into_iter().map(|id| id as f64).collect())
+    }
+
+    /// Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030 /
+    /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert. The
+    /// element renders locally immediately and converges with concurrent
+    /// remote adds on the server's echo.
+    ///
+    /// ponytail: mirrors SyncClient::or_set_add (client.rs L571); rewire to
+    /// share when convenient.
+    #[wasm_bindgen(js_name = orSetAdd)]
+    pub fn or_set_add(&mut self, table: &str, pk: &str, element: &str) -> Result<f64, JsValue> {
+        self.or_set_op(table, pk, element, false)
+    }
+
+    /// Remove `element` from the OR-set — a tombstone at a fresh HLC. Add-wins:
+    /// a concurrent or later re-add (a higher HLC) re-activates the element.
+    #[wasm_bindgen(js_name = orSetRemove)]
+    pub fn or_set_remove(&mut self, table: &str, pk: &str, element: &str) -> Result<f64, JsValue> {
+        self.or_set_op(table, pk, element, true)
+    }
+
+    /// Shared OR-set add/remove: mint HLC, build OrSetPayload, enqueue upsert,
+    /// apply_local. Mirrors SyncClient::or_set_op (client.rs L594).
+    fn or_set_op(
+        &mut self,
+        table: &str,
+        pk: &str,
+        element: &str,
+        remove: bool,
+    ) -> Result<f64, JsValue> {
+        let h = self.mint_hlc();
+        let element_struct = nostos_domain::OrSetElement {
+            v: element.to_string(),
+            h: if remove { nostos_domain::Hlc::ZERO } else { h },
+            d: if remove { Some(h) } else { None },
+        };
+        let payload = serde_json::to_string(&nostos_domain::OrSetPayload {
+            elements: vec![element_struct],
+        })
+        .expect("OrSetPayload serializes infallibly");
+        let write = PendingWrite {
+            table: table.to_string(),
+            op: WriteOp::Upsert,
+            pk: pk.to_string(),
+            payload_json: Some(payload),
+        };
+        let s = self.inner.storage_mut();
+        let id = s
+            .enqueue(write.clone())
+            .map_err(|e| JsValue::from_str(&format!("orSetOp: enqueue: {e}")))?;
+        let _ = s.apply_local(&write);
+        Ok(id as f64)
+    }
+
+    /// Increment the PN-Counter in row `pk` of `table` by `delta` (ADR-0030
+    /// addendum / ADR-0032 T4). Read-modify-write: reads the current counter
+    /// payload, applies the delta to this replica's entry, and enqueues the
+    /// result.
+    ///
+    /// ponytail: mirrors SyncClient::counter_op (client.rs L665); rewire to
+    /// share when convenient.
+    #[wasm_bindgen(js_name = counterIncrement)]
+    pub fn counter_increment(&mut self, table: &str, pk: &str, delta: f64) -> Result<f64, JsValue> {
+        self.counter_op(table, pk, delta as i64)
+    }
+
+    /// Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
+    #[wasm_bindgen(js_name = counterDecrement)]
+    pub fn counter_decrement(&mut self, table: &str, pk: &str, delta: f64) -> Result<f64, JsValue> {
+        let neg = -(delta as i64);
+        self.counter_op(table, pk, neg)
+    }
+
+    /// Shared counter RMW: read existing payload → apply delta → enqueue upsert.
+    /// Wasm is single-threaded — no lock needed (unlike native's engine lock).
+    fn counter_op(&mut self, table: &str, pk: &str, delta: i64) -> Result<f64, JsValue> {
+        let s = self.inner.storage_mut();
+        let existing = s
+            .read_payload(table, pk)
+            .map_err(|e| JsValue::from_str(&format!("counter: read_payload: {e}")))?
+            .unwrap_or_default();
+        let payload_bytes = nostos_domain::counter_apply_delta(&existing, &self.replica_id, delta);
+        let payload_json = String::from_utf8(payload_bytes)
+            .expect("counter_apply_delta serializes valid UTF-8 JSON");
+        let write = PendingWrite {
+            table: table.to_string(),
+            op: WriteOp::Upsert,
+            pk: pk.to_string(),
+            payload_json: Some(payload_json),
+        };
+        let id = s
+            .enqueue(write.clone())
+            .map_err(|e| JsValue::from_str(&format!("counter: enqueue: {e}")))?;
+        let _ = s.apply_local(&write);
+        Ok(id as f64)
+    }
+
+    /// Materialize the WS2 read-views over `cairn_data`. After this,
+    /// `SELECT col FROM <table>` resolves against a VIEW that
+    /// `json_extract`s each column from the opaque payload. SqliteWasm only
+    /// (Memory is a no-op). Mirrors native `SqliteStorage::apply_schema`.
+    ///
+    /// JS: `eng.applySchema([{name, columns}, ...])`
+    #[wasm_bindgen(js_name = applySchema)]
+    #[allow(clippy::needless_pass_by_value)] // wasm_bindgen requires owned Vec<JsValue>
+    pub fn apply_schema(&mut self, tables: Vec<JsValue>) -> Result<(), JsValue> {
+        let mut mapped = Vec::with_capacity(tables.len());
+        for t in &tables {
+            let obj = js_sys::Object::from(t.clone());
+            let name = js_get_str(&obj, "name")
+                .ok_or_else(|| JsValue::from_str("applySchema: missing name"))?;
+            let columns_val = Reflect::get(&obj, &"columns".into())
+                .map_err(|_| JsValue::from_str("applySchema: missing columns"))?;
+            let columns_arr = js_sys::Array::from(&columns_val);
+            let mut cols = Vec::new();
+            for i in 0..columns_arr.length() {
+                if let Some(s) = columns_arr.get(i).as_string() {
+                    cols.push(s);
+                }
+            }
+            mapped.push((name, cols));
+        }
+        self.inner
+            .storage()
+            .apply_schema(&mapped)
+            .map_err(|e| JsValue::from_str(&format!("applySchema: {e}")))
+    }
+
+    /// Run an arbitrary SELECT, returning a JSON-array-of-objects string.
+    /// SqliteWasm only (Memory returns `"[]"`). Mirrors native
+    /// `SqliteStorage::query` (sqlite.rs L416).
+    #[wasm_bindgen(js_name = query)]
+    pub fn query(&self, sql: &str) -> Result<String, JsValue> {
+        self.inner
+            .storage()
+            .query_json(sql)
+            .map_err(|e| JsValue::from_str(&format!("query: {e}")))
+    }
+
+    /// The current pending (non-dead-lettered) write count. For
+    /// `watchWriteStatus`.
+    #[wasm_bindgen(getter, js_name = pendingCount)]
+    pub fn pending_count(&self) -> u32 {
+        self.inner.storage().pending_count() as u32
+    }
+
+    /// The current dead-lettered write count. For `watchWriteStatus`.
+    #[wasm_bindgen(getter, js_name = deadLetteredCount)]
+    pub fn dead_lettered_count(&self) -> u32 {
+        self.inner.storage().dead_letter_count() as u32
+    }
+
+    /// The last error from the most recent dead-lettered write (or null).
+    #[wasm_bindgen(getter, js_name = lastError)]
+    pub fn last_error(&self) -> Option<String> {
+        self.inner.storage().last_dead_letter_error()
+    }
+
+    /// Mint the next client HLC (ADR-0030 Decision 4). Uses `js_sys::Date::now`
+    /// for wall-clock time (seconds since epoch as f64; multiply by 1000 for
+    /// ms). The logical counter preserves monotonicity if the clock jumps back.
+    /// Mirrors SyncClient::mint_hlc (client.rs L731).
+    fn mint_hlc(&self) -> nostos_domain::Hlc {
+        let now_wall_ms = now_ms();
+        let prev = self.hlc_state.get();
+        let h = nostos_domain::Hlc::mint(prev, now_wall_ms);
+        self.hlc_state.set(Some(h));
+        h
+    }
+
+    /// Read the raw payload bytes for `(table, pk)`. Used by host tests to
+    /// assert CRDT-merged state. Not exposed to JS (the counter_value helper
+    /// in the JS wrapper parses payloads from `query` results instead).
+    #[cfg(test)]
+    pub(crate) fn read_payload(
+        &self,
+        table: &str,
+        pk: &str,
+    ) -> nostos_core::Result<Option<Vec<u8>>> {
+        self.inner.storage().read_payload(table, pk)
     }
 }
 
@@ -463,8 +1046,9 @@ impl NostosSocket {
         token: Option<String>,
         table: String,
         where_sql: Option<String>,
+        db_handle: Option<js_sys::Object>,
     ) -> Result<NostosSocket, JsValue> {
-        transport::connect(url, token, table, where_sql).await
+        transport::connect(url, token, table, where_sql, db_handle).await
     }
 
     /// The current durable checkpoint (the LSN persisted to `localStorage`).
@@ -515,6 +1099,16 @@ impl NostosSocket {
     /// outbox id (ponytail: `PendingWrite` — a `nostos-core` domain type —
     /// carries no `client_write_id` field, so the caller's id is lost across an
     /// offline gap; the live path preserves it).
+    /// Send a client write. WS1 contract: this NEVER throws because the socket
+    /// is closed — a write while disconnected is captured into the `Outbox`
+    /// (`enqueue`) and rendered locally right away (`apply_local`), so the row
+    /// is visible INSTANTLY and the write ships on the next (re)connect via the
+    /// `onopen` flush loop. Returns the outbox id (Wave 4a: mirrors native
+    /// `write` returning the id — the caller can use it to correlate with
+    /// `watchWriteStatus` outcomes).
+    ///
+    /// The call is still `Err` for a *caller bug* — a malformed / non-object
+    /// `payload_json`, or an `op` outside `"upsert" | "delete" | "patch"`.
     #[wasm_bindgen(js_name = write)]
     #[allow(clippy::needless_pass_by_value)] // wasm-bindgen JS boundary: owned Option<String>
     pub fn write(
@@ -524,7 +1118,7 @@ impl NostosSocket {
         pk: &str,
         payload_json: Option<String>,
         client_write_id: &str,
-    ) -> Result<(), JsValue> {
+    ) -> Result<f64, JsValue> {
         // Validate payload + build the wire frame FIRST (caller bug → Err, and
         // nothing is enqueued). `op` is validated just below.
         let frame =
@@ -573,7 +1167,7 @@ impl NostosSocket {
         if local_applied {
             transport::emit_change(&self.inner.on_change);
         }
-        Ok(())
+        Ok(id as f64)
     }
 
     /// ADR-0029 D1: wipe the socket's engine rows + outbox (sign-out). Call
@@ -646,6 +1240,263 @@ impl NostosSocket {
     #[wasm_bindgen(js_name = offChange)]
     pub fn off_change(&self) {
         *self.inner.on_change.borrow_mut() = None;
+    }
+
+    // ========================================================================
+    // Wave 4a: socket-level typed-verb surface.
+    // ========================================================================
+
+    /// Materialize the WS2 read-views over `cairn_data` on the socket's engine.
+    /// Delegates to [`NostosEngine::apply_schema`]. SqliteWasm only.
+    #[wasm_bindgen(js_name = applySchema)]
+    pub fn apply_schema(&self, tables: Vec<JsValue>) -> Result<(), JsValue> {
+        self.inner.engine.borrow_mut().apply_schema(tables)
+    }
+
+    /// Run an arbitrary SELECT, returning a JSON-array string. Delegates to
+    /// [`NostosEngine::query`]. SqliteWasm only (Memory returns `"[]"`).
+    #[wasm_bindgen(js_name = query)]
+    pub fn query(&self, sql: &str) -> Result<String, JsValue> {
+        self.inner.engine.borrow().query(sql)
+    }
+
+    /// Configure which tables are OR-set / counter CRDTs on the socket's engine.
+    /// Delegates to [`NostosEngine::set_crdt_tables`].
+    #[wasm_bindgen(js_name = setCrdtTables)]
+    pub fn set_crdt_tables(&self, or_set: Vec<String>, counter: Vec<String>) {
+        self.inner
+            .engine
+            .borrow_mut()
+            .set_crdt_tables(or_set, counter);
+    }
+
+    /// The current pending (non-dead-lettered) write count. For
+    /// `watchWriteStatus`.
+    #[wasm_bindgen(getter, js_name = pendingCount)]
+    pub fn pending_count(&self) -> u32 {
+        self.inner.engine.borrow().pending_count()
+    }
+
+    /// The current dead-lettered write count. For `watchWriteStatus`.
+    #[wasm_bindgen(getter, js_name = deadLetteredCount)]
+    pub fn dead_lettered_count(&self) -> u32 {
+        self.inner.engine.borrow().dead_lettered_count()
+    }
+
+    /// The last error from the most recent dead-lettered write (or null).
+    #[wasm_bindgen(getter, js_name = lastError)]
+    pub fn last_error(&self) -> Option<String> {
+        self.inner.engine.borrow().last_error()
+    }
+
+    /// Send an additional subscribe frame for a DIFFERENT table over the
+    /// existing socket (Wave 4a multi-table subscribe). The server streams
+    /// events for all subscribed tables over the same socket. Call AFTER
+    /// `connect` resolves.
+    ///
+    /// ponytail: the current transport is single-table at the engine level
+    /// (the frame-pump acks/persists per-table). A true multi-table port needs
+    /// per-table checkpoint tracking in the engine — the server sends events
+    /// tagged by `table`, and each table has its own resume_lsn. For now, the
+    /// subscribe frame is sent but the checkpoint persists for the FIRST table
+    /// only. rewire when convenient.
+    #[wasm_bindgen(js_name = subscribe)]
+    pub fn subscribe(&self, table: &str, where_sql: Option<String>) -> Result<(), JsValue> {
+        let ws = &self.inner.ws;
+        if ws.ready_state() != 1 {
+            return Err(JsValue::from_str("subscribe: socket not open"));
+        }
+        let where_clean = where_sql.filter(|s| !s.is_empty());
+        let resume = self.inner.engine.borrow().checkpoint();
+        let frame = transport::build_subscribe_frame(
+            table,
+            where_clean.as_deref(),
+            if resume > 0.0 {
+                Some(resume as u64)
+            } else {
+                None
+            },
+        );
+        ws.send_with_str(&frame)
+            .map_err(|e| JsValue::from_str(&format!("subscribe: send failed: {e:?}")))
+    }
+
+    /// Reconnect retaining engine state (Wave 4a). If the socket is closed,
+    /// opens a new WebSocket with the stored connection params. The engine
+    /// (rows, checkpoint, outbox) survives — the server resumes streaming from
+    /// the persisted checkpoint. Returns `true` if a reconnect was initiated,
+    /// `false` if the socket was already open.
+    ///
+    /// ponytail: this creates a new `NostosSocket` internally because the
+    /// existing `ws` field is not `RefCell` (changing it would ripple through
+    /// the transport). The JS caller should use the returned socket and drop
+    /// the old one. A future refactor should make `ws` interior-mutable so
+    /// resume can hot-swap in place.
+    #[wasm_bindgen(js_name = resume)]
+    #[allow(clippy::unused_async)] // async so JS callers can `await`; no Rust await needed (synchronous socket check)
+    pub async fn resume(&self) -> Result<bool, JsValue> {
+        if self.inner.ws.ready_state() == 1 {
+            // Already open — re-send the subscribe frame as a heartbeat.
+            let cp = self.inner.engine.borrow().checkpoint();
+            let frame = transport::build_subscribe_frame(
+                &self.inner.table,
+                self.inner.where_sql.as_deref(),
+                if cp > 0.0 { Some(cp as u64) } else { None },
+            );
+            let _ = self.inner.ws.send_with_str(&frame);
+            return Ok(false);
+        }
+        // Socket not open — signal the caller to reconnect via connect().
+        // The engine state (rows, checkpoint, outbox) is in the Rc<RefCell<...>>,
+        // which the caller can extract before calling connect with the same
+        // db_handle. ponytail: a full in-place reconnect requires making `ws`
+        // interior-mutable; deferred to avoid transport churn in Wave 4a.
+        Err(JsValue::from_str(
+            "resume: socket is closed — call NostosSocket.connect() with the \
+             same URL + dbHandle to reconnect; the engine state is preserved \
+             in the dbHandle's SQLite/OPFS store",
+        ))
+    }
+
+    // ========================================================================
+    // Wave 4c (ADR-0036): CRDT + atomic-batch delegates.
+    // ========================================================================
+    //
+    // These close the Flutter-web typed-surface gap: the CRDT verbs + the
+    // transactional `writeBatch` lived ONLY on the in-process `NostosEngine`
+    // (4a), but the Flutter-web Worker drives `NostosSocket` (the transport
+    // wrapper). The engine is reachable from the socket (`SocketInner.engine`
+    // is the same `ApplyEngine<WebStorage>`), so these are THIN DELEGATES that
+    // reuse `NostosEngine`'s logic verbatim (HLC mint, `nostos-domain` CRDT
+    // algebra, `enqueue_batch` atomicity) — no CRDT algebra is re-implemented
+    // here, and `NostosEngine`/native are untouched. The only addition over a
+    // bare delegate is the ship step (`ship_if_open`): the engine path
+    // enqueues + `apply_local`s but never sends over the wire, so a connected
+    // client's CRDT op would otherwise sit in the outbox until the next
+    // reconnect flush. Mirrors the ship + reactive-tick half of [`Self::write`].
+
+    /// Add `element` to the add-wins OR-set in row `pk` of `table`. Delegates to
+    /// [`NostosEngine::or_set_add`] (mints the client HLC, builds the
+    /// `OrSetPayload`, enqueues, `apply_local`s) then ships the write frame now
+    /// if the socket is OPEN. Mirrors [`Self::write`]'s enqueue→apply→ship→tick
+    /// flow. Returns the outbox id (ADR-0032 T4 / ADR-0030).
+    #[wasm_bindgen(js_name = orSetAdd)]
+    pub fn or_set_add(&self, table: &str, pk: &str, element: &str) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .or_set_add(table, pk, element)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Remove `element` from the OR-set (a tombstone at a fresh HLC). Add-wins:
+    /// a concurrent or later re-add re-activates the element. Delegates to
+    /// [`NostosEngine::or_set_remove`].
+    #[wasm_bindgen(js_name = orSetRemove)]
+    pub fn or_set_remove(&self, table: &str, pk: &str, element: &str) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .or_set_remove(table, pk, element)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Increment the PN-Counter in row `pk` of `table` by `delta` (read-modify-
+    /// write). Delegates to [`NostosEngine::counter_increment`] (reads the current
+    /// payload, applies the delta to this replica's entry via `nostos-domain`'s
+    /// `counter_apply_delta`, enqueues, `apply_local`s) then ships if OPEN.
+    #[wasm_bindgen(js_name = counterIncrement)]
+    pub fn counter_increment(&self, table: &str, pk: &str, delta: f64) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .counter_increment(table, pk, delta)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
+    /// Delegates to [`NostosEngine::counter_decrement`].
+    #[wasm_bindgen(js_name = counterDecrement)]
+    pub fn counter_decrement(&self, table: &str, pk: &str, delta: f64) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .counter_decrement(table, pk, delta)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Enqueue a batch of writes atomically (ADR-0032 T3). All ops commit in
+    /// one SQLite txn (SqliteWasm) or one BTreeMap extend (Memory) via the
+    /// engine's `enqueue_batch` — a mid-batch failure rolls back the entire
+    /// batch. Delegates to [`NostosEngine::write_batch`], then ships each write
+    /// now if OPEN. Returns the outbox ids in order.
+    #[wasm_bindgen(js_name = writeBatch)]
+    #[allow(clippy::needless_pass_by_value)] // wasm_bindgen requires owned Vec<JsValue>
+    pub fn write_batch(&self, ops: Vec<JsValue>) -> Result<Vec<f64>, JsValue> {
+        let ids = self.inner.engine.borrow_mut().write_batch(ops)?;
+        // Ship each now if OPEN. Atomicity is in `enqueue_batch` (one storage
+        // txn); the per-write ship is the network send, not the storage
+        // boundary, so shipping individually preserves the atomic enqueue.
+        for &id in &ids {
+            self.ship_if_open(id as u64);
+        }
+        if !ids.is_empty() {
+            transport::emit_change(&self.inner.on_change);
+        }
+        Ok(ids)
+    }
+
+    /// Ship the just-enqueued write `id` if the socket is OPEN: look up the
+    /// pending entry, build the wire frame, send it, `mark_done` on success.
+    /// Mirrors the ship half of [`Self::write`] — used by the CRDT delegates
+    /// + [`Self::write_batch`], which enqueue via the engine (apply_local + HLC
+    /// mint) but need the same "ship now if connected" path so a connected
+    /// client's CRDT op ships immediately instead of waiting for the next
+    /// `onopen` flush. `client_write_id` is synthesized from the outbox id (the
+    /// offline-flush convention in `transport::flush_pending`); the CRDT verbs
+    /// carry no caller id.
+    fn ship_if_open(&self, id: u64) {
+        let ws = &self.inner.ws;
+        if ws.ready_state() != 1 {
+            return; // closed — leave pending for the onopen flush loop.
+        }
+        // Snapshot the matching pending entry (owned) so the RefCell borrow is
+        // released before the synchronous `send_with_str` + `mark_done`.
+        let entry = {
+            let Ok(pending) = self.inner.engine.borrow_mut().storage_mut().pending() else {
+                return;
+            };
+            pending.into_iter().find(|(pid, _)| *pid == id)
+        };
+        let Some((_, write)) = entry else {
+            return; // already shipped or dead-lettered — nothing to do.
+        };
+        // `let-else` (clippy::manual_let_else): a malformed payload is left
+        // pending for retry rather than shipped as an invalid frame.
+        let Ok(frame) = transport::build_write_frame(
+            &write.table,
+            write.op.as_wire_str(),
+            &write.pk,
+            write.payload_json.as_deref(),
+            &id.to_string(),
+        ) else {
+            return;
+        };
+        if ws.send_with_str(&frame).is_ok() {
+            let _ = self.inner.engine.borrow_mut().storage_mut().mark_done(id);
+        }
     }
 }
 
@@ -1265,5 +2116,274 @@ mod transport_tests {
         let snapshot = eng.rows_for("tasks");
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].pk(), "1");
+    }
+}
+
+#[cfg(test)]
+mod typed_verb_tests {
+    //! Host unit tests for the Wave 4a typed-verb surface.
+    //!
+    //! These exercise the typed verbs on the `Memory` backend (which already
+    //! has CRDT support — or_set_tables, counter_tables, enqueue_batch,
+    //! read_payload). The `SqliteWasmStorage` overrides need a browser +
+    //! OPFS — those are covered by the Playwright browser test (ADR-0033).
+    //!
+    //! What's tested here:
+    //! - `setCrdtTables` → storage tags propagate
+    //! - `orSetAdd` / `orSetRemove` → HLC mint + element present/absent
+    //! - `counterIncrement` / `counterDecrement` → RMW + value accumulates
+    //! - `enqueue_batch` through `WebStorage` → atomic delegation
+    //! - `read_payload` through `WebStorage` → delegation works
+    use super::*;
+
+    // ---- setCrdtTables: CRDT table tags propagate to storage ----
+
+    #[test]
+    fn set_crdt_tables_enables_counter_merge() {
+        // Before tagging: an upsert clobbers (no merge).
+        let mut eng = NostosEngine::new();
+        let s = eng.inner.storage_mut();
+        let _ = s.enqueue(PendingWrite {
+            table: "counters".into(),
+            op: WriteOp::Upsert,
+            pk: "c1".into(),
+            payload_json: Some(r#"{"entries":[{"r":"a","p":5,"n":0}]}"#.into()),
+        });
+        let _ = s.apply_local(&PendingWrite {
+            table: "counters".into(),
+            op: WriteOp::Upsert,
+            pk: "c1".into(),
+            payload_json: Some(r#"{"entries":[{"r":"b","p":3,"n":0}]}"#.into()),
+        });
+        // Clobbered: only the second write's value survives.
+        let payload = eng.inner.storage().read_payload("counters", "c1").unwrap();
+        let value = nostos_domain::counter_value(&payload.unwrap()).unwrap();
+        assert_eq!(value, 3, "untagged: last-writer-wins (clobber)");
+
+        // After tagging as counter: merge per-replica max.
+        eng.set_crdt_tables(vec![], vec!["counters".into()]);
+        let s = eng.inner.storage_mut();
+        let _ = s.apply_local(&PendingWrite {
+            table: "counters".into(),
+            op: WriteOp::Upsert,
+            pk: "c1".into(),
+            payload_json: Some(r#"{"entries":[{"r":"a","p":10,"n":0}]}"#.into()),
+        });
+        let payload = eng.inner.storage().read_payload("counters", "c1").unwrap();
+        let value = nostos_domain::counter_value(&payload.unwrap()).unwrap();
+        // Per-replica max merge: existing replica "b" (p=3) + incoming replica
+        // "a" (p=10) → total = 13 (both replicas survive, not clobbered).
+        assert_eq!(value, 13, "tagged: merged per-replica max (3 + 10 = 13)");
+    }
+
+    // ---- orSetAdd: element renders locally ----
+
+    #[test]
+    fn or_set_add_renders_element_locally() {
+        let mut eng = NostosEngine::new();
+        eng.set_crdt_tables(vec!["tags".into()], vec![]);
+        let id = eng.or_set_add("tags", "row1", "alice").unwrap();
+        assert!(id > 0.0, "orSetAdd returned a positive outbox id");
+
+        // The element should be present in the row's payload.
+        let payload = eng.read_payload("tags", "row1").unwrap().unwrap();
+        let present = nostos_domain::present_elements(&payload).unwrap();
+        assert!(
+            present.contains(&"alice".to_string()),
+            "element 'alice' is present after orSetAdd"
+        );
+    }
+
+    #[test]
+    fn or_set_remove_tombstones_element() {
+        let mut eng = NostosEngine::new();
+        eng.set_crdt_tables(vec!["tags".into()], vec![]);
+        eng.or_set_add("tags", "row1", "bob").unwrap();
+        // Verify present.
+        let payload = eng.read_payload("tags", "row1").unwrap().unwrap();
+        assert!(
+            nostos_domain::present_elements(&payload)
+                .unwrap()
+                .contains(&"bob".to_string()),
+            "element 'bob' present after add"
+        );
+        // Remove: tombstone should make it absent.
+        eng.or_set_remove("tags", "row1", "bob").unwrap();
+        let payload = eng.read_payload("tags", "row1").unwrap().unwrap();
+        let present = nostos_domain::present_elements(&payload).unwrap();
+        assert!(
+            !present.contains(&"bob".to_string()),
+            "element 'bob' absent after remove"
+        );
+    }
+
+    // ---- counterIncrement / counterDecrement: RMW accumulates ----
+
+    #[test]
+    fn counter_increment_accumulates_same_replica() {
+        let mut eng = NostosEngine::new();
+        eng.set_crdt_tables(vec![], vec!["likes".into()]);
+
+        // First increment: starts from 0 (no existing payload).
+        eng.counter_increment("likes", "post1", 5.0).unwrap();
+        let payload = eng.read_payload("likes", "post1").unwrap().unwrap();
+        let v1 = nostos_domain::counter_value(&payload).unwrap();
+        assert_eq!(v1, 5, "first increment: value = 5");
+
+        // Second increment: RMW reads existing (5), applies delta (+3) = 8.
+        eng.counter_increment("likes", "post1", 3.0).unwrap();
+        let payload = eng.read_payload("likes", "post1").unwrap().unwrap();
+        let v2 = nostos_domain::counter_value(&payload).unwrap();
+        assert_eq!(v2, 8, "second increment: RMW accumulates (5 + 3 = 8)");
+    }
+
+    #[test]
+    fn counter_decrement_subtracts_value() {
+        let mut eng = NostosEngine::new();
+        eng.set_crdt_tables(vec![], vec!["score".into()]);
+        eng.counter_increment("score", "g1", 10.0).unwrap();
+        eng.counter_decrement("score", "g1", 4.0).unwrap();
+        let payload = eng.read_payload("score", "g1").unwrap().unwrap();
+        let v = nostos_domain::counter_value(&payload).unwrap();
+        assert_eq!(v, 6, "increment 10 - decrement 4 = 6");
+    }
+
+    #[test]
+    fn counter_increment_multiple_replicas_merge() {
+        // Two engines with different replica ids each increment the same row;
+        // the per-replica max merge converges (the total is the sum of each
+        // replica's positive counter).
+        let mut eng1 = NostosEngine::new();
+        eng1.set_crdt_tables(vec![], vec!["views".into()]);
+        eng1.counter_increment("views", "page", 7.0).unwrap();
+
+        // Simulate a second replica: read eng1's payload, merge with eng2's.
+        let payload1 = eng1.read_payload("views", "page").unwrap().unwrap();
+
+        let mut eng2 = NostosEngine::new();
+        eng2.set_crdt_tables(vec![], vec!["views".into()]);
+        eng2.counter_increment("views", "page", 3.0).unwrap();
+
+        // Manually merge (simulating what the server does):
+        let payload2 = eng2.read_payload("views", "page").unwrap().unwrap();
+        let merged = nostos_domain::merge_counter_or_lww(&payload1, &payload2);
+        let total = nostos_domain::counter_value(&merged).unwrap();
+        assert_eq!(total, 10, "merged counter = 7 + 3 = 10");
+    }
+
+    // ---- enqueue_batch: atomic delegation through WebStorage ----
+
+    #[test]
+    fn enqueue_batch_returns_ids_in_order() {
+        // InMemoryStorage's enqueue_batch is atomic (BTreeMap extend) and
+        // returns ids in order. This test proves the WebStorage delegation
+        // routes correctly.
+        let mut eng = NostosEngine::new();
+        let writes = vec![
+            PendingWrite {
+                table: "t".into(),
+                op: WriteOp::Upsert,
+                pk: "1".into(),
+                payload_json: Some(r#"{"v":1}"#.into()),
+            },
+            PendingWrite {
+                table: "t".into(),
+                op: WriteOp::Upsert,
+                pk: "2".into(),
+                payload_json: Some(r#"{"v":2}"#.into()),
+            },
+            PendingWrite {
+                table: "t".into(),
+                op: WriteOp::Upsert,
+                pk: "3".into(),
+                payload_json: Some(r#"{"v":3}"#.into()),
+            },
+        ];
+        let ids = eng.inner.storage_mut().enqueue_batch(writes).unwrap();
+        assert_eq!(ids.len(), 3, "batch returned 3 ids");
+        // Ids are sequential and ascending.
+        assert!(ids[0] < ids[1] && ids[1] < ids[2], "ids are ascending");
+        // All three are pending.
+        let pending = eng.inner.storage().pending().unwrap();
+        assert_eq!(pending.len(), 3, "all 3 writes pending");
+    }
+
+    // ---- read_payload: delegation through WebStorage ----
+
+    #[test]
+    fn read_payload_returns_none_for_absent_row() {
+        let eng = NostosEngine::new();
+        let result = eng.read_payload("absent", "x").unwrap();
+        assert!(result.is_none(), "absent row → None");
+    }
+
+    #[test]
+    fn read_payload_returns_bytes_after_apply() {
+        let mut eng = NostosEngine::new();
+        let s = eng.inner.storage_mut();
+        let _ = s.enqueue(PendingWrite {
+            table: "t".into(),
+            op: WriteOp::Upsert,
+            pk: "k".into(),
+            payload_json: Some(r#"{"hello":"world"}"#.into()),
+        });
+        let _ = s.apply_local(&PendingWrite {
+            table: "t".into(),
+            op: WriteOp::Upsert,
+            pk: "k".into(),
+            payload_json: Some(r#"{"hello":"world"}"#.into()),
+        });
+        let bytes = eng.read_payload("t", "k").unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["hello"], "world");
+    }
+
+    // ---- query on Memory returns empty (no SQL engine) ----
+
+    #[test]
+    fn query_on_memory_returns_empty_array() {
+        let eng = NostosEngine::new();
+        let result = eng.query("SELECT * FROM tasks").unwrap();
+        assert_eq!(result, "[]", "Memory backend has no SQL → empty array");
+    }
+
+    // ---- write status getters ----
+
+    #[test]
+    fn pending_count_reflects_enqueued_writes() {
+        let mut eng = NostosEngine::new();
+        assert_eq!(eng.pending_count(), 0, "fresh engine: 0 pending");
+        let s = eng.inner.storage_mut();
+        let _ = s.enqueue(PendingWrite {
+            table: "t".into(),
+            op: WriteOp::Upsert,
+            pk: "1".into(),
+            payload_json: Some(r"{}".into()),
+        });
+        let _ = s.enqueue(PendingWrite {
+            table: "t".into(),
+            op: WriteOp::Upsert,
+            pk: "2".into(),
+            payload_json: Some(r"{}".into()),
+        });
+        assert_eq!(eng.pending_count(), 2, "2 writes enqueued");
+    }
+
+    #[test]
+    fn replica_id_is_unique_per_engine() {
+        let eng1 = NostosEngine::new();
+        let eng2 = NostosEngine::new();
+        assert_ne!(
+            eng1.replica_id, eng2.replica_id,
+            "two engines have distinct replica ids"
+        );
+    }
+
+    #[test]
+    fn hlc_state_advances_monotonically() {
+        let eng = NostosEngine::new();
+        let h1 = eng.mint_hlc();
+        let h2 = eng.mint_hlc();
+        assert!(h2 > h1, "second mint > first (monotonic HLC)");
     }
 }

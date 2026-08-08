@@ -3,10 +3,12 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:meta/meta.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'nostos.dart';
 import 'nostos_config.dart';
+import 'predicate.dart';
 import 'schema.dart';
 
 /// PowerSync-style entry point: open a [Nostos] sync connection AND resolve
@@ -49,6 +51,15 @@ class NostosDatabase {
   /// listener would call `setToken` on a closed engine on the next refresh.
   StreamSubscription<AuthState>? _authSub;
 
+  /// Sign-out hooks — extra local state to wipe on [signOut] beyond the engine
+  /// + outbox (ADR-0029). The T6 attachments driver registers its [BlobStore]
+  /// wipe here so the next principal sees no blob bytes (consistent with the
+  /// SQLite + outbox wipe). Hooks run AFTER the engine quiesces + wipes, are
+  /// awaited in registration order, and MUST be idempotent (signOut is
+  /// re-callable). A throwing hook is swallowed (best-effort) so one failing
+  /// wipe cannot block the core sign-out.
+  final List<Future<void> Function()> _signOutHooks = <Future<void> Function()>[];
+
   /// Open a [Nostos] connection and resolve the schema.
   ///
   /// [url] is the `nostos-server` `/sync` WebSocket URL (the one `nostos dev`
@@ -69,8 +80,17 @@ class NostosDatabase {
     String? token,
     NostosSchema? schema,
     required String sqlitePath,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) =>
-      _open(url: url, token: token, schema: schema, sqlitePath: sqlitePath);
+      _open(
+        url: url,
+        token: token,
+        schema: schema,
+        sqlitePath: sqlitePath,
+        orSetTables: orSetTables,
+        counterTables: counterTables,
+      );
 
   /// Config-driven open: connect using a [NostosConfig] (normally loaded
   /// from the app's bundled `assets/nostos.json` via [NostosConfig.load])
@@ -103,6 +123,8 @@ class NostosDatabase {
     required NostosConfig config,
     NostosSchema? schema,
     required String sqliteDir,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
     final sqlitePath = '$sqliteDir/${config.sqliteFilename}';
     String? token;
@@ -128,6 +150,8 @@ class NostosDatabase {
       token: token,
       schema: schema,
       sqlitePath: sqlitePath,
+      orSetTables: orSetTables,
+      counterTables: counterTables,
     );
   }
 
@@ -180,6 +204,8 @@ class NostosDatabase {
     required String nostosUrl,
     NostosSchema? schema,
     required String sqlitePath,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
     final session = Supabase.instance.client.auth.currentSession;
     if (session == null) {
@@ -192,6 +218,8 @@ class NostosDatabase {
       token: session.accessToken,
       schema: schema,
       sqlitePath: sqlitePath,
+      orSetTables: orSetTables,
+      counterTables: counterTables,
     );
     db._wireSupabaseTokenRefresh();
     return db;
@@ -242,11 +270,15 @@ class NostosDatabase {
     String? token,
     NostosSchema? schema,
     required String sqlitePath,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
     final nostos = await Nostos.connect(
       url: url,
       token: token,
       sqlitePath: sqlitePath,
+      orSetTables: orSetTables,
+      counterTables: counterTables,
     );
     final resolved = schema ?? await _fetchSchema(_deriveHttpBase(url));
     nostos.applySchema(resolved.toClientTables());
@@ -256,6 +288,12 @@ class NostosDatabase {
   /// Connection-state transitions for the underlying [Nostos] session.
   Stream<NostosConnectionState> get connectionState =>
       _nostos.connectionState;
+
+  /// Snapshot of whether the session is currently `connected` (best-effort).
+  /// True only after [status] has observed a `connected` transition; false
+  /// before the first wire AND while `disconnected`. Used by the T6 attachment
+  /// driver to gate blob transfers on connectivity (ADR-0034).
+  bool get isOnline => _status?.value.conn == NostosConnectionState.connected;
 
   /// Subscribe to [table], optionally filtered by [where] (a safe-SQL
   /// predicate — see `Nostos.subscribe`). Must be called before [watch] /
@@ -280,21 +318,36 @@ class NostosDatabase {
     if (_statusWired) _wireWriteStatus();
   }
 
-  /// Reactive SQL watch: re-runs [sql] whenever the synced data changes and
-  /// emits the decoded result set. Thin delegate over `Nostos.watchQuery`
-  /// (PowerSync-parity P1). Requires an active [subscribe] first.
-  Stream<List<Map<String, dynamic>>> watch(String sql, {Duration? throttle}) =>
+  /// Reactive SQL watch (the ESCAPE HATCH — ADR-0032): re-runs [sql] whenever
+  /// the synced data changes and emits the decoded result set. Thin delegate
+  /// over `Nostos.watchQuery`. Requires an active [subscribe] first.
+  ///
+  /// This is the greppable raw-SQL escape hatch, kept for queries the typed
+  /// `Collection<T>` + structured-predicate surface can't express yet (e.g. an
+  /// `(col IS NULL) DESC` order, a join, or a projection). Prefer
+  /// [Collection.watch] with [Where]/[Order] for every "table, maybe filter,
+  /// maybe order" read — it is injection-safe by construction.
+  Stream<List<Map<String, dynamic>>> watchSql(String sql,
+          {Duration? throttle}) =>
       _nostos.watchQuery(sql, throttle: throttle);
 
+  /// Legacy reactive SQL watch (alias of [watchSql]). Prefer [Collection.watch]
+  /// (structured) for app reads; prefer [watchSql] if you must reach for raw
+  /// SQL. Kept for back-compat with code written against the pre-contract
+  /// surface.
+  Stream<List<Map<String, dynamic>>> watch(String sql,
+          {Duration? throttle}) =>
+      watchSql(sql, throttle: throttle);
+
   /// Run a one-shot SELECT against on-device SQLite and return the decoded
-  /// rows. Non-reactive counterpart to [watch]. Requires an active
+  /// rows. Non-reactive counterpart to [watchSql]. Requires an active
   /// [subscribe] (the engine enforces this).
   Future<List<Map<String, dynamic>>> getAll(String sql) async =>
       (jsonDecode(await _nostos.query(sql)) as List<dynamic>)
           .cast<Map<String, dynamic>>();
 
-  /// Raw-SQL execute. A READ-ONLY alias of [getAll] — **by convention, not by
-  /// enforcement.**
+  /// Raw-SQL execute (the ESCAPE HATCH — ADR-0032). A READ-ONLY alias of
+  /// [getAll] — **by convention, not by enforcement.**
   ///
   /// Nothing here parses your SQL. `SqliteStorage::query` runs whatever it is
   /// handed, so a `DELETE` reaches SQLite and returns an empty result set.
@@ -343,6 +396,87 @@ class NostosDatabase {
     Map<String, dynamic>? payload,
   }) =>
       _nostos.write(table, op: op, pk: pk, payload: payload);
+
+  /// Enqueue a group of writes as an all-or-nothing *entry* batch
+  /// (ADR-0032 T3). Every op enters the durable outbox atomically — all land in
+  /// one SQLite transaction or none do — so the group uploads together in one
+  /// round. Returns the local outbox ids in the same order as [writes].
+  ///
+  /// **This is NOT a server transaction.** The server applies each row
+  /// individually with per-field last-writer-wins (ADR-0014); there is no
+  /// cross-row rollback and no all-or-nothing *apply*. Two ops in the batch
+  /// that touch the same row/field collapse to the last one's value (verified
+  /// by the outbox's pk-dedup + the server's idempotent upsert) — exactly what
+  /// a sequential `patch`/`upsert` sequence already produces.
+  ///
+  /// *Entry* atomicity IS real (one storage transaction): a mid-batch disk
+  /// failure rolls back the whole batch, leaving zero partial outbox rows. The
+  /// WASM engine (Wave 2) inherits the same contract via the Outbox trait's
+  /// default `enqueue_batch` (sequential, best-effort) until it gains its own
+  /// transactional override.
+  Future<List<int>> writeBatch(List<NostosWrite> writes) async {
+    if (writes.isEmpty) {
+      throw ArgumentError.value(
+        writes,
+        'writes',
+        'writeBatch requires a non-empty list',
+      );
+    }
+    return _nostos.writeBatch(
+      writes
+          .map((w) => (
+                table: w.table,
+                op: w.op,
+                pk: w.pk.toString(),
+                payload: w.payload,
+              ))
+          .toList(),
+    );
+  }
+
+  /// Read-only snapshot of the dead-letter queue (ADR-0032 T5 / ADR-0027):
+  /// writes the server permanently rejected and the flush loop quarantined.
+  /// Rows stay in `cairn_outbox` with `dlq = 1`; this lists them so failures are
+  /// diagnosable. Each row carries the server's per-row reason ([DeadLetter]
+  /// .error) and the quarantine timestamp ([DeadLetter.timestamp]). Order is
+  /// oldest-first. v1 is read-only — `retryDeadLetter(id)` /
+  /// `discardDeadLetter(id)` are deferred to v1.1.
+  Future<List<DeadLetter>> deadLetters() async {
+    final rows = await getAll(
+      // Bare SQLite over the internal outbox table (read-only SELECT; the
+      // `execute`-writes-by-convention warning does not apply to a SELECT).
+      'SELECT id, table_name, op, pk, payload, attempts, last_error, '
+      'dead_lettered_at '
+      'FROM cairn_outbox WHERE dlq = 1 ORDER BY id ASC',
+    );
+    return rows.map((r) {
+      final payloadJson = r['payload'] as String?;
+      Map<String, dynamic>? payload;
+      if (payloadJson != null && payloadJson.isNotEmpty) {
+        try {
+          payload =
+              (jsonDecode(payloadJson) as Map<String, dynamic>).cast();
+        } on Object {
+          payload = null; // Corrupt payload shouldn't hide the rest of the row.
+        }
+      }
+      final deadLetteredAtMs = r['dead_lettered_at'] as num?;
+      return DeadLetter(
+        id: (r['id'] as num?)?.toInt() ?? 0,
+        table: (r['table_name'] ?? '').toString(),
+        op: (r['op'] ?? '').toString(),
+        pk: (r['pk'] ?? '').toString(),
+        attempts: (r['attempts'] as num?)?.toInt() ?? 0,
+        payload: payload,
+        error: r['last_error'] as String?,
+        timestamp: deadLetteredAtMs == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(
+                deadLetteredAtMs.toInt(),
+              ),
+      );
+    }).toList(growable: false);
+  }
 
   // ─────────────────── Reactive facade (ADR-0024) ───────────────────
   //
@@ -395,6 +529,7 @@ class NostosDatabase {
   StreamSubscription<NostosConnectionState>? _statusSub;
   StreamSubscription<({int pending, int deadLettered, String? lastError})>?
       _writeStatusSub;
+  StreamSubscription<bool>? _storageDegradedSub;
   bool _statusWired = false;
   bool _hasSubscribed = false;
 
@@ -420,6 +555,7 @@ class NostosDatabase {
         pendingWrites: prev.pendingWrites,
         deadLetteredWrites: prev.deadLetteredWrites,
         lastWriteError: prev.lastWriteError,
+        webStorageDegraded: prev.webStorageDegraded,
       );
     });
     // The other half of the later-of rule (see [_wireWriteStatus]): status
@@ -462,10 +598,29 @@ class NostosDatabase {
           pendingWrites: w.pending,
           deadLetteredWrites: w.deadLettered,
           lastWriteError: w.lastError,
+          webStorageDegraded: prev.webStorageDegraded,
         );
       },
       // A dead pump must not take the app with it: the connection half of
       // SyncStatus keeps working, and the write counts simply stop updating.
+      onError: (Object _) {},
+    );
+    // ADR-0036: fold the web storage-degrade signal in. Native never fires
+    // (empty stream → this listener stays idle), so this is a no-op there.
+    unawaited(_storageDegradedSub?.cancel());
+    _storageDegradedSub = _nostos.webStorageDegraded.listen(
+      (degraded) {
+        final prev = _status!.value;
+        if (prev.webStorageDegraded == degraded) return;
+        _status!.value = SyncStatus(
+          conn: prev.conn,
+          lastSyncedAt: prev.lastSyncedAt,
+          pendingWrites: prev.pendingWrites,
+          deadLetteredWrites: prev.deadLetteredWrites,
+          lastWriteError: prev.lastWriteError,
+          webStorageDegraded: degraded,
+        );
+      },
       onError: (Object _) {},
     );
   }
@@ -478,30 +633,102 @@ class NostosDatabase {
     await _authSub?.cancel();
     await _statusSub?.cancel();
     await _writeStatusSub?.cancel();
+    await _storageDegradedSub?.cancel();
     _status?.dispose();
     await _nostos.close();
   }
+
+  /// Register a hook wiped on [signOut] (ADR-0029). The T6 attachments driver
+  /// uses this to wipe local blobs so the next principal sees none of the
+  /// prior user's bytes. Hooks are awaited AFTER the core wipe, in order, and
+  /// MUST be idempotent. Returns without awaiting the hook.
+  void registerSignOutHook(Future<void> Function() hook) =>
+      _signOutHooks.add(hook);
 
   /// ADR-0029: sign out — wipe the local store + durable outbox (the next
   /// principal sees nothing of this one), stop sync, clear the seed token, and
   /// cancel the auth/status listeners. Unlike [close], the on-device SQLite
   /// state is wiped via `clear_local_state`. Idempotent.
+  ///
+  /// T6 (ADR-0034): registered [_signOutHooks] (e.g. the blob-store wipe) run
+  /// AFTER the core wipe so the engine is already quiesced — a hook never sees
+  /// in-flight apply frames.
   Future<void> signOut() async {
     // Auth listener first (as in close): a surviving refresh would call
     // setToken on a wiped engine.
     await _authSub?.cancel();
     await _statusSub?.cancel();
     await _writeStatusSub?.cancel();
+    await _storageDegradedSub?.cancel();
     _status?.dispose();
     await _nostos.signOut();
+    // Wipe extra local surfaces (blobs) AFTER the engine is quiesced + wiped.
+    // Best-effort: a failing hook is logged-and-swallowed so it cannot block
+    // the (already-complete) core sign-out. Run a snapshot so a re-entrant
+    // register during wipe cannot mutate the list under us.
+    for (final hook in List<Future<void> Function()>.of(_signOutHooks)) {
+      try {
+        await hook();
+      } on Object {
+        // Swallowed deliberately — see method doc.
+      }
+    }
   }
 
-  /// Pause syncing (delegate to [Nostos.disconnect]); reads/writes/UI keep
-  /// working offline. See `Nostos.disconnect`.
-  Future<void> disconnect() => _nostos.disconnect();
+  /// Pause syncing (ADR-0032 T1 canonical name): abort ONLY the background
+  /// connect loop, keeping the client, its on-device SQLite store, the token,
+  /// the schema, and every `watch()` pump alive. Reads, writes (enqueued to the
+  /// durable outbox), and the UI keep working offline. Emits `disconnected` on
+  /// [connectionState]. Idempotent.
+  ///
+  /// [resumeSync] restarts the connect loop on the same client — the outbox
+  /// flushes on reconnect and live updates resume, and watches re-emit their
+  /// latest value without the caller re-wiring anything (the pumps are
+  /// hot-replay-shared and survive a pause). No wire-protocol change.
+  Future<void> pauseSync() => _nostos.disconnect();
 
-  /// Resume syncing after [disconnect] (delegate to [Nostos.resume]).
-  void resume() => _nostos.resume();
+  /// Resume syncing after [pauseSync] (ADR-0032 T1 canonical name). Restarts
+  /// the connect loop on the same client; the durable outbox drains on
+  /// reconnect and live updates resume. Emits `connecting → connected …` on
+  /// [connectionState]. Requires a prior [subscribe] (throws otherwise).
+  void resumeSync() => _nostos.resume();
+
+  /// Legacy alias of [pauseSync]. Prefer `pauseSync()` (ADR-0032); this name is
+  /// kept for back-compat with code written against the pre-contract surface.
+  Future<void> disconnect() => pauseSync();
+
+  /// Legacy alias of [resumeSync]. Prefer `resumeSync()` (ADR-0032).
+  void resume() => resumeSync();
+
+  /// Awaitable barrier that completes once the first sync has landed, i.e. the
+  /// session has reached `connected` at least once (ADR-0032 T1). Resolves
+  /// immediately if sync has already happened (so it is safe to call on every
+  /// reconnect / app start). Use this instead of polling [SyncStatus.hasSynced].
+  ///
+  /// ponytail: `lastSyncedAt` is a proxy stamped on each `connected`
+  /// transition, not a precise "download completed / reconcile done" signal
+  /// (which the engine does not yet expose — ADR-0024). It is the same proxy
+  /// [SyncStatus.hasSynced] uses; upgrading one upgrades the other.
+  Future<void> waitForFirstSync() {
+    if (_status?.value.lastSyncedAt != null) return Future<void>.value();
+    _ensureStatusWired();
+    final completer = Completer<void>();
+    void listener() {
+      if (_status!.value.lastSyncedAt != null && !completer.isCompleted) {
+        completer.complete();
+        _status!.removeListener(listener);
+      }
+    }
+
+    _status!.addListener(listener);
+    // If the very first connect already landed between the check above and
+    // addListener, resolve now rather than deadlock.
+    if (_status!.value.lastSyncedAt != null && !completer.isCompleted) {
+      completer.complete();
+      _status!.removeListener(listener);
+    }
+    return completer.future;
+  }
 
   /// Derive the HTTP base for `GET /schema` from the WS `/sync` URL:
   /// `wss`→`https`, `ws`→`http`, host+port preserved, trailing path stripped.
@@ -521,6 +748,41 @@ class NostosDatabase {
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     return NostosSchema.fromSchemaDescriptor(body);
   }
+}
+
+/// Compose a `SELECT * FROM <table>` SQL string from the structured
+/// [where]/[orderBy]/[limit]/[offset] (ADR-0032 T2). All inputs are
+/// injection-safe: column names are identifier-validated in [Where.toSql]/
+/// [Order.toSql], and values are emitted as literals (see `predicate.dart`).
+String _composeQuery(
+  String table, {
+  Where? where,
+  List<Order>? orderBy,
+  int? limit,
+  int? offset,
+}) {
+  var sql = 'SELECT * FROM $table';
+  final w = where?.toSql();
+  if (w != null) sql += ' WHERE $w';
+  if (orderBy != null && orderBy.isNotEmpty) {
+    sql += ' ORDER BY ${orderBy.map((o) => o.toSql()).join(', ')}';
+  }
+  if (limit != null) {
+    if (limit < 0) {
+      throw ArgumentError.value(limit, 'limit', 'must be >= 0');
+    }
+    sql += ' LIMIT $limit';
+  }
+  if (offset != null) {
+    if (offset < 0) {
+      throw ArgumentError.value(offset, 'offset', 'must be >= 0');
+    }
+    // SQLite requires LIMIT to be present when OFFSET is; use -1 (no limit) if
+    // the caller wanted offset-only.
+    if (limit == null) sql += ' LIMIT -1';
+    sql += ' OFFSET $offset';
+  }
+  return sql;
 }
 
 /// Typed handle to one synced table — the beautiful default dev surface
@@ -543,40 +805,97 @@ class Collection<T> {
   final Map<String, dynamic> Function(T value)? _toRow;
   final String pkColumn;
 
-  /// Reactive typed read. Re-runs whenever the table's synced data changes.
+  /// Reactive typed read (ADR-0032 T2). Re-runs whenever the table's synced
+  /// data changes and re-emits the typed rows matching [where].
   ///
-  /// - [where] is a literal SQL fragment (e.g. `'completed = 0'`). Parameter
-  ///   binding (`parameters: [...]`) is P1 — the engine query path is
-  ///   parameter-less today; until then pass constants, **never** interpolated
-  ///   user input.
-  /// - [orderBy] is a literal `ORDER BY` fragment (e.g. `'starts_at'` or
-  ///   `'created_at DESC'`), appended after [where]. Prefer this to stuffing
-  ///   `ORDER BY` into [where].
+  /// - [where] is structured data, not a SQL fragment — build it with
+  ///   [Where.eq]/[Where.gt]/[Where.and]/… (see `predicate.dart`). Column names
+  ///   are identifier-validated and values are emitted as safe SQLite literals,
+  ///   so nothing the caller supplies is spliced raw. This replaces the old
+  ///   string-`where` and kills the injection foot-gun.
+  /// - [orderBy] is a list of [Order] terms (first entry sorts first).
+  /// - [limit]/[offset] map to SQL `LIMIT`/`OFFSET`.
   /// - [throttle] coalesces a burst of change ticks into one re-query per
   ///   window.
   Stream<List<T>> watch({
-    String? where,
+    Where? where,
+    List<Order>? orderBy,
+    int? limit,
+    int? offset,
     Duration? throttle,
-    String? orderBy,
   }) {
-    var sql = 'SELECT * FROM $table';
-    if (where != null) sql += ' WHERE $where';
-    if (orderBy != null) sql += ' ORDER BY $orderBy';
+    final sql = _composeQuery(table, where: where, orderBy: orderBy, limit: limit, offset: offset);
     return _db
         .watch(sql, throttle: throttle)
         .map((rows) => rows.map(_fromRow).toList(growable: false));
   }
 
+  /// One-shot typed read (ADR-0032 T2): the non-reactive twin of [watch].
+  /// Same [where]/[orderBy]/[limit]/[offset] semantics, run once.
+  Future<List<T>> getAll({
+    Where? where,
+    List<Order>? orderBy,
+    int? limit,
+    int? offset,
+  }) async {
+    final sql = _composeQuery(table, where: where, orderBy: orderBy, limit: limit, offset: offset);
+    final rows = await _db.getAll(sql);
+    return rows.map(_fromRow).toList(growable: false);
+  }
+
+  /// One-shot single-row fetch by primary key (ADR-0032 T2 — `fetchById`
+  /// parity). Returns `null` if no row matches. `fetchById` is an alias.
+  Future<T?> get(Object pk) => _get(pk);
+
+  /// Alias of [get] (the name sibling SDKs expose). Kept for cross-SDK parity.
+  Future<T?> fetchById(Object pk) => _get(pk);
+
+  Future<T?> _get(Object pk) async {
+    final rows = await getAll(where: Where.eq(pkColumn, pk), limit: 1);
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  /// Reactive single-row watch by primary key (ADR-0032 T2 — WatermelonDB
+  /// `findAndObserve` parity). Emits the row matching [pk], or `null` when it's
+  /// absent; re-emits on any change to that row. Detail screens use this so they
+  /// don't rebuild on unrelated list churn.
+  Stream<T?> watchOne(Object pk) {
+    final sql = _composeQuery(
+      table,
+      where: Where.eq(pkColumn, pk),
+      limit: 1,
+    );
+    return _db.watch(sql).map((rows) {
+      if (rows.isEmpty) return null;
+      return _fromRow(rows.first);
+    });
+  }
+
   /// Derived count — emits the row count matching [where], re-runs on table
-  /// change. Use this for count badges so they don't rebuild on unrelated
-  /// column writes.
-  Stream<int> count({String? where}) {
-    final sql = where == null
+  /// change (ADR-0032 T2). Use this for count badges so they don't rebuild on
+  /// unrelated column writes.
+  Stream<int> count({Where? where}) {
+    final whereFragment = where?.toSql();
+    final sql = whereFragment == null
         ? 'SELECT COUNT(*) AS count FROM $table'
-        : 'SELECT COUNT(*) AS count FROM $table WHERE $where';
+        : 'SELECT COUNT(*) AS count FROM $table WHERE $whereFragment';
     return _db.watch(sql).map((rows) {
       final v = rows.isEmpty ? null : rows.first['count'];
       return v is num ? v.toInt() : 0;
+    });
+  }
+
+  /// Reactive boolean — emits whether any row matches [where], re-runs on
+  /// table change (ADR-0032 T2). Cheaper to render than [count] for "is there
+  /// any…" UI (empty-vs-nonempty badges, conditional affordances).
+  Stream<bool> exists({Where? where}) {
+    final whereFragment = where?.toSql();
+    final sql = whereFragment == null
+        ? 'SELECT EXISTS(SELECT 1 FROM $table) AS hit'
+        : 'SELECT EXISTS(SELECT 1 FROM $table WHERE $whereFragment) AS hit';
+    return _db.watch(sql).map((rows) {
+      final v = rows.isEmpty ? null : rows.first['hit'];
+      return v is num ? v.toInt() != 0 : false;
     });
   }
 
@@ -630,6 +949,73 @@ class Collection<T> {
   /// Delete the row whose primary key is [pk].
   Future<int> delete(Object pk) =>
       _db.write(table: table, op: 'delete', pk: pk.toString());
+
+  // ─────────────────── CRDT handles (ADR-0030 / ADR-0032 T4) ───────────────────
+  //
+  // OR-set (add-wins) handles for columns the server tags as an OR-set. Unlike
+  // [upsert]/[patch] (per-field last-writer-wins, ADR-0014), an OR-set column
+  // MERGES: concurrent adds of different elements both survive, and a remove is
+  // a tombstone that a concurrent or later re-add revives (add-wins). Use these
+  // for multi-value fields (tags, collaborators, reactions) where LWW would
+  // clobber concurrent additions.
+  //
+  // Counters (PN-Counter, ADR-0030 addendum) merge per-replica: each client
+  // owns its positive/negative entry, and `apply_local` takes the elementwise
+  // max across replicas on the server's echo — no clobbering. Use these for
+  // tallies (likes, views, scores) where LWW would lose concurrent increments.
+  //
+  // Both families REQUIRE the table to be declared as a CRDT table at open:
+  // pass [NostosDatabase.connect]/[NostosDatabase.open]/[NostosDatabase.supabase]
+  // an `orSetTables` / `counterTables` set. Without it the verb throws
+  // `*TableNotTagged` (the gate) and writes clobber instead of merge. The
+  // declared set MUST also match the server's `NOSTOS_OR_SET_COLUMNS` /
+  // `NOSTOS_COUNTER_COLUMNS`, or client-merge and server-clobber disagree.
+
+  /// Add [element] to the OR-set column in row [pk] of this table (ADR-0030 /
+  /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert; the element
+  /// renders locally immediately and converges with concurrent remote adds on
+  /// the server's echo. Returns the local outbox id.
+  ///
+  /// Requires the table to be declared in the `orSetTables` set passed to
+  /// [NostosDatabase.connect]/[NostosDatabase.open]/[NostosDatabase.supabase] (and
+  /// the server's `NOSTOS_OR_SET_COLUMNS`) — without it the verb throws
+  /// `OrSetTableNotTagged`.
+  Future<int> orSetAdd({required Object pk, required String element}) =>
+      _db._nostos.orSetAdd(table: table, pk: pk.toString(), element: element);
+
+  /// Remove [element] from the OR-set column in row [pk] — a tombstone at a
+  /// fresh HLC. Add-wins: a concurrent or later re-add revives the element.
+  /// Returns the local outbox id.
+  Future<int> orSetRemove({required Object pk, required String element}) =>
+      _db._nostos.orSetRemove(table: table, pk: pk.toString(), element: element);
+
+  /// Increment the PN-Counter in row [pk] of this table by [delta] (ADR-0030
+  /// addendum). Read-modify-write: reads the current counter payload, applies
+  /// the delta to this replica's entry, and enqueues a merge-upsert. Converges
+  /// with concurrent remote increments on the server's echo. Returns the local
+  /// outbox id.
+  ///
+  /// Requires the table to be declared in the `counterTables` set passed to
+  /// [NostosDatabase.connect]/[NostosDatabase.open]/[NostosDatabase.supabase] (and
+  /// the server's `NOSTOS_COUNTER_COLUMNS`) — without it the verb throws
+  /// `CounterTableNotTagged`.
+  Future<int> counterIncrement({required Object pk, required int delta}) =>
+      _db._nostos.counterIncrement(table: table, pk: pk.toString(), delta: delta);
+
+  /// Decrement the PN-Counter by [delta] (bumps the negative counter `n` for
+  /// this replica). Returns the local outbox id.
+  Future<int> counterDecrement({required Object pk, required int delta}) =>
+      _db._nostos.counterDecrement(table: table, pk: pk.toString(), delta: delta);
+
+  /// Single-table [NostosDatabase.writeBatch] convenience (ADR-0032 T3): stamps
+  /// this collection's [table] onto every op. Same all-or-nothing-delivery,
+  /// NOT-a-server-transaction semantics — see [NostosDatabase.writeBatch].
+  Future<List<int>> writeBatch(List<NostosWrite> writes) {
+    final stamped = writes
+        .map((w) => NostosWrite(table: table, op: w.op, pk: w.pk, payload: w.payload))
+        .toList(growable: false);
+    return _db.writeBatch(stamped);
+  }
 }
 
 /// Honest P0 sync status. Carries the connection state and the last time we
@@ -648,6 +1034,7 @@ class SyncStatus {
     this.pendingWrites = 0,
     this.deadLetteredWrites = 0,
     this.lastWriteError,
+    this.webStorageDegraded = false,
   });
 
   /// Writes captured locally but not yet ack'd by the server.
@@ -671,6 +1058,13 @@ class SyncStatus {
   /// usually actionable (e.g. a `NOSTOS_WRITE_TABLES` rejection names the exact
   /// env var to set).
   final String? lastWriteError;
+
+  /// Web-only (ADR-0036): true when the browser storage backend degraded to
+  /// in-memory because OPFS was unavailable (Safari Private Browsing, old
+  /// browsers, OPFS disallowed). Always false on native. When true, rows +
+  /// outbox do NOT survive a reload — surface a "session not persisted"
+  /// banner so the user knows to use a non-private window.
+  final bool webStorageDegraded;
 
   /// True when at least one write is permanently lost. This is the condition
   /// Flutter's own optimistic-state guidance expects you to render (revert the
@@ -703,5 +1097,65 @@ class SyncStatus {
   String toString() =>
       'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt, '
       'pendingWrites: $pendingWrites, deadLetteredWrites: $deadLetteredWrites, '
+      'webStorageDegraded: $webStorageDegraded, '
       'lastWriteError: $lastWriteError)';
+}
+
+/// One write op inside a [NostosDatabase.writeBatch] group (ADR-0032 T3).
+/// `op` is `"upsert"`, `"delete"`, or `"patch"` (same vocabulary as
+/// [NostosDatabase.write]); `payload` is the row image (upsert) or column
+/// subset (patch), and is `null` for deletes.
+@immutable
+class NostosWrite {
+  const NostosWrite({
+    required this.table,
+    required this.op,
+    required this.pk,
+    this.payload,
+  });
+
+  final String table;
+  final String op;
+  final Object pk;
+  final Map<String, dynamic>? payload;
+
+  @override
+  String toString() =>
+      'NostosWrite(table: $table, op: $op, pk: $pk, payload: $payload)';
+}
+
+/// One permanently-failed write surfaced by [NostosDatabase.deadLetters]
+/// (ADR-0032 T5 / ADR-0027). `error` is the server's verbatim per-row reason
+/// and `timestamp` is when the flush loop quarantined it (both persisted since
+/// the `last_error`/`dead_lettered_at` outbox migration). `attempts` is the
+/// flush-retry count at the point the row was quarantined.
+@immutable
+class DeadLetter {
+  const DeadLetter({
+    required this.id,
+    required this.table,
+    required this.op,
+    required this.pk,
+    required this.attempts,
+    this.payload,
+    this.error,
+    this.timestamp,
+  });
+
+  final int id;
+  final String table;
+  final String op;
+  final String pk;
+  final int attempts;
+  final Map<String, dynamic>? payload;
+
+  /// Server's per-row reason for the permanent failure (verbatim).
+  final String? error;
+
+  /// When the row was quarantined (epoch-ms → [DateTime]).
+  final DateTime? timestamp;
+
+  @override
+  String toString() =>
+      'DeadLetter(id: $id, table: $table, op: $op, pk: $pk, attempts: $attempts)';
 }

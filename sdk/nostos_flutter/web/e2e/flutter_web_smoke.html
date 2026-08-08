@@ -1,0 +1,108 @@
+<!doctype html>
+<!--
+  flutter_web_smoke.html — Playwright harness for the Flutter-web Worker (ADR-0036).
+
+  This is the browser half of the Flutter-web smoke. It spawns the Flutter-web
+  Worker (`nostos/nostos_worker.js`) and drives WebNostosEngine's boundary protocol
+  directly from JS — connect, watch, write — surfacing every push + response on
+  `window.nostos*` for the Playwright spec to poll. The Dart WebNostosEngine layer
+  (the pure-Dart protocol fanout) is covered by test/engine_web_test.dart; this
+  page proves the JS Worker asset itself boots the shared wasm backend, connects
+  to a live server, applies a write, and pushes the reactive snapshot back.
+
+  Real browser only (FileSystemSyncAccessHandle / OPFS path; falls back to
+  memory if sqlite-wasm isn't served — the Safari-Private-Browsing degrade).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nostos Flutter-web Worker smoke</title>
+  </head>
+  <body>
+    <h1>Nostos Flutter-web Worker smoke (ADR-0036)</h1>
+    <p id="status">spawning worker…</p>
+    <script type="module">
+      const log = (m) => console.log("[flutter-web-smoke] " + m);
+      const worker = new Worker("/nostos/nostos_worker.js", { type: "module" });
+
+      const pending = new Map();
+      let nextId = 1;
+      window.nostosEvents = [];
+      window.nostosSnapshots = [];
+      window.nostosConnected = null;
+      window.nostosStorage = null;
+      window.nostosErrors = [];
+
+      worker.onerror = (e) => {
+        window.nostosErrors.push("worker.onerror: " + (e.message || e));
+      };
+
+      worker.onmessage = (ev) => {
+        const d = ev.data || {};
+        // Unsolicited push (has `type`).
+        if (d.type) {
+          window.nostosEvents.push(d);
+          if (d.type === "snapshot") {
+            window.nostosSnapshots.push(d);
+            log("snapshot " + d.table + " (" + (d.json || "").length + " bytes)");
+          } else if (d.type === "status") {
+            window.nostosConnected = !!d.connected;
+            log("status connected=" + d.connected);
+          } else if (d.type === "storage") {
+            window.nostosStorage = d.mode;
+            log("storage mode=" + d.mode + (d.error ? " err=" + d.error : ""));
+          } else if (d.type === "writeStatus") {
+            log("writeStatus pending=" + d.pending);
+          }
+          return;
+        }
+        // Request response (has `id`).
+        const id = d.id;
+        if (id != null && pending.has(id)) {
+          pending.get(id)(d);
+          pending.delete(id);
+        }
+      };
+
+      function request(msg) {
+        return new Promise((resolve, reject) => {
+          const id = nextId++;
+          pending.set(id, (d) => (d.error ? reject(new Error(d.error)) : resolve(d)));
+          worker.postMessage({ ...msg, id });
+        });
+      }
+
+      window.nostosConnect = (url, table) =>
+        request({
+          cmd: "connect",
+          url,
+          token: null,
+          tables: [{ name: table, whereSql: null }],
+        });
+
+      window.nostosWrite = (table, pk, payloadJson) =>
+        request({ cmd: "write", table, op: "upsert", pk, payloadJson });
+
+      window.nostosWatch = (table) =>
+        worker.postMessage({ cmd: "watch", table });
+
+      // Wave 4c (ADR-0036): CRDT + atomic-writeBatch driver surface. These
+      // exercise the new NostosSocket delegates through the real Worker/wasm
+      // path — proving the verbs ship over the live socket, not just enqueue.
+      window.nostosSetCrdtTables = (orSet, counter) =>
+        request({ cmd: "setCrdtTables", orSet, counter });
+
+      window.nostosCounterIncrement = (table, pk, delta) =>
+        request({ cmd: "counterIncrement", table, pk, delta });
+
+      window.nostosOrSetAdd = (table, pk, element) =>
+        request({ cmd: "orSetAdd", table, pk, element });
+
+      window.nostosWriteBatch = (ops) =>
+        request({ cmd: "writeBatch", ops });
+
+      document.getElementById("status").textContent = "worker spawned — drive via window.nostos*";
+      log("harness ready");
+    </script>
+  </body>
+</html>

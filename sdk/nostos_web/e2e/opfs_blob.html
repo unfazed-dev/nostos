@@ -1,0 +1,73 @@
+<!doctype html>
+<!--
+  opfs_blob.html — harness for the OpfsBlobStore browser test (ADR-0034 / T6).
+
+  Loaded by e2e/opfs_blob.spec.cjs in headless Chromium. Loads the REAL
+  attachments.js source (not a copy) via a CJS shim and exercises OpfsBlobStore
+  against real OPFS — put/get/remove/wipe — then writes PASS/FAIL to #out.
+  attachments.js has no top-level require except @supabase/supabase-js, which is
+  pulled in lazily only inside SupabaseStorageAdapter's constructor, so the shim
+  never needs to satisfy it.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>opfs-blob-test</title>
+  </head>
+  <body>
+    <pre id="out">running…</pre>
+    <script>
+      (async () => {
+        const out = document.getElementById("out");
+        const done = (ok, msg) => {
+          out.textContent = (ok ? "PASS" : "FAIL") + (msg ? ": " + msg : "");
+        };
+        try {
+          // CJS shim: eval the real attachments.js with module/exports/require.
+          const src = await fetch("/attachments.js").then((r) => r.text());
+          const module = { exports: {} };
+          const require = (name) => {
+            throw new Error("unexpected require at load time: " + name);
+          };
+          // eslint-disable-next-line no-new-func
+          new Function("module", "exports", "require", src)(
+            module,
+            module.exports,
+            require,
+          );
+          const { OpfsBlobStore } = module.exports;
+          if (!OpfsBlobStore) throw new Error("OpfsBlobStore not exported");
+
+          const store = new OpfsBlobStore("nostos-blobs-test");
+
+          // put + get round-trip
+          const bytes = new Uint8Array([10, 20, 30, 40]);
+          await store.put("k1", bytes);
+          let got = await store.get("k1");
+          if (!got || got.length !== 4 || got[0] !== 10 || got[3] !== 40) {
+            throw new Error("get after put mismatch: " + JSON.stringify(got));
+          }
+
+          // remove → not found (null)
+          await store.remove("k1");
+          got = await store.get("k1");
+          if (got !== null) throw new Error("get after remove not null");
+
+          // wipe clears everything (and recreates the dir so later puts work)
+          await store.put("k2", new Uint8Array([99]));
+          await store.wipe();
+          got = await store.get("k2");
+          if (got !== null) throw new Error("get after wipe not null");
+          // dir still usable after wipe
+          await store.put("k3", new Uint8Array([7]));
+          got = await store.get("k3");
+          if (!got || got[0] !== 7) throw new Error("put after wipe failed");
+
+          done(true, "OpfsBlobStore put/get/remove/wipe OK in real OPFS");
+        } catch (e) {
+          done(false, String((e && e.message) || e));
+        }
+      })();
+    </script>
+  </body>
+</html>

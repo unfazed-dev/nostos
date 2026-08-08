@@ -8,7 +8,7 @@
     "build": "wasm-pack build ../../crates/nostos-ffi-wasm --target nodejs --out-dir pkg-node",
     "build:web": "wasm-pack build ../../crates/nostos-ffi-wasm --target web --out-dir pkg-web",
     "build:all": "npm run build && npm run build:web",
-    "smoke": "node smoke.cjs",
+    "smoke": "node smoke.cjs && node --test e2e/attachments.spec.cjs",
     "test:e2e": "npx playwright test --config=playwright.config.cjs",
     "test": "npm run smoke && npm run test:e2e"
   },
@@ -20,6 +20,9 @@
   ],
   "devDependencies": {
     "@playwright/test": "^1.40.0"
+  },
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1"
   },
   "repository": {
     "type": "git",

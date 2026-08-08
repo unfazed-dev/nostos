@@ -23,6 +23,8 @@ import 'package:nostos_flutter/src/schema.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _FakeEngine implements NostosEngine {
+  @override
+  Stream<bool> get webStorageDegraded => const Stream<bool>.empty();
   final rowsController = StreamController<String>.broadcast();
   final stateController = StreamController<NostosConnectionState>.broadcast();
   String queryResult = '[]';
@@ -35,6 +37,8 @@ class _FakeEngine implements NostosEngine {
   @override
   Stream<NostosConnectionState> subscribe({
     required List<NostosTableSub> tables,
+    Set<String> orSetTables = const <String>{},
+    Set<String> counterTables = const <String>{},
   }) =>
       stateController.stream;
 
@@ -57,6 +61,40 @@ class _FakeEngine implements NostosEngine {
     writes.add((table: table, op: op, pk: pk, payloadJson: payloadJson));
     return 1;
   }
+
+  @override
+  Future<List<int>> writeBatch({
+    required List<({String table, String op, String pk, String? payloadJson})>
+        ops,
+  }) async => List.filled(ops.length, 1);
+
+  @override
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) async => 1;
+
+  @override
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) async => 1;
+
+  @override
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async => 0;
+
+  @override
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) async => 0;
 
   @override
   void applySchema(List<ClientTableFfi> tables) {}

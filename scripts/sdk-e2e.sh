@@ -103,7 +103,23 @@ fi
 # running.
 if want flutter; then
   if [ "$(uname -s)" = "Darwin" ] && command -v flutter >/dev/null 2>&1; then
-    run_slice flutter "cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
+    # If macOS `open` can't foreground the app (headless/agent/CI without a
+    # GUI session), the test times out — an environment limit, not a code
+    # defect, so SKIP honestly instead of reporting a false FAIL.
+    _flutter_cmd="cd sdk/nostos_flutter/example && flutter test integration_test/nostos_server_test.dart -d macos"
+    _flutter_start=$SECONDS
+    if bash -c "$_flutter_cmd" > /tmp/sdk-e2e-flutter.log 2>&1; then
+      _flutter_dur=$((SECONDS - _flutter_start))
+      _flutter_proof="$(grep -hoEi 'All tests passed!|PUSH_OK' /tmp/sdk-e2e-flutter.log 2>/dev/null | tail -1 | cut -c1-60)"
+      printf "  ${GREEN}%-13s PASS${RESET}\n" "flutter"
+      RESULTS+=("flutter|PASS|${_flutter_dur}s|$_flutter_proof")
+    elif grep -q 'Failed to foreground app' /tmp/sdk-e2e-flutter.log 2>/dev/null; then
+      skip_slice flutter "(macOS \`open\` can't foreground — no GUI session; environment limit)"
+    else
+      _flutter_dur=$((SECONDS - _flutter_start))
+      printf "  ${RED}%-13s FAIL${RESET}  (log: /tmp/sdk-e2e-flutter.log)\n" "flutter"
+      RESULTS+=("flutter|FAIL|${_flutter_dur}s|")
+    fi
   else
     skip_slice flutter "(macOS host + flutter required — \`flutter test -d macos\`)"
   fi

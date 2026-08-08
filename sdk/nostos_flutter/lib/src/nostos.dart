@@ -2,10 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:meta/meta.dart';
-import 'package:path_provider/path_provider.dart';
 
 import 'engine.dart';
-import 'rust/frb_generated.dart';
+import 'engine_selector.dart';
 
 export 'engine.dart' show NostosConnectionState, NostosTableSub;
 
@@ -24,7 +23,9 @@ export 'engine.dart' show NostosConnectionState, NostosTableSub;
 /// down). The single-table [subscribe] is a convenience that subscribes to
 /// exactly one table.
 class Nostos {
-  Nostos._(this._engine);
+  Nostos._(this._engine, {Set<String>? orSetTables, Set<String>? counterTables})
+    : _orSetTables = orSetTables ?? const <String>{},
+      _counterTables = counterTables ?? const <String>{};
 
   /// Test-only constructor: inject a fake [NostosEngine] to exercise this
   /// class's wiring (subscribe/watch/write, table-mismatch errors, JSON
@@ -34,7 +35,11 @@ class Nostos {
 
   final NostosEngine _engine;
 
-  static bool _rustInitialized = false;
+  /// Tables tagged as add-wins OR-sets / PN-Counters (ADR-0030 / ADR-0032 T4),
+  /// declared at [connect] and forwarded into every [subscribeTables] so
+  /// `orSet*` / `counter*` verbs merge instead of throwing `*TableNotTagged`.
+  final Set<String> _orSetTables;
+  final Set<String> _counterTables;
 
   /// Open a connection to a `nostos-server` `/sync` endpoint. Does not touch
   /// the network yet — [subscribe] starts the actual session.
@@ -44,20 +49,30 @@ class Nostos {
   /// on the WS handshake (matches whatever `NOSTOS_SYNC_AUTH` mode the server
   /// runs — `none` ignores it, `supabase-jwt` verifies it).
   ///
-  /// [sqlitePath] overrides where the durable client store lives; omit it to
-  /// use a per-`url` default under the platform's application-support
-  /// directory (via `path_provider`) — zero manual steps for the common case.
+  /// Platform selection (ADR-0036) happens here via a compile-time conditional
+  /// import ([createNostosEngine]): native → [RustNostosEngine] (frb + the Rust
+  /// dylib + a `path_provider` SQLite path); web → [WebNostosEngine] over the
+  /// shared `nostos-ffi-wasm` Worker (opfs-sahpool). [sqlitePath] is native-only
+  /// (web durability is OPFS-backed); [workerUrl] overrides the web Worker
+  /// script URL (default `nostos/nostos_worker.js`).
   static Future<Nostos> connect({
     required String url,
     String? token,
     String? sqlitePath,
+    String? workerUrl,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
-    if (!_rustInitialized) {
-      await RustLib.init();
-      _rustInitialized = true;
-    }
-    final path = sqlitePath ?? await _defaultSqlitePath(url);
-    return Nostos._(RustNostosEngine.connect(url: url, token: token, dbPath: path));
+    return Nostos._(
+      await createNostosEngine(
+        url: url,
+        token: token,
+        sqlitePath: sqlitePath,
+        workerUrl: workerUrl,
+      ),
+      orSetTables: orSetTables,
+      counterTables: counterTables,
+    );
   }
 
   /// The set of tables the active subscription covers (empty before the first
@@ -83,6 +98,10 @@ class Nostos {
   Stream<({int pending, int deadLettered, String? lastError})>
       get writeStatus => _engine.watchWriteStatus();
 
+  /// Web-only storage degrade signal (folds into [SyncStatus.webStorageDegraded]
+  /// via NostosDatabase). Native never fires. See [NostosEngine.webStorageDegraded].
+  Stream<bool> get webStorageDegraded => _engine.webStorageDegraded;
+
   /// Materialize the WS2 read-views for [tables] in the on-device SQLite
   /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...)
   /// AS col, ... FROM cairn_data WHERE table_name='<table>'` — see
@@ -107,7 +126,13 @@ class Nostos {
     _subscribedTables
       ..clear()
       ..addAll(tables.map((t) => t.name));
-    _engine.subscribe(tables: tables).listen(_stateController.add);
+    _engine
+        .subscribe(
+          tables: tables,
+          orSetTables: _orSetTables,
+          counterTables: _counterTables,
+        )
+        .listen(_stateController.add);
   }
 
   /// Single-table convenience — equivalent to
@@ -305,6 +330,106 @@ class Nostos {
     );
   }
 
+  /// Atomic batch enqueue — all ops land in one storage transaction or none do
+  /// (ADR-0032 T3). Validates every op's table is in the active subscription
+  /// and JSON-encodes payloads BEFORE calling the engine, so a bad table fails
+  /// fast with a clear error instead of a rolled-back FFI call. Returns outbox
+  /// ids in the same order as [writes].
+  Future<List<int>> writeBatch(
+    List<({String table, String op, String pk, Map<String, dynamic>? payload})>
+        writes,
+  ) {
+    for (final w in writes) {
+      if (!_subscribedTables.contains(w.table)) {
+        throw StateError(
+          'writeBatch op (${w.table}/${w.op}/${w.pk}) is not in the active '
+          'subscription '
+          '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+        );
+      }
+    }
+    return _engine.writeBatch(
+      ops: writes
+          .map((w) => (
+                table: w.table,
+                op: w.op,
+                pk: w.pk,
+                payloadJson: w.payload == null ? null : jsonEncode(w.payload),
+              ))
+          .toList(),
+    );
+  }
+
+  /// Add [element] to the add-wins OR-set in row [pk] of [table] (ADR-0030 /
+  /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert; the element
+  /// renders locally immediately and converges with concurrent remote adds on
+  /// the server's echo. Requires an active subscription including [table].
+  Future<int> orSetAdd({
+    required String table,
+    required String pk,
+    required String element,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'orSetAdd("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.orSetAdd(table: table, pk: pk, element: element);
+  }
+
+  /// Remove [element] from the OR-set in row [pk] of [table] — a tombstone at
+  /// a fresh HLC. Add-wins: a concurrent or later re-add revives the element.
+  /// Requires an active subscription including [table].
+  Future<int> orSetRemove({
+    required String table,
+    required String pk,
+    required String element,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'orSetRemove("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.orSetRemove(table: table, pk: pk, element: element);
+  }
+
+  /// Increment the PN-Counter in row [pk] of [table] by [delta] (ADR-0030
+  /// addendum). Read-modify-write: reads the current counter payload, applies
+  /// the delta to this replica's entry, and enqueues the result. Converges with
+  /// concurrent remote increments on the server's echo. Requires an active
+  /// subscription including [table].
+  Future<int> counterIncrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'counterIncrement("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.counterIncrement(table: table, pk: pk, delta: delta);
+  }
+
+  /// Decrement the PN-Counter by [delta] (bumps the negative counter `n`).
+  /// Requires an active subscription including [table].
+  Future<int> counterDecrement({
+    required String table,
+    required String pk,
+    required int delta,
+  }) {
+    if (!_subscribedTables.contains(table)) {
+      throw StateError(
+        'counterDecrement("$table", ...) is not in the active subscription '
+        '(${_subscribedTables.isEmpty ? "none — call subscribe() first" : _subscribedTables.toList()}).',
+      );
+    }
+    return _engine.counterDecrement(table: table, pk: pk, delta: delta);
+  }
+
   /// Tears down the background sync loop and watch-stream pump for the
   /// active subscription (if any) — call this from a widget's own
   /// `dispose()` lifecycle method so a torn-down UI doesn't leave a
@@ -460,12 +585,6 @@ class Nostos {
       },
     );
     return controller.stream;
-  }
-
-  static Future<String> _defaultSqlitePath(String url) async {
-    final dir = await getApplicationSupportDirectory();
-    final safeName = url.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_');
-    return '${dir.path}/nostos_$safeName.sqlite';
   }
 }
 
