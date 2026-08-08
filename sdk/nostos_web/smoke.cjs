@@ -57,6 +57,39 @@ async function main() {
   client.write("tasks", "2", [9, 9]);
   check("rowCount is 2 after second write", client.rowCount === 2);
 
+  // --- typed Tier-1 surface (ADR-0030 / ADR-0032 T3+T4) ---------------------
+  // Tag tables, then exercise writeBatch + OR-set + PN-counter + dead-letter
+  // visibility. These take the CLIENT-WRITE outbox path (distinct from the
+  // Frame-feed write() above = replication path); with no server to ack them
+  // they stay pending, which is what pendingCount asserts.
+  client.setCrdtTables(["tags"], ["likes"]);
+
+  const ids = client.writeBatch([
+    { table: "tasks", op: "upsert", pk: "b1", payloadJson: '{"title":"batch"}' },
+  ]);
+  check("writeBatch() returns a plain Array", Array.isArray(ids));
+  check("writeBatch() returns 1 id", Array.isArray(ids) && ids.length === 1);
+  check(
+    "writeBatch() id is a non-negative number",
+    ids.length === 1 && typeof ids[0] === "number" && ids[0] >= 0
+  );
+
+  const orId = client.orSetAdd("tags", "t1", "red");
+  check("orSetAdd() returns a write id", typeof orId === "number" && orId >= 0);
+  client.orSetRemove("tags", "t1", "red"); // add-wins tombstone; must not throw
+
+  const incId = client.counterIncrement("likes", "l1", 5);
+  check("counterIncrement() returns a write id", typeof incId === "number" && incId >= 0);
+  client.counterDecrement("likes", "l1", 2); // must not throw
+
+  // 5 client writes above (1 batch op + orSetAdd + orSetRemove + inc + dec),
+  // none ack'd (no server in node) → the outbox holds them all.
+  check("pendingCount reflects enqueued typed writes", client.pendingCount >= 5);
+  check("deadLetteredCount is 0 (no failures)", client.deadLetteredCount === 0);
+  // Memory storage returns None → wasm surfaces as undefined (falsy); a real
+  // dead-letter error is a non-empty truthy string. So "no failure" = falsy.
+  check("lastError is falsy before any failure", !client.lastError);
+
   console.log("");
   console.log(failures.length === 0 ? "SMOKE_OK" : `SMOKE_FAIL: ${failures.length} check(s) failed`);
   process.exitCode = failures.length === 0 ? 0 : 1;

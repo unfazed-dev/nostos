@@ -80,6 +80,57 @@ From `index.js`. `connect()` here does **not** open a socket — see *Ceiling*.
 | `watch(table, cb)` | fires `cb` once with a snapshot, returns an unsubscribe stub |
 | `checkpoint` / `rowCount` | getters on the engine |
 
+**Typed Tier-1 surface** (ADR-0030/0032 — the same surface the Flutter SDK and the
+wasm `NostosEngine` expose; forwarded since Wave 4a):
+
+| method | behavior |
+|---|---|
+| `setCrdtTables(orSetTables, counterTables)` | tag tables so CRDT verbs **merge** instead of clobber — call before any `orSet*`/`counter*` (mirrors the server's `NOSTOS_*_COLUMNS`) |
+| `writeBatch([{table, op, pk, payloadJson?}])` | atomic batch (`op`: `upsert`\|`delete`\|`patch`); returns the outbox write ids |
+| `orSetAdd(table, pk, el)` / `orSetRemove(...)` | add-wins OR-set element |
+| `counterIncrement(table, pk, delta)` / `counterDecrement(...)` | PN-counter delta |
+| `pendingCount` / `deadLetteredCount` / `lastError` | outbox + dead-letter visibility (getters; `lastError` is falsy when no write has dead-lettered) |
+
+## Attachments — two-plane blob sync (T6, ADR-0034)
+
+Re-exported from `index.js`: `Attachments`, `SupabaseStorageAdapter`,
+`OpfsBlobStore`, and `AttachmentConstants` (`TABLE`/`COL`/`STATE`). The metadata
+plane is an ordinary synced `attachments` table; the **blob plane is a
+developer-supplied adapter — blob bytes never transit the Nostos server** (moat
+constraint). The driver is a pure state machine over three injectable seams:
+
+| seam | role | browser | node |
+|---|---|---|---|
+| `AttachmentStorageAdapter` | remote bucket (upload/download/delete) | `SupabaseStorageAdapter` (`@supabase/supabase-js`, peer dep) | a fake, or `SupabaseStorageAdapter` |
+| `BlobStore` | local cache | `OpfsBlobStore` (real OPFS, browser-only) | an in-memory fake |
+| `AttachmentMetadataGateway` | read queued rows + patch state | *(live Worker gateway — see below)* | an in-memory fake |
+
+```js
+const { Attachments, SupabaseStorageAdapter, OpfsBlobStore } = require("@nostos-sync/web");
+const a = new Attachments({
+  gateway,                                   // your metadata-plane gateway
+  adapter: new SupabaseStorageAdapter({ url, key, bucket: "files" }),
+  blobStore: new OpfsBlobStore("nostos-blobs"), // browser only
+  isOnline: async () => navigator.onLine,
+});
+const id = await a.queueUpload({ filename, bytes, mediaType });
+await a.pump(); // → uploads, state flips queued_upload → synced
+```
+
+Lifecycle: `queueUpload`→`queued_upload`, `queueDownload`→`queued_download`,
+`remove`→`queued_delete`; `pump()` dispatches each (when online) and flips
+state — upload/download→`synced`, delete→`archived`. Adapter failures retry with
+exponential backoff, then dead-letter to `archived` after `maxAttempts` (default
+5). Declare the `attachments` table and add it to `NOSTOS_WRITE_TABLES` so the
+client can patch state server-side (the standard write-back foot-gun).
+
+**Tested:** the state machine is proven in node (`node --test e2e/attachments.spec.cjs`,
+part of `npm run smoke`) with in-memory fakes — upload/download/delete/retry→
+dead-letter/offline/wipe — guarding it against divergence from the Flutter driver.
+**Remaining wiring:** the browser *live* metadata gateway (reading queued
+`attachments` rows + patching state over the Worker's postMessage) and a real-OPFS
+blob-plane browser test; the spec's fake gateway "stands in for" the live one.
+
 ## Ceiling (ponytail)
 
 **In the browser this is an *in-session offline-capable* client** — writes do not
@@ -90,15 +141,18 @@ synchronous "socket not OPEN" throw is gone (shipped `9004b3c`, "WS1 slice 2"; s
 the [ADR-0017 addendum](../../docs/adr/0017-web-persistence.md)). One limit remains,
 by design:
 
-- **Nothing survives a reload.** Rows and pending writes live in an in-memory
-  `BTreeMap`; only the `localStorage` checkpoint persists, so a refresh replays
-  from `resume_lsn` (one re-fetch, no duplicates — ADR-0009's exactly-once holds).
-  A pending offline write that hadn't flushed before the reload is lost.
-  Reload-durability (IndexedDB/OPFS) is the deferred upgrade — deliberate, because
-  `Storage`/`Outbox` are *sync* traits and IndexedDB is async (can't await on the
-  main thread).
+- **The browser Worker path IS reload-durable** (ADR-0033, shipped Wave 2): rows
+  and pending writes persist to OPFS via `opfs-sahpool` — the *synchronous*
+  `FileSystemSyncAccessHandle` primitive, Worker+browser-only — so a refresh
+  resumes from the SQLite checkpoint with nothing lost. This resolved the earlier
+  "`Storage`/`Outbox` are sync traits, IndexedDB is async" blocker (opfs-sahpool
+  is sync). Proven by `e2e/durable.spec.cjs` (write survives a full reload;
+  `signOut` wipes the store). The **Node `NostosClient` facade stays in-memory**
+  (no OPFS in Node) — for Node-side durability use `@nostos-sync/node` (napi + real
+  SQLite).
 
-So: offline-capable within a session; nothing survives a reload.
+So: the browser client is offline-capable AND reload-durable; the Node facade is
+offline-capable within a session only.
 
 **A third gap is Node-only.** `NostosSocket.connect()` is wired to
 `web-sys::WebSocket` + `Window::localStorage`, which Node lacks, so the

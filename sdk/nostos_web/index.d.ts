@@ -60,6 +60,19 @@ export declare class NostosClient {
   write(table: string, pk: string | number, payload: Uint8Array | number[]): WriteResult;
   query(table: string): Row[];
   watch(table: string, callback: (rows: Row[]) => void): () => void;
+  // ── Typed Tier-1 surface (ADR-0030/0032) ──
+  /** Tag tables so CRDT verbs merge instead of clobber (call before orSet*/counter*). */
+  setCrdtTables(orSetTables: string[], counterTables: string[]): void;
+  /** Atomic batch; returns the outbox write ids in order. */
+  writeBatch(ops: WriteBatchOp[]): number[];
+  orSetAdd(table: string, pk: string, element: string): number;
+  orSetRemove(table: string, pk: string, element: string): number;
+  counterIncrement(table: string, pk: string, delta: number): number;
+  counterDecrement(table: string, pk: string, delta: number): number;
+  /** Apply a client schema (durable sqlite-wasm; the Memory node engine is schemaless). */
+  applySchema(tables: unknown[]): void;
+  /** Arbitrary SQL → rows as a JSON string (durable sqlite-wasm; limited on Memory). */
+  querySql(sql: string): string;
   /** ADR-0029: wipe rows + outbox + cached token. */
   signOut(): void;
   /** ADR-0029 §3: cache a new JWT for the next connect. */
@@ -68,6 +81,21 @@ export declare class NostosClient {
   readonly rowCount: number;
   /** Storage backend mode — always "memory" in the node smoke (no OPFS). */
   readonly storageMode: StorageMode;
+  /** Pending (server-un-acked) writes in the outbox. */
+  readonly pendingCount: number;
+  /** Writes moved to the dead-letter queue (exhausted retries). */
+  readonly deadLetteredCount: number;
+  /** Last dead-letter error (undefined when none — truthy-check it). */
+  readonly lastError: string | undefined;
+}
+
+/** A single op in a {@link NostosClient.writeBatch} call. */
+export interface WriteBatchOp {
+  table: string;
+  op: "upsert" | "delete" | "patch";
+  pk: string;
+  /** Column→value JSON object string (omit/empty for delete). */
+  payloadJson?: string;
 }
 
 // ─────────────────── T6 attachments (ADR-0034) ───────────────────
