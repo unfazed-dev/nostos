@@ -30,6 +30,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// shapes the driver emits (the queued-rows SELECT and the single-state SELECT).
 /// Every other NostosEngine method is a harmless stub.
 class _AttachFakeEngine implements NostosEngine {
+  @override
+  Stream<bool> get webStorageDegraded => const Stream<bool>.empty();
   final Map<String, Map<String, dynamic>> attachments = {};
 
   final rowsController = StreamController<String>.broadcast();

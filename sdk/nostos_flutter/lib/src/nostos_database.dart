@@ -508,6 +508,7 @@ class NostosDatabase {
   StreamSubscription<NostosConnectionState>? _statusSub;
   StreamSubscription<({int pending, int deadLettered, String? lastError})>?
       _writeStatusSub;
+  StreamSubscription<bool>? _storageDegradedSub;
   bool _statusWired = false;
   bool _hasSubscribed = false;
 
@@ -533,6 +534,7 @@ class NostosDatabase {
         pendingWrites: prev.pendingWrites,
         deadLetteredWrites: prev.deadLetteredWrites,
         lastWriteError: prev.lastWriteError,
+        webStorageDegraded: prev.webStorageDegraded,
       );
     });
     // The other half of the later-of rule (see [_wireWriteStatus]): status
@@ -575,10 +577,29 @@ class NostosDatabase {
           pendingWrites: w.pending,
           deadLetteredWrites: w.deadLettered,
           lastWriteError: w.lastError,
+          webStorageDegraded: prev.webStorageDegraded,
         );
       },
       // A dead pump must not take the app with it: the connection half of
       // SyncStatus keeps working, and the write counts simply stop updating.
+      onError: (Object _) {},
+    );
+    // ADR-0036: fold the web storage-degrade signal in. Native never fires
+    // (empty stream → this listener stays idle), so this is a no-op there.
+    unawaited(_storageDegradedSub?.cancel());
+    _storageDegradedSub = _nostos.webStorageDegraded.listen(
+      (degraded) {
+        final prev = _status!.value;
+        if (prev.webStorageDegraded == degraded) return;
+        _status!.value = SyncStatus(
+          conn: prev.conn,
+          lastSyncedAt: prev.lastSyncedAt,
+          pendingWrites: prev.pendingWrites,
+          deadLetteredWrites: prev.deadLetteredWrites,
+          lastWriteError: prev.lastWriteError,
+          webStorageDegraded: degraded,
+        );
+      },
       onError: (Object _) {},
     );
   }
@@ -591,6 +612,7 @@ class NostosDatabase {
     await _authSub?.cancel();
     await _statusSub?.cancel();
     await _writeStatusSub?.cancel();
+    await _storageDegradedSub?.cancel();
     _status?.dispose();
     await _nostos.close();
   }
@@ -616,6 +638,7 @@ class NostosDatabase {
     await _authSub?.cancel();
     await _statusSub?.cancel();
     await _writeStatusSub?.cancel();
+    await _storageDegradedSub?.cancel();
     _status?.dispose();
     await _nostos.signOut();
     // Wipe extra local surfaces (blobs) AFTER the engine is quiesced + wiped.
@@ -980,6 +1003,7 @@ class SyncStatus {
     this.pendingWrites = 0,
     this.deadLetteredWrites = 0,
     this.lastWriteError,
+    this.webStorageDegraded = false,
   });
 
   /// Writes captured locally but not yet ack'd by the server.
@@ -1003,6 +1027,13 @@ class SyncStatus {
   /// usually actionable (e.g. a `NOSTOS_WRITE_TABLES` rejection names the exact
   /// env var to set).
   final String? lastWriteError;
+
+  /// Web-only (ADR-0036): true when the browser storage backend degraded to
+  /// in-memory because OPFS was unavailable (Safari Private Browsing, old
+  /// browsers, OPFS disallowed). Always false on native. When true, rows +
+  /// outbox do NOT survive a reload — surface a "session not persisted"
+  /// banner so the user knows to use a non-private window.
+  final bool webStorageDegraded;
 
   /// True when at least one write is permanently lost. This is the condition
   /// Flutter's own optimistic-state guidance expects you to render (revert the
@@ -1035,6 +1066,7 @@ class SyncStatus {
   String toString() =>
       'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt, '
       'pendingWrites: $pendingWrites, deadLetteredWrites: $deadLetteredWrites, '
+      'webStorageDegraded: $webStorageDegraded, '
       'lastWriteError: $lastWriteError)';
 }
 

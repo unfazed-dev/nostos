@@ -2,10 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:meta/meta.dart';
-import 'package:path_provider/path_provider.dart';
 
 import 'engine.dart';
-import 'rust/frb_generated.dart';
+import 'engine_selector.dart';
 
 export 'engine.dart' show NostosConnectionState, NostosTableSub;
 
@@ -34,8 +33,6 @@ class Nostos {
 
   final NostosEngine _engine;
 
-  static bool _rustInitialized = false;
-
   /// Open a connection to a `nostos-server` `/sync` endpoint. Does not touch
   /// the network yet — [subscribe] starts the actual session.
   ///
@@ -44,20 +41,26 @@ class Nostos {
   /// on the WS handshake (matches whatever `NOSTOS_SYNC_AUTH` mode the server
   /// runs — `none` ignores it, `supabase-jwt` verifies it).
   ///
-  /// [sqlitePath] overrides where the durable client store lives; omit it to
-  /// use a per-`url` default under the platform's application-support
-  /// directory (via `path_provider`) — zero manual steps for the common case.
+  /// Platform selection (ADR-0036) happens here via a compile-time conditional
+  /// import ([createNostosEngine]): native → [RustNostosEngine] (frb + the Rust
+  /// dylib + a `path_provider` SQLite path); web → [WebNostosEngine] over the
+  /// shared `nostos-ffi-wasm` Worker (opfs-sahpool). [sqlitePath] is native-only
+  /// (web durability is OPFS-backed); [workerUrl] overrides the web Worker
+  /// script URL (default `nostos/nostos_worker.js`).
   static Future<Nostos> connect({
     required String url,
     String? token,
     String? sqlitePath,
+    String? workerUrl,
   }) async {
-    if (!_rustInitialized) {
-      await RustLib.init();
-      _rustInitialized = true;
-    }
-    final path = sqlitePath ?? await _defaultSqlitePath(url);
-    return Nostos._(RustNostosEngine.connect(url: url, token: token, dbPath: path));
+    return Nostos._(
+      await createNostosEngine(
+        url: url,
+        token: token,
+        sqlitePath: sqlitePath,
+        workerUrl: workerUrl,
+      ),
+    );
   }
 
   /// The set of tables the active subscription covers (empty before the first
@@ -82,6 +85,10 @@ class Nostos {
   /// Requires a prior [subscribe]. Emits the current value on listen.
   Stream<({int pending, int deadLettered, String? lastError})>
       get writeStatus => _engine.watchWriteStatus();
+
+  /// Web-only storage degrade signal (folds into [SyncStatus.webStorageDegraded]
+  /// via NostosDatabase). Native never fires. See [NostosEngine.webStorageDegraded].
+  Stream<bool> get webStorageDegraded => _engine.webStorageDegraded;
 
   /// Materialize the WS2 read-views for [tables] in the on-device SQLite
   /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...)
@@ -560,12 +567,6 @@ class Nostos {
       },
     );
     return controller.stream;
-  }
-
-  static Future<String> _defaultSqlitePath(String url) async {
-    final dir = await getApplicationSupportDirectory();
-    final safeName = url.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_');
-    return '${dir.path}/nostos_$safeName.sqlite';
   }
 }
 

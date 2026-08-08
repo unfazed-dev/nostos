@@ -162,6 +162,7 @@ durable outbox (ADR-0027 / ADR-0032 T5).
 | `deadLetteredWrites` | `int` — **never decreases**; permanently failed |
 | `lastWriteError` | `String?` — server's reason for the most recent permanent failure |
 | `hasWriteError` / `hasPendingWrites` / `uploading` | `bool` |
+| `webStorageDegraded` | `bool` — web-only (ADR-0036): OPFS unavailable, fell back to memory. Always `false` on native |
 
 `db.deadLetters()` → `Future<List<DeadLetter>>` lists the quarantined rows (id,
 table, op, pk, attempts, payload, error, timestamp) so failures are diagnosable.
@@ -302,6 +303,43 @@ Cross-row ordering ("a `tasks` row referencing `attachment_id` must not land unt
 uploaded") is **not enforced**; the app gates the referencing UI by reading `state` reactively
 (`watch`). Strong cross-row ordering would need an outbox dependency mechanism — see ADR-0034 §3
 for the boundary + upgrade path.
+
+## Flutter-web (ADR-0036)
+
+`nostos_flutter` targets the web. `Nostos.connect` / `NostosDatabase.open` work
+unchanged — engine selection is a **compile-time conditional import**
+(`engine_selector.dart`): native builds drive `RustNostosEngine` (frb + the Rust
+dylib + `path_provider`); web builds drive `WebNostosEngine`, which talks to the
+**shared `nostos-ffi-wasm` backend** (`@nostos-sync/web`'s backend — ADR-0035) over a
+durable-storage Worker. So Flutter-web inherits opfs-sahpool durability
+(ADR-0033), NOT the rejected `frb_generated.web.dart` path (which would compile
+rusqlite to wasm and strand the app on an in-memory backend).
+
+**Bootstrap (web assets).** Ship these in your app's `web/nostos/` directory
+(reference copies live in `sdk/nostos_flutter/web/nostos/`):
+
+- `nostos_worker.js` — the Worker host (loads wasm + sqlite-wasm, owns the live
+  `NostosSocket`, speaks `WebNostosEngine`'s protocol).
+- `sqlite_wasm_glue.js` — the opfs-sahpool VFS wrapper (copied verbatim from
+  `sdk/nostos_web/worker/`).
+- `nostos_ffi_wasm.js` + `nostos_ffi_wasm_bg.wasm` — the wasm artifact; produce
+  with `wasm-pack build crates/nostos-ffi-wasm --target web --out-dir pkg-web`
+  and copy `pkg-web/nostos_ffi_wasm.{js,wasm}` into `web/nostos/`.
+
+Override the Worker URL with `Nostos.connect(url: ..., workerUrl:
+'assets/nostos/nostos_worker.js')` if your asset layout differs. The default is
+`nostos/nostos_worker.js`.
+
+**Safari Private Browsing.** When OPFS is unavailable the Worker degrades to
+in-memory storage and `SyncStatus.webStorageDegraded` flips `true` — surface a
+"session not persisted" banner (rows + outbox will not survive a reload).
+
+**Web gaps (ADR-0036).** The four CRDT verbs (`orSetAdd`/`orSetRemove`/
+`counterIncrement`/`counterDecrement`) throw `UnsupportedError` on web: the
+connected `NostosSocket` exposes no CRDT verb, and the in-process `NostosEngine`
+that mints the client HLC has no transport. `writeBatch` is a best-effort loop
+of single writes (non-atomic) until `NostosSocket` gains a batch delegate. Use
+native for CRDT-heavy apps.
 
 ## Proven by
 

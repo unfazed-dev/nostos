@@ -24,7 +24,8 @@ class AppointmentsView extends StatefulWidget {
 class _AppointmentsViewState extends State<AppointmentsView> {
   late final _appts = widget.db.collection<Appointment>(
       table: 'appointments', fromRow: Appointment.fromRow);
-  late final Stream<List<Appointment>> _rows = _appts.watch(orderBy: 'starts_at');
+  late final Stream<List<Appointment>> _rows =
+      _appts.watch(orderBy: [Order.asc('starts_at')]);
   // Typed write images (ADR-0024 Option C). _appts stays over the presentation
   // Appointment (watch + patch); duration_min is int? in codegen (matches the
   // dialog's parsed int). rate_cents/hours_min on the invoice are String? (TEXT).

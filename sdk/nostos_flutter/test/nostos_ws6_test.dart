@@ -133,6 +133,8 @@ class Task {
 /// canned change-tick stream. Implements the full interface so any [Nostos]
 /// method can be exercised without the FFI.
 class _FakeEngine implements NostosEngine {
+  @override
+  Stream<bool> get webStorageDegraded => const Stream<bool>.empty();
   _FakeEngine({required this.queryResult, required this.rows});
 
   final String queryResult;

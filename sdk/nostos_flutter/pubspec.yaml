@@ -47,6 +47,16 @@ dependencies:
   # for the same `depend_on_referenced_packages` reason as code_assets/hooks
   # above.
   crypto: ^3.0.7
+  # Wave 4b (ADR-0036): the WebNostosEngine Worker adapter (web_worker_port.dart)
+  # drives the shared nostos-ffi-wasm backend via this package's `Worker` + the
+  # `dart:js_interop` extensions it ships. Only imported on web (conditional
+  # import in engine_selector), so it adds zero weight to native builds.
+  web: ^1.1.0
+  # The web plugin registrant (lib/web/nostos_flutter_web.dart) imports this;
+  # declared directly to satisfy `depend_on_referenced_packages`. SDK-only,
+  # zero weight on native.
+  flutter_web_plugins:
+    sdk: flutter
 
 dev_dependencies:
   flutter_test:
@@ -83,6 +93,15 @@ flutter:
         pluginClass: NostosFlutterPlugin
       macos:
         pluginClass: NostosFlutterPlugin
+      # Wave 4b (ADR-0036): Flutter-web target. Nostos-web uses NO method
+      # channel — the conditional import selects WebNostosEngine (over the
+      # shared nostos-ffi-wasm Worker) at compile time. The registrant is a
+      # no-op stub that exists only so Flutter's plugin tooling recognizes web
+      # as a supported platform (and `flutter build web` doesn't warn about a
+      # missing web implementation).
+      web:
+        pluginClass: NostosFlutterWeb
+        fileName: web/nostos_flutter_web.dart
 
   # To add assets to your plugin package, add an assets section, like this:
   # assets:

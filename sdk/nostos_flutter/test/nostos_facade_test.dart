@@ -26,6 +26,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// connection-state stream for `subscribe`/`resume`. Captures SQL in [queries]
 /// so Collection.watch/count tests can assert the composed SQL verbatim.
 class _FakeEngine implements NostosEngine {
+  @override
+  Stream<bool> get webStorageDegraded => const Stream<bool>.empty();
   final rowsController = StreamController<String>.broadcast();
   final stateController = StreamController<NostosConnectionState>.broadcast();
 

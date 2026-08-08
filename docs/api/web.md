@@ -13,6 +13,13 @@ single most likely mistake here.
 If you want a synced browser app, use the Worker architecture (below). If you are in Node and want
 real sync, you want [`@nostos-sync/node`](node.md) instead.
 
+> **Flutter-web shares this backend (ADR-0036).** `nostos_flutter` compiled to web
+> does NOT use `frb_generated.web.dart`; it drives the *same* `nostos-ffi-wasm`
+> artifact below through its own Worker (`sdk/nostos_flutter/web/nostos/`,
+> protocol-adapted for the Dart `NostosEngine` seam). So a Flutter-web app gets
+> the same OPFS durability + memory degrade as `@nostos-sync/web`. See
+> [`flutter.md`](flutter.md#flutter-web-adr-0036).
+
 ## Browser — the Worker architecture (ADR-0017 / ADR-0024 / ADR-0033)
 
 The browser SDK runs entirely inside a **Web Worker** (`sdk/nostos_web/worker/nostos.worker.js`).

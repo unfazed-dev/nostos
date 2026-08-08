@@ -23,6 +23,8 @@ import 'package:nostos_flutter/src/schema.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _FakeEngine implements NostosEngine {
+  @override
+  Stream<bool> get webStorageDegraded => const Stream<bool>.empty();
   final rowsController = StreamController<String>.broadcast();
   final stateController = StreamController<NostosConnectionState>.broadcast();
   String queryResult = '[]';
