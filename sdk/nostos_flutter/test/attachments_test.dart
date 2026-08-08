@@ -99,7 +99,11 @@ class _AttachFakeEngine implements NostosEngine {
 
   // ──────────────────── unused-but-required NostosEngine surface ────────────────────
   @override
-  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables}) =>
+  Stream<NostosConnectionState> subscribe({
+    required List<NostosTableSub> tables,
+    Set<String> orSetTables = const <String>{},
+    Set<String> counterTables = const <String>{},
+  }) =>
       stateController.stream;
   @override
   Stream<String> watch({required String table}) => rowsController.stream;

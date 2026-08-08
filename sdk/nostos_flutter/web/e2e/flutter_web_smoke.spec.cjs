@@ -275,3 +275,106 @@ test("Flutter-web Worker: CRDT + writeBatch delegates ship (Wave 4c)", async ({ 
     spine.child.kill("SIGTERM");
   }
 });
+
+// Reload-persistence proof for the durable web backend. Wave 4c's test above
+// proves counter/orSet/writeBatch SHIP on the live socket (happy path); this
+// proves an atomic writeBatch's rows SURVIVE a full page reload in durable OPFS
+// — i.e. SqliteWasmStorage.enqueue_batch's transactional commit lands in OPFS
+// (cairn_data) and the re-spawned Worker resumes from it. (Plain-write reload
+// persistence is already covered by sdk/nostos_web/e2e/durable.spec.cjs; this
+// closes the writeBatch-specific gap.) Storage-internal not covered here —
+// enqueue_batch rollback-on-failure and migrate_outbox_dlq mirror the native
+// SqliteStorage and aren't reachable for failure-injection via the public
+// surface; the happy path here exercises the same commit path.
+test("Flutter-web Worker: writeBatch rows survive reload in durable OPFS", async ({ page }) => {
+  test.setTimeout(120000);
+
+  const logs = [];
+  page.on("console", (msg) => logs.push(msg.text()));
+  page.on("pageerror", (err) =>
+    logs.push("[pageerror] " + (err && err.message ? err.message : String(err))),
+  );
+
+  const spine = await startSpine();
+  const staticServer = await startStaticServer();
+  const wsUrl = `ws://127.0.0.1:${spine.port}/sync`;
+  console.log("[flutter-web-smoke-reload] spine port", spine.port, "; static", staticServer.port);
+
+  const pks = ["persist-a", "persist-b", "persist-c"];
+  const allPresent = async () => {
+    const snaps = await page.evaluate(() => window.nostosSnapshots);
+    const tasks = snaps
+      .filter((s) => s.table === "tasks")
+      .map((s) => s.json || "")
+      .join("\n");
+    return pks.every((pk) => tasks.includes(pk));
+  };
+
+  try {
+    await page.goto(`http://127.0.0.1:${staticServer.port}/`, { waitUntil: "load" });
+    await page.waitForFunction(() => typeof window.nostosConnect === "function", null, {
+      timeout: 10000,
+    });
+    const mode = await page
+      .waitForFunction(() => window.nostosStorage !== null, null, { timeout: 15000 })
+      .then(() => page.evaluate(() => window.nostosStorage));
+    console.log("[flutter-web-smoke-reload] storage mode:", mode);
+
+    await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
+    await expect
+      .poll(() => page.evaluate(() => window.nostosConnected), { timeout: 15000 })
+      .toBe(true);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+
+    // Atomic batch of 3 distinct rows → SqliteWasmStorage.enqueue_batch commits
+    // them in one OPFS transaction.
+    const batchRes = await page.evaluate((p) => {
+      return window.nostosWriteBatch(
+        p.map((pk, i) => ({
+          table: "tasks",
+          op: "upsert",
+          pk,
+          payloadJson: JSON.stringify({ n: i + 1 }),
+        })),
+      );
+    }, pks);
+    expect(batchRes.ok).toBe(true);
+    expect(batchRes.writeIds.length).toBe(3);
+
+    // Wait for all 3 to appear in a tasks snapshot (local apply + server echo),
+    // then settle so the server has acked before we tear the socket down.
+    await expect.poll(allPresent, { timeout: 20000 }).toBe(true);
+    await page.waitForTimeout(800);
+
+    // ===== RELOAD: Worker is destroyed + re-spawned; OPFS persists =====
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction(() => typeof window.nostosConnect === "function", null, {
+      timeout: 10000,
+    });
+    await page.waitForFunction(() => window.nostosStorage !== null, { timeout: 15000 });
+
+    await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
+    await expect
+      .poll(() => page.evaluate(() => window.nostosConnected), { timeout: 15000 })
+      .toBe(true);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+
+    if (mode === "durable") {
+      // DURABLE PROOF: the atomic-batch rows survived the reload in OPFS.
+      await expect
+        .poll(allPresent, { timeout: 20000, message: "writeBatch rows survive reload (durable)" })
+        .toBe(true);
+      console.log("[flutter-web-smoke-reload] DURABLE_OK");
+    } else {
+      // Memory mode: rows are lost on reload — the documented degrade ceiling,
+      // not a failure. The test still proves the reload + reconnect path works.
+      console.log("[flutter-web-smoke-reload] memory mode — persistence is the documented ceiling");
+    }
+
+    const pageErrors = logs.filter((l) => l.startsWith("[pageerror]") || /worker.onerror/.test(l));
+    expect(pageErrors, "page errors: " + pageErrors.join(" | ")).toEqual([]);
+  } finally {
+    await staticServer.server.close();
+    spine.child.kill("SIGTERM");
+  }
+});

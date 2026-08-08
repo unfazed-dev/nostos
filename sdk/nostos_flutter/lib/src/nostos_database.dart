@@ -80,8 +80,17 @@ class NostosDatabase {
     String? token,
     NostosSchema? schema,
     required String sqlitePath,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) =>
-      _open(url: url, token: token, schema: schema, sqlitePath: sqlitePath);
+      _open(
+        url: url,
+        token: token,
+        schema: schema,
+        sqlitePath: sqlitePath,
+        orSetTables: orSetTables,
+        counterTables: counterTables,
+      );
 
   /// Config-driven open: connect using a [NostosConfig] (normally loaded
   /// from the app's bundled `assets/nostos.json` via [NostosConfig.load])
@@ -114,6 +123,8 @@ class NostosDatabase {
     required NostosConfig config,
     NostosSchema? schema,
     required String sqliteDir,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
     final sqlitePath = '$sqliteDir/${config.sqliteFilename}';
     String? token;
@@ -139,6 +150,8 @@ class NostosDatabase {
       token: token,
       schema: schema,
       sqlitePath: sqlitePath,
+      orSetTables: orSetTables,
+      counterTables: counterTables,
     );
   }
 
@@ -191,6 +204,8 @@ class NostosDatabase {
     required String nostosUrl,
     NostosSchema? schema,
     required String sqlitePath,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
     final session = Supabase.instance.client.auth.currentSession;
     if (session == null) {
@@ -203,6 +218,8 @@ class NostosDatabase {
       token: session.accessToken,
       schema: schema,
       sqlitePath: sqlitePath,
+      orSetTables: orSetTables,
+      counterTables: counterTables,
     );
     db._wireSupabaseTokenRefresh();
     return db;
@@ -253,11 +270,15 @@ class NostosDatabase {
     String? token,
     NostosSchema? schema,
     required String sqlitePath,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
     final nostos = await Nostos.connect(
       url: url,
       token: token,
       sqlitePath: sqlitePath,
+      orSetTables: orSetTables,
+      counterTables: counterTables,
     );
     final resolved = schema ?? await _fetchSchema(_deriveHttpBase(url));
     nostos.applySchema(resolved.toClientTables());
@@ -938,18 +959,27 @@ class Collection<T> {
   // for multi-value fields (tags, collaborators, reactions) where LWW would
   // clobber concurrent additions.
   //
-  // Counters (server-authoritative `WriteOp::Increment`, ADR-0030 D1) are NOT
-  // exposed here: the client cannot compute (column, delta) locally without the
-  // server, so there is no offline-first counter handle. Increment a counter
-  // via a `patch` of the absolute value once the server echoes it, or wait for
-  // a future engine-side counter-merge primitive.
+  // Counters (PN-Counter, ADR-0030 addendum) merge per-replica: each client
+  // owns its positive/negative entry, and `apply_local` takes the elementwise
+  // max across replicas on the server's echo — no clobbering. Use these for
+  // tallies (likes, views, scores) where LWW would lose concurrent increments.
+  //
+  // Both families REQUIRE the table to be declared as a CRDT table at open:
+  // pass [NostosDatabase.connect]/[NostosDatabase.open]/[NostosDatabase.supabase]
+  // an `orSetTables` / `counterTables` set. Without it the verb throws
+  // `*TableNotTagged` (the gate) and writes clobber instead of merge. The
+  // declared set MUST also match the server's `NOSTOS_OR_SET_COLUMNS` /
+  // `NOSTOS_COUNTER_COLUMNS`, or client-merge and server-clobber disagree.
 
   /// Add [element] to the OR-set column in row [pk] of this table (ADR-0030 /
   /// ADR-0032 T4). Mints a client HLC and enqueues a merge-upsert; the element
   /// renders locally immediately and converges with concurrent remote adds on
   /// the server's echo. Returns the local outbox id.
   ///
-  /// Requires the column to be tagged as an OR-set in the server/client config.
+  /// Requires the table to be declared in the `orSetTables` set passed to
+  /// [NostosDatabase.connect]/[NostosDatabase.open]/[NostosDatabase.supabase] (and
+  /// the server's `NOSTOS_OR_SET_COLUMNS`) — without it the verb throws
+  /// `OrSetTableNotTagged`.
   Future<int> orSetAdd({required Object pk, required String element}) =>
       _db._nostos.orSetAdd(table: table, pk: pk.toString(), element: element);
 
@@ -965,9 +995,10 @@ class Collection<T> {
   /// with concurrent remote increments on the server's echo. Returns the local
   /// outbox id.
   ///
-  /// Requires the table to be tagged as a counter in the server/client config
-  /// (`NOSTOS_COUNTER_COLUMNS` / `SyncClientConfig.counter_tables` /
-  /// `SqliteStorage.with_counter_tables`).
+  /// Requires the table to be declared in the `counterTables` set passed to
+  /// [NostosDatabase.connect]/[NostosDatabase.open]/[NostosDatabase.supabase] (and
+  /// the server's `NOSTOS_COUNTER_COLUMNS`) — without it the verb throws
+  /// `CounterTableNotTagged`.
   Future<int> counterIncrement({required Object pk, required int delta}) =>
       _db._nostos.counterIncrement(table: table, pk: pk.toString(), delta: delta);
 

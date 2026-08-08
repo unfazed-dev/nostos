@@ -56,7 +56,19 @@ abstract class NostosEngine {
   /// Start a multi-table subscription over one `/sync` socket. Returns the
   /// connection-state stream (the session's lifecycle). Call [watch] per
   /// table to receive that table's rows.
-  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables});
+  ///
+  /// [orSetTables] / [counterTables] tag which tables hold add-wins OR-set /
+  /// PN-Counter CRDTs (ADR-0030 / ADR-0032 T4). Tagging is REQUIRED before any
+  /// `orSet*` / `counter*` verb — without it the verb throws
+  /// `*TableNotTagged` (the gate) and writes clobber instead of merge. Applied
+  /// at connection establishment (native builds the config + storage sets here;
+  /// web forwards to the Worker's `setCrdtTables` on connect). Must match the
+  /// server's `NOSTOS_OR_SET_COLUMNS` / `NOSTOS_COUNTER_COLUMNS`.
+  Stream<NostosConnectionState> subscribe({
+    required List<NostosTableSub> tables,
+    Set<String> orSetTables = const <String>{},
+    Set<String> counterTables = const <String>{},
+  });
 
   /// Attach a row stream for one subscribed table: one JSON-array-of-objects
   /// string per tick (the durable snapshot immediately, then after every

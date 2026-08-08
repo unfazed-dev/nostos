@@ -140,6 +140,8 @@ abstract class RustLibApi extends BaseApi {
   Stream<NostosConnectionState> crateApiNostosNostosHandleSubscribe({
     required NostosHandle that,
     required List<TableSubFfi> tables,
+    required List<String> orSetTables,
+    required List<String> counterTables,
   });
 
   Stream<String> crateApiNostosNostosHandleWatch({
@@ -640,6 +642,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Stream<NostosConnectionState> crateApiNostosNostosHandleSubscribe({
     required NostosHandle that,
     required List<TableSubFfi> tables,
+    required List<String> orSetTables,
+    required List<String> counterTables,
   }) {
     final stateSink = RustStreamSink<NostosConnectionState>();
     unawaited(
@@ -656,6 +660,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
               stateSink,
               serializer,
             );
+            sse_encode_list_String(orSetTables, serializer);
+            sse_encode_list_String(counterTables, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
@@ -668,7 +674,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: sse_decode_String,
           ),
           constMeta: kCrateApiNostosNostosHandleSubscribeConstMeta,
-          argValues: [that, tables, stateSink],
+          argValues: [that, tables, stateSink, orSetTables, counterTables],
           apiImpl: this,
         ),
       ),
@@ -679,7 +685,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiNostosNostosHandleSubscribeConstMeta =>
       const TaskConstMeta(
         debugName: "NostosHandle_subscribe",
-        argNames: ["that", "tables", "stateSink"],
+        argNames: [
+          "that",
+          "tables",
+          "stateSink",
+          "orSetTables",
+          "counterTables",
+        ],
       );
 
   @override
@@ -1850,11 +1862,16 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// SQLite store fails. Once subscribed, network/session errors surface
   /// only as `state_sink` transitions (reconnect is automatic and silent,
   /// matching `SyncClient::run_with_reconnect`'s contract).
-  Stream<NostosConnectionState> subscribe({required List<TableSubFfi> tables}) =>
-      RustLib.instance.api.crateApiNostosNostosHandleSubscribe(
-        that: this,
-        tables: tables,
-      );
+  Stream<NostosConnectionState> subscribe({
+    required List<TableSubFfi> tables,
+    required List<String> orSetTables,
+    required List<String> counterTables,
+  }) => RustLib.instance.api.crateApiNostosNostosHandleSubscribe(
+    that: this,
+    tables: tables,
+    orSetTables: orSetTables,
+    counterTables: counterTables,
+  );
 
   /// Attach a row stream for `table`: emits the current full row set
   /// immediately (the durable snapshot already on disk — visible offline)

@@ -768,6 +768,8 @@ fn wire__crate__api__nostos__NostosHandle_subscribe_impl(
                 crate::api::nostos::NostosConnectionState,
                 flutter_rust_bridge::for_generated::SseCodec,
             >>::sse_decode(&mut deserializer);
+            let api_or_set_tables = <Vec<String>>::sse_decode(&mut deserializer);
+            let api_counter_tables = <Vec<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -793,6 +795,8 @@ fn wire__crate__api__nostos__NostosHandle_subscribe_impl(
                             &*api_that_guard,
                             api_tables,
                             api_state_sink,
+                            api_or_set_tables,
+                            api_counter_tables,
                         )
                         .await?;
                         Ok(output_ok)

@@ -36,11 +36,23 @@ class RustNostosEngine implements NostosEngine {
   final rust.NostosHandle _handle;
 
   @override
-  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables}) {
+  Stream<NostosConnectionState> subscribe({
+    required List<NostosTableSub> tables,
+    Set<String> orSetTables = const <String>{},
+    Set<String> counterTables = const <String>{},
+  }) {
     final ffiTables = tables
         .map((t) => rust.TableSubFfi(name: t.name, whereSql: t.whereSql))
         .toList(growable: false);
-    return _handle.subscribe(tables: ffiTables).map(_mapState);
+    // Threaded into SyncClientConfig (verb gate) + SqliteStorage (apply merge)
+    // at subscribe — see NostosHandle::subscribe. Empty by default (no CRDT).
+    return _handle
+        .subscribe(
+          tables: ffiTables,
+          orSetTables: orSetTables.toList(),
+          counterTables: counterTables.toList(),
+        )
+        .map(_mapState);
   }
 
   @override

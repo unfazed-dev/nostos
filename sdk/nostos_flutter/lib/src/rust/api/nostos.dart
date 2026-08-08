@@ -220,7 +220,11 @@ abstract class NostosHandle implements RustOpaqueInterface {
   /// SQLite store fails. Once subscribed, network/session errors surface
   /// only as `state_sink` transitions (reconnect is automatic and silent,
   /// matching `SyncClient::run_with_reconnect`'s contract).
-  Stream<NostosConnectionState> subscribe({required List<TableSubFfi> tables});
+  Stream<NostosConnectionState> subscribe({
+    required List<TableSubFfi> tables,
+    required List<String> orSetTables,
+    required List<String> counterTables,
+  });
 
   /// Attach a row stream for `table`: emits the current full row set
   /// immediately (the durable snapshot already on disk — visible offline)

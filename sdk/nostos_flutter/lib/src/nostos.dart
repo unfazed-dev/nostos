@@ -23,7 +23,9 @@ export 'engine.dart' show NostosConnectionState, NostosTableSub;
 /// down). The single-table [subscribe] is a convenience that subscribes to
 /// exactly one table.
 class Nostos {
-  Nostos._(this._engine);
+  Nostos._(this._engine, {Set<String>? orSetTables, Set<String>? counterTables})
+    : _orSetTables = orSetTables ?? const <String>{},
+      _counterTables = counterTables ?? const <String>{};
 
   /// Test-only constructor: inject a fake [NostosEngine] to exercise this
   /// class's wiring (subscribe/watch/write, table-mismatch errors, JSON
@@ -32,6 +34,12 @@ class Nostos {
   Nostos.withEngine(NostosEngine engine) : this._(engine);
 
   final NostosEngine _engine;
+
+  /// Tables tagged as add-wins OR-sets / PN-Counters (ADR-0030 / ADR-0032 T4),
+  /// declared at [connect] and forwarded into every [subscribeTables] so
+  /// `orSet*` / `counter*` verbs merge instead of throwing `*TableNotTagged`.
+  final Set<String> _orSetTables;
+  final Set<String> _counterTables;
 
   /// Open a connection to a `nostos-server` `/sync` endpoint. Does not touch
   /// the network yet — [subscribe] starts the actual session.
@@ -52,6 +60,8 @@ class Nostos {
     String? token,
     String? sqlitePath,
     String? workerUrl,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
   }) async {
     return Nostos._(
       await createNostosEngine(
@@ -60,6 +70,8 @@ class Nostos {
         sqlitePath: sqlitePath,
         workerUrl: workerUrl,
       ),
+      orSetTables: orSetTables,
+      counterTables: counterTables,
     );
   }
 
@@ -114,7 +126,13 @@ class Nostos {
     _subscribedTables
       ..clear()
       ..addAll(tables.map((t) => t.name));
-    _engine.subscribe(tables: tables).listen(_stateController.add);
+    _engine
+        .subscribe(
+          tables: tables,
+          orSetTables: _orSetTables,
+          counterTables: _counterTables,
+        )
+        .listen(_stateController.add);
   }
 
   /// Single-table convenience — equivalent to

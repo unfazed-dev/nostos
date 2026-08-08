@@ -277,6 +277,8 @@ impl NostosHandle {
         &self,
         tables: Vec<TableSubFfi>,
         state_sink: StreamSink<NostosConnectionState>,
+        or_set_tables: Vec<String>,
+        counter_tables: Vec<String>,
     ) -> Result<(), String> {
         if tables.is_empty() {
             return Err("subscribe() requires at least one table".to_string());
@@ -299,7 +301,18 @@ impl NostosHandle {
             table_set.insert(t.name.clone());
         }
 
-        let storage = SqliteStorage::open(&self.db_path).map_err(|e| e.to_string())?;
+        // CRDT-table tagging (ADR-0030 / ADR-0032 T4): the verb gate reads
+        // `config.{or_set,counter}_tables` (client.rs) and the apply-merge reads
+        // the storage's sets (sqlite.rs) — both MUST be populated, or
+        // `counterIncrement`/`orSetAdd` throw `*TableNotTagged`. Three-views-of-
+        // one-truth: these must also match the server's `NOSTOS_OR_SET_COLUMNS` /
+        // `NOSTOS_COUNTER_COLUMNS`, or client-merge and server-clobber disagree.
+        let or_set_tables_set: HashSet<String> = or_set_tables.into_iter().collect();
+        let counter_tables_set: HashSet<String> = counter_tables.into_iter().collect();
+        let storage = SqliteStorage::open(&self.db_path)
+            .map_err(|e| e.to_string())?
+            .with_or_set_tables(or_set_tables_set.clone())
+            .with_counter_tables(counter_tables_set.clone());
         let config = SyncClientConfig {
             table: primary.name,
             // Read the seed fresh: a `set_token` between `connect()` and here
@@ -318,6 +331,8 @@ impl NostosHandle {
             // by a periodic reconnect (re-handshake, re-subscribe from the
             // durable checkpoint, re-flush the outbox).
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
+            or_set_tables: or_set_tables_set,
+            counter_tables: counter_tables_set,
             ..SyncClientConfig::default()
         };
         let client = Arc::new(SyncClient::new(self.url.clone(), storage, config.clone()));

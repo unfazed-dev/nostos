@@ -103,6 +103,15 @@ as safe SQLite literals — nothing the caller supplies is spliced raw.
 > elements both survive, and a remove is a tombstone a concurrent or later re-add
 > revives (add-wins). The server-authoritative `WriteOp::Increment` (ADR-0030 D1)
 > remains for server-serialized counters that don't need offline convergence.
+>
+> **Declaring CRDT tables.** A table must be tagged before its first `counter*`/
+> `orSet*` verb — without it the verb throws `*TableNotTagged` and writes clobber
+> instead of merge. Declare it once at open: `NostosDatabase.connect` / `.open` /
+> `.supabase` take `counterTables` and `orSetTables` sets
+> (e.g. `counterTables: {'likes'}, orSetTables: {'tags'}`). These MUST match the
+> server's `NOSTOS_COUNTER_COLUMNS` / `NOSTOS_OR_SET_COLUMNS` ("three-views-of-one-
+> truth": the client verb-gate, the client apply-merge, and the server must
+> agree), or client-merge and server-clobber will diverge.
 
 ## Writing — durable collapsed outbox (ADR-0013)
 
@@ -334,12 +343,16 @@ Override the Worker URL with `Nostos.connect(url: ..., workerUrl:
 in-memory storage and `SyncStatus.webStorageDegraded` flips `true` — surface a
 "session not persisted" banner (rows + outbox will not survive a reload).
 
-**Web gaps (ADR-0036).** The four CRDT verbs (`orSetAdd`/`orSetRemove`/
-`counterIncrement`/`counterDecrement`) throw `UnsupportedError` on web: the
-connected `NostosSocket` exposes no CRDT verb, and the in-process `NostosEngine`
-that mints the client HLC has no transport. `writeBatch` is a best-effort loop
-of single writes (non-atomic) until `NostosSocket` gains a batch delegate. Use
-native for CRDT-heavy apps.
+**CRDT + writeBatch on web (ADR-0036).** The four CRDT verbs and atomic
+`writeBatch` work on web: the Flutter-web Worker drives `NostosSocket` delegates
+(added Wave 4c) that reuse the in-process `NostosEngine`'s CRDT/HLC logic and
+`enqueue_batch` atomicity — no CRDT algebra is re-implemented in the wasm crate.
+CRDT tables declared via `counterTables` / `orSetTables` at `connect` / `open` /
+`supabase` are forwarded into the `connect` Worker message, which re-tags on
+every (re)connect. (The earlier gap — CRDT verbs throwing `UnsupportedError` on
+web — is closed.) Merge correctness is proven by the `nostos-ffi-wasm` host tests
++ the Flutter-web Playwright smoke; native and web share the same `nostos-domain`
+CRDT invariants.
 
 ## Proven by
 

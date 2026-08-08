@@ -141,7 +141,11 @@ class _FakeEngine implements NostosEngine {
   final Stream<String> rows;
 
   @override
-  Stream<NostosConnectionState> subscribe({required List<NostosTableSub> tables}) =>
+  Stream<NostosConnectionState> subscribe({
+    required List<NostosTableSub> tables,
+    Set<String> orSetTables = const <String>{},
+    Set<String> counterTables = const <String>{},
+  }) =>
       const Stream<NostosConnectionState>.empty();
 
   @override

@@ -40,6 +40,27 @@ void main() {
     await eng.close();
   });
 
+  test('subscribe threads CRDT tables into the connect command (T4 config surface)',
+      () async {
+    final port = FakeNostosWorkerPort();
+    final eng = _engine(port);
+    eng.subscribe(
+      tables: const [NostosTableSub(name: 'tasks')],
+      orSetTables: const {'tags'},
+      counterTables: const {'likes'},
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    // The connect cmd must carry the CRDT-table tags so the Worker re-tags on
+    // every (re)connect (nostos_worker.js openSocket → setCrdtTables). Without
+    // this, orSet/counter verbs throw *TableNotTagged on web.
+    final req = port.sent.single;
+    expect(req['cmd'], 'connect');
+    expect(req['orSetTables'], ['tags']);
+    expect(req['counterTables'], ['likes']);
+    await eng.close();
+  });
+
   test('write correlates response by id and returns the outbox id', () async {
     final port = FakeNostosWorkerPort();
     final eng = _engine(port);

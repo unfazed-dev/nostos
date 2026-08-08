@@ -163,6 +163,11 @@ async function openSocket() {
     first.whereSql ?? null,
     dbHandle,
   );
+  // Re-tag CRDT tables on every (re)connect so apply_local MERGES instead of
+  // clobbering (ADR-0030 / ADR-0032 T4). setCrdtTables is a no-op when both
+  // lists are empty. Stashed in connParams by the connect handler so reconnects
+  // (resume/setToken → openSocket) re-apply without Dart re-sending.
+  sock.setCrdtTables(connParams.orSetTables ?? [], connParams.counterTables ?? []);
   // Subscribe the remaining tables over the open socket.
   for (let i = 1; i < tables.length; i++) {
     try {
@@ -201,7 +206,12 @@ self.onmessage = async (ev) => {
       case "connect": {
         await ensureWasm();
         token = m.token ?? null;
-        connParams = { url: m.url, tables: m.tables ?? [] };
+        connParams = {
+          url: m.url,
+          tables: m.tables ?? [],
+          orSetTables: m.orSetTables ?? [],
+          counterTables: m.counterTables ?? [],
+        };
         await openSocket();
         self.postMessage({ id, ok: true, checkpoint: sock.checkpoint });
         self.postMessage({ type: "status", connected: true });
