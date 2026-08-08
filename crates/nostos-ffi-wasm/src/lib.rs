@@ -1357,6 +1357,147 @@ impl NostosSocket {
              in the dbHandle's SQLite/OPFS store",
         ))
     }
+
+    // ========================================================================
+    // Wave 4c (ADR-0036): CRDT + atomic-batch delegates.
+    // ========================================================================
+    //
+    // These close the Flutter-web typed-surface gap: the CRDT verbs + the
+    // transactional `writeBatch` lived ONLY on the in-process `NostosEngine`
+    // (4a), but the Flutter-web Worker drives `NostosSocket` (the transport
+    // wrapper). The engine is reachable from the socket (`SocketInner.engine`
+    // is the same `ApplyEngine<WebStorage>`), so these are THIN DELEGATES that
+    // reuse `NostosEngine`'s logic verbatim (HLC mint, `nostos-domain` CRDT
+    // algebra, `enqueue_batch` atomicity) — no CRDT algebra is re-implemented
+    // here, and `NostosEngine`/native are untouched. The only addition over a
+    // bare delegate is the ship step (`ship_if_open`): the engine path
+    // enqueues + `apply_local`s but never sends over the wire, so a connected
+    // client's CRDT op would otherwise sit in the outbox until the next
+    // reconnect flush. Mirrors the ship + reactive-tick half of [`Self::write`].
+
+    /// Add `element` to the add-wins OR-set in row `pk` of `table`. Delegates to
+    /// [`NostosEngine::or_set_add`] (mints the client HLC, builds the
+    /// `OrSetPayload`, enqueues, `apply_local`s) then ships the write frame now
+    /// if the socket is OPEN. Mirrors [`Self::write`]'s enqueue→apply→ship→tick
+    /// flow. Returns the outbox id (ADR-0032 T4 / ADR-0030).
+    #[wasm_bindgen(js_name = orSetAdd)]
+    pub fn or_set_add(&self, table: &str, pk: &str, element: &str) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .or_set_add(table, pk, element)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Remove `element` from the OR-set (a tombstone at a fresh HLC). Add-wins:
+    /// a concurrent or later re-add re-activates the element. Delegates to
+    /// [`NostosEngine::or_set_remove`].
+    #[wasm_bindgen(js_name = orSetRemove)]
+    pub fn or_set_remove(&self, table: &str, pk: &str, element: &str) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .or_set_remove(table, pk, element)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Increment the PN-Counter in row `pk` of `table` by `delta` (read-modify-
+    /// write). Delegates to [`NostosEngine::counter_increment`] (reads the current
+    /// payload, applies the delta to this replica's entry via `nostos-domain`'s
+    /// `counter_apply_delta`, enqueues, `apply_local`s) then ships if OPEN.
+    #[wasm_bindgen(js_name = counterIncrement)]
+    pub fn counter_increment(&self, table: &str, pk: &str, delta: f64) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .counter_increment(table, pk, delta)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
+    /// Delegates to [`NostosEngine::counter_decrement`].
+    #[wasm_bindgen(js_name = counterDecrement)]
+    pub fn counter_decrement(&self, table: &str, pk: &str, delta: f64) -> Result<f64, JsValue> {
+        let id = self
+            .inner
+            .engine
+            .borrow_mut()
+            .counter_decrement(table, pk, delta)?;
+        self.ship_if_open(id as u64);
+        transport::emit_change(&self.inner.on_change);
+        Ok(id)
+    }
+
+    /// Enqueue a batch of writes atomically (ADR-0032 T3). All ops commit in
+    /// one SQLite txn (SqliteWasm) or one BTreeMap extend (Memory) via the
+    /// engine's `enqueue_batch` — a mid-batch failure rolls back the entire
+    /// batch. Delegates to [`NostosEngine::write_batch`], then ships each write
+    /// now if OPEN. Returns the outbox ids in order.
+    #[wasm_bindgen(js_name = writeBatch)]
+    #[allow(clippy::needless_pass_by_value)] // wasm_bindgen requires owned Vec<JsValue>
+    pub fn write_batch(&self, ops: Vec<JsValue>) -> Result<Vec<f64>, JsValue> {
+        let ids = self.inner.engine.borrow_mut().write_batch(ops)?;
+        // Ship each now if OPEN. Atomicity is in `enqueue_batch` (one storage
+        // txn); the per-write ship is the network send, not the storage
+        // boundary, so shipping individually preserves the atomic enqueue.
+        for &id in &ids {
+            self.ship_if_open(id as u64);
+        }
+        if !ids.is_empty() {
+            transport::emit_change(&self.inner.on_change);
+        }
+        Ok(ids)
+    }
+
+    /// Ship the just-enqueued write `id` if the socket is OPEN: look up the
+    /// pending entry, build the wire frame, send it, `mark_done` on success.
+    /// Mirrors the ship half of [`Self::write`] — used by the CRDT delegates
+    /// + [`Self::write_batch`], which enqueue via the engine (apply_local + HLC
+    /// mint) but need the same "ship now if connected" path so a connected
+    /// client's CRDT op ships immediately instead of waiting for the next
+    /// `onopen` flush. `client_write_id` is synthesized from the outbox id (the
+    /// offline-flush convention in `transport::flush_pending`); the CRDT verbs
+    /// carry no caller id.
+    fn ship_if_open(&self, id: u64) {
+        let ws = &self.inner.ws;
+        if ws.ready_state() != 1 {
+            return; // closed — leave pending for the onopen flush loop.
+        }
+        // Snapshot the matching pending entry (owned) so the RefCell borrow is
+        // released before the synchronous `send_with_str` + `mark_done`.
+        let entry = {
+            let Ok(pending) = self.inner.engine.borrow_mut().storage_mut().pending() else {
+                return;
+            };
+            pending.into_iter().find(|(pid, _)| *pid == id)
+        };
+        let Some((_, write)) = entry else {
+            return; // already shipped or dead-lettered — nothing to do.
+        };
+        // `let-else` (clippy::manual_let_else): a malformed payload is left
+        // pending for retry rather than shipped as an invalid frame.
+        let Ok(frame) = transport::build_write_frame(
+            &write.table,
+            write.op.as_wire_str(),
+            &write.pk,
+            write.payload_json.as_deref(),
+            &id.to_string(),
+        ) else {
+            return;
+        };
+        if ws.send_with_str(&frame).is_ok() {
+            let _ = self.inner.engine.borrow_mut().storage_mut().mark_done(id);
+        }
+    }
 }
 
 use std::rc::Rc;

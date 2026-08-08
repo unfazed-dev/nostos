@@ -25,8 +25,14 @@
 //   Dart -> Worker (each request carries `id`):
 //     {id, cmd:"connect", url, token?, tables:[{name, whereSql?}, ...]}
 //     {id, cmd:"write", table, op, pk, payloadJson?}      -> {id, ok, writeId}
+//     {id, cmd:"orSetAdd", table, pk, element}            -> {id, ok, writeId}
+//     {id, cmd:"orSetRemove", table, pk, element}         -> {id, ok, writeId}
+//     {id, cmd:"counterIncrement", table, pk, delta}      -> {id, ok, writeId}
+//     {id, cmd:"counterDecrement", table, pk, delta}      -> {id, ok, writeId}
+//     {id, cmd:"writeBatch", ops:[{table,op,pk,payloadJson?}]} -> {id, ok, writeIds}
 //     {id, cmd:"query", sql}                              -> {id, ok, json}
 //     {id, cmd:"applySchema", tables:[{name, columns}]}   -> {id, ok}
+//     {id, cmd:"setCrdtTables", orSet:[], counter:[]}     -> {id, ok}
 //     {    cmd:"watch", table}        (no id — fire-and-forget)
 //     {    cmd:"unwatch"}             (no id — clears all watches; see ponytail)
 //     {id, cmd:"setToken", token?}                        -> {id, ok}
@@ -218,6 +224,44 @@ self.onmessage = async (ev) => {
         self.postMessage({ id, ok: true, writeId });
         break;
       }
+      case "orSetAdd":
+      case "orSetRemove":
+      case "counterIncrement":
+      case "counterDecrement": {
+        // Wave 4c (ADR-0036): CRDT delegates on NostosSocket. Each mints a
+        // client HLC + enqueues + apply_locals in the engine (reusing
+        // nostos-domain), then ships if OPEN. The wasm method name matches the
+        // cmd (camelCase); dispatch by the cmd string.
+        if (!sock) {
+          self.postMessage({ id, error: "not connected" });
+          break;
+        }
+        const fn = sock[m.cmd]; // orSetAdd | orSetRemove | counterIncrement | counterDecrement
+        const writeId = fn.call(sock, m.table, m.pk, m.element ?? m.delta);
+        self.postMessage({ id, ok: true, writeId });
+        break;
+      }
+      case "writeBatch": {
+        // Wave 4c: atomic enqueue (one storage txn) + per-op ship if OPEN.
+        // ops is [{table, op, pk, payloadJson?}, ...] → matches NostosEngine's
+        // writeBatch Vec<JsValue> shape. Returns the outbox ids in order.
+        // wasm-bindgen returns Vec<f64> as a Float64Array; normalize to a plain
+        // Array so the postMessage boundary carries JSON-friendly values (the
+        // Dart + JS consumers both expect a regular array).
+        if (!sock) {
+          self.postMessage({ id, error: "not connected" });
+          break;
+        }
+        const ops = (m.ops ?? []).map((o) => ({
+          table: o.table,
+          op: o.op,
+          pk: o.pk,
+          payloadJson: o.payloadJson ?? null,
+        }));
+        const writeIds = Array.from(sock.writeBatch(ops));
+        self.postMessage({ id, ok: true, writeIds });
+        break;
+      }
       case "query": {
         const json = sock ? sock.query(m.sql) : "[]";
         self.postMessage({ id, ok: true, json });
@@ -235,6 +279,16 @@ self.onmessage = async (ev) => {
             columns: t.columns ?? [],
           }));
           sock.applySchema(tables);
+        }
+        self.postMessage({ id, ok: true });
+        break;
+      }
+      case "setCrdtTables": {
+        // Wave 4c: tag which tables are OR-set / counter CRDTs so apply_local
+        // merges instead of clobbering. Delegates to NostosSocket.setCrdtTables
+        // (→ the engine's set_crdt_tables). Call BEFORE any CRDT verb.
+        if (sock) {
+          sock.setCrdtTables(m.orSet ?? [], m.counter ?? []);
         }
         self.postMessage({ id, ok: true });
         break;

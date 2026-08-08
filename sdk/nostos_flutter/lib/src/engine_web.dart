@@ -26,24 +26,19 @@
 /// | resume              | resume          | `NostosSocket.resume` / reconnect     |
 /// | close               | close           | terminate Worker                     |
 /// | signOut             | signOut         | `clearLocalState` + close            |
-/// | writeBatch          | write (looped)  | `NostosSocket.write` × N (see ponytail)|
-/// | orSetAdd/Remove     | —               | **GAP** (see below)                  |
-/// | counterInc/Dec      | —               | **GAP** (see below)                  |
+/// | writeBatch          | writeBatch      | `NostosSocket.writeBatch` (atomic)    |
+/// | orSetAdd            | orSetAdd        | `NostosSocket.orSetAdd`               |
+/// | orSetRemove         | orSetRemove     | `NostosSocket.orSetRemove`            |
+/// | counterInc/Dec      | counterInc/Dec  | `NostosSocket.counterIncrement`/Dec   |
 ///
-/// ## Gaps (reported, not self-resolved — ADR-0036)
+/// ## CRDT + atomic writeBatch (closed — Wave 4c, ADR-0036)
 ///
 /// The wasm surface splits transport (`NostosSocket` — connected, ships) from
-/// the full typed-verb engine (`NostosEngine` — in-process, no transport). The
-/// OR-set / PN-counter verbs (`orSetAdd`/`orSetRemove`/`counterIncrement`/
-/// `counterDecrement`) live ONLY on the in-process `NostosEngine`, which mints a
-/// client HLC (`nostos-domain`) and is unreachable from a connected socket.
-/// `NostosSocket` exposes no CRDT verb. Reaching them would require either a
-/// small `nostos-ffi-wasm` addition (delegate the CRDT verbs on `NostosSocket`,
-/// mirroring how `applySchema`/`query`/`setCrdtTables` already delegate) or
-/// Dart-side HLC minting (rejected — ADR-0035 keeps CRDT invariants in
-/// `nostos-domain`, not re-implemented). Until that lands these throw
-/// [UnsupportedError] with a pointer to the gap. `writeBatch` is wired as a
-/// best-effort loop of single writes with a documented atomicity ceiling.
+/// the full typed-verb engine (`NostosEngine` — in-process, no transport). Wave
+/// 4c closed the gap by adding thin delegates on `NostosSocket` that reuse
+/// `NostosEngine`'s CRDT logic (HLC mint via `nostos-domain`, `enqueue_batch`
+/// atomicity) plus the ship-if-open step, mirroring `write`. No CRDT algebra is
+/// re-implemented in the wasm crate; `NostosEngine`/native are untouched.
 library;
 
 import 'dart:async';
@@ -200,19 +195,26 @@ class WebNostosEngine implements NostosEngine {
       ({String table, String op, String pk, String? payloadJson})
     > ops,
   }) async {
-    // ponytail: NostosSocket exposes no batch verb, so this loops single
-    // writes. That is NOT atomic — a disconnect mid-loop leaves a prefix
-    // enqueued (each op is its own storage txn). The contract demands atomic
-    // enqueue (ADR-0032 T3); the ceiling is reached when NostosSocket gains a
-    // `writeBatch` delegate (small nostos-ffi-wasm addition mirroring how
-    // applySchema/query already delegate to the socket's engine). Until then
-    // this is best-effort: all ops apply_local + enqueue, shipping on the next
-    // (re)connect flush. Reported as a gap in ADR-0036.
-    final ids = <int>[];
-    for (final o in ops) {
-      ids.add(await write(table: o.table, op: o.op, pk: o.pk, payloadJson: o.payloadJson));
+    // Wave 4c (ADR-0036): atomic enqueue via the NostosSocket.writeBatch delegate
+    // (one storage txn on the engine's enqueue_batch — a mid-batch failure
+    // rolls back the whole batch). The Worker ships each op if OPEN; atomicity
+    // is at the storage boundary, not the network send.
+    final res = await _request({
+      'cmd': 'writeBatch',
+      'ops': ops
+          .map((o) => {
+            'table': o.table,
+            'op': o.op,
+            'pk': o.pk,
+            'payloadJson': o.payloadJson,
+          })
+          .toList(),
+    });
+    final writeIds = res['writeIds'];
+    if (writeIds is List) {
+      return writeIds.map(_asInt).toList();
     }
-    return ids;
+    return const [];
   }
 
   @override
@@ -220,32 +222,60 @@ class WebNostosEngine implements NostosEngine {
     required String table,
     required String pk,
     required String element,
-  }) =>
-      throw _crdtUnsupported('orSetAdd');
+  }) async {
+    final res = await _request({
+      'cmd': 'orSetAdd',
+      'table': table,
+      'pk': pk,
+      'element': element,
+    });
+    return _asInt(res['writeId']);
+  }
 
   @override
   Future<int> orSetRemove({
     required String table,
     required String pk,
     required String element,
-  }) =>
-      throw _crdtUnsupported('orSetRemove');
+  }) async {
+    final res = await _request({
+      'cmd': 'orSetRemove',
+      'table': table,
+      'pk': pk,
+      'element': element,
+    });
+    return _asInt(res['writeId']);
+  }
 
   @override
   Future<int> counterIncrement({
     required String table,
     required String pk,
     required int delta,
-  }) =>
-      throw _crdtUnsupported('counterIncrement');
+  }) async {
+    final res = await _request({
+      'cmd': 'counterIncrement',
+      'table': table,
+      'pk': pk,
+      'delta': delta,
+    });
+    return _asInt(res['writeId']);
+  }
 
   @override
   Future<int> counterDecrement({
     required String table,
     required String pk,
     required int delta,
-  }) =>
-      throw _crdtUnsupported('counterDecrement');
+  }) async {
+    final res = await _request({
+      'cmd': 'counterDecrement',
+      'table': table,
+      'pk': pk,
+      'delta': delta,
+    });
+    return _asInt(res['writeId']);
+  }
 
   @override
   Future<String> query({required String sql}) async {
@@ -384,14 +414,6 @@ class WebNostosEngine implements NostosEngine {
       _port.terminate();
     }
   }
-
-  UnsupportedError _crdtUnsupported(String verb) => UnsupportedError(
-    '$verb is unavailable on Flutter-web: the wasm NostosSocket (the connected, '
-    'shipping surface) exposes no CRDT verb. The CRDT verbs live on the '
-    'in-process NostosEngine, which mints a client HLC (nostos-domain) and has no '
-    'transport. See ADR-0036 — reaching them needs a small nostos-ffi-wasm '
-    'addition (delegate orSet/counter on NostosSocket).',
-  );
 }
 
 /// Internal: a pending request's completer (typed as Map for all responses).

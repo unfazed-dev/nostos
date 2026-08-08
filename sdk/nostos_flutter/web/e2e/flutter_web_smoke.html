@@ -86,6 +86,21 @@
       window.nostosWatch = (table) =>
         worker.postMessage({ cmd: "watch", table });
 
+      // Wave 4c (ADR-0036): CRDT + atomic-writeBatch driver surface. These
+      // exercise the new NostosSocket delegates through the real Worker/wasm
+      // path — proving the verbs ship over the live socket, not just enqueue.
+      window.nostosSetCrdtTables = (orSet, counter) =>
+        request({ cmd: "setCrdtTables", orSet, counter });
+
+      window.nostosCounterIncrement = (table, pk, delta) =>
+        request({ cmd: "counterIncrement", table, pk, delta });
+
+      window.nostosOrSetAdd = (table, pk, element) =>
+        request({ cmd: "orSetAdd", table, pk, element });
+
+      window.nostosWriteBatch = (ops) =>
+        request({ cmd: "writeBatch", ops });
+
       document.getElementById("status").textContent = "worker spawned — drive via window.nostos*";
       log("harness ready");
     </script>

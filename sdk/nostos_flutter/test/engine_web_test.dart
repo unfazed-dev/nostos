@@ -4,8 +4,8 @@
 // that stands in for the JS Worker. They pin the load-bearing wiring the
 // browser smoke can't economically cover on every build: request/response id
 // correlation, multi-table watch stream fan-out, connection-state synthesis
-// from Worker status pushes, write-status polling, and the reported CRDT gap
-// (orSet/counter throw, not silently no-op).
+// from Worker status pushes, write-status polling, and (Wave 4c) the CRDT +
+// atomic-writeBatch Worker commands.
 
 import 'package:nostos_flutter/src/engine.dart';
 import 'package:nostos_flutter/src/engine_web.dart';
@@ -94,7 +94,7 @@ void main() {
     await eng.close();
   });
 
-  test('writeBatch loops single writes (non-atomic on web — ADR-0036 ponytail)',
+  test('writeBatch sends a single atomic writeBatch command (Wave 4c)',
       () async {
     final port = FakeNostosWorkerPort();
     final eng = _engine(port);
@@ -103,33 +103,54 @@ void main() {
       (table: 't', op: 'upsert', pk: '2', payloadJson: null),
     ]);
 
-    // writeBatch awaits each write in sequence, so replies must arrive in order.
+    // Wave 4c: one writeBatch request (not a loop of single writes).
     await Future<void>.delayed(Duration.zero);
-    final first = port.sent.lastWhere((m) => m['cmd'] == 'write');
-    port.reply({'id': first['id'] as int, 'ok': true, 'writeId': 10});
-    await Future<void>.delayed(Duration.zero);
-    final second = port.sent.lastWhere(
-      (m) => m['cmd'] == 'write' && (m['id'] as int) != (first['id'] as int),
-    );
-    port.reply({'id': second['id'] as int, 'ok': true, 'writeId': 20});
+    final req = port.sent.singleWhere((m) => m['cmd'] == 'writeBatch');
+    expect(req['ops'], [
+      {'table': 't', 'op': 'upsert', 'pk': '1', 'payloadJson': null},
+      {'table': 't', 'op': 'upsert', 'pk': '2', 'payloadJson': null},
+    ]);
+    final id = req['id'] as int;
+    port.reply({'id': id, 'ok': true, 'writeIds': [10, 20]});
 
     expect(await f, [10, 20]);
-    expect(port.sent.where((m) => m['cmd'] == 'write').length, 2);
+    // Exactly one Worker request — no per-op write fan-out.
+    expect(port.sent.where((m) => m['cmd'] == 'write'), isEmpty);
     await eng.close();
   });
 
-  test('CRDT verbs throw UnsupportedError (reported gap — not a silent no-op)',
+  test('orSetAdd wires to the orSetAdd Worker command (Wave 4c)', () async {
+    final port = FakeNostosWorkerPort();
+    final eng = _engine(port);
+    final f = eng.orSetAdd(table: 'tags', pk: 'row1', element: 'alice');
+    await Future<void>.delayed(Duration.zero);
+    final req = port.sent.singleWhere((m) => m['cmd'] == 'orSetAdd');
+    expect(req['table'], 'tags');
+    expect(req['pk'], 'row1');
+    expect(req['element'], 'alice');
+    port.reply({'id': req['id'] as int, 'ok': true, 'writeId': 7});
+    expect(await f, 7);
+    await eng.close();
+  });
+
+  test('counterIncrement + counterDecrement wire to Worker commands (Wave 4c)',
       () async {
     final port = FakeNostosWorkerPort();
     final eng = _engine(port);
-    expect(
-      () => eng.orSetAdd(table: 't', pk: '1', element: 'x'),
-      throwsA(isA<UnsupportedError>()),
-    );
-    expect(
-      () => eng.counterIncrement(table: 't', pk: '1', delta: 1),
-      throwsA(isA<UnsupportedError>()),
-    );
+
+    final inc = eng.counterIncrement(table: 'likes', pk: 'p1', delta: 5);
+    await Future<void>.delayed(Duration.zero);
+    final incReq = port.sent.singleWhere((m) => m['cmd'] == 'counterIncrement');
+    expect(incReq['delta'], 5);
+    port.reply({'id': incReq['id'] as int, 'ok': true, 'writeId': 11});
+    expect(await inc, 11);
+
+    final dec = eng.counterDecrement(table: 'likes', pk: 'p1', delta: 2);
+    await Future<void>.delayed(Duration.zero);
+    final decReq = port.sent.singleWhere((m) => m['cmd'] == 'counterDecrement');
+    expect(decReq['delta'], 2);
+    port.reply({'id': decReq['id'] as int, 'ok': true, 'writeId': 12});
+    expect(await dec, 12);
     await eng.close();
   });
 

@@ -207,3 +207,71 @@ test("Flutter-web Worker: connect + write + reactive snapshot (ADR-0036)", async
     spine.child.kill("SIGTERM");
   }
 });
+
+// Wave 4c (ADR-0036): proves the CRDT + atomic-writeBatch delegates on
+// NostosSocket ship over the live socket — counterIncrement, orSetAdd, and
+// writeBatch each enqueue (HLC mint / nostos-domain) and return an outbox id,
+// exercising the new Worker commands + the wasm delegates end-to-end in a real
+// browser. Merge correctness is covered by the nostos-ffi-wasm host tests; this
+// proves the verbs are reachable + ship from the connected Worker path.
+test("Flutter-web Worker: CRDT + writeBatch delegates ship (Wave 4c)", async ({ page }) => {
+  test.setTimeout(90000);
+
+  const logs = [];
+  page.on("console", (msg) => logs.push(msg.text()));
+  page.on("pageerror", (err) =>
+    logs.push("[pageerror] " + (err && err.message ? err.message : String(err))),
+  );
+
+  const spine = await startSpine();
+  const staticServer = await startStaticServer();
+  const wsUrl = `ws://127.0.0.1:${spine.port}/sync`;
+  console.log("[flutter-web-smoke-4c] spine port", spine.port, "; static", staticServer.port);
+
+  try {
+    await page.goto(`http://127.0.0.1:${staticServer.port}/`, { waitUntil: "load" });
+    await page.waitForFunction(() => typeof window.nostosConnect === "function", null, {
+      timeout: 10000,
+    });
+    await page.waitForFunction(() => window.nostosStorage !== null, { timeout: 15000 });
+
+    // Connect + tag the CRDT tables before any CRDT verb (the loud-fail gate).
+    await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
+    await expect
+      .poll(() => page.evaluate(() => window.nostosConnected), { timeout: 15000 })
+      .toBe(true);
+    await page.evaluate(() => window.nostosSetCrdtTables(["tags"], ["likes"]));
+
+    // counterIncrement: enqueues a counter RMW (HLC + counter_apply_delta),
+    // returns the outbox id, ships over the open socket.
+    const counterRes = await page.evaluate(() =>
+      window.nostosCounterIncrement("likes", "post1", 5),
+    );
+    expect(counterRes.ok).toBe(true);
+    expect(typeof counterRes.writeId).toBe("number");
+
+    // orSetAdd: mints an HLC, builds the OrSetPayload, enqueues + ships.
+    const orSetRes = await page.evaluate(() =>
+      window.nostosOrSetAdd("tags", "row1", "alice"),
+    );
+    expect(orSetRes.ok).toBe(true);
+    expect(typeof orSetRes.writeId).toBe("number");
+
+    // writeBatch: atomic enqueue (one storage txn) of two ops, ships each.
+    const batchRes = await page.evaluate(() =>
+      window.nostosWriteBatch([
+        { table: "tasks", op: "upsert", pk: "batch-1", payloadJson: JSON.stringify({ n: 1 }) },
+        { table: "tasks", op: "upsert", pk: "batch-2", payloadJson: JSON.stringify({ n: 2 }) },
+      ]),
+    );
+    expect(batchRes.ok).toBe(true);
+    expect(Array.isArray(batchRes.writeIds)).toBe(true);
+    expect(batchRes.writeIds.length).toBe(2);
+
+    const pageErrors = logs.filter((l) => l.startsWith("[pageerror]") || /worker.onerror/.test(l));
+    expect(pageErrors, "page errors: " + pageErrors.join(" | ")).toEqual([]);
+  } finally {
+    await staticServer.server.close();
+    spine.child.kill("SIGTERM");
+  }
+});
