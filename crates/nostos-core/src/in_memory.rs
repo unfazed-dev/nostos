@@ -67,6 +67,19 @@ impl InMemoryStorage {
         self
     }
 
+    /// Set the OR-set tables post-construction (Wave 4a: the wasm engine's
+    /// `set_crdt_tables` needs a setter, not a builder, because the engine is
+    /// already constructed when the JS caller configures CRDT tables).
+    pub fn set_or_set_tables(&mut self, tables: HashSet<String>) {
+        self.or_set_tables = tables;
+    }
+
+    /// Set the counter tables post-construction (Wave 4a: same rationale as
+    /// [`Self::set_or_set_tables`]).
+    pub fn set_counter_tables(&mut self, tables: HashSet<String>) {
+        self.counter_tables = tables;
+    }
+
     /// Read back a row's opaque payload (for test assertions).
     #[must_use]
     pub fn payload(&self, table: &str, pk: &str) -> Option<&[u8]> {

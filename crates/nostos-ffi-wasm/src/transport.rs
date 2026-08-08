@@ -415,6 +415,15 @@ pub(crate) struct SocketInner {
     /// the fresh full-table snapshot (idempotent — self-healing on lag, like the
     /// node/kotlin ports).
     pub(crate) on_change: OnChangeSlot,
+    // ---- Wave 4a: resume + conn-state support ----
+    /// The connect URL (without `?token=`), stored so `resume()` can reconnect.
+    #[allow(dead_code)] // read by NostosSocket::resume (wasm-only async fn)
+    pub(crate) url: String,
+    /// The auth token, stored so `resume()` can re-attach it.
+    #[allow(dead_code)] // read by NostosSocket::resume (wasm-only async fn)
+    pub(crate) token: Option<String>,
+    /// The `where_sql` predicate, stored so `resume()` can re-attach it.
+    pub(crate) where_sql: Option<String>,
 }
 
 /// The reactive push slot's type: an optional no-arg `Closure` behind shared
@@ -489,6 +498,10 @@ pub(crate) async fn connect(
     where_sql: Option<String>,
     db_handle: Option<js_sys::Object>,
 ) -> Result<crate::NostosSocket, JsValue> {
+    // Wave 4a: clone url + token before they're consumed by connect_url —
+    // they're stored on SocketInner for resume() reuse.
+    let url_stored = url.clone();
+    let token_stored = token.clone();
     // Build the connect URL with `?token=` (same convention as the native
     // SyncClient — browsers can't set headers on a WS handshake).
     let connect_url = match &token {
@@ -533,6 +546,9 @@ pub(crate) async fn connect(
         ws: ws.clone(),
         table: table.clone(),
         on_change: Rc::new(RefCell::new(None)),
+        url: url_stored,
+        token: token_stored,
+        where_sql: where_sql.clone(),
     });
 
     // --- onopen: send the subscribe frame (the server won't stream until it
