@@ -10,6 +10,7 @@
 //! | [`replicator`] | `ReplicatorStream` | `PgReplicator` — real pgoutput logical replication (feature "pg"); `FakeReplicator` — synthetic WAL generator for benches/tests. |
 //! | [`wire`] | — | `ReplicationEvent` ↔ JSON/binary frame codec |
 //! | [`transport`] | — | axum WebSocket server adapter |
+//! | [`token_store`] | — (inherent; ADR-0037) | `PgTokenStore` — push-token registry (feature "pg") |
 //!
 //! The benchmark drives a `FakeReplicator` through the *real* `FanOutService`
 //! and `TokioEventSink`, so what we measure is the production pipeline.
@@ -35,6 +36,11 @@ pub mod schema_source;
 #[cfg(feature = "pg")]
 pub mod snapshot_source;
 pub mod store;
+/// `#[cfg(feature = "pg")]` — the push-token registry adapter (ADR-0037 §3).
+/// Absent without the `pg` feature. Inherent methods only — no port trait
+/// until a second implementation or a test seam demands one.
+#[cfg(feature = "pg")]
+pub mod token_store;
 pub mod transport;
 pub mod wire;
 pub mod write_back;
@@ -71,3 +77,6 @@ pub use oplog::PgOpLogWriter;
 
 #[cfg(feature = "pg")]
 pub use oplog::PgOpLogCompactor;
+
+#[cfg(feature = "pg")]
+pub use token_store::{PgTokenStore, PushToken, TokenStoreError};

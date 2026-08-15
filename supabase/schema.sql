@@ -301,3 +301,27 @@ CREATE TABLE IF NOT EXISTS cairn_oplog (
 );
 CREATE INDEX IF NOT EXISTS idx_cairn_oplog_tenant_lsn ON cairn_oplog (tenant_id, lsn);
 CREATE INDEX IF NOT EXISTS idx_cairn_oplog_table_pk   ON cairn_oplog (table_name, pk);
+
+-- ===========================================================================
+-- cairn_push_tokens — push-notification transport-token registry (ADR-0037 §3).
+-- Registered via REST (POST /push-tokens) authenticated like /sync; tenant_id
+-- and account_id are stamped SERVER-SIDE from the principal (ADR-0018
+-- discipline — a client-attested tenant on a token row is an
+-- exfiltration-adjacent bug). The token is the PK: one token = one device =
+-- one current account, so re-registering under a different account MIGRATES
+-- the row (a leaked registration must never push the previous principal's
+-- data to the next user). Pruned on APNs 410 / FCM UNREGISTERED. The
+-- (account_id, tenant_id) index is the offline-account device lookup.
+--
+-- NOT in cairn_pub, same as cairn_oplog: nostos-internal table, and publishing
+-- it would replicate device push tokens through the sync stream.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS cairn_push_tokens (
+    token      TEXT        PRIMARY KEY,
+    platform   TEXT        NOT NULL,                -- 'apns' | 'fcm' | 'webpush'
+    account_id TEXT        NOT NULL,
+    tenant_id  TEXT        NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cairn_push_tokens_account
+    ON cairn_push_tokens (account_id, tenant_id);
