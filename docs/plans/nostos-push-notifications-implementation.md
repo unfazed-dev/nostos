@@ -8,20 +8,20 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
 
 ### P1 Foundations (application/infra)
 
-- [ ] 1.1 Thread `Principal` through `StoredSession`/`SessionCandidate`
+- [x] 1.1 Thread `Principal` through `StoredSession`/`SessionCandidate`
   (`crates/nostos-infra/src/store.rs:48-52`, `crates/nostos-application/src/ports.rs:206-210`)
   — `SyncSession` already carries it; the store discards it. Add an
   account→sessions index. Presence API: `SessionStore::account_online(account_id)`.
   Tests: index updated on register/unregister AND on eviction
   (`fanout.rs:309-318` — the leak path); zombie socket counts as offline.
-- [ ] 1.2 `PushNotifier` port (`ports.rs`, mirrors `EventSink` shape) +
+- [x] 1.2 `PushNotifier` port (`ports.rs`, mirrors `EventSink` shape) +
   `NoopNotifier` default; composition-root wiring (`nostos-server/src/main.rs:400-412`).
 - [ ] 1.3 Off-hot-loop enqueue: after the matched-set drain in `fan_out`
   (`fanout.rs:233-238`), fire-and-forget `(table, tenant, account, lsn)` into a
   bounded channel — copy the `OpLogWriter` non-blocking contract
   (`ports.rs:431-459`) verbatim, drop-on-full with a counter. Bench gate: fan-out
   latency unchanged with push enabled (extend `nostos-bench`).
-- [ ] 1.4 `cairn_push_tokens` migration + `PgTokenStore` (pool-of-one per
+- [x] 1.4 `cairn_push_tokens` migration + `PgTokenStore` (pool-of-one per
   `PgWriteBack`, `write_back.rs:231-246`): upsert/prune/list-by-account; prune
   on 410/`UNREGISTERED`; ADR-0013 identifier-regex discipline on table/column
   names. Column extractor typing note: predicates over numeric columns match
@@ -73,7 +73,7 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
 
 ## Wave 2 — UniFFI wake API + mobile SDKs
 
-- [ ] 5.1 `SyncClient::disconnect()`/`resume()` non-destructive siblings in
+- [x] 5.1 `SyncClient::disconnect()`/`resume()` non-destructive siblings in
   `nostos-client` (node's `close()` at `src/lib.rs:467` is the model); expose via
   UniFFI on kotlin/swift/dotnet (`disconnect` must NOT wipe — contrast
   `sign_out`). This is the prerequisite gap; test: disconnect→resume→delta

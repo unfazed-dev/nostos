@@ -122,10 +122,11 @@ raise user-visible events to the wake tier.
 - **Negative:** visible templates put notification content on the server —
   tenant isolation of templates is a config-surface responsibility (documented
   footgun, `NOSTOS_WRITE_TABLES`-style).
-- **Known inherited hole (pre-existing):** the streaming path's column
-  extractor is string-only (`nostos-server/src/main.rs:478-485`), so predicates
-  over numeric/bool columns match wider than intended; push inherits this
-  until typed extraction lands (tracked in the implementation plan).
+- **Closed hole:** the streaming path's column extractor was string-only, so
+  predicates over numeric/bool columns matched wider than intended; typed
+  extraction landed with plan task 1.4
+  (`extract_typed_column`, delegates to the canonical `extract_json_column`
+  mapping per ADR-0019).
 
 ## The test that matters
 
