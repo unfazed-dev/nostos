@@ -153,14 +153,20 @@ pub struct Config {
     ///   in title/body statically interpolates the triggering row's column
     ///   value (no expression language). A missing column interpolates the
     ///   empty string.
+    /// - `table:liveactivity:<json>` — EXPERIMENTAL (plan 6.4): the JSON
+    ///   object is the ActivityKit `content-state`; `{col}` in its string
+    ///   leaves interpolates the same way, and updates ride APNs
+    ///   priority 5 to tokens registered with platform
+    ///   `apns-liveactivity`.
     ///
     /// Colons cannot appear inside title/body and semicolons cannot appear
-    /// anywhere in an entry (they separate entries). Tables listed here
-    /// doorbell the tenant's fully-offline accounts; every other table only
-    /// doorbells via matched sessions. Example:
-    /// `tasks;orders:visible:New order:Order {id} placed`. Empty (default) =
-    /// push off beyond the matched-account path. Table names must match
-    /// `^[a-z_][a-z0-9_]*$` (ADR-0013 identifier discipline).
+    /// anywhere in an entry (they separate entries — including inside a
+    /// liveactivity JSON template). Tables listed here doorbell the tenant's
+    /// fully-offline accounts; every other table only doorbells via matched
+    /// sessions. Example:
+    /// `tasks;orders:visible:New order:Order {id} placed;deliveries:liveactivity:{"status":"{status}"}`.
+    /// Empty (default) = push off beyond the matched-account path. Table
+    /// names must match `^[a-z_][a-z0-9_]*$` (ADR-0013 identifier discipline).
     #[arg(long, env = "NOSTOS_PUSH_TABLES", default_value = "")]
     push_tables: String,
 
@@ -449,7 +455,7 @@ async fn main() -> anyhow::Result<()> {
     // per-table config from NOSTOS_PUSH_TABLES; the token registry — Pg under
     // pg mode, in-memory otherwise so the REST surface still works in dev
     // builds (no persistence across restarts in fake mode).
-    let push_tables_cfg =
+    let push_cfg =
         parse_push_tables(&cfg.push_tables, tenant_col).context("invalid NOSTOS_PUSH_TABLES")?;
     let rails = nostos_infra::RailSet::from_env().context("push rail configuration")?;
     #[cfg(feature = "pg")]
@@ -470,7 +476,7 @@ async fn main() -> anyhow::Result<()> {
     // configured, or push tables listed); NoopNotifier otherwise — push
     // stays entirely off the fan-out path (the bench baseline pays nothing).
     let push_notifier: Arc<dyn nostos_application::ports::PushNotifier> =
-        if rails.is_empty() && push_tables_cfg.tables.is_empty() {
+        if rails.is_empty() && push_cfg.tables.tables.is_empty() {
             info!("push: off (no rails configured, no NOSTOS_PUSH_TABLES)");
             Arc::new(nostos_application::ports::NoopNotifier)
         } else {
@@ -481,7 +487,8 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             info!(
-                tables = push_tables_cfg.tables.len(),
+                tables = push_cfg.tables.tables.len(),
+                live_activity_tables = push_cfg.live_activities.len(),
                 debounce_ms = cfg.push_debounce_ms,
                 "push: PushRouter coalescer active"
             );
@@ -489,7 +496,10 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(rails),
                 Arc::clone(&push_registry),
                 Arc::clone(&store),
-                push_tables_cfg.clone(),
+                nostos_infra::push::router::RouterConfig {
+                    tables: push_cfg.tables.clone(),
+                    live_activities: push_cfg.live_activities,
+                },
                 std::time::Duration::from_millis(cfg.push_debounce_ms),
                 Arc::clone(&metrics),
             ))
@@ -508,7 +518,7 @@ async fn main() -> anyhow::Result<()> {
         };
         builder
             .with_ack_progress_every(cfg.ack_progress_interval)
-            .with_push_tables(push_tables_cfg)
+            .with_push_tables(push_cfg.tables)
             .with_push_notifier(push_notifier)
     });
 
@@ -988,27 +998,41 @@ fn is_plain_identifier(s: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
-/// Parse `NOSTOS_PUSH_TABLES` into the [`nostos_application::ports::PushTables`]
-/// config injected into both `FanOutService` (tenant-wide hints) and
-/// `PushRouter` (template resolution). Format (see the `Config::push_tables`
-/// help): `;`-separated entries of `table`, `table:silent`, or
-/// `table:visible:<title>:<body>`; `{col}` in title/body is a static
-/// single-column interpolation placeholder. Invalid input is a startup
-/// error — a typo'd table silently not pushing is the failure mode this
-/// refuses to allow.
-fn parse_push_tables(
-    raw: &str,
-    tenant_column: Option<&str>,
-) -> anyhow::Result<nostos_application::ports::PushTables> {
+/// `NOSTOS_PUSH_TABLES` parse output: the application-layer [`PushTables`]
+/// plus the infra-side Live Activity content-state templates (plan task 6.4,
+/// experimental). A `liveactivity` entry appears in BOTH maps: the
+/// `PushTables` row is a placeholder `Visible` — the only variant the
+/// application layer attaches tuple bytes for (`fanout.rs:337`) — and the
+/// router consults `live_activities` FIRST, so the placeholder never
+/// renders. ponytail: placeholder coupling; the upgrade is a real
+/// `PushTemplate::LiveActivity` variant when the application crate accepts
+/// new variants again.
+#[derive(Debug, Default)]
+struct PushTablesConfig {
+    tables: nostos_application::ports::PushTables,
+    live_activities: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Parse `NOSTOS_PUSH_TABLES` into the per-table push configuration (see the
+/// `Config::push_tables` help) injected into both `FanOutService`
+/// (tenant-wide hints) and `PushRouter` (template resolution). Format:
+/// `;`-separated entries of `table`, `table:silent`,
+/// `table:visible:<title>:<body>`, or `table:liveactivity:<json>` where
+/// `<json>` is a JSON object whose string leaves may carry `{col}` static
+/// interpolation placeholders (they become the ActivityKit `content-state`).
+/// Invalid input is a startup error — a typo'd table silently not pushing is
+/// the failure mode this refuses to allow.
+fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<PushTablesConfig> {
     use nostos_application::ports::{PushTables, PushTemplate};
 
     let mut tables = std::collections::HashMap::new();
+    let mut live_activities = std::collections::HashMap::new();
     for entry in raw.split(';') {
         let entry = entry.trim();
         if entry.is_empty() {
             continue;
         }
-        let mut parts = entry.splitn(4, ':');
+        let mut parts = entry.splitn(2, ':');
         let table = parts.next().unwrap_or_default().trim().to_string();
         if table.is_empty() {
             anyhow::bail!("NOSTOS_PUSH_TABLES: empty table name in entry {entry:?}");
@@ -1018,33 +1042,81 @@ fn parse_push_tables(
                 "NOSTOS_PUSH_TABLES: table name {table:?} must match ^[a-z_][a-z0-9_]*$ (ADR-0013)"
             );
         }
-        let mode = parts.next().map(str::trim);
-        let title = parts.next();
-        let body = parts.next();
-        let template = match (mode, title, body) {
-            (None, _, _) | (Some("silent"), None, None) => PushTemplate::Silent,
-            (Some("silent"), _, _) => {
-                anyhow::bail!("NOSTOS_PUSH_TABLES: \"silent\" entries take no title/body: {entry:?}")
+        let template = match parts.next() {
+            None => PushTemplate::Silent,
+            Some(rest) => {
+                let (mode, args) = match rest.split_once(':') {
+                    Some((m, a)) => (m.trim(), Some(a)),
+                    None => (rest.trim(), None),
+                };
+                match (mode, args) {
+                    ("silent", None) => PushTemplate::Silent,
+                    ("silent", Some(_)) => {
+                        anyhow::bail!(
+                            "NOSTOS_PUSH_TABLES: \"silent\" entries take no title/body: {entry:?}"
+                        )
+                    }
+                    ("visible", Some(title_body)) => {
+                        // Title runs to the next ':'; body keeps any further
+                        // colons (the old `splitn(4)` remainder semantics).
+                        match title_body.split_once(':') {
+                            Some((title, body)) => PushTemplate::Visible {
+                                title: title.trim().to_string(),
+                                body: body.trim().to_string(),
+                            },
+                            None => anyhow::bail!(
+                                "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
+                                 table:visible:<title>:<body> (got {entry:?})"
+                            ),
+                        }
+                    }
+                    ("visible", None) => anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
+                         table:visible:<title>:<body> (got {entry:?})"
+                    ),
+                    ("liveactivity", Some(tpl)) => {
+                        let tpl = tpl.trim();
+                        let value: serde_json::Value = serde_json::from_str(tpl).map_err(|e| {
+                            anyhow::anyhow!(
+                                "NOSTOS_PUSH_TABLES: liveactivity template for {table:?} is not \
+                                 valid JSON: {e}"
+                            )
+                        })?;
+                        if !value.is_object() {
+                            anyhow::bail!(
+                                "NOSTOS_PUSH_TABLES: liveactivity template for {table:?} must be \
+                                 a JSON object (the ActivityKit content-state), got {tpl:?}"
+                            );
+                        }
+                        live_activities.insert(table.clone(), value);
+                        // Placeholder — see `PushTablesConfig`; the router's
+                        // live_activities lookup shadows it before render.
+                        PushTemplate::Visible {
+                            title: String::new(),
+                            body: String::new(),
+                        }
+                    }
+                    ("liveactivity", None) => anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: \"liveactivity\" entries need a JSON content-state \
+                         template: table:liveactivity:{{\"col\":\"{{col}}\"}} (got {entry:?})"
+                    ),
+                    (other, _) => anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: unknown mode {other:?} in {entry:?} (expected \
+                         silent, visible or liveactivity)"
+                    ),
+                }
             }
-            (Some("visible"), Some(title), Some(body)) => PushTemplate::Visible {
-                title: title.trim().to_string(),
-                body: body.trim().to_string(),
-            },
-            (Some("visible"), _, _) => anyhow::bail!(
-                "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
-                 table:visible:<title>:<body> (got {entry:?})"
-            ),
-            (Some(other), _, _) => anyhow::bail!(
-                "NOSTOS_PUSH_TABLES: unknown mode {other:?} in {entry:?} (expected silent or visible)"
-            ),
         };
         if tables.insert(table.clone(), template).is_some() {
             anyhow::bail!("NOSTOS_PUSH_TABLES: table {table:?} listed twice");
         }
     }
-    Ok(PushTables {
-        tenant_column: tenant_column.map(str::to_string),
-        tables,
+    Ok(PushTablesConfig {
+        tables: PushTables {
+            tenant_column: tenant_column.map(str::to_string),
+            tables,
+        },
+        live_activities,
     })
 }
 
@@ -2230,6 +2302,7 @@ mod put_rules_handler_tests {
 mod parse_push_tables_tests {
     use super::{is_plain_identifier, parse_push_tables};
     use nostos_application::ports::PushTemplate;
+    use serde_json::json;
 
     #[test]
     fn parses_silent_default_explicit_and_visible_with_placeholders() {
@@ -2238,24 +2311,26 @@ mod parse_push_tables_tests {
             Some("org_id"),
         )
         .expect("valid config");
-        assert_eq!(cfg.tenant_column.as_deref(), Some("org_id"));
-        assert_eq!(cfg.get("tasks"), Some(&PushTemplate::Silent));
-        assert_eq!(cfg.get("notes"), Some(&PushTemplate::Silent));
+        assert_eq!(cfg.tables.tenant_column.as_deref(), Some("org_id"));
+        assert_eq!(cfg.tables.get("tasks"), Some(&PushTemplate::Silent));
+        assert_eq!(cfg.tables.get("notes"), Some(&PushTemplate::Silent));
         assert_eq!(
-            cfg.get("orders"),
+            cfg.tables.get("orders"),
             Some(&PushTemplate::Visible {
                 title: "New order".into(),
                 body: "Order {id} placed".into()
             })
         );
-        assert_eq!(cfg.get("absent"), None);
+        assert_eq!(cfg.tables.get("absent"), None);
+        assert!(cfg.live_activities.is_empty());
     }
 
     #[test]
     fn empty_string_is_an_empty_config() {
         let cfg = parse_push_tables("", None).expect("empty is valid (push off)");
-        assert!(cfg.tables.is_empty());
-        assert!(cfg.tenant_column.is_none());
+        assert!(cfg.tables.tables.is_empty());
+        assert!(cfg.tables.tenant_column.is_none());
+        assert!(cfg.live_activities.is_empty());
     }
 
     #[test]
@@ -2266,6 +2341,45 @@ mod parse_push_tables_tests {
             "Orders:visible:a:b",
             "tasks;tasks",
             "tasks:silent:extra",
+        ] {
+            assert!(
+                parse_push_tables(bad, None).is_err(),
+                "{bad:?} must be rejected at startup"
+            );
+        }
+    }
+
+    #[test]
+    fn liveactivity_entry_parses_template_and_placeholders() {
+        let cfg = parse_push_tables(
+            r#"deliveries:liveactivity:{"status":"{status}","eta_min":"{eta_min}","nested":{"deep":"{x}"}}"#,
+            None,
+        )
+        .expect("valid liveactivity config");
+        // The tables map carries the Visible placeholder so fan-out attaches
+        // tuple bytes (see PushTablesConfig); the real template is separate.
+        assert_eq!(
+            cfg.tables.get("deliveries"),
+            Some(&PushTemplate::Visible {
+                title: String::new(),
+                body: String::new()
+            })
+        );
+        assert_eq!(
+            cfg.live_activities.get("deliveries"),
+            Some(
+                &json!({ "status": "{status}", "eta_min": "{eta_min}", "nested": { "deep": "{x}" } })
+            )
+        );
+    }
+
+    #[test]
+    fn liveactivity_entries_must_be_a_json_object() {
+        for bad in [
+            r"deliveries:liveactivity:not json",
+            r"deliveries:liveactivity:[1,2]",
+            r#"deliveries:liveactivity:"string""#,
+            "deliveries:liveactivity",
         ] {
             assert!(
                 parse_push_tables(bad, None).is_err(),
@@ -2315,6 +2429,7 @@ mod push_e2e_tests {
     /// The fake rail: records every send, always reports Delivered.
     struct RecordingRail {
         sends: Mutex<Vec<(String, String, PushPayload)>>, // (platform, token, payload)
+        live_sends: Mutex<Vec<(String, String, serde_json::Value)>>, // (token, collapse, state)
     }
 
     #[async_trait]
@@ -2330,6 +2445,20 @@ mod push_e2e_tests {
                 platform.to_string(),
                 token.to_string(),
                 payload.clone(),
+            ));
+            RailOutcome::Delivered
+        }
+
+        async fn send_live_activity(
+            &self,
+            token: &str,
+            _collapse_key: &str,
+            content_state: &serde_json::Value,
+        ) -> RailOutcome {
+            self.live_sends.lock().unwrap().push((
+                token.to_string(),
+                _collapse_key.to_string(),
+                content_state.clone(),
             ));
             RailOutcome::Delivered
         }
@@ -2410,13 +2539,17 @@ mod push_e2e_tests {
             .unwrap();
         let rail = Arc::new(RecordingRail {
             sends: Mutex::new(Vec::new()),
+            live_sends: Mutex::new(Vec::new()),
         });
         let registry_dyn: Arc<dyn PushTokenRegistry> = registry.clone();
         let router = PushRouter::new(
             Arc::clone(&rail) as Arc<dyn PushSink>,
             registry_dyn,
             Arc::clone(&store),
-            push_tables(),
+            nostos_infra::push::router::RouterConfig {
+                tables: push_tables(),
+                live_activities: std::collections::HashMap::new(),
+            },
             Duration::from_millis(60),
             Arc::new(Metrics::new()),
         );

@@ -2,8 +2,13 @@
 //!
 //! Pinned contract:
 //!
-//! - `POST /push-tokens` body `{"platform":"fcm"|"apns"|"webpush","token":"…"}`
-//!   → `204` on success.
+//! - `POST /push-tokens` body
+//!   `{"platform":"fcm"|"apns"|"webpush"|"apns-liveactivity","token":"…"}` →
+//!   `204` on success. The `apns-liveactivity` platform (plan task 6.4,
+//!   EXPERIMENTAL) carries an ActivityKit push token: apps register one per
+//!   Live Activity — the token is per-activity, so a device with two live
+//!   activities has two rows — and re-register on every `pushTokenUpdates`
+//!   emission (tokens rotate; `DELETE` the superseded one).
 //! - `DELETE /push-tokens/{token}` → `204` (idempotent — a no-op delete is
 //!   still a success).
 //!
@@ -49,8 +54,11 @@ struct RegisterPushToken {
     token: String,
 }
 
-/// The rails the registry's `platform` column may name (token_store.rs).
-const PLATFORMS: [&str; 3] = ["fcm", "apns", "webpush"];
+/// The rails/platforms the registry's `platform` column may name
+/// (token_store.rs). `apns-liveactivity` is the ActivityKit token platform
+/// (plan 6.4, experimental) — distinct from `apns` because activity tokens
+/// only ever receive Live Activity state updates, never doorbells.
+const PLATFORMS: [&str; 4] = ["fcm", "apns", "webpush", "apns-liveactivity"];
 /// Sanity cap on the client-supplied token string — APNs tokens are 64 hex
 /// chars, FCM ~152, a Web Push subscription endpoint a URL; anything past
 /// this is garbage, not a token.
@@ -136,7 +144,7 @@ pub async fn post_push_token(
         return Err(err(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
-                "unknown platform {:?} (expected one of fcm|apns|webpush)",
+                "unknown platform {:?} (expected one of fcm|apns|webpush|apns-liveactivity)",
                 body.platform
             ),
         ));
@@ -332,6 +340,25 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].platform, "apns");
         assert_eq!(rows[0].token, "dev-9");
+    }
+
+    /// ActivityKit tokens register through the SAME route under the
+    /// `apns-liveactivity` platform (plan 6.4) — one row per live activity,
+    /// no route change beyond the platform name.
+    #[tokio::test]
+    async fn activitykit_token_registers_under_its_own_platform() {
+        let (state, registry) = authed_state_with();
+        let res = post_push_token(
+            State(state),
+            headers_with_bearer(),
+            body(&serde_json::json!({"platform":"apns-liveactivity","token":"feedface"})),
+        )
+        .await
+        .expect("valid registration");
+        assert_eq!(res, StatusCode::NO_CONTENT);
+        let rows = registry.list_by_account("t1", "u1").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].platform, "apns-liveactivity");
     }
 
     #[tokio::test]

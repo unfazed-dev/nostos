@@ -128,6 +128,7 @@ every write is refused. This trips up everyone once.
 | `GET {NOSTOS_WS_PATH}` (default `/sync`) | the WebSocket. Auth token goes on the query string as `?token=` — browsers cannot set handshake headers |
 | `GET /schema` | typed publication schema (ADR-0021). **404 unless `NOSTOS_REPLICATOR=pg`** |
 | `GET /healthz` | liveness |
+| `POST /push-tokens` / `DELETE /push-tokens/{token}` | push-token registration (ADR-0037). Rails, `NOSTOS_PUSH_TABLES` templates and the experimental Live Activities mode: [`push.md`](push.md) |
 
 Environment variables, from `crates/nostos-server/src/main.rs` +
 `crates/nostos-infra/src/`. The ones you will actually set:

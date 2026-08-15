@@ -24,6 +24,11 @@
 //!    [`RailOutcome::Unregistered`] prunes the token row; transient outcomes
 //!    get ONE deferred retry (doorbell semantics: beyond that, the client's
 //!    durable LSN checkpoint reconciles).
+//! 5. Live Activity tables (plan task 6.4, experimental): a table listed in
+//!    the `live_activities` map sends interpolated content-state updates to
+//!    [`PLATFORM_APNS_LIVE_ACTIVITY`] tokens (APNs-only, priority 5) while
+//!    ordinary device tokens still get the plain doorbell — the update
+//!    repaints the Lock Screen, it does not move the device's LSN.
 //!
 //! Template resolution lives HERE (per `push/mod.rs`'s handoff note): a
 //! visible-configured table's hint carries the event tuple bytes; the
@@ -41,12 +46,21 @@ use nostos_application::ports::{
     Metrics, PushHint, PushNotifier, PushTables, PushTemplate, SessionStore,
 };
 use nostos_domain::{ColumnValue, Lsn};
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::{
     apns::ApnsRail, fcm::FcmRail, webpush::WebPushRail, PushPayload, PushRailError, RailOutcome,
 };
+
+/// The registry `platform` value for an ActivityKit push token (plan task
+/// 6.4, experimental). A dedicated string — not plain `apns` — because the
+/// router must route content-state updates ONLY to activity tokens and must
+/// never doorbell them (an activity token cannot wake the app; a
+/// non-liveactivity push to it is wire-invalid). The token itself still rides
+/// the APNs rail.
+pub const PLATFORM_APNS_LIVE_ACTIVITY: &str = "apns-liveactivity";
 
 /// Depth of the router's inbound hint channel. Full ⇒ drop-and-count (the
 /// fan-out channel upstream already sheds load the same way).
@@ -228,6 +242,17 @@ pub trait PushSink: Send + Sync {
         collapse_key: &str,
         payload: &PushPayload,
     ) -> RailOutcome;
+
+    /// Send one Live Activity state update (plan task 6.4, experimental).
+    /// Only [`PLATFORM_APNS_LIVE_ACTIVITY`] tokens reach this method — APNs
+    /// is the only rail with ActivityKit, and `content_state` is not a
+    /// [`PushPayload`] variant because the other rails must never see it.
+    async fn send_live_activity(
+        &self,
+        token: &str,
+        collapse_key: &str,
+        content_state: &Value,
+    ) -> RailOutcome;
 }
 
 /// The production [`PushSink`]: platform dispatch over the provider rails
@@ -294,6 +319,37 @@ impl PushSink for RailSet {
             other => RailOutcome::Fatal(format!("unknown push platform {other:?}")),
         }
     }
+
+    async fn send_live_activity(
+        &self,
+        token: &str,
+        collapse_key: &str,
+        content_state: &Value,
+    ) -> RailOutcome {
+        match &self.apns {
+            Some(rail) => {
+                rail.send_live_activity(token, Some(collapse_key), content_state)
+                    .await
+            }
+            None => {
+                RailOutcome::Fatal("no apns rail configured (live activities ride APNs)".into())
+            }
+        }
+    }
+}
+
+/// Static per-table config the coalescer resolves sends from: the
+/// application-layer `PushTables` (doorbell/visible templates) plus the Live
+/// Activity content-state templates (plan task 6.4, experimental). Grouped
+/// so the spawned consumer carries one config value.
+#[derive(Debug, Clone, Default)]
+pub struct RouterConfig {
+    /// Doorbell + visible-notification templates (ADR-0037 §1/§2).
+    pub tables: PushTables,
+    /// table → ActivityKit `content-state` template. A table present here
+    /// sends priority-5 `event:"update"` pushes to
+    /// [`PLATFORM_APNS_LIVE_ACTIVITY`] tokens instead of a visible render.
+    pub live_activities: HashMap<String, Value>,
 }
 
 /// The coalescer — the application `PushNotifier` port implementation wired
@@ -313,7 +369,7 @@ impl PushRouter {
         sink: Arc<dyn PushSink>,
         registry: Arc<dyn PushTokenRegistry>,
         store: Arc<dyn SessionStore>,
-        config: PushTables,
+        config: RouterConfig,
         debounce: Duration,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -360,7 +416,7 @@ async fn coalesce(
     sink: Arc<dyn PushSink>,
     registry: Arc<dyn PushTokenRegistry>,
     store: Arc<dyn SessionStore>,
-    config: PushTables,
+    config: RouterConfig,
     debounce: Duration,
     metrics: Arc<Metrics>,
 ) {
@@ -468,7 +524,7 @@ async fn flush(
     sink: &Arc<dyn PushSink>,
     registry: &Arc<dyn PushTokenRegistry>,
     store: &Arc<dyn SessionStore>,
-    config: &PushTables,
+    config: &RouterConfig,
     metrics: &Arc<Metrics>,
 ) {
     use std::sync::atomic::Ordering;
@@ -500,7 +556,22 @@ async fn flush(
         if tokens.is_empty() {
             continue;
         }
-        let payload = build_payload(config, &p.table, p.lsn, p.payload.as_deref());
+        // Live Activity tables (plan 6.4): interpolate the content-state from
+        // the latest hint's tuple bytes; ordinary devices still get the plain
+        // doorbell (they must sync too — the activity update only repaints
+        // the Lock Screen, it does not move the device's LSN).
+        let live = config
+            .live_activities
+            .get(&p.table)
+            .map(|tpl| interpolate_state(tpl, p.payload.as_deref()));
+        let payload = if live.is_some() {
+            PushPayload::Silent {
+                table: p.table.clone(),
+                lsn: p.lsn,
+            }
+        } else {
+            build_payload(config, &p.table, p.lsn, p.payload.as_deref())
+        };
         metrics.record_push_lsn(&key.1, p.lsn.raw());
         // One deferred retry per transient outcome (doorbell semantics: two
         // failures ⇒ count failed and abandon; the next event re-pushes).
@@ -509,7 +580,18 @@ async fn flush(
             // Collapse key = the subscription's table: rail-native supersede
             // per (device, subscription) — a newer doorbell replaces an
             // undelivered older one on the same device+table.
-            match sink.send(&t.platform, &t.token, &p.table, &payload).await {
+            let outcome = if t.platform == PLATFORM_APNS_LIVE_ACTIVITY {
+                // An ActivityKit token is not a device token: it renders
+                // state updates only and can never be doorbelled — a
+                // non-liveactivity table skips it entirely.
+                match &live {
+                    Some(state) => sink.send_live_activity(&t.token, &p.table, state).await,
+                    None => continue,
+                }
+            } else {
+                sink.send(&t.platform, &t.token, &p.table, &payload).await
+            };
+            match outcome {
                 RailOutcome::Delivered => {
                     metrics.push_sent.fetch_add(1, Ordering::Relaxed);
                 }
@@ -544,14 +626,17 @@ async fn flush(
 
 /// Resolve the send payload from the per-table config: a visible template
 /// interpolates `{col}` placeholders from the hint's tuple bytes; anything
-/// else is a content-free silent doorbell (ADR-0037 §2).
+/// else is a content-free silent doorbell (ADR-0037 §2). Live Activity
+/// tables are resolved by the caller (`interpolate_state`) BEFORE this — a
+/// `liveactivity` table's `PushTables` row is a placeholder `Visible` that
+/// exists only so fan-out attaches tuple bytes (see `parse_push_tables`).
 fn build_payload(
-    config: &PushTables,
+    config: &RouterConfig,
     table: &str,
     lsn: Lsn,
     payload: Option<&[u8]>,
 ) -> PushPayload {
-    match config.get(table) {
+    match config.tables.get(table) {
         Some(PushTemplate::Visible { title, body }) => PushPayload::Visible {
             title: interpolate(title, payload),
             body: interpolate(body, payload),
@@ -568,6 +653,11 @@ fn build_payload(
 /// `{col}` in a notification reads like a bug). No expression language.
 fn interpolate(template: &str, payload: Option<&[u8]>) -> String {
     let get = payload.and_then(crate::replicator::extract_json_column);
+    interpolate_with(template, &|col| get.as_ref().and_then(|f| f(col)))
+}
+
+/// The `{col}` scanner behind both string templates and content-state leaves.
+fn interpolate_with(template: &str, get: &dyn Fn(&str) -> Option<ColumnValue>) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(open) = rest.find('{') {
@@ -575,8 +665,7 @@ fn interpolate(template: &str, payload: Option<&[u8]>) -> String {
         let after = &rest[open + 1..];
         if let Some(close) = after.find('}') {
             let col = &after[..close];
-            let value = get.as_ref().and_then(|f| f(col));
-            out.push_str(&column_to_str(value));
+            out.push_str(&column_to_str(get(col)));
             rest = &after[close + 1..];
         } else {
             // Unterminated '{' — emit literally and stop.
@@ -586,6 +675,26 @@ fn interpolate(template: &str, payload: Option<&[u8]>) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Interpolate `{col}` placeholders in every STRING leaf of a Live Activity
+/// content-state template (plan 6.4). ActivityKit decodes `content-state`
+/// into the app's `Activity.ContentState` type, so nested objects/arrays are
+/// legal; non-string leaves pass through untouched. Same static-substitution
+/// rules as [`interpolate`].
+fn interpolate_state(template: &Value, payload: Option<&[u8]>) -> Value {
+    fn walk(v: &Value, get: &dyn Fn(&str) -> Option<ColumnValue>) -> Value {
+        match v {
+            Value::String(s) => Value::String(interpolate_with(s, get)),
+            Value::Array(a) => Value::Array(a.iter().map(|x| walk(x, get)).collect()),
+            Value::Object(o) => {
+                Value::Object(o.iter().map(|(k, x)| (k.clone(), walk(x, get))).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    let get = payload.and_then(crate::replicator::extract_json_column);
+    walk(template, &|col| get.as_ref().and_then(|f| f(col)))
 }
 
 fn column_to_str(v: Option<ColumnValue>) -> String {
@@ -618,6 +727,7 @@ mod tests {
     /// A sink that records sends and replays a configurable outcome.
     struct FakeSink {
         sends: Mutex<Vec<Sent>>,
+        live_sends: Mutex<Vec<(String, String, Value)>>, // (token, collapse_key, state)
         outcome: RailOutcome,
     }
 
@@ -625,6 +735,7 @@ mod tests {
         fn delivered() -> Arc<Self> {
             Arc::new(Self {
                 sends: Mutex::new(Vec::new()),
+                live_sends: Mutex::new(Vec::new()),
                 outcome: RailOutcome::Delivered,
             })
         }
@@ -632,12 +743,17 @@ mod tests {
         fn with_outcome(outcome: RailOutcome) -> Arc<Self> {
             Arc::new(Self {
                 sends: Mutex::new(Vec::new()),
+                live_sends: Mutex::new(Vec::new()),
                 outcome,
             })
         }
 
         fn sent(&self) -> Vec<Sent> {
             self.sends.lock().unwrap().clone()
+        }
+
+        fn live_sent(&self) -> Vec<(String, String, Value)> {
+            self.live_sends.lock().unwrap().clone()
         }
     }
 
@@ -656,6 +772,20 @@ mod tests {
                 collapse_key: collapse_key.to_string(),
                 payload: payload.clone(),
             });
+            self.outcome.clone()
+        }
+
+        async fn send_live_activity(
+            &self,
+            token: &str,
+            collapse_key: &str,
+            content_state: &Value,
+        ) -> RailOutcome {
+            self.live_sends.lock().unwrap().push((
+                token.to_string(),
+                collapse_key.to_string(),
+                content_state.clone(),
+            ));
             self.outcome.clone()
         }
     }
@@ -716,6 +846,17 @@ mod tests {
         tables: Vec<(&str, PushTemplate)>,
         metrics: Arc<Metrics>,
     ) -> PushRouter {
+        router_with_live(sink, registry, online, tables, HashMap::new(), metrics)
+    }
+
+    fn router_with_live(
+        sink: Arc<dyn PushSink>,
+        registry: Arc<InMemoryTokenRegistry>,
+        online: &[&str],
+        tables: Vec<(&str, PushTemplate)>,
+        live_activities: HashMap<String, Value>,
+        metrics: Arc<Metrics>,
+    ) -> PushRouter {
         let store: Arc<dyn SessionStore> = Arc::new(FakeStore {
             online: Mutex::new(online.iter().map(|s| (*s).to_string()).collect()),
         });
@@ -723,7 +864,10 @@ mod tests {
             sink,
             registry,
             store,
-            config(tables),
+            RouterConfig {
+                tables: config(tables),
+                live_activities,
+            },
             Duration::from_millis(40),
             metrics,
         )
@@ -895,6 +1039,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn liveactivity_table_updates_activity_token_and_doorbells_devices() {
+        let sink = FakeSink::delivered();
+        let reg = Arc::new(InMemoryTokenRegistry::new());
+        reg.upsert("apns", "dev-1", "u1", "t1").await.unwrap();
+        reg.upsert(PLATFORM_APNS_LIVE_ACTIVITY, "la-1", "u1", "t1")
+            .await
+            .unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let live: HashMap<String, Value> = [(
+            "deliveries".to_string(),
+            serde_json::json!({ "status": "{status}", "eta_min": "{eta_min}" }),
+        )]
+        .into_iter()
+        .collect();
+        // The Visible placeholder mirrors what parse_push_tables enters for a
+        // liveactivity table so fan-out attaches tuple bytes.
+        let router = router_with_live(
+            sink.clone(),
+            reg,
+            &[],
+            vec![(
+                "deliveries",
+                PushTemplate::Visible {
+                    title: String::new(),
+                    body: String::new(),
+                },
+            )],
+            live,
+            metrics.clone(),
+        );
+
+        let mut h = hint("t1", "u1", "deliveries", 5);
+        h.payload = Some(br#"{"status":"courier_assigned","eta_min":12}"#.to_vec());
+        router.notify(h).await;
+
+        soon(|| !sink.live_sent().is_empty() && !sink.sent().is_empty()).await;
+        wait_quiet().await;
+        // The activity token gets the interpolated content-state update…
+        assert_eq!(
+            sink.live_sent(),
+            vec![(
+                "la-1".to_string(),
+                "deliveries".to_string(),
+                serde_json::json!({ "status": "courier_assigned", "eta_min": "12" })
+            )],
+            "string leaves interpolate; numeric column values stringify"
+        );
+        // …and ordinary devices still get the plain doorbell (the update
+        // repaints the Lock Screen, it does not move the device's LSN).
+        let sent = sink.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].token, "dev-1");
+        assert!(matches!(sent[0].payload, PushPayload::Silent { .. }));
+        assert_eq!(metrics.snapshot().push_sent, 2);
+    }
+
+    #[tokio::test]
+    async fn activity_tokens_never_receive_doorbell_payloads() {
+        // An ActivityKit token cannot wake the app — a non-liveactivity
+        // table's doorbell must skip it entirely (no send, no failure count).
+        let sink = FakeSink::delivered();
+        let reg = Arc::new(InMemoryTokenRegistry::new());
+        reg.upsert(PLATFORM_APNS_LIVE_ACTIVITY, "la-1", "u1", "t1")
+            .await
+            .unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let router = router(sink.clone(), reg, &[], vec![], metrics.clone());
+
+        router.notify(hint("t1", "u1", "tasks", 1)).await;
+        wait_quiet().await;
+        assert!(sink.sent().is_empty());
+        assert!(sink.live_sent().is_empty());
+        assert_eq!(metrics.snapshot().push_failed, 0);
+    }
+
+    #[tokio::test]
     async fn unconfigured_table_stays_silent_even_with_payload_attached() {
         // A hint may carry tuple bytes (fan-out attaches them for visible
         // tables); if the config no longer lists the table, the payload must
@@ -924,5 +1144,21 @@ mod tests {
         assert_eq!(interpolate("{missing}", Some(payload)), "");
         assert_eq!(interpolate("{missing}", None), "");
         assert_eq!(interpolate("open { brace", Some(payload)), "open { brace");
+    }
+
+    /// Content-state interpolation walks nested string leaves only.
+    #[test]
+    fn interpolate_state_walks_nested_leaves_only() {
+        let tpl =
+            serde_json::json!({ "a": "{a}", "n": 5, "nest": { "b": "{missing}" }, "arr": ["{a}"] });
+        let payload = br#"{"a":"x"}"#.as_slice();
+        assert_eq!(
+            interpolate_state(&tpl, Some(payload)),
+            serde_json::json!({ "a": "x", "n": 5, "nest": { "b": "" }, "arr": ["x"] })
+        );
+        assert_eq!(
+            interpolate_state(&tpl, None),
+            serde_json::json!({ "a": "", "n": 5, "nest": { "b": "" }, "arr": [""] })
+        );
     }
 }

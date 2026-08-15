@@ -15,6 +15,14 @@
 //! - visible: `alert` push-type + priority 10 + expiration `now + 1h` and
 //!   payload `{"aps":{"alert":{"title","body"}}}` (already interpolated —
 //!   template resolution is task 2.4).
+//! - liveactivity (plan task 6.4, experimental): ActivityKit state updates
+//!   via a dedicated [`ApnsRail::send_live_activity`] — `apns-push-type:
+//!   liveactivity`, `apns-topic: <bundle>.push-type.liveactivity` (Apple
+//!   mandates the suffix for this push type), priority 5 (the budget-free
+//!   update tier, ADR-0037 §5) and payload `{"aps":{"timestamp":…,
+//!   "event":"update","content-state":{…}}}`. Not a `PushPayload` variant:
+//!   an ActivityKit token is not a device token and only ever receives
+//!   state updates, so the other rails never see this shape.
 //! - `apns-collapse-id` (≤64 bytes, truncated on char boundary) carries the
 //!   per-(device, subscription) supersede key; `apns-topic` = bundle id.
 //! - Provider JWT (`ES256`, `kid` = key id, `iss` = team id, no `exp` —
@@ -35,6 +43,11 @@ const APNS_SANDBOX_BASE: &str = "https://api.sandbox.push.apple.com";
 /// Apple: provider tokens are valid 1h and should be refreshed no more often
 /// than every 20 minutes; 50min sits between.
 const JWT_TTL: Duration = Duration::from_mins(50);
+/// A Live Activity update older than ~15min renders outdated state on the
+/// Lock Screen — worse than no update (the next event re-pushes, and
+/// `timestamp` newest-wins supersedes). Bounds both `apns-expiration`
+/// (discard if undeliverable) in [`ApnsRail::send_live_activity`].
+const LIVE_ACTIVITY_TTL_SECS: u64 = 900;
 
 pub struct ApnsRail {
     http: reqwest::Client,
@@ -132,12 +145,8 @@ impl ApnsRail {
         collapse_key: Option<&str>,
         payload: &PushPayload,
     ) -> RailOutcome {
-        if device_token.is_empty() || !device_token.bytes().all(|b| b.is_ascii_hexdigit()) {
-            // Length only — never echo token material into logs.
-            return RailOutcome::Fatal(format!(
-                "apns device token is not hex (len {})",
-                device_token.len()
-            ));
+        if let Err(fatal) = hex_or_fatal(device_token, "device") {
+            return fatal;
         }
         let jwt = match self.provider_token() {
             Ok(t) => t,
@@ -184,6 +193,74 @@ impl ApnsRail {
         }
     }
 
+    /// Send one Live Activity state update to an ActivityKit push token
+    /// (ADR-0037 §5, plan task 6.4 — experimental). Wire shape per Apple's
+    /// ActivityKit push docs:
+    ///
+    /// - `apns-push-type: liveactivity`, `apns-priority: 5` (the budget-free
+    ///   tier — priority 10 counts against the device's hourly update
+    ///   budget), `apns-topic: <bundle>.push-type.liveactivity`.
+    /// - payload `{"aps":{"timestamp":now,"event":"update","content-state":…}}`
+    ///   — `timestamp` is Apple's newest-wins anchor (the system always
+    ///   renders the most recent update); `content-state` must decode into
+    ///   the app's `Activity.ContentState` type.
+    /// - `apns-expiration: now + 15min` bounds staleness (the research doc's
+    ///   expiry-as-staleness rule: a late update renders outdated state);
+    ///   `apns-collapse-id` rides along like the other rails for in-flight
+    ///   supersede.
+    /// - `stale-date` (optional Apple field that dims the activity when its
+    ///   data ages out) is deliberately NOT set: nostos cannot know when the
+    ///   app's data goes legitimately quiet vs stale — premature dimming is
+    ///   worse than omitting it.
+    pub async fn send_live_activity(
+        &self,
+        activity_token: &str,
+        collapse_key: Option<&str>,
+        content_state: &Value,
+    ) -> RailOutcome {
+        if let Err(fatal) = hex_or_fatal(activity_token, "live activity") {
+            return fatal;
+        }
+        let jwt = match self.provider_token() {
+            Ok(t) => t,
+            Err(e) => return RailOutcome::Fatal(e.to_string()),
+        };
+        let now = jsonwebtoken::get_current_timestamp();
+        let url = format!("{}/3/device/{activity_token}", self.base);
+        let mut req = self
+            .http
+            .post(&url)
+            .bearer_auth(&jwt)
+            .header("apns-push-type", "liveactivity")
+            .header("apns-priority", "5")
+            .header(
+                "apns-expiration",
+                (now + LIVE_ACTIVITY_TTL_SECS).to_string(),
+            )
+            .header(
+                "apns-topic",
+                format!("{}.push-type.liveactivity", self.bundle_id),
+            );
+        if let Some(key) = collapse_key {
+            let cid: String = key.chars().take(64).collect();
+            req = req.header("apns-collapse-id", cid);
+        }
+        let body = json!({
+            "aps": {
+                "timestamp": now,
+                "event": "update",
+                "content-state": content_state
+            }
+        });
+        match req.json(&body).send().await {
+            Ok(resp) => outcome_for(resp).await,
+            Err(e) => {
+                warn!(%e, "apns live activity send network error");
+                RailOutcome::TransientRetryable
+            }
+        }
+    }
+
     /// Cached provider JWT. Apple rejects tokens >1h old and rate-limits
     /// refreshes, so one token lives 50 minutes here.
     fn provider_token(&self) -> Result<String, PushRailError> {
@@ -200,6 +277,20 @@ impl ApnsRail {
             .map_err(|e| PushRailError(format!("apns jwt sign: {e}")))?;
         *cache = Some((jwt.clone(), Instant::now() + JWT_TTL));
         Ok(jwt)
+    }
+}
+
+/// Token-shape guard shared by device and ActivityKit tokens: hex only.
+/// `Err` carries the `Fatal` diagnostic; the message records LENGTH only —
+/// never echo token material into logs.
+fn hex_or_fatal(token: &str, kind: &str) -> Result<(), RailOutcome> {
+    if !token.is_empty() && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(RailOutcome::Fatal(format!(
+            "apns {kind} token is not hex (len {})",
+            token.len()
+        )))
     }
 }
 
@@ -323,6 +414,66 @@ mod tests {
         assert_eq!(
             req.json(),
             json!({ "aps": { "alert": { "title": "Tasks changed", "body": "New items to sync" } } })
+        );
+    }
+
+    #[tokio::test]
+    async fn apns_liveactivity_headers_and_payload() {
+        let (rail, mock) = rail_with(vec![CannedResponse::json(200, "")]).await;
+        let before = jsonwebtoken::get_current_timestamp();
+        let outcome = rail
+            .send_live_activity(
+                TOKEN,
+                Some("deliveries"),
+                &json!({ "status": "out_for_delivery", "eta_min": 12 }),
+            )
+            .await;
+        assert_eq!(outcome, RailOutcome::Delivered);
+        let req = &mock.requests()[0];
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, format!("/3/device/{TOKEN}"));
+        assert_eq!(req.header("apns-push-type"), Some("liveactivity"));
+        assert_eq!(req.header("apns-priority"), Some("5"), "budget-free tier");
+        // Apple mandates the .push-type.liveactivity topic suffix for this
+        // push type — the bare bundle id is rejected.
+        assert_eq!(
+            req.header("apns-topic"),
+            Some("run.nostos.app.push-type.liveactivity")
+        );
+        assert_eq!(req.header("apns-collapse-id"), Some("deliveries"));
+        let expiration: u64 = req
+            .header("apns-expiration")
+            .expect("expiration")
+            .parse()
+            .expect("expiration is unix ts");
+        assert!(
+            (before + 880..=before + 920).contains(&expiration),
+            "liveactivity expiration should be ~now+15min, got {expiration}"
+        );
+        let payload = req.json();
+        assert_eq!(payload["aps"]["event"], json!("update"));
+        assert_eq!(
+            payload["aps"]["content-state"],
+            json!({ "status": "out_for_delivery", "eta_min": 12 })
+        );
+        let timestamp = payload["aps"]["timestamp"].as_u64().expect("timestamp");
+        assert!(
+            (before..=before + 5).contains(&timestamp),
+            "timestamp is the update's unix time, got {timestamp}"
+        );
+        assert_eq!(payload["aps"]["alert"], json!(Value::Null));
+    }
+
+    #[tokio::test]
+    async fn apns_liveactivity_non_hex_token_is_fatal_without_a_request() {
+        let (rail, mock) = rail_with(vec![CannedResponse::json(200, "")]).await;
+        let outcome = rail
+            .send_live_activity("not-hex!", None, &json!({ "status": "x" }))
+            .await;
+        assert!(matches!(outcome, RailOutcome::Fatal(_)));
+        assert!(
+            mock.requests().is_empty(),
+            "invalid activity token must not hit the network"
         );
     }
 
