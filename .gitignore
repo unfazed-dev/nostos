@@ -70,3 +70,8 @@ sdk/nostos_react_native/ios/libnostos_swift.a
 # is CLI scratch. Neither belongs in the shared OSS repo.
 .mcp.json
 supabase/.temp/
+
+# Firebase/Google credentials dropped for local testing
+apps/atlet/FCM/
+apps/atlet/flutter/android/app/google-services.json
+apps/atlet/flutter/ios/Runner/GoogleService-Info.plist

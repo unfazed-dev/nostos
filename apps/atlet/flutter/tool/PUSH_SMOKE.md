@@ -100,11 +100,8 @@ local docker PG — the smoke needs no Supabase DB access.
   foregrounded app must receive the data message);
 - `flutter` + `cargo` on PATH. First `cargo run -p nostos-server` may build
   for a few minutes; the repo's `target/` cache usually covers it;
-- the nostos_flutter **native Rust lib must build for Android** (its
-  `hook/build.dart` cargo step). At the time of writing that hook fails on
-  this host (`cargo build did not produce …/rust/target/release/
-  libnostos_flutter_rust.so` — sdk-side, tracked separately); the smoke
-  cannot run until it builds.
+- the nostos_flutter native Rust lib builds for Android via its
+  `hook/build.dart` cargo step (cargo-ndk; needs `ANDROID_HOME` + NDK).
 
 ## Run
 
@@ -113,12 +110,60 @@ cd /Volumes/developer_ssd/Developer/nostos   # repo root not required, but tidy
 apps/atlet/flutter/tool/push_smoke.sh
 ```
 
-Expected: three lines — `device ready: user=…`, `server: cairn_push_sent_total 0 → 1`,
+Expected, leg 1 (silent doorbell): three lines — `device ready: user=…`,
+`server: cairn_push_sent_total 0 → 1`,
 `device: PUSH_SMOKE_RECEIVED table=sessions lsn=…`, then
 `PASS  real-rail FCM doorbell: PG row → nostos-server → FCM → device`.
 
+Expected, leg 2 (ecommerce order lifecycle, below): `device checked out:
+order=…`, two vendor lines, then
+`PASS  order lifecycle: checkout → shipped → delivered pushes`.
+
 Logs: `/tmp/atlet-push-smoke-server.log` (nostos-server),
-`/tmp/atlet-push-smoke-app.log` (flutter test).
+`/tmp/atlet-push-smoke-app.log` (leg 1 flutter test),
+`/tmp/atlet-push-smoke-order.log` (leg 2 flutter test).
+
+## Leg 2 — ecommerce order lifecycle (the SDK reference model)
+
+Leg 2 drives the **real atlet app UI** through its ecommerce feature and
+proves visible push notifications over the whole order lifecycle — the
+pattern every other nostos SDK (Swift/Kotlin/RN/Capacitor/…) should copy:
+
+```
+atlet app (foregrounded test)                      harness plays the vendor
+  Shop → product → Add to cart → Cart → Checkout
+    → Pay  ── nostos write ──▶ PG `orders` row (status=paid)
+  pauseSync (offline; pushes target offline accounts)
+                            UPDATE orders SET status='shipped'
+                               └─▶ replication ─▶ visible push ─▶ FCM ─▶ device
+                            UPDATE orders SET status='delivered'
+                               └─▶ same again
+```
+
+Server config (the whole "feature"): one `NOSTOS_PUSH_TABLES` entry —
+
+```
+orders:visible:Atlet order update:Your order {id} is {status}
+```
+
+`{col}` statically interpolates the triggering row (docs/api/push.md), so the
+same template renders "Your order 3f2a… is shipped" and "… is delivered"
+without any per-status config.
+
+Two behaviors that trip first-timers, both by design:
+
+- **Presence gate.** Push sends re-check account presence at flush time —
+  an online account gets nothing (its WebSocket already carries the data).
+  The test therefore re-pauses the engine after every received push, and the
+  harness sleeps past the 2s coalescer window between lifecycle steps.
+- **Foreground vs background.** While the app is foregrounded, notification
+  messages arrive via `FirebaseMessaging.onMessage` and are NOT shown in the
+  tray (FlutterFire documented behavior). Backgrounded or killed, the same
+  message lands in the system tray. The automated leg asserts the foreground
+  path — keep the emulator foregrounded while it runs; backgrounding it makes
+  the marker asserts fail even though the tray notifications themselves
+  appear. The tray path is the same FCM rail, exercised by any real build of
+  the app against the same server config.
 
 ## In-app pilot wiring (what the app does with a doorbell)
 

@@ -94,6 +94,28 @@ case "$DEVICE_MODE" in
     fi
     BIND=127.0.0.1                        # 10.0.2.2 (emulator) → host loopback
     SYNC_URL="${NOSTOS_SYNC_URL:-ws://10.0.2.2:$PORT/sync}"
+    # FCM data messages reach the test's onMessage only while the app is
+    # FOREGROUNDED — anything else holding the screen (the launcher, another
+    # app) silently starves the smoke. .MainActivity is singleTop, so this is
+    # a no-restart focus restore for an already-running test.
+    keep_foreground() {
+      case "$("$ADB" shell dumpsys window 2>/dev/null | grep -m1 mCurrentFocus)" in
+        *internal.atlet.atlet*) ;;
+        *) "$ADB" shell am start -n internal.atlet.atlet/.MainActivity >/dev/null 2>&1 || true ;;
+      esac
+    }
+    # A failed `flutter test` UNINSTALLS the app when it exits, so a grant
+    # made earlier in the script has no package to attach to on the next run
+    # — the test then hangs in requestPermission()'s untapped dialog. Install
+    # the previously built APK first (if any) so the POST_NOTIFICATIONS grant
+    # lands; flutter test reinstalls the same APK over it, preserving both.
+    # First-ever run on a clean box: no APK yet — tap Allow once, or grant
+    # manually, then it persists.
+    prep_device() {
+      local apk="$APP_DIR/build/app/outputs/flutter-apk/app-debug.apk"
+      [ -f "$apk" ] && "$ADB" install -t "$apk" >/dev/null 2>&1 || true
+      "$ADB" shell pm grant internal.atlet.atlet android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+    }
     ;;
   ios)
     [ -f "$APP_DIR/ios/Runner/GoogleService-Info.plist" ] \
@@ -123,10 +145,14 @@ docker exec "$PG_CONTAINER" pg_isready -U cairn -d cairn >/dev/null 2>&1 \
 
 psql_exec() { docker exec "$PG_CONTAINER" psql -U cairn -d cairn -qAt -c "$1"; }
 
-# Throwaway schema: atlet's sessions shape (tenant column user_id), REPLICA
-# IDENTITY FULL (ADR-0025), dedicated publication + slot.
+# Throwaway schema: atlet's REAL table shapes so the actual app (Shop tab,
+# cart, checkout) runs unmodified against the smoke server. REPLICA
+# IDENTITY FULL (ADR-0025), dedicated publication + slot. `products` is
+# seeded (global catalog); user-owned tables carry user_id.
 psql_exec "DROP PUBLICATION IF EXISTS $PUB;" >/dev/null
-psql_exec "DROP TABLE IF EXISTS $TABLE;" >/dev/null
+for t in $TABLE products cart_items orders; do
+  psql_exec "DROP TABLE IF EXISTS $t;" >/dev/null
+done
 psql_exec "CREATE TABLE $TABLE (
   id text PRIMARY KEY,
   user_id text NOT NULL,
@@ -135,9 +161,48 @@ psql_exec "CREATE TABLE $TABLE (
   metric int NOT NULL,
   unit text NOT NULL,
   occurred_on date NOT NULL);" >/dev/null
-psql_exec "ALTER TABLE $TABLE REPLICA IDENTITY FULL;" >/dev/null
-psql_exec "CREATE PUBLICATION $PUB FOR TABLE $TABLE;" >/dev/null
+psql_exec "CREATE TABLE products (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  category text NOT NULL,
+  price_cents int NOT NULL,
+  rating real,
+  plant_based int NOT NULL DEFAULT 0,
+  image_url text);" >/dev/null
+psql_exec "CREATE TABLE cart_items (
+  id text PRIMARY KEY,
+  user_id text NOT NULL,
+  product_id text NOT NULL,
+  qty int NOT NULL,
+  added_at timestamptz NOT NULL);" >/dev/null
+psql_exec "CREATE TABLE orders (
+  id text PRIMARY KEY,
+  user_id text NOT NULL,
+  status text NOT NULL,
+  subtotal_cents int NOT NULL,
+  tax_cents int NOT NULL,
+  shipping_cents int NOT NULL,
+  total_cents int NOT NULL,
+  payment_ref text,
+  items_json text,
+  created_at timestamptz NOT NULL);" >/dev/null
+for t in $TABLE products cart_items orders; do
+  psql_exec "ALTER TABLE $t REPLICA IDENTITY FULL;" >/dev/null
+done
+psql_exec "INSERT INTO products (id,name,category,price_cents,rating,plant_based) VALUES
+  ('p1','Trail Runner','shoes',12900,4.6,0),
+  ('p2','Energy Bar','nutrition',250,4.2,1),
+  ('p3','Water Bottle','gear',1500,4.4,0),
+  ('p4','Training Tee','apparel',3500,4.0,1),
+  ('p5','Speed Laces','gear',900,3.9,0),
+  ('p6','Recovery Mix','nutrition',2200,4.7,1);" >/dev/null
+psql_exec "CREATE PUBLICATION $PUB FOR TABLE $TABLE, products, cart_items, orders;" >/dev/null
 psql_exec "SELECT pg_drop_replication_slot('$SLOT') FROM pg_replication_slots WHERE slot_name='$SLOT';" >/dev/null
+# The token registry persists in this docker volume across runs, and every
+# flutter-test install mints a FRESH FCM token (app data wiped per install)
+# — stale rows otherwise accumulate and eat send quota (each is now pruned
+# on first UNREGISTERED, but start each run clean regardless).
+psql_exec "TRUNCATE cairn_push_tokens;" >/dev/null 2>&1 || true
 
 # ---- 4. nostos-server (real PG replicator + FCM rail + doorbell table) -----
 printf "  starting nostos-server (cargo run, log: $SERVER_LOG)…\n"
@@ -149,8 +214,8 @@ NOSTOS_PG_SLOT="$SLOT" \
 NOSTOS_SYNC_AUTH=supabase-jwt \
 NOSTOS_SUPABASE_JWT_SECRET="$NOSTOS_SUPABASE_JWT_SECRET" \
 NOSTOS_TENANT_COLUMN=user_id \
-NOSTOS_WRITE_TABLES="$TABLE" \
-NOSTOS_PUSH_TABLES="$TABLE" \
+NOSTOS_WRITE_TABLES="$TABLE,cart_items,orders" \
+NOSTOS_PUSH_TABLES="$TABLE;orders:visible:Atlet order update:Your order {id} is {status}" \
 NOSTOS_FCM_CREDENTIALS_JSON="$FCM_JSON" \
   cargo run -q -p nostos-server >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
@@ -173,6 +238,7 @@ sent_before="${sent_before:-0}"
 
 # ---- 5. device leg: register token, go offline, listen -------------------
 printf "  running atlet push smoke on %s [%s] (log: $APP_LOG)…\n" "$DEVICE_MODE" "$DEVICE_ID"
+prep_device
 ( cd "$APP_DIR" && flutter pub get >/dev/null 2>&1 && \
   flutter test integration_test/push_smoke_test.dart -d "$DEVICE_ID" \
     --dart-define=SUPABASE_URL="$SUPABASE_URL" \
@@ -188,6 +254,7 @@ for _ in $(seq 1 600); do
   [ -n "$USER_ID" ] && grep -q 'PUSH_SMOKE_READY' "$APP_LOG" 2>/dev/null && break
   USER_ID="$(grep -oE 'PUSH_SMOKE_USER=[0-9a-f-]+' "$APP_LOG" 2>/dev/null | head -1 | cut -d= -f2)"
   kill -0 "$APP_PID" 2>/dev/null || break
+  keep_foreground
   sleep 1
 done
 if [ -z "$USER_ID" ] || ! grep -q 'PUSH_SMOKE_READY' "$APP_LOG" 2>/dev/null; then
@@ -226,8 +293,80 @@ APP_STATUS=$?
 if [ $APP_STATUS -eq 0 ] && grep -q 'PUSH_SMOKE_RECEIVED' "$APP_LOG"; then
   grep -o 'PUSH_SMOKE_RECEIVED.*' "$APP_LOG" | head -1 | sed 's/^/  device: /'
   printf "  ${GREEN}PASS${RESET}  real-rail FCM doorbell: PG row → nostos-server → FCM → device\n"
+else
+  printf "  ${RED}FAIL${RESET}  device leg (exit=$APP_STATUS, log: $APP_LOG)\n"
+  grep -E 'PUSH_SMOKE_(TOKEN|MESSAGE|TIMEOUT)' "$APP_LOG" | head -5 || true
+  exit 1
+fi
+
+# ---- 9. ecommerce order-lifecycle leg (visible pushes, ADR-0037 §2) -------
+# The REFERENCE MODEL for other SDKs: the real app UI (Shop → cart →
+# checkout → Pay) writes the order through nostos; this script plays the
+# vendor advancing paid → shipped → delivered. Each push-table commit to an
+# offline account sends a VISIBLE notification via the orders:visible
+# template. The device re-arms itself between pushes (the test re-pauses on
+# every arrival), so each UPDATE needs the device offline again — the sleep
+# below covers the 2s coalescer + socket teardown.
+ORDER_LOG=/tmp/atlet-push-smoke-order.log
+printf "  running atlet order-lifecycle leg (log: $ORDER_LOG)…\n"
+prep_device
+( cd "$APP_DIR" && flutter pub get >/dev/null 2>&1 && \
+  flutter test integration_test/order_push_test.dart -d "$DEVICE_ID" \
+    --dart-define=SUPABASE_URL="$SUPABASE_URL" \
+    --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
+    --dart-define=NOSTOS_SYNC_URL="$SYNC_URL" \
+    --dart-define=ATLET_PUSH_PILOT=1 ) >"$ORDER_LOG" 2>&1 &
+ORDER_PID=$!
+
+ORDER_ID=""
+for _ in $(seq 1 600); do
+  [ -n "$ORDER_ID" ] && grep -q 'PUSH_SMOKE_ORDER_READY' "$ORDER_LOG" 2>/dev/null && break
+  ORDER_ID="$(grep -oE 'PUSH_SMOKE_ORDER=[0-9a-f-]+' "$ORDER_LOG" 2>/dev/null | head -1 | cut -d= -f2)"
+  kill -0 "$ORDER_PID" 2>/dev/null || break
+  keep_foreground
+  sleep 1
+done
+if [ -z "$ORDER_ID" ] || ! grep -q 'PUSH_SMOKE_ORDER_READY' "$ORDER_LOG" 2>/dev/null; then
+  printf "  ${RED}FAIL${RESET}  order leg never reached READY (log: $ORDER_LOG)\n"
+  tail -20 "$ORDER_LOG"
+  wait "$ORDER_PID" 2>/dev/null
+  exit 1
+fi
+printf "  device checked out: order=%s — playing the vendor…\n" "${ORDER_ID:0:8}"
+
+# The vendor can only advance an order that exists in PG.
+for _ in $(seq 1 30); do
+  [ "$(psql_exec "SELECT count(*) FROM orders WHERE id='$ORDER_ID';")" = "1" ] && break
+  sleep 1
+done
+[ "$(psql_exec "SELECT count(*) FROM orders WHERE id='$ORDER_ID';")" = "1" ] \
+  || { printf "  ${RED}FAIL${RESET}  order $ORDER_ID never landed in PG\n"; exit 1; }
+
+# Advance one lifecycle step and assert BOTH sides: the rail fired
+# (cairn_push_sent_total) and the device received it (PUSH_SMOKE_PUSH marker).
+order_step() {  # $1 = new status
+  psql_exec "UPDATE orders SET status='$1' WHERE id='$ORDER_ID';" >/dev/null
+  for _ in $(seq 1 90); do
+    grep -q "PUSH_SMOKE_PUSH=$1" "$ORDER_LOG" 2>/dev/null && return 0
+    keep_foreground
+    sleep 1
+  done
+  printf "  ${RED}FAIL${RESET}  '$1' push not received within 90s (log: $ORDER_LOG)\n"
+  curl -s "http://127.0.0.1:$PORT/metrics" | grep '^cairn_push_' || true
+  tail -15 "$ORDER_LOG"
+  exit 1
+}
+
+order_step shipped
+sleep 4   # coalescer window + reconnect teardown — device must be offline again
+order_step delivered
+
+wait "$ORDER_PID"
+ORDER_STATUS=$?
+if [ $ORDER_STATUS -eq 0 ] && grep -q 'PUSH_SMOKE_ORDER_PASS' "$ORDER_LOG"; then
+  printf "  ${GREEN}PASS${RESET}  order lifecycle: checkout → shipped → delivered pushes\n"
   exit 0
 fi
-printf "  ${RED}FAIL${RESET}  device leg (exit=$APP_STATUS, log: $APP_LOG)\n"
-grep -E 'PUSH_SMOKE_(TOKEN|MESSAGE|TIMEOUT)' "$APP_LOG" | head -5 || true
+printf "  ${RED}FAIL${RESET}  order leg (exit=$ORDER_STATUS, log: $ORDER_LOG)\n"
+grep -E 'PUSH_SMOKE_ORDER_(MESSAGE|PASS)' "$ORDER_LOG" | head -5 || true
 exit 1

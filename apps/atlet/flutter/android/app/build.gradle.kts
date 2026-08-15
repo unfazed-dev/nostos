@@ -8,7 +8,9 @@ plugins {
 // android/app/google-services.json (never committed — operator-owned).
 // Without it Firebase.initializeApp() is never called (ATLET_PUSH_PILOT
 // dart-define gates the Dart side), so a config-less build stays green.
-if (File("google-services.json").exists()) {
+// NB: projectDir-anchored — a bare File("...") resolves against the gradle
+// daemon's CWD and silently skips the plugin.
+if (File(projectDir, "google-services.json").exists()) {
     apply(plugin = "com.google.gms.google-services")
 }
 
