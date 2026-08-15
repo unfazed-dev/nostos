@@ -16,8 +16,18 @@
     "dist",
     "ios",
     "android",
+    "Package.swift",
+    "NostosCapacitor.podspec",
     "README.md"
   ],
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    },
+    "android": {
+      "src": "android"
+    }
+  },
   "peerDependencies": {
     "@capacitor/core": "^8.0.0"
   },
