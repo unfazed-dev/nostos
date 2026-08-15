@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -14,6 +16,7 @@ import 'bench/store.dart';
 import 'bench/upload.dart';
 import 'design/tokens.dart';
 import 'engine_registry.dart';
+import 'push/push_pilot.dart';
 import 'ui/analytics.dart';
 import 'ui/connectivity_led.dart';
 import 'ui/home.dart';
@@ -37,12 +40,23 @@ const _supabaseAnonKey = String.fromEnvironment(
 // wire it in if the bench harness ever needs per-build accuracy.
 const _appVersion = '1.0.0+1'; // mirrors pubspec.yaml's `version:`
 
+// PILOT (ADR-0037): opt-in FCM doorbell wiring — see lib/push/push_pilot.dart.
+// Off by default so builds/analyze/tests stay green without operator-owned
+// Firebase config (google-services.json / GoogleService-Info.plist).
+const _pushPilotEnabled = bool.fromEnvironment('ATLET_PUSH_PILOT');
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Supabase.initialize(
     url: _supabaseUrl,
     publishableKey: _supabaseAnonKey,
   );
+  if (_pushPilotEnabled) {
+    // Platform config (google-services.json / GoogleService-Info.plist) —
+    // throws here when absent, which is the point of the opt-in flag.
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(nostosDoorbellBackgroundHandler);
+  }
   runApp(const AtletApp());
 }
 
@@ -184,7 +198,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _notify('Switching to ${target.name}…');
     try {
       final dbDir = (await getApplicationDocumentsDirectory()).path;
-      await engineRegistry.switchTo(
+      final adapter = await engineRegistry.switchTo(
         target,
         SyncSession(
           supabaseUrl: _supabaseUrl,
@@ -193,6 +207,17 @@ class _HomeScreenState extends State<HomeScreen> {
           dbDir: dbDir,
         ),
       );
+      // PILOT (ADR-0037): doorbell registration follows the nostos engine —
+      // push is a nostos feature, PowerSync has no rail. detach() on switch-
+      // away only unwires handlers; the SDK's sign-out hook (run inside the
+      // registry's wipe, above) deregisters the tokens.
+      if (_pushPilotEnabled) {
+        if (target == Engine.cairn) {
+          unawaited(pushPilot.attach(adapter as NostosAdapter));
+        } else {
+          unawaited(pushPilot.detach());
+        }
+      }
       _notify('Now syncing with ${target.name}.');
     } catch (e) {
       _notify('Engine switch failed: $e');

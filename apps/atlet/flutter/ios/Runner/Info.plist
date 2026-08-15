@@ -49,6 +49,13 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- PILOT (ADR-0037): wake on silent content-available doorbells. Inert
+	     without APNs entitlements + GoogleService-Info.plist (operator-owned,
+	     never committed) — see tool/PUSH_SMOKE.md. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

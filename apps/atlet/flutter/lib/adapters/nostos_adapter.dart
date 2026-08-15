@@ -57,6 +57,11 @@ class NostosAdapter implements SyncAdapter {
   /// stamping is off — `products` is a global table on the same connection).
   String? _userId;
 
+  /// Access token the live session was opened with. Kept only for the push
+  /// pilot's background-isolate wake (see push/push_pilot.dart); cleared in
+  /// signOut with everything else.
+  String? _accessToken;
+
   /// True only between the end of a successful init() and signOut().
   /// setConnected() no-ops outside that window — see its comment.
   bool _ready = false;
@@ -69,6 +74,7 @@ class NostosAdapter implements SyncAdapter {
     required String dbDir,
   }) async {
     _userId = userId;
+    _accessToken = accessToken;
     _sessionsController = StreamController<List<SessionRow>>.broadcast();
     _productsController = StreamController<List<ProductRow>>.broadcast();
     _cartController = StreamController<List<CartItemRow>>.broadcast();
@@ -103,8 +109,7 @@ class NostosAdapter implements SyncAdapter {
 
     // Typed collection handles (ADR-0032 T2): the taught surface for "table,
     // maybe filter, maybe order" reads. Injection-safe by construction.
-    final sessions = db.collection<SessionRow>(
-        table: 'sessions', fromRow: sessionFromRow);
+    // (No sessions handle — its sort needs watchSql, see below.)
     final products = db.collection<ProductRow>(
         table: 'products', fromRow: productFromRow);
     final cartItems = db.collection<CartItemRow>(
@@ -274,6 +279,7 @@ class NostosAdapter implements SyncAdapter {
 
     await _db?.signOut(); // ADR-0029: full local wipe + client teardown
     _db = null;
+    _accessToken = null;
 
     await _sessionsController?.close();
     await _productsController?.close();
@@ -299,6 +305,17 @@ class NostosAdapter implements SyncAdapter {
 
   NostosDatabase _requireDb() =>
       _db ?? (throw StateError('NostosAdapter.init() must be called first'));
+
+  /// PILOT (ADR-0037): register this device's push token against the live
+  /// engine's REST surface (`POST /push-tokens`, same JWT as `/sync`).
+  /// Passthrough so callers never hold the SDK directly; the SDK's sign-out
+  /// hook deregisters session-registered tokens automatically.
+  Future<void> registerPushToken(String platform, String token) =>
+      _requireDb().registerPushToken(platform, token);
+
+  /// PILOT (ADR-0037): the access token the live session was opened with —
+  /// what the push pilot persists for its background-isolate wake.
+  String? get currentAccessToken => _accessToken;
 
   Stream<T> _requireController<T>(StreamController<T>? c, String what) =>
       (c ?? (throw StateError('NostosAdapter: $what'))).stream;
