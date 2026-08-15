@@ -251,6 +251,14 @@ void main() {
       final countBefore = requests.length;
       await db.signOut();
       expect(requests.length, countBefore);
+
+      // L1: the seed token died with the session — a post-signOut REST call
+      // carries NO Authorization header (never the previous principal's).
+      await db.deregisterPushToken('tok-c');
+      final post = requests.last;
+      expect(post.method, 'DELETE');
+      expect(post.path, '/push-tokens/tok-c');
+      expect(post.headers.containsKey('authorization'), isFalse);
       await server.close();
     },
   );

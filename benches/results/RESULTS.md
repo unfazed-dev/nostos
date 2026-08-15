@@ -60,3 +60,28 @@ PowerSync publishes no comparable aggregate fan-out figure. Its published rates 
 **Why retired:** the 2,000–4,000 ops/sec figure is PowerSync's **replication-ingest** rate (Postgres → PowerSync Service — a different pipeline stage), not a fan-out or aggregate multi-client figure. PowerSync's fan-out-direction metric (Service → Client) is published as 2,000–20,000 ops/sec **per client**, not an aggregate across clients — PowerSync publishes no aggregate multi-client fan-out ceiling anywhere in its docs, blog, or benchmark repos. Dividing nostos's aggregate fan-out number by PowerSync's per-source ingest number compared two different stages of two different pipelines under the same "ops/sec" label. Verified against docs.powersync.com/resources/performance-and-limits (fetched 2026-08-06). Full verification: [`docs/plans/research-powersync-perf-verification-2026-08-06.md`](../../docs/plans/research-powersync-perf-verification-2026-08-06.md).
 
 **Current framing:** nostos reports 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops (eval-only) on its own terms, with PowerSync's ingest and per-client figures cited for context — no cross-stage multiple.
+
+## Push enqueue path (ADR-0037) — MEASURED 2026-08-15
+
+Same-stage comparison (fan-out loop, eval-only FakeReplicator on loopback,
+1,000 clients × 100,000 events, release lto=fat): quiet-machine pair with the
+push doorbell path attached (`NOSTOS_BENCH_PUSH=1` — bounded hint channel +
+`CountingNotifier` consumer, mirroring the op-log toggle methodology above):
+
+| Run | ops/sec | drop% | delivered |
+|---|---|---|---|
+| pre-push binary (`target/tmp/nostos-bench-before`) | 833,319 | 0.00% | 99,998,946 |
+| push-enabled binary | 833,308 | 0.00% | 99,997,598 |
+
+0.001% delta — statistically invisible, same band as the op-log toggle. Bench
+sessions are anonymous, so `push_hints=0`: the per-event hot-path cost is the
+per-candidate principal null-check only; the enqueue itself
+(`try_send` drop-on-full) is pinned by unit test
+(`full_push_channel_drops_and_counts_without_stalling_fanout` — 1,088 events,
+100% delivered against a stalled consumer). Contended-machine attempts the same
+day (load 21, simulator + xcodebuild) produced grace-aborted runs of
+112k–336k ops/sec **for both binaries** — invalid as measurements, recorded
+here so nobody cites them. Push rails (APNs/FCM/WebPush round-trips) are not
+exercised by this bench. Coalescing factor is E2E-pinned, not benched:
+100-event burst → exactly 1 push per offline account
+(`burst_to_offline_account_yields_exactly_one_push`).

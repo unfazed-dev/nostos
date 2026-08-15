@@ -1174,8 +1174,8 @@ static class _UniFFILib {
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token();
-            if (checksum != 61001) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token` checksum `61001`, library returned `{checksum}`");
+            if (checksum != 50310) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token` checksum `50310`, library returned `{checksum}`");
             }
         }
         {
@@ -1368,9 +1368,10 @@ internal interface INostosClient {
     /// automatically; call it directly when the app can no longer receive on
     /// the token (e.g. the user disables notifications).
     ///
-    /// ponytail: the token is interpolated into the path un-encoded — every
-    /// rail's tokens are URL-safe by construction (`[A-Za-z0-9_:-]`).
-    /// Percent-encode if a rail ever emits reserved characters.
+    /// The token rides the path percent-encoded as ONE segment
+    /// (`encode_path_segment`): a webpush token is the full
+    /// `pushSubscription` JSON and contains `/`, which would split the path
+    /// and 404 the DELETE.
     ///
     /// # Errors
     /// `NostosError` on any non-`204` reply.
@@ -1730,9 +1731,10 @@ internal class NostosClient : INostosClient, IDisposable {
     /// automatically; call it directly when the app can no longer receive on
     /// the token (e.g. the user disables notifications).
     ///
-    /// ponytail: the token is interpolated into the path un-encoded — every
-    /// rail's tokens are URL-safe by construction (`[A-Za-z0-9_:-]`).
-    /// Percent-encode if a rail ever emits reserved characters.
+    /// The token rides the path percent-encoded as ONE segment
+    /// (`encode_path_segment`): a webpush token is the full
+    /// `pushSubscription` JSON and contains `/`, which would split the path
+    /// and 404 the DELETE.
     ///
     /// # Errors
     /// `NostosError` on any non-`204` reply.

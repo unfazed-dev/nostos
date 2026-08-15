@@ -102,6 +102,8 @@ self.addEventListener("message", (event) => {
   const m = event.data || {};
   if (m.type === "nostos:simulate-push") {
     // Test hook: drives the SAME handler a real `push` event uses.
+    // Same-origin-trust by design: a page can only postMessage its own SW,
+    // and the e2e suite relies on this hook — no origin/attestation check.
     void handlePush(m.payload);
     return;
   }

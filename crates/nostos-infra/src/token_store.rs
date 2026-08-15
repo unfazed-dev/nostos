@@ -20,9 +20,12 @@
 //! Identity semantics: the token is the primary key (one token = one device =
 //! one current account), so re-registering a token under a different account
 //! MIGRATES the row — the previous principal stops being pushed on that
-//! device. This is the structural defense against the ADR's "leaked
-//! registration pushes the previous principal's data to the next user"
-//! footgun; SDK sign-out deregistration (task 4.1) is the belt-and-braces.
+//! device — but only within one tenant: the conflict update is gated on the
+//! existing row's tenant (M2), so a cross-tenant re-register keeps the
+//! existing row. Within a tenant this is the structural defense against the
+//! ADR's "leaked registration pushes the previous principal's data to the
+//! next user" footgun; SDK sign-out deregistration (task 4.1) is the
+//! belt-and-braces.
 //!
 //! ## SQL discipline (ADR-0013)
 //!
@@ -109,9 +112,18 @@ impl PgTokenStore {
         *guard = None;
     }
 
-    /// Register (or re-register) a device token for an account. Idempotent;
-    /// a token re-registered under a different account migrates the row (see
-    /// the module's identity-semantics note).
+    /// Register (or re-register) a device token for an account. Idempotent.
+    ///
+    /// Identity semantics (M2): the token is the primary key, so a token
+    /// re-registered under a different account MIGRATES the row (the
+    /// previous principal stops being pushed on that device) — but only
+    /// WITHIN one tenant: the conflict update is gated on the existing
+    /// row's tenant matching the registrant's. A cross-tenant conflict
+    /// (another tenant's account — same or different account id —
+    /// re-registering the token) is a silent no-op keep-existing: a
+    /// registration can never drag a token, and its pushes, across the
+    /// tenant boundary (ADR-0018). Returns `Ok(())` in both cases — the
+    /// registrant learns nothing about another tenant's row.
     ///
     /// # Errors
     /// [`TokenStoreError`] if the Postgres round-trip fails.
@@ -129,7 +141,8 @@ impl PgTokenStore {
                 platform = EXCLUDED.platform, \
                 account_id = EXCLUDED.account_id, \
                 tenant_id = EXCLUDED.tenant_id, \
-                updated_at = now()";
+                updated_at = now() \
+            WHERE cairn_push_tokens.tenant_id = EXCLUDED.tenant_id";
         let client = self.client().await?;
         let params: [&(dyn tokio_postgres::types::ToSql + Sync); 4] =
             [&token, &platform, &account_id, &tenant_id];
@@ -202,6 +215,38 @@ impl PgTokenStore {
                 token: row.get(1),
             })
             .collect())
+    }
+
+    /// Distinct tokens registered to one `(tenant, account)` — the REST
+    /// surface's per-account cap count (L3). Same tenant filter discipline
+    /// as [`Self::list_by_account`].
+    ///
+    /// # Errors
+    /// [`TokenStoreError`] if the Postgres round-trip fails.
+    pub async fn count_for_account(
+        &self,
+        tenant_id: &str,
+        account_id: &str,
+    ) -> Result<u64, TokenStoreError> {
+        let client = self.client().await?;
+        match client
+            .query_one(
+                "SELECT count(*) FROM cairn_push_tokens \
+                 WHERE tenant_id = $1 AND account_id = $2",
+                &[&tenant_id, &account_id],
+            )
+            .await
+        {
+            Ok(row) => {
+                self.return_client(client).await;
+                let n: i64 = row.get(0);
+                Ok(u64::try_from(n).expect("count(*) is never negative"))
+            }
+            Err(e) => {
+                self.drop_client().await;
+                Err(TokenStoreError(e.to_string()))
+            }
+        }
     }
 
     /// Every token registered within one tenant, with its account — the
@@ -335,6 +380,12 @@ impl crate::push::router::PushTokenRegistry for PgTokenStore {
         tenant_id: &str,
     ) -> Result<Vec<crate::push::router::RegisteredToken>, String> {
         PgTokenStore::list_by_tenant(self, tenant_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn count_for_account(&self, tenant_id: &str, account_id: &str) -> Result<u64, String> {
+        PgTokenStore::count_for_account(self, tenant_id, account_id)
             .await
             .map_err(|e| e.to_string())
     }

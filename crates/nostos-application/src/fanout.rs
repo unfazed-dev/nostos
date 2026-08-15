@@ -338,6 +338,13 @@ impl FanOutService {
                 _ => None,
             };
             for (account, tenant) in &push_accounts {
+                // ponytail (L4): presence is keyed by bare account id — an
+                // account id colliding across tenants suppresses the other
+                // tenant's doorbell too. Over-suppression ONLY (a missed
+                // push loses nothing; the durable LSN checkpoint is the
+                // correctness mechanism), so the ceiling is cosmetic.
+                // Upgrade = re-key `account_online` to (tenant, account)
+                // here and in the push router's send-time re-check.
                 if self.store.account_online(account).await {
                     continue;
                 }
@@ -376,6 +383,13 @@ impl FanOutService {
                 // scan) when a deploy shows that gap matters.
                 let mut tenants: Vec<String> = Vec::new();
                 if let Some(col) = &self.push_tables.tenant_column {
+                    // INVARIANT: push's tenant column must be the SAME column
+                    // the write path force-stamps (write_back.rs's
+                    // `stamp_tenant_column`, ADR-0018) — the hint targets the
+                    // tenant the WRITER authenticated as, never a
+                    // client-attested value. A deploy pointing
+                    // NOSTOS_TENANT_COLUMN here at a non-stamped column makes
+                    // tenant-wide hints follow untrusted row data.
                     if let Some(ColumnValue::Text(t)) = column_extractor(event, col) {
                         tenants.push(t);
                     }

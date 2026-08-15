@@ -4,8 +4,9 @@
 //! mirroring the `PgWriteBack` increment/OR-set tests in
 //! `e2e_pg_writeback.rs`): upsert / prune / list-by-account round-trip, the
 //! ADR's identity semantics (a token re-registered under a different account
-//! MIGRATES — the previous principal must resolve to zero devices), and
-//! tenant isolation of the account lookup.
+//! MIGRATES — the previous principal must resolve to zero devices), tenant
+//! isolation of the account lookup, and the cross-tenant conflict gate (a
+//! re-register from another tenant NEVER migrates the row).
 //!
 //! Parallel-safe by construction: the DDL runs once per process (three
 //! concurrent `CREATE TABLE IF NOT EXISTS` race on `pg_type`), and each test
@@ -192,6 +193,80 @@ async fn re_registration_migrates_token_to_new_account() {
     assert_eq!(next[0].token, "mig-shared");
 
     clean_tokens(&["mig-shared"]).await;
+}
+
+/// M2: a cross-tenant re-registration NEVER migrates the row — the conflict
+/// update is gated on the existing row's tenant. Both shapes: another
+/// tenant's account re-registering the token, and the SAME account id under
+/// another tenant (tenant mismatch ⇒ keep either way). Contrast: a
+/// same-tenant re-register still migrates.
+#[tokio::test]
+async fn cross_tenant_re_registration_keeps_the_existing_row() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    ensure_table().await;
+    clean_tokens(&["x-tenant-tok"]).await;
+    let store = PgTokenStore::new(&pg_url());
+
+    store
+        .upsert("apns", "x-tenant-tok", "x-acct-1", "x-tenant-a")
+        .await
+        .expect("tenant-a registration");
+
+    // Another tenant's account re-registers the same token: a silent no-op.
+    store
+        .upsert("fcm", "x-tenant-tok", "x-acct-2", "x-tenant-b")
+        .await
+        .expect("cross-tenant re-register must not error");
+    let rows = store
+        .list_by_tenant("x-tenant-a")
+        .await
+        .expect("tenant-a lookup");
+    assert_eq!(rows.len(), 1, "the row must stay in tenant-a");
+    assert_eq!(rows[0].account_id, "x-acct-1");
+    assert_eq!(
+        rows[0].platform, "apns",
+        "the losing registration must not even touch platform"
+    );
+    assert!(
+        store.list_by_tenant("x-tenant-b").await.unwrap().is_empty(),
+        "tenant-b must gain nothing"
+    );
+
+    // Same account id, other tenant: same rule (tenant mismatch ⇒ keep).
+    store
+        .upsert("fcm", "x-tenant-tok", "x-acct-1", "x-tenant-b")
+        .await
+        .expect("same-account cross-tenant re-register");
+    let rows = store.list_by_tenant("x-tenant-a").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tenant_id, "x-tenant-a");
+
+    // Contrast: a SAME-tenant re-register still migrates the row.
+    store
+        .upsert("fcm", "x-tenant-tok", "x-acct-3", "x-tenant-a")
+        .await
+        .expect("same-tenant re-register migrates");
+    assert!(
+        store
+            .list_by_account("x-tenant-a", "x-acct-1")
+            .await
+            .unwrap()
+            .is_empty(),
+        "same-tenant migration still applies"
+    );
+    assert_eq!(
+        store
+            .list_by_account("x-tenant-a", "x-acct-3")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    clean_tokens(&["x-tenant-tok"]).await;
 }
 
 /// The account lookup is tenant-isolated (ADR-0018): the same account id

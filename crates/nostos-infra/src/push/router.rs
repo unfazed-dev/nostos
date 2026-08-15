@@ -85,7 +85,8 @@ pub struct RegisteredToken {
 /// The token-registry seam (ADR-0037 §3). `PgTokenStore` (feature `pg`) is
 /// the production implementation; [`InMemoryTokenRegistry`] serves the
 /// non-pg/fake dev path and the tests. Upsert semantics migrate a
-/// re-registered token to its new owner (see `token_store.rs`).
+/// re-registered token to its new owner within one tenant; a cross-tenant
+/// conflict keeps the existing row (see `token_store.rs`).
 #[async_trait]
 pub trait PushTokenRegistry: Send + Sync {
     /// Register (or re-register) a device token for `(account, tenant)`.
@@ -131,6 +132,14 @@ pub trait PushTokenRegistry: Send + Sync {
         account_id: &str,
     ) -> Result<Vec<RegisteredToken>, String>;
 
+    /// Distinct tokens registered to one `(tenant, account)` — the REST
+    /// surface's per-account cap count (L3). Cheaper than
+    /// [`Self::list_by_account`] when the rows themselves aren't needed.
+    ///
+    /// # Errors
+    /// `Err` on a backend failure.
+    async fn count_for_account(&self, tenant_id: &str, account_id: &str) -> Result<u64, String>;
+
     /// Every token registered within one tenant, with its account — the
     /// tenant-wide expansion lookup (ADR-0037 §1 amendment).
     ///
@@ -141,7 +150,9 @@ pub trait PushTokenRegistry: Send + Sync {
 
 /// In-memory [`PushTokenRegistry`] — the fake-replicator / no-`pg` dev path
 /// and the test double. Same identity semantics as `PgTokenStore`: the token
-/// is the key, so re-registration under a different account migrates the row.
+/// is the key, so re-registration under a different account migrates the row
+/// — within one tenant; a cross-tenant conflict keeps the existing row (M2,
+/// see `token_store.rs`).
 #[derive(Default)]
 pub struct InMemoryTokenRegistry {
     rows: std::sync::Mutex<HashMap<String, RegisteredToken>>,
@@ -163,7 +174,13 @@ impl PushTokenRegistry for InMemoryTokenRegistry {
         account_id: &str,
         tenant_id: &str,
     ) -> Result<(), String> {
-        self.rows.lock().expect("registry").insert(
+        let mut rows = self.rows.lock().expect("registry");
+        // M2: a cross-tenant conflict keeps the existing row (the Pg twin's
+        // `WHERE tenant_id = EXCLUDED.tenant_id` gate).
+        if rows.get(token).is_some_and(|r| r.tenant_id != tenant_id) {
+            return Ok(());
+        }
+        rows.insert(
             token.to_string(),
             RegisteredToken {
                 tenant_id: tenant_id.to_string(),
@@ -210,6 +227,17 @@ impl PushTokenRegistry for InMemoryTokenRegistry {
             .filter(|r| r.tenant_id == tenant_id && r.account_id == account_id)
             .cloned()
             .collect())
+    }
+
+    async fn count_for_account(&self, tenant_id: &str, account_id: &str) -> Result<u64, String> {
+        let n = self
+            .rows
+            .lock()
+            .expect("registry")
+            .values()
+            .filter(|r| r.tenant_id == tenant_id && r.account_id == account_id)
+            .count();
+        Ok(u64::try_from(n).expect("usize count fits u64"))
     }
 
     async fn list_by_tenant(&self, tenant_id: &str) -> Result<Vec<RegisteredToken>, String> {
@@ -542,6 +570,11 @@ async fn flush(
         // enqueue-race window and suppresses expansion hits that came online
         // during the window. Store membership is presence; `Dropped` sinks
         // are still online.
+        // ponytail (L4): keyed by bare account id — a cross-tenant account-id
+        // collision over-suppresses the other tenant's doorbell. Harmless
+        // (missed pushes lose nothing; the LSN checkpoint is correctness).
+        // Upgrade = re-key `account_online` to (tenant, account) together
+        // with the enqueue-time check in the fan-out.
         if store.account_online(&key.1).await {
             continue;
         }

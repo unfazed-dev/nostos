@@ -63,6 +63,10 @@ const PLATFORMS: [&str; 4] = ["fcm", "apns", "webpush", "apns-liveactivity"];
 /// chars, FCM ~152, a Web Push subscription endpoint a URL; anything past
 /// this is garbage, not a token.
 const MAX_TOKEN_LEN: usize = 2048;
+/// Cap on distinct tokens per `(tenant, account)` (L3): registration is
+/// unauthenticated in effect (any registered principal), so without a cap an
+/// account can balloon the table (and its own fan-out list) without bound.
+const MAX_TOKENS_PER_ACCOUNT: u64 = 20;
 
 fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({ "error": message.into() })))
@@ -156,7 +160,49 @@ pub async fn post_push_token(
         ));
     }
 
-    // 5. Server-side stamping (ADR-0018): the principal's own account and
+    // 5. Per-account cap (L3): at most MAX_TOKENS_PER_ACCOUNT distinct tokens
+    //    per (tenant, account). An exact re-registration never counts as new
+    //    — token refreshes (every app relaunch re-registers) must keep
+    //    working at the cap, so at the cap only a token the account already
+    //    owns may re-upsert.
+    //    ponytail: check-then-upsert races under concurrent POSTs — worst
+    //    case a few rows over cap for one account, never unbounded; enforce
+    //    inside the upsert (trigger/advisory lock) if a tenant ever cares.
+    let count = state
+        .registry
+        .count_for_account(&tenant_id, &account_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "push-token count failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token registry unavailable",
+            )
+        })?;
+    if count >= MAX_TOKENS_PER_ACCOUNT {
+        let owned = state
+            .registry
+            .list_by_account(&tenant_id, &account_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "push-token ownership lookup failed");
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "token registry unavailable",
+                )
+            })?;
+        if !owned.iter().any(|t| t.token == token) {
+            return Err(err(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "push-token limit reached: at most {MAX_TOKENS_PER_ACCOUNT} tokens per \
+                     account — deregister a device before registering another"
+                ),
+            ));
+        }
+    }
+
+    // 6. Server-side stamping (ADR-0018): the principal's own account and
     // tenant — computed in `authenticate`, never read from the body.
     state
         .registry
@@ -340,6 +386,55 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].platform, "apns");
         assert_eq!(rows[0].token, "dev-9");
+    }
+
+    /// L3: the 21st DISTINCT token per (tenant, account) is a 429 with a
+    /// clear message; an exact re-registration at the cap still succeeds
+    /// (token refreshes must never strand a device at the cap).
+    #[tokio::test]
+    async fn twenty_first_distinct_token_is_429_but_re_registration_is_allowed() {
+        let (state, registry) = authed_state_with();
+        for i in 0..20 {
+            post_push_token(
+                State(state.clone()),
+                headers_with_bearer(),
+                body(&serde_json::json!({"platform":"fcm","token":format!("dev-{i}")})),
+            )
+            .await
+            .expect("the first 20 register");
+        }
+
+        // The 21st distinct token: 429 + a message that names the limit.
+        let res = post_push_token(
+            State(state.clone()),
+            headers_with_bearer(),
+            body(&serde_json::json!({"platform":"fcm","token":"dev-extra"})),
+        )
+        .await;
+        let (status, Json(message)) = res.unwrap_err();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            message["error"].as_str().unwrap().contains("limit reached"),
+            "the message must name the limit, got: {message}"
+        );
+        assert_eq!(
+            registry.count_for_account("t1", "u1").await.unwrap(),
+            20,
+            "the refused POST registered nothing"
+        );
+
+        // At the cap, re-registering an OWNED token still succeeds.
+        let res = post_push_token(
+            State(state.clone()),
+            headers_with_bearer(),
+            body(&serde_json::json!({"platform":"apns","token":"dev-7"})),
+        )
+        .await;
+        assert_eq!(
+            res.expect("re-registration at the cap"),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(registry.count_for_account("t1", "u1").await.unwrap(), 20);
     }
 
     /// ActivityKit tokens register through the SAME route under the

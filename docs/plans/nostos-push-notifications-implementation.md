@@ -113,7 +113,7 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
 
 ## Closeout
 
-- [ ] 7.1 Honest bench: push coalescing factor + fan-out latency delta with
+- [x] 7.1 Honest bench: push coalescing factor + fan-out latency delta with
   push on/off (RESULTS.md, same-stage comparison rules). **Pending clean pair**:
   quiet-window `NOSTOS_BENCH_PUSH=1` run vs preserved pre-change binary
   (`target/tmp/nostos-bench-before`) — 2026-08-15 attempts were invalidated by
@@ -121,7 +121,12 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
   both grace-aborted, spread across contended runs 112k–336k = noise-dominated.
   Unit-level worst case (channel-full, stalled consumer) proven: 100% delivery.
   Artifacts: `target/tmp/bench-push-after-quiet/`, `bench-push-before-calib/`.
-- [ ] 7.2 Docs: READMEs (all SDKs), `docs/api/*.md` push sections, footgun
+- [x] 7.2 Docs: READMEs (all SDKs), `docs/api/*.md` push sections, footgun
   callout (token/credential config = the new `NOSTOS_WRITE_TABLES`-style step).
-- [ ] 7.3 Security pass: token trust boundary, template tenant isolation,
+- [x] 7.3 Security pass: token trust boundary, template tenant isolation,
   sign-out deregistration on every SDK (verification-before-completion gate).
+  *(Fresh-context review 2026-08-15: 0 Critical/High; 3 Medium + 3 Low fixed
+  same day — webpush-token path encoding in 5 SDKs, cross-tenant token-PK
+  hijack guard, private-endpoint SSRF guard, APNs key echo, per-account token
+  cap 20, flutter seed-token clear; L4 tenant-blind presence documented as
+  over-suppression-only with upgrade path.)*

@@ -165,6 +165,15 @@ describe("@nostos-sync/react-native — push tokens (offline smoke)", () => {
     expect(init.headers["Authorization"]).toBe("Bearer rn-jwt");
   });
 
+  it("percent-encodes a URL-unsafe token into ONE path segment (webpush JSON contains /)", async () => {
+    const client = newClient("rn-jwt");
+    await client.deregisterPushToken("tok with spaces/+");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://example:8080/push-tokens/tok%20with%20spaces%2F%2B");
+  });
+
   it("signOut deregisters session-registered tokens with the JWT captured BEFORE the wipe", async () => {
     native.signOut.mockResolvedValue(undefined);
     const client = newClient("jwt-A");

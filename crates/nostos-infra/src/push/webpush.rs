@@ -14,9 +14,10 @@
 //!   at most 32 base64url characters, dropped with a warning if longer).
 //! - The registry token for this rail is the browser `pushSubscription`
 //!   JSON (`{endpoint, keys: {p256dh, auth}}`).
-//! - The endpoint must be `https://` — tokens are client-registered and
-//!   untrusted, so this is the SSRF guard on the one URL nostos does not
-//!   construct itself.
+//! - The endpoint must be `https://` AND must not resolve to a
+//!   loopback/private/link-local/unique-local address — tokens are
+//!   client-registered and untrusted, so these two checks are the SSRF
+//!   guard on the one URL nostos does not construct itself (M3).
 //! - 404/410 → [`RailOutcome::Unregistered`] (prune trigger); 429/5xx →
 //!   retryable.
 
@@ -117,11 +118,25 @@ impl WebPushRail {
             Err(e) => return RailOutcome::Fatal(format!("webpush subscription json: {e}")),
         };
         let endpoint_ok = sub.endpoint.starts_with("https://");
-        // Test-only escape for the plain-HTTP fixture server (see field doc).
+        // Test-only escape for the plain-HTTP fixture server (see field
+        // doc). The fixture binds loopback over plain HTTP, so this skips
+        // BOTH the https guard and the private-target SSRF guard.
         #[cfg(test)]
-        let endpoint_ok = endpoint_ok || self.allow_http_endpoints;
-        if !endpoint_ok {
+        let fixture_override = self.allow_http_endpoints;
+        #[cfg(not(test))]
+        let fixture_override = false;
+        if !endpoint_ok && !fixture_override {
             return RailOutcome::Fatal("webpush endpoint must be https".into());
+        }
+        // M3 SSRF guard: the `https://` check alone still lets a client-
+        // registered subscription point the server at internal services —
+        // resolve the host and refuse loopback/private/link-local/
+        // unique-local targets before any request leaves. Fails closed
+        // (an unresolvable host is refused too).
+        if !fixture_override {
+            if let Err(reason) = endpoint_target_allowed(&sub.endpoint).await {
+                return RailOutcome::Fatal(reason);
+            }
         }
         let info = SubscriptionInfo {
             endpoint: sub.endpoint,
@@ -226,6 +241,73 @@ fn b64url_no_pad(s: &str) -> String {
         })
         .filter(|c| *c != '=')
         .collect()
+}
+
+/// M3 SSRF guard: resolve `endpoint`'s host and refuse it when ANY resolved
+/// address is loopback / private / link-local / unique-local (IPv4 + IPv6,
+/// IPv4-mapped IPv6 included). The token is client-registered, so a
+/// subscription could otherwise point the server at internal services even
+/// over `https://`. Fails closed — a host that cannot be resolved is refused
+/// too. ponytail: resolve-then-check, not resolve-then-pin — a rebinding DNS
+/// answer could still race the connect; pin the resolved IP on reqwest if a
+/// threat model ever demands it.
+async fn endpoint_target_allowed(endpoint: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(endpoint).map_err(|e| format!("webpush endpoint url: {e}"))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    let Some(host) = url.host_str() else {
+        return Err("webpush endpoint has no host".into());
+    };
+    // `host_str` returns IPv6 literals bracketed (`[::1]`) — strip to parse.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let ips: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse() {
+        vec![ip]
+    } else {
+        match tokio::net::lookup_host((host, port)).await {
+            Ok(resolved) => resolved.map(|sa| sa.ip()).collect(),
+            Err(e) => {
+                return Err(format!(
+                    "webpush endpoint host {host:?} cannot be resolved ({e}); refusing"
+                ));
+            }
+        }
+    };
+    if ips.is_empty() {
+        return Err(format!(
+            "webpush endpoint host {host:?} resolves to nothing; refusing"
+        ));
+    }
+    for ip in ips {
+        if is_private_target(ip) {
+            return Err(format!(
+                "webpush endpoint resolves to a refused address ({ip}); refusing"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The refused ranges (M3): loopback, private, link-local, unique-local, and
+/// the unspecified/broadcast extremes — all std predicates, no new deps.
+fn is_private_target(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4_refused(v4),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_unspecified()
+                // IPv4-mapped (::ffff:a.b.c.d) inherits the IPv4 verdict.
+                || v6.to_ipv4_mapped().is_some_and(v4_refused)
+        }
+    }
+}
+
+fn v4_refused(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
 }
 
 /// RFC 8030 §5.4: Topic is at most 32 base64url characters.
@@ -436,6 +518,47 @@ mod tests {
         let outcome = rail.send(&sub, None, &silent()).await;
         assert!(matches!(outcome, RailOutcome::Fatal(_)));
         assert!(mock.requests().is_empty(), "must not hit the network");
+    }
+
+    /// M3: an `https://` endpoint on a loopback/private target must be
+    /// refused WITHOUT a request — the https guard passes, the private-target
+    /// guard is what stops the internal SSRF. Covers the IP-literal shape
+    /// (v4 + v6) and the unique-local v6 range.
+    #[tokio::test]
+    async fn webpush_private_https_endpoint_refused_without_a_request() {
+        let (key_b64, _) = vapid_key();
+        let rail = WebPushRail::new(&key_b64, "mailto:ops@example.com").expect("rail");
+        let mock = ProviderMock::start(HashMap::new()).await;
+        // Same loopback authority the fixture serves on, but https://.
+        let endpoint = mock.url("/push/abc").replacen("http", "https", 1);
+        for endpoint in [
+            endpoint,
+            "https://10.1.2.3/push/abc".to_string(),
+            "https://192.168.0.1/push/abc".to_string(),
+            "https://[::1]/push/abc".to_string(),
+            "https://[fc00::9]/push/abc".to_string(),
+        ] {
+            let sub = subscription_json(&endpoint);
+            let outcome = rail.send(&sub, None, &silent()).await;
+            assert!(
+                matches!(outcome, RailOutcome::Fatal(_)),
+                "{endpoint} must be refused"
+            );
+        }
+        assert!(mock.requests().is_empty(), "must not hit the network");
+    }
+
+    /// M3: a `localhost` hostname (resolved, not an IP literal) is refused
+    /// after resolution — the guard must not trust a name just because it is
+    /// not dotted-quad. Fails closed either way: even on a resolver that
+    /// cannot resolve `localhost`, the send is Fatal, never attempted.
+    #[tokio::test]
+    async fn webpush_localhost_name_endpoint_refused_after_resolution() {
+        let (key_b64, _) = vapid_key();
+        let rail = WebPushRail::new(&key_b64, "mailto:ops@example.com").expect("rail");
+        let sub = subscription_json("https://localhost:9/push/abc");
+        let outcome = rail.send(&sub, None, &silent()).await;
+        assert!(matches!(outcome, RailOutcome::Fatal(_)));
     }
 
     #[tokio::test]

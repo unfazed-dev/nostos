@@ -425,9 +425,10 @@ export class NostosClient {
    * call it directly when the app can no longer receive on the token.
    */
   async deregisterPushToken(token: string): Promise<void> {
-    // ponytail: the token is interpolated into the path un-encoded — every
-    // rail's tokens are URL-safe by construction (`[A-Za-z0-9_:-]`). Percent-
-    // encode if a rail ever emits reserved characters (node does the same).
+    // The token rides the path percent-encoded as ONE segment: a webpush
+    // token is the full pushSubscription JSON and contains `/`, which
+    // un-encoded would split the path and 404 the DELETE (M1). The server's
+    // Path extractor decodes it back verbatim.
     await this.deregisterPushTokenHttp(this.config.token, token);
     this.registeredPushTokens.delete(token);
   }
@@ -442,7 +443,7 @@ export class NostosClient {
     token: string,
   ): Promise<void> {
     const response = await this.pushFetch(
-      this.pushEndpoint(`/push-tokens/${token}`),
+      this.pushEndpoint(`/push-tokens/${encodeURIComponent(token)}`),
       { method: "DELETE", headers: this.bearerHeaders(auth, {}) },
     "deregister",
     );

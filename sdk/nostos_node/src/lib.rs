@@ -556,9 +556,10 @@ impl NostosClient {
     /// automatically; call it directly when the app can no longer receive on
     /// the token.
     ///
-    /// ponytail: the token is interpolated into the path un-encoded — every
-    /// rail's tokens are URL-safe by construction (`[A-Za-z0-9_:-]`).
-    /// Percent-encode if a rail ever emits reserved characters.
+    /// The token rides the path percent-encoded as ONE segment
+    /// ([`encode_path_segment`]): a webpush token is the full
+    /// `pushSubscription` JSON and contains `/`, which would split the path
+    /// and 404 the DELETE.
     #[napi]
     pub async fn deregister_push_token(&self, token: String) -> napi::Result<()> {
         let auth = self.token.lock().expect("token lock poisoned").clone();
@@ -578,17 +579,20 @@ impl NostosClient {
         auth: Option<&str>,
         token: &str,
     ) -> napi::Result<()> {
-        let mut request = reqwest::Client::new()
-            .delete(format!("{}/push-tokens/{token}", http_base(ws_url)));
+        let mut request = reqwest::Client::new().delete(format!(
+            "{}/push-tokens/{}",
+            http_base(ws_url),
+            encode_path_segment(token)
+        ));
         if let Some(jwt) = auth {
             request = request.bearer_auth(jwt);
         }
-        let response = request.send().await.map_err(|e| {
-            napi::Error::from_reason(format!("push-token deregister failed: {e}"))
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("push-token deregister failed: {e}")))?;
         expect_204(response, "deregister").await
     }
-
 
     /// outbox (so the next principal sees nothing of this one), and clear the
     /// cached token. Implements ADR-0029.
@@ -609,7 +613,11 @@ impl NostosClient {
     pub async fn sign_out(&self) -> napi::Result<()> {
         // ADR-0037 §3: the sign-out deregistration needs the JWT from BEFORE
         // step (4) clears it — capture both now.
-        let auth = self.token.lock().expect("sign_out: token lock poisoned").clone();
+        let auth = self
+            .token
+            .lock()
+            .expect("sign_out: token lock poisoned")
+            .clone();
         let mut guard = self.session.lock().await;
         // Take the session out so its client is dropped only AFTER the wipe; the
         // guard holds `None` for the duration, so concurrent write()/query()
@@ -705,6 +713,30 @@ fn http_base(ws_url: &str) -> String {
         }
         None => ws_url.to_owned(),
     }
+}
+
+/// Percent-encode a push token as ONE path segment: every byte outside RFC
+/// 3986's unreserved set (`A-Za-z0-9-._~`) becomes `%XX`. A webpush token is
+/// the full `pushSubscription` JSON — it contains `/`, which un-encoded
+/// splits the path and 404s the DELETE (M1). Hand-rolled: this standalone
+/// workspace has no `percent-encoding` dep and the path-safe subset is this
+/// small; the server's `Path` extractor decodes it back verbatim.
+fn encode_path_segment(token: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(token.len());
+    for &b in token.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0x0F)]));
+            }
+        }
+    }
+    out
 }
 
 /// Enforce the pinned push-token contract (ADR-0037 §3): success is exactly
@@ -982,25 +1014,23 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
             for _ in 0..count {
-                let Ok((mut stream, _)) = listener.accept() else { break };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
                 let mut raw = Vec::<u8>::new();
                 let mut buf = [0u8; 4096];
                 // Read until the headers end AND any Content-Length body is
                 // fully received — one complete HTTP/1.1 request.
                 loop {
-                    let complete = raw
-                        .windows(4)
-                        .position(|w| w == b"\r\n\r\n")
-                        .map(|pos| {
-                            let headers =
-                                String::from_utf8_lossy(&raw[..pos]).to_ascii_lowercase();
-                            let len: usize = headers
-                                .lines()
-                                .find_map(|l| l.strip_prefix("content-length:"))
-                                .and_then(|v| v.trim().parse().ok())
-                                .unwrap_or(0);
-                            raw.len() >= pos + 4 + len
-                        });
+                    let complete = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|pos| {
+                        let headers = String::from_utf8_lossy(&raw[..pos]).to_ascii_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        raw.len() >= pos + 4 + len
+                    });
                     if complete == Some(true) {
                         break;
                     }
@@ -1038,10 +1068,7 @@ mod tests {
     /// (ADR-0018 discipline).
     #[test]
     fn register_push_token_posts_exact_json_with_bearer() {
-        let (authority, rx) = spawn_capture_server(
-            1,
-            reply("HTTP/1.1 204 No Content", ""),
-        );
+        let (authority, rx) = spawn_capture_server(1, reply("HTTP/1.1 204 No Content", ""));
         let client = push_client(&authority, Some("node-jwt"));
         client
             .rt
@@ -1072,10 +1099,7 @@ mod tests {
     /// with the same auth (register first so the happy path is also real).
     #[test]
     fn deregister_push_token_deletes_the_token_path() {
-        let (authority, rx) = spawn_capture_server(
-            2,
-            reply("HTTP/1.1 204 No Content", ""),
-        );
+        let (authority, rx) = spawn_capture_server(2, reply("HTTP/1.1 204 No Content", ""));
         let client = push_client(&authority, Some("node-jwt"));
         client
             .rt
@@ -1093,8 +1117,29 @@ mod tests {
             "expected DELETE /push-tokens/tok-1, got: {raw}"
         );
         assert!(
-            raw.to_ascii_lowercase().contains("authorization: bearer node-jwt"),
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer node-jwt"),
             "expected the sync token as Bearer, got: {raw}"
+        );
+    }
+
+    /// M1: a token containing reserved characters — a webpush token IS the
+    /// full `pushSubscription` JSON, so it contains `/` — must ride the path
+    /// percent-encoded as ONE segment; un-encoded it splits the path and the
+    /// DELETE 404s (mirrors the Flutter `push_token_test.dart` pin).
+    #[test]
+    fn deregister_push_token_percent_encodes_url_unsafe_token() {
+        let (authority, rx) = spawn_capture_server(1, reply("HTTP/1.1 204 No Content", ""));
+        let client = push_client(&authority, Some("node-jwt"));
+        client
+            .rt
+            .block_on(client.deregister_push_token("tok with spaces/+".into()))
+            .expect("deregister should succeed on 204");
+
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("DELETE");
+        assert!(
+            raw.starts_with("DELETE /push-tokens/tok%20with%20spaces%2F%2B HTTP/1.1"),
+            "expected the token percent-encoded as one path segment, got: {raw}"
         );
     }
 
@@ -1142,10 +1187,7 @@ mod tests {
     /// (step 4) — this test pins that ordering.
     #[test]
     fn sign_out_deregisters_session_registered_tokens() {
-        let (authority, rx) = spawn_capture_server(
-            2,
-            reply("HTTP/1.1 204 No Content", ""),
-        );
+        let (authority, rx) = spawn_capture_server(2, reply("HTTP/1.1 204 No Content", ""));
         let client = push_client(&authority, Some("node-jwt"));
         client
             .rt
@@ -1160,7 +1202,8 @@ mod tests {
             "signOut should deregister the session token, got: {raw}"
         );
         assert!(
-            raw.to_ascii_lowercase().contains("authorization: bearer node-jwt"),
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer node-jwt"),
             "the deregister must use the pre-clear JWT, got: {raw}"
         );
     }

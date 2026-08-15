@@ -111,8 +111,16 @@ impl ApnsRail {
         let pem = if p8.contains("-----BEGIN") {
             p8
         } else {
-            std::fs::read_to_string(&p8)
-                .map_err(|e| PushRailError(format!("NOSTOS_APNS_KEY_P8: cannot read {p8}: {e}")))?
+            std::fs::read_to_string(&p8).map_err(|e| {
+                // L2: never echo the value — a mis-pasted inline key without
+                // the PEM header lands here too, and the error must not
+                // repeat the secret. Length/presence only.
+                PushRailError(format!(
+                    "NOSTOS_APNS_KEY_P8: not a PEM (no -----BEGIN) and not a \
+                     readable path (value is {} chars): {e}",
+                    p8.len()
+                ))
+            })?
         };
         let sandbox = std::env::var("NOSTOS_APNS_SANDBOX").is_ok_and(|v| v == "1");
         Self::new(&pem, &key_id, &team_id, &bundle_id, sandbox).map(Some)

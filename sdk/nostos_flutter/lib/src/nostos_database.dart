@@ -72,8 +72,10 @@ class NostosDatabase {
   /// The explicit token passed to [connect], when auth wasn't Supabase. The
   /// push-token REST calls read this (or the live Supabase session, when
   /// [_supabaseAuth]) — the SAME credential source the sync connection uses;
-  /// there is no second path.
-  final String? _seedToken;
+  /// there is no second path. Mutable (L1): [signOut] clears it AFTER the
+  /// sign-out hooks run — the push-token deregistration hook needs the seed
+  /// to authorize its DELETEs — so any post-signOut REST call is anonymous.
+  String? _seedToken;
   final bool _supabaseAuth;
 
   String? get _restAuthToken => _supabaseAuth
@@ -693,6 +695,12 @@ class NostosDatabase {
   /// T6 (ADR-0034): registered [_signOutHooks] (e.g. the blob-store wipe) run
   /// AFTER the core wipe so the engine is already quiesced — a hook never sees
   /// in-flight apply frames.
+  ///
+  /// Ordering (L1): the seed token is cleared AFTER the hooks — the
+  /// push-token deregistration hook authorizes its DELETEs with it. In
+  /// Supabase apps call THIS signOut BEFORE `supabase.auth.signOut()`:
+  /// the hook reads the live Supabase session (`_restAuthToken`), which 401s
+  /// once Supabase has already signed out.
   Future<void> signOut() async {
     // Auth listener first (as in close): a surviving refresh would call
     // setToken on a wiped engine.
@@ -713,6 +721,9 @@ class NostosDatabase {
         // Swallowed deliberately — see method doc.
       }
     }
+    // L1: the REST credential dies with the session — a post-signOut
+    // push-token call is anonymous, never the previous principal's.
+    _seedToken = null;
   }
 
   /// Pause syncing (ADR-0032 T1 canonical name): abort ONLY the background
