@@ -45,6 +45,11 @@ reqwest = { workspace = true }
 # Mint HS256 JWTs in admin_auth.rs's supabase_jwt_is_not_admin test (mirrors
 # crates/nostos-infra/tests/auth_sync.rs's hand-rolled mint_jwt).
 hmac = { workspace = true }
+# Push test doubles (push_api.rs, push_e2e_tests in main.rs): implement the
+# async ports (SyncAuth/EventSink/PushSink) and build ReplicationEvent
+# payloads. Mirrors the main deps the library crates already carry.
+async-trait = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true
