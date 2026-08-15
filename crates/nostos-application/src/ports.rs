@@ -809,6 +809,15 @@ pub struct Metrics {
     /// steady state under write load, not an alert — but a flat-zero under
     /// load means the compactor isn't running.
     pub oplog_compacted_rows: AtomicU64,
+    /// Push doorbell hints enqueued into the bounded channel after the
+    /// matched-set drain (ADR-0037 §4, plan 1.3) — one per matched OFFLINE
+    /// account per event; online accounts are suppressed at enqueue time.
+    pub push_enqueued: AtomicU64,
+    /// Push hints dropped because the bounded channel was full (or its
+    /// consumer gone). Doorbell semantics: a dropped hint loses nothing —
+    /// the client's durable LSN checkpoint is the correctness mechanism.
+    /// Alert on sustained increase (the coalescer, plan 2.4, can't keep up).
+    pub push_dropped: AtomicU64,
 }
 
 impl Metrics {
@@ -836,6 +845,8 @@ impl Metrics {
             oplog_flush_failed: self.oplog_flush_failed.load(Ordering::Relaxed),
             slot_epoch: self.slot_epoch.load(Ordering::Relaxed),
             oplog_compacted_rows: self.oplog_compacted_rows.load(Ordering::Relaxed),
+            push_enqueued: self.push_enqueued.load(Ordering::Relaxed),
+            push_dropped: self.push_dropped.load(Ordering::Relaxed),
         }
     }
 
@@ -898,4 +909,8 @@ pub struct MetricsSnapshot {
     pub slot_epoch: u64,
     /// Rows swept by op-log compaction (ADR-0025 slice 5).
     pub oplog_compacted_rows: u64,
+    /// Push hints enqueued / dropped at the fan-out enqueue site
+    /// (ADR-0037 §4, plan 1.3). See [`Metrics::push_enqueued`].
+    pub push_enqueued: u64,
+    pub push_dropped: u64,
 }

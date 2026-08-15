@@ -38,6 +38,7 @@ nostos-domain = { workspace = true }
 nostos-application = { workspace = true }
 nostos-infra = { workspace = true }
 
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 axum = { workspace = true }

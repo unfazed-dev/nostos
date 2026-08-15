@@ -26,7 +26,14 @@ use tracing::{trace, warn};
 
 use nostos_domain::{ColumnValue, ReplicationEvent};
 
-use crate::ports::{DeliveryDecision, Metrics, ReplicatorStream, SessionStore};
+use crate::ports::{
+    DeliveryDecision, Metrics, PushHint, PushNotifier, ReplicatorStream, SessionStore,
+};
+
+/// Bounded depth of the push-hint channel (ADR-0037 §4, plan 1.3). Hints are
+/// tiny routing tuples consumed by a background drain task (the coalescer,
+/// plan 2.4); full ⇒ drop-and-count — never block the fan-out loop.
+const PUSH_HINT_CAPACITY: usize = 1024;
 
 /// The result of fanning one event out to all matching sessions.
 ///
@@ -99,6 +106,12 @@ pub struct FanOutService {
     /// stays conservative (at most `ack_progress_every` events of extra WAL
     /// retention). See [`Self::with_ack_progress_every`].
     ack_progress_every: u32,
+    /// Push doorbell (ADR-0037 §4, plan 1.3): the sender half of a bounded
+    /// channel fed after the matched-set drain — one [`PushHint`] per matched
+    /// offline account. `None` by default: push stays entirely off (the bench
+    /// baseline and fake-mode deploys pay nothing). See
+    /// [`Self::with_push_notifier`].
+    push: Option<tokio::sync::mpsc::Sender<PushHint>>,
 }
 
 impl FanOutService {
@@ -112,6 +125,7 @@ impl FanOutService {
             eviction: crate::EvictionPolicy::disabled(),
             op_log: None,
             ack_progress_every: 1,
+            push: None,
         }
     }
 
@@ -170,6 +184,32 @@ impl FanOutService {
         self
     }
 
+    /// Enable the push doorbell (ADR-0037 §4, plan 1.3). After every
+    /// matched-set drain, [`Self::fan_out`] enqueues one [`PushHint`] per
+    /// matched OFFLINE account into a bounded channel — the
+    /// [`crate::ports::OpLogWriter`] non-blocking contract: `try_send`,
+    /// drop-on-full, counted in [`Metrics`] (`push_enqueued`/`push_dropped`),
+    /// never blocking or doing rail I/O on the fan-out path.
+    ///
+    /// The spawned drain task forwards each hint to `notifier` — the minimal
+    /// placeholder consumer until the coalescer (plan 2.4) replaces it. With
+    /// [`crate::ports::NoopNotifier`] (the composition-root default until the
+    /// rails land) it simply consumes and discards.
+    ///
+    /// Must be called inside a tokio runtime (it spawns the drain task). The
+    /// task ends when the service (and its sender) drops.
+    #[must_use]
+    pub fn with_push_notifier(mut self, notifier: Arc<dyn PushNotifier>) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PushHint>(PUSH_HINT_CAPACITY);
+        tokio::spawn(async move {
+            while let Some(hint) = rx.recv().await {
+                notifier.notify(hint).await;
+            }
+        });
+        self.push = Some(tx);
+        self
+    }
+
     /// Fan a single event out to all matching sessions. This is the unit the
     /// benchmark counts as "one op" — and the unit PowerSync's 2-4k ops/sec
     /// ceiling refers to (one row change processed through the router).
@@ -202,6 +242,24 @@ impl FanOutService {
             .collect();
         let matched_count = matched.len() as u64;
 
+        // Push candidate accounts (ADR-0037 §1): one entry per matched
+        // authenticated, non-anonymous session's account, deduped per event.
+        // Collected before `matched` is moved into the delivery tasks; the
+        // enqueue itself runs after the drain. Entirely skipped — no
+        // iteration, no allocation — when push is not wired (bench baseline /
+        // fake-mode deploys). The two small String clones per DISTINCT account
+        // are the whole cost and are push-gated.
+        let mut push_accounts: Vec<(String, String)> = Vec::new();
+        if self.push.is_some() {
+            for c in &matched {
+                if let Some(p) = c.principal.as_ref() {
+                    if !p.is_anonymous() && !push_accounts.iter().any(|(a, _)| *a == p.account_id) {
+                        push_accounts.push((p.account_id.clone(), p.tenant_id.clone()));
+                    }
+                }
+            }
+        }
+
         let mut set = tokio::task::JoinSet::new();
         for c in matched {
             let ev = event.clone();
@@ -230,6 +288,43 @@ impl FanOutService {
                 }
             }
         }
+        // ADR-0037 §4 (plan 1.3) — push doorbell enqueue, strictly off the hot
+        // loop's critical path. Non-blocking contract copied from
+        // `OpLogWriter`: try_send into a bounded channel, drop-on-full with a
+        // counter, no rail I/O here. Online accounts are suppressed at
+        // enqueue time — store membership is presence; a `Dropped`-but-live
+        // session is still online (its socket is draining; pushing it would
+        // double-signal a client that is catching up).
+        //
+        // ponytail: enqueue-time presence suppression has a race window — an
+        // account can CONNECT between this enqueue and the coalescer's send
+        // (plan 2.4), so a now-online client may get one stale doorbell.
+        // Harmless (doorbell semantics; the socket data and the durable LSN
+        // checkpoint reconcile), but noisy. Upgrade path: the coalescer
+        // re-checks `account_online` before sending (plan 2.4).
+        let mut push_enqueued = 0u64;
+        let mut push_dropped = 0u64;
+        if let Some(tx) = &self.push {
+            for (account, tenant) in &push_accounts {
+                if self.store.account_online(account).await {
+                    continue;
+                }
+                let hint = PushHint {
+                    table: event.table().to_owned(),
+                    tenant_id: tenant.clone(),
+                    account_id: account.clone(),
+                    lsn: event.lsn,
+                };
+                match tx.try_send(hint) {
+                    Ok(()) => push_enqueued += 1,
+                    // Full channel (or consumer gone): the doorbell is
+                    // best-effort — a missed push loses nothing, the client's
+                    // durable LSN checkpoint is the correctness mechanism.
+                    // Counted, never blocking.
+                    Err(_) => push_dropped += 1,
+                }
+            }
+        }
         let outcome = FanOutOutcome {
             matched: matched_count,
             delivered,
@@ -243,6 +338,10 @@ impl FanOutService {
             m.delivered.fetch_add(outcome.delivered, Ordering::Relaxed);
             m.dropped.fetch_add(outcome.dropped, Ordering::Relaxed);
             m.faulted.fetch_add(outcome.faulted, Ordering::Relaxed);
+            if push_enqueued != 0 || push_dropped != 0 {
+                m.push_enqueued.fetch_add(push_enqueued, Ordering::Relaxed);
+                m.push_dropped.fetch_add(push_dropped, Ordering::Relaxed);
+            }
         }
         trace!(?outcome, "fan_out complete");
         outcome
@@ -333,8 +432,8 @@ mod tests {
     use crate::ports::{EventSink, SessionCandidate, SessionStore};
     use async_trait::async_trait;
     use bytes::Bytes;
-    use nostos_domain::{Lsn, Predicate, RowOp, SessionId, SyncSession};
-    use std::collections::HashMap;
+    use nostos_domain::{Lsn, Predicate, Principal, RowOp, SessionId, SyncSession};
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
     // ---- test doubles ----
@@ -355,6 +454,15 @@ mod tests {
     /// An in-memory store keyed by table — the simplest correct SessionStore.
     struct TableStore {
         by_table: Mutex<HashMap<String, Vec<SessionCandidate>>>,
+        /// Accounts the push path must treat as ONLINE (suppress). Absent ⇒
+        /// offline ⇒ push — the port's default failure direction.
+        online: Mutex<HashSet<String>>,
+    }
+
+    impl TableStore {
+        fn set_online(&self, account: &str) {
+            self.online.lock().unwrap().insert(account.to_string());
+        }
     }
 
     #[async_trait]
@@ -415,11 +523,15 @@ mod tests {
         async fn min_acked_lsn(&self) -> Option<nostos_domain::Lsn> {
             None
         }
+        async fn account_online(&self, account_id: &str) -> bool {
+            self.online.lock().unwrap().contains(account_id)
+        }
     }
 
     fn make_store() -> Arc<TableStore> {
         Arc::new(TableStore {
             by_table: Mutex::new(HashMap::new()),
+            online: Mutex::new(HashSet::new()),
         })
     }
 
@@ -643,6 +755,186 @@ mod tests {
                 dropped: 1,
                 faulted: 3
             }
+        );
+    }
+
+    // ---- push doorbell enqueue (ADR-0037 §4, plan 1.3) ----
+
+    /// Records every hint it is asked to send — the test double for
+    /// [`PushNotifier`].
+    #[derive(Default)]
+    struct RecordingNotifier {
+        hints: Mutex<Vec<PushHint>>,
+    }
+
+    #[async_trait]
+    impl PushNotifier for RecordingNotifier {
+        async fn notify(&self, hint: PushHint) {
+            self.hints.lock().unwrap().push(hint);
+        }
+    }
+
+    /// A rail whose send never completes — pins the channel's consumer so the
+    /// bounded buffer provably fills.
+    struct StalledNotifier {
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl PushNotifier for StalledNotifier {
+        async fn notify(&self, _hint: PushHint) {
+            self.gate.notified().await;
+        }
+    }
+
+    /// The `with_push_notifier` drain task forwards asynchronously — poll
+    /// (with a generous deadline) until `f` holds, then let the caller's
+    /// asserts fail with real values if it never did.
+    async fn soon(mut f: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    }
+
+    fn authenticated_session(table: &str, account: &str) -> SyncSession {
+        SyncSession::new_authenticated(
+            Predicate::all(table),
+            Principal::new(account, "tenant-acme"),
+        )
+    }
+
+    #[tokio::test]
+    async fn push_hint_enqueued_for_offline_matched_account() {
+        let store = make_store();
+        // Two sessions of ONE account (multi-device) + one anonymous session:
+        // the burst must collapse to a single hint, and the anonymous session
+        // must produce none (no account to doorbell).
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+        store
+            .add(
+                SyncSession::new(Predicate::all("tasks")),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+
+        let recorder = Arc::new(RecordingNotifier::default());
+        let metrics = Arc::new(Metrics::new());
+        let svc = FanOutService::new(store)
+            .with_metrics(Arc::clone(&metrics))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        let ev = ReplicationEvent::new(
+            Lsn::new(42),
+            RowOp::Insert {
+                table: "tasks".into(),
+                pk: "1".into(),
+                payload: Bytes::from_static(b"x"),
+            },
+        );
+        let outcome = svc.fan_out(&ev, extract_org).await;
+        assert_eq!(outcome.delivered, 3);
+
+        soon(|| recorder.hints.lock().unwrap().len() == 1).await;
+        let hints = recorder.hints.lock().unwrap().clone();
+        assert_eq!(hints.len(), 1, "one hint per account, not per session");
+        assert_eq!(hints[0].table, "tasks");
+        assert_eq!(hints[0].account_id, "u1");
+        assert_eq!(hints[0].tenant_id, "tenant-acme");
+        assert_eq!(hints[0].lsn, Lsn::new(42));
+        let snap = metrics.snapshot();
+        assert_eq!(snap.push_enqueued, 1);
+        assert_eq!(snap.push_dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn online_account_is_not_enqueued() {
+        let store = make_store();
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+        store.set_online("u1");
+
+        let recorder = Arc::new(RecordingNotifier::default());
+        let metrics = Arc::new(Metrics::new());
+        let svc = FanOutService::new(store)
+            .with_metrics(Arc::clone(&metrics))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        let outcome = svc.fan_out(&insert_event("tasks"), extract_org).await;
+        assert_eq!(outcome.delivered, 1);
+
+        // Nothing was enqueued, so nothing can arrive; give the drain task a
+        // grace window before asserting emptiness.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(recorder.hints.lock().unwrap().is_empty());
+        let snap = metrics.snapshot();
+        assert_eq!(snap.push_enqueued, 0);
+        assert_eq!(snap.push_dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn full_push_channel_drops_and_counts_without_stalling_fanout() {
+        let store = make_store();
+        // Offline (default) ⇒ a hint per event; the stalled consumer pins the
+        // channel so it fills after PUSH_HINT_CAPACITY (+1 in-flight) hints.
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+
+        let metrics = Arc::new(Metrics::new());
+        let svc = FanOutService::new(store)
+            .with_metrics(Arc::clone(&metrics))
+            .with_push_notifier(Arc::new(StalledNotifier {
+                gate: Arc::new(tokio::sync::Notify::new()),
+            }));
+
+        let n = (PUSH_HINT_CAPACITY + 64) as u64;
+        let mut total = FanOutOutcome::default();
+        for _ in 0..n {
+            total = total.merged(svc.fan_out(&insert_event("tasks"), extract_org).await);
+        }
+
+        // Every event was still delivered — enqueue drops never touch the
+        // fan-out path (the non-blocking contract).
+        assert_eq!(total.matched, n);
+        assert_eq!(total.delivered, n);
+        let snap = metrics.snapshot();
+        // Each try_send either landed or was dropped — the counts partition
+        // the hints exactly, regardless of drain timing.
+        assert_eq!(snap.push_enqueued + snap.push_dropped, n);
+        assert!(
+            snap.push_dropped > 0,
+            "channel (capacity {PUSH_HINT_CAPACITY}) must have filled"
         );
     }
 }

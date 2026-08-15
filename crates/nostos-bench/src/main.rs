@@ -170,9 +170,25 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
             None
         };
     let op_log_handle = op_log.clone();
-    let fanout = Arc::new(match op_log {
-        Some(w) => FanOutService::new(Arc::clone(&store)).with_op_log(w),
-        None => FanOutService::new(Arc::clone(&store)),
+    // ADR-0037 plan 1.3: toggle the push doorbell enqueue so the bench can
+    // measure its hot-path cost — the same before/after discipline as
+    // NOSTOS_BENCH_OPLOG above. The counting consumer (a NoopNotifier plus an
+    // AtomicU64) stands in for the coalescer (plan 2.4). Bench sessions are
+    // anonymous (no account), so the expected hint count is 0 — this measures
+    // the enqueue bookkeeping on the fan-out path, not rail traffic.
+    let push_count: Option<Arc<AtomicU64>> =
+        std::env::var_os("NOSTOS_BENCH_PUSH").map(|_| Arc::new(AtomicU64::new(0)));
+    let fanout = Arc::new({
+        let builder = match op_log {
+            Some(w) => FanOutService::new(Arc::clone(&store)).with_op_log(w),
+            None => FanOutService::new(Arc::clone(&store)),
+        };
+        match &push_count {
+            Some(count) => builder.with_push_notifier(Arc::new(CountingNotifier {
+                count: Arc::clone(count),
+            })),
+            None => builder,
+        }
     });
 
     // ---- in-process axum server on an ephemeral port ----
@@ -318,6 +334,17 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         );
     }
 
+    // ADR-0037 plan 1.3: hints consumed by the counting rail. 0 is the
+    // expected value — bench sessions are anonymous (no account to doorbell),
+    // so a non-zero count here means account derivation is misfiring.
+    if let Some(count) = &push_count {
+        info!(
+            clients,
+            push_hints = count.load(Ordering::Relaxed),
+            "push doorbell hints consumed (0 expected: bench sessions are anonymous)"
+        );
+    }
+
     Ok(RunResult {
         clients,
         events_total: cfg.events,
@@ -329,6 +356,20 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         elapsed_secs: elapsed.as_secs_f64(),
         profile: cfg.profile.clone(),
     })
+}
+
+/// The NOSTOS_BENCH_PUSH counting rail: a no-op forward that counts hints, so
+/// the enqueue toggle both measures the fan-out cost and proves hints flow
+/// through the drain task (see `run_one`).
+struct CountingNotifier {
+    count: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl nostos_application::ports::PushNotifier for CountingNotifier {
+    async fn notify(&self, _hint: nostos_application::ports::PushHint) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// One benchmark client: connect, subscribe, count received frames, record latency.

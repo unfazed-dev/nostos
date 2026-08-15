@@ -397,12 +397,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // ADR-0037 (plan 1.2): the push doorbell port, defaulting to the no-op
-    // rail until the FCM/APNs/Web Push adapters land. Task 1.3's off-hot-loop
-    // enqueue consumes this handle (`FanOutService::with_push_notifier`);
-    // underscore-bound now so the composition-root seam exists without dead
-    // code — the service gains the field in 1.3.
-    let _push_notifier: Arc<dyn nostos_application::ports::PushNotifier> =
+    // ADR-0037 (plan 1.3): the push doorbell. `with_push_notifier` wires the
+    // fan-out loop's off-hot-loop enqueue (one hint per matched offline
+    // account, try_send into a bounded channel, drop-on-full counted in
+    // /metrics) plus a drain task that forwards hints to the rail.
+    // NoopNotifier until the FCM/APNs/Web Push adapters land (plan 2.1–2.3);
+    // the coalescer (plan 2.4) replaces the drain task.
+    let push_notifier: Arc<dyn nostos_application::ports::PushNotifier> =
         Arc::new(nostos_application::ports::NoopNotifier);
 
     let fanout = Arc::new({
@@ -416,7 +417,9 @@ async fn main() -> anyhow::Result<()> {
             Some(w) => builder.with_op_log(w),
             None => builder,
         };
-        builder.with_ack_progress_every(cfg.ack_progress_interval)
+        builder
+            .with_ack_progress_every(cfg.ack_progress_interval)
+            .with_push_notifier(push_notifier)
     });
 
     // ---- start the replicator → fan-out driver ----
@@ -1357,7 +1360,13 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          cairn_slot_epoch {slot_epoch}\n\
          # HELP cairn_oplog_compacted_rows_total Rows swept by op-log compaction (collapse duplicates to latest op per (table_name, pk) + age out rows past the retention window). ADR-0025 slice 5.\n\
          # TYPE cairn_oplog_compacted_rows_total counter\n\
-         cairn_oplog_compacted_rows_total {oplog_compacted_rows}\n",
+         cairn_oplog_compacted_rows_total {oplog_compacted_rows}\n\
+         # HELP cairn_push_enqueued_total Push doorbell hints enqueued (one per matched offline account; online accounts suppressed at enqueue time). ADR-0037.\n\
+         # TYPE cairn_push_enqueued_total counter\n\
+         cairn_push_enqueued_total {push_enqueued}\n\
+         # HELP cairn_push_dropped_total Push hints dropped (bounded channel full / consumer gone). Doorbell semantics: a dropped hint loses nothing — the durable LSN checkpoint reconciles. ADR-0037.\n\
+         # TYPE cairn_push_dropped_total counter\n\
+         cairn_push_dropped_total {push_dropped}\n",
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
@@ -1370,6 +1379,8 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         oplog_flush_failed = snap.oplog_flush_failed,
         slot_epoch = snap.slot_epoch,
         oplog_compacted_rows = snap.oplog_compacted_rows,
+        push_enqueued = snap.push_enqueued,
+        push_dropped = snap.push_dropped,
     )
 }
 
