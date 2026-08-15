@@ -11,6 +11,7 @@
 //! | [`wire`] | — | `ReplicationEvent` ↔ JSON/binary frame codec |
 //! | [`transport`] | — | axum WebSocket server adapter |
 //! | [`token_store`] | — (inherent; ADR-0037) | `PgTokenStore` — push-token registry (feature "pg") |
+//! | [`push`] | — (inherent; ADR-0037) | FCM HTTP v1 / APNs / Web Push rails — composition into `PushNotifier` is plan task 2.4 |
 //!
 //! The benchmark drives a `FakeReplicator` through the *real* `FanOutService`
 //! and `TokioEventSink`, so what we measure is the production pipeline.
@@ -22,6 +23,10 @@ mod jwks;
 /// Persisted operation-log writers (ADR-0025 slice 2). `RecordingOpLogWriter`
 /// (always available, in-memory — bench/test) + `PgOpLogWriter` (feature "pg").
 pub mod oplog;
+/// The push provider rails (ADR-0037 §1, plan tasks 2.1–2.3): FCM HTTP v1 /
+/// APNs / Web Push senders with one shared `RailOutcome`. Inherent methods
+/// only — the `PushNotifier` port composition is plan task 2.4.
+pub mod push;
 pub mod replicator;
 pub mod router;
 /// `nostos_rules.toml` load/save (ADR-0031, Task 7). No `pg` feature gate —
@@ -47,6 +52,12 @@ pub mod write_back;
 
 pub use auth::{AllowAnonymous, SupabaseJwtAuth};
 pub use oplog::RecordingOpLogWriter;
+pub use push::{
+    apns::ApnsRail,
+    fcm::{FcmMessage, FcmRail, FcmTarget},
+    webpush::WebPushRail,
+    PushPayload, PushRailError, RailOutcome,
+};
 pub use replicator::{FakeReplicator, FakeReplicatorConfig};
 pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;
