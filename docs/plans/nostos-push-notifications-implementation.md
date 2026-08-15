@@ -89,22 +89,25 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
   UniFFI on kotlin/swift/dotnet (`disconnect` must NOT wipe — contrast
   `sign_out`). This is the prerequisite gap; test: disconnect→resume→delta
   applies from checkpoint, no data loss.
-- [ ] 5.2 kotlin/swift: token registration + FCM/APNs handler wiring + poke
+- [x] 5.2 kotlin/swift: token registration + FCM/APNs handler wiring + poke
   (resume from killed app: `connect`+`subscribe` cold path is safe — verify
   durable checkpoint on both).
-- [ ] 5.3 react_native: TurboModule spec methods bridging 5.1/5.2.
-- [ ] 5.4 dotnet: registration + host-app wake doc (MAUI push is host-dependent).
+- [x] 5.3 react_native: TurboModule spec methods bridging 5.1/5.2.
+  *(disconnect/resume bridged natively; registration rides a JS facade over the
+  pinned REST contract — native bridging optional follow-up now that UniFFI
+  registration exists.)*
+- [x] 5.4 dotnet: registration + host-app wake doc (MAUI push is host-dependent).
 
 ## Wave 3 — experimental: web + capacitor + Live Activities
 
-- [ ] 6.1 Storage seam: replace `Window::localStorage` dependency in
+- [x] 6.1 Storage seam: replace `Window::localStorage` dependency in
   `nostos-ffi-wasm` with an injected key-value store (SW-compatible).
-- [ ] 6.2 Real Service Worker: `push` event → postMessage wake to
+- [x] 6.2 Real Service Worker: `push` event → postMessage wake to
   `nostos.worker.js`; VAPID pubkey config; permission UX in index.js. Behind a
   flag until proven (ADR-0033 discipline).
-- [ ] 6.3 Capacitor native plugin (new package): APNs/FCM registration +
+- [x] 6.3 Capacitor native plugin (new package): APNs/FCM registration +
   foreground bridge; beta-labeled.
-- [ ] 6.4 Live Activities: ActivityKit token registration (P3 route),
+- [x] 6.4 Live Activities: ActivityKit token registration (P3 route),
   priority-5 state updates from coalescer; template maps sync row → activity
   update; experimental.
 
