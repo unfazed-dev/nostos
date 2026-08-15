@@ -37,6 +37,18 @@ no parallel push-subscription list to drift from sync state (the anti-pattern
 that killed Parse-style targeting and plagues Ably/PubNub channel-push). The
 only new state is transport tokens.
 
+**Fully-offline accounts (killed app, no live session):** the matched set alone
+cannot doorbell them, but "push arrives when the app is not open" is a v1
+requirement. Resolution: for tables listed in push config (`NOSTOS_PUSH_TABLES`),
+the router additionally enqueues one per-`(tenant, table)` hint per event batch;
+the coalescer expands it to that tenant's registered tokens whose accounts are
+offline (presence re-check at send time). Ceiling: offline accounts cannot be
+predicate-filtered — over-notification is possible and harmless for silent
+doorbells (client syncs, applies nothing); visible pushes are per-table
+operator opt-in, so the blast radius is a conscious config choice. The upgrade
+path is a durable per-account predicate registry, deliberately rejected for now
+because it is exactly the drift-prone second registry this ADR avoids.
+
 ### 2. Doorbell semantics — push is a hint, sync is the transport
 
 Data-only payload is at most `{table, lsn}`. Row data never transits

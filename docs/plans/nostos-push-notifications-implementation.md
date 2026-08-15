@@ -16,7 +16,7 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
   (`fanout.rs:309-318` — the leak path); zombie socket counts as offline.
 - [x] 1.2 `PushNotifier` port (`ports.rs`, mirrors `EventSink` shape) +
   `NoopNotifier` default; composition-root wiring (`nostos-server/src/main.rs:400-412`).
-- [ ] 1.3 Off-hot-loop enqueue: after the matched-set drain in `fan_out`
+- [x] 1.3 Off-hot-loop enqueue: after the matched-set drain in `fan_out`
   (`fanout.rs:233-238`), fire-and-forget `(table, tenant, account, lsn)` into a
   bounded channel — copy the `OpLogWriter` non-blocking contract
   (`ports.rs:431-459`) verbatim, drop-on-full with a counter. Bench gate: fan-out
@@ -31,22 +31,33 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
 
 ### P2 Rails (infra)
 
-- [ ] 2.1 FCM HTTP v1 adapter (reqwest, OAuth2 service-account JWT): data-only
+- [x] 2.1 FCM HTTP v1 adapter (reqwest, OAuth2 service-account JWT): data-only
   + visible payloads, `collapse_key`, `ttl`, priority, 500-msg batch endpoint.
   Accept both `token` and `fid` (deprecation). Config: `NOSTOS_FCM_CREDENTIALS_JSON`.
-- [ ] 2.2 APNs adapter (`a2` crate, token-based auth): `background` push-type
+  *(Shipped via existing `jsonwebtoken` RS256 + reqwest; exact-JSON mock tests
+  pin wire shapes, batch chunking at 500.)*
+- [x] 2.2 APNs adapter (`a2` crate, token-based auth): `background` push-type
   + priority 5 for silent; `alert` + templated payload for visible;
   `apns-collapse-id`, `apns-expiration: 0` silent / short otherwise.
   Config: `NOSTOS_APNS_KEY_P8`, `NOSTOS_APNS_KEY_ID`, `NOSTOS_APNS_TEAM_ID`, bundle id.
-- [ ] 2.3 Web Push adapter (direct VAPID): `web-push` crate — verify a version
+  *(Deviation: `a2` dropped — one POST + 5 headers via existing `jsonwebtoken`
+  ES256 + reqwest/http2; avoids a second HTTP stack. Same wire shapes, mock-tested.)*
+- [x] 2.3 Web Push adapter (direct VAPID): `web-push` crate — verify a version
   with CVE-2025-53604 fixed before depending; if unfixed, minimal RFC-8030
   client on reqwest + the crate's crypto only. `Topic`/`Urgency`/`TTL` headers.
   Config: `NOSTOS_WEBPUSH_VAPID_PRIVATE_KEY`, subject.
+  *(Shipped `web-push = 0.11`, `default-features = false` — RUSTSEC-2025-0015
+  patched; built-in clients disabled, sends ride shared reqwest.)*
 - [ ] 2.4 Coalescer task: bounded channel consumer; per-account look-back
   window (default ~2s, env `NOSTOS_PUSH_DEBOUNCE_MS`); per (device,
   subscription) collapse key; priority/template from per-table config
   (`NOSTOS_PUSH_TABLES` env or rules file section — match `nostos_rules.toml`
   style). Visible template: `{title, body, column?}` static interpolation only.
+  Plus (ADR-0037 §1 amendment): per-`(tenant, table)` hints from
+  `NOSTOS_PUSH_TABLES` for **fully-offline accounts** — expand to the tenant's
+  registered tokens whose accounts are offline (needs
+  `PgTokenStore::list_by_tenant` + presence re-check at send); over-notification
+  ceiling documented in the ADR.
 
 ### P3 Server surface
 
@@ -100,7 +111,13 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
 ## Closeout
 
 - [ ] 7.1 Honest bench: push coalescing factor + fan-out latency delta with
-  push on/off (RESULTS.md, same-stage comparison rules).
+  push on/off (RESULTS.md, same-stage comparison rules). **Pending clean pair**:
+  quiet-window `NOSTOS_BENCH_PUSH=1` run vs preserved pre-change binary
+  (`target/tmp/nostos-bench-before`) — 2026-08-15 attempts were invalidated by
+  machine load 21 (simulator + xcodebuild): post-change 161k, pre-change 224k,
+  both grace-aborted, spread across contended runs 112k–336k = noise-dominated.
+  Unit-level worst case (channel-full, stalled consumer) proven: 100% delivery.
+  Artifacts: `target/tmp/bench-push-after-quiet/`, `bench-push-before-calib/`.
 - [ ] 7.2 Docs: READMEs (all SDKs), `docs/api/*.md` push sections, footgun
   callout (token/credential config = the new `NOSTOS_WRITE_TABLES`-style step).
 - [ ] 7.3 Security pass: token trust boundary, template tenant isolation,
