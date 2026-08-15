@@ -42,6 +42,17 @@
 //                              bearer on the interior-mutable token cell — the reconnect loop reads it on
 //                              its NEXT attempt, so a live session picks up the new token with NO disconnect.
 //                              `null` = clear (anonymous). Callable before connect AND on a live session.
+//   disconnect()              → NostosClient::disconnect() (ADR-0037 task 5.1) — NON-destructive pause: the
+//                              run loop gates closed + quiesces, but session, durable store, and token all
+//                              survive (contrast signOut's wipe). query()/write() keep working; the watch
+//                              pumps stay live (purely local). Idempotent, no-op before connect.
+//   resume()                  → NostosClient::resume() (ADR-0037 task 5.1) — the push WAKE primitive: re-open
+//                              the loop after disconnect(); the reconnect re-seeds resume_lsn from the
+//                              durable checkpoint, so the missed delta applies with no data loss. Does NOT
+//                              re-run connect(). Idempotent with a live loop; ERRORS before connect().
+//   registerPushToken /       → NO UniFFI analogue (plan task 5.2 is the UniFFI half): the TS facade speaks
+//   deregisterPushToken          the pinned REST contract itself (POST/DELETE /push-tokens, same JWT as
+//                              /sync, strict 204 — ADR-0037 §3) via RN's global fetch. See NostosClient.ts.
 //   signOut()                 → NostosClient::sign_out() (ADR-0029): abort run loop → await quiesce →
 //                              clear_local_state (rows + checkpoint + epoch + outbox + dead-letter) → drop
 //                              session → clear token. Idempotent; the "B must not see A's rows" wipe.
@@ -164,6 +175,26 @@ export interface Spec extends TurboModule {
    * resolver is still iOS-only — see `NostosTurboModule` for the gap).
    */
   resolveDbPath(name: string): Promise<string>;
+  /**
+   * NON-destructive pause of the live replication loop (ADR-0037 task 5.1 —
+   * the "this app is going to sleep" primitive; `signOut` is "this user is
+   * leaving"). Maps to UniFFI `NostosClient::disconnect()`: the run loop gates
+   * closed at a safe point (final flush + ack) and quiesces, but the session,
+   * the durable store, and the token all survive — `query()`/`write()` keep
+   * answering and the local watch pumps keep ticking. Idempotent and a no-op
+   * with no active session.
+   */
+  disconnect(): Promise<void>;
+  /**
+   * Re-open the live replication loop after `disconnect()` — the push wake
+   * primitive (ADR-0037 task 5.1). Maps to UniFFI `NostosClient::resume()`: the
+   * reconnect's Subscribe re-seeds `resume_lsn` from the durable checkpoint, so
+   * the delta that accrued while disconnected applies with no data loss. Does
+   * NOT re-run `connect()` — the session and its store were never torn down.
+   * Idempotent with a live loop (a gate-clear no-op); rejects if called before
+   * `connect()`.
+   */
+  resume(): Promise<void>;
   /**
    * Hot-swap the auth bearer WITHOUT tearing down the live session
    * (ADR-0029 #3). Maps to UniFFI `NostosClient::set_token(token: Option<String>)`

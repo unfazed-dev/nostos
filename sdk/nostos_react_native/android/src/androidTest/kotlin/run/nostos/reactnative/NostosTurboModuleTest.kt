@@ -90,6 +90,42 @@ class NostosTurboModuleTest {
     }
 
     /**
+     * ADR-0037 task 5.3 (bridging 5.1), offline half: the TurboModule's
+     * `disconnect()` is NON-destructive — the session (and its durable store)
+     * survives, so `querySync()` keeps answering, `resumeSync()` re-enters the
+     * loop, and the destructive sibling `signOutSync()` still wipes afterwards.
+     * Mirrors `sdk/nostos_kotlin`'s `disconnect_keeps_local_state_queryable_and_
+     * resume_reenters` but routes through the TurboModule's sync core. The
+     * connected half (delta applies from the checkpoint) is pinned in
+     * nostos-client's `disconnect_then_resume_applies_delta_from_checkpoint_without_loss`.
+     */
+    @Test
+    fun offline_turbomodule_disconnect_nondestructive_resume_reenters() {
+        val module = newModule()
+        module.connectSync(url = "ws://localhost:0", token = null, dbPath = ":memory:")
+
+        // Idempotent + no live loop against a dead URL: still fine, session
+        // untouched.
+        module.disconnectSync()
+        Log.i("NostosTurboModuleTest", "[rn-e2e] disconnect() ok — session + store kept")
+
+        // Non-destructive: querySync() answers from the durable store.
+        val rowsJson = module.querySync("SELECT 1 AS one")
+        assertTrue(
+            "expected query() to answer after disconnect(), got: $rowsJson",
+            rowsJson.contains("\"one\":1") || rowsJson.contains("\"one\": 1"),
+        )
+
+        // Wake primitive: resume re-enters the loop (dead URL — fire-and-forget,
+        // the run loop's reconnect backoff owns it).
+        module.resumeSync()
+        Log.i("NostosTurboModuleTest", "[rn-e2e] resume() ok — loop re-entered")
+
+        // The destructive sibling still works after a disconnect/resume cycle.
+        module.signOutSync()
+    }
+
+    /**
      * SHOULD — Tier-2 LIVE replication E2E, the RN slice of
      * `docs/plans/sdk-live-e2e-consolidation.md`. Drives the SAME
      * two-direction round-trip `nostos_kotlin`'s

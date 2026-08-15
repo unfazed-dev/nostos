@@ -12,6 +12,14 @@
 //     `ThreadsafeFunction`) and kotlin's `watch()` (UniFFI `SnapshotSink`);
 //     the push crosses JSI as a retained TurboModule callback
 //     (`NativeNostos.watchChanges`).
+//
+// Push/wake surface (ADR-0037, plan task 5.3): `disconnect()`/`resume()` bridge
+// the UniFFI non-destructive teardown pair (plan task 5.1) through the
+// TurboModule; `registerPushToken`/`deregisterPushToken` speak the pinned REST
+// contract (POST/DELETE /push-tokens, the sync JWT as Bearer, strict 204)
+// directly from the facade via RN's global fetch — the UniFFI layer has no
+// registration method yet (plan task 5.2), and the REST contract is identical,
+// so the seam lives where the credential already does.
 
 import NativeNostos from "./NativeNostos";
 
@@ -21,6 +29,63 @@ import NativeNostos from "./NativeNostos";
  * `dispatch_write` accepts.
  */
 export type WriteOp = "upsert" | "delete" | "patch";
+
+/**
+ * Push rail a token belongs to (ADR-0037 §3 — the server's pinned set).
+ * RN apps register `"fcm"` (Android) or `"apns"` (iOS); `"webpush"` exists for
+ * parity with the other SDKs.
+ */
+export type PushPlatform = "fcm" | "apns" | "webpush";
+
+/**
+ * Typed failure from `registerPushToken` / `deregisterPushToken` — the JS-side
+ * shape of node's string-reason errors: the failing half of the pair, the HTTP
+ * status + body when the server answered (anything but the pinned `204`,
+ * INCLUDING other 2xx variants — contract drift must fail loudly), and
+ * `undefined` status on a transport failure (offline, DNS, …).
+ */
+export class NostosPushError extends Error {
+  /** Which REST half failed — `"register"` (POST) or `"deregister"` (DELETE). */
+  readonly operation: "register" | "deregister";
+  /** HTTP status when the server answered; `undefined` on transport failure. */
+  readonly status?: number;
+  /** Response body when the server answered with a non-204. */
+  readonly body?: string;
+
+  constructor(
+    operation: "register" | "deregister",
+    status: number | undefined,
+    body: string | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = "NostosPushError";
+    this.operation = operation;
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/**
+ * RN ships a global `fetch` (whatwg-fetch over its network stack) but NOT its
+ * type declarations, and this package's tsconfig has no DOM lib — declare the
+ * minimal structural surface the push-token REST seam uses. Jest's node test
+ * env satisfies the same shape with Node's built-in fetch.
+ */
+declare const fetch: (
+  input: string,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+) => Promise<{ status: number; text(): Promise<string> }>;
+
+/** The minimal response surface `expectPush204` reads (structural — see fetch). */
+interface PushHttpResponse {
+  readonly status: number;
+  text(): Promise<string>;
+}
 
 /** Constructor config — mirrors `@nostos-sync/web`'s `NostosClientConfig` shape. */
 export interface NostosClientConfig {
@@ -105,6 +170,18 @@ export class NostosClient {
    * the kotlin/node ports tie to session lifecycle.
    */
   private readonly watches: Map<string, WatchBundle> = new Map();
+  /**
+   * Push tokens registered via `registerPushToken` this session (ADR-0037 §3),
+   * best-effort deregistered by `signOut` — a leaked registration would push
+   * the previous principal's data to the next user. The JS-side mirror of
+   * nostos_node's `registered_push_tokens` cell.
+   *
+   * ponytail: in-memory only — tokens registered before a process restart are
+   * not auto-deregistered. The stale case is covered server-side (the rails
+   * prune on APNs 410 / FCM UNREGISTERED); persist the set locally if
+   * rail-prune proves too slow.
+   */
+  private readonly registeredPushTokens: Set<string> = new Set();
 
   constructor(config: NostosClientConfig = {}) {
     this.config = {
@@ -280,6 +357,137 @@ export class NostosClient {
   }
 
   /**
+   * NON-destructive pause of the live replication loop (ADR-0037 task 5.1 —
+   * "this app is going to sleep"; `signOut()` is "this user is leaving").
+   * Delegates to `NativeNostos.disconnect` → UniFFI `NostosClient::disconnect`:
+   * the run loop gates closed at a safe point (final flush + ack) and
+   * quiesces, but the session, durable store, and token all survive —
+   * `query()`/`write()` keep answering and local watch pumps keep ticking.
+   * Idempotent and a no-op with no active session.
+   */
+  async disconnect(): Promise<void> {
+    await NativeNostos.disconnect();
+  }
+
+  /**
+   * Re-open the live replication loop after `disconnect()` — the push wake
+   * primitive (ADR-0037 task 5.1). Delegates to `NativeNostos.resume` → UniFFI
+   * `NostosClient::resume`: the reconnect's Subscribe re-seeds `resume_lsn`
+   * from the durable checkpoint, so the delta that accrued while disconnected
+   * applies with no data loss. Does NOT re-run `connect()`. Idempotent with a
+   * live loop; rejects before `connect()` (the native `resume` surfaces the
+   * before-connect error as a promise rejection).
+   */
+  async resume(): Promise<void> {
+    await NativeNostos.resume();
+  }
+
+  /**
+   * Register a push token with the server (ADR-0037 §3): `POST /push-tokens`
+   * with `{"platform": …, "token": …}`, authenticated by the SAME token the
+   * sync connection uses (`Authorization: Bearer`, read from this handle's
+   * cached credential — the one `connect()`/`setToken()` stage). The server
+   * stamps tenant/account itself; the SDK never attests identity fields.
+   *
+   * FCM handler wiring (Android): call this from the `firebase/messaging`
+   * `onNewToken` callback. APNs (iOS): from the `didRegisterForRemoteNotifications`
+   * device-token callback (hex-encode the token). Resolves only on the pinned
+   * `204`; anything else (including a 2xx variant) rejects with a
+   * {@link NostosPushError} carrying the status + body. Registered tokens are
+   * deregistered best-effort by `signOut()`.
+   */
+  async registerPushToken(
+    platform: PushPlatform,
+    token: string,
+  ): Promise<void> {
+    if (platform !== "fcm" && platform !== "apns" && platform !== "webpush") {
+      // Fail before the wire — the same guard nostos_node applies (an unknown
+      // platform is an SDK-side bug, not a server response).
+      throw new Error(
+        `unknown push platform ${JSON.stringify(platform)}: expected "fcm", "apns", or "webpush"`,
+      );
+    }
+    const response = await this.pushFetch(this.pushEndpoint("/push-tokens"), {
+      method: "POST",
+      headers: this.bearerHeaders(this.config.token, {
+        "Content-Type": "application/json",
+      }),
+      body: JSON.stringify({ platform, token }),
+    }, "register");
+    await expectPush204(response, "register");
+    this.registeredPushTokens.add(token);
+  }
+
+  /**
+   * Deregister a push token (ADR-0037 §3): `DELETE /push-tokens/{token}` with
+   * the same auth as `registerPushToken`. Resolves only on the pinned `204`.
+   * `signOut()` calls this for every session-registered token automatically;
+   * call it directly when the app can no longer receive on the token.
+   */
+  async deregisterPushToken(token: string): Promise<void> {
+    // ponytail: the token is interpolated into the path un-encoded — every
+    // rail's tokens are URL-safe by construction (`[A-Za-z0-9_:-]`). Percent-
+    // encode if a rail ever emits reserved characters (node does the same).
+    await this.deregisterPushTokenHttp(this.config.token, token);
+    this.registeredPushTokens.delete(token);
+  }
+
+  /**
+   * Shared DELETE core — `deregisterPushToken` (reads the live cached token)
+   * and `signOut` (reads the token captured BEFORE it was cleared) both ride
+   * this, so there is one wire shape (nostos_node's `deregister_push_token_http`).
+   */
+  private async deregisterPushTokenHttp(
+    auth: string | null | undefined,
+    token: string,
+  ): Promise<void> {
+    const response = await this.pushFetch(
+      this.pushEndpoint(`/push-tokens/${token}`),
+      { method: "DELETE", headers: this.bearerHeaders(auth, {}) },
+    "deregister",
+    );
+    await expectPush204(response, "deregister");
+  }
+
+  /** The push-token REST base + path, derived from the configured sync URL. */
+  private pushEndpoint(path: string): string {
+    const { url } = this.config;
+    if (url === null || url === undefined || url === "") {
+      throw new Error(
+        "@nostos-sync/react-native: no sync URL configured — pass { url: 'ws://host:port/sync' } to the NostosClient constructor",
+      );
+    }
+    return httpBase(url) + path;
+  }
+
+  /** Bearer headers from `auth` — anonymous (null/undefined) sends NO Authorization. */
+  private bearerHeaders(
+    auth: string | null | undefined,
+    extra: Record<string, string>,
+  ): Record<string, string> {
+    if (auth === null || auth === undefined) return extra;
+    return { ...extra, Authorization: `Bearer ${auth}` };
+  }
+
+  /** fetch + transport-failure mapping into the typed error. */
+  private async pushFetch(
+    url: string,
+    init: { method: string; headers: Record<string, string>; body?: string },
+    operation: "register" | "deregister",
+  ): Promise<PushHttpResponse> {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      throw new NostosPushError(
+        operation,
+        undefined,
+        undefined,
+        `push-token ${operation} failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /**
    * Hot-swap the auth bearer WITHOUT tearing down the session (ADR-0029 #3).
    * Delegates to `NativeNostos.setToken`, which maps to UniFFI
    * `NostosClient::set_token`: the new token lands in the interior-mutable token
@@ -312,11 +520,61 @@ export class NostosClient {
    * a dead client). The next `connect()` starts from a clean store + clean maps.
    */
   async signOut(): Promise<void> {
+    // ADR-0037 §3: the sign-out deregistration needs the JWT from BEFORE the
+    // native sign-out + the mirror below clear it — capture it now (node's
+    // sign_out does the same before its step 4).
+    const auth = this.config.token;
     await NativeNostos.signOut();
     this.config.token = null;
     this.subscriptions.clear();
     this.watches.clear();
+    // ADR-0037 §3: deregister this session's push tokens — best-effort, AFTER
+    // the local wipe (node's step-5 ordering; a failed DELETE is swallowed —
+    // the server prunes stale rows on a rail 410/UNREGISTERED). Uses the token
+    // captured above, so the DELETEs authorize as the signing-out principal.
+    const registered = Array.from(this.registeredPushTokens);
+    this.registeredPushTokens.clear();
+    for (const token of registered) {
+      await this.deregisterPushTokenHttp(auth, token).catch(() => undefined);
+    }
   }
+}
+
+/**
+ * Derive the HTTP base for the push-token REST endpoints from the WS `/sync`
+ * URL: `wss`→`https`, `ws`→`http`, trailing path stripped — the same
+ * derivation nostos_node's `http_base` and the Flutter SDK's
+ * `_deriveHttpBase` use. One credential source, one URL source.
+ */
+function httpBase(wsUrl: string): string {
+  const idx = wsUrl.indexOf("://");
+  if (idx === -1) return wsUrl;
+  const scheme = wsUrl.slice(0, idx);
+  const mapped = scheme === "wss" ? "https" : scheme === "ws" ? "http" : scheme;
+  // Authority runs to the first `/` (or end); the path is dropped.
+  const rest = wsUrl.slice(idx + 3);
+  const authority = rest.split("/")[0] || rest;
+  return `${mapped}://${authority}`;
+}
+
+/**
+ * Enforce the pinned push-token contract (ADR-0037 §3): success is exactly
+ * `204 No Content`. Anything else — including a 2xx variant — throws a
+ * {@link NostosPushError} carrying the status + body so contract drift fails
+ * loudly on the SDK side.
+ */
+async function expectPush204(
+  response: PushHttpResponse,
+  operation: "register" | "deregister",
+): Promise<void> {
+  if (response.status === 204) return;
+  const body = await response.text().catch(() => "");
+  throw new NostosPushError(
+    operation,
+    response.status,
+    body,
+    `push-token ${operation} failed: HTTP ${response.status}: ${body}`,
+  );
 }
 
 /**
