@@ -125,6 +125,52 @@ accepted for forward-compatibility (see ponytail in `lib/src/nostos.dart`) but n
 yet used to derive anything — point `nostosUrl` at wherever your `nostos-server`
 actually runs.
 
+## Push notifications (ADR-0037)
+
+Push is a **doorbell**, not a data channel: a data-only `{table, lsn}` hint
+wakes the app, and the sync connection — never the push rail — delivers the
+rows, resuming from the durable LSN checkpoint. Register the OS push token
+with the server and re-wake sync on arrival:
+
+```dart
+// 1. Whenever the OS hands you a (possibly rotated) token:
+//    - Android/FCM:  FirebaseMessaging.instance.getToken() / onTokenRefresh
+//    - iOS/APNs:     didRegisterForRemoteNotificationsWithDeviceToken
+await db.registerPushToken('fcm', fcmToken); // or 'apns' / 'webpush'
+// signOut() deregisters session-registered tokens automatically (best-effort).
+```
+
+**Wake entry** — what your FCM/APNs background handler does. The FRB engine
+handle cannot cross isolates, so a background isolate re-initializes its own
+`NostosDatabase` and rides the normal resume path (task 5.1's non-destructive
+`disconnect()`/`resume()` siblings; this SDK's `pauseSync()`/`resumeSync()`):
+
+```dart
+// FCM background isolate (Android) — same shape for an APNs content-available
+// handler on iOS. Static doc code: bring your own firebase_messaging plugin.
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  // If a paused db handle exists in this isolate: just db.resumeSync().
+  // From a killed app there is no handle — cold-open the durable store; the
+  // engine resumes from its on-disk LSN checkpoint and applies only the delta.
+  final db = await NostosDatabase.connect(
+    url: 'ws://127.0.0.1:8800/sync',
+    sqlitePath: '$dir/cairn.db', // SAME file as the foreground session
+  );
+  await db.subscribe('tasks'); // re-declare tables; delta applies, not a resync
+  // Keep the isolate alive until the delta lands, then close():
+  await db.waitForFirstSync();
+  await db.close();
+}
+```
+
+Nothing here adds a plugin dependency — `registerPushToken` is a plain REST
+call (`POST /push-tokens`, same JWT as `/sync`); `firebase_messaging` /
+APNs registration stay the app's own. Errors surface as
+`NostosPushTokenException` (non-`204` reply). Tokens registered before a
+process restart are not auto-deregistered on a later sign-out — the server
+prunes them when the rail reports the token dead (410 / `UNREGISTERED`).
+
 ## API
 
 **Entry points** (`NostosDatabase` — use these):
@@ -137,8 +183,9 @@ actually runs.
   → config/codegen-driven; what `example/` uses.
 - Then: `subscribe` / `subscribeTables`, `watch(sql)` / `getAll(sql)`,
   `write(table:, op:, pk:, payload:)`, `collection<T>(…)`, `syncStatus`,
-  `disconnect` / `resume` / `close`. `execute(sql)` is a **read-only** alias of
-  `getAll` — see its dartdoc before reaching for it.
+  `disconnect` / `resume` / `close`, `registerPushToken(platform, token)` /
+  `deregisterPushToken(token)` (ADR-0037). `execute(sql)` is a **read-only**
+  alias of `getAll` — see its dartdoc before reaching for it.
 
 **Low-level handle** (escape hatch; `NostosDatabase` wraps this):
 

@@ -31,20 +31,54 @@ import 'schema.dart';
 /// reactive wrapper over the Rust engine) to a resolved [NostosSchema]. A
 /// Supabase-flavored factory is provided (see [NostosDatabase.supabase]).
 class NostosDatabase {
-  NostosDatabase._(this._nostos, this.schema);
+  NostosDatabase._(
+    this._nostos,
+    this.schema,
+    this._httpBase,
+    this._seedToken,
+    this._supabaseAuth,
+  ) {
+    // ADR-0037 §3: every SDK deregisters its push tokens in its sign-out hook
+    // — a leaked registration would push the previous principal's data to the
+    // next user. Registered at construction (not inside registerPushToken) so
+    // the hook exists even for a session that registers nothing.
+    _signOutHooks.add(_deregisterPushTokensOnSignOut);
+  }
 
   /// Test-only: wrap an injected [Nostos] (itself injectable via
   /// `Nostos.withEngine`) to exercise the typed mappers ([watchMapped] /
   /// [getAllMapped]) without the native library. See
-  /// `test/nostos_ws6_test.dart`.
+  /// `test/nostos_ws6_test.dart`. [httpBase] / [token] feed the push-token
+  /// REST seam (`test/push_token_test.dart` points them at a local server).
   @visibleForTesting
-  NostosDatabase.forTest(this._nostos, this.schema);
+  NostosDatabase.forTest(
+    Nostos nostos,
+    NostosSchema schema, {
+    String? httpBase,
+    String? token,
+  }) : this._(nostos, schema, httpBase ?? '', token, false);
 
   final Nostos _nostos;
 
   /// The resolved server schema used to materialize the read-views.
   /// Exposed for inspection / codegen; not meant to be mutated.
   final NostosSchema schema;
+
+  /// HTTP base for the REST surface (`GET /schema`, `POST /push-tokens`,
+  /// `DELETE /push-tokens/{token}`), derived from the same WS [url] the sync
+  /// connection uses — see [_deriveHttpBase].
+  final String _httpBase;
+
+  /// The explicit token passed to [connect], when auth wasn't Supabase. The
+  /// push-token REST calls read this (or the live Supabase session, when
+  /// [_supabaseAuth]) — the SAME credential source the sync connection uses;
+  /// there is no second path.
+  final String? _seedToken;
+  final bool _supabaseAuth;
+
+  String? get _restAuthToken => _supabaseAuth
+      ? Supabase.instance.client.auth.currentSession?.accessToken
+      : _seedToken;
 
   /// Supabase auth listener forwarding token rotations (set by
   /// [NostosDatabase.supabase] only). MUST be cancelled in [close] — a surviving
@@ -58,7 +92,8 @@ class NostosDatabase {
   /// awaited in registration order, and MUST be idempotent (signOut is
   /// re-callable). A throwing hook is swallowed (best-effort) so one failing
   /// wipe cannot block the core sign-out.
-  final List<Future<void> Function()> _signOutHooks = <Future<void> Function()>[];
+  final List<Future<void> Function()> _signOutHooks =
+      <Future<void> Function()>[];
 
   /// Open a [Nostos] connection and resolve the schema.
   ///
@@ -82,15 +117,14 @@ class NostosDatabase {
     required String sqlitePath,
     Set<String>? orSetTables,
     Set<String>? counterTables,
-  }) =>
-      _open(
-        url: url,
-        token: token,
-        schema: schema,
-        sqlitePath: sqlitePath,
-        orSetTables: orSetTables,
-        counterTables: counterTables,
-      );
+  }) => _open(
+    url: url,
+    token: token,
+    schema: schema,
+    sqlitePath: sqlitePath,
+    orSetTables: orSetTables,
+    counterTables: counterTables,
+  );
 
   /// Config-driven open: connect using a [NostosConfig] (normally loaded
   /// from the app's bundled `assets/nostos.json` via [NostosConfig.load])
@@ -152,6 +186,7 @@ class NostosDatabase {
       sqlitePath: sqlitePath,
       orSetTables: orSetTables,
       counterTables: counterTables,
+      supabaseAuth: config.hasSupabase,
     );
   }
 
@@ -220,6 +255,7 @@ class NostosDatabase {
       sqlitePath: sqlitePath,
       orSetTables: orSetTables,
       counterTables: counterTables,
+      supabaseAuth: true,
     );
     db._wireSupabaseTokenRefresh();
     return db;
@@ -272,6 +308,7 @@ class NostosDatabase {
     required String sqlitePath,
     Set<String>? orSetTables,
     Set<String>? counterTables,
+    bool supabaseAuth = false,
   }) async {
     final nostos = await Nostos.connect(
       url: url,
@@ -282,12 +319,17 @@ class NostosDatabase {
     );
     final resolved = schema ?? await _fetchSchema(_deriveHttpBase(url));
     nostos.applySchema(resolved.toClientTables());
-    return NostosDatabase._(nostos, resolved);
+    return NostosDatabase._(
+      nostos,
+      resolved,
+      _deriveHttpBase(url),
+      token,
+      supabaseAuth,
+    );
   }
 
   /// Connection-state transitions for the underlying [Nostos] session.
-  Stream<NostosConnectionState> get connectionState =>
-      _nostos.connectionState;
+  Stream<NostosConnectionState> get connectionState => _nostos.connectionState;
 
   /// Snapshot of whether the session is currently `connected` (best-effort).
   /// True only after [status] has observed a `connected` transition; false
@@ -327,16 +369,16 @@ class NostosDatabase {
   /// `(col IS NULL) DESC` order, a join, or a projection). Prefer
   /// [Collection.watch] with [Where]/[Order] for every "table, maybe filter,
   /// maybe order" read — it is injection-safe by construction.
-  Stream<List<Map<String, dynamic>>> watchSql(String sql,
-          {Duration? throttle}) =>
-      _nostos.watchQuery(sql, throttle: throttle);
+  Stream<List<Map<String, dynamic>>> watchSql(
+    String sql, {
+    Duration? throttle,
+  }) => _nostos.watchQuery(sql, throttle: throttle);
 
   /// Legacy reactive SQL watch (alias of [watchSql]). Prefer [Collection.watch]
   /// (structured) for app reads; prefer [watchSql] if you must reach for raw
   /// SQL. Kept for back-compat with code written against the pre-contract
   /// surface.
-  Stream<List<Map<String, dynamic>>> watch(String sql,
-          {Duration? throttle}) =>
+  Stream<List<Map<String, dynamic>>> watch(String sql, {Duration? throttle}) =>
       watchSql(sql, throttle: throttle);
 
   /// Run a one-shot SELECT against on-device SQLite and return the decoded
@@ -371,16 +413,14 @@ class NostosDatabase {
   Stream<List<T>> watchMapped<T>(
     String sql,
     T Function(Map<String, dynamic> row) fromRow,
-  ) =>
-      _nostos.watchMapped(sql, fromRow);
+  ) => _nostos.watchMapped(sql, fromRow);
 
   /// One-shot typed-record query (WS6): like [getAll] but maps each row to a
   /// typed record via [fromRow].
   Future<List<T>> getAllMapped<T>(
     String sql,
     T Function(Map<String, dynamic> row) fromRow,
-  ) async =>
-      (await getAll(sql)).map(fromRow).toList(growable: false);
+  ) async => (await getAll(sql)).map(fromRow).toList(growable: false);
 
   /// Enqueue a durable write into the local outbox. Returns the local outbox
   /// id (NOT a server ack — the applied row round-trips back through [watch];
@@ -394,8 +434,7 @@ class NostosDatabase {
     required String op,
     required String pk,
     Map<String, dynamic>? payload,
-  }) =>
-      _nostos.write(table, op: op, pk: pk, payload: payload);
+  }) => _nostos.write(table, op: op, pk: pk, payload: payload);
 
   /// Enqueue a group of writes as an all-or-nothing *entry* batch
   /// (ADR-0032 T3). Every op enters the durable outbox atomically — all land in
@@ -424,12 +463,14 @@ class NostosDatabase {
     }
     return _nostos.writeBatch(
       writes
-          .map((w) => (
-                table: w.table,
-                op: w.op,
-                pk: w.pk.toString(),
-                payload: w.payload,
-              ))
+          .map(
+            (w) => (
+              table: w.table,
+              op: w.op,
+              pk: w.pk.toString(),
+              payload: w.payload,
+            ),
+          )
           .toList(),
     );
   }
@@ -449,33 +490,34 @@ class NostosDatabase {
       'dead_lettered_at '
       'FROM cairn_outbox WHERE dlq = 1 ORDER BY id ASC',
     );
-    return rows.map((r) {
-      final payloadJson = r['payload'] as String?;
-      Map<String, dynamic>? payload;
-      if (payloadJson != null && payloadJson.isNotEmpty) {
-        try {
-          payload =
-              (jsonDecode(payloadJson) as Map<String, dynamic>).cast();
-        } on Object {
-          payload = null; // Corrupt payload shouldn't hide the rest of the row.
-        }
-      }
-      final deadLetteredAtMs = r['dead_lettered_at'] as num?;
-      return DeadLetter(
-        id: (r['id'] as num?)?.toInt() ?? 0,
-        table: (r['table_name'] ?? '').toString(),
-        op: (r['op'] ?? '').toString(),
-        pk: (r['pk'] ?? '').toString(),
-        attempts: (r['attempts'] as num?)?.toInt() ?? 0,
-        payload: payload,
-        error: r['last_error'] as String?,
-        timestamp: deadLetteredAtMs == null
-            ? null
-            : DateTime.fromMillisecondsSinceEpoch(
-                deadLetteredAtMs.toInt(),
-              ),
-      );
-    }).toList(growable: false);
+    return rows
+        .map((r) {
+          final payloadJson = r['payload'] as String?;
+          Map<String, dynamic>? payload;
+          if (payloadJson != null && payloadJson.isNotEmpty) {
+            try {
+              payload = (jsonDecode(payloadJson) as Map<String, dynamic>)
+                  .cast();
+            } on Object {
+              payload =
+                  null; // Corrupt payload shouldn't hide the rest of the row.
+            }
+          }
+          final deadLetteredAtMs = r['dead_lettered_at'] as num?;
+          return DeadLetter(
+            id: (r['id'] as num?)?.toInt() ?? 0,
+            table: (r['table_name'] ?? '').toString(),
+            op: (r['op'] ?? '').toString(),
+            pk: (r['pk'] ?? '').toString(),
+            attempts: (r['attempts'] as num?)?.toInt() ?? 0,
+            payload: payload,
+            error: r['last_error'] as String?,
+            timestamp: deadLetteredAtMs == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(deadLetteredAtMs.toInt()),
+          );
+        })
+        .toList(growable: false);
   }
 
   // ─────────────────── Reactive facade (ADR-0024) ───────────────────
@@ -502,8 +544,7 @@ class NostosDatabase {
     required T Function(Map<String, dynamic> row) fromRow,
     Map<String, dynamic> Function(T value)? toRow,
     String pkColumn = 'id',
-  }) =>
-      Collection<T>._(this, table, fromRow, toRow, pkColumn);
+  }) => Collection<T>._(this, table, fromRow, toRow, pkColumn);
 
   /// Hot sync status: connection state ([SyncStatus.conn],
   /// [SyncStatus.connected], [SyncStatus.lastSyncedAt]) folded together with
@@ -528,7 +569,7 @@ class NostosDatabase {
   ValueNotifier<SyncStatus>? _status;
   StreamSubscription<NostosConnectionState>? _statusSub;
   StreamSubscription<({int pending, int deadLettered, String? lastError})>?
-      _writeStatusSub;
+  _writeStatusSub;
   StreamSubscription<bool>? _storageDegradedSub;
   bool _statusWired = false;
   bool _hasSubscribed = false;
@@ -536,10 +577,12 @@ class NostosDatabase {
   void _ensureStatusWired() {
     if (_statusWired) return;
     _statusWired = true;
-    _status = ValueNotifier<SyncStatus>(const SyncStatus(
-      conn: NostosConnectionState.disconnected,
-      lastSyncedAt: null,
-    ));
+    _status = ValueNotifier<SyncStatus>(
+      const SyncStatus(
+        conn: NostosConnectionState.disconnected,
+        lastSyncedAt: null,
+      ),
+    );
     // ponytail: there is still no "download completed" / "reconcile done"
     // signal, so lastSyncedAt stays a best-effort proxy stamped on each
     // `connected` transition. The WRITE side is no longer a proxy — it comes
@@ -608,21 +651,18 @@ class NostosDatabase {
     // ADR-0036: fold the web storage-degrade signal in. Native never fires
     // (empty stream → this listener stays idle), so this is a no-op there.
     unawaited(_storageDegradedSub?.cancel());
-    _storageDegradedSub = _nostos.webStorageDegraded.listen(
-      (degraded) {
-        final prev = _status!.value;
-        if (prev.webStorageDegraded == degraded) return;
-        _status!.value = SyncStatus(
-          conn: prev.conn,
-          lastSyncedAt: prev.lastSyncedAt,
-          pendingWrites: prev.pendingWrites,
-          deadLetteredWrites: prev.deadLetteredWrites,
-          lastWriteError: prev.lastWriteError,
-          webStorageDegraded: degraded,
-        );
-      },
-      onError: (Object _) {},
-    );
+    _storageDegradedSub = _nostos.webStorageDegraded.listen((degraded) {
+      final prev = _status!.value;
+      if (prev.webStorageDegraded == degraded) return;
+      _status!.value = SyncStatus(
+        conn: prev.conn,
+        lastSyncedAt: prev.lastSyncedAt,
+        pendingWrites: prev.pendingWrites,
+        deadLetteredWrites: prev.deadLetteredWrites,
+        lastWriteError: prev.lastWriteError,
+        webStorageDegraded: degraded,
+      );
+    }, onError: (Object _) {});
   }
 
   /// Tear down the underlying [Nostos] session (sync loop + watch pump) AND the
@@ -699,6 +739,118 @@ class NostosDatabase {
 
   /// Legacy alias of [resumeSync]. Prefer `resumeSync()` (ADR-0032).
   void resume() => resumeSync();
+
+  // ─────────────────── Push tokens (ADR-0037 §3) ───────────────────
+  //
+  // Doorbell semantics: push is a hint, sync is the transport. Registering a
+  // token only tells the server WHERE to knock; the data always arrives over
+  // the sync connection, which resumes from the durable LSN checkpoint
+  // ([pauseSync]/[resumeSync], or a cold `connect` + `subscribe` from a
+  // killed app). Row data never transits Apple/Google servers.
+
+  /// Push tokens registered via [registerPushToken] THIS session,
+  /// deregistered by the [signOut] hook (ADR-0037 §3 — a leaked registration
+  /// would push the previous principal's data to the next user).
+  ///
+  /// ponytail: in-memory only — tokens registered before a process restart
+  /// are not auto-deregistered (the set dies with the process). The stale
+  /// case is covered server-side: the rails prune on APNs 410 / FCM
+  /// `UNREGISTERED`. Upgrade path: persist the set in the local store if
+  /// rail-prune proves too slow for real tenants.
+  final Set<String> _registeredPushTokens = <String>{};
+
+  /// The platforms `POST /push-tokens` accepts (ADR-0037 §3).
+  static const Set<String> _pushPlatforms = {'fcm', 'apns', 'webpush'};
+
+  /// Register this device's push token with the server (ADR-0037 §3):
+  /// `POST /push-tokens` with `{"platform": …, "token": …}`, authenticated by
+  /// the SAME JWT the sync connection uses (`Authorization: Bearer`). The
+  /// server stamps tenant/account itself — the SDK never attests identity
+  /// fields.
+  ///
+  /// [platform] is one of `"fcm"`, `"apns"`, `"webpush"`. Call this whenever
+  /// the OS push service hands the app a (possibly rotated) token — e.g.
+  /// `FirebaseMessaging.onTokenRefresh` on Android, APNs
+  /// `didRegisterForRemoteNotificationsWithDeviceToken` on iOS.
+  ///
+  /// Throws [ArgumentError] for an unknown platform, or
+  /// [NostosPushTokenException] when the server replies anything other than
+  /// `204`. Registered tokens are deregistered automatically by [signOut].
+  Future<void> registerPushToken(String platform, String token) async {
+    if (!_pushPlatforms.contains(platform)) {
+      throw ArgumentError.value(
+        platform,
+        'platform',
+        'must be one of ${_pushPlatforms.toList()}',
+      );
+    }
+    if (token.isEmpty) {
+      throw ArgumentError.value(token, 'token', 'must be non-empty');
+    }
+    await _pushTokensRest(
+      'POST',
+      '/push-tokens',
+      body: jsonEncode(<String, String>{'platform': platform, 'token': token}),
+    );
+    _registeredPushTokens.add(token);
+  }
+
+  /// Deregister [token] (ADR-0037 §3): `DELETE /push-tokens/{token}` with the
+  /// same auth as [registerPushToken]. Call this when the app can no longer
+  /// receive on this token (e.g. the user disables notifications);
+  /// [signOut] deregisters every session-registered token automatically.
+  ///
+  /// Throws [NostosPushTokenException] when the server replies anything other
+  /// than `204`.
+  Future<void> deregisterPushToken(String token) async {
+    await _pushTokensRest(
+      'DELETE',
+      '/push-tokens/${Uri.encodeComponent(token)}',
+    );
+    _registeredPushTokens.remove(token);
+  }
+
+  /// One REST round-trip against the pinned push-token contract. Sends the
+  /// JSON [body] for `POST` (none for `DELETE`) and the sync JWT as a Bearer
+  /// header when one exists (a `NOSTOS_SYNC_AUTH=none` server has no token to
+  /// send, same as the WS handshake).
+  Future<void> _pushTokensRest(
+    String method,
+    String path, {
+    String? body,
+  }) async {
+    final token = _restAuthToken;
+    final uri = Uri.parse('$_httpBase$path');
+    final headers = <String, String>{
+      if (body != null) 'content-type': 'application/json',
+      if (token != null) 'authorization': 'Bearer $token',
+    };
+    final response = method == 'POST'
+        ? await http.post(uri, headers: headers, body: body)
+        : await http.delete(uri, headers: headers);
+    if (response.statusCode != 204) {
+      throw NostosPushTokenException(
+        operation: method == 'POST' ? 'register' : 'deregister',
+        statusCode: response.statusCode,
+        body: response.body,
+      );
+    }
+  }
+
+  /// Sign-out hook: best-effort DELETE of every session-registered token.
+  /// Per-token failures are swallowed (one failed DELETE must not block the
+  /// rest — the stale row is pruned server-side, see the
+  /// [_registeredPushTokens] ponytail). Idempotent: [deregisterPushToken]
+  /// removes each token from the set as it succeeds.
+  Future<void> _deregisterPushTokensOnSignOut() async {
+    for (final token in List<String>.of(_registeredPushTokens)) {
+      try {
+        await deregisterPushToken(token);
+      } on Object {
+        // Swallowed — see method doc.
+      }
+    }
+  }
 
   /// Awaitable barrier that completes once the first sync has landed, i.e. the
   /// session has reached `connected` at least once (ADR-0032 T1). Resolves
@@ -824,7 +976,13 @@ class Collection<T> {
     int? offset,
     Duration? throttle,
   }) {
-    final sql = _composeQuery(table, where: where, orderBy: orderBy, limit: limit, offset: offset);
+    final sql = _composeQuery(
+      table,
+      where: where,
+      orderBy: orderBy,
+      limit: limit,
+      offset: offset,
+    );
     return _db
         .watch(sql, throttle: throttle)
         .map((rows) => rows.map(_fromRow).toList(growable: false));
@@ -838,7 +996,13 @@ class Collection<T> {
     int? limit,
     int? offset,
   }) async {
-    final sql = _composeQuery(table, where: where, orderBy: orderBy, limit: limit, offset: offset);
+    final sql = _composeQuery(
+      table,
+      where: where,
+      orderBy: orderBy,
+      limit: limit,
+      offset: offset,
+    );
     final rows = await _db.getAll(sql);
     return rows.map(_fromRow).toList(growable: false);
   }
@@ -860,11 +1024,7 @@ class Collection<T> {
   /// absent; re-emits on any change to that row. Detail screens use this so they
   /// don't rebuild on unrelated list churn.
   Stream<T?> watchOne(Object pk) {
-    final sql = _composeQuery(
-      table,
-      where: Where.eq(pkColumn, pk),
-      limit: 1,
-    );
+    final sql = _composeQuery(table, where: Where.eq(pkColumn, pk), limit: 1);
     return _db.watch(sql).map((rows) {
       if (rows.isEmpty) return null;
       return _fromRow(rows.first);
@@ -999,20 +1159,25 @@ class Collection<T> {
   /// [NostosDatabase.connect]/[NostosDatabase.open]/[NostosDatabase.supabase] (and
   /// the server's `NOSTOS_COUNTER_COLUMNS`) — without it the verb throws
   /// `CounterTableNotTagged`.
-  Future<int> counterIncrement({required Object pk, required int delta}) =>
-      _db._nostos.counterIncrement(table: table, pk: pk.toString(), delta: delta);
+  Future<int> counterIncrement({required Object pk, required int delta}) => _db
+      ._nostos
+      .counterIncrement(table: table, pk: pk.toString(), delta: delta);
 
   /// Decrement the PN-Counter by [delta] (bumps the negative counter `n` for
   /// this replica). Returns the local outbox id.
-  Future<int> counterDecrement({required Object pk, required int delta}) =>
-      _db._nostos.counterDecrement(table: table, pk: pk.toString(), delta: delta);
+  Future<int> counterDecrement({required Object pk, required int delta}) => _db
+      ._nostos
+      .counterDecrement(table: table, pk: pk.toString(), delta: delta);
 
   /// Single-table [NostosDatabase.writeBatch] convenience (ADR-0032 T3): stamps
   /// this collection's [table] onto every op. Same all-or-nothing-delivery,
   /// NOT-a-server-transaction semantics — see [NostosDatabase.writeBatch].
   Future<List<int>> writeBatch(List<NostosWrite> writes) {
     final stamped = writes
-        .map((w) => NostosWrite(table: table, op: w.op, pk: w.pk, payload: w.payload))
+        .map(
+          (w) =>
+              NostosWrite(table: table, op: w.op, pk: w.pk, payload: w.payload),
+        )
         .toList(growable: false);
     return _db.writeBatch(stamped);
   }
@@ -1158,4 +1323,30 @@ class DeadLetter {
   @override
   String toString() =>
       'DeadLetter(id: $id, table: $table, op: $op, pk: $pk, attempts: $attempts)';
+}
+
+/// A push-token REST call failed (ADR-0037 §3) — the server answered with
+/// anything other than the pinned `204`. [statusCode] is the HTTP status
+/// (e.g. `401` for an expired JWT) and [body] the verbatim response body.
+@immutable
+class NostosPushTokenException implements Exception {
+  const NostosPushTokenException({
+    required this.operation,
+    required this.statusCode,
+    required this.body,
+  });
+
+  /// Which call failed: `'register'` or `'deregister'`.
+  final String operation;
+
+  /// The server's HTTP status code.
+  final int statusCode;
+
+  /// The server's verbatim response body (may be empty).
+  final String body;
+
+  @override
+  String toString() =>
+      'NostosPushTokenException: push-token $operation failed with HTTP '
+      '$statusCode: $body';
 }
