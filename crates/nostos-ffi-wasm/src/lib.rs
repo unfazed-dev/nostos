@@ -971,6 +971,26 @@ impl Default for NostosEngine {
 /// The WASM WebSocket transport: pure frame-pump + thin `web_sys` glue.
 pub mod transport;
 
+/// Inject the key-value store the transport persists sync checkpoints to
+/// (plan task 6.1 / ADR-0037 §6 Wave 3 — EXPERIMENTAL Web Push enablement).
+///
+/// `store` is any JS object with the Web Storage shape — `getItem(key)`
+/// returning a string or null, and `setItem(key, value)`. Pass `localStorage`
+/// itself (the default when unset), a Map-backed shim (the Service-Worker
+/// context has no `window`), or a test spy. Passing `null`/`undefined`
+/// restores the default. Call BEFORE `NostosSocket.connect` — the active store
+/// is captured per-socket at connect time. Default behavior for embedders
+/// that never call this is unchanged (`window.localStorage`, a no-op where no
+/// window exists).
+#[wasm_bindgen(js_name = setKvStore)]
+pub fn set_kv_store(store: Option<js_sys::Object>) {
+    transport::set_kv_override(
+        store
+            .map(transport::JsKvStore)
+            .map(|s| Rc::new(s) as Rc<dyn transport::KvStore>),
+    );
+}
+
 /// A live WebSocket sync session in the browser.
 ///
 /// Construct with [`NostosSocket::connect`], which returns a `Promise` that
@@ -978,8 +998,9 @@ pub mod transport;
 /// frame is queued (sent on `open`). The server then streams events; each
 /// inbound message is decoded by the pure frame-pump, applied to the socket's
 /// engine, ACKed per committed batch, and the resulting checkpoint is
-/// persisted to `localStorage` under the `cairn:checkpoint:<table>` key so a
-/// reload can resume.
+/// persisted under the `cairn:checkpoint:<table>` key so a reload can resume —
+/// to `localStorage` by default, or to whatever store was injected via
+/// [`set_kv_store`] (plan 6.1: the SW-compatible KV seam).
 ///
 /// ## Resume
 ///
@@ -1638,9 +1659,11 @@ mod transport_tests {
     //! - `checkpoint_key` + `parse_checkpoint`
     use super::*;
     use nostos_core::Operation;
+    use transport::KvStore;
     use transport::{
         build_ack_frame, build_subscribe_frame, build_write_frame, checkpoint_from, checkpoint_key,
-        decode_frames, decode_hex, on_message, parse_checkpoint, pump_committed, PumpResult,
+        decode_frames, decode_hex, on_message, parse_checkpoint, pump_committed, read_checkpoint,
+        write_checkpoint, PumpResult,
     };
 
     // ---- wire decode (mirror of nostos_infra::wire::decode_frames) ----
@@ -2003,6 +2026,70 @@ mod transport_tests {
             ack: None,
         };
         assert_eq!(checkpoint_from(result), None);
+    }
+
+    // ---- the 6.1 storage seam: checkpoint persistence through KvStore ----
+    //
+    // The pure read/write helpers take the store as a parameter, so host
+    // tests pin the seam with an in-memory fake. The browser halves
+    // (`WindowLocalStorage`, `JsKvStore`) are covered by the Playwright
+    // browser test (e2e/webpush.spec.cjs) — same testability split as the WS
+    // glue (see the module docs).
+
+    /// Host-test fake: a `RefCell<HashMap>` behind the [`KvStore`] trait —
+    /// the Rust twin of the Map-backed shim a Service Worker injects.
+    struct MemKv(std::cell::RefCell<std::collections::HashMap<String, String>>);
+
+    impl MemKv {
+        fn new() -> Self {
+            Self(std::cell::RefCell::new(std::collections::HashMap::new()))
+        }
+    }
+
+    impl transport::KvStore for MemKv {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.borrow().get(key).cloned()
+        }
+        fn set(&self, key: &str, value: &str) {
+            self.0
+                .borrow_mut()
+                .insert(key.to_string(), value.to_string());
+        }
+    }
+
+    #[test]
+    fn checkpoint_round_trips_through_injected_store() {
+        // write → the injected store holds the key; read → the same LSN back.
+        let kv = MemKv::new();
+        write_checkpoint("tasks", 42, &kv);
+        assert_eq!(
+            kv.0.borrow()
+                .get("cairn:checkpoint:tasks")
+                .map(String::as_str),
+            Some("42"),
+            "the injected store received the checkpoint under the pinned key"
+        );
+        assert_eq!(read_checkpoint("tasks", &kv), Some(42));
+    }
+
+    #[test]
+    fn injected_store_missing_or_malformed_reads_resume_from_none() {
+        // A fresh store (no key) and a corrupt value both read None — the
+        // connect path resumes from 0, never panics.
+        let kv = MemKv::new();
+        assert_eq!(read_checkpoint("tasks", &kv), None, "no key → None");
+        kv.set("cairn:checkpoint:tasks", "not a number");
+        assert_eq!(read_checkpoint("tasks", &kv), None, "malformed → None");
+    }
+
+    #[test]
+    fn injected_store_overwrites_are_newest_wins() {
+        // Re-connecting and committing a higher LSN replaces the prior value
+        // (the engine's high-water is monotonic; the store must not lag it).
+        let kv = MemKv::new();
+        write_checkpoint("tasks", 10, &kv);
+        write_checkpoint("tasks", 20, &kv);
+        assert_eq!(read_checkpoint("tasks", &kv), Some(20));
     }
 
     #[test]

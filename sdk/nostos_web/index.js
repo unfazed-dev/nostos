@@ -12,7 +12,8 @@
 // CEILING: this is the apply engine only. `connect()` does NOT open a
 // WebSocket. `NostosSocket.connect()` (the live browser WS transport,
 // E1) is intentionally NOT invoked here because it is wired to
-// `web-sys::WebSocket` + `Window::localStorage`, neither of which
+// `web-sys::WebSocket` + `Window::localStorage` (the default of the
+// injectable `setKvStore` seam — plan 6.1), neither of which
 // exists in Node without a polyfill. Calling it from node would throw
 // at the first `web_sys::WebSocket::new()` or `window()` access.
 //

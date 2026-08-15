@@ -110,6 +110,34 @@
         rowsFor: (table) => request("rowsFor", { table }),
         checkpoint: () => request("checkpoint"),
         close: () => request("close"),
+        // Plan 6.2 (EXPERIMENTAL): the Service Worker doorbell lands here —
+        // push.js `onWake` default. Reconnects the Worker's socket if it is
+        // down; an open socket needs nothing (the WS stream is the transport).
+        wake: () => request("wake", {}),
+        // Plan 6.2 (EXPERIMENTAL — default OFF, ADR-0033 flag discipline):
+        // opt into Web Push. Dynamically imports push.js (nothing loads
+        // unless called), registers sw/nostos.sw.js, asks permission,
+        // subscribes with `vapidPublicKey`, POSTs /push-tokens, and wires
+        // SW wake messages to the Worker's `wake` command. The cfg persists
+        // under the flag key so the boot path below re-arms it on every
+        // reload (the wake listener does not survive a page load).
+        // cfg: {vapidPublicKey, httpBase, token?, swUrl?, scope?}.
+        enableWebPush: async (cfg) => {
+          const mod = await import("/push.js");
+          const full = {
+            swUrl: "/nostos.sw.js",
+            ...cfg,
+            onWake: () => {
+              request("wake", {});
+            },
+          };
+          const { onWake, ...persist } = full;
+          localStorage.setItem(
+            "cairn:experimental:webpush",
+            JSON.stringify(persist),
+          );
+          return mod.enableWebPush(full);
+        },
         // ADR-0029 WS4-D3: wipe rows+outbox, close the socket, drop the token —
         // the next user on this Worker session sees none of the prior user's
         // rows or pending writes. Resolves once the Worker has torn down.
@@ -158,6 +186,30 @@
       };
 
       log("PROXY_READY");
+
+      // Plan 6.2 (EXPERIMENTAL, default OFF): when the host opted in via
+      // nostos.enableWebPush (flag key below), re-run the boot-path enablement
+      // on every load — permission is already granted, the subscription is
+      // reused, and the SW wake listener is re-armed in THIS document (a
+      // listener does not survive a reload). Nothing runs when the key is
+      // absent: the default remains untouched for every other embedder/spec.
+      (async () => {
+        try {
+          const raw = localStorage.getItem("cairn:experimental:webpush");
+          if (raw) {
+            const mod = await import("/push.js");
+            await mod.enableWebPush({
+              ...JSON.parse(raw),
+              onWake: () => {
+                request("wake", {});
+              },
+            });
+            log("WEBPUSH_READY");
+          }
+        } catch (e) {
+          log("WEBPUSH_ERROR " + ((e && e.message) || String(e)));
+        }
+      })();
     </script>
   </body>
 </html>
