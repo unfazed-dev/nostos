@@ -230,3 +230,81 @@ async fn list_by_account_is_tenant_isolated() {
 
     clean_tokens(&["iso-tenant-a", "iso-tenant-b"]).await;
 }
+
+/// `list_by_tenant` (ADR-0037 §1 amendment): the tenant-wide expansion
+/// lookup — returns every account's tokens within ONE tenant (grouped by
+/// account for the coalescer's presence filter), never another tenant's.
+#[tokio::test]
+async fn list_by_tenant_groups_accounts_and_isolates_tenants() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    ensure_table().await;
+    clean_tokens(&["lt-a1", "lt-a2", "lt-b1"]).await;
+    let store = PgTokenStore::new(&pg_url());
+
+    // Two accounts (multi-device) in tenant A; one in tenant B.
+    store
+        .upsert("apns", "lt-a1", "lt-acct-1", "lt-tenant-a")
+        .await
+        .expect("a1");
+    store
+        .upsert("fcm", "lt-a2", "lt-acct-1", "lt-tenant-a")
+        .await
+        .expect("a2");
+    store
+        .upsert("apns", "lt-a1", "lt-acct-2", "lt-tenant-a")
+        .await
+        .expect("a1 re-registered under acct-2 (migrated)");
+    store
+        .upsert("apns", "lt-b1", "lt-acct-1", "lt-tenant-b")
+        .await
+        .expect("b1 (same account id, other tenant)");
+
+    let mut rows = store
+        .list_by_tenant("lt-tenant-a")
+        .await
+        .expect("list by tenant");
+    rows.sort_by(|a, b| a.token.cmp(&b.token));
+    assert_eq!(
+        rows,
+        vec![
+            nostos_infra::RegisteredToken {
+                tenant_id: "lt-tenant-a".into(),
+                account_id: "lt-acct-2".into(),
+                platform: "apns".into(),
+                token: "lt-a1".into(),
+            },
+            nostos_infra::RegisteredToken {
+                tenant_id: "lt-tenant-a".into(),
+                account_id: "lt-acct-1".into(),
+                platform: "fcm".into(),
+                token: "lt-a2".into(),
+            },
+        ],
+        "tenant A resolves its own accounts' devices — including the migrated \
+         token — and never tenant B's row for the same account id"
+    );
+
+    // Owner-scoped delete (plan 3.1): removing acct-1's token leaves
+    // acct-2's row alone even though a bare prune would hit it.
+    assert_eq!(
+        store
+            .delete_for_owner("lt-tenant-a", "lt-acct-1", "lt-a2")
+            .await
+            .expect("scoped delete"),
+        1
+    );
+    assert_eq!(store.list_by_tenant("lt-tenant-a").await.unwrap().len(), 1);
+    // A different owner's delete is a no-op.
+    assert_eq!(
+        store
+            .delete_for_owner("lt-tenant-a", "lt-acct-9", "lt-a1")
+            .await
+            .expect("scoped delete no-op"),
+        0
+    );
+
+    clean_tokens(&["lt-a1", "lt-a2", "lt-b1"]).await;
+}

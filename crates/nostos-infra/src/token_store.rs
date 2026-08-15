@@ -14,8 +14,8 @@
 //! `account_id` / `tenant_id` MUST be stamped server-side from the
 //! authenticated `Principal` by the caller — this type is a dumb row-keeper
 //! and deliberately offers no API shape that could smuggle a client-attested
-//! tenant claim into a row. The REST stamping arrives with task 3.1
-//! (`POST /push-tokens`); until then the store is exercised by tests only.
+//! tenant claim into a row. The REST surface (task 3.1, `POST /push-tokens`)
+//! does the stamping via the `PushTokenRegistry` seam implemented below.
 //!
 //! Identity semantics: the token is the primary key (one token = one device =
 //! one current account), so re-registering a token under a different account
@@ -202,6 +202,141 @@ impl PgTokenStore {
                 token: row.get(1),
             })
             .collect())
+    }
+
+    /// Every token registered within one tenant, with its account — the
+    /// tenant-wide expansion lookup (ADR-0037 §1 amendment): the push router
+    /// resolves a tenant-wide hint to this list, then presence-filters per
+    /// account at send time.
+    ///
+    /// # Errors
+    /// [`TokenStoreError`] if the Postgres round-trip fails.
+    pub async fn list_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<crate::push::router::RegisteredToken>, TokenStoreError> {
+        let client = self.client().await?;
+        let rows = match client
+            .query(
+                "SELECT tenant_id, account_id, platform, token FROM cairn_push_tokens \
+                 WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.drop_client().await;
+                return Err(TokenStoreError(e.to_string()));
+            }
+        };
+        self.return_client(client).await;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::push::router::RegisteredToken {
+                tenant_id: row.get(0),
+                account_id: row.get(1),
+                platform: row.get(2),
+                token: row.get(3),
+            })
+            .collect())
+    }
+
+    /// Owner-scoped delete (sign-out deregistration, plan 3.1): only the
+    /// authenticated `(tenant, account)`'s own row disappears. A token that
+    /// migrated to another principal is a no-op (0 rows) — one user can
+    /// never deregister another user's device.
+    ///
+    /// # Errors
+    /// [`TokenStoreError`] if the Postgres round-trip fails.
+    pub async fn delete_for_owner(
+        &self,
+        tenant_id: &str,
+        account_id: &str,
+        token: &str,
+    ) -> Result<u64, TokenStoreError> {
+        let sql = "DELETE FROM cairn_push_tokens \
+                   WHERE token = $1 AND tenant_id = $2 AND account_id = $3";
+        let client = self.client().await?;
+        match client
+            .execute(sql, &[&token, &tenant_id, &account_id])
+            .await
+        {
+            Ok(n) => {
+                self.return_client(client).await;
+                Ok(n)
+            }
+            Err(e) => {
+                self.drop_client().await;
+                Err(TokenStoreError(e.to_string()))
+            }
+        }
+    }
+}
+
+/// The `PushTokenRegistry` seam (push/router) over the inherent methods —
+/// the REST surface (plan 3.1) and the push router (plan 2.4) both talk to
+/// the registry through this trait so the fake-mode in-memory twin can stand
+/// in for dev builds and tests.
+#[async_trait::async_trait]
+impl crate::push::router::PushTokenRegistry for PgTokenStore {
+    async fn upsert(
+        &self,
+        platform: &str,
+        token: &str,
+        account_id: &str,
+        tenant_id: &str,
+    ) -> Result<(), String> {
+        PgTokenStore::upsert(self, platform, token, account_id, tenant_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn prune(&self, token: &str) -> Result<u64, String> {
+        PgTokenStore::prune(self, token)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_for_owner(
+        &self,
+        tenant_id: &str,
+        account_id: &str,
+        token: &str,
+    ) -> Result<u64, String> {
+        PgTokenStore::delete_for_owner(self, tenant_id, account_id, token)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_by_account(
+        &self,
+        tenant_id: &str,
+        account_id: &str,
+    ) -> Result<Vec<crate::push::router::RegisteredToken>, String> {
+        PgTokenStore::list_by_account(self, tenant_id, account_id)
+            .await
+            .map(|tokens| {
+                tokens
+                    .into_iter()
+                    .map(|t| crate::push::router::RegisteredToken {
+                        tenant_id: tenant_id.to_string(),
+                        account_id: account_id.to_string(),
+                        platform: t.platform,
+                        token: t.token,
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<crate::push::router::RegisteredToken>, String> {
+        PgTokenStore::list_by_tenant(self, tenant_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

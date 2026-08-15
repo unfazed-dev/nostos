@@ -11,7 +11,7 @@
 //! | [`wire`] | — | `ReplicationEvent` ↔ JSON/binary frame codec |
 //! | [`transport`] | — | axum WebSocket server adapter |
 //! | [`token_store`] | — (inherent; ADR-0037) | `PgTokenStore` — push-token registry (feature "pg") |
-//! | [`push`] | — (inherent; ADR-0037) | FCM HTTP v1 / APNs / Web Push rails — composition into `PushNotifier` is plan task 2.4 |
+//! | [`push`] | — (inherent; ADR-0037) | FCM HTTP v1 / APNs / Web Push rails + `PushRouter` coalescer (the `PushNotifier` port impl, plan 2.4) |
 //!
 //! The benchmark drives a `FakeReplicator` through the *real* `FanOutService`
 //! and `TokioEventSink`, so what we measure is the production pipeline.
@@ -23,9 +23,10 @@ mod jwks;
 /// Persisted operation-log writers (ADR-0025 slice 2). `RecordingOpLogWriter`
 /// (always available, in-memory — bench/test) + `PgOpLogWriter` (feature "pg").
 pub mod oplog;
-/// The push provider rails (ADR-0037 §1, plan tasks 2.1–2.3): FCM HTTP v1 /
-/// APNs / Web Push senders with one shared `RailOutcome`. Inherent methods
-/// only — the `PushNotifier` port composition is plan task 2.4.
+/// The push provider rails (ADR-0037 §1, plan tasks 2.1–2.4): FCM HTTP v1 /
+/// APNs / Web Push senders with one shared `RailOutcome`, plus `router`'s
+/// `PushRouter` — the coalescer that implements the application
+/// `PushNotifier` port over them.
 pub mod push;
 pub mod replicator;
 pub mod router;
@@ -42,8 +43,8 @@ pub mod schema_source;
 pub mod snapshot_source;
 pub mod store;
 /// `#[cfg(feature = "pg")]` — the push-token registry adapter (ADR-0037 §3).
-/// Absent without the `pg` feature. Inherent methods only — no port trait
-/// until a second implementation or a test seam demands one.
+/// Absent without the `pg` feature. Implements the `PushTokenRegistry` seam
+/// (push/router) — the second implementation next to `InMemoryTokenRegistry`.
 #[cfg(feature = "pg")]
 pub mod token_store;
 pub mod transport;
@@ -52,6 +53,9 @@ pub mod write_back;
 
 pub use auth::{AllowAnonymous, SupabaseJwtAuth};
 pub use oplog::RecordingOpLogWriter;
+pub use push::router::{
+    InMemoryTokenRegistry, PushRouter, PushSink, PushTokenRegistry, RailSet, RegisteredToken,
+};
 pub use push::{
     apns::ApnsRail,
     fcm::{FcmMessage, FcmRail, FcmTarget},

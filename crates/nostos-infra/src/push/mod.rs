@@ -15,9 +15,9 @@
 //!
 //! ## Token hygiene
 //!
-//! [`RailOutcome::Unregistered`] is the prune trigger for `PgTokenStore` —
-//! APNs 410, FCM `UNREGISTERED`, Web Push 404/410. The rails only report the
-//! outcome; pruning is consumed by task 2.4.
+//! [`RailOutcome::Unregistered`] is the prune trigger for the token
+//! registry — APNs 410, FCM `UNREGISTERED`, Web Push 404/410. The rails only
+//! report the outcome; the coalescer (`router.rs`, plan 2.4) prunes.
 //!
 //! ## Config (env-only; no credentials in code)
 //!
@@ -97,6 +97,7 @@ pub(crate) fn env_nonempty(name: &str) -> Option<String> {
 
 pub mod apns;
 pub mod fcm;
+pub mod router;
 pub mod webpush;
 
 #[cfg(test)]
