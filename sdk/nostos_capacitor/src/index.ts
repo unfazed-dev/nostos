@@ -23,7 +23,9 @@ import type { NostosPlugin } from "./definitions";
 
 export type {
   NostosConnectResult,
+  NostosForegroundPushEvent,
   NostosPlugin,
+  NostosPushTokenEvent,
   NostosRow,
   NostosWatchSnapshot,
   NostosWatchSubscription,
@@ -33,6 +35,7 @@ export type {
   SetTokenOptions,
   WatchOptions,
   WriteOptions,
+  PushPlatform,
 } from "./definitions";
 export { NostosWeb } from "./web";
 

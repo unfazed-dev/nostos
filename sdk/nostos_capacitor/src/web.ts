@@ -38,6 +38,9 @@ import type {
   WriteOptions,
 } from "./definitions";
 
+/** The platforms `POST /push-tokens` accepts (ADR-0037 §3). */
+const PUSH_PLATFORMS = new Set(["apns", "fcm", "webpush"]);
+
 /** Default URL of the wasm-pack `--target web` glue, served by the host. */
 const DEFAULT_WASM_URL = "/pkg-web/nostos_ffi_wasm.js";
 
@@ -130,6 +133,33 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
   /** Configured wasm URL (configure() overrides the default). */
   private wasmUrl: string = DEFAULT_WASM_URL;
 
+  /**
+   * The last ConnectOptions (minus the token, which lives in this.token) —
+   * kept so reconnect() can re-open the same session after a push wake.
+   */
+  private lastConnect: ConnectOptions | null = null;
+
+  /**
+   * HTTP base derived from the last connect() url (`wss`→`https`, `ws`→
+   * `http`, path stripped) — the REST surface (`POST /push-tokens`,
+   * `DELETE /push-tokens/{token}`) hangs off the SAME server the WS session
+   * uses. Same derivation as the Flutter/Node SDKs.
+   */
+  private httpBase: string | null = null;
+
+  /**
+   * Push tokens registered via registerPushToken THIS session, deregistered
+   * by signOut() (ADR-0037 §3 — a leaked registration would push the previous
+   * principal's data to the next user).
+   *
+   * ponytail: in-memory only — tokens registered before a webview reload are
+   * not auto-deregistered (the set dies with the page). The stale case is
+   * covered server-side: the rails prune on APNs 410 / FCM `UNREGISTERED`.
+   * Upgrade path: persist the set alongside the checkpoint if rail-prune
+   * proves too slow for real tenants.
+   */
+  private registeredPushTokens = new Set<string>();
+
   /** @inheritDoc */
   async configure(options: ConfigureOptions): Promise<void> {
     if (!options || !options.wasmUrl) {
@@ -156,6 +186,8 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
     // connect — same shape as SyncClient::set_token.
     const token = options.token ?? this.token;
     this.token = token ?? null;
+    this.lastConnect = options;
+    this.httpBase = deriveHttpBase(options.url);
     this.sock = await NostosSocket.connect(
       options.url,
       token ?? null,
@@ -384,12 +416,20 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
 
   /** @inheritDoc */
   async signOut(): Promise<void> {
-    // Order matters (ADR-0029): wipe the engine's rows + outbox WHILE the
-    // socket is still live (clearLocalState drives the engine the socket
-    // owns), then close the socket, then drop reactive listeners and clear the
-    // stored token. After this the plugin holds none of the prior principal's
-    // state — the next connect() cold-starts into an empty DB (no rows, no
-    // checkpoint, no pending writes, no token). Idempotent.
+    // Order matters (ADR-0037 §3 + ADR-0029): deregister push tokens while
+    // this.token still holds the prior principal's JWT (the DELETE needs the
+    // SAME auth the registration used), THEN wipe the engine's rows + outbox
+    // WHILE the socket is still live, close the socket, drop reactive
+    // listeners and clear the stored token. After this the plugin holds none
+    // of the prior principal's state. Idempotent — the token set drains.
+    for (const token of Array.from(this.registeredPushTokens)) {
+      try {
+        await this.deregisterPushToken(token);
+      } catch {
+        // Swallowed: one failed DELETE must not block the rest of sign-out —
+        // the stale row is pruned server-side (rail 410/UNREGISTERED).
+      }
+    }
     const s = this.sock;
     this.sock = null;
     this.watchers.clear();
@@ -407,6 +447,87 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
       }
     }
     this.token = null;
+    this.lastConnect = null;
+    this.httpBase = null;
+  }
+
+  // ─────────────────── Push (beta, ADR-0037 §2/§3) ───────────────────
+
+  /** @inheritDoc */
+  async registerPushToken(platform: string, token: string): Promise<void> {
+    if (!PUSH_PLATFORMS.has(platform)) {
+      throw new Error(
+        `Nostos.registerPushToken: platform must be one of ${Array.from(PUSH_PLATFORMS).join(", ")} (got ${JSON.stringify(platform)})`,
+      );
+    }
+    if (!token) {
+      throw new Error("Nostos.registerPushToken: token must be non-empty");
+    }
+    await this.pushTokensRest("POST", "/push-tokens", {
+      platform: platform,
+      token: token,
+    });
+    this.registeredPushTokens.add(token);
+  }
+
+  /** @inheritDoc */
+  async deregisterPushToken(token: string): Promise<void> {
+    await this.pushTokensRest(
+      "DELETE",
+      `/push-tokens/${encodeURIComponent(token)}`,
+    );
+    this.registeredPushTokens.delete(token);
+  }
+
+  /** @inheritDoc */
+  async registerForPushNotifications(): Promise<void> {
+    throw new Error(
+      "Nostos.registerForPushNotifications: web has no OS push — web push is the Service Worker work (plan task 6.2); on iOS/Android the native side handles it",
+    );
+  }
+
+  /** @inheritDoc */
+  async reconnect(): Promise<NostosConnectResult> {
+    if (!this.lastConnect) {
+      throw new Error("Nostos.reconnect: connect() not called yet");
+    }
+    await this.close();
+    return this.connect(this.lastConnect);
+  }
+
+  /**
+   * One REST round-trip against the pinned push-token contract (ADR-0037 §3).
+   * Sends the JSON body for POST (none for DELETE) and this.token as a Bearer
+   * header when one exists (a NOSTOS_SYNC_AUTH=none server has no token to
+   * send, same as the WS handshake). Resolves on 204; anything else rejects
+   * with status + body in the message.
+   */
+  private async pushTokensRest(
+    method: "POST" | "DELETE",
+    path: string,
+    body?: Record<string, string>,
+  ): Promise<void> {
+    if (!this.httpBase) {
+      throw new Error("Nostos.pushTokensRest: connect() not called");
+    }
+    const headers: Record<string, string> = {};
+    if (body !== undefined) {
+      headers["content-type"] = "application/json";
+    }
+    if (this.token) {
+      headers.authorization = `Bearer ${this.token}`;
+    }
+    const response = await fetch(`${this.httpBase}${path}`, {
+      method: method,
+      headers: headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (response.status !== 204) {
+      const text = await response.text().catch(() => "");
+      throw new Error(
+        `Nostos.pushTokensRest: ${method} ${path} failed with ${response.status}${text ? `: ${text}` : ""}`,
+      );
+    }
   }
 
 
@@ -452,4 +573,19 @@ export class NostosWeb extends WebPlugin implements NostosPlugin {
     this.wasmPromise = promise;
     return promise;
   }
+}
+
+/**
+ * Derive the HTTP base for the REST surface (`POST /push-tokens`,
+ * `DELETE /push-tokens/{token}`) from the WS /sync URL: `wss`→`https`,
+ * `ws`→`http`, host+port preserved, path stripped. Same rules as the
+ * Flutter/Node SDKs (`_deriveHttpBase` / `http_base`).
+ */
+function deriveHttpBase(wsUrl: string): string {
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]+)/.exec(wsUrl);
+  if (!m) {
+    return wsUrl;
+  }
+  const scheme = m[1] === "wss" ? "https" : m[1] === "ws" ? "http" : m[1];
+  return `${scheme}://${m[2]}`;
 }
