@@ -113,6 +113,14 @@ RCT_EXPORT_MODULE(NativeNostos)
   [self.backend bridgeSetToken:token resolve:resolve reject:reject];
 }
 
+- (void)disconnect:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  [self.backend bridgeDisconnect:resolve reject:reject];
+}
+
+- (void)resume:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  [self.backend bridgeResume:resolve reject:reject];
+}
+
 - (void)signOut:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   [self.backend bridgeSignOut:resolve reject:reject];
 }

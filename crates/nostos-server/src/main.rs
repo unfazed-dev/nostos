@@ -11,6 +11,7 @@
 //! the hexagonal payoff (ADR-0001).
 
 mod admin_auth;
+mod push_api;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -142,6 +143,37 @@ pub struct Config {
     /// retention). Example: `16` or `32` for high client counts.
     #[arg(long, env = "NOSTOS_ACK_PROGRESS_INTERVAL", default_value = "1")]
     ack_progress_interval: u32,
+
+    /// Per-table push configuration (ADR-0037 §1 amendment + §2, plan 2.4).
+    /// `;`-separated entries; each entry is one of
+    ///
+    /// - `table` — silent doorbell (content-free wake),
+    /// - `table:silent` — the same, explicit,
+    /// - `table:visible:<title>:<body>` — a visible notification; `{col}`
+    ///   in title/body statically interpolates the triggering row's column
+    ///   value (no expression language). A missing column interpolates the
+    ///   empty string.
+    /// - `table:liveactivity:<json>` — EXPERIMENTAL (plan 6.4): the JSON
+    ///   object is the ActivityKit `content-state`; `{col}` in its string
+    ///   leaves interpolates the same way, and updates ride APNs
+    ///   priority 5 to tokens registered with platform
+    ///   `apns-liveactivity`.
+    ///
+    /// Colons cannot appear inside title/body and semicolons cannot appear
+    /// anywhere in an entry (they separate entries — including inside a
+    /// liveactivity JSON template). Tables listed here doorbell the tenant's
+    /// fully-offline accounts; every other table only doorbells via matched
+    /// sessions. Example:
+    /// `tasks;orders:visible:New order:Order {id} placed;deliveries:liveactivity:{"status":"{status}"}`.
+    /// Empty (default) = push off beyond the matched-account path. Table
+    /// names must match `^[a-z_][a-z0-9_]*$` (ADR-0013 identifier discipline).
+    #[arg(long, env = "NOSTOS_PUSH_TABLES", default_value = "")]
+    push_tables: String,
+
+    /// Push coalescer debounce window in milliseconds (ADR-0037 §4): bursts
+    /// of hints to one account collapse to ONE push per window. Default 2s.
+    #[arg(long, env = "NOSTOS_PUSH_DEBOUNCE_MS", default_value_t = 2000)]
+    push_debounce_ms: u64,
 
     /// Logical-replication slot name.
     #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "cairn_slot")]
@@ -397,6 +429,82 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // ---- tenant column (used by the push wiring below AND the WS transport
+    // state further down). Tenant column is enforced only under supabase-jwt
+    // auth — the anonymous mode has no principal to scope with (see
+    // ADR-0011). An *empty* `NOSTOS_TENANT_COLUMN=` is the explicit opt-out
+    // (single-tenant deploys scoping per-table via nostos_rules.toml
+    // instead): before this guard, the empty string was passed through as a
+    // real column name, injecting `"" = <tenant>` into every predicate — a
+    // column no row has, so every authenticated subscription silently
+    // snapshot/streamed zero rows.
+    let tenant_col = if cfg.sync_auth == "supabase-jwt" && !cfg.tenant_column.is_empty() {
+        Some(cfg.tenant_column.as_str())
+    } else {
+        None
+    };
+    if cfg.sync_auth == "supabase-jwt" && cfg.tenant_column.is_empty() {
+        tracing::info!(
+            "NOSTOS_TENANT_COLUMN is empty — tenant scoping disabled; \
+             use nostos_rules.toml scopes for per-table row filtering"
+        );
+    }
+
+    // ---- ADR-0037 push doorbell (plan 1.3 + 2.4) ----
+    // Rails from env (`from_env` per rail: `Ok(None)` = unconfigured); the
+    // per-table config from NOSTOS_PUSH_TABLES; the token registry — Pg under
+    // pg mode, in-memory otherwise so the REST surface still works in dev
+    // builds (no persistence across restarts in fake mode).
+    let push_cfg =
+        parse_push_tables(&cfg.push_tables, tenant_col).context("invalid NOSTOS_PUSH_TABLES")?;
+    let rails = nostos_infra::RailSet::from_env().context("push rail configuration")?;
+    #[cfg(feature = "pg")]
+    let push_registry: std::sync::Arc<dyn nostos_infra::PushTokenRegistry> =
+        if cfg.replicator == "pg" {
+            info!("push tokens: PgTokenStore (real registry)");
+            Arc::new(nostos_infra::PgTokenStore::new(&cfg.pg_url))
+        } else {
+            info!(
+            "push tokens: in-memory registry (fake replicator — registrations are not persisted)"
+        );
+            Arc::new(nostos_infra::InMemoryTokenRegistry::new())
+        };
+    #[cfg(not(feature = "pg"))]
+    let push_registry: std::sync::Arc<dyn nostos_infra::PushTokenRegistry> =
+        Arc::new(nostos_infra::InMemoryTokenRegistry::new());
+    // The notifier: the coalescer router when anything can deliver (a rail
+    // configured, or push tables listed); NoopNotifier otherwise — push
+    // stays entirely off the fan-out path (the bench baseline pays nothing).
+    let push_notifier: Arc<dyn nostos_application::ports::PushNotifier> =
+        if rails.is_empty() && push_cfg.tables.tables.is_empty() {
+            info!("push: off (no rails configured, no NOSTOS_PUSH_TABLES)");
+            Arc::new(nostos_application::ports::NoopNotifier)
+        } else {
+            if rails.is_empty() {
+                warn!(
+                    "NOSTOS_PUSH_TABLES is set but no push rail is configured — \
+                     hints enqueue but no provider can deliver"
+                );
+            }
+            info!(
+                tables = push_cfg.tables.tables.len(),
+                live_activity_tables = push_cfg.live_activities.len(),
+                debounce_ms = cfg.push_debounce_ms,
+                "push: PushRouter coalescer active"
+            );
+            Arc::new(nostos_infra::PushRouter::new(
+                Arc::new(rails),
+                Arc::clone(&push_registry),
+                Arc::clone(&store),
+                nostos_infra::push::router::RouterConfig {
+                    tables: push_cfg.tables.clone(),
+                    live_activities: push_cfg.live_activities,
+                },
+                std::time::Duration::from_millis(cfg.push_debounce_ms),
+                Arc::clone(&metrics),
+            ))
+        };
+
     let fanout = Arc::new({
         let builder = FanOutService::new(Arc::clone(&store))
             .with_metrics(Arc::clone(&metrics))
@@ -408,7 +516,10 @@ async fn main() -> anyhow::Result<()> {
             Some(w) => builder.with_op_log(w),
             None => builder,
         };
-        builder.with_ack_progress_every(cfg.ack_progress_interval)
+        builder
+            .with_ack_progress_every(cfg.ack_progress_interval)
+            .with_push_tables(push_cfg.tables)
+            .with_push_notifier(push_notifier)
     });
 
     // ---- start the replicator → fan-out driver ----
@@ -473,15 +584,12 @@ async fn main() -> anyhow::Result<()> {
                 let fanout_drv = Arc::clone(&fanout);
                 let drv = tokio::spawn(async move {
                     // Extract a column from the JSON payload: parse the small
-                    // object and return the named field. Cheap (one parse per
-                    // candidate event) and keeps predicates honest.
-                    let extract = |e: &ReplicationEvent, col: &str| -> Option<ColumnValue> {
-                        let payload = e.payload_bytes();
-                        let parsed: serde_json::Value = serde_json::from_slice(payload).ok()?;
-                        parsed
-                            .get(col)
-                            .and_then(|v| v.as_str())
-                            .map(ColumnValue::text)
+                    // object and return the named field. Typed (ADR-0037 plan
+                    // 1.4): JSON scalars keep their type — a bare `5` yields
+                    // `Number(5)`, not "absent" — so predicates over numeric/
+                    // bool columns no longer match wider than intended.
+                    let extract = |e: &ReplicationEvent, col: &str| {
+                        extract_typed_column(e.payload_bytes(), col)
                     };
                     let outcome = fanout_drv.run(&mut repl, extract).await;
                     info!(?outcome, "PgReplicator stream ended");
@@ -519,24 +627,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ---- build the axum router + transport ----
-    // Tenant column is enforced only under supabase-jwt auth — the anonymous
-    // mode has no principal to scope with (see ADR-0011). An *empty*
-    // `NOSTOS_TENANT_COLUMN=` is the explicit opt-out (single-tenant deploys
-    // scoping per-table via nostos_rules.toml instead): before this guard, the
-    // empty string was passed through as a real column name, injecting
-    // `"" = <tenant>` into every predicate — a column no row has, so every
-    // authenticated subscription silently snapshot/streamed zero rows.
-    let tenant_col = if cfg.sync_auth == "supabase-jwt" && !cfg.tenant_column.is_empty() {
-        Some(cfg.tenant_column.as_str())
-    } else {
-        None
-    };
-    if cfg.sync_auth == "supabase-jwt" && cfg.tenant_column.is_empty() {
-        tracing::info!(
-            "NOSTOS_TENANT_COLUMN is empty — tenant scoping disabled; \
-             use nostos_rules.toml scopes for per-table row filtering"
-        );
-    }
     let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
         .with_buffer(cfg.session_buffer)
         .with_metrics(Arc::clone(&metrics));
@@ -741,9 +831,33 @@ async fn main() -> anyhow::Result<()> {
                 move || metrics_handler(m.clone(), store_for_gauge.clone())
             }),
         )
-        .layer(cors)
+        .layer(cors.clone())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state)
+        // ADR-0037 §3 (plan 3.1): push-token registration, same JWT auth as
+        // /sync, own state (registry + auth + tenant column) — merged after
+        // `.with_state` so the two state types stay separate. The CORS +
+        // trace layers are re-applied here because `.layer` only covers
+        // routes registered on the router at call time; without this, a
+        // browser SDK's cross-origin POST /push-tokens would be blocked.
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/push-tokens",
+                    axum::routing::post(push_api::post_push_token),
+                )
+                .route(
+                    "/push-tokens/:token",
+                    axum::routing::delete(push_api::delete_push_token),
+                )
+                .with_state(push_api::PushApiState {
+                    auth: Arc::clone(&auth),
+                    registry: Arc::clone(&push_registry),
+                    tenant_column: tenant_col.map(str::to_string),
+                })
+                .layer(cors)
+                .layer(TraceLayer::new_for_http()),
+        );
 
     let addr: SocketAddr = cfg
         .bind
@@ -861,6 +975,151 @@ async fn watch_rules(
     }
 }
 
+/// Typed column extraction for the pg streaming path (ADR-0037 plan 1.4):
+/// the payload's JSON scalars keep their type — `{"priority":5}` yields
+/// [`ColumnValue::Number`] — instead of the old string-only read, which made
+/// numeric/bool columns look absent and let `Ne`/`Not(Eq)` predicates over
+/// them match wider than intended. Delegates to the canonical
+/// `extract_json_column` mapping (ADR-0019) so streaming predicates and the
+/// snapshot path can never drift.
+#[cfg(feature = "pg")]
+fn extract_typed_column(payload: &[u8], col: &str) -> Option<ColumnValue> {
+    nostos_infra::replicator::extract_json_column(payload)?(col)
+}
+
+// ---- push-tables config parsing (ADR-0037 §1 amendment + §2, plan 2.4) ----
+
+/// `^[a-z_][a-z0-9_]*$` — the ADR-0013 identifier shape, char-class edition
+/// (the regex itself lives behind the write-back adapter; a config parser
+/// doesn't need it).
+fn is_plain_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('_' | 'a'..='z'))
+        && chars.all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// `NOSTOS_PUSH_TABLES` parse output: the application-layer [`PushTables`]
+/// plus the infra-side Live Activity content-state templates (plan task 6.4,
+/// experimental). A `liveactivity` entry appears in BOTH maps: the
+/// `PushTables` row is a placeholder `Visible` — the only variant the
+/// application layer attaches tuple bytes for (`fanout.rs:337`) — and the
+/// router consults `live_activities` FIRST, so the placeholder never
+/// renders. ponytail: placeholder coupling; the upgrade is a real
+/// `PushTemplate::LiveActivity` variant when the application crate accepts
+/// new variants again.
+#[derive(Debug, Default)]
+struct PushTablesConfig {
+    tables: nostos_application::ports::PushTables,
+    live_activities: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Parse `NOSTOS_PUSH_TABLES` into the per-table push configuration (see the
+/// `Config::push_tables` help) injected into both `FanOutService`
+/// (tenant-wide hints) and `PushRouter` (template resolution). Format:
+/// `;`-separated entries of `table`, `table:silent`,
+/// `table:visible:<title>:<body>`, or `table:liveactivity:<json>` where
+/// `<json>` is a JSON object whose string leaves may carry `{col}` static
+/// interpolation placeholders (they become the ActivityKit `content-state`).
+/// Invalid input is a startup error — a typo'd table silently not pushing is
+/// the failure mode this refuses to allow.
+fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<PushTablesConfig> {
+    use nostos_application::ports::{PushTables, PushTemplate};
+
+    let mut tables = std::collections::HashMap::new();
+    let mut live_activities = std::collections::HashMap::new();
+    for entry in raw.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.splitn(2, ':');
+        let table = parts.next().unwrap_or_default().trim().to_string();
+        if table.is_empty() {
+            anyhow::bail!("NOSTOS_PUSH_TABLES: empty table name in entry {entry:?}");
+        }
+        if !is_plain_identifier(&table) {
+            anyhow::bail!(
+                "NOSTOS_PUSH_TABLES: table name {table:?} must match ^[a-z_][a-z0-9_]*$ (ADR-0013)"
+            );
+        }
+        let template = match parts.next() {
+            None => PushTemplate::Silent,
+            Some(rest) => {
+                let (mode, args) = match rest.split_once(':') {
+                    Some((m, a)) => (m.trim(), Some(a)),
+                    None => (rest.trim(), None),
+                };
+                match (mode, args) {
+                    ("silent", None) => PushTemplate::Silent,
+                    ("silent", Some(_)) => {
+                        anyhow::bail!(
+                            "NOSTOS_PUSH_TABLES: \"silent\" entries take no title/body: {entry:?}"
+                        )
+                    }
+                    ("visible", Some(title_body)) => {
+                        // Title runs to the next ':'; body keeps any further
+                        // colons (the old `splitn(4)` remainder semantics).
+                        match title_body.split_once(':') {
+                            Some((title, body)) => PushTemplate::Visible {
+                                title: title.trim().to_string(),
+                                body: body.trim().to_string(),
+                            },
+                            None => anyhow::bail!(
+                                "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
+                                 table:visible:<title>:<body> (got {entry:?})"
+                            ),
+                        }
+                    }
+                    ("visible", None) => anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
+                         table:visible:<title>:<body> (got {entry:?})"
+                    ),
+                    ("liveactivity", Some(tpl)) => {
+                        let tpl = tpl.trim();
+                        let value: serde_json::Value = serde_json::from_str(tpl).map_err(|e| {
+                            anyhow::anyhow!(
+                                "NOSTOS_PUSH_TABLES: liveactivity template for {table:?} is not \
+                                 valid JSON: {e}"
+                            )
+                        })?;
+                        if !value.is_object() {
+                            anyhow::bail!(
+                                "NOSTOS_PUSH_TABLES: liveactivity template for {table:?} must be \
+                                 a JSON object (the ActivityKit content-state), got {tpl:?}"
+                            );
+                        }
+                        live_activities.insert(table.clone(), value);
+                        // Placeholder — see `PushTablesConfig`; the router's
+                        // live_activities lookup shadows it before render.
+                        PushTemplate::Visible {
+                            title: String::new(),
+                            body: String::new(),
+                        }
+                    }
+                    ("liveactivity", None) => anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: \"liveactivity\" entries need a JSON content-state \
+                         template: table:liveactivity:{{\"col\":\"{{col}}\"}} (got {entry:?})"
+                    ),
+                    (other, _) => anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: unknown mode {other:?} in {entry:?} (expected \
+                         silent, visible or liveactivity)"
+                    ),
+                }
+            }
+        };
+        if tables.insert(table.clone(), template).is_some() {
+            anyhow::bail!("NOSTOS_PUSH_TABLES: table {table:?} listed twice");
+        }
+    }
+    Ok(PushTablesConfig {
+        tables: PushTables {
+            tenant_column: tenant_column.map(str::to_string),
+            tables,
+        },
+        live_activities,
+    })
+}
+
 /// Builds the `/rules`/`/sync`/`/schema` CORS layer from `NOSTOS_CORS_ORIGINS`.
 ///
 /// Empty ⇒ `CorsLayer::permissive()` (local dev, no credentials). Non-empty
@@ -880,7 +1139,9 @@ async fn watch_rules(
 ///
 /// Methods must include `PUT` — the admin panel's own `PUT /rules` save is
 /// otherwise blocked by CORS the moment `NOSTOS_CORS_ORIGINS` is configured,
-/// even though the route itself is reachable and correctly gated.
+/// even though the route itself is reachable and correctly gated. `DELETE`
+/// for the same reason: the SDKs deregister push tokens on sign-out
+/// (ADR-0037 `DELETE /push-tokens/{token}`) from browser clients.
 fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::CorsLayer> {
     if cors_origins.is_empty() {
         return Ok(tower_http::cors::CorsLayer::permissive());
@@ -902,6 +1163,7 @@ fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::Cors
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::PUT,
+            axum::http::Method::DELETE,
             axum::http::Method::OPTIONS,
         ])
         .allow_headers([
@@ -1304,6 +1566,24 @@ async fn apply_put_rules(
 async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) -> String {
     let snap = metrics.snapshot();
     let sessions = store.len().await;
+    // Per-account last-pushed-LSN (plan 3.2 — the push-LSN→client-ack
+    // correlation surface), rendered next to the session gauges so an
+    // operator can see whether a doorbelled device actually caught up.
+    // Label values are escaped (account ids are external data).
+    let last_pushed: String = metrics
+        .push_last_lsn
+        .lock()
+        .map(|map| {
+            map.iter().fold(String::new(), |mut acc, (account, lsn)| {
+                let escaped = account.replace('\\', "\\\\").replace('"', "\\\"");
+                let _ = std::fmt::Write::write_fmt(
+                    &mut acc,
+                    format_args!("cairn_push_last_lsn{{account=\"{escaped}\"}} {lsn}\n"),
+                );
+                acc
+            })
+        })
+        .unwrap_or_default();
     format!(
         "# HELP cairn_events_matched_total Events whose predicate matched ≥1 session.\n\
          # TYPE cairn_events_matched_total counter\n\
@@ -1340,7 +1620,25 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          cairn_slot_epoch {slot_epoch}\n\
          # HELP cairn_oplog_compacted_rows_total Rows swept by op-log compaction (collapse duplicates to latest op per (table_name, pk) + age out rows past the retention window). ADR-0025 slice 5.\n\
          # TYPE cairn_oplog_compacted_rows_total counter\n\
-         cairn_oplog_compacted_rows_total {oplog_compacted_rows}\n",
+         cairn_oplog_compacted_rows_total {oplog_compacted_rows}\n\
+         # HELP cairn_push_enqueued_total Push doorbell hints enqueued (one per matched offline account; online accounts suppressed at enqueue time). ADR-0037.\n\
+         # TYPE cairn_push_enqueued_total counter\n\
+         cairn_push_enqueued_total {push_enqueued}\n\
+         # HELP cairn_push_dropped_total Push hints dropped (bounded channel full / consumer gone). Doorbell semantics: a dropped hint loses nothing — the durable LSN checkpoint reconciles. ADR-0037.\n\
+         # TYPE cairn_push_dropped_total counter\n\
+         cairn_push_dropped_total {push_dropped}\n\
+         # HELP cairn_push_sent_total Push sends the rails accepted (2xx). Last-mile delivery stays best-effort; the client's LSN ack is the proof. ADR-0037 plan 3.2.\n\
+         # TYPE cairn_push_sent_total counter\n\
+         cairn_push_sent_total {push_sent}\n\
+         # HELP cairn_push_failed_total Push sends that failed terminally or exhausted their retry (rail fatal/transient). ADR-0037 plan 3.2.\n\
+         # TYPE cairn_push_failed_total counter\n\
+         cairn_push_failed_total {push_failed}\n\
+         # HELP cairn_push_pruned_total Push-token rows pruned (rail reported the target gone, or the owner deregistered). ADR-0037 plan 3.2.\n\
+         # TYPE cairn_push_pruned_total counter\n\
+         cairn_push_pruned_total {push_pruned}\n\
+         # HELP cairn_push_last_lsn Highest doorbell LSN pushed per account — correlate against session acked-LSN to see whether a doorbelled device actually caught up. ADR-0037 plan 3.2.\n\
+         # TYPE cairn_push_last_lsn gauge\n\
+         {last_pushed}",
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
@@ -1353,6 +1651,11 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         oplog_flush_failed = snap.oplog_flush_failed,
         slot_epoch = snap.slot_epoch,
         oplog_compacted_rows = snap.oplog_compacted_rows,
+        push_enqueued = snap.push_enqueued,
+        push_dropped = snap.push_dropped,
+        push_sent = snap.push_sent,
+        push_failed = snap.push_failed,
+        push_pruned = snap.push_pruned,
     )
 }
 
@@ -1377,6 +1680,54 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("received Ctrl-C, shutting down"),
         () = terminate => info!("received SIGTERM, shutting down"),
+    }
+}
+
+/// Typed extraction regression (ADR-0037 plan 1.4): the streaming extractor
+/// must preserve JSON scalar types. Pinned here because the old inline
+/// `as_str()`-only read made `{"priority":5}` extract as absent, so `Ne`/
+/// `Not(Eq)` predicates over numeric columns matched wide and `Eq` under-
+/// delivered.
+#[cfg(all(test, feature = "pg"))]
+mod extract_typed_column_tests {
+    use super::extract_typed_column;
+    use nostos_domain::{ColumnValue, Predicate};
+
+    #[test]
+    fn json_scalars_keep_their_type() {
+        let payload = br#"{"org_id":"acme","priority":5,"score":2.5,"active":true}"#;
+        assert_eq!(
+            extract_typed_column(payload, "org_id"),
+            Some(ColumnValue::text("acme"))
+        );
+        assert_eq!(
+            extract_typed_column(payload, "priority"),
+            Some(ColumnValue::number(5))
+        );
+        assert_eq!(
+            extract_typed_column(payload, "score"),
+            Some(ColumnValue::float(2.5))
+        );
+        assert_eq!(
+            extract_typed_column(payload, "active"),
+            Some(ColumnValue::boolean(true))
+        );
+        assert_eq!(extract_typed_column(payload, "missing"), None);
+    }
+
+    #[test]
+    fn not_eq_over_numeric_column_no_longer_matches_wide() {
+        // Before the fix: `priority` extracted as absent → the inner Eq was
+        // false → Not(Eq) matched EVERY row, including priority=5 itself.
+        let payload = br#"{"priority":5}"#;
+        let not_eq = !Predicate::eq("tasks", "priority", ColumnValue::number(5));
+        assert!(!not_eq.matches(|c| extract_typed_column(payload, c)));
+
+        // And the under-delivery side: Ne now sees the value and matches.
+        let ne = Predicate::ne("tasks", "priority", ColumnValue::number(7));
+        assert!(ne.matches(|c| extract_typed_column(payload, c)));
+        let eq = Predicate::eq("tasks", "priority", ColumnValue::number(5));
+        assert!(eq.matches(|c| extract_typed_column(payload, c)));
     }
 }
 
@@ -1944,5 +2295,397 @@ mod put_rules_handler_tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(state.rules.read().await.checksum(), initial_checksum);
+    }
+}
+
+#[cfg(test)]
+mod parse_push_tables_tests {
+    use super::{is_plain_identifier, parse_push_tables};
+    use nostos_application::ports::PushTemplate;
+    use serde_json::json;
+
+    #[test]
+    fn parses_silent_default_explicit_and_visible_with_placeholders() {
+        let cfg = parse_push_tables(
+            "tasks; notes:silent ; orders:visible:New order:Order {id} placed",
+            Some("org_id"),
+        )
+        .expect("valid config");
+        assert_eq!(cfg.tables.tenant_column.as_deref(), Some("org_id"));
+        assert_eq!(cfg.tables.get("tasks"), Some(&PushTemplate::Silent));
+        assert_eq!(cfg.tables.get("notes"), Some(&PushTemplate::Silent));
+        assert_eq!(
+            cfg.tables.get("orders"),
+            Some(&PushTemplate::Visible {
+                title: "New order".into(),
+                body: "Order {id} placed".into()
+            })
+        );
+        assert_eq!(cfg.tables.get("absent"), None);
+        assert!(cfg.live_activities.is_empty());
+    }
+
+    #[test]
+    fn empty_string_is_an_empty_config() {
+        let cfg = parse_push_tables("", None).expect("empty is valid (push off)");
+        assert!(cfg.tables.tables.is_empty());
+        assert!(cfg.tables.tenant_column.is_none());
+        assert!(cfg.live_activities.is_empty());
+    }
+
+    #[test]
+    fn rejects_bad_modes_missing_body_bad_identifiers_and_duplicates() {
+        for bad in [
+            "tasks:loud",
+            "orders:visible:OnlyTitle",
+            "Orders:visible:a:b",
+            "tasks;tasks",
+            "tasks:silent:extra",
+        ] {
+            assert!(
+                parse_push_tables(bad, None).is_err(),
+                "{bad:?} must be rejected at startup"
+            );
+        }
+    }
+
+    #[test]
+    fn liveactivity_entry_parses_template_and_placeholders() {
+        let cfg = parse_push_tables(
+            r#"deliveries:liveactivity:{"status":"{status}","eta_min":"{eta_min}","nested":{"deep":"{x}"}}"#,
+            None,
+        )
+        .expect("valid liveactivity config");
+        // The tables map carries the Visible placeholder so fan-out attaches
+        // tuple bytes (see PushTablesConfig); the real template is separate.
+        assert_eq!(
+            cfg.tables.get("deliveries"),
+            Some(&PushTemplate::Visible {
+                title: String::new(),
+                body: String::new()
+            })
+        );
+        assert_eq!(
+            cfg.live_activities.get("deliveries"),
+            Some(
+                &json!({ "status": "{status}", "eta_min": "{eta_min}", "nested": { "deep": "{x}" } })
+            )
+        );
+    }
+
+    #[test]
+    fn liveactivity_entries_must_be_a_json_object() {
+        for bad in [
+            r"deliveries:liveactivity:not json",
+            r"deliveries:liveactivity:[1,2]",
+            r#"deliveries:liveactivity:"string""#,
+            "deliveries:liveactivity",
+        ] {
+            assert!(
+                parse_push_tables(bad, None).is_err(),
+                "{bad:?} must be rejected at startup"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_shape_matches_adr0013() {
+        for good in ["tasks", "a", "_x", "t1_2"] {
+            assert!(is_plain_identifier(good), "{good} should pass");
+        }
+        for bad in ["Tasks", "1t", "a-b", "", "a b"] {
+            assert!(!is_plain_identifier(bad), "{bad} should fail");
+        }
+    }
+}
+
+/// ADR-0037 "the test that matters" — server-side slice (plan 3.3): the real
+/// `FanOutService` hint enqueue → the real `PushRouter` coalescer, against a
+/// recording fake rail, the in-memory token registry, and the REAL
+/// `InMemorySessionStore` (presence = store membership, so a `Dropped`-but-
+/// registered session counts as online). The fake replicator's payload is
+/// opaque, so the extractor hands the tenant column out directly.
+#[cfg(test)]
+mod push_e2e_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use nostos_application::ports::{
+        DeliveryDecision, EventSink, Metrics, PushNotifier, PushTables, PushTemplate, SyncAuth,
+    };
+    use nostos_application::FanOutService;
+    use nostos_domain::{
+        ColumnValue, Lsn, Predicate, Principal, ReplicationEvent, RowOp, SyncSession,
+    };
+    use nostos_infra::push::{PushPayload, RailOutcome};
+    use nostos_infra::{
+        InMemorySessionStore, InMemoryTokenRegistry, PushRouter, PushSink, PushTokenRegistry,
+    };
+
+    use super::push_api::{self, PushApiState};
+
+    /// The fake rail: records every send, always reports Delivered.
+    struct RecordingRail {
+        sends: Mutex<Vec<(String, String, PushPayload)>>, // (platform, token, payload)
+        live_sends: Mutex<Vec<(String, String, serde_json::Value)>>, // (token, collapse, state)
+    }
+
+    #[async_trait]
+    impl PushSink for RecordingRail {
+        async fn send(
+            &self,
+            platform: &str,
+            token: &str,
+            _collapse_key: &str,
+            payload: &PushPayload,
+        ) -> RailOutcome {
+            self.sends.lock().unwrap().push((
+                platform.to_string(),
+                token.to_string(),
+                payload.clone(),
+            ));
+            RailOutcome::Delivered
+        }
+
+        async fn send_live_activity(
+            &self,
+            token: &str,
+            _collapse_key: &str,
+            content_state: &serde_json::Value,
+        ) -> RailOutcome {
+            self.live_sends.lock().unwrap().push((
+                token.to_string(),
+                _collapse_key.to_string(),
+                content_state.clone(),
+            ));
+            RailOutcome::Delivered
+        }
+    }
+
+    /// A slow-client sink: always `Dropped`, still a live session.
+    struct DroppingSink;
+
+    #[async_trait]
+    impl EventSink for DroppingSink {
+        async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+            DeliveryDecision::Dropped
+        }
+    }
+
+    /// Always resolves to one fixed principal — the authenticated test path.
+    struct FixedAuth(Principal);
+
+    #[async_trait]
+    impl SyncAuth for FixedAuth {
+        async fn authenticate(&self, _token: &str) -> Option<Principal> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn push_tables() -> PushTables {
+        PushTables {
+            tenant_column: Some("org_id".into()),
+            tables: [("tasks".to_string(), PushTemplate::Silent)]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn event(lsn: u64) -> ReplicationEvent {
+        ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Insert {
+                table: "tasks".into(),
+                pk: lsn.to_string(),
+                payload: Bytes::from_static(b"x"),
+            },
+        )
+    }
+
+    /// The tenant column extractor: `org_id` → t1 (the fake payload is
+    /// opaque bytes, so the value is handed out directly).
+    fn extract(_e: &ReplicationEvent, col: &str) -> Option<ColumnValue> {
+        (col == "org_id").then(|| ColumnValue::text("t1"))
+    }
+
+    /// Build the full chain: store + registry + rail + router + fan-out.
+    /// `session` optionally registers a live session for account u1 first.
+    async fn harness(
+        session: Option<Arc<dyn EventSink>>,
+    ) -> (
+        Arc<RecordingRail>,
+        Arc<InMemoryTokenRegistry>,
+        Arc<FanOutService>,
+    ) {
+        let store: Arc<dyn nostos_application::ports::SessionStore> =
+            Arc::new(InMemorySessionStore::new());
+        if let Some(sink) = session {
+            store
+                .add(
+                    SyncSession::new_authenticated(
+                        Predicate::all("tasks"),
+                        Principal::new("u1", "t1"),
+                    ),
+                    sink,
+                )
+                .await;
+        }
+        let registry = Arc::new(InMemoryTokenRegistry::new());
+        registry
+            .upsert("apns", "dev-e2e", "u1", "t1")
+            .await
+            .unwrap();
+        let rail = Arc::new(RecordingRail {
+            sends: Mutex::new(Vec::new()),
+            live_sends: Mutex::new(Vec::new()),
+        });
+        let registry_dyn: Arc<dyn PushTokenRegistry> = registry.clone();
+        let router = PushRouter::new(
+            Arc::clone(&rail) as Arc<dyn PushSink>,
+            registry_dyn,
+            Arc::clone(&store),
+            nostos_infra::push::router::RouterConfig {
+                tables: push_tables(),
+                live_activities: std::collections::HashMap::new(),
+            },
+            Duration::from_millis(60),
+            Arc::new(Metrics::new()),
+        );
+        let svc = Arc::new(
+            FanOutService::new(Arc::clone(&store))
+                .with_push_tables(push_tables())
+                .with_push_notifier(Arc::new(router) as Arc<dyn PushNotifier>),
+        );
+        (rail, registry, svc)
+    }
+
+    async fn burst(svc: &FanOutService) {
+        for lsn in 1..=100u64 {
+            let _ = svc.fan_out(&event(lsn), extract).await;
+        }
+    }
+
+    async fn soon(mut f: impl FnMut() -> bool) {
+        for _ in 0..250 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(4)).await;
+        }
+    }
+
+    /// Let a completed window settle — no further sends may arrive.
+    async fn quiet() {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    /// (a) 100-event burst to an OFFLINE account ⇒ exactly ONE push, carrying
+    /// the latest LSN (the doorbell is a wake-up; the durable checkpoint is
+    /// the correctness mechanism).
+    #[tokio::test]
+    async fn burst_to_offline_account_yields_exactly_one_push() {
+        let (rail, _registry, svc) = harness(None).await;
+        burst(&svc).await;
+        soon(|| !rail.sends.lock().unwrap().is_empty()).await;
+        quiet().await;
+        let sends = rail.sends.lock().unwrap().clone();
+        assert_eq!(sends.len(), 1, "100-event burst must collapse to one push");
+        assert_eq!(sends[0].1, "dev-e2e");
+        assert_eq!(
+            sends[0].2,
+            PushPayload::Silent {
+                table: "tasks".into(),
+                lsn: Lsn::new(100)
+            }
+        );
+    }
+
+    /// (b) ONLINE account ⇒ ZERO pushes — the socket is the transport; a
+    /// push would double-signal a client that is already receiving.
+    #[tokio::test]
+    async fn online_account_gets_no_push() {
+        // A recording sink that never drops: the session is healthy.
+        struct OkSink;
+        #[async_trait]
+        impl EventSink for OkSink {
+            async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+                DeliveryDecision::Delivered
+            }
+        }
+        let (rail, _registry, svc) = harness(Some(Arc::new(OkSink))).await;
+        burst(&svc).await;
+        quiet().await;
+        assert!(
+            rail.sends.lock().unwrap().is_empty(),
+            "an online account must not be doorbelled"
+        );
+    }
+
+    /// (c) `Dropped`-but-online ⇒ ZERO pushes — `Dropped` is slow-client
+    /// backpressure, NOT presence (ADR-0037 §4); pushing a draining socket
+    /// double-signals a client that is catching up.
+    #[tokio::test]
+    async fn dropped_but_online_account_gets_no_push() {
+        let (rail, _registry, svc) = harness(Some(Arc::new(DroppingSink))).await;
+        burst(&svc).await;
+        quiet().await;
+        assert!(
+            rail.sends.lock().unwrap().is_empty(),
+            "'Dropped' is backpressure, not offline-presence"
+        );
+    }
+
+    /// (d) Sign-out: the token deregistered through the REST route receives
+    /// nothing afterwards — and it DID receive a push before deregistration,
+    /// proving the route (not the fixture) removed it.
+    #[tokio::test]
+    async fn signout_deregisters_token_via_rest_route() {
+        let (rail, registry, svc) = harness(None).await;
+
+        // Phase 1: pre-sign-out, the burst doorbells the device.
+        burst(&svc).await;
+        soon(|| !rail.sends.lock().unwrap().is_empty()).await;
+        quiet().await;
+        assert_eq!(rail.sends.lock().unwrap().len(), 1);
+
+        // Sign-out: DELETE /push-tokens/{token} through the real handler,
+        // with the same JWT auth path the route uses.
+        let state = PushApiState {
+            auth: Arc::new(FixedAuth(Principal::new("u1", "t1"))),
+            registry: registry.clone(),
+            tenant_column: Some("org_id".into()),
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer jwt-signout".parse().unwrap(),
+        );
+        let status = push_api::delete_push_token(
+            axum::extract::State(state),
+            axum::extract::Path("dev-e2e".to_string()),
+            headers,
+        )
+        .await
+        .expect("deregistration succeeds");
+        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+        assert!(
+            registry
+                .list_by_account("t1", "u1")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the REST route must have removed the token row"
+        );
+
+        // Phase 2: a fresh burst (past the previous window) reaches nothing.
+        burst(&svc).await;
+        quiet().await;
+        assert_eq!(
+            rail.sends.lock().unwrap().len(),
+            1,
+            "no push to the deregistered token"
+        );
     }
 }

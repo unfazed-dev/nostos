@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nostos KV-seam E2E (main-thread NostosSocket)</title>
+  </head>
+  <body>
+    <h1>Nostos KV-seam E2E</h1>
+    <!--
+      Plan task 6.1 harness: drives NostosSocket on the MAIN thread (the
+      pre-Worker dual entry — one shared --target web artifact) so the
+      checkpoint KV seam's default (window.localStorage) and the injected
+      store (setKvStore) are both observable from the page. The Worker
+      architecture (app.html) has no window, so this page is where the
+      localStorage-backed default is actually exercisable end-to-end.
+    -->
+    <script type="module">
+      import init, { NostosSocket, setKvStore } from "/pkg-web/nostos_ffi_wasm.js";
+      await init();
+      window.__nostos = { NostosSocket, setKvStore };
+      console.log("[kv-e2e] MAIN_READY");
+    </script>
+  </body>
+</html>

@@ -69,6 +69,11 @@ serde_json = "1.0"
 # type: Some(String)"). `thiserror` supplies the Display + std::error::Error
 # impls that UniFFI's error trait requires — nostos-client uses the same crate.
 thiserror = "1.0"
+# Push-token REST (ADR-0037 §3): POST/DELETE /push-tokens. Mirrors the root
+# workspace pin's posture (rustls, no default TLS stack) and `sdk/nostos_node`'s
+# identical dep; the `json` helper feature is unneeded — the body is a
+# hand-built JSON string pinned by tests.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [build-dependencies]
 # ponytail: no build.rs today — the proc-macro path via setup_scaffolding!

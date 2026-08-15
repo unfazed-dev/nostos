@@ -774,6 +774,14 @@ static class _UniFFILib {
     
     
     
+    
+    
+    
+    
+    
+    
+    
+    
 
     static _UniFFILib() {
         _UniFFILib.uniffiCheckContractApiVersion();
@@ -803,7 +811,23 @@ static class _UniFFILib {
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_nostosclient_deregister_push_token(IntPtr @ptr,RustBuffer @token,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_nostosclient_disconnect(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
     public static extern RustBuffer uniffi_nostos_dotnet_fn_method_nostosclient_query(IntPtr @ptr,RustBuffer @sql,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_nostosclient_register_push_token(IntPtr @ptr,RustBuffer @platform,RustBuffer @token,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void uniffi_nostos_dotnet_fn_method_nostosclient_resume(IntPtr @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
@@ -1075,7 +1099,23 @@ static class _UniFFILib {
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_disconnect(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
     public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_query(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_register_push_token(
+    );
+
+    [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
+    public static extern ushort uniffi_nostos_dotnet_checksum_method_nostosclient_resume(
     );
 
     [DllImport("nostos_dotnet", CallingConvention = CallingConvention.Cdecl)]
@@ -1133,9 +1173,33 @@ static class _UniFFILib {
             }
         }
         {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token();
+            if (checksum != 50310) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token` checksum `50310`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_disconnect();
+            if (checksum != 5562) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_disconnect` checksum `5562`, library returned `{checksum}`");
+            }
+        }
+        {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_query();
             if (checksum != 35331) {
                 throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_query` checksum `35331`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_register_push_token();
+            if (checksum != 5810) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_register_push_token` checksum `5810`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_resume();
+            if (checksum != 880) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_resume` checksum `880`, library returned `{checksum}`");
             }
         }
         {
@@ -1298,6 +1362,44 @@ internal interface INostosClient {
     /// <exception cref="NostosException"></exception>
     void Connect();
     /// <summary>
+    /// Deregister a push token (ADR-0037 §3): `DELETE /push-tokens/{token}`
+    /// with the same auth as `register_push_token`. Resolves on the pinned
+    /// `204`. `sign_out` calls this for every session-registered token
+    /// automatically; call it directly when the app can no longer receive on
+    /// the token (e.g. the user disables notifications).
+    ///
+    /// The token rides the path percent-encoded as ONE segment
+    /// (`encode_path_segment`): a webpush token is the full
+    /// `pushSubscription` JSON and contains `/`, which would split the path
+    /// and 404 the DELETE.
+    ///
+    /// # Errors
+    /// `NostosError` on any non-`204` reply.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    void DeregisterPushToken(string @token);
+    /// <summary>
+    /// Stop the live replication loop WITHOUT touching local state (ADR-0037
+    /// task 5.1) — the push-notification sleep primitive, and the direct
+    /// counterpart of `nostos_node`'s `close()`. The run loop winds down
+    /// cleanly (final flush + checkpoint ack via `SyncClient::disconnect`'s
+    /// gate), the session's durable store — rows, checkpoint, epoch, outbox —
+    /// survives intact, and `query()` / `write()` / `checkpoint()` / `watch()`
+    /// keep working offline. Contrast `sign_out()`, which WIPES that state for
+    /// the next principal (ADR-0029): disconnect is for "this app is going to
+    /// sleep", sign-out is for "this user is leaving".
+    ///
+    /// The `watch()` pumps stay ALIVE across disconnect: they are purely local
+    /// (the change broadcast + storage reads), so a backgrounded app's UI
+    /// keeps rendering, and their ticks resume the moment `resume()` reopens
+    /// the loop. Idempotent and a no-op with no active session.
+    ///
+    /// # Errors
+    /// Never errors today — `Result` mirrors the sibling lifecycle methods.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    void Disconnect();
+    /// <summary>
     /// Run an arbitrary `SELECT` against the on-device SQLite store and return
     /// a JSON-array-of-objects STRING (one object per row, keyed by column
     /// name) — the same shape `nostos_swift`'s, `nostos_kotlin`'s, `nostos_node`'s,
@@ -1308,6 +1410,43 @@ internal interface INostosClient {
     /// </summary>
     /// <exception cref="NostosException"></exception>
     string Query(string @sql);
+    /// <summary>
+    /// Register this device's push token with the server (ADR-0037 §3):
+    /// `POST /push-tokens` with `{"platform": …, "token": …}`, authenticated by
+    /// the SAME token the sync connection uses (`Authorization: Bearer`, read
+    /// from this handle's stored token seed — the credential `connect()`
+    /// builds the `SyncClient` from). The server stamps tenant/account
+    /// itself; the SDK never attests identity fields. The token itself is
+    /// host-dependent on .NET (MAUI routes it through a push plugin — see the
+    /// README's wake doc): FCM on Android, APNs on iOS, WNS on Windows.
+    ///
+    /// `platform` is `"fcm"`, `"apns"`, or `"webpush"`. Resolves on the pinned
+    /// `204`; any other status throws `NostosError` carrying the status + body.
+    /// Registered tokens are deregistered best-effort by `sign_out`.
+    ///
+    /// ponytail: a fresh reqwest client per call — registration is a rare
+    /// path, not a hot loop. Share one `Client` on the handle if a
+    /// measurement ever says otherwise (mirrors `nostos_node`'s stance).
+    ///
+    /// # Errors
+    /// `NostosError` on an unknown platform or any non-`204` reply.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    void RegisterPushToken(string @platform, string @token);
+    /// <summary>
+    /// Reopen the live replication loop after `disconnect()` (ADR-0037 task
+    /// 5.1) — the wake primitive for MAUI host-app wake scenarios: the host is
+    /// poked, calls `resume()`, and the delta past the durable checkpoint
+    /// applies (the reconnect's Subscribe re-seeds `resume_lsn` from the
+    /// checkpoint). Does NOT re-run `connect()` — the session and its store
+    /// were never torn down. Idempotent: with a live loop it is only a gate
+    /// clear (a no-op).
+    ///
+    /// # Errors
+    /// `NostosError` if no session is active (call `connect()` first).
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    void Resume();
     /// <summary>
     /// ADR-0029 D3: swap the bearer token. Updates the stored seed (so a future
     /// `connect()` builds the `SyncClient` with the new JWT) AND — if a session
@@ -1586,6 +1725,60 @@ internal class NostosClient : INostosClient, IDisposable {
     
     
     /// <summary>
+    /// Deregister a push token (ADR-0037 §3): `DELETE /push-tokens/{token}`
+    /// with the same auth as `register_push_token`. Resolves on the pinned
+    /// `204`. `sign_out` calls this for every session-registered token
+    /// automatically; call it directly when the app can no longer receive on
+    /// the token (e.g. the user disables notifications).
+    ///
+    /// The token rides the path percent-encoded as ONE segment
+    /// (`encode_path_segment`): a webpush token is the full
+    /// `pushSubscription` JSON and contains `/`, which would split the path
+    /// and 404 the DELETE.
+    ///
+    /// # Errors
+    /// `NostosError` on any non-`204` reply.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    public void DeregisterPushToken(string @token) {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeNostosError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_deregister_push_token(thisPtr, FfiConverterString.INSTANCE.Lower(@token), ref _status)
+));
+    }
+    
+    
+    
+    /// <summary>
+    /// Stop the live replication loop WITHOUT touching local state (ADR-0037
+    /// task 5.1) — the push-notification sleep primitive, and the direct
+    /// counterpart of `nostos_node`'s `close()`. The run loop winds down
+    /// cleanly (final flush + checkpoint ack via `SyncClient::disconnect`'s
+    /// gate), the session's durable store — rows, checkpoint, epoch, outbox —
+    /// survives intact, and `query()` / `write()` / `checkpoint()` / `watch()`
+    /// keep working offline. Contrast `sign_out()`, which WIPES that state for
+    /// the next principal (ADR-0029): disconnect is for "this app is going to
+    /// sleep", sign-out is for "this user is leaving".
+    ///
+    /// The `watch()` pumps stay ALIVE across disconnect: they are purely local
+    /// (the change broadcast + storage reads), so a backgrounded app's UI
+    /// keeps rendering, and their ticks resume the moment `resume()` reopens
+    /// the loop. Idempotent and a no-op with no active session.
+    ///
+    /// # Errors
+    /// Never errors today — `Result` mirrors the sibling lifecycle methods.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    public void Disconnect() {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeNostosError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_disconnect(thisPtr,  ref _status)
+));
+    }
+    
+    
+    
+    /// <summary>
     /// Run an arbitrary `SELECT` against the on-device SQLite store and return
     /// a JSON-array-of-objects STRING (one object per row, keyed by column
     /// name) — the same shape `nostos_swift`'s, `nostos_kotlin`'s, `nostos_node`'s,
@@ -1601,6 +1794,59 @@ internal class NostosClient : INostosClient, IDisposable {
     _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_query(thisPtr, FfiConverterString.INSTANCE.Lower(@sql), ref _status)
 )));
     }
+    
+    
+    /// <summary>
+    /// Register this device's push token with the server (ADR-0037 §3):
+    /// `POST /push-tokens` with `{"platform": …, "token": …}`, authenticated by
+    /// the SAME token the sync connection uses (`Authorization: Bearer`, read
+    /// from this handle's stored token seed — the credential `connect()`
+    /// builds the `SyncClient` from). The server stamps tenant/account
+    /// itself; the SDK never attests identity fields. The token itself is
+    /// host-dependent on .NET (MAUI routes it through a push plugin — see the
+    /// README's wake doc): FCM on Android, APNs on iOS, WNS on Windows.
+    ///
+    /// `platform` is `"fcm"`, `"apns"`, or `"webpush"`. Resolves on the pinned
+    /// `204`; any other status throws `NostosError` carrying the status + body.
+    /// Registered tokens are deregistered best-effort by `sign_out`.
+    ///
+    /// ponytail: a fresh reqwest client per call — registration is a rare
+    /// path, not a hot loop. Share one `Client` on the handle if a
+    /// measurement ever says otherwise (mirrors `nostos_node`'s stance).
+    ///
+    /// # Errors
+    /// `NostosError` on an unknown platform or any non-`204` reply.
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    public void RegisterPushToken(string @platform, string @token) {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeNostosError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_register_push_token(thisPtr, FfiConverterString.INSTANCE.Lower(@platform), FfiConverterString.INSTANCE.Lower(@token), ref _status)
+));
+    }
+    
+    
+    
+    /// <summary>
+    /// Reopen the live replication loop after `disconnect()` (ADR-0037 task
+    /// 5.1) — the wake primitive for MAUI host-app wake scenarios: the host is
+    /// poked, calls `resume()`, and the delta past the durable checkpoint
+    /// applies (the reconnect's Subscribe re-seeds `resume_lsn` from the
+    /// checkpoint). Does NOT re-run `connect()` — the session and its store
+    /// were never torn down. Idempotent: with a live loop it is only a gate
+    /// clear (a no-op).
+    ///
+    /// # Errors
+    /// `NostosError` if no session is active (call `connect()` first).
+    /// </summary>
+    /// <exception cref="NostosException"></exception>
+    public void Resume() {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeNostosError.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_nostos_dotnet_fn_method_nostosclient_resume(thisPtr,  ref _status)
+));
+    }
+    
     
     
     /// <summary>

@@ -26,7 +26,15 @@ use tracing::{trace, warn};
 
 use nostos_domain::{ColumnValue, ReplicationEvent};
 
-use crate::ports::{DeliveryDecision, Metrics, ReplicatorStream, SessionStore};
+use crate::ports::{
+    DeliveryDecision, Metrics, PushHint, PushNotifier, PushTables, PushTemplate, ReplicatorStream,
+    SessionStore,
+};
+
+/// Bounded depth of the push-hint channel (ADR-0037 §4, plan 1.3). Hints are
+/// tiny routing tuples consumed by a background drain task (the coalescer,
+/// plan 2.4); full ⇒ drop-and-count — never block the fan-out loop.
+const PUSH_HINT_CAPACITY: usize = 1024;
 
 /// The result of fanning one event out to all matching sessions.
 ///
@@ -99,6 +107,18 @@ pub struct FanOutService {
     /// stays conservative (at most `ack_progress_every` events of extra WAL
     /// retention). See [`Self::with_ack_progress_every`].
     ack_progress_every: u32,
+    /// Push doorbell (ADR-0037 §4, plan 1.3): the sender half of a bounded
+    /// channel fed after the matched-set drain — one [`PushHint`] per matched
+    /// offline account. `None` by default: push stays entirely off (the bench
+    /// baseline and fake-mode deploys pay nothing). See
+    /// [`Self::with_push_notifier`].
+    push: Option<tokio::sync::mpsc::Sender<PushHint>>,
+    /// Per-table push config (ADR-0037 §1 amendment, plan 2.4): tables that
+    /// additionally emit a tenant-wide hint for fully-offline accounts, plus
+    /// the tenant column used to target it. Constructor-injected — the
+    /// application layer never reads env. Default (empty) = tenant-wide
+    /// hints off; the per-account path runs unchanged.
+    push_tables: PushTables,
 }
 
 impl FanOutService {
@@ -112,6 +132,8 @@ impl FanOutService {
             eviction: crate::EvictionPolicy::disabled(),
             op_log: None,
             ack_progress_every: 1,
+            push: None,
+            push_tables: PushTables::default(),
         }
     }
 
@@ -170,6 +192,48 @@ impl FanOutService {
         self
     }
 
+    /// Enable the push doorbell (ADR-0037 §4, plan 1.3). After every
+    /// matched-set drain, [`Self::fan_out`] enqueues one [`PushHint`] per
+    /// matched OFFLINE account into a bounded channel — the
+    /// [`crate::ports::OpLogWriter`] non-blocking contract: `try_send`,
+    /// drop-on-full, counted in [`Metrics`] (`push_enqueued`/`push_dropped`),
+    /// never blocking or doing rail I/O on the fan-out path.
+    ///
+    /// The spawned drain task forwards each hint to `notifier` — with the
+    /// coalescer (`PushRouter`, plan 2.4) that is debounce + presence
+    /// re-check + rail send; with [`crate::ports::NoopNotifier`] (the
+    /// composition-root default when no rails are configured) it simply
+    /// consumes and discards.
+    ///
+    /// Must be called inside a tokio runtime (it spawns the drain task). The
+    /// task ends when the service (and its sender) drops.
+    #[must_use]
+    pub fn with_push_notifier(mut self, notifier: Arc<dyn PushNotifier>) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PushHint>(PUSH_HINT_CAPACITY);
+        tokio::spawn(async move {
+            while let Some(hint) = rx.recv().await {
+                notifier.notify(hint).await;
+            }
+        });
+        self.push = Some(tx);
+        self
+    }
+
+    /// Inject the per-table push config (ADR-0037 §1 amendment, plan 2.4):
+    /// tables listed here additionally emit ONE tenant-wide hint
+    /// (`account_id` empty) per event — even when no session matched — which
+    /// the coalescer expands to the tenant's registered tokens whose accounts
+    /// are offline at send time. The config is parsed by the composition
+    /// root (`NOSTOS_PUSH_TABLES`); this layer never reads env.
+    ///
+    /// Hot-loop contract: an event whose table is NOT in the config costs
+    /// exactly one map lookup/compare here and nothing else.
+    #[must_use]
+    pub fn with_push_tables(mut self, tables: PushTables) -> Self {
+        self.push_tables = tables;
+        self
+    }
+
     /// Fan a single event out to all matching sessions. This is the unit the
     /// benchmark counts as "one op" — and the unit PowerSync's 2-4k ops/sec
     /// ceiling refers to (one row change processed through the router).
@@ -202,6 +266,24 @@ impl FanOutService {
             .collect();
         let matched_count = matched.len() as u64;
 
+        // Push candidate accounts (ADR-0037 §1): one entry per matched
+        // authenticated, non-anonymous session's account, deduped per event.
+        // Collected before `matched` is moved into the delivery tasks; the
+        // enqueue itself runs after the drain. Entirely skipped — no
+        // iteration, no allocation — when push is not wired (bench baseline /
+        // fake-mode deploys). The two small String clones per DISTINCT account
+        // are the whole cost and are push-gated.
+        let mut push_accounts: Vec<(String, String)> = Vec::new();
+        if self.push.is_some() {
+            for c in &matched {
+                if let Some(p) = c.principal.as_ref() {
+                    if !p.is_anonymous() && !push_accounts.iter().any(|(a, _)| *a == p.account_id) {
+                        push_accounts.push((p.account_id.clone(), p.tenant_id.clone()));
+                    }
+                }
+            }
+        }
+
         let mut set = tokio::task::JoinSet::new();
         for c in matched {
             let ev = event.clone();
@@ -230,6 +312,110 @@ impl FanOutService {
                 }
             }
         }
+        // ADR-0037 §4 (plan 1.3) — push doorbell enqueue, strictly off the hot
+        // loop's critical path. Non-blocking contract copied from
+        // `OpLogWriter`: try_send into a bounded channel, drop-on-full with a
+        // counter, no rail I/O here. Online accounts are suppressed at
+        // enqueue time — store membership is presence; a `Dropped`-but-live
+        // session is still online (its socket is draining; pushing it would
+        // double-signal a client that is catching up).
+        //
+        // The enqueue-time suppression still has a race window (an account can
+        // CONNECT between enqueue and send) — the coalescer (`PushRouter`,
+        // plan 2.4) closes it by re-checking `account_online` at SEND time, so
+        // at worst a hint is absorbed and then discarded.
+        let mut push_enqueued = 0u64;
+        let mut push_dropped = 0u64;
+        if let Some(tx) = &self.push {
+            // ADR-0037 §1 amendment — the ONE per-event config lookup. A miss
+            // on a non-configured table is this block's entire cost.
+            let template = self.push_tables.get(event.table());
+            // Visible-configured tables carry the tuple bytes for in-process
+            // `{col}` interpolation at send time; silent doorbells stay
+            // content-free (ADR-0037 §2).
+            let payload = match template {
+                Some(PushTemplate::Visible { .. }) => Some(event.payload_bytes().to_vec()),
+                _ => None,
+            };
+            for (account, tenant) in &push_accounts {
+                // ponytail (L4): presence is keyed by bare account id — an
+                // account id colliding across tenants suppresses the other
+                // tenant's doorbell too. Over-suppression ONLY (a missed
+                // push loses nothing; the durable LSN checkpoint is the
+                // correctness mechanism), so the ceiling is cosmetic.
+                // Upgrade = re-key `account_online` to (tenant, account)
+                // here and in the push router's send-time re-check.
+                if self.store.account_online(account).await {
+                    continue;
+                }
+                let hint = PushHint {
+                    table: event.table().to_owned(),
+                    tenant_id: tenant.clone(),
+                    account_id: account.clone(),
+                    lsn: event.lsn,
+                    payload: payload.clone(),
+                };
+                match tx.try_send(hint) {
+                    Ok(()) => push_enqueued += 1,
+                    // Full channel (or consumer gone): the doorbell is
+                    // best-effort — a missed push loses nothing, the client's
+                    // durable LSN checkpoint is the correctness mechanism.
+                    // Counted, never blocking.
+                    Err(_) => push_dropped += 1,
+                }
+            }
+            // ADR-0037 §1 amendment — fully-offline accounts: a tenant-wide
+            // hint (`account_id` empty) for push-configured tables, emitted
+            // even when NO session matched (the killed-app case the matched
+            // set cannot doorbell). The coalescer expands it to the tenant's
+            // registered tokens whose accounts are offline at send time —
+            // offline accounts cannot be predicate-filtered, so
+            // over-notification is possible and harmless for silent
+            // doorbells; visible tables are a conscious operator opt-in.
+            if template.is_some() {
+                // Tenant targeting: the row's OWN tenant column when
+                // configured (read via the caller's extractor — works with
+                // zero matched sessions), else the matched sessions' distinct
+                // tenants. ponytail: without a tenant column the event
+                // carries no tenant to read, so a fully-offline tenant with
+                // no matched session gets no hint; upgrade = require the
+                // column for tenant-wide hints (or a per-tenant registry
+                // scan) when a deploy shows that gap matters.
+                let mut tenants: Vec<String> = Vec::new();
+                if let Some(col) = &self.push_tables.tenant_column {
+                    // INVARIANT: push's tenant column must be the SAME column
+                    // the write path force-stamps (write_back.rs's
+                    // `stamp_tenant_column`, ADR-0018) — the hint targets the
+                    // tenant the WRITER authenticated as, never a
+                    // client-attested value. A deploy pointing
+                    // NOSTOS_TENANT_COLUMN here at a non-stamped column makes
+                    // tenant-wide hints follow untrusted row data.
+                    if let Some(ColumnValue::Text(t)) = column_extractor(event, col) {
+                        tenants.push(t);
+                    }
+                }
+                if tenants.is_empty() {
+                    for (_, tenant) in &push_accounts {
+                        if !tenants.iter().any(|t| t == tenant) {
+                            tenants.push(tenant.clone());
+                        }
+                    }
+                }
+                for tenant in tenants {
+                    let hint = PushHint {
+                        table: event.table().to_owned(),
+                        tenant_id: tenant,
+                        account_id: String::new(),
+                        lsn: event.lsn,
+                        payload: payload.clone(),
+                    };
+                    match tx.try_send(hint) {
+                        Ok(()) => push_enqueued += 1,
+                        Err(_) => push_dropped += 1,
+                    }
+                }
+            }
+        }
         let outcome = FanOutOutcome {
             matched: matched_count,
             delivered,
@@ -243,6 +429,10 @@ impl FanOutService {
             m.delivered.fetch_add(outcome.delivered, Ordering::Relaxed);
             m.dropped.fetch_add(outcome.dropped, Ordering::Relaxed);
             m.faulted.fetch_add(outcome.faulted, Ordering::Relaxed);
+            if push_enqueued != 0 || push_dropped != 0 {
+                m.push_enqueued.fetch_add(push_enqueued, Ordering::Relaxed);
+                m.push_dropped.fetch_add(push_dropped, Ordering::Relaxed);
+            }
         }
         trace!(?outcome, "fan_out complete");
         outcome
@@ -333,8 +523,8 @@ mod tests {
     use crate::ports::{EventSink, SessionCandidate, SessionStore};
     use async_trait::async_trait;
     use bytes::Bytes;
-    use nostos_domain::{Lsn, Predicate, RowOp, SessionId, SyncSession};
-    use std::collections::HashMap;
+    use nostos_domain::{Lsn, Predicate, Principal, RowOp, SessionId, SyncSession};
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
     // ---- test doubles ----
@@ -355,6 +545,15 @@ mod tests {
     /// An in-memory store keyed by table — the simplest correct SessionStore.
     struct TableStore {
         by_table: Mutex<HashMap<String, Vec<SessionCandidate>>>,
+        /// Accounts the push path must treat as ONLINE (suppress). Absent ⇒
+        /// offline ⇒ push — the port's default failure direction.
+        online: Mutex<HashSet<String>>,
+    }
+
+    impl TableStore {
+        fn set_online(&self, account: &str) {
+            self.online.lock().unwrap().insert(account.to_string());
+        }
     }
 
     #[async_trait]
@@ -364,6 +563,7 @@ mod tests {
             let cand = SessionCandidate {
                 id: session.id,
                 predicate: session.predicate,
+                principal: session.principal,
                 sink,
             };
             self.by_table
@@ -389,6 +589,7 @@ mod tests {
             g.entry(table).or_default().push(SessionCandidate {
                 id,
                 predicate: session.predicate,
+                principal: session.principal,
                 sink,
             });
             Ok(id)
@@ -413,11 +614,15 @@ mod tests {
         async fn min_acked_lsn(&self) -> Option<nostos_domain::Lsn> {
             None
         }
+        async fn account_online(&self, account_id: &str) -> bool {
+            self.online.lock().unwrap().contains(account_id)
+        }
     }
 
     fn make_store() -> Arc<TableStore> {
         Arc::new(TableStore {
             by_table: Mutex::new(HashMap::new()),
+            online: Mutex::new(HashSet::new()),
         })
     }
 
@@ -642,5 +847,312 @@ mod tests {
                 faulted: 3
             }
         );
+    }
+
+    // ---- push doorbell enqueue (ADR-0037 §4, plan 1.3) ----
+
+    /// Records every hint it is asked to send — the test double for
+    /// [`PushNotifier`].
+    #[derive(Default)]
+    struct RecordingNotifier {
+        hints: Mutex<Vec<PushHint>>,
+    }
+
+    #[async_trait]
+    impl PushNotifier for RecordingNotifier {
+        async fn notify(&self, hint: PushHint) {
+            self.hints.lock().unwrap().push(hint);
+        }
+    }
+
+    /// A rail whose send never completes — pins the channel's consumer so the
+    /// bounded buffer provably fills.
+    struct StalledNotifier {
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl PushNotifier for StalledNotifier {
+        async fn notify(&self, _hint: PushHint) {
+            self.gate.notified().await;
+        }
+    }
+
+    /// The `with_push_notifier` drain task forwards asynchronously — poll
+    /// (with a generous deadline) until `f` holds, then let the caller's
+    /// asserts fail with real values if it never did.
+    async fn soon(mut f: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    }
+
+    fn authenticated_session(table: &str, account: &str) -> SyncSession {
+        SyncSession::new_authenticated(
+            Predicate::all(table),
+            Principal::new(account, "tenant-acme"),
+        )
+    }
+
+    #[tokio::test]
+    async fn push_hint_enqueued_for_offline_matched_account() {
+        let store = make_store();
+        // Two sessions of ONE account (multi-device) + one anonymous session:
+        // the burst must collapse to a single hint, and the anonymous session
+        // must produce none (no account to doorbell).
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+        store
+            .add(
+                SyncSession::new(Predicate::all("tasks")),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+
+        let recorder = Arc::new(RecordingNotifier::default());
+        let metrics = Arc::new(Metrics::new());
+        let svc = FanOutService::new(store)
+            .with_metrics(Arc::clone(&metrics))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        let ev = ReplicationEvent::new(
+            Lsn::new(42),
+            RowOp::Insert {
+                table: "tasks".into(),
+                pk: "1".into(),
+                payload: Bytes::from_static(b"x"),
+            },
+        );
+        let outcome = svc.fan_out(&ev, extract_org).await;
+        assert_eq!(outcome.delivered, 3);
+
+        soon(|| recorder.hints.lock().unwrap().len() == 1).await;
+        let hints = recorder.hints.lock().unwrap().clone();
+        assert_eq!(hints.len(), 1, "one hint per account, not per session");
+        assert_eq!(hints[0].table, "tasks");
+        assert_eq!(hints[0].account_id, "u1");
+        assert_eq!(hints[0].tenant_id, "tenant-acme");
+        assert_eq!(hints[0].lsn, Lsn::new(42));
+        let snap = metrics.snapshot();
+        assert_eq!(snap.push_enqueued, 1);
+        assert_eq!(snap.push_dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn online_account_is_not_enqueued() {
+        let store = make_store();
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+        store.set_online("u1");
+
+        let recorder = Arc::new(RecordingNotifier::default());
+        let metrics = Arc::new(Metrics::new());
+        let svc = FanOutService::new(store)
+            .with_metrics(Arc::clone(&metrics))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        let outcome = svc.fan_out(&insert_event("tasks"), extract_org).await;
+        assert_eq!(outcome.delivered, 1);
+
+        // Nothing was enqueued, so nothing can arrive; give the drain task a
+        // grace window before asserting emptiness.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(recorder.hints.lock().unwrap().is_empty());
+        let snap = metrics.snapshot();
+        assert_eq!(snap.push_enqueued, 0);
+        assert_eq!(snap.push_dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn full_push_channel_drops_and_counts_without_stalling_fanout() {
+        let store = make_store();
+        // Offline (default) ⇒ a hint per event; the stalled consumer pins the
+        // channel so it fills after PUSH_HINT_CAPACITY (+1 in-flight) hints.
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+
+        let metrics = Arc::new(Metrics::new());
+        let svc = FanOutService::new(store)
+            .with_metrics(Arc::clone(&metrics))
+            .with_push_notifier(Arc::new(StalledNotifier {
+                gate: Arc::new(tokio::sync::Notify::new()),
+            }));
+
+        let n = (PUSH_HINT_CAPACITY + 64) as u64;
+        let mut total = FanOutOutcome::default();
+        for _ in 0..n {
+            total = total.merged(svc.fan_out(&insert_event("tasks"), extract_org).await);
+        }
+
+        // Every event was still delivered — enqueue drops never touch the
+        // fan-out path (the non-blocking contract).
+        assert_eq!(total.matched, n);
+        assert_eq!(total.delivered, n);
+        let snap = metrics.snapshot();
+        // Each try_send either landed or was dropped — the counts partition
+        // the hints exactly, regardless of drain timing.
+        assert_eq!(snap.push_enqueued + snap.push_dropped, n);
+        assert!(
+            snap.push_dropped > 0,
+            "channel (capacity {PUSH_HINT_CAPACITY}) must have filled"
+        );
+    }
+
+    // ---- tenant-wide hints (ADR-0037 §1 amendment, plan 2.4) ----
+
+    fn push_tables_cfg(
+        tenant_column: Option<&str>,
+        tables: Vec<(&str, crate::ports::PushTemplate)>,
+    ) -> crate::ports::PushTables {
+        crate::ports::PushTables {
+            tenant_column: tenant_column.map(str::to_string),
+            tables: tables
+                .into_iter()
+                .map(|(t, tpl)| (t.to_string(), tpl))
+                .collect(),
+        }
+    }
+
+    /// The killed-app case: zero matched sessions, but the table is
+    /// push-configured and the event's own tenant column names the tenant —
+    /// exactly one tenant-wide hint (`account_id` empty) must fire.
+    #[tokio::test]
+    async fn tenant_wide_hint_emitted_for_configured_table_with_no_sessions() {
+        let store = make_store();
+        let recorder = Arc::new(RecordingNotifier::default());
+        let metrics = Arc::new(Metrics::new());
+        let svc = FanOutService::new(store)
+            .with_metrics(Arc::clone(&metrics))
+            .with_push_tables(push_tables_cfg(
+                Some("org_id"),
+                vec![("tasks", crate::ports::PushTemplate::Silent)],
+            ))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        // extract_org yields Text("acme") for org_id — the payload-tenant path.
+        let outcome = svc.fan_out(&insert_event("tasks"), extract_org).await;
+        assert_eq!(outcome.matched, 0, "fixture: nobody is subscribed");
+
+        soon(|| recorder.hints.lock().unwrap().len() == 1).await;
+        let hints = recorder.hints.lock().unwrap().clone();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].table, "tasks");
+        assert_eq!(hints[0].tenant_id, "acme");
+        assert!(hints[0].account_id.is_empty(), "tenant-wide marker");
+        assert!(
+            hints[0].payload.is_none(),
+            "silent template carries no row data"
+        );
+        assert_eq!(metrics.snapshot().push_enqueued, 1);
+    }
+
+    /// A non-configured table must not emit a tenant-wide hint — one lookup,
+    /// nothing else.
+    #[tokio::test]
+    async fn unconfigured_table_emits_no_tenant_hint() {
+        let store = make_store();
+        let recorder = Arc::new(RecordingNotifier::default());
+        let svc = FanOutService::new(store)
+            .with_push_tables(push_tables_cfg(
+                Some("org_id"),
+                vec![("tasks", crate::ports::PushTemplate::Silent)],
+            ))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        let _ = svc.fan_out(&insert_event("notes"), extract_org).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(recorder.hints.lock().unwrap().is_empty());
+    }
+
+    /// Visible-configured tables attach the event's tuple bytes to the hint
+    /// (in-process interpolation input — ADR-0037 §2's visible opt-in).
+    #[tokio::test]
+    async fn visible_table_hints_carry_payload() {
+        let store = make_store();
+        let recorder = Arc::new(RecordingNotifier::default());
+        let svc = FanOutService::new(store)
+            .with_push_tables(push_tables_cfg(
+                Some("org_id"),
+                vec![(
+                    "tasks",
+                    crate::ports::PushTemplate::Visible {
+                        title: "Changed".into(),
+                        body: "{label} updated".into(),
+                    },
+                )],
+            ))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        let _ = svc.fan_out(&insert_event("tasks"), extract_org).await;
+        soon(|| recorder.hints.lock().unwrap().len() == 1).await;
+        let hints = recorder.hints.lock().unwrap().clone();
+        assert_eq!(hints.len(), 1);
+        assert!(
+            hints[0].payload.is_some(),
+            "a visible-configured table must carry the tuple bytes"
+        );
+    }
+
+    /// No tenant column configured ⇒ fall back to the matched sessions'
+    /// tenants: the tenant-wide hint still fires alongside the per-account
+    /// hint (the coalescer debounces both into one send per account).
+    #[tokio::test]
+    async fn tenant_hint_falls_back_to_matched_tenants_without_tenant_column() {
+        let store = make_store();
+        store
+            .add(
+                authenticated_session("tasks", "u1"),
+                Arc::new(RecordingSink {
+                    events: Arc::new(Mutex::new(vec![])),
+                }),
+            )
+            .await;
+        let recorder = Arc::new(RecordingNotifier::default());
+        let svc = FanOutService::new(store)
+            .with_push_tables(push_tables_cfg(
+                None,
+                vec![("tasks", crate::ports::PushTemplate::Silent)],
+            ))
+            .with_push_notifier(Arc::clone(&recorder) as Arc<dyn PushNotifier>);
+
+        let _ = svc.fan_out(&insert_event("tasks"), extract_org).await;
+        soon(|| recorder.hints.lock().unwrap().len() == 2).await;
+        let hints = recorder.hints.lock().unwrap().clone();
+        assert_eq!(hints.len(), 2, "one per-account + one tenant-wide");
+        assert!(hints.iter().any(|h| h.account_id == "u1"));
+        assert!(hints
+            .iter()
+            .any(|h| h.account_id.is_empty() && h.tenant_id == "tenant-acme"));
     }
 }

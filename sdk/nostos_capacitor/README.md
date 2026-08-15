@@ -1,11 +1,15 @@
 # @nostos-sync/capacitor
 
-A **web-only** [Capacitor v8](https://capacitorjs.com/) plugin that re-exports
-[`@nostos-sync/web`][web]'s live browser sync path into the Capacitor plugin shape.
-There is **no native `android/` or `ios/` source** in this package — the iOS
-WKWebView and the Android WebView are full browser engines, so the WASM build
-of `nostos-ffi-wasm` and the `WebSocket` API both run unmodified inside the
-webview. The plugin's single `web` implementation is the only implementation.
+A [Capacitor v8](https://capacitorjs.com/) plugin that runs
+[`@nostos-sync/web`][web]'s live browser sync path inside the app webview, plus a
+**beta** native push bridge (ADR-0037): OS push-token registration
+(APNs/FCM) and a foreground-push event.
+
+> **Beta (push):** the push surface — `registerPushToken` /
+> `deregisterPushToken` / `registerForPushNotifications` / the
+> `pushToken`+`foregroundPush` events, and the native `ios/`+`android/`
+> source — is experimental (plan task 6.3, ADR-0033 discipline). The sync
+> surface below it is the previously shipped v0.1 web path, unchanged.
 
 [web]: ../nostos_web
 
@@ -19,8 +23,11 @@ webview. The plugin's single `web` implementation is the only implementation.
   ACKs per committed batch, and persists the resume LSN to localStorage so a
   reload resumes from where it left off.
 - Exposes the PowerSync-shaped API in the Capacitor plugin convention:
-  `connect`, `subscribe`, `write`, `query`, `watch`, `checkpoint`, `rowCount`,
-  `close`, `configure`.
+  `connect`, `subscribe`, `write`, `query`, `watch`, `checkpoint`,
+  `rowCount`, `close`, `configure`, `reconnect`.
+- **Beta push bridge**: the native sides obtain the OS push token (iOS APNs)
+  and emit foreground-push events; the JS side registers the token with the
+  nostos server's REST surface.
 
 This mirrors the wiring proven by
 [`sdk/nostos_web/e2e/browser_live.spec.cjs`](../nostos_web/e2e/browser_live.spec.cjs),
@@ -94,6 +101,114 @@ Until it lands, `watch()` delivers the **initial snapshot only** — the same ba
 `@nostos-sync/web`'s own `watch()` sets. The delta hook probes the candidate seam names
 and activates with no API change the moment the seam ships. This is not polling.
 
+## Push notifications (beta — ADR-0037)
+
+Doorbell semantics: push is a **hint**, sync is the transport. Registering a
+token only tells the server where to knock; the data always arrives over the
+sync connection, which resumes from the durable LSN checkpoint. Row data
+never transits Apple/Google servers.
+
+### Register / deregister (JS, all platforms)
+
+```ts
+import { Nostos, NostosWeb } from "@nostos-sync/capacitor";
+
+// The REST pair rides the SAME server + JWT the sync session uses (derived
+// from the connect() url; the token passed to connect()/setToken()). There
+// is no second credential source, and the server stamps tenant/account
+// itself — the SDK never attests identity fields.
+await Nostos.registerPushToken("fcm", "<os-push-token>");   // platform: "apns" | "fcm" | "webpush"
+await Nostos.deregisterPushToken("<os-push-token>");
+
+// On iOS/Android, call these on the NostosWeb instance you sync with — the
+// REST half lives in the webview (see "Why no native sync source?" below):
+const nostos = new NostosWeb();
+await nostos.connect({ url: "wss://sync.example.com/sync", token, table: "tasks" });
+await nostos.registerPushToken("apns", apnsToken);
+
+// signOut() deregisters every session-registered token automatically
+// (ADR-0037 §3 — a leaked registration would push the previous principal's
+// data to the next user).
+```
+
+Wire contract (pinned by `test/push_rest.spec.cjs`, same pins as the Flutter
+and Node SDKs): `POST /push-tokens` with `{"platform":…,"token":…}` and
+`Authorization: Bearer <sync-jwt>` → `204`; `DELETE /push-tokens/{token}`
+(percent-encoded) with the same auth → `204`.
+
+### Getting the OS push token (native bridge)
+
+```ts
+import { Nostos } from "@nostos-sync/capacitor";
+
+await Nostos.addListener("pushToken", ({ platform, token }) => {
+  // iOS: platform is "apns", token is the hex APNs device token.
+  nostos.registerPushToken(platform, token);
+});
+await Nostos.addListener("pushTokenError", ({ message }) => log(message));
+
+// iOS: registers with APNs (no permission prompt — silent pushes need only
+// registration). The token arrives via the "pushToken" event above.
+await Nostos.registerForPushNotifications();
+
+// Android: registerForPushNotifications() is unimplemented by design —
+// obtain the FCM token app-side (see below) and call
+// registerPushToken("fcm", token) yourself.
+```
+
+### Foreground bridge → wake
+
+A push that arrives while the app is foregrounded is surfaced as a JS event
+(the OS presentation is suppressed on iOS — a foregrounded live socket has
+already applied the data, so the handler typically just reconnects or
+re-reads):
+
+```ts
+await Nostos.addListener("foregroundPush", async ({ payload }) => {
+  // The wake path: close + re-open the session; the wasm socket resumes
+  // from the durable localStorage checkpoint, so nothing is lost.
+  // (ponytail: watch() listeners are dropped by close() — re-register.)
+  await nostos.reconnect();
+});
+```
+
+On Android the event fires only if your app forwards it (Firebase stays
+app-side): call `NostosPlugin.emitForegroundPush(dataMap)` from your
+`FirebaseMessagingService.onMessageReceived`.
+
+### What stays app-side (explicit)
+
+The plugin vendors no Firebase/Apple push SDKs beyond the bridge skeleton:
+
+- **iOS**: the `aps-environment` entitlement + Push Notifications capability;
+  the APNs key/team config on the server; visible-notification authorization
+  (`UNUserNotificationCenter.requestAuthorization`) if the app shows alerts;
+  the app-id provisioning. The plugin only registers and forwards.
+- **Android**: the full Firebase setup (`google-services.json`,
+  `firebase-messaging` dependency, `FirebaseMessagingService` + its manifest
+  entry, `POST_NOTIFICATIONS` runtime permission for visible notifications on
+  Android 13+). Obtain the FCM token in your service and register it from JS.
+- **Web**: no OS push in the webview — web push is the Service Worker work
+  (plan task 6.2); `registerForPushNotifications()` rejects there.
+
+### Honest limitations (beta)
+
+- **No silent-background wake.** A Capacitor app follows the native OS rules:
+  iOS silent pushes are budgeted/opportunistic and discarded when force-quit;
+  Android defers under Doze. The wake path is: the OS surfaces the
+  notification (or budget-permits the silent push) → the app foregrounds or
+  reconnects → `reconnect()`/`connect()` resumes from the checkpoint. Push is
+  a nudge; sync reconciles (ADR-0037 §2).
+- The native sides are skeleton-shaped and were not compiled in CI (no
+  Capacitor app project exists in-repo): the Swift side is syntax-checked
+  only, the Kotlin side is reviewed-by-construction against the Capacitor
+  plugin template. Both follow the @capacitor/push-notifications wiring.
+- Registered tokens are tracked in memory for sign-out deregistration only —
+  a webview reload forgets them; the server-side rails prune stale rows
+  (APNs 410 / FCM `UNREGISTERED`).
+- On iOS the plugin claims `UNUserNotificationCenter.delegate`; a second push
+  plugin claiming it (e.g. @capacitor/push-notifications) will conflict.
+
 ## Storage (ceiling + upgrade path)
 
 Today the wasm engine holds applied rows in an in-memory KV — the same bar
@@ -104,26 +219,33 @@ wasm `Storage` trait will be implemented against the SQLite plugin so rows
 persist across launches. Until then, treat this plugin as a live-replication
 proof, not a durable store.
 
-## Why no native source?
+## Why no native sync source?
 
 Capacitor's iOS WKWebView origin is `capacitor://localhost` and Android's is
 `http://localhost`; both serve a full browser engine. WASM instantiation and
 `WebSocket` work identically to a desktop browser, so reusing the existing
-`@nostos-sync/web` browser path is strictly simpler than a native `echo`/`toast`
-plugin that just bounces calls over the bridge. The bridge exists for things
-the browser engine cannot do (keychain, biometrics, file system, sqlite) —
-none of which the v0.1 sync plugin needs.
+`@nostos-sync/web` browser path is strictly simpler than a native bridge that just
+bounces sync calls over it. The bridge exists for things the browser engine
+cannot do — push registration and foreground notification delivery are
+exactly that, which is what the (beta) native sides implement and all they
+implement.
 
 ## Verify
+
+Unit tests (pure node, mocked fetch — pin the REST wire shape):
+
+```bash
+cd sdk/nostos_capacitor
+npm install
+npm run build         # tsc → dist/
+npm run test:unit     # node --test test/push_rest.spec.cjs
+```
 
 The example app under `example-app/` has a Playwright E2E
 (`example-app/e2e/push-echo.spec.cjs`) that spawns the SDK E2E spine, opens
 the example page in a headless browser, and proves PUSH + ECHO. Run:
 
 ```bash
-cd sdk/nostos_capacitor
-npm install
-npm run build         # tsc → dist/
 cd example-app
 npm install           # playwright + capacitor-core already hoisted by parent
 npx playwright test --config=playwright.config.cjs

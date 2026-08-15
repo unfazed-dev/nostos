@@ -45,6 +45,57 @@ All calls are **blocking**: the Rust side owns a multi-thread tokio runtime and
 This exact sequence is what [`dotnet/smoke/Program.cs`](dotnet/smoke/Program.cs)
 runs in the passing E2E.
 
+## Push notifications (ADR-0037)
+
+Push is a **doorbell**, not a data channel: a data-only `{table, lsn}` hint
+wakes the app, and the sync connection — never the push rail — delivers the
+rows, resuming from the durable LSN checkpoint.
+
+MAUI push is **host-dependent**: .NET ships no push rail of its own — the
+host app registers with FCM (Android), APNs (iOS), or WNS (Windows) via its
+own plugin (e.g. `Plugin.PushNotification`) or platform APIs, then hands the
+token here:
+
+```csharp
+// From the host app's push plugin callback (token acquisition is NOT ours):
+client.RegisterPushToken("fcm", fcmToken);   // "apns" / "webpush" accepted too
+// SignOut() deregisters session-registered tokens automatically (best-effort).
+```
+
+Nothing here adds a NuGet dependency — `RegisterPushToken` is a plain REST
+call (`POST /push-tokens`, same JWT the client uses for `/sync`); the server
+stamps tenant/account and the SDK never attests them. A non-`204` throws
+`NostosError.Message` carrying the status + body. Tokens registered before a
+process restart are not auto-deregistered on a later sign-out — the server
+prunes them when the rail reports the token dead (410 / `UNREGISTERED`).
+
+**Wake entry** — the host app's background push handler (an Android
+`FirebaseMessagingService`, an iOS `UNUserNotificationCenterDelegate` /
+`didReceiveRemoteNotification`, a Windows toast background task) makes sync
+run; nostos picks up from there:
+
+```csharp
+// Paused app (a live NostosClient whose loop was Disconnect()-ed): the delta
+// past the durable checkpoint applies on reconnect.
+client.Resume();
+
+// Killed app: no handle survives. Cold-open the SAME dbPath — the durable
+// checkpoint lives in the SQLite file, so this is a delta catch-up, not a
+// resync:
+var nostos = new NostosClient(url, token, dbPath);
+nostos.Connect();
+nostos.Subscribe("tasks");   // delta applies from the checkpoint
+```
+
+Verified claims (engine-level, shared with kotlin/swift): the warm path
+(`disconnect` → `resume` applies the delta from the checkpoint, no loss) is
+pinned by nostos-client's
+`disconnect_then_resume_applies_delta_from_checkpoint_without_loss`; the
+cold path's premise — the checkpoint survives process death on disk — is
+pinned by `checkpoint_survives_drop_and_reopen_on_disk` (ADR-0016). This
+crate's `disconnect_keeps_local_state_queryable_and_resume_reenters` pins
+the FFI port.
+
 ## Why UniFFI-CS (Nord)
 
 The official `mozilla/uniffi` ships bindgens for Swift, Kotlin, Python, Ruby —
@@ -201,6 +252,8 @@ The SAME surface as nostos_swift and nostos_kotlin — `NostosClient` Object wit
 | `write` | `(table, op, pk, payload_json: Option<String>) -> u64` | op ∈ `"upsert"`/`"delete"`/`"patch"`. Returns outbox seq. |
 | `query` | `(sql) -> String` | JSON-array-of-objects (same as nostos_node/nostos_tauri/nostos_swift/nostos_kotlin). |
 | `checkpoint` | `() -> u64` | current durable LSN. Fresh store = `0`. |
+| `register_push_token` | `(platform, token) -> ()` | platform ∈ `"fcm"`/`"apns"`/`"webpush"`; `POST /push-tokens`, same JWT as the sync connection (ADR-0037). C#: `RegisterPushToken`. |
+| `deregister_push_token` | `(token) -> ()` | `DELETE /push-tokens/{token}`; `SignOut` calls it for session-registered tokens. C#: `DeregisterPushToken`. |
 
 ## `unsafe` policy
 

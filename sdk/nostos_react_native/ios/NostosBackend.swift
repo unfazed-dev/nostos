@@ -116,6 +116,23 @@ import React
         resolve(nil)
     }
 
+    @objc(bridgeDisconnect:reject:)
+    public func disconnect(resolve: RCTPromiseResolveBlock!, reject: RCTPromiseRejectBlock!) {
+        // NON-destructive pause (ADR-0037 task 5.1) — session, store, and token
+        // survive; the run loop gates closed + quiesces. Idempotent, no-op pre-connect.
+        do { try backing?.disconnect(); resolve(nil) }
+        catch { reject("NostosDisconnectError", (error as NSError).localizedDescription, error as NSError) }
+    }
+
+    @objc(bridgeResume:reject:)
+    public func resume(resolve: RCTPromiseResolveBlock!, reject: RCTPromiseRejectBlock!) {
+        // The push wake primitive (ADR-0037 task 5.1): re-open the loop after
+        // disconnect(); resume_lsn re-seeds from the durable checkpoint. Throws
+        // (→ rejection) if called before connect — the UniFFI contract.
+        do { try backing?.resume(); resolve(nil) }
+        catch { reject("NostosResumeError", (error as NSError).localizedDescription, error as NSError) }
+    }
+
     @objc(bridgeSignOut:reject:)
     public func signOut(resolve: RCTPromiseResolveBlock!, reject: RCTPromiseRejectBlock!) {
         do {

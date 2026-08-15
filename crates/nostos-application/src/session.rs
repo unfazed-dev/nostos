@@ -134,6 +134,7 @@ mod tests {
                 SessionCandidate {
                     id: session.id,
                     predicate: session.predicate,
+                    principal: session.principal,
                     sink,
                 },
             );
@@ -156,6 +157,7 @@ mod tests {
                 SessionCandidate {
                     id,
                     predicate: session.predicate,
+                    principal: session.principal,
                     sink,
                 },
             );

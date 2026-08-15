@@ -30,6 +30,10 @@ nostos-domain = { path = "../../crates/nostos-domain" }
 
 tokio = { version = "1.39", features = ["rt-multi-thread", "sync", "time", "macros"] }
 serde_json = "1.0"
+# Push-token REST (ADR-0037 §3): POST/DELETE /push-tokens. Mirrors the root
+# workspace pin's posture (rustls, no default TLS stack); the `json` helper
+# feature is unneeded — the body is a hand-built JSON string pinned by tests.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [build-dependencies]
 napi-build = "2"

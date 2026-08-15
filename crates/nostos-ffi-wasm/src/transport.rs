@@ -8,8 +8,9 @@
 //!   [`on_message`] → [`PumpResult`], and the [`checkpoint_key`] /
 //!   [`parse_checkpoint`] helpers. These are the real coverage — every wire
 //!   shape and apply/ack/checkpoint transition runs in `make ci`.
-//! - **Browser glue, NOT host-tested**: [`read_checkpoint_ls`] /
-//!   [`write_checkpoint_ls`] (localStorage), [`yield_to_event_loop`], and the
+//! - **Browser glue, NOT host-tested**: the [`WindowLocalStorage`] /
+//!   [`JsKvStore`] impls (the 6.1 seam's browser halves), [`current_kv`],
+//!   [`yield_to_event_loop`], and the
 //!   [`connect`](crate::NostosSocket::connect) async fn + [`SocketInner`]
 //!   (the `web_sys::WebSocket` plumbing). A browser can't be spawned in CI
 //!   without a flaky headless harness; the glue is plumbing over the tested
@@ -356,25 +357,99 @@ pub fn parse_checkpoint(raw: Option<&str>) -> Option<u64> {
 }
 
 // -----------------------------------------------------------------------------
-// localStorage helpers — web-sys glue, NOT host-tested (browser-only).
+// The checkpoint KV seam (plan task 6.1 / ADR-0037 §6 Wave 3) — host-tested.
 // -----------------------------------------------------------------------------
 
-/// Read the persisted checkpoint for `table` from `localStorage`. Returns
-/// `None` if the key is missing/malformed (the connect path then resumes from
-/// the engine's current checkpoint, or 0). ponytail: WS glue untested in CI.
-fn read_checkpoint_ls(table: &str) -> Option<u64> {
-    let storage = window_local_storage()?;
-    let key = checkpoint_key(table);
-    let raw = storage.get_item(&key).ok().flatten();
-    parse_checkpoint(raw.as_deref())
+/// A synchronous string→string key-value store for the durable sync
+/// checkpoint. The default impl is `window.localStorage` (unchanged
+/// pre-6.1 behavior); an embedding that runs where `Window` doesn't exist
+/// (a Service Worker) or wants its own store injects any JS object with the
+/// Web Storage shape (`getItem`/`setItem`) via the exported `setKvStore`.
+pub trait KvStore {
+    /// The value at `key`, or `None` when absent.
+    fn get(&self, key: &str) -> Option<String>;
+    /// Set `key` to `value` (an overwrite).
+    fn set(&self, key: &str, value: &str);
 }
 
-/// Persist `lsn` as the durable checkpoint for `table` in `localStorage`.
-/// Idempotent: overwrites the prior value. ponytail: WS glue untested in CI.
-fn write_checkpoint_ls(table: &str, lsn: u64) {
-    if let Some(storage) = window_local_storage() {
-        let _ = storage.set_item(&checkpoint_key(table), &lsn.to_string());
+/// The default store: `window.localStorage`. No window (a Worker / Service
+/// Worker) or storage disabled → every op is a no-op / `None` — exactly the
+/// pre-6.1 `window_local_storage` behavior, preserved for existing embedders.
+/// Browser-only (web-sys); never constructed in host tests.
+struct WindowLocalStorage;
+
+impl KvStore for WindowLocalStorage {
+    fn get(&self, key: &str) -> Option<String> {
+        window_local_storage()?.get_item(key).ok().flatten()
     }
+    fn set(&self, key: &str, value: &str) {
+        if let Some(storage) = window_local_storage() {
+            let _ = storage.set_item(key, value);
+        }
+    }
+}
+
+/// An embedding-injected store: any JS object exposing `getItem(key)` and
+/// `setItem(key, value)` — `localStorage` itself, a Map-backed shim running
+/// in a Service Worker, or a test spy. Browser-only (`JsValue`).
+pub(crate) struct JsKvStore(pub(crate) js_sys::Object);
+
+impl KvStore for JsKvStore {
+    fn get(&self, key: &str) -> Option<String> {
+        let f = js_sys::Reflect::get(&self.0, &JsValue::from_str("getItem"))
+            .ok()
+            .and_then(|v| v.dyn_into::<js_sys::Function>().ok())?;
+        f.call1(&self.0, &JsValue::from_str(key)).ok()?.as_string()
+    }
+    fn set(&self, key: &str, value: &str) {
+        let Ok(f) = js_sys::Reflect::get(&self.0, &JsValue::from_str("setItem")) else {
+            return;
+        };
+        let Ok(f) = f.dyn_into::<js_sys::Function>() else {
+            return;
+        };
+        let _ = f.call2(&self.0, &JsValue::from_str(key), &JsValue::from_str(value));
+    }
+}
+
+thread_local! {
+    /// The embedding-injected store override (plan 6.1). `None` = the
+    /// `WindowLocalStorage` default. Set at boot by the exported `setKvStore`
+    /// (see `crate::set_kv_store`); captured per-socket at `connect`.
+    static KV_OVERRIDE: RefCell<Option<Rc<dyn KvStore>>> = RefCell::new(None);
+}
+
+/// The active checkpoint store: the injected override if `setKvStore` was
+/// called, else `window.localStorage`.
+fn current_kv() -> Rc<dyn KvStore> {
+    KV_OVERRIDE.with(|o| {
+        o.borrow()
+            .clone()
+            .unwrap_or_else(|| Rc::new(WindowLocalStorage))
+    })
+}
+
+/// Set (or clear, on `None`) the embedding's checkpoint store override.
+/// Called by the `#[wasm_bindgen]` `setKvStore` in the crate root.
+pub(crate) fn set_kv_override(store: Option<Rc<dyn KvStore>>) {
+    KV_OVERRIDE.with(|o| *o.borrow_mut() = store);
+}
+
+// -----------------------------------------------------------------------------
+// Checkpoint read/write through the seam — pure given a store, host-tested.
+// -----------------------------------------------------------------------------
+
+/// Read the persisted checkpoint for `table` from `kv`. Returns `None` if the
+/// key is missing/malformed (the connect path then resumes from the engine's
+/// current checkpoint, or 0).
+pub(crate) fn read_checkpoint(table: &str, kv: &dyn KvStore) -> Option<u64> {
+    parse_checkpoint(kv.get(&checkpoint_key(table)).as_deref())
+}
+
+/// Persist `lsn` as the durable checkpoint for `table` in `kv`. Idempotent:
+/// overwrites the prior value.
+pub(crate) fn write_checkpoint(table: &str, lsn: u64, kv: &dyn KvStore) {
+    kv.set(&checkpoint_key(table), &lsn.to_string());
 }
 
 /// Reach `window.localStorage`, or `None` if there's no window / storage
@@ -415,6 +490,10 @@ pub(crate) struct SocketInner {
     /// the fresh full-table snapshot (idempotent — self-healing on lag, like the
     /// node/kotlin ports).
     pub(crate) on_change: OnChangeSlot,
+    /// The checkpoint KV store (plan 6.1): the injected override or the
+    /// `window.localStorage` default, captured at `connect` so a later
+    /// `setKvStore` swap doesn't affect a live socket.
+    pub(crate) kv: Rc<dyn KvStore>,
     // ---- Wave 4a: resume + conn-state support ----
     /// The connect URL (without `?token=`), stored so `resume()` can reconnect.
     #[allow(dead_code)] // read by NostosSocket::resume (wasm-only async fn)
@@ -530,7 +609,9 @@ pub(crate) async fn connect(
     engine.set_where_sql(where_sql.clone());
 
     // For durable mode, the checkpoint comes from SQLite (the engine already
-    // loaded it at construction). For in-memory, fall back to localStorage.
+    // loaded it at construction). For in-memory, fall back to the checkpoint
+    // KV seam (the injected store, or localStorage when unset — plan 6.1).
+    let kv = current_kv();
     let resume_lsn = if engine.storage().is_durable() {
         let cp = engine.checkpoint();
         if cp > 0.0 {
@@ -539,13 +620,14 @@ pub(crate) async fn connect(
             None
         }
     } else {
-        read_checkpoint_ls(&table)
+        read_checkpoint(&table, &*kv)
     };
     let inner = Rc::new(SocketInner {
         engine: Rc::new(RefCell::new(engine)),
         ws: ws.clone(),
         table: table.clone(),
         on_change: Rc::new(RefCell::new(None)),
+        kv,
         url: url_stored,
         token: token_stored,
         where_sql: where_sql.clone(),
@@ -608,7 +690,7 @@ pub(crate) async fn connect(
         if let Some(lsn) = ack_lsn {
             // Persist FIRST (so a crash between ack + persist doesn't lose the
             // checkpoint and force a full replay), then tell the server.
-            write_checkpoint_ls(&inner_msg.table, lsn);
+            write_checkpoint(&inner_msg.table, lsn, &*inner_msg.kv);
             let _ = inner_msg.ws.send_with_str(&build_ack_frame(lsn));
         }
         // Reactive push (ADR-0024): on every change tick — a commit detected by
@@ -638,7 +720,7 @@ pub(crate) async fn connect(
         let mut engine = inner_close.engine.borrow_mut();
         if let Ok(Some(outcome)) = engine.flush() {
             let lsn = outcome.checkpoint() as u64;
-            write_checkpoint_ls(&inner_close.table, lsn);
+            write_checkpoint(&inner_close.table, lsn, &*inner_close.kv);
             // The socket is closing; the ack may not land, but the persisted
             // checkpoint drives the next connect's resume_lsn regardless.
             let _ = inner_close.ws.send_with_str(&build_ack_frame(lsn));

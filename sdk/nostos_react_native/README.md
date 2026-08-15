@@ -129,6 +129,10 @@ native modules must satisfy it byte-for-byte.
 | `query(sql)`                 | `query(sql): Promise<string>`                 | `NostosClient::query(sql: String) -> Result<String>` (JSON rows)    |
 | `pollRows(table)`            | (uses `query`)                                | —                                                                  |
 | `checkpoint()`               | `checkpoint(): Promise<number>`               | `NostosClient::checkpoint() -> Result<u64>`                         |
+| `disconnect()`               | `disconnect(): Promise<void>`                 | `NostosClient::disconnect() -> Result<()>` (ADR-0037 task 5.1)      |
+| `resume()`                   | `resume(): Promise<void>`                     | `NostosClient::resume() -> Result<()>` (the push wake primitive)    |
+| `registerPushToken(p, t)`    | (facade REST — see below)                     | `POST /push-tokens` (ADR-0037 §3; no UniFFI analogue yet)          |
+| `deregisterPushToken(t)`     | (facade REST — see below)                     | `DELETE /push-tokens/{token}` (ADR-0037 §3)                        |
 | `watch(table, onSnapshot)`   | `watchChanges(t, cb): Promise<void>`          | `NostosClient::watch(t, sink: SnapshotSink)` (kotlin) / node `watch` |
 |                              | `unwatchChanges(table): Promise<void>`        | `stop_watch(table)` (the follow-on kotlin/node deferred)           |
 
@@ -137,6 +141,59 @@ callback and invokes it on the JS thread with the initial snapshot, then after
 every applied change — a full snapshot per tick, the same shape `query()`
 returns. The facade multiplexes one native pump per table and reference-counts
 teardown (`unwatchChanges` fires when the table's last handle unsubscribes).
+
+## Push notifications & background wake (ADR-0037)
+
+Push is a **doorbell**, sync is the transport — the payload is at most a hint;
+the durable LSN checkpoint is the correctness mechanism. Two halves:
+
+**Token registration (facade REST).** `registerPushToken(platform, token)`
+speaks the pinned REST contract directly from the facade via RN's global
+`fetch`: `POST /push-tokens` with `{"platform": …, "token": …}` (platform ∈
+`fcm` / `apns` / `webpush`), authenticated by the **same JWT** the sync
+connection uses — `Authorization: Bearer` from the handle's cached token (the
+one `connect()` / `setToken()` stage). The server stamps tenant/account; the
+SDK never attests them. Success is exactly `204`; anything else (including a
+2xx variant) rejects with a typed `NostosPushError` (`operation`, `status`,
+`body`). The HTTP base is derived from the sync URL (`ws`→`http`,
+`wss`→`https`, path stripped) — one URL source, one credential source.
+
+```ts
+// FCM (Android) — from the messaging onNewToken callback:
+await client.registerPushToken("fcm", fcmToken);
+// APNs (iOS) — hex-encode the device token from didRegisterForRemoteNotifications:
+await client.registerPushToken("apns", hexDeviceToken);
+
+// The app can no longer receive on the token (e.g. logout elsewhere):
+await client.deregisterPushToken(fcmToken);
+```
+
+`signOut()` deregisters every session-registered token **best-effort, after
+the local wipe, with the JWT captured before the clear** — a leaked
+registration would push the previous principal's data to the next user. A
+failed DELETE is swallowed (the server prunes stale rows on a rail
+410/`UNREGISTERED`).
+
+**Wake (TurboModule bridge).** `disconnect()` / `resume()` bridge the
+non-destructive teardown pair the UniFFI layer ships (plan task 5.1):
+`disconnect()` gates the replication loop closed at a safe point (final flush
++ ack) while the session, store, and token survive — NOT a sign-out;
+`resume()` re-opens the loop and the delta past the durable checkpoint
+applies. The FCM/APNs background handler wiring:
+
+```ts
+// e.g. react-native background handler (data-only "doorbell" push)
+// 1. App backgrounds → pause the loop (power-cheap; local reads still work):
+await client.disconnect();
+// 2. Push arrives (or the app foregrounds) → wake:
+await client.resume(); // reconnect re-seeds resume_lsn from the checkpoint
+// 3. App killed → push opens it: connect() + subscribe() cold path is also
+//    safe — the durable checkpoint is the resume point either way.
+```
+
+Killed-app note: from a cold start there is no session to resume — call
+`connect()` + `subscribe()` as usual; the checkpoint on disk is the resume
+point for both paths.
 
 ## `unsafe` policy
 

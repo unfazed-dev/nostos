@@ -115,6 +115,116 @@ pub trait EventSink: Send + Sync {
     }
 }
 
+/// One push doorbell hint — the minimal routing tuple the router emits per
+/// matched account (ADR-0037 §2/§4). Silent doorbells deliberately carry NO
+/// row data: push is a wake-up trigger, never a data channel; the client's
+/// durable LSN checkpoint is the correctness mechanism, so a missed or stale
+/// push loses nothing.
+///
+/// Two extensions ride the same tuple (plan 2.4):
+/// - `account_id` empty = a TENANT-WIDE hint (ADR-0037 §1 amendment): the
+///   coalescer expands it to that tenant's registered tokens whose accounts
+///   are offline at send time — the killed-app case the matched set cannot
+///   doorbell.
+/// - `payload` = the event's tuple bytes, attached ONLY when the table's push
+///   config is a visible template. It exists for in-process `{column}`
+///   interpolation and never reaches a provider except as the interpolated
+///   title/body (the operator's visible-push opt-in, ADR-0037 §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushHint {
+    /// The table the matching event landed on (the per-table template /
+    /// priority config key for the rails).
+    pub table: String,
+    /// The matched session's tenant — `""` when the session is anonymous.
+    pub tenant_id: String,
+    /// The matched session's account — the push-token registry lookup key.
+    /// Empty for a tenant-wide hint (see the type doc).
+    pub account_id: String,
+    /// The event's LSN — bounds staleness in-rail and anchors the
+    /// push-LSN→client-ack correlation surface.
+    pub lsn: Lsn,
+    /// The event's tuple bytes, present only for visible-configured tables
+    /// (template interpolation input — see the type doc).
+    pub payload: Option<Vec<u8>>,
+}
+
+/// Per-table push template (ADR-0037 §2/§4, plan 2.4): a content-free
+/// doorbell, or a visible notification with optional single-column
+/// interpolation. Static interpolation only — no expression language, no
+/// scheduling; that is the marketing-platform layer nostos explicitly does
+/// not build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushTemplate {
+    /// Doorbell: at most `{table, lsn}` transits the provider.
+    Silent,
+    /// Visible notification; `{col}` placeholders in title/body interpolate
+    /// the triggering event's column values at send time.
+    Visible { title: String, body: String },
+}
+
+/// The compiled per-table push configuration (ADR-0037 §1 amendment + §2):
+/// which tables doorbell fully-offline accounts, their templates, and the
+/// tenant column used to target those hints. Parsed by the composition root
+/// from `NOSTOS_PUSH_TABLES` (`nostos-server/src/main.rs`) — no env reads in
+/// this layer. Default (empty) = no tenant-wide hints; the matched-account
+/// path (plan 1.3) runs unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct PushTables {
+    /// The operator's tenant column (`NOSTOS_TENANT_COLUMN`): the fan-out
+    /// reads its value from each event's payload (via the caller's column
+    /// extractor) to stamp tenant-wide hints — the row's own tenant, so
+    /// hints fire even when NO session matched. `None` degrades to the
+    /// matched sessions' distinct tenants (best effort).
+    pub tenant_column: Option<String>,
+    /// table → template. A table absent here never triggers a tenant-wide
+    /// hint (one HashMap miss is the whole hot-loop cost).
+    pub tables: std::collections::HashMap<String, PushTemplate>,
+}
+
+impl PushTables {
+    /// The table's template, if any.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, table: &str) -> Option<&PushTemplate> {
+        self.tables.get(table)
+    }
+}
+
+/// The push doorbell rail (ADR-0037 §1/§4) — the driven-side port behind FCM /
+/// APNs / Web Push. Push relevance is derived from the same predicate pass
+/// that feeds WS fan-out; there is no parallel push-subscription registry.
+///
+/// `notify` is called **once per matched-account signal** — not per event, not
+/// per session: the router collapses an event's matching sessions to one hint
+/// per account, and the rail's own coalescer further debounces bursts
+/// in-rail (digest window).
+///
+/// # Non-blocking contract
+///
+/// Same shape as [`OpLogWriter`]: the caller is the fan-out loop's matched-set
+/// drain, so an implementation MUST return promptly — enqueue internally
+/// (bounded channel, drop-on-full with a counter) and let a background task do
+/// the rail I/O. The 833k ops/sec hot loop must not gain a network
+/// round-trip. `()` return: delivery accounting is the implementation's,
+/// surfaced via [`Metrics`].
+#[async_trait]
+pub trait PushNotifier: Send + Sync {
+    /// Fire one doorbell hint. Fire-and-forget.
+    async fn notify(&self, hint: PushHint);
+}
+
+/// The default push rail: sends nothing. Push stays entirely off — no token
+/// registry, no rails — when the composition root has nothing to wire (no
+/// rail env configured and no `NOSTOS_PUSH_TABLES`), so the bench baseline
+/// and fake-mode deploys pay nothing. The real consumer is the `PushRouter`
+/// coalescer (infra, plan 2.4).
+pub struct NoopNotifier;
+
+#[async_trait]
+impl PushNotifier for NoopNotifier {
+    async fn notify(&self, _hint: PushHint) {}
+}
+
 /// Why an atomic add was rejected by [`SessionStore::try_add_below_cap`].
 ///
 /// Surfacing this from the store (rather than checking `len` then `add` in the
@@ -196,16 +306,41 @@ pub trait SessionStore: Send + Sync {
     async fn slowest_session(&self) -> Option<(SessionId, Lsn)> {
         None
     }
+
+    /// Presence (ADR-0037 §4): does `account_id` have at least one live
+    /// session in the store? The push router suppresses the doorbell for
+    /// online accounts — an online client gets the data over its socket, so a
+    /// push would only double-signal it.
+    ///
+    /// "Online" means **store membership** — never socket liveness (an evicted
+    /// session's zombie sink may still be alive in the transport, but it is no
+    /// longer in the store and must count as offline) and never the sink's
+    /// [`DeliveryDecision`] (a `Dropped`-but-registered slow client is still
+    /// online: its socket is draining, and pushing it would double-signal a
+    /// client that is catching up over the socket).
+    ///
+    /// Default: `false` (treat as unknown/offline → push). The failure
+    /// direction is deliberate: a spurious push is a harmless nudge (sync
+    /// reconciles; doorbell semantics), while a swallowed push hides a change.
+    /// Implementations with an account index override this.
+    async fn account_online(&self, _account_id: &str) -> bool {
+        false
+    }
 }
 
 /// A session + its sink, returned by [`SessionStore::candidates_for`].
 ///
 /// Carrying the predicate alongside lets the router evaluate filters without a
-/// second lookup.
+/// second lookup; carrying the principal lets the push path (ADR-0037) derive
+/// the `(tenant, account)` of a matched session without a second store lookup.
 #[derive(Clone)]
 pub struct SessionCandidate {
     pub id: SessionId,
     pub predicate: Predicate,
+    /// The session's authenticated identity, or `None` for the anonymous /
+    /// unauthenticated path. Threaded from [`SyncSession`] by the store —
+    /// before ADR-0037 the store discarded it here.
+    pub principal: Option<Principal>,
     pub sink: Arc<dyn EventSink>,
 }
 
@@ -732,6 +867,35 @@ pub struct Metrics {
     /// steady state under write load, not an alert — but a flat-zero under
     /// load means the compactor isn't running.
     pub oplog_compacted_rows: AtomicU64,
+    /// Push doorbell hints enqueued into the bounded channel after the
+    /// matched-set drain (ADR-0037 §4, plan 1.3) — one per matched OFFLINE
+    /// account per event; online accounts are suppressed at enqueue time.
+    pub push_enqueued: AtomicU64,
+    /// Push hints dropped because the bounded channel was full (or its
+    /// consumer gone). Doorbell semantics: a dropped hint loses nothing —
+    /// the client's durable LSN checkpoint is the correctness mechanism.
+    /// Alert on sustained increase (the coalescer, plan 2.4, can't keep up).
+    /// Also bumped by the coalescer's own inbound channel when it is full
+    /// (same failure class: a hint dropped before send).
+    pub push_dropped: AtomicU64,
+    /// Push sends the rails accepted (2xx) — plan 3.2. Last-mile delivery
+    /// stays best-effort; the client's LSN ack is the proof.
+    pub push_sent: AtomicU64,
+    /// Push sends that failed terminally or exhausted their retry (rail
+    /// `Fatal`/`TransientRetryable`) — plan 3.2.
+    pub push_failed: AtomicU64,
+    /// Token rows pruned after a rail reported the target gone (APNs 410 /
+    /// FCM `UNREGISTERED` / Web Push 404-410) or an owner deregistered —
+    /// plan 3.2.
+    pub push_pruned: AtomicU64,
+    /// Highest doorbell LSN pushed per account (ADR-0037 §5 delivery
+    /// observability — the push-LSN→client-ack correlation surface). Keyed
+    /// by account id so `/metrics` can render it next to session acked-LSN.
+    ///
+    /// ponytail: unbounded map — one entry per pushed account, so the
+    /// ceiling is the distinct-account count; bound with an LRU if a
+    /// deploy ever shows unbounded account churn.
+    pub push_last_lsn: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
 }
 
 impl Metrics {
@@ -759,6 +923,11 @@ impl Metrics {
             oplog_flush_failed: self.oplog_flush_failed.load(Ordering::Relaxed),
             slot_epoch: self.slot_epoch.load(Ordering::Relaxed),
             oplog_compacted_rows: self.oplog_compacted_rows.load(Ordering::Relaxed),
+            push_enqueued: self.push_enqueued.load(Ordering::Relaxed),
+            push_dropped: self.push_dropped.load(Ordering::Relaxed),
+            push_sent: self.push_sent.load(Ordering::Relaxed),
+            push_failed: self.push_failed.load(Ordering::Relaxed),
+            push_pruned: self.push_pruned.load(Ordering::Relaxed),
         }
     }
 
@@ -800,6 +969,16 @@ impl Metrics {
     pub fn record_oplog_compacted(&self, n: u64) {
         self.oplog_compacted_rows.fetch_add(n, Ordering::Relaxed);
     }
+
+    /// Record the highest LSN doorbelled to one account (plan 3.2 — the
+    /// push-LSN→client-ack correlation surface). Called by the push router
+    /// at send time; monotonically overwritten, never cleared.
+    #[inline]
+    pub fn record_push_lsn(&self, account_id: &str, lsn: u64) {
+        if let Ok(mut map) = self.push_last_lsn.lock() {
+            map.insert(account_id.to_string(), lsn);
+        }
+    }
 }
 
 /// A point-in-time read of [`Metrics`] (plain values, safe to format/serialize).
@@ -821,4 +1000,12 @@ pub struct MetricsSnapshot {
     pub slot_epoch: u64,
     /// Rows swept by op-log compaction (ADR-0025 slice 5).
     pub oplog_compacted_rows: u64,
+    /// Push hints enqueued / dropped at the fan-out enqueue site
+    /// (ADR-0037 §4, plan 1.3). See [`Metrics::push_enqueued`].
+    pub push_enqueued: u64,
+    pub push_dropped: u64,
+    /// Push sends accepted / failed, and token rows pruned (plan 3.2).
+    pub push_sent: u64,
+    pub push_failed: u64,
+    pub push_pruned: u64,
 }

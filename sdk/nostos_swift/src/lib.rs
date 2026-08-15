@@ -81,6 +81,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig};
@@ -188,6 +189,17 @@ pub struct NostosClient {
     /// `connect()` (which takes session→token).
     token: AsyncMutex<Option<String>>,
     db_path: String,
+    /// Push tokens registered via `register_push_token` this session,
+    /// best-effort deregistered by `sign_out` (ADR-0037 §3 — a leaked
+    /// registration would push the previous principal's data to the next
+    /// user). `StdMutex` (never held across an await): the UniFFI receiver is
+    /// `&self`, like `nostos_node`'s identical field.
+    ///
+    /// ponytail: in-memory only — tokens registered before a process restart
+    /// are not auto-deregistered. The stale case is covered server-side (the
+    /// rails prune on APNs 410 / FCM UNREGISTERED); persist the set locally
+    /// if rail-prune proves too slow.
+    registered_push_tokens: StdMutex<Vec<String>>,
     session: AsyncMutex<Option<Session>>,
 }
 
@@ -258,6 +270,7 @@ impl NostosClient {
             url,
             token: AsyncMutex::new(token),
             db_path,
+            registered_push_tokens: StdMutex::new(Vec::new()),
             session: AsyncMutex::new(None),
         }))
     }
@@ -341,6 +354,11 @@ impl NostosClient {
             if session.run_task.is_some() {
                 return Ok(());
             }
+            // A stale disconnect() gate would make the spawned loop no-op
+            // instantly (`run_once` returns immediately while disconnected);
+            // subscribe() means "start the live loop", so clear it (a no-op
+            // when the gate was never set).
+            session.client.resume();
             let client = Arc::clone(&session.client);
             // Spawn on OUR runtime (not UniFFI's) so the loop outlives this
             // call. `run_with_reconnect` retries forever on transport errors;
@@ -352,6 +370,76 @@ impl NostosClient {
                 let _ = client.run_with_reconnect().await;
             });
             session.run_task = Some(run_task);
+            Ok(())
+        })
+    }
+
+    /// Stop the live replication loop WITHOUT touching local state (ADR-0037
+    /// task 5.1) — the push-notification sleep primitive, and the direct
+    /// counterpart of `nostos_node`'s `close()`. The run loop winds down
+    /// cleanly (final flush + checkpoint ack via `SyncClient::disconnect`'s
+    /// gate), the session's durable store — rows, checkpoint, epoch, outbox —
+    /// survives intact, and `query()` / `write()` / `checkpoint()` / `watch()`
+    /// keep working offline. Contrast `sign_out()`, which WIPES that state for
+    /// the next principal (ADR-0029): disconnect is for "this app is going to
+    /// sleep", sign-out is for "this user is leaving".
+    ///
+    /// The `watch()` pumps stay ALIVE across disconnect: they are purely local
+    /// (the change broadcast + storage reads), so a backgrounded app's UI
+    /// keeps rendering, and their ticks resume the moment `resume()` reopens
+    /// the loop. Idempotent and a no-op with no active session.
+    ///
+    /// # Errors
+    /// Never errors today — `Result` mirrors the sibling lifecycle methods.
+    pub fn disconnect(&self) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let mut guard = self.session.lock().await;
+            if let Some(session) = guard.as_mut() {
+                // Graceful first: the gate makes the loop break at a safe
+                // point (final flush + ack) and `run_with_reconnect` return on
+                // its own.
+                session.client.disconnect();
+                // Abort + await as the quiesce backstop (mirrors `sign_out`'s
+                // step 1): if the gate already exited the task, abort is a
+                // no-op; if it was parked somewhere ungated (a connect
+                // handshake to an unreachable server), the await still proves
+                // no socket outlives this call.
+                if let Some(task) = session.run_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Reopen the live replication loop after `disconnect()` (ADR-0037 task
+    /// 5.1) — the push wake primitive: a backgrounded app is poked, calls
+    /// `resume()`, and the delta past the durable checkpoint applies (the
+    /// reconnect's Subscribe re-seeds `resume_lsn` from the checkpoint). Does
+    /// NOT re-run `connect()` — the session and its store were never torn
+    /// down. Idempotent: with a live loop it is only a gate clear (a no-op).
+    ///
+    /// # Errors
+    /// `NostosError` if no session is active (call `connect()` first).
+    pub fn resume(&self) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let mut guard = self.session.lock().await;
+            let session = guard.as_mut().ok_or_else(|| NostosError::Message {
+                message: "resume() called before connect()".to_string(),
+            })?;
+            // Clear the gate BEFORE spawning: a fresh `run_with_reconnect`
+            // against a set gate would no-op instantly.
+            session.client.resume();
+            if session.run_task.is_none() {
+                let client = Arc::clone(&session.client);
+                // Same fire-and-forget shape as `subscribe()`'s spawn: the
+                // loop owns its own reconnects; Session::Drop aborts it.
+                let run_task = self.rt.spawn(async move {
+                    let _ = client.run_with_reconnect().await;
+                });
+                session.run_task = Some(run_task);
+            }
             Ok(())
         })
     }
@@ -595,6 +683,83 @@ impl NostosClient {
         })
     }
 
+    /// Register this device's push token with the server (ADR-0037 §3):
+    /// `POST /push-tokens` with `{"platform": …, "token": …}`, authenticated by
+    /// the SAME token the sync connection uses (`Authorization: Bearer`, read
+    /// from this handle's stored token — the credential `connect()` builds the
+    /// `SyncClient` from). The server stamps tenant/account itself; the SDK
+    /// never attests identity fields. On Apple platforms the token comes from
+    /// APNs (`didRegisterForRemoteNotificationsWithDeviceToken`) or an FCM
+    /// SDK layered over it.
+    ///
+    /// `platform` is `"fcm"`, `"apns"`, or `"webpush"`. Resolves on the pinned
+    /// `204`; any other status throws `NostosError` carrying the status + body.
+    /// Registered tokens are deregistered best-effort by `sign_out`.
+    ///
+    /// ponytail: a fresh reqwest client per call — registration is a rare
+    /// path, not a hot loop. Share one `Client` on the handle if a
+    /// measurement ever says otherwise (mirrors `nostos_node`'s stance).
+    ///
+    /// # Errors
+    /// `NostosError` on an unknown platform or any non-`204` reply.
+    pub fn register_push_token(&self, platform: String, token: String) -> Result<(), NostosError> {
+        match platform.as_str() {
+            "fcm" | "apns" | "webpush" => {}
+            other => {
+                return Err(NostosError::Message {
+                    message: format!(
+                        "unknown push platform {other:?}: expected \"fcm\", \"apns\", or \"webpush\""
+                    ),
+                });
+            }
+        }
+        self.rt.block_on(async {
+            let auth = self.token.lock().await.clone();
+            let body = serde_json::json!({"platform": platform, "token": token}).to_string();
+            let mut request = reqwest::Client::new()
+                .post(format!("{}/push-tokens", http_base(&self.url)))
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
+            if let Some(jwt) = &auth {
+                request = request.bearer_auth(jwt);
+            }
+            let response = request.send().await.map_err(|e| NostosError::Message {
+                message: format!("push-token register failed: {e}"),
+            })?;
+            expect_204(response, "register").await?;
+            self.registered_push_tokens
+                .lock()
+                .expect("registered_push_tokens lock poisoned")
+                .push(token);
+            Ok(())
+        })
+    }
+
+    /// Deregister a push token (ADR-0037 §3): `DELETE /push-tokens/{token}`
+    /// with the same auth as `register_push_token`. Resolves on the pinned
+    /// `204`. `sign_out` calls this for every session-registered token
+    /// automatically; call it directly when the app can no longer receive on
+    /// the token (e.g. the user disables notifications).
+    ///
+    /// The token rides the path percent-encoded as ONE segment
+    /// (`encode_path_segment`): a webpush token is the full
+    /// `pushSubscription` JSON and contains `/`, which would split the path
+    /// and 404 the DELETE.
+    ///
+    /// # Errors
+    /// `NostosError` on any non-`204` reply.
+    pub fn deregister_push_token(&self, token: String) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let auth = self.token.lock().await.clone();
+            deregister_push_token_http(&self.url, auth.as_deref(), &token).await?;
+            self.registered_push_tokens
+                .lock()
+                .expect("registered_push_tokens lock poisoned")
+                .retain(|t| t != &token);
+            Ok(())
+        })
+    }
+
     /// Sign out the current user (ADR-0029 / WS4-D3): stop the live sync,
     /// wipe ALL local rows (and checkpoint + epoch) plus the durable outbox
     /// (pending + dead-letter), drop the session, and clear the token — so the
@@ -623,11 +788,20 @@ impl NostosClient {
     /// app can surface the error and the user can retry on a clean session.
     pub fn sign_out(&self) -> Result<(), NostosError> {
         self.rt.block_on(async {
+            // ADR-0037 §3: the sign-out deregistration (tail) needs the JWT
+            // from BEFORE the token clear below — capture it now.
+            let auth = self.token.lock().await.clone();
             let mut guard = self.session.lock().await;
             let Some(session) = guard.as_mut() else {
                 // No session: still clear the held token so the next connect()
                 // is anonymous. Idempotent for the session half.
                 *self.token.lock().await = None;
+                deregister_registered_push_tokens(
+                    &self.url,
+                    auth.as_deref(),
+                    &self.registered_push_tokens,
+                )
+                .await;
                 return Ok(());
             };
 
@@ -658,6 +832,17 @@ impl NostosClient {
             // happen regardless of the wipe outcome (see Errors).
             *guard = None;
             *self.token.lock().await = None;
+            // (4) ADR-0037 §3: deregister this session's push tokens —
+            // best-effort (a failed DELETE is swallowed; the server prunes
+            // stale rows on a rail 410/UNREGISTERED). AFTER the local wipe,
+            // mirroring the Flutter SDK's hook ordering and `nostos_node`'s
+            // step (5). Uses the token captured before (3) cleared it.
+            deregister_registered_push_tokens(
+                &self.url,
+                auth.as_deref(),
+                &self.registered_push_tokens,
+            )
+            .await;
             wipe.map_err(NostosError::wrap)
         })
     }
@@ -688,6 +873,109 @@ async fn snapshot_json(
         .map_err(|e: ClientError| NostosError::wrap(e))?
         .map_err(NostosError::wrap)?;
     serde_json::to_string(&rows).map_err(NostosError::wrap)
+}
+
+/// Derive the HTTP base for the push-token REST endpoints from the WS `/sync`
+/// URL: `wss`→`https`, `ws`→`http`, trailing path stripped — the same
+/// derivation the Flutter SDK uses for `GET /schema`
+/// (`NostosDatabase._deriveHttpBase`) and `nostos_node`'s identical `http_base`.
+/// One credential source, one URL source.
+fn http_base(ws_url: &str) -> String {
+    match ws_url.split_once("://") {
+        Some((scheme, rest)) => {
+            let scheme = match scheme {
+                "wss" => "https",
+                "ws" => "http",
+                other => other,
+            };
+            // Authority runs to the first `/` (or end); the path is dropped.
+            let authority = rest.split('/').next().unwrap_or(rest);
+            format!("{scheme}://{authority}")
+        }
+        None => ws_url.to_owned(),
+    }
+}
+
+/// Percent-encode a push token as ONE path segment: every byte outside RFC
+/// 3986's unreserved set (`A-Za-z0-9-._~`) becomes `%XX`. A webpush token is
+/// the full `pushSubscription` JSON — it contains `/`, which un-encoded
+/// splits the path and 404s the DELETE (M1). Hand-rolled: this standalone
+/// workspace has no `percent-encoding` dep and the path-safe subset is this
+/// small; the server's `Path` extractor decodes it back verbatim.
+fn encode_path_segment(token: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(token.len());
+    for &b in token.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0x0F)]));
+            }
+        }
+    }
+    out
+}
+
+/// Enforce the pinned push-token contract (ADR-0037 §3): success is exactly
+/// `204 No Content`. Anything else — including a 2xx variant — surfaces the
+/// status + body so contract drift fails loudly on the SDK side.
+async fn expect_204(response: reqwest::Response, operation: &str) -> Result<(), NostosError> {
+    let status = response.status();
+    if status.as_u16() == 204 {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(NostosError::Message {
+        message: format!(
+            "push-token {operation} failed: HTTP {}: {body}",
+            status.as_u16()
+        ),
+    })
+}
+
+/// Shared DELETE core — `deregister_push_token` (reads the live stored token)
+/// and `sign_out` (reads the token captured BEFORE it was cleared) both ride
+/// this, so there is one wire shape (mirrors `nostos_node`'s associated fn).
+async fn deregister_push_token_http(
+    ws_url: &str,
+    auth: Option<&str>,
+    token: &str,
+) -> Result<(), NostosError> {
+    let mut request = reqwest::Client::new().delete(format!(
+        "{}/push-tokens/{}",
+        http_base(ws_url),
+        encode_path_segment(token)
+    ));
+    if let Some(jwt) = auth {
+        request = request.bearer_auth(jwt);
+    }
+    let response = request.send().await.map_err(|e| NostosError::Message {
+        message: format!("push-token deregister failed: {e}"),
+    })?;
+    expect_204(response, "deregister").await
+}
+
+/// ADR-0037 §3 sign-out tail: best-effort DELETE of every session-registered
+/// push token. Per-token failures are swallowed (one failed DELETE must not
+/// block the rest — the stale row is pruned server-side on a rail 410 /
+/// UNREGISTERED; see the `registered_push_tokens` ponytail).
+async fn deregister_registered_push_tokens(
+    ws_url: &str,
+    auth: Option<&str>,
+    registered: &StdMutex<Vec<String>>,
+) {
+    let tokens = std::mem::take(
+        &mut *registered
+            .lock()
+            .expect("registered_push_tokens lock poisoned"),
+    );
+    for token in tokens {
+        let _ = deregister_push_token_http(ws_url, auth, &token).await;
+    }
 }
 
 #[cfg(test)]
@@ -793,6 +1081,57 @@ mod tests {
         // spawned run_with_reconnect task. If abort is broken, this test
         // hangs on runtime shutdown.
         drop(client);
+    }
+
+    /// ADR-0037 task 5.1, offline half: `disconnect()` is NON-destructive —
+    /// the session (and its durable store) survives, so `query()` keeps
+    /// answering, `resume()` re-enters the loop, and the destructive sibling
+    /// `sign_out()` still wipes afterwards. The connected half (delta applies
+    /// from the checkpoint) is pinned in nostos-client's
+    /// `disconnect_then_resume_applies_delta_from_checkpoint_without_loss`.
+    #[test]
+    fn disconnect_keeps_local_state_queryable_and_resume_reenters() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.connect().expect("connect");
+
+        // Idempotent + no live loop: still Ok, session untouched.
+        client.disconnect().expect("disconnect");
+        // Non-destructive: query() answers from the durable store.
+        let rows = client
+            .query("SELECT 1 AS one".into())
+            .expect("query after disconnect");
+        assert!(
+            rows.contains("\"one\":1") || rows.contains("\"one\": 1"),
+            "store survived disconnect, got: {rows}"
+        );
+
+        // resume() re-enters: spawns the run loop against the (dead, test)
+        // URL — fire-and-forget, Session::Drop + runtime teardown reclaim it.
+        client.resume().expect("resume");
+        // The destructive sibling still works after a disconnect/resume cycle.
+        client.sign_out().expect("sign_out after disconnect");
+    }
+
+    /// `disconnect()` with no session is a no-op; `resume()` before
+    /// `connect()` surfaces the before-connect error — the same contract
+    /// `subscribe()` enforces.
+    #[test]
+    fn disconnect_without_session_is_noop_and_resume_before_connect_errors() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+
+        client
+            .disconnect()
+            .expect("disconnect before connect is a no-op");
+        let err = client
+            .resume()
+            .expect_err("resume before connect should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("before connect"),
+            "expected a before-connect error, got: {msg}"
+        );
     }
 
     /// Test-only [`SnapshotSink`] that records every emitted snapshot into a
@@ -1064,6 +1403,227 @@ mod tests {
         assert!(
             rows.contains("\"one\":1") || rows.contains("\"one\": 1"),
             "session usable after set_token, got: {rows}"
+        );
+    }
+
+    // ─────────── push-token REST (ADR-0037 §3 / plan task 5.2) ───────────
+    // Mirrors `nostos_node`'s pinned-contract suite verbatim: the UniFFI
+    // methods are synchronous (each blocks on the owned runtime), so the only
+    // adaptation is the call style + `NostosError` Display assertions.
+
+    /// Build a full HTTP/1.1 reply with an exact Content-Length (no
+    /// hand-counted lengths to drift).
+    fn reply(status_line: &str, body: &str) -> String {
+        format!(
+            "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Spawn a local HTTP server on 127.0.0.1:0 that accepts `count`
+    /// connections, replies `response` to each, and forwards each raw request
+    /// (start line + headers + body, verbatim) over the channel. Hand-rolled
+    /// on std::net so the pinned-contract tests add no dev-dependencies (an
+    /// axum/hyper dev-dep would outweigh the scaffold SDK itself).
+    /// `Connection: close` in the canned reply keeps reqwest from reusing a
+    /// connection, so one accept == one request. Returns the host:port
+    /// authority.
+    fn spawn_capture_server(
+        count: usize,
+        response: String,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for _ in 0..count {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut raw = Vec::<u8>::new();
+                let mut buf = [0u8; 4096];
+                // Read until the headers end AND any Content-Length body is
+                // fully received — one complete HTTP/1.1 request.
+                loop {
+                    let complete = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|pos| {
+                        let headers = String::from_utf8_lossy(&raw[..pos]).to_ascii_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        raw.len() >= pos + 4 + len
+                    });
+                    if complete == Some(true) {
+                        break;
+                    }
+                    let n = match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    raw.extend_from_slice(&buf[..n]);
+                }
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                if tx.send(String::from_utf8_lossy(&raw).into_owned()).is_err() {
+                    break;
+                }
+            }
+        });
+        (format!("127.0.0.1:{}", addr.port()), rx)
+    }
+
+    /// A client pointed at the capture server (WS URL derived from the HTTP
+    /// authority the way a real app's `ws://…/sync` URL would be). Returns the
+    /// `Arc` the UniFFI constructor hands out.
+    fn push_client(authority: &str, token: Option<&str>) -> Arc<NostosClient> {
+        NostosClient::new(
+            format!("ws://{authority}/sync"),
+            token.map(|t| t.to_owned()),
+            ":memory:".into(),
+        )
+        .expect("construct")
+    }
+
+    /// PINNED CONTRACT: registerPushToken sends `POST /push-tokens` with the
+    /// exact JSON body and the sync token as a Bearer header. The server
+    /// routes are built against this same pin (plan task 3.1); drift fails
+    /// here first. tenant/account are never sent — the server stamps them
+    /// (ADR-0018 discipline).
+    #[test]
+    fn register_push_token_posts_exact_json_with_bearer() {
+        let (authority, rx) = spawn_capture_server(1, reply("HTTP/1.1 204 No Content", ""));
+        let client = push_client(&authority, Some("swift-jwt"));
+        client
+            .register_push_token("apns".into(), "tok-1".into())
+            .expect("register should succeed on 204");
+
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("request");
+        assert!(
+            raw.starts_with("POST /push-tokens HTTP/1.1"),
+            "expected POST /push-tokens, got: {raw}"
+        );
+        let lower = raw.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: bearer swift-jwt"),
+            "expected the sync token as Bearer, got: {raw}"
+        );
+        assert!(
+            lower.contains("content-type: application/json"),
+            "expected a JSON content-type, got: {raw}"
+        );
+        assert!(
+            raw.contains(r#"{"platform":"apns","token":"tok-1"}"#),
+            "expected the exact pinned JSON body, got: {raw}"
+        );
+    }
+
+    /// PINNED CONTRACT: deregisterPushToken sends `DELETE /push-tokens/{token}`
+    /// with the same auth (register first so the happy path is also real).
+    #[test]
+    fn deregister_push_token_deletes_the_token_path() {
+        let (authority, rx) = spawn_capture_server(2, reply("HTTP/1.1 204 No Content", ""));
+        let client = push_client(&authority, Some("swift-jwt"));
+        client
+            .register_push_token("fcm".into(), "tok-1".into())
+            .expect("register");
+        client
+            .deregister_push_token("tok-1".into())
+            .expect("deregister should succeed on 204");
+
+        let _post = rx.recv_timeout(Duration::from_secs(5)).expect("POST");
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("DELETE");
+        assert!(
+            raw.starts_with("DELETE /push-tokens/tok-1 HTTP/1.1"),
+            "expected DELETE /push-tokens/tok-1, got: {raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer swift-jwt"),
+            "expected the sync token as Bearer, got: {raw}"
+        );
+    }
+
+    /// M1: a token containing reserved characters — a webpush token IS the
+    /// full `pushSubscription` JSON, so it contains `/` — must ride the path
+    /// percent-encoded as ONE segment; un-encoded it splits the path and the
+    /// DELETE 404s (mirrors the Flutter `push_token_test.dart` pin).
+    #[test]
+    fn deregister_push_token_percent_encodes_url_unsafe_token() {
+        let (authority, rx) = spawn_capture_server(1, reply("HTTP/1.1 204 No Content", ""));
+        let client = push_client(&authority, Some("swift-jwt"));
+        client
+            .deregister_push_token("tok with spaces/+".into())
+            .expect("deregister should succeed on 204");
+
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("DELETE");
+        assert!(
+            raw.starts_with("DELETE /push-tokens/tok%20with%20spaces%2F%2B HTTP/1.1"),
+            "expected the token percent-encoded as one path segment, got: {raw}"
+        );
+    }
+
+    /// Anything other than the pinned 204 surfaces the status + body in the
+    /// error message (this SDK's error style is the single-variant
+    /// `NostosError.Message`, matching every other method here).
+    #[test]
+    fn register_push_token_errors_on_non_204() {
+        let (authority, _rx) = spawn_capture_server(
+            1,
+            reply("HTTP/1.1 401 Unauthorized", r#"{"error":"unauthorized"}"#),
+        );
+        let client = push_client(&authority, Some("stale-jwt"));
+        let err = client
+            .register_push_token("fcm".into(), "tok-1".into())
+            .expect_err("non-204 must error");
+        assert!(
+            err.to_string().contains("401") && err.to_string().contains("unauthorized"),
+            "expected status + body in the message, got: {err}"
+        );
+    }
+
+    /// An unknown platform fails before the wire (no request reaches the
+    /// server — it is spawned with zero accepts, so any request would hang
+    /// the test).
+    #[test]
+    fn register_push_token_unknown_platform_is_an_error() {
+        let (authority, _rx) = spawn_capture_server(0, String::new());
+        let client = push_client(&authority, Some("swift-jwt"));
+        let err = client
+            .register_push_token("gcm".into(), "tok-1".into())
+            .expect_err("unknown platform must error");
+        assert!(
+            err.to_string().contains("unknown push platform"),
+            "expected a platform error, got: {err}"
+        );
+    }
+
+    /// ADR-0037 §3: signOut deregisters session-registered tokens. The DELETE
+    /// must carry the JWT captured BEFORE sign_out clears the stored token
+    /// (step 3) — this test pins that ordering. Covers BOTH sign_out paths:
+    /// this one runs with a live session-less client (register, then sign_out
+    /// with no connect() — the early-return branch).
+    #[test]
+    fn sign_out_deregisters_session_registered_tokens() {
+        let (authority, rx) = spawn_capture_server(2, reply("HTTP/1.1 204 No Content", ""));
+        let client = push_client(&authority, Some("swift-jwt"));
+        client
+            .register_push_token("webpush".into(), "tok-1".into())
+            .expect("register");
+        client.sign_out().expect("sign_out");
+
+        let _post = rx.recv_timeout(Duration::from_secs(5)).expect("POST");
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("DELETE");
+        assert!(
+            raw.starts_with("DELETE /push-tokens/tok-1 HTTP/1.1"),
+            "signOut should deregister the session token, got: {raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer swift-jwt"),
+            "the deregister must use the pre-clear JWT, got: {raw}"
         );
     }
 }

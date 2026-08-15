@@ -15,6 +15,17 @@
 // query / write / watch / checkpoint). Storage today is the wasm engine's
 // in-memory KV (matches @nostos-sync/web's current bar — see ADR-0017 for the
 // OPFS / @capacitor-community/sqlite durable upgrade path).
+//
+// BETA (plan task 6.3 / ADR-0037 §2): the push surface is the one part with
+// native source — a minimal bridge that obtains the OS push token and emits
+// foreground-push events to JS. The REST half (registerPushToken /
+// deregisterPushToken) stays in the webview implementation, riding the SAME
+// base URL + Bearer the sync session uses (one credential source; the server
+// stamps tenant/account itself — ADR-0018 discipline). Doorbell semantics:
+// push is a hint, sync is the transport; row data never transits
+// Apple/Google servers.
+
+import type { Plugin, PluginListenerHandle } from "@capacitor/core";
 
 /**
  * Options passed to {@link NostosPlugin.connect}.
@@ -132,8 +143,13 @@ export interface SetTokenOptions {
  *
  * All methods are async because they cross the JS↔wasm↔WS boundary. Connect
  * must be called before any of write / query / checkpoint / subscribe.
+ *
+ * The push methods are **beta** (plan task 6.3, ADR-0037): the REST pair is
+ * implemented in the web implementation (the webview's `fetch`), while
+ * `registerForPushNotifications` dispatches to the native sides (iOS only —
+ * on Android FCM acquisition stays app-side; see the README push section).
  */
-export interface NostosPlugin {
+export interface NostosPlugin extends Plugin {
   /**
    * Load the wasm engine (if not already loaded) and open the live WS sync
    * session. Resolves once the browser's WebSocket `open` has fired and the
@@ -200,12 +216,14 @@ export interface NostosPlugin {
   setToken(options: SetTokenOptions): Promise<void>;
 
   /**
-   * Sign out the current user (ADR-0029): wipe the engine's in-memory rows AND
-   * the pending outbox, close the live socket, drop every reactive listener,
-   * and clear the stored token. After this the plugin holds none of the prior
-   * user's state, so the next {@link connect} (a new principal) cold-starts
-   * into an empty database rather than the previous user's rows. Idempotent —
-   * safe to call when not connected.
+   * Sign out the current user (ADR-0029): deregister every session-registered
+   * push token (ADR-0037 §3 — while the prior principal's JWT is still held),
+   * wipe the engine's in-memory rows AND the pending outbox, close the live
+   * socket, drop every reactive listener, and clear the stored token. After
+   * this the plugin holds none of the prior user's state, so the next
+   * {@link connect} (a new principal) cold-starts into an empty database
+   * rather than the previous user's rows. Idempotent — safe to call when not
+   * connected.
    */
   signOut(): Promise<void>;
 
@@ -214,4 +232,122 @@ export interface NostosPlugin {
    * bundle the plugin should point this at the bundled asset.
    */
   configure(options: ConfigureOptions): Promise<void>;
+
+  // ─────────────────── Push notifications (beta, ADR-0037) ───────────────────
+  //
+  // Doorbell semantics: push is a hint, sync is the transport. Registering a
+  // token only tells the server WHERE to knock; data always arrives over the
+  // sync connection, which resumes from the durable LSN checkpoint
+  // (reconnect(), or a cold connect after a killed app). Row data never
+  // transits Apple/Google servers.
+
+  /**
+   * Register this device's push token with the server (ADR-0037 §3):
+   * `POST /push-tokens` with `{"platform": …, "token": …}`, authenticated by
+   * the SAME token the sync session uses (`Authorization: Bearer` — the one
+   * passed to {@link connect} or {@link setToken}; there is no second
+   * credential source). The HTTP base is derived from the sync `url`
+   * (`wss`→`https`, `ws`→`http`, path stripped) — the same derivation the
+   * Flutter/Node SDKs use. The server stamps tenant/account itself.
+   *
+   * `platform` is `"apns"`, `"fcm"`, or `"webpush"`. Beta: implemented in the
+   * web implementation (the webview's `fetch`) — on iOS/Android call it on
+   * the {@link NostosWeb} instance you sync with, not through the bridge
+   * proxy. Registered tokens are deregistered best-effort by {@link signOut}.
+   */
+  registerPushToken(platform: PushPlatform, token: string): Promise<void>;
+
+  /**
+   * Deregister `token` (ADR-0037 §3): `DELETE /push-tokens/{token}` (URL-
+   * encoded) with the same auth as {@link registerPushToken}. Call when the
+   * app can no longer receive on this token (e.g. notifications disabled);
+   * {@link signOut} deregisters every session-registered token anyway.
+   */
+  deregisterPushToken(token: string): Promise<void>;
+
+  /**
+   * Ask the OS for this platform's push token (beta). iOS: registers with
+   * APNs — no permission prompt (silent pushes need only registration; the
+   * visible-notification authorization is app-side, see the README) — and the
+   * hex device token arrives as a `pushToken` event; failure arrives as
+   * `pushTokenError`. Android: `unimplemented` — FCM token acquisition stays
+   * app-side (the plugin does not vendor Firebase); forward the token from
+   * your `FirebaseMessagingService` and call `registerPushToken("fcm", …)`.
+   * Web: rejects — web push is the Service Worker work (plan task 6.2).
+   *
+   * ponytail: skeleton bridge — no silent-background wake exists on any side.
+   * A Capacitor app follows the native OS rules (iOS silent-push budgets,
+   * force-quit discard, Doze); the honest wake path is: OS shows the
+   * notification / budget-permits the silent push → app foregrounds or
+   * reconnects → `reconnect()`/`connect()` resumes from the checkpoint.
+   */
+  registerForPushNotifications(): Promise<void>;
+
+  /**
+   * Close the live socket (if any) and re-open it with the last
+   * {@link connect} options — the wake path a `foregroundPush` listener
+   * triggers. The wasm socket resumes from the durable localStorage
+   * checkpoint, so nothing is lost while it was down.
+   *
+   * ponytail: `close()` drops reactive listeners, so `watch()` subscriptions
+   * must be re-registered after a reconnect (same as after any `close()`).
+   * Re-arming them automatically arrives with the same wasm change-callback
+   * seam the delta path needs (see {@link watch}).
+   */
+  reconnect(): Promise<NostosConnectResult>;
+
+  /** `pushToken` event: the OS push token, as handed over by the native side. */
+  addListener(
+    eventName: "pushToken",
+    listenerFunc: (event: NostosPushTokenEvent) => void,
+  ): Promise<PluginListenerHandle>;
+
+  /** `pushTokenError` event: APNs registration failed (iOS). */
+  addListener(
+    eventName: "pushTokenError",
+    listenerFunc: (event: { message: string }) => void,
+  ): Promise<PluginListenerHandle>;
+
+  /**
+   * `foregroundPush` event: a push arrived while the app was foregrounded.
+   * iOS: emitted from `userNotificationCenter(_:willPresent:)` for
+   * user-visible notifications (data-only foreground delivery is not
+   * bridged — silent pushes are the OS's business). Android: emitted only if
+   * the app's own `FirebaseMessagingService` calls
+   * `NostosPlugin.emitForegroundPush(...)` (Firebase stays app-side).
+   *
+   * The typical handler triggers {@link reconnect} — or just re-reads state,
+   * since a foregrounded live socket has already applied the data.
+   */
+  addListener(
+    eventName: "foregroundPush",
+    listenerFunc: (event: NostosForegroundPushEvent) => void,
+  ): Promise<PluginListenerHandle>;
+
+  /** Untyped fallback (from `Plugin`) for any other event name. */
+  addListener(
+    eventName: string,
+    listenerFunc: (...args: any[]) => any,
+  ): Promise<PluginListenerHandle>;
+}
+
+/** The platforms `POST /push-tokens` accepts (ADR-0037 §3). */
+export type PushPlatform = "apns" | "fcm" | "webpush";
+
+/** Payload of the `pushToken` event (iOS native side). */
+export interface NostosPushTokenEvent {
+  /** Always `"apns"` today — Android FCM tokens are app-side. */
+  platform: PushPlatform;
+  /** The hex APNs device token. */
+  token: string;
+}
+
+/** Payload of the `foregroundPush` event. */
+export interface NostosForegroundPushEvent {
+  /**
+   * The notification payload as the platform hands it over (iOS
+   * `userInfo`-shaped object; Android the data map the app forwarded). No
+   * schema is imposed — doorbell semantics mean the app syncs, not parses.
+   */
+  payload: unknown;
 }

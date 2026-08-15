@@ -101,6 +101,30 @@ class NostosTurboModule :
     }
 
     /**
+     * NON-destructive pause of the live replication loop (ADR-0037 task 5.1 —
+     * "this app is going to sleep"; [signOutSync] is "this user is leaving").
+     * Delegates to UniFFI `disconnect()`: the run loop gates closed at a safe
+     * point (final flush + ack) and quiesces, but the session, the durable
+     * store, and the token all survive — query/write keep answering and the
+     * local watch pumps keep ticking. Idempotent and a no-op with no session.
+     */
+    fun disconnectSync() {
+        client().disconnect()
+    }
+
+    /**
+     * Re-open the live replication loop after [disconnectSync] — the push wake
+     * primitive (ADR-0037 task 5.1). Delegates to UniFFI `resume()`: the
+     * reconnect's Subscribe re-seeds `resume_lsn` from the durable checkpoint,
+     * so the delta that accrued while disconnected applies with no data loss.
+     * Does NOT re-run [connectSync]. Idempotent with a live loop; throws (→
+     * promise rejection) if called before `connect()`.
+     */
+    fun resumeSync() {
+        client().resume()
+    }
+
+    /**
      * Sign out (ADR-0029): abort the run loop, await quiescence, wipe local
      * state (rows + checkpoint + epoch + outbox + dead-letter), drop the
      * session, and clear the token. Delegates to UniFFI `signOut()`.
@@ -213,6 +237,26 @@ class NostosTurboModule :
             promise.resolve(null)
         } catch (t: Throwable) {
             promise.reject("NostosSetTokenError", t)
+        }
+    }
+
+    @ReactMethod
+    override fun disconnect(promise: Promise) {
+        try {
+            disconnectSync()
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("NostosDisconnectError", t)
+        }
+    }
+
+    @ReactMethod
+    override fun resume(promise: Promise) {
+        try {
+            resumeSync()
+            promise.resolve(null)
+        } catch (t: Throwable) {
+            promise.reject("NostosResumeError", t)
         }
     }
 

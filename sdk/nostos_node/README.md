@@ -20,6 +20,8 @@ never block the event loop.
 | `subscribe(table, whereSql?)` | `Promise<void>` | starts the live replication run loop |
 | `write(table, op, pk, payloadJson?)` | `Promise<number>` | `op` ∈ `upsert` / `delete` / `patch`; returns the outbox id |
 | `query(sql)` | `Promise<string>` | JSON array of rows from on-device SQLite |
+| `registerPushToken(platform, token)` | `Promise<void>` | `platform` ∈ `fcm` / `apns` / `webpush`; `POST /push-tokens`, same JWT as the sync connection (ADR-0037) |
+| `deregisterPushToken(token)` | `Promise<void>` | `DELETE /push-tokens/{token}`; `signOut` calls it for session-registered tokens |
 | `close()` | `Promise<void>` | aborts the run loop, drops the session |
 | `url` | getter | the configured endpoint |
 
@@ -42,6 +44,24 @@ subscription (its `Drop` aborts the previous run loop).
 `write` resolves when the write is durable in the local outbox, **not** when the
 server acks it — see
 [ADR-0027](../../docs/adr/0027-write-outcome-visibility-in-the-client-sdk.md).
+
+### Push tokens (ADR-0037)
+
+Node has no OS push, so token registration exists for **symmetry** with the
+other SDKs (plan task 4.2) — e.g. a host app routing a Web Push subscription
+through the same registry:
+
+```js
+await nostos.registerPushToken("webpush", subscription.endpoint);
+await nostos.deregisterPushToken(subscription.endpoint);
+```
+
+Both hit the pinned REST contract (`POST /push-tokens` /
+`DELETE /push-tokens/{token}`, `204` on success) with the **same JWT** the
+sync connection uses (the handle's cached token — the one `connect()` /
+`subscribe()` build the client from). The server stamps tenant/account; the
+SDK never attests them. `signOut()` deregisters session-registered tokens
+best-effort; a non-`204` rejects with the status + body in the error reason.
 
 ## Build
 

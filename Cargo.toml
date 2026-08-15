@@ -134,7 +134,10 @@ webpki-roots = "0.26"
 # rusqlite = embedded sqlite for the cloud store (zero external deps to run).
 rusqlite = { version = "0.32", features = ["bundled"] }
 # HTTP client for Stripe REST calls (Checkout sessions, customer portal).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `http2` is needed by the APNs push rail (api.push.apple.com rejects
+# HTTP/1.1; h2 is negotiated via ALPN) — the default-features=false list
+# would otherwise drop it.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 # Webhook signature verification — HMAC-SHA256 (Stripe spec), no SDK needed.
 hmac = "0.12"
 sha2 = "0.10"
@@ -156,14 +159,27 @@ rand = "0.8"
 # jsonwebtoken 10 requires picking a crypto backend explicitly; "rust_crypto"
 # (pure Rust, MIT/Apache) matches the RustCrypto family we already pull in via
 # rsa/p256 for tests, rather than adding a second crypto stack (aws-lc-rs).
+# "use_pem" is a jsonwebtoken default feature the no-default list below would
+# drop — restored here for the push rails' service-account (.pem) and APNs
+# (.p8) keys (from_rsa_pem / from_ec_pem).
 jsonwebtoken = { version = "10", default-features = false, features = [
   "rust_crypto",
+  "use_pem",
 ] }
 # Test-only: mint RSA/EC/Ed25519 keypairs + JWKs for the JWKS fixture-server
 # tests (nostos-infra dev-dependencies only — never a runtime dependency).
 rsa = "0.9"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+
+# --- Web Push rail (nostos-infra, ADR-0037 task 2.3) ---
+# RFC 8188/8291 aes128gcm payload encryption + RFC 8292 VAPID signing —
+# the two pieces not worth hand-rolling. Built-in HTTP clients (isahc/hyper)
+# disabled: nostos sends over its shared reqwest client.
+# CVE-2025-53604 / RUSTSEC-2025-0015 (Content-Length OOM in those built-in
+# clients) is patched >=0.10.3 per rustsec.org (0.10.3 was yanked; GHSA
+# flags <0.10.4) — pinning 0.11 clears every advisory threshold.
+web-push = { version = "0.11", default-features = false }
 
 # internal crates (so members can reference each other via the workspace)
 nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }

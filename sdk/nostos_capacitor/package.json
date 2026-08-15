@@ -1,18 +1,21 @@
 {
   "name": "@nostos-sync/capacitor",
-  "version": "0.1.0",
-  "description": "Capacitor v8 web-only plugin re-exporting @nostos-sync/web's live browser sync path (NostosSocket via the --target web wasm build). No native android/ios source \u2014 the webview is a full browser engine, so WASM + WebSocket run unmodified.",
+  "version": "0.2.0-beta.1",
+  "description": "Capacitor v8 plugin: in-webview wasm sync (@nostos-sync/web live path) + beta native push bridge (APNs registration token + foreground events on iOS; FCM stays app-side). Push surface is beta (ADR-0037).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "prebuild": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\"",
+    "test:unit": "node --test test/push_rest.spec.cjs",
     "test:e2e": "cd example-app && npx playwright test --config=playwright.config.cjs",
-    "test": "npm run build && npm run test:e2e"
+    "test": "npm run build && npm run test:unit && npm run test:e2e"
   },
   "license": "Apache-2.0",
   "files": [
     "dist",
+    "ios",
+    "android",
     "README.md"
   ],
   "peerDependencies": {

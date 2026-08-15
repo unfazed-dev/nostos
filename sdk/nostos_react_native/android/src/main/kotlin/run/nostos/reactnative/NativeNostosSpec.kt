@@ -26,6 +26,11 @@ import com.facebook.react.module.annotations.ReactModule
  *   query(sql)                  → .query(sql)                          (JSON-rows String)
  *   checkpoint()                → .checkpoint()                        (ULong → JS Double)
  *   setToken(token)             → .setToken(token)  (ADR-0029 #3; Option<String> ↔ Kotlin String?)
+ *   disconnect()                → .disconnect()     (ADR-0037 task 5.1 — NON-destructive pause: gate the
+ *                              run loop closed + quiesce; session, store, and token survive. Idempotent.)
+ *   resume()                    → .resume()         (the push wake primitive: re-open the loop after
+ *                              disconnect; re-seeds resume_lsn from the durable checkpoint. Errors before
+ *                              connect() — surfaced to JS as a promise rejection.)
  *   signOut()                   → .signOut()        (ADR-0029 wipe; abort→await→clear→drop→clear-token)
  *   watchChanges(table, cb)     → .subscribe(table) + .watch(table, sink)  (RN Callback wrapped in a
  *                              UniFFI `SnapshotSink` adapter — the Kotlin mirror of iOS's NostosSnapshotSink.
@@ -72,6 +77,8 @@ abstract class NativeNostosSpec :
     abstract fun query(sql: String, promise: Promise)
     abstract fun checkpoint(promise: Promise)
     abstract fun setToken(token: String?, promise: Promise)
+    abstract fun disconnect(promise: Promise)
+    abstract fun resume(promise: Promise)
     abstract fun signOut(promise: Promise)
     abstract fun watchChanges(table: String, onSnapshot: Callback, promise: Promise)
     abstract fun unwatchChanges(table: String, promise: Promise)

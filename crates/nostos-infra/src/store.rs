@@ -39,16 +39,34 @@ use nostos_domain::{ReplicationEvent, SessionId, SyncSession};
 /// `by_table` maps `predicate.table → Vec<StoredSession>`. The inner `Vec` is
 /// guarded by a per-table `Mutex` so add/remove on one table doesn't block
 /// lookups on another. `live_count` mirrors the total across all tables for
-/// O(1) `len()` and atomic cap enforcement (see the module doc).
+/// O(1) `len()` and atomic cap enforcement (see the module doc). `by_account`
+/// counts live sessions per `principal.account_id` — the presence index the
+/// push router reads (ADR-0037 §4).
 pub struct InMemorySessionStore {
     by_table: DashMap<String, Arc<Mutex<Vec<StoredSession>>>>,
     live_count: AtomicUsize,
+    by_account: DashMap<String, usize>,
 }
 
 struct StoredSession {
     id: SessionId,
     predicate: nostos_domain::Predicate,
+    /// The session's authenticated identity, retained for the push path
+    /// (ADR-0037) — presence + per-account hint routing.
+    principal: Option<nostos_domain::Principal>,
     sink: Arc<dyn EventSink>,
+}
+
+impl StoredSession {
+    /// The presence-index key: the principal's `account_id` when the session
+    /// carries a real (non-anonymous) identity. Anonymous principals have an
+    /// empty `account_id` and are never indexed — they belong to no account.
+    fn account(&self) -> Option<&str> {
+        self.principal
+            .as_ref()
+            .filter(|p| !p.account_id.is_empty())
+            .map(|p| p.account_id.as_str())
+    }
 }
 
 impl InMemorySessionStore {
@@ -58,7 +76,22 @@ impl InMemorySessionStore {
         Self {
             by_table: DashMap::new(),
             live_count: AtomicUsize::new(0),
+            by_account: DashMap::new(),
         }
+    }
+
+    /// Shared insert tail of `add`/`try_add_below_cap`: table-list push +
+    /// presence-index bump, so both registration chutes keep `by_account`
+    /// honest identically.
+    async fn insert_indexed(&self, stored: StoredSession, table: String) {
+        if let Some(account) = stored.account() {
+            *self.by_account.entry(account.to_owned()).or_insert(0) += 1;
+        }
+        let entry = self
+            .by_table
+            .entry(table)
+            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
+        entry.lock().await.push(stored);
     }
 }
 
@@ -75,13 +108,10 @@ impl SessionStore for InMemorySessionStore {
         let stored = StoredSession {
             id: session.id,
             predicate: session.predicate,
+            principal: session.principal,
             sink,
         };
-        let entry = self
-            .by_table
-            .entry(table)
-            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
-        entry.lock().await.push(stored);
+        self.insert_indexed(stored, table).await;
         // Mirrors the cap-free insert; the count stays honest for `len()`.
         self.live_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -113,32 +143,38 @@ impl SessionStore for InMemorySessionStore {
         let stored = StoredSession {
             id,
             predicate: session.predicate,
+            principal: session.principal,
             sink,
         };
-        let entry = self
-            .by_table
-            .entry(table)
-            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
-        entry.lock().await.push(stored);
+        self.insert_indexed(stored, table).await;
         Ok(id)
     }
 
     async fn remove(&self, id: SessionId) {
         // A session lives in exactly one table's list; scan all to be safe
-        // (cheap — sessions per table is small after pruning).
-        let mut removed = false;
+        // (cheap — sessions per table is small after pruning). Capture the
+        // removed session so the presence index decrements the right account.
+        let mut removed: Option<StoredSession> = None;
         for entry in &self.by_table {
             let mut list = entry.value().lock().await;
-            let before = list.len();
-            list.retain(|s| s.id != id);
-            if list.len() != before {
-                removed = true;
-                break; // found & removed
-            }
+            let Some(pos) = list.iter().position(|s| s.id == id) else {
+                continue;
+            };
+            removed = Some(list.remove(pos));
+            break;
         }
-        if removed {
-            // Keep the atomic honest. Saturating so a stray double-remove can't
-            // underflow (remove is best-effort by id).
+        if let Some(stored) = removed {
+            // Every removal path funnels through here — transport disconnect
+            // AND WAL-bloat eviction — so an evicted session's zombie socket
+            // (sink Arc still alive in the transport) counts as offline
+            // (ADR-0037 §4: presence is store membership, not sink liveness).
+            if let Some(account) = stored.account() {
+                if let Some(mut count) = self.by_account.get_mut(account) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+            // Keep the atomic honest. Only decremented when a session was
+            // actually removed, so a stray double-remove can't underflow.
             self.live_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -156,6 +192,7 @@ impl SessionStore for InMemorySessionStore {
             .map(|s| SessionCandidate {
                 id: s.id,
                 predicate: s.predicate.clone(),
+                principal: s.principal.clone(),
                 sink: Arc::clone(&s.sink),
             })
             .collect()
@@ -213,14 +250,23 @@ impl SessionStore for InMemorySessionStore {
         }
         slowest.map(|(id, raw)| (id, nostos_domain::Lsn::new(raw)))
     }
+
+    /// Presence from the `by_account` index (ADR-0037 §4). Entries linger at
+    /// zero after an account's last session leaves — same shape as
+    /// `by_table`'s empty vecs; bounded by distinct accounts, so no
+    /// remove-on-zero churn (and its race) is worth it.
+    async fn account_online(&self, account_id: &str) -> bool {
+        self.by_account.get(account_id).is_some_and(|c| *c > 0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use nostos_application::ports::{DeliveryDecision, EventSink};
-    use nostos_domain::{Lsn, Predicate, ReplicationEvent, RowOp};
+    use nostos_application::ports::{DeliveryDecision, EventSink, ReplicatorStream};
+    use nostos_application::{EvictionPolicy, FanOutService};
+    use nostos_domain::{Lsn, Predicate, Principal, ReplicationEvent, RowOp};
 
     struct NoopSink;
     #[async_trait]
@@ -239,6 +285,10 @@ mod tests {
                 payload: Bytes::from_static(b"x"),
             },
         )
+    }
+
+    fn auth_session(table: &str, account: &str) -> SyncSession {
+        SyncSession::new_authenticated(Predicate::all(table), Principal::new(account, "org-acme"))
     }
 
     #[tokio::test]
@@ -272,5 +322,146 @@ mod tests {
         assert_eq!(store.len().await, 1000);
         let cands = store.candidates_for(&event_on("tasks")).await;
         assert_eq!(cands.len(), 1000);
+    }
+
+    // ---- presence index (ADR-0037 §4: presence is store membership) ----
+
+    #[tokio::test]
+    async fn presence_tracks_register_and_unregister() {
+        let store = InMemorySessionStore::new();
+        let s = auth_session("tasks", "u1");
+        let id = s.id;
+        assert!(!store.account_online("u1").await, "nobody registered yet");
+
+        store.add(s, Arc::new(NoopSink)).await;
+        assert!(store.account_online("u1").await);
+
+        // An anonymous session belongs to no account — it must never register
+        // presence, not even for the empty account id.
+        store
+            .add(
+                SyncSession::new(Predicate::all("tasks")),
+                Arc::new(NoopSink),
+            )
+            .await;
+        assert!(!store.account_online("").await);
+
+        store.remove(id).await;
+        assert!(!store.account_online("u1").await, "unregister ⇒ offline");
+    }
+
+    #[tokio::test]
+    async fn presence_stays_online_until_last_session_leaves() {
+        let store = InMemorySessionStore::new();
+        // Two devices sharing one account, on different tables.
+        let a = auth_session("tasks", "u1");
+        let b = auth_session("notes", "u1");
+        let (id_a, id_b) = (a.id, b.id);
+        store.add(a, Arc::new(NoopSink)).await;
+        store.add(b, Arc::new(NoopSink)).await;
+
+        store.remove(id_a).await;
+        assert!(
+            store.account_online("u1").await,
+            "the second device keeps the account online"
+        );
+
+        store.remove(id_b).await;
+        assert!(!store.account_online("u1").await);
+    }
+
+    /// The WAL-bloat eviction chute (application `fanout.rs` `run`) removes
+    /// through the same `SessionStore::remove` the transport's disconnect
+    /// uses, so the presence index flips offline there too. The sink Arc is
+    /// still alive in this test when the assert runs — the "zombie socket" —
+    /// and must NOT keep the account online (ADR-0037 §4).
+    struct AckedSink {
+        acked: Lsn,
+    }
+
+    #[async_trait]
+    impl EventSink for AckedSink {
+        async fn deliver(&self, _e: ReplicationEvent) -> DeliveryDecision {
+            DeliveryDecision::Delivered
+        }
+        fn last_acked_lsn(&self) -> Option<Lsn> {
+            Some(self.acked)
+        }
+    }
+
+    struct OneShotReplicator {
+        event: Option<ReplicationEvent>,
+    }
+
+    #[async_trait]
+    impl ReplicatorStream for OneShotReplicator {
+        async fn next_event(&mut self) -> Option<ReplicationEvent> {
+            self.event.take()
+        }
+    }
+
+    #[tokio::test]
+    async fn evicted_session_counts_as_offline_even_with_zombie_sink() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let session = auth_session("tasks", "u1");
+        // Keep a handle to the sink past the eviction — the transport still
+        // holds the socket object when eviction fires. This is the zombie.
+        let zombie_socket: Arc<dyn EventSink> = Arc::new(AckedSink { acked: Lsn::new(1) });
+        store.add(session, Arc::clone(&zombie_socket)).await;
+        assert!(store.account_online("u1").await);
+
+        // Head 10_000 vs acked 1 → gap 9_999 > 100 ⇒ `run` evicts the slowest
+        // (only) session mid-loop.
+        let head = ReplicationEvent::new(
+            Lsn::new(10_000),
+            RowOp::Insert {
+                table: "tasks".into(),
+                pk: "1".into(),
+                payload: Bytes::from_static(b"x"),
+            },
+        );
+        let mut repl = OneShotReplicator { event: Some(head) };
+        let svc = FanOutService::new(Arc::clone(&store) as Arc<dyn SessionStore>)
+            .with_eviction(EvictionPolicy::new(100));
+        let _ = svc.run(&mut repl, |_e, _col| None).await;
+
+        assert_eq!(store.len().await, 0, "eviction removed the session");
+        assert!(
+            !store.account_online("u1").await,
+            "store membership is presence — an evicted session's zombie socket is offline"
+        );
+    }
+
+    /// `DeliveryDecision::Dropped` is slow-client backpressure, NOT presence
+    /// (ADR-0037 §4: "never `Dropped` — a slow-online client must not be
+    /// double-signalled"). A registered-but-dropping session stays online.
+    struct FullSink;
+
+    #[async_trait]
+    impl EventSink for FullSink {
+        async fn deliver(&self, _e: ReplicationEvent) -> DeliveryDecision {
+            DeliveryDecision::Dropped
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_but_registered_session_is_still_online() {
+        let store = Arc::new(InMemorySessionStore::new());
+        let session = auth_session("tasks", "u1");
+        let id = session.id;
+        store.add(session, Arc::new(FullSink)).await;
+
+        let svc = FanOutService::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+        let outcome = svc.fan_out(&event_on("tasks"), |_e, _col| None).await;
+        assert_eq!(outcome.matched, 1);
+        assert_eq!(outcome.dropped, 1);
+
+        assert!(
+            store.account_online("u1").await,
+            "`Dropped` is backpressure, not offline-presence"
+        );
+
+        store.remove(id).await;
+        assert!(!store.account_online("u1").await);
     }
 }

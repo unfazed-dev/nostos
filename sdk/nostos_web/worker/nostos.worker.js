@@ -22,6 +22,8 @@
 //     {id, cmd:"unwatch"}                reactive unsubscribe
 //     {id, cmd:"signOut"}                ADR-0029: clearLocalState + close + drop token
 //     {id, cmd:"setToken", token}        ADR-0029: cache token; if live, reconnect with it
+//     {id, cmd:"wake"}                    plan 6.2 (EXPERIMENTAL): SW doorbell —
+//                                        reconnect if down (resume from checkpoint)
 //   Worker -> main:
 //     {id, ok:true, ...}                 response to a request
 //     {id, error:"..."}                  response error
@@ -175,6 +177,31 @@ function stopPolling() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+}
+
+// Shared reconnect (ADR-0029 §3 setToken refresh + plan 6.2 SW wake): tear
+// down the live socket cleanly, then re-open with the CURRENT token +
+// captured connParams. The engine (rows, checkpoint, outbox) survives in the
+// Rc<RefCell<...>>; NostosSocket.connect resumes from the durable checkpoint.
+async function reconnect() {
+  const rp = connParams;
+  if (sock) {
+    try {
+      sock.offChange();
+    } catch (_) {
+      /* noop if never registered */
+    }
+    try {
+      sock.close();
+    } catch (_) {
+      /* already closed */
+    }
+    sock = null;
+    stopPolling();
+  }
+  await ensureWasm();
+  sock = await NostosSocket.connect(rp.url, token, rp.table, rp.where_sql, dbHandle);
+  attachChangePush(sock);
 }
 
 self.onmessage = async (ev) => {
@@ -331,6 +358,22 @@ self.onmessage = async (ev) => {
         self.postMessage({ type: "status", connected: false });
         break;
       }
+      case "wake": {
+        // Plan 6.2 (EXPERIMENTAL): the Service Worker's doorbell — push →
+        // nostos.sw.js → client.postMessage("nostos:wake") → the page forwards
+        // here. If the socket is down (page backgrounded/stepped), reconnect;
+        // the engine resumes from the durable checkpoint so the missed data
+        // flows (sync is the transport — ADR-0037 §2). If already open, the
+        // WS stream IS the transport: nothing to do.
+        if (!connParams || sock) {
+          self.postMessage({ id: m.id, ok: true, woken: false });
+          break;
+        }
+        await reconnect();
+        self.postMessage({ id: m.id, ok: true, woken: true, checkpoint: sock.checkpoint });
+        self.postMessage({ type: "status", connected: true });
+        break;
+      }
       case "setToken": {
         // ADR-0029 §3: swap the auth token. NostosSocket has no wasm-level token
         // swap (the token is baked into the WS handshake at connect), so a
@@ -339,28 +382,7 @@ self.onmessage = async (ev) => {
         // just cache it for the next `connect`.
         token = m.token ?? null;
         if (sock && connParams) {
-          const rp = connParams;
-          try {
-            sock.offChange();
-          } catch (_) {
-            /* noop if never registered */
-          }
-          try {
-            sock.close();
-          } catch (_) {
-            /* already closed */
-          }
-          sock = null;
-          stopPolling();
-          await ensureWasm();
-          sock = await NostosSocket.connect(
-            rp.url,
-            token,
-            rp.table,
-            rp.where_sql,
-            dbHandle,
-          );
-          attachChangePush(sock);
+          await reconnect();
           self.postMessage({ id: m.id, ok: true, checkpoint: sock.checkpoint });
           self.postMessage({ type: "status", connected: true });
         } else {
