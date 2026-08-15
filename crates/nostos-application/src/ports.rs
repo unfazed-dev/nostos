@@ -115,6 +115,58 @@ pub trait EventSink: Send + Sync {
     }
 }
 
+/// One push doorbell hint — the minimal routing tuple the router emits per
+/// matched account (ADR-0037 §2/§4). Deliberately carries NO row data: push is
+/// a wake-up trigger, never a data channel; the client's durable LSN
+/// checkpoint is the correctness mechanism, so a missed or stale push loses
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushHint {
+    /// The table the matching event landed on (the per-table template /
+    /// priority config key for the rails).
+    pub table: String,
+    /// The matched session's tenant — `""` when the session is anonymous.
+    pub tenant_id: String,
+    /// The matched session's account — the push-token registry lookup key.
+    pub account_id: String,
+    /// The event's LSN — bounds staleness in-rail and anchors the
+    /// push-LSN→client-ack correlation surface.
+    pub lsn: Lsn,
+}
+
+/// The push doorbell rail (ADR-0037 §1/§4) — the driven-side port behind FCM /
+/// APNs / Web Push. Push relevance is derived from the same predicate pass
+/// that feeds WS fan-out; there is no parallel push-subscription registry.
+///
+/// `notify` is called **once per matched-account signal** — not per event, not
+/// per session: the router collapses an event's matching sessions to one hint
+/// per account, and the rail's own coalescer further debounces bursts
+/// in-rail (digest window).
+///
+/// # Non-blocking contract
+///
+/// Same shape as [`OpLogWriter`]: the caller is the fan-out loop's matched-set
+/// drain, so an implementation MUST return promptly — enqueue internally
+/// (bounded channel, drop-on-full with a counter) and let a background task do
+/// the rail I/O. The 833k ops/sec hot loop must not gain a network
+/// round-trip. `()` return: delivery accounting is the implementation's,
+/// surfaced via [`Metrics`].
+#[async_trait]
+pub trait PushNotifier: Send + Sync {
+    /// Fire one doorbell hint. Fire-and-forget.
+    async fn notify(&self, hint: PushHint);
+}
+
+/// The default push rail: sends nothing. Push stays entirely off — no token
+/// registry, no rails — until an adapter is wired (plan tasks 2.1–2.4). The
+/// composition root's default (ADR-0037 plan task 1.2).
+pub struct NoopNotifier;
+
+#[async_trait]
+impl PushNotifier for NoopNotifier {
+    async fn notify(&self, _hint: PushHint) {}
+}
+
 /// Why an atomic add was rejected by [`SessionStore::try_add_below_cap`].
 ///
 /// Surfacing this from the store (rather than checking `len` then `add` in the
@@ -196,16 +248,41 @@ pub trait SessionStore: Send + Sync {
     async fn slowest_session(&self) -> Option<(SessionId, Lsn)> {
         None
     }
+
+    /// Presence (ADR-0037 §4): does `account_id` have at least one live
+    /// session in the store? The push router suppresses the doorbell for
+    /// online accounts — an online client gets the data over its socket, so a
+    /// push would only double-signal it.
+    ///
+    /// "Online" means **store membership** — never socket liveness (an evicted
+    /// session's zombie sink may still be alive in the transport, but it is no
+    /// longer in the store and must count as offline) and never the sink's
+    /// [`DeliveryDecision`] (a `Dropped`-but-registered slow client is still
+    /// online: its socket is draining, and pushing it would double-signal a
+    /// client that is catching up over the socket).
+    ///
+    /// Default: `false` (treat as unknown/offline → push). The failure
+    /// direction is deliberate: a spurious push is a harmless nudge (sync
+    /// reconciles; doorbell semantics), while a swallowed push hides a change.
+    /// Implementations with an account index override this.
+    async fn account_online(&self, _account_id: &str) -> bool {
+        false
+    }
 }
 
 /// A session + its sink, returned by [`SessionStore::candidates_for`].
 ///
 /// Carrying the predicate alongside lets the router evaluate filters without a
-/// second lookup.
+/// second lookup; carrying the principal lets the push path (ADR-0037) derive
+/// the `(tenant, account)` of a matched session without a second store lookup.
 #[derive(Clone)]
 pub struct SessionCandidate {
     pub id: SessionId,
     pub predicate: Predicate,
+    /// The session's authenticated identity, or `None` for the anonymous /
+    /// unauthenticated path. Threaded from [`SyncSession`] by the store —
+    /// before ADR-0037 the store discarded it here.
+    pub principal: Option<Principal>,
     pub sink: Arc<dyn EventSink>,
 }
 

@@ -364,6 +364,7 @@ mod tests {
             let cand = SessionCandidate {
                 id: session.id,
                 predicate: session.predicate,
+                principal: session.principal,
                 sink,
             };
             self.by_table
@@ -389,6 +390,7 @@ mod tests {
             g.entry(table).or_default().push(SessionCandidate {
                 id,
                 predicate: session.predicate,
+                principal: session.principal,
                 sink,
             });
             Ok(id)

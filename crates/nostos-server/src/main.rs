@@ -397,6 +397,14 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // ADR-0037 (plan 1.2): the push doorbell port, defaulting to the no-op
+    // rail until the FCM/APNs/Web Push adapters land. Task 1.3's off-hot-loop
+    // enqueue consumes this handle (`FanOutService::with_push_notifier`);
+    // underscore-bound now so the composition-root seam exists without dead
+    // code — the service gains the field in 1.3.
+    let _push_notifier: Arc<dyn nostos_application::ports::PushNotifier> =
+        Arc::new(nostos_application::ports::NoopNotifier);
+
     let fanout = Arc::new({
         let builder = FanOutService::new(Arc::clone(&store))
             .with_metrics(Arc::clone(&metrics))
@@ -473,15 +481,12 @@ async fn main() -> anyhow::Result<()> {
                 let fanout_drv = Arc::clone(&fanout);
                 let drv = tokio::spawn(async move {
                     // Extract a column from the JSON payload: parse the small
-                    // object and return the named field. Cheap (one parse per
-                    // candidate event) and keeps predicates honest.
-                    let extract = |e: &ReplicationEvent, col: &str| -> Option<ColumnValue> {
-                        let payload = e.payload_bytes();
-                        let parsed: serde_json::Value = serde_json::from_slice(payload).ok()?;
-                        parsed
-                            .get(col)
-                            .and_then(|v| v.as_str())
-                            .map(ColumnValue::text)
+                    // object and return the named field. Typed (ADR-0037 plan
+                    // 1.4): JSON scalars keep their type — a bare `5` yields
+                    // `Number(5)`, not "absent" — so predicates over numeric/
+                    // bool columns no longer match wider than intended.
+                    let extract = |e: &ReplicationEvent, col: &str| {
+                        extract_typed_column(e.payload_bytes(), col)
                     };
                     let outcome = fanout_drv.run(&mut repl, extract).await;
                     info!(?outcome, "PgReplicator stream ended");
@@ -859,6 +864,18 @@ async fn watch_rules(
         *rules.write().await = compiled;
         let _ = rules_tx.send(new_checksum);
     }
+}
+
+/// Typed column extraction for the pg streaming path (ADR-0037 plan 1.4):
+/// the payload's JSON scalars keep their type — `{"priority":5}` yields
+/// [`ColumnValue::Number`] — instead of the old string-only read, which made
+/// numeric/bool columns look absent and let `Ne`/`Not(Eq)` predicates over
+/// them match wider than intended. Delegates to the canonical
+/// `extract_json_column` mapping (ADR-0019) so streaming predicates and the
+/// snapshot path can never drift.
+#[cfg(feature = "pg")]
+fn extract_typed_column(payload: &[u8], col: &str) -> Option<ColumnValue> {
+    nostos_infra::replicator::extract_json_column(payload)?(col)
 }
 
 /// Builds the `/rules`/`/sync`/`/schema` CORS layer from `NOSTOS_CORS_ORIGINS`.
@@ -1377,6 +1394,54 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("received Ctrl-C, shutting down"),
         () = terminate => info!("received SIGTERM, shutting down"),
+    }
+}
+
+/// Typed extraction regression (ADR-0037 plan 1.4): the streaming extractor
+/// must preserve JSON scalar types. Pinned here because the old inline
+/// `as_str()`-only read made `{"priority":5}` extract as absent, so `Ne`/
+/// `Not(Eq)` predicates over numeric columns matched wide and `Eq` under-
+/// delivered.
+#[cfg(all(test, feature = "pg"))]
+mod extract_typed_column_tests {
+    use super::extract_typed_column;
+    use nostos_domain::{ColumnValue, Predicate};
+
+    #[test]
+    fn json_scalars_keep_their_type() {
+        let payload = br#"{"org_id":"acme","priority":5,"score":2.5,"active":true}"#;
+        assert_eq!(
+            extract_typed_column(payload, "org_id"),
+            Some(ColumnValue::text("acme"))
+        );
+        assert_eq!(
+            extract_typed_column(payload, "priority"),
+            Some(ColumnValue::number(5))
+        );
+        assert_eq!(
+            extract_typed_column(payload, "score"),
+            Some(ColumnValue::float(2.5))
+        );
+        assert_eq!(
+            extract_typed_column(payload, "active"),
+            Some(ColumnValue::boolean(true))
+        );
+        assert_eq!(extract_typed_column(payload, "missing"), None);
+    }
+
+    #[test]
+    fn not_eq_over_numeric_column_no_longer_matches_wide() {
+        // Before the fix: `priority` extracted as absent → the inner Eq was
+        // false → Not(Eq) matched EVERY row, including priority=5 itself.
+        let payload = br#"{"priority":5}"#;
+        let not_eq = !Predicate::eq("tasks", "priority", ColumnValue::number(5));
+        assert!(!not_eq.matches(|c| extract_typed_column(payload, c)));
+
+        // And the under-delivery side: Ne now sees the value and matches.
+        let ne = Predicate::ne("tasks", "priority", ColumnValue::number(7));
+        assert!(ne.matches(|c| extract_typed_column(payload, c)));
+        let eq = Predicate::eq("tasks", "priority", ColumnValue::number(5));
+        assert!(eq.matches(|c| extract_typed_column(payload, c)));
     }
 }
 

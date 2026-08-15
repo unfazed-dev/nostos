@@ -66,6 +66,7 @@ impl SessionStore for TableStore {
         let cand = SessionCandidate {
             id: session.id,
             predicate: session.predicate,
+            principal: session.principal,
             sink,
         };
         self.by_table
