@@ -327,6 +327,14 @@ where
     /// first mint. Mutex (not atomic) — mints are rare (user edits), and the
     /// read-modify-write needs the previous value.
     hlc_state: std::sync::Mutex<Option<nostos_domain::Hlc>>,
+    /// Non-destructive disconnect gate (ADR-0037 task 5.1). `true` = a
+    /// [`SyncClient::disconnect`] request is outstanding: the live
+    /// `run_once`/`run_with_reconnect` loop winds down cleanly (final flush +
+    /// ack, then return), and further runs return immediately until
+    /// [`SyncClient::resume`] clears it. A `watch` channel (not an `AtomicBool`)
+    /// because the run loops must WAKE from a parked `select!` on the request,
+    /// not just notice it on the next iteration.
+    disconnect_gate: tokio::sync::watch::Sender<bool>,
 }
 
 impl<S> SyncClient<S>
@@ -355,6 +363,7 @@ where
         // lagged receiver self-heals on the next tick.
         let (changes, _) = tokio::sync::broadcast::channel(64);
         let token = std::sync::RwLock::new(config.token.clone());
+        let (disconnect_gate, _) = tokio::sync::watch::channel(false);
         Self {
             url: url.into(),
             config,
@@ -364,6 +373,7 @@ where
             write_notify: Notify::new(),
             write_status,
             hlc_state: std::sync::Mutex::new(None),
+            disconnect_gate,
         }
     }
 
@@ -987,6 +997,41 @@ where
         Ok(())
     }
 
+    /// Request a NON-DESTRUCTIVE disconnect (ADR-0037 task 5.1): the live
+    /// [`Self::run_once`]/[`Self::run_with_reconnect`] loop winds down cleanly —
+    /// the receive loop breaks, any buffered batch is force-flushed, the final
+    /// checkpoint is ack'd, and the WS stream drops with the task. The durable
+    /// store (rows + checkpoint + epoch + outbox) is UNTOUCHED — this is the
+    /// push-notification sleep primitive, the sibling of [`Self::resume`], and
+    /// the exact counterpart of `nostos_node`'s `close()`. Contrast
+    /// [`Self::clear_local_state`], which wipes everything and is only for
+    /// sign-out (ADR-0029).
+    ///
+    /// Synchronous and callable from any thread: it only sets the gate — the
+    /// loop notices at its next `select!` iteration, so a frame mid-apply still
+    /// lands atomically (no torn batches). Idempotent; safe with no live loop
+    /// (a later `run_once`/`run_with_reconnect` returns immediately until
+    /// [`Self::resume`]). `Self::checkpoint`, `Self::write`, and
+    /// `Self::with_storage` keep working while disconnected — the engine is
+    /// still live, only the socket is gone.
+    pub fn disconnect(&self) {
+        self.disconnect_gate.send_replace(true);
+    }
+
+    /// Clear the disconnect request (ADR-0037 task 5.1) so the next
+    /// `run_once`/`run_with_reconnect` may connect again. The reconnected
+    /// session re-seeds `resume_lsn` from the durable checkpoint (see
+    /// [`Self::run_once`]), so only the delta past the checkpoint flows — this
+    /// is the wake primitive a push-poked backgrounded app calls. Synchronous,
+    /// idempotent, and a no-op on a client that was never disconnected.
+    ///
+    /// Does NOT itself start a loop: the caller re-enters
+    /// [`Self::run_with_reconnect`] (the mobile SDKs' `resume()` does exactly
+    /// that — `SyncClient` does not own its run task; the embedding does).
+    pub fn resume(&self) {
+        self.disconnect_gate.send_replace(false);
+    }
+
     /// Run one connection attempt to completion: connect, subscribe, apply until
     /// the stream ends or errors. Does NOT reconnect on its own — see
     /// [`Self::run_with_reconnect`]. Returns the session outcome.
@@ -995,6 +1040,18 @@ where
     /// Returns the underlying error if the connection can't be established or
     /// the apply loop hits a non-recoverable storage error.
     pub async fn run_once(&self) -> Result<SessionOutcome, ClientError> {
+        let mut disconnect_rx = self.disconnect_gate.subscribe();
+        // Already-requested disconnect (loop spawned after disconnect()): a
+        // clean no-op session so run_with_reconnect terminates instead of
+        // reconnecting forever against a sleeping client.
+        if *disconnect_rx.borrow() {
+            let checkpoint = self.checkpoint().await?;
+            return Ok(SessionOutcome {
+                frames_received: 0,
+                commits: 0,
+                checkpoint,
+            });
+        }
         let url = self.connect_url();
         let (ws, _resp) = tokio_tungstenite::connect_async(&url)
             .await
@@ -1066,7 +1123,7 @@ where
         self.flush_outbox(&mut write, &mut sent_this_conn).await?;
 
         // ---- Receive → apply → ack loop ----
-        // Three independent triggers race each loop iteration:
+        // Four independent triggers race each loop iteration:
         //   1. the next WS message (idle_timeout-bounded if configured — a
         //      long gap with NOTHING pending means "caught up", so break and
         //      return the session, the "sync then disconnect" shape);
@@ -1075,7 +1132,10 @@ where
         //      transaction's frames when they're the last activity on an
         //      otherwise-idle table (see `SyncClientConfig::flush_quiesce`);
         //   3. `write_notify` — a write enqueued mid-session, resent now
-        //      instead of waiting for a reconnect (see `Self::write`).
+        //      instead of waiting for a reconnect (see `Self::write`);
+        //   4. the disconnect gate — a `disconnect()` request breaks the loop
+        //      through the same clean tail (non-destructive teardown,
+        //      ADR-0037 task 5.1).
         let quiesce = self.config.flush_quiesce;
         let mut last_frame_at = tokio::time::Instant::now();
         loop {
@@ -1324,6 +1384,18 @@ where
                 () = self.write_notify.notified() => {
                     self.flush_outbox(&mut write, &mut sent_this_conn).await?;
                 }
+
+                // ---- Branch 4: disconnect() requested — wind down cleanly.
+                //      The loop break routes through the same final flush +
+                //      checkpoint tail as a clean stream end, so nothing
+                //      buffered is lost. A false transition (a resume() racing
+                //      the loop's exit) just keeps the session alive. ----
+                _ = disconnect_rx.changed() => {
+                    if *disconnect_rx.borrow_and_update() {
+                        debug!("disconnect() requested; winding down session");
+                        break;
+                    }
+                }
             }
         }
 
@@ -1361,7 +1433,13 @@ where
     /// This is the top-level entry point a long-lived client uses. Each call to
     /// [`Self::run_once`] is independent; reconnect re-seeds `resume_lsn` from
     /// the durable checkpoint, so the server skips already-applied frames.
+    ///
+    /// A [`Self::disconnect`] request ends the loop from ANY state — mid-session
+    /// (run_once breaks and returns cleanly) or mid-backoff (the sleep is
+    /// gated; the next run_once is a no-op) — so the caller's `await` resolves
+    /// promptly without an abort.
     pub async fn run_with_reconnect(&self) -> Result<SessionOutcome, ClientError> {
+        let mut disconnect_rx = self.disconnect_gate.subscribe();
         let mut backoff = self.config.base_backoff;
         let mut attempt: u32 = 0;
         let mut total_frames: u64 = 0;
@@ -1373,7 +1451,8 @@ where
                 Ok(outcome) => {
                     total_frames += outcome.frames_received;
                     total_commits += outcome.commits;
-                    // A clean end (server-initiated close) means we're done.
+                    // A clean end (server-initiated close or disconnect())
+                    // means we're done.
                     return Ok(SessionOutcome {
                         frames_received: total_frames,
                         commits: total_commits,
@@ -1387,7 +1466,14 @@ where
                             return Err(e);
                         }
                     }
-                    tokio::time::sleep(backoff).await;
+                    // Gate the backoff sleep too: disconnect() while waiting to
+                    // reconnect wakes here, the next run_once no-ops, and the
+                    // loop returns — a sleeping client must not hold the task
+                    // hostage for a full backoff window (up to max_backoff).
+                    tokio::select! {
+                        () = tokio::time::sleep(backoff) => {}
+                        _ = disconnect_rx.changed() => {}
+                    }
                     backoff = (backoff * 2).min(self.config.max_backoff);
                 }
             }

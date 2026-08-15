@@ -341,6 +341,11 @@ impl NostosClient {
             if session.run_task.is_some() {
                 return Ok(());
             }
+            // A stale disconnect() gate would make the spawned loop no-op
+            // instantly (`run_once` returns immediately while disconnected);
+            // subscribe() means "start the live loop", so clear it (a no-op
+            // when the gate was never set).
+            session.client.resume();
             let client = Arc::clone(&session.client);
             // Spawn on OUR runtime (not UniFFI's) so the loop outlives this
             // call. `run_with_reconnect` retries forever on transport errors;
@@ -352,6 +357,76 @@ impl NostosClient {
                 let _ = client.run_with_reconnect().await;
             });
             session.run_task = Some(run_task);
+            Ok(())
+        })
+    }
+
+    /// Stop the live replication loop WITHOUT touching local state (ADR-0037
+    /// task 5.1) — the push-notification sleep primitive, and the direct
+    /// counterpart of `nostos_node`'s `close()`. The run loop winds down
+    /// cleanly (final flush + checkpoint ack via `SyncClient::disconnect`'s
+    /// gate), the session's durable store — rows, checkpoint, epoch, outbox —
+    /// survives intact, and `query()` / `write()` / `checkpoint()` / `watch()`
+    /// keep working offline. Contrast `sign_out()`, which WIPES that state for
+    /// the next principal (ADR-0029): disconnect is for "this app is going to
+    /// sleep", sign-out is for "this user is leaving".
+    ///
+    /// The `watch()` pumps stay ALIVE across disconnect: they are purely local
+    /// (the change broadcast + storage reads), so a backgrounded app's UI
+    /// keeps rendering, and their ticks resume the moment `resume()` reopens
+    /// the loop. Idempotent and a no-op with no active session.
+    ///
+    /// # Errors
+    /// Never errors today — `Result` mirrors the sibling lifecycle methods.
+    pub fn disconnect(&self) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let mut guard = self.session.lock().await;
+            if let Some(session) = guard.as_mut() {
+                // Graceful first: the gate makes the loop break at a safe
+                // point (final flush + ack) and `run_with_reconnect` return on
+                // its own.
+                session.client.disconnect();
+                // Abort + await as the quiesce backstop (mirrors `sign_out`'s
+                // step 1): if the gate already exited the task, abort is a
+                // no-op; if it was parked somewhere ungated (a connect
+                // handshake to an unreachable server), the await still proves
+                // no socket outlives this call.
+                if let Some(task) = session.run_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Reopen the live replication loop after `disconnect()` (ADR-0037 task
+    /// 5.1) — the push wake primitive: a backgrounded app is poked, calls
+    /// `resume()`, and the delta past the durable checkpoint applies (the
+    /// reconnect's Subscribe re-seeds `resume_lsn` from the checkpoint). Does
+    /// NOT re-run `connect()` — the session and its store were never torn
+    /// down. Idempotent: with a live loop it is only a gate clear (a no-op).
+    ///
+    /// # Errors
+    /// `NostosError` if no session is active (call `connect()` first).
+    pub fn resume(&self) -> Result<(), NostosError> {
+        self.rt.block_on(async {
+            let mut guard = self.session.lock().await;
+            let session = guard.as_mut().ok_or_else(|| NostosError::Message {
+                message: "resume() called before connect()".to_string(),
+            })?;
+            // Clear the gate BEFORE spawning: a fresh `run_with_reconnect`
+            // against a set gate would no-op instantly.
+            session.client.resume();
+            if session.run_task.is_none() {
+                let client = Arc::clone(&session.client);
+                // Same fire-and-forget shape as `subscribe()`'s spawn: the
+                // loop owns its own reconnects; Session::Drop aborts it.
+                let run_task = self.rt.spawn(async move {
+                    let _ = client.run_with_reconnect().await;
+                });
+                session.run_task = Some(run_task);
+            }
             Ok(())
         })
     }
@@ -793,6 +868,57 @@ mod tests {
         // spawned run_with_reconnect task. If abort is broken, this test
         // hangs on runtime shutdown.
         drop(client);
+    }
+
+    /// ADR-0037 task 5.1, offline half: `disconnect()` is NON-destructive —
+    /// the session (and its durable store) survives, so `query()` keeps
+    /// answering, `resume()` re-enters the loop, and the destructive sibling
+    /// `sign_out()` still wipes afterwards. The connected half (delta applies
+    /// from the checkpoint) is pinned in nostos-client's
+    /// `disconnect_then_resume_applies_delta_from_checkpoint_without_loss`.
+    #[test]
+    fn disconnect_keeps_local_state_queryable_and_resume_reenters() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+        client.connect().expect("connect");
+
+        // Idempotent + no live loop: still Ok, session untouched.
+        client.disconnect().expect("disconnect");
+        // Non-destructive: query() answers from the durable store.
+        let rows = client
+            .query("SELECT 1 AS one".into())
+            .expect("query after disconnect");
+        assert!(
+            rows.contains("\"one\":1") || rows.contains("\"one\": 1"),
+            "store survived disconnect, got: {rows}"
+        );
+
+        // resume() re-enters: spawns the run loop against the (dead, test)
+        // URL — fire-and-forget, Session::Drop + runtime teardown reclaim it.
+        client.resume().expect("resume");
+        // The destructive sibling still works after a disconnect/resume cycle.
+        client.sign_out().expect("sign_out after disconnect");
+    }
+
+    /// `disconnect()` with no session is a no-op; `resume()` before
+    /// `connect()` surfaces the before-connect error — the same contract
+    /// `subscribe()` enforces.
+    #[test]
+    fn disconnect_without_session_is_noop_and_resume_before_connect_errors() {
+        let client = NostosClient::new("ws://localhost:0".into(), None, ":memory:".into())
+            .expect("construct");
+
+        client
+            .disconnect()
+            .expect("disconnect before connect is a no-op");
+        let err = client
+            .resume()
+            .expect_err("resume before connect should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("before connect"),
+            "expected a before-connect error, got: {msg}"
+        );
     }
 
     /// Test-only [`SnapshotSink`] that records every emitted snapshot into a
