@@ -48,7 +48,7 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
   Config: `NOSTOS_WEBPUSH_VAPID_PRIVATE_KEY`, subject.
   *(Shipped `web-push = 0.11`, `default-features = false` — RUSTSEC-2025-0015
   patched; built-in clients disabled, sends ride shared reqwest.)*
-- [ ] 2.4 Coalescer task: bounded channel consumer; per-account look-back
+- [x] 2.4 Coalescer task: bounded channel consumer; per-account look-back
   window (default ~2s, env `NOSTOS_PUSH_DEBOUNCE_MS`); per (device,
   subscription) collapse key; priority/template from per-table config
   (`NOSTOS_PUSH_TABLES` env or rules file section — match `nostos_rules.toml`
@@ -61,26 +61,26 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
 
 ### P3 Server surface
 
-- [ ] 3.1 REST `POST /push-tokens` + `DELETE /push-tokens/{token}` on the axum
+- [x] 3.1 REST `POST /push-tokens` + `DELETE /push-tokens/{token}` on the axum
   router (`main.rs:721-735` precedents) — same JWT auth as `/sync`; server-side
   tenant/account stamp from `Principal::tenant_scope` (`principal.rs:160-166`);
   reject client-attested tenant fields.
-- [ ] 3.2 Metrics: `push_sent`/`push_failed`/`push_pruned` counters
+- [x] 3.2 Metrics: `push_sent`/`push_failed`/`push_pruned` counters
   (`ports.rs:687-735` pattern) + push-LSN→client-ack correlation surface
   (expose "last pushed lsn per account" alongside session acked-lsn).
-- [ ] 3.3 E2E test: fake rails (in-memory `PushNotifier`) — 100-event burst to
+- [x] 3.3 E2E test: fake rails (in-memory `PushNotifier`) — 100-event burst to
   an offline account ⇒ 1 push; online account ⇒ 0 pushes (no double-signal);
   `Dropped`-but-online ⇒ 0 pushes; sign-out ⇒ token pruned. Real-rail smoke
   behind env vars (skip cleanly, like `NOSTOS_E2E_PG`).
 
 ### P4 Flutter + node SDKs
 
-- [ ] 4.1 flutter: `NostosDatabase.registerPushToken(platform, token)` → REST;
+- [x] 4.1 flutter: `NostosDatabase.registerPushToken(platform, token)` → REST;
   deregister in `_signOutHooks` (`nostos_database.dart:645` pattern); wake
   entry: bg-isolate re-`connect`+`subscribe` from durable checkpoint (FRB
   handle can't cross isolates — re-init, `resume()` exists at engine.dart:161);
   app-side FCM/APNs handler doc + example wiring.
-- [ ] 4.2 node: `registerPushToken` symmetry (no OS push; for completeness).
+- [x] 4.2 node: `registerPushToken` symmetry (no OS push; for completeness).
 
 ## Wave 2 — UniFFI wake API + mobile SDKs
 
