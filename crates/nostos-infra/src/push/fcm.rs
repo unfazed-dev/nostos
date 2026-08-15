@@ -303,14 +303,26 @@ impl FcmRail {
     }
 }
 
-/// Map an FCM REST status + error body to the rail outcome. `error.status`
-/// follows Google's canonical error codes; `UNREGISTERED` is the prune
-/// trigger, quota/unavailable are retryable.
+/// Map an FCM REST status + error body to the rail outcome. Google's
+/// canonical marker for a dead token is `UNREGISTERED`, but the SHAPES it
+/// arrives in differ by endpoint vintage — the live v1 API sends
+/// `{"error":{"status":"NOT_FOUND","message":"NotRegistered","details":[
+/// {"@type":"…FcmError","errorCode":"UNREGISTERED"}]}}` (caught by the atlet
+/// order-lifecycle smoke against real FCM; the original `status ==
+/// "UNREGISTERED"` match never fired and dead tokens were never pruned).
+/// Match all three shapes; quota/unavailable stay retryable.
 fn outcome_for(status: u16, body: &Value) -> RailOutcome {
     if (200..300).contains(&status) {
         return RailOutcome::Delivered;
     }
-    if body.pointer("/error/status").and_then(Value::as_str) == Some("UNREGISTERED") {
+    let unregistered = body.pointer("/error/status").and_then(Value::as_str)
+        == Some("UNREGISTERED")
+        || body
+            .pointer("/error/details/0/errorCode")
+            .and_then(Value::as_str)
+            == Some("UNREGISTERED")
+        || body.pointer("/error/message").and_then(Value::as_str) == Some("NotRegistered");
+    if unregistered {
         return RailOutcome::Unregistered;
     }
     match status {
@@ -551,9 +563,12 @@ mod tests {
 
     #[tokio::test]
     async fn fcm_unregistered_maps_to_prune_trigger() {
+        // The LIVE v1 shape, verbatim from a real 404 (the order-lifecycle
+        // smoke caught the old `/error/status == "UNREGISTERED"` match never
+        // firing on it): status is NOT_FOUND; the marker rides details[0].
         let (rail, _mock) = rail_with_mock(vec![CannedResponse::json(
             404,
-            r#"{"error":{"code":404,"message":"Requested entity was not found","status":"UNREGISTERED"}}"#,
+            r#"{"error":{"code":404,"details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}],"message":"NotRegistered","status":"NOT_FOUND"}}"#,
         )])
         .await;
         let outcome = rail
