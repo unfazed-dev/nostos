@@ -18,7 +18,16 @@ pg = ["nostos-infra/pg"]
 [dependencies]
 nostos-core = { workspace = true }
 nostos-domain = { workspace = true }
-nostos-infra = { workspace = true }   # WireFrame decode (client ↔ server contract)
+# Direct path dep (NOT `workspace = true`): cargo silently IGNORES a member's
+# `default-features = false` on an inherited workspace dependency — verified on
+# cargo 1.95 — and setting it in the root [workspace.dependencies] table would
+# strip the webpush rail from every consumer (nostos-server included). A direct
+# path dep is the only way THIS crate opts out of nostos-infra's default
+# features: drops the `webpush` rail (web-push → ece has ONLY an OpenSSL
+# backend; openssl-sys cannot cross-compile to iOS — it broke the RN iOS
+# staticlib build). We use the wire codec only. The dev-dep below keeps
+# `workspace = true` so host-side tests still exercise the full server spine.
+nostos-infra = { path = "../nostos-infra", default-features = false }   # WireFrame decode (client ↔ server contract)
 rusqlite = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

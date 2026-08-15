@@ -50,9 +50,9 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use super::{
-    apns::ApnsRail, fcm::FcmRail, webpush::WebPushRail, PushPayload, PushRailError, RailOutcome,
-};
+#[cfg(feature = "webpush")]
+use super::webpush::WebPushRail;
+use super::{apns::ApnsRail, fcm::FcmRail, PushPayload, PushRailError, RailOutcome};
 
 /// The registry `platform` value for an ActivityKit push token (plan task
 /// 6.4, experimental). A dedicated string — not plain `apns` — because the
@@ -291,6 +291,9 @@ pub trait PushSink: Send + Sync {
 pub struct RailSet {
     pub fcm: Option<FcmRail>,
     pub apns: Option<ApnsRail>,
+    /// OpenSSL-backed rail (`webpush` feature) — absent in client builds that
+    /// opt out of nostos-infra's default features.
+    #[cfg(feature = "webpush")]
     pub webpush: Option<WebPushRail>,
 }
 
@@ -304,6 +307,7 @@ impl RailSet {
         Ok(Self {
             fcm: FcmRail::from_env()?,
             apns: ApnsRail::from_env()?,
+            #[cfg(feature = "webpush")]
             webpush: WebPushRail::from_env()?,
         })
     }
@@ -311,7 +315,14 @@ impl RailSet {
     /// True when no rail is configured — push cannot deliver anything.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.fcm.is_none() && self.apns.is_none() && self.webpush.is_none()
+        if self.fcm.is_some() || self.apns.is_some() {
+            return false;
+        }
+        #[cfg(feature = "webpush")]
+        if self.webpush.is_some() {
+            return false;
+        }
+        true
     }
 }
 
@@ -340,6 +351,7 @@ impl PushSink for RailSet {
                 Some(rail) => rail.send(token, Some(collapse_key), payload).await,
                 None => RailOutcome::Fatal("no apns rail configured".into()),
             },
+            #[cfg(feature = "webpush")]
             "webpush" => match &self.webpush {
                 Some(rail) => rail.send(token, Some(collapse_key), payload).await,
                 None => RailOutcome::Fatal("no webpush rail configured".into()),

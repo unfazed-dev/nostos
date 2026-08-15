@@ -59,9 +59,11 @@ pub use push::router::{
 pub use push::{
     apns::ApnsRail,
     fcm::{FcmMessage, FcmRail, FcmTarget},
-    webpush::WebPushRail,
     PushPayload, PushRailError, RailOutcome,
 };
+// OpenSSL-backed rail — feature-gated (see push/mod.rs); default-on for servers.
+#[cfg(feature = "webpush")]
+pub use push::webpush::WebPushRail;
 pub use replicator::{FakeReplicator, FakeReplicatorConfig};
 pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;

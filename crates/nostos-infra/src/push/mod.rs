@@ -64,6 +64,8 @@ impl PushPayload {
     /// Seconds this payload stays valuable. A silent ping older than a minute
     /// is worthless; a visible notification is still worth showing for an
     /// hour (ADR-0037 §4 — the rails bound staleness).
+    /// Only caller is the webpush rail — gated with it (fcm/apns use the consts directly).
+    #[cfg(feature = "webpush")]
     pub(crate) fn ttl_secs(&self) -> u32 {
         match self {
             Self::Silent { .. } => SILENT_TTL_SECS,
@@ -98,6 +100,9 @@ pub(crate) fn env_nonempty(name: &str) -> Option<String> {
 pub mod apns;
 pub mod fcm;
 pub mod router;
+// OpenSSL-backed (ece): behind the `webpush` feature so client builds
+// (iOS staticlib) don't cross-compile openssl-sys. Default-on for servers.
+#[cfg(feature = "webpush")]
 pub mod webpush;
 
 #[cfg(test)]
