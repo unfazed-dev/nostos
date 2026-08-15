@@ -12,8 +12,7 @@ import 'package:flutter/material.dart';
 import '../../nostos.g.dart' as gen;
 import '../../models.dart';
 import '../../services/billing_service.dart';
-import '../../widgets/connection_badge.dart'
-    show EmptyState, StatusChip;
+import '../../widgets/connection_badge.dart' show EmptyState, StatusChip;
 
 class InvoicesView extends StatefulWidget {
   const InvoicesView({super.key, required this.db});
@@ -24,15 +23,18 @@ class InvoicesView extends StatefulWidget {
 
 class _InvoicesViewState extends State<InvoicesView> {
   late final _invoices = widget.db.collection<Invoice>(
-      table: 'invoices', fromRow: Invoice.fromRow);
+    table: 'invoices',
+    fromRow: Invoice.fromRow,
+  );
   late final Stream<List<Invoice>> _rows = _invoices.watch();
   // Typed write image (ADR-0024 Option C). BillingService still builds the
   // payload Map; we project it into gen.Invoice here. Codegen keeps
   // amount_cents as int? but rate_cents/hours_min as String? (TEXT columns).
   late final _invoicesWrite = widget.db.collection<gen.Invoice>(
-      table: 'invoices',
-      fromRow: gen.Invoice.fromRow,
-      toRow: (i) => i.toPayload());
+    table: 'invoices',
+    fromRow: gen.Invoice.fromRow,
+    toRow: (i) => i.toPayload(),
+  );
 
   Future<void> _add() async {
     final payload = await showDialog<Map<String, dynamic>>(
@@ -40,20 +42,22 @@ class _InvoicesViewState extends State<InvoicesView> {
       builder: (_) => _InvoiceDialog(db: widget.db),
     );
     if (payload == null) return;
-    await _invoicesWrite.upsert(gen.Invoice(
-      id: uuidV4(),
-      appointmentId: payload['appointment_id'] as String?,
-      clientId: payload['client_id'] as String?,
-      providerId: payload['provider_id'] as String?,
-      amountCents: payload['amount_cents'] as int?,
-      lineType: payload['line_type'] as String?,
-      rateCents: payload['rate_cents']?.toString(),
-      hoursMin: payload['hours_min']?.toString(),
-      description: payload['description'] as String?,
-      status: payload['status'] as String?,
-      issuedAt: payload['issued_at'] as String?,
-      createdAt: payload['created_at'] as String?,
-    ));
+    await _invoicesWrite.upsert(
+      gen.Invoice(
+        id: uuidV4(),
+        appointmentId: payload['appointment_id'] as String?,
+        clientId: payload['client_id'] as String?,
+        providerId: payload['provider_id'] as String?,
+        amountCents: payload['amount_cents'] as int?,
+        lineType: payload['line_type'] as String?,
+        rateCents: payload['rate_cents']?.toString(),
+        hoursMin: payload['hours_min']?.toString(),
+        description: payload['description'] as String?,
+        status: payload['status'] as String?,
+        issuedAt: payload['issued_at'] as String?,
+        createdAt: payload['created_at'] as String?,
+      ),
+    );
   }
 
   Future<void> _markPaid(Invoice inv) async {
@@ -65,81 +69,86 @@ class _InvoicesViewState extends State<InvoicesView> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        body: StreamBuilder<List<Invoice>>(
-          stream: _rows,
-          builder: (context, snap) {
-            final invoices = snap.data ?? const [];
-            if (invoices.isEmpty) {
-              return const EmptyState(
-                icon: Icons.receipt_long_outlined,
-                message: 'No invoices yet. Tap + to create one.',
-              );
-            }
-            return ListView.builder(
-              itemCount: invoices.length,
-              itemBuilder: (context, i) {
-                final inv = invoices[i];
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 6),
-                  child: ListTile(
-                    leading: const CircleAvatar(
-                      child: Icon(Icons.receipt_long, size: 20),
-                    ),
-                    title: Row(
-                      children: [
-                        Text(inv.amount,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.w700, fontSize: 16)),
-                        const SizedBox(width: 8),
-                        StatusChip(
-                            status: inv.status.label,
-                            positive: inv.status == InvoiceStatus.paid),
-                      ],
-                    ),
-                    subtitle: Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(inv.lineSummary,
-                              style: TextStyle(
-                                  fontSize: 13,
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurfaceVariant)),
-                          if (inv.description != null)
-                            Text(inv.description!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .outline)),
-                        ],
+    body: StreamBuilder<List<Invoice>>(
+      stream: _rows,
+      builder: (context, snap) {
+        final invoices = snap.data ?? const [];
+        if (invoices.isEmpty) {
+          return const EmptyState(
+            icon: Icons.receipt_long_outlined,
+            message: 'No invoices yet. Tap + to create one.',
+          );
+        }
+        return ListView.builder(
+          itemCount: invoices.length,
+          itemBuilder: (context, i) {
+            final inv = invoices[i];
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: ListTile(
+                leading: const CircleAvatar(
+                  child: Icon(Icons.receipt_long, size: 20),
+                ),
+                title: Row(
+                  children: [
+                    Text(
+                      inv.amount,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 16,
                       ),
                     ),
-                    trailing: inv.status == InvoiceStatus.issued
-                        ? IconButton(
-                            tooltip: 'Mark paid',
-                            icon: const Icon(Icons.check_circle_outline,
-                                size: 20),
-                            onPressed: () => _markPaid(inv),
-                          )
-                        : null,
-                    onTap: () => _showDetail(context, inv),
+                    const SizedBox(width: 8),
+                    StatusChip(
+                      status: inv.status.label,
+                      positive: inv.status == InvoiceStatus.paid,
+                    ),
+                  ],
+                ),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        inv.lineSummary,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      if (inv.description != null)
+                        Text(
+                          inv.description!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(context).colorScheme.outline,
+                          ),
+                        ),
+                    ],
                   ),
-                );
-              },
+                ),
+                trailing: inv.status == InvoiceStatus.issued
+                    ? IconButton(
+                        tooltip: 'Mark paid',
+                        icon: const Icon(Icons.check_circle_outline, size: 20),
+                        onPressed: () => _markPaid(inv),
+                      )
+                    : null,
+                onTap: () => _showDetail(context, inv),
+              ),
             );
           },
-        ),
-        floatingActionButton: FloatingActionButton(
-          onPressed: _add,
-          child: const Icon(Icons.add),
-        ),
-      );
+        );
+      },
+    ),
+    floatingActionButton: FloatingActionButton(
+      onPressed: _add,
+      child: const Icon(Icons.add),
+    ),
+  );
 
   void _showDetail(BuildContext context, Invoice inv) {
     showDialog(
@@ -164,17 +173,22 @@ class _InvoicesViewState extends State<InvoicesView> {
               if (inv.paidAt != null) _row('Paid', _shortDate(inv.paidAt!)),
               if (inv.description != null) ...[
                 const Divider(height: 24),
-                Text(inv.description!,
-                    style: TextStyle(
-                        fontSize: 13, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                Text(
+                  inv.description!,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
               ],
             ],
           ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close')),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
           if (inv.status == InvoiceStatus.issued)
             FilledButton.tonalIcon(
               icon: const Icon(Icons.check, size: 18),
@@ -196,22 +210,28 @@ class _InvoicesViewState extends State<InvoicesView> {
   }
 
   Widget _row(String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(
-          children: [
-            SizedBox(
-                width: 80,
-                child: Text(label,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: Theme.of(context).colorScheme.outline))),
-            Expanded(
-                child: Text(value,
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w500))),
-          ],
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.outline,
+            ),
+          ),
         ),
-      );
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// Invoice creation dialog — picks an appointment and AUTO-CALCULATES the amount
@@ -253,12 +273,15 @@ class _InvoiceDialogState extends State<_InvoiceDialog> {
   void _submit() {
     final appt = _appts.where((a) => a.id == _apptId).firstOrNull;
     if (appt == null) return;
-    final provider =
-        _providers.where((p) => p.id == appt.providerId).firstOrNull;
+    final provider = _providers
+        .where((p) => p.id == appt.providerId)
+        .firstOrNull;
     if (provider == null) return;
 
     final billing = BillingService.calculate(
-        provider: provider, durationMinutes: appt.durationMin);
+      provider: provider,
+      durationMinutes: appt.durationMin,
+    );
     final payload = BillingService.buildInvoicePayload(
       appointmentId: appt.id,
       clientId: appt.clientId,
@@ -272,27 +295,30 @@ class _InvoiceDialogState extends State<_InvoiceDialog> {
   Widget build(BuildContext context) {
     if (_loading) {
       return const AlertDialog(
-          content: SizedBox(
-              height: 48,
-              width: 48,
-              child: Center(child: CircularProgressIndicator())));
+        content: SizedBox(
+          height: 48,
+          width: 48,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
     }
     if (_appts.isEmpty) {
       return AlertDialog(
         title: const Text('No appointments'),
         content: const Text(
-            'Create an appointment first — invoices are generated from appointments.'),
+          'Create an appointment first — invoices are generated from appointments.',
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context, null),
-              child: const Text('OK')),
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('OK'),
+          ),
         ],
       );
     }
 
     // Live preview of the auto-calculated amount.
-    final selectedAppt =
-        _appts.where((a) => a.id == _apptId).firstOrNull;
+    final selectedAppt = _appts.where((a) => a.id == _apptId).firstOrNull;
     final provider = selectedAppt != null
         ? _providers.where((p) => p.id == selectedAppt.providerId).firstOrNull
         : null;
@@ -301,7 +327,9 @@ class _InvoiceDialogState extends State<_InvoiceDialog> {
         : null;
     final preview = (selectedAppt != null && provider != null)
         ? BillingService.calculate(
-            provider: provider, durationMinutes: selectedAppt.durationMin)
+            provider: provider,
+            durationMinutes: selectedAppt.durationMin,
+          )
         : null;
 
     return AlertDialog(
@@ -319,8 +347,7 @@ class _InvoiceDialogState extends State<_InvoiceDialog> {
                 for (final a in _appts)
                   DropdownMenuItem(
                     value: a.id,
-                    child: Text(
-                        '${a.formattedStart} (${a.durationMin}min)'),
+                    child: Text('${a.formattedStart} (${a.durationMin}min)'),
                   ),
               ],
               onChanged: (v) => setState(() => _apptId = v),
@@ -331,46 +358,48 @@ class _InvoiceDialogState extends State<_InvoiceDialog> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Theme.of(context)
-                      .colorScheme
-                      .primaryContainer
-                      .withValues(alpha: 0.5),
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.primaryContainer.withValues(alpha: 0.5),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Auto-calculated',
-                        style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onPrimaryContainer)),
+                    Text(
+                      'Auto-calculated',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: Theme.of(context).colorScheme.onPrimaryContainer,
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     _previewRow('Provider', provider.name),
                     if (client != null) _previewRow('Client', client.name),
-                    _previewRow('Rate model',
-                        '${provider.rateType.label} · ${provider.rateLabel}'),
-                    _previewRow('Duration',
-                        '${selectedAppt!.durationMin} min'),
+                    _previewRow(
+                      'Rate model',
+                      '${provider.rateType.label} · ${provider.rateLabel}',
+                    ),
+                    _previewRow('Duration', '${selectedAppt!.durationMin} min'),
                     if (preview.hoursMin > 0)
-                      _previewRow(
-                          'Hours', formatHours(preview.hoursMin)),
+                      _previewRow('Hours', formatHours(preview.hoursMin)),
                     const Divider(height: 16),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('Total',
-                            style: TextStyle(
-                                fontWeight: FontWeight.w700)),
-                        Text(formatCents(preview.amountCents),
-                            style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w800,
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .primary)),
+                        const Text(
+                          'Total',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        Text(
+                          formatCents(preview.amountCents),
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                        ),
                       ],
                     ),
                   ],
@@ -382,26 +411,31 @@ class _InvoiceDialogState extends State<_InvoiceDialog> {
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(context, null),
-            child: const Text('Cancel')),
+          onPressed: () => Navigator.pop(context, null),
+          child: const Text('Cancel'),
+        ),
         FilledButton(onPressed: _submit, child: const Text('Create invoice')),
       ],
     );
   }
 
   Widget _previewRow(String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(label,
-                style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.outline)),
-            Text(value,
-                style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w500)),
-          ],
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).colorScheme.outline,
+          ),
         ),
-      );
+        Text(
+          value,
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+        ),
+      ],
+    ),
+  );
 }

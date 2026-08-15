@@ -37,26 +37,25 @@ class _AttachFakeEngine implements NostosEngine {
   final rowsController = StreamController<String>.broadcast();
   final stateController = StreamController<NostosConnectionState>.broadcast();
   final writeStatusController =
-      StreamController<({int pending, int deadLettered, String? lastError})>
-          .broadcast();
+      StreamController<
+        ({int pending, int deadLettered, String? lastError})
+      >.broadcast();
 
   @override
   Future<String> query({required String sql}) async {
     if (sql.contains('state IN')) {
       // Pump: queued rows.
-      const queued = {
-        'queued_upload',
-        'queued_download',
-        'queued_delete',
-      };
+      const queued = {'queued_upload', 'queued_download', 'queued_delete'};
       final out = attachments.values
           .where((r) => queued.contains(r['state']))
-          .map((r) => {
-                'id': r['id'],
-                'state': r['state'],
-                'media_type': r['media_type'] ?? '',
-                'filename': r['filename'] ?? '',
-              })
+          .map(
+            (r) => {
+              'id': r['id'],
+              'state': r['state'],
+              'media_type': r['media_type'] ?? '',
+              'filename': r['filename'] ?? '',
+            },
+          )
           .toList();
       return jsonEncode(out);
     }
@@ -67,7 +66,7 @@ class _AttachFakeEngine implements NostosEngine {
       final row = attachments[id];
       if (row == null) return '[]';
       return jsonEncode([
-        {'state': row['state']}
+        {'state': row['state']},
       ]);
     }
     return '[]';
@@ -84,12 +83,14 @@ class _AttachFakeEngine implements NostosEngine {
     if (table != 'attachments') return 1;
     switch (op) {
       case 'upsert':
-        final payload =
-            payloadJson == null ? <String, dynamic>{} : jsonDecode(payloadJson);
+        final payload = payloadJson == null
+            ? <String, dynamic>{}
+            : jsonDecode(payloadJson);
         attachments[pk] = Map<String, dynamic>.from(payload);
       case 'patch':
-        final payload =
-            payloadJson == null ? <String, dynamic>{} : jsonDecode(payloadJson);
+        final payload = payloadJson == null
+            ? <String, dynamic>{}
+            : jsonDecode(payloadJson);
         attachments[pk] = {...?attachments[pk], ...payload};
       case 'delete':
         attachments.remove(pk);
@@ -103,17 +104,16 @@ class _AttachFakeEngine implements NostosEngine {
     required List<NostosTableSub> tables,
     Set<String> orSetTables = const <String>{},
     Set<String> counterTables = const <String>{},
-  }) =>
-      stateController.stream;
+  }) => stateController.stream;
   @override
   Stream<String> watch({required String table}) => rowsController.stream;
   @override
   Stream<({int pending, int deadLettered, String? lastError})>
-      watchWriteStatus() => writeStatusController.stream;
+  watchWriteStatus() => writeStatusController.stream;
   @override
   Future<List<int>> writeBatch({
     required List<({String table, String op, String pk, String? payloadJson})>
-        ops,
+    ops,
   }) async => List.generate(ops.length, (i) => i + 1);
   @override
   Future<int> orSetAdd({
@@ -214,8 +214,10 @@ class _FakeAdapter implements AttachmentStorageAdapter {
   }
 }
 
-NostosDatabase _newDb(_AttachFakeEngine engine) =>
-    NostosDatabase.forTest(Nostos.withEngine(engine), const NostosSchema(tables: []));
+NostosDatabase _newDb(_AttachFakeEngine engine) => NostosDatabase.forTest(
+  Nostos.withEngine(engine),
+  const NostosSchema(tables: []),
+);
 
 /// Build a db with `attachments` subscribed (the write-path guard requires an
 /// active subscription — same as the facade tests subscribing to `todos`).
@@ -226,31 +228,33 @@ Future<NostosDatabase> _newSubscribedDb(_AttachFakeEngine engine) async {
 }
 
 void main() {
-  test('queueUpload caches bytes locally and enqueues a queued_upload row',
-      () async {
-    final engine = _AttachFakeEngine();
-    final db = await _newSubscribedDb(engine);
-    final blob = _MemBlobStore();
-    final adapter = _FakeAdapter();
-    final driver = Attachments(
-      db: db,
-      adapter: adapter,
-      blobStore: blob,
-      isOnline: () async => true,
-    );
+  test(
+    'queueUpload caches bytes locally and enqueues a queued_upload row',
+    () async {
+      final engine = _AttachFakeEngine();
+      final db = await _newSubscribedDb(engine);
+      final blob = _MemBlobStore();
+      final adapter = _FakeAdapter();
+      final driver = Attachments(
+        db: db,
+        adapter: adapter,
+        blobStore: blob,
+        isOnline: () async => true,
+      );
 
-    final id = await driver.queueUpload(
-      filename: 'photo.png',
-      bytes: Uint8List.fromList([1, 2, 3, 4]),
-      mediaType: 'image/png',
-    );
+      final id = await driver.queueUpload(
+        filename: 'photo.png',
+        bytes: Uint8List.fromList([1, 2, 3, 4]),
+        mediaType: 'image/png',
+      );
 
-    expect(blob.has(id), isTrue); // bytes cached locally at once
-    expect(engine.attachments[id]?['state'], 'queued_upload');
-    expect(engine.attachments[id]?['size'], 4);
-    expect(engine.attachments[id]?['media_type'], 'image/png');
-    expect(adapter.uploadCalls, 0); // not yet pumped
-  });
+      expect(blob.has(id), isTrue); // bytes cached locally at once
+      expect(engine.attachments[id]?['state'], 'queued_upload');
+      expect(engine.attachments[id]?['size'], 4);
+      expect(engine.attachments[id]?['media_type'], 'image/png');
+      expect(adapter.uploadCalls, 0); // not yet pumped
+    },
+  );
 
   test('pump uploads on reconnect and flips state to synced', () async {
     final engine = _AttachFakeEngine();
@@ -272,13 +276,15 @@ void main() {
     await driver.pump();
 
     expect(adapter.uploadCalls, 1);
-    expect(adapter.remote[id], Uint8List.fromList([9, 9])); // bytes reached the bucket
+    expect(
+      adapter.remote[id],
+      Uint8List.fromList([9, 9]),
+    ); // bytes reached the bucket
     expect(engine.attachments[id]?['state'], 'synced');
     expect(driver.lastErrorFor(id), isNull);
   });
 
-  test(
-      'second client downloads the blob through the shared bucket '
+  test('second client downloads the blob through the shared bucket '
       '(offline/local-adapter round-trip)', () async {
     // Client A uploads.
     final engineA = _AttachFakeEngine();
@@ -328,46 +334,48 @@ void main() {
     expect(engineB.attachments[id]?['state'], 'synced');
   });
 
-  test('adapter failure retries with backoff then dead-letters to archived',
-      () async {
-    final engine = _AttachFakeEngine();
-    final db = await _newSubscribedDb(engine);
-    final blob = _MemBlobStore();
-    final adapter = _FakeAdapter()
-      ..uploadError = Exception('bucket unreachable');
-    var now = DateTime(2026, 1, 1);
-    final driver = Attachments(
-      db: db,
-      adapter: adapter,
-      blobStore: blob,
-      isOnline: () async => true,
-      maxAttempts: 2,
-      clock: () => now,
-    );
+  test(
+    'adapter failure retries with backoff then dead-letters to archived',
+    () async {
+      final engine = _AttachFakeEngine();
+      final db = await _newSubscribedDb(engine);
+      final blob = _MemBlobStore();
+      final adapter = _FakeAdapter()
+        ..uploadError = Exception('bucket unreachable');
+      var now = DateTime(2026, 1, 1);
+      final driver = Attachments(
+        db: db,
+        adapter: adapter,
+        blobStore: blob,
+        isOnline: () async => true,
+        maxAttempts: 2,
+        clock: () => now,
+      );
 
-    final id = await driver.queueUpload(
-      filename: 'failing.bin',
-      bytes: Uint8List.fromList([1]),
-      mediaType: 'application/octet-stream',
-    );
+      final id = await driver.queueUpload(
+        filename: 'failing.bin',
+        bytes: Uint8List.fromList([1]),
+        mediaType: 'application/octet-stream',
+      );
 
-    // Attempt 1: fails, schedules backoff.
-    await driver.pump();
-    expect(adapter.uploadCalls, 1);
-    expect(engine.attachments[id]?['state'], 'queued_upload'); // still queued
-    expect(driver.lastErrorFor(id), contains('bucket unreachable'));
+      // Attempt 1: fails, schedules backoff.
+      await driver.pump();
+      expect(adapter.uploadCalls, 1);
+      expect(engine.attachments[id]?['state'], 'queued_upload'); // still queued
+      expect(driver.lastErrorFor(id), contains('bucket unreachable'));
 
-    // Same instant: backoff not elapsed → skipped.
-    await driver.pump();
-    expect(adapter.uploadCalls, 1);
+      // Same instant: backoff not elapsed → skipped.
+      await driver.pump();
+      expect(adapter.uploadCalls, 1);
 
-    // After the backoff window: attempt 2 → fail again → dead-letter (max=2).
-    now = now.add(const Duration(seconds: 3));
-    await driver.pump();
-    expect(adapter.uploadCalls, 2);
-    expect(engine.attachments[id]?['state'], 'archived');
-    expect(driver.lastErrorFor(id), contains('bucket unreachable'));
-  });
+      // After the backoff window: attempt 2 → fail again → dead-letter (max=2).
+      now = now.add(const Duration(seconds: 3));
+      await driver.pump();
+      expect(adapter.uploadCalls, 2);
+      expect(engine.attachments[id]?['state'], 'archived');
+      expect(driver.lastErrorFor(id), contains('bucket unreachable'));
+    },
+  );
 
   test('delete archives the blob in the remote bucket', () async {
     final engine = _AttachFakeEngine();

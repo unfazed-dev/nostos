@@ -22,15 +22,18 @@ class ProvidersView extends StatefulWidget {
 
 class _ProvidersViewState extends State<ProvidersView> {
   late final _providers = widget.db.collection<Provider>(
-      table: 'providers', fromRow: Provider.fromRow);
+    table: 'providers',
+    fromRow: Provider.fromRow,
+  );
   late final Stream<List<Provider>> _rows = _providers.watch();
   // Typed write image (ADR-0024 Option C). Read collection stays over the
   // presentation Provider (initials/rateLabel getters). Codegen keeps rate
   // fields as String? (TEXT cols) — defaults are '0', not 0.
   late final _providersWrite = widget.db.collection<gen.Provider>(
-      table: 'providers',
-      fromRow: gen.Provider.fromRow,
-      toRow: (p) => p.toPayload());
+    table: 'providers',
+    fromRow: gen.Provider.fromRow,
+    toRow: (p) => p.toPayload(),
+  );
 
   Future<void> _add() async {
     final form = await showFormDialog(
@@ -45,18 +48,20 @@ class _ProvidersViewState extends State<ProvidersView> {
       saveLabel: 'Create',
     );
     if (form == null || form['name'] == null) return;
-    await _providersWrite.upsert(gen.Provider(
-      id: uuidV4(),
-      name: form['name'],
-      specialty: form['specialty'],
-      email: form['email'],
-      phone: form['phone'],
-      rateType: 'hourly',
-      hourlyRateCents: '0',
-      flatRateCents: '0',
-      subscriptionRateCents: '0',
-      createdAt: DateTime.now().toUtc().toIso8601String(),
-    ));
+    await _providersWrite.upsert(
+      gen.Provider(
+        id: uuidV4(),
+        name: form['name'],
+        specialty: form['specialty'],
+        email: form['email'],
+        phone: form['phone'],
+        rateType: 'hourly',
+        hourlyRateCents: '0',
+        flatRateCents: '0',
+        subscriptionRateCents: '0',
+        createdAt: DateTime.now().toUtc().toIso8601String(),
+      ),
+    );
   }
 
   Future<void> _editRates(Provider p) async {
@@ -70,64 +75,68 @@ class _ProvidersViewState extends State<ProvidersView> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        body: StreamBuilder<List<Provider>>(
-          stream: _rows,
-          builder: (context, snap) {
-            final providers = snap.data ?? const [];
-            if (providers.isEmpty) {
-              return const EmptyState(
-                icon: Icons.medical_services_outlined,
-                message: 'No providers yet. Tap + to add one.',
-              );
-            }
-            return ListView.builder(
-              itemCount: providers.length,
-              itemBuilder: (context, i) {
-                final p = providers[i];
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 6),
-                  child: ListTile(
-                    leading: InitialsAvatar(
-                      initials: p.initials,
-                      color: Color(p.avatarColorValue),
-                    ),
-                    title: Text(p.name,
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    subtitle: Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (p.specialty != null)
-                            Text(p.specialty!,
-                                style: TextStyle(
-                                    fontSize: 13,
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onSurfaceVariant)),
-                          const SizedBox(height: 6),
-                          RateBadgeInline(provider: p),
-                        ],
-                      ),
-                    ),
-                    trailing: IconButton(
-                      tooltip: 'Edit rates',
-                      icon: const Icon(Icons.tune, size: 20),
-                      onPressed: () => _editRates(p),
-                    ),
-                    onTap: () => _showDetail(context, p),
+    body: StreamBuilder<List<Provider>>(
+      stream: _rows,
+      builder: (context, snap) {
+        final providers = snap.data ?? const [];
+        if (providers.isEmpty) {
+          return const EmptyState(
+            icon: Icons.medical_services_outlined,
+            message: 'No providers yet. Tap + to add one.',
+          );
+        }
+        return ListView.builder(
+          itemCount: providers.length,
+          itemBuilder: (context, i) {
+            final p = providers[i];
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: ListTile(
+                leading: InitialsAvatar(
+                  initials: p.initials,
+                  color: Color(p.avatarColorValue),
+                ),
+                title: Text(
+                  p.name,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (p.specialty != null)
+                        Text(
+                          p.specialty!,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      const SizedBox(height: 6),
+                      RateBadgeInline(provider: p),
+                    ],
                   ),
-                );
-              },
+                ),
+                trailing: IconButton(
+                  tooltip: 'Edit rates',
+                  icon: const Icon(Icons.tune, size: 20),
+                  onPressed: () => _editRates(p),
+                ),
+                onTap: () => _showDetail(context, p),
+              ),
             );
           },
-        ),
-        floatingActionButton: FloatingActionButton(
-          onPressed: _add,
-          child: const Icon(Icons.add),
-        ),
-      );
+        );
+      },
+    ),
+    floatingActionButton: FloatingActionButton(
+      onPressed: _add,
+      child: const Icon(Icons.add),
+    ),
+  );
 
   void _showDetail(BuildContext context, Provider p) {
     showDialog(
@@ -136,7 +145,9 @@ class _ProvidersViewState extends State<ProvidersView> {
         title: Row(
           children: [
             InitialsAvatar(
-                initials: p.initials, color: Color(p.avatarColorValue)),
+              initials: p.initials,
+              color: Color(p.avatarColorValue),
+            ),
             const SizedBox(width: 12),
             Expanded(child: Text(p.name)),
           ],
@@ -155,10 +166,13 @@ class _ProvidersViewState extends State<ProvidersView> {
               _detailRow('Active rate', p.rateLabel),
               if (p.bio != null) ...[
                 const SizedBox(height: 8),
-                Text(p.bio!,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                Text(
+                  p.bio!,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
               ],
             ],
           ),
@@ -182,24 +196,29 @@ class _ProvidersViewState extends State<ProvidersView> {
   }
 
   Widget _detailRow(String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 90,
-              child: Text(label,
-                  style: TextStyle(
-                      fontSize: 13,
-                      color: Theme.of(context).colorScheme.outline)),
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 90,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.outline,
             ),
-            Expanded(
-                child: Text(value,
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w500))),
-          ],
+          ),
         ),
-      );
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// Inline rate badge (separate widget to avoid import cycle with the main
@@ -224,11 +243,12 @@ class RateBadgeInline extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-          color: bg, borderRadius: BorderRadius.circular(20)),
+        color: bg,
+        borderRadius: BorderRadius.circular(20),
+      ),
       child: Text(
         '${provider.rateType.label} · ${provider.rateLabel}',
-        style: TextStyle(
-            fontSize: 12, fontWeight: FontWeight.w600, color: fg),
+        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg),
       ),
     );
   }
@@ -245,12 +265,15 @@ class _RateEditDialog extends StatefulWidget {
 
 class _RateEditDialogState extends State<_RateEditDialog> {
   late RateType _rateType = widget.provider.rateType;
-  late final _hourly =
-      TextEditingController(text: (widget.provider.hourlyRateCents / 100).toStringAsFixed(2));
-  late final _flat =
-      TextEditingController(text: (widget.provider.flatRateCents / 100).toStringAsFixed(2));
+  late final _hourly = TextEditingController(
+    text: (widget.provider.hourlyRateCents / 100).toStringAsFixed(2),
+  );
+  late final _flat = TextEditingController(
+    text: (widget.provider.flatRateCents / 100).toStringAsFixed(2),
+  );
   late final _sub = TextEditingController(
-      text: (widget.provider.subscriptionRateCents / 100).toStringAsFixed(2));
+    text: (widget.provider.subscriptionRateCents / 100).toStringAsFixed(2),
+  );
 
   @override
   void dispose() {
@@ -281,23 +304,28 @@ class _RateEditDialogState extends State<_RateEditDialog> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Billing model determines how invoices auto-calculate:',
-                style: TextStyle(fontSize: 12)),
+            const Text(
+              'Billing model determines how invoices auto-calculate:',
+              style: TextStyle(fontSize: 12),
+            ),
             const SizedBox(height: 8),
             SegmentedButton<RateType>(
               segments: const [
                 ButtonSegment(
-                    value: RateType.hourly,
-                    label: Text('Hourly'),
-                    icon: Icon(Icons.schedule, size: 18)),
+                  value: RateType.hourly,
+                  label: Text('Hourly'),
+                  icon: Icon(Icons.schedule, size: 18),
+                ),
                 ButtonSegment(
-                    value: RateType.flat,
-                    label: Text('Flat'),
-                    icon: Icon(Icons.looks_one, size: 18)),
+                  value: RateType.flat,
+                  label: Text('Flat'),
+                  icon: Icon(Icons.looks_one, size: 18),
+                ),
                 ButtonSegment(
-                    value: RateType.subscription,
-                    label: Text('Sub'),
-                    icon: Icon(Icons.autorenew, size: 18)),
+                  value: RateType.subscription,
+                  label: Text('Sub'),
+                  icon: Icon(Icons.autorenew, size: 18),
+                ),
               ],
               selected: {_rateType},
               onSelectionChanged: (s) => setState(() => _rateType = s.first),
@@ -306,39 +334,46 @@ class _RateEditDialogState extends State<_RateEditDialog> {
             TextField(
               controller: _hourly,
               decoration: const InputDecoration(
-                  labelText: 'Hourly rate (\$/hr)',
-                  prefixText: '\$ ',
-                  suffixText: '/hr'),
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
+                labelText: 'Hourly rate (\$/hr)',
+                prefixText: '\$ ',
+                suffixText: '/hr',
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
             ),
             const SizedBox(height: 8),
             TextField(
               controller: _flat,
               decoration: const InputDecoration(
-                  labelText: 'Flat fee (\$/visit)',
-                  prefixText: '\$ ',
-                  suffixText: '/visit'),
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
+                labelText: 'Flat fee (\$/visit)',
+                prefixText: '\$ ',
+                suffixText: '/visit',
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
             ),
             const SizedBox(height: 8),
             TextField(
               controller: _sub,
               decoration: const InputDecoration(
-                  labelText: 'Subscription (\$/month)',
-                  prefixText: '\$ ',
-                  suffixText: '/mo'),
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
+                labelText: 'Subscription (\$/month)',
+                prefixText: '\$ ',
+                suffixText: '/mo',
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
             ),
           ],
         ),
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(context, null),
-            child: const Text('Cancel')),
+          onPressed: () => Navigator.pop(context, null),
+          child: const Text('Cancel'),
+        ),
         FilledButton(onPressed: _submit, child: const Text('Save rates')),
       ],
     );

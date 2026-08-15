@@ -50,12 +50,12 @@ class NostosDashboardApp extends StatelessWidget {
   const NostosDashboardApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'Nostos Provider Dashboard',
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.light,
-        darkTheme: AppTheme.dark,
-        home: const DashboardBoot(),
-      );
+    title: 'Nostos Provider Dashboard',
+    debugShowCheckedModeBanner: false,
+    theme: AppTheme.light,
+    darkTheme: AppTheme.dark,
+    home: const DashboardBoot(),
+  );
 }
 
 /// Boots the NostosDatabase connection before showing the DashboardShell.
@@ -114,14 +114,15 @@ class _DashboardBootState extends State<DashboardBoot> {
                 children: [
                   CircularProgressIndicator(),
                   SizedBox(height: 16),
-                  Text('Connecting to nostos…',
-                      style: TextStyle(fontSize: 13)),
+                  Text('Connecting to nostos…', style: TextStyle(fontSize: 13)),
                 ],
               )
             : Padding(
                 padding: const EdgeInsets.all(24),
-                child: Text('Connect failed:\n$_error',
-                    style: const TextStyle(color: Colors.red)),
+                child: Text(
+                  'Connect failed:\n$_error',
+                  style: const TextStyle(color: Colors.red),
+                ),
               ),
       ),
     );

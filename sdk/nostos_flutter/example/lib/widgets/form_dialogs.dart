@@ -32,8 +32,7 @@ Future<Map<String, String>?> showFormDialog(
   String saveLabel = 'Save',
 }) async {
   final controllers = {
-    for (final f in fields)
-      f.key: TextEditingController(text: f.initial ?? ''),
+    for (final f in fields) f.key: TextEditingController(text: f.initial ?? ''),
   };
   final result = await showDialog<Map<String, String>>(
     context: context,
@@ -83,9 +82,9 @@ Future<Map<String, String>?> showFormDialog(
 /// A loading spinner dialog (used while fetching provider/client lists for
 /// dropdowns). Dismiss by popping with the result.
 Widget loadingDialog() => const AlertDialog(
-      content: SizedBox(
-        height: 48,
-        width: 48,
-        child: Center(child: CircularProgressIndicator()),
-      ),
-    );
+  content: SizedBox(
+    height: 48,
+    width: 48,
+    child: Center(child: CircularProgressIndicator()),
+  ),
+);

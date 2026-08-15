@@ -63,8 +63,8 @@ class NostosSchema {
   /// names via `json_extract`, so affinity is for typed-record derivation, not
   /// for view materialization.
   factory NostosSchema.fromSchemaDescriptor(Map<String, dynamic> json) {
-    final rawTables =
-        (json['tables'] as List<dynamic>).cast<Map<String, dynamic>>();
+    final rawTables = (json['tables'] as List<dynamic>)
+        .cast<Map<String, dynamic>>();
     return NostosSchema(
       tables: rawTables.map(NostosTable._fromJson).toList(growable: false),
     );
@@ -110,13 +110,13 @@ class NostosTable {
   final List<NostosColumn> columns;
 
   factory NostosTable._fromJson(Map<String, dynamic> json) => NostosTable(
-        name: json['name'] as String,
-        primaryKey: (json['primary_key'] as List<dynamic>).cast<String>(),
-        columns: (json['columns'] as List<dynamic>)
-            .cast<Map<String, dynamic>>()
-            .map(NostosColumn._fromJson)
-            .toList(growable: false),
-      );
+    name: json['name'] as String,
+    primaryKey: (json['primary_key'] as List<dynamic>).cast<String>(),
+    columns: (json['columns'] as List<dynamic>)
+        .cast<Map<String, dynamic>>()
+        .map(NostosColumn._fromJson)
+        .toList(growable: false),
+  );
 }
 
 /// One column in a resolved [NostosTable].
@@ -136,30 +136,24 @@ class NostosColumn {
   const NostosColumn({required this.name, this.affinity, this.pgOid});
 
   /// Declared TEXT column (String reads) — for app-declared schemas.
-  const NostosColumn.text(this.name)
-      : affinity = 'TEXT',
-        pgOid = null;
+  const NostosColumn.text(this.name) : affinity = 'TEXT', pgOid = null;
 
   /// Declared INTEGER column (int / 0-1 bool reads) — for app-declared
   /// schemas.
-  const NostosColumn.integer(this.name)
-      : affinity = 'INTEGER',
-        pgOid = null;
+  const NostosColumn.integer(this.name) : affinity = 'INTEGER', pgOid = null;
 
   /// Declared REAL column (double reads) — for app-declared schemas.
-  const NostosColumn.real(this.name)
-      : affinity = 'REAL',
-        pgOid = null;
+  const NostosColumn.real(this.name) : affinity = 'REAL', pgOid = null;
 
   final String name;
   final String? affinity;
   final int? pgOid;
 
   factory NostosColumn._fromJson(Map<String, dynamic> json) => NostosColumn(
-        name: json['name'] as String,
-        affinity: json['affinity'] as String?,
-        pgOid: json['pg_oid'] as int?,
-      );
+    name: json['name'] as String,
+    affinity: json['affinity'] as String?,
+    pgOid: json['pg_oid'] as int?,
+  );
 }
 
 /// Collision-free alias for [NostosTable], exported from the package barrel.

@@ -3,7 +3,6 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:meta/meta.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'nostos.dart';

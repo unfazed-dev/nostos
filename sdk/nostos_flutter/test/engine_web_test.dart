@@ -18,53 +18,62 @@ WebNostosEngine _engine(FakeNostosWorkerPort port) {
 }
 
 void main() {
-  test('subscribe emits connecting, then connected on a Worker status push',
-      () async {
-    final port = FakeNostosWorkerPort();
-    final eng = _engine(port);
-    final states = <NostosConnectionState>[];
-    final sub = eng.subscribe(tables: const [NostosTableSub(name: 'tasks')]);
-    final done = sub.listen(states.add);
+  test(
+    'subscribe emits connecting, then connected on a Worker status push',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = _engine(port);
+      final states = <NostosConnectionState>[];
+      final sub = eng.subscribe(tables: const [NostosTableSub(name: 'tasks')]);
+      final done = sub.listen(states.add);
 
-    // Let the connect request flush, then push connected.
-    await Future<void>.delayed(Duration.zero);
-    expect(port.sent.single['cmd'], 'connect');
-    port.reply({'type': 'status', 'connected': true});
-    await Future<void>.delayed(Duration.zero);
+      // Let the connect request flush, then push connected.
+      await Future<void>.delayed(Duration.zero);
+      expect(port.sent.single['cmd'], 'connect');
+      port.reply({'type': 'status', 'connected': true});
+      await Future<void>.delayed(Duration.zero);
 
-    expect(states, [
-      NostosConnectionState.connecting,
-      NostosConnectionState.connected,
-    ]);
-    done.cancel();
-    await eng.close();
-  });
+      expect(states, [
+        NostosConnectionState.connecting,
+        NostosConnectionState.connected,
+      ]);
+      done.cancel();
+      await eng.close();
+    },
+  );
 
-  test('subscribe threads CRDT tables into the connect command (T4 config surface)',
-      () async {
-    final port = FakeNostosWorkerPort();
-    final eng = _engine(port);
-    eng.subscribe(
-      tables: const [NostosTableSub(name: 'tasks')],
-      orSetTables: const {'tags'},
-      counterTables: const {'likes'},
-    );
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'subscribe threads CRDT tables into the connect command (T4 config surface)',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = _engine(port);
+      eng.subscribe(
+        tables: const [NostosTableSub(name: 'tasks')],
+        orSetTables: const {'tags'},
+        counterTables: const {'likes'},
+      );
+      await Future<void>.delayed(Duration.zero);
 
-    // The connect cmd must carry the CRDT-table tags so the Worker re-tags on
-    // every (re)connect (nostos_worker.js openSocket → setCrdtTables). Without
-    // this, orSet/counter verbs throw *TableNotTagged on web.
-    final req = port.sent.single;
-    expect(req['cmd'], 'connect');
-    expect(req['orSetTables'], ['tags']);
-    expect(req['counterTables'], ['likes']);
-    await eng.close();
-  });
+      // The connect cmd must carry the CRDT-table tags so the Worker re-tags on
+      // every (re)connect (nostos_worker.js openSocket → setCrdtTables). Without
+      // this, orSet/counter verbs throw *TableNotTagged on web.
+      final req = port.sent.single;
+      expect(req['cmd'], 'connect');
+      expect(req['orSetTables'], ['tags']);
+      expect(req['counterTables'], ['likes']);
+      await eng.close();
+    },
+  );
 
   test('write correlates response by id and returns the outbox id', () async {
     final port = FakeNostosWorkerPort();
     final eng = _engine(port);
-    final f = eng.write(table: 'tasks', op: 'upsert', pk: '1', payloadJson: '{}');
+    final f = eng.write(
+      table: 'tasks',
+      op: 'upsert',
+      pk: '1',
+      payloadJson: '{}',
+    );
     await Future<void>.delayed(Duration.zero);
 
     final req = port.sent.single;
@@ -95,50 +104,59 @@ void main() {
     await eng.close();
   });
 
-  test('watchWriteStatus surfaces pending/deadLettered/lastError pushes',
-      () async {
-    final port = FakeNostosWorkerPort();
-    final eng = _engine(port);
-    final seen =
-        <({int pending, int deadLettered, String? lastError})>[];
-    eng.watchWriteStatus().listen(seen.add);
+  test(
+    'watchWriteStatus surfaces pending/deadLettered/lastError pushes',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = _engine(port);
+      final seen = <({int pending, int deadLettered, String? lastError})>[];
+      eng.watchWriteStatus().listen(seen.add);
 
-    port.reply({
-      'type': 'writeStatus',
-      'pending': 3,
-      'deadLettered': 1,
-      'lastError': 'boom',
-    });
-    await Future<void>.delayed(Duration.zero);
+      port.reply({
+        'type': 'writeStatus',
+        'pending': 3,
+        'deadLettered': 1,
+        'lastError': 'boom',
+      });
+      await Future<void>.delayed(Duration.zero);
 
-    expect(seen.last, (pending: 3, deadLettered: 1, lastError: 'boom'));
-    await eng.close();
-  });
+      expect(seen.last, (pending: 3, deadLettered: 1, lastError: 'boom'));
+      await eng.close();
+    },
+  );
 
-  test('writeBatch sends a single atomic writeBatch command (Wave 4c)',
-      () async {
-    final port = FakeNostosWorkerPort();
-    final eng = _engine(port);
-    final f = eng.writeBatch(ops: [
-      (table: 't', op: 'upsert', pk: '1', payloadJson: null),
-      (table: 't', op: 'upsert', pk: '2', payloadJson: null),
-    ]);
+  test(
+    'writeBatch sends a single atomic writeBatch command (Wave 4c)',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = _engine(port);
+      final f = eng.writeBatch(
+        ops: [
+          (table: 't', op: 'upsert', pk: '1', payloadJson: null),
+          (table: 't', op: 'upsert', pk: '2', payloadJson: null),
+        ],
+      );
 
-    // Wave 4c: one writeBatch request (not a loop of single writes).
-    await Future<void>.delayed(Duration.zero);
-    final req = port.sent.singleWhere((m) => m['cmd'] == 'writeBatch');
-    expect(req['ops'], [
-      {'table': 't', 'op': 'upsert', 'pk': '1', 'payloadJson': null},
-      {'table': 't', 'op': 'upsert', 'pk': '2', 'payloadJson': null},
-    ]);
-    final id = req['id'] as int;
-    port.reply({'id': id, 'ok': true, 'writeIds': [10, 20]});
+      // Wave 4c: one writeBatch request (not a loop of single writes).
+      await Future<void>.delayed(Duration.zero);
+      final req = port.sent.singleWhere((m) => m['cmd'] == 'writeBatch');
+      expect(req['ops'], [
+        {'table': 't', 'op': 'upsert', 'pk': '1', 'payloadJson': null},
+        {'table': 't', 'op': 'upsert', 'pk': '2', 'payloadJson': null},
+      ]);
+      final id = req['id'] as int;
+      port.reply({
+        'id': id,
+        'ok': true,
+        'writeIds': [10, 20],
+      });
 
-    expect(await f, [10, 20]);
-    // Exactly one Worker request — no per-op write fan-out.
-    expect(port.sent.where((m) => m['cmd'] == 'write'), isEmpty);
-    await eng.close();
-  });
+      expect(await f, [10, 20]);
+      // Exactly one Worker request — no per-op write fan-out.
+      expect(port.sent.where((m) => m['cmd'] == 'write'), isEmpty);
+      await eng.close();
+    },
+  );
 
   test('orSetAdd wires to the orSetAdd Worker command (Wave 4c)', () async {
     final port = FakeNostosWorkerPort();
@@ -154,26 +172,32 @@ void main() {
     await eng.close();
   });
 
-  test('counterIncrement + counterDecrement wire to Worker commands (Wave 4c)',
-      () async {
-    final port = FakeNostosWorkerPort();
-    final eng = _engine(port);
+  test(
+    'counterIncrement + counterDecrement wire to Worker commands (Wave 4c)',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = _engine(port);
 
-    final inc = eng.counterIncrement(table: 'likes', pk: 'p1', delta: 5);
-    await Future<void>.delayed(Duration.zero);
-    final incReq = port.sent.singleWhere((m) => m['cmd'] == 'counterIncrement');
-    expect(incReq['delta'], 5);
-    port.reply({'id': incReq['id'] as int, 'ok': true, 'writeId': 11});
-    expect(await inc, 11);
+      final inc = eng.counterIncrement(table: 'likes', pk: 'p1', delta: 5);
+      await Future<void>.delayed(Duration.zero);
+      final incReq = port.sent.singleWhere(
+        (m) => m['cmd'] == 'counterIncrement',
+      );
+      expect(incReq['delta'], 5);
+      port.reply({'id': incReq['id'] as int, 'ok': true, 'writeId': 11});
+      expect(await inc, 11);
 
-    final dec = eng.counterDecrement(table: 'likes', pk: 'p1', delta: 2);
-    await Future<void>.delayed(Duration.zero);
-    final decReq = port.sent.singleWhere((m) => m['cmd'] == 'counterDecrement');
-    expect(decReq['delta'], 2);
-    port.reply({'id': decReq['id'] as int, 'ok': true, 'writeId': 12});
-    expect(await dec, 12);
-    await eng.close();
-  });
+      final dec = eng.counterDecrement(table: 'likes', pk: 'p1', delta: 2);
+      await Future<void>.delayed(Duration.zero);
+      final decReq = port.sent.singleWhere(
+        (m) => m['cmd'] == 'counterDecrement',
+      );
+      expect(decReq['delta'], 2);
+      port.reply({'id': decReq['id'] as int, 'ok': true, 'writeId': 12});
+      expect(await dec, 12);
+      await eng.close();
+    },
+  );
 
   test('query returns the Worker json (defaults to [] when absent)', () async {
     final port = FakeNostosWorkerPort();

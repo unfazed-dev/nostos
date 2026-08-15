@@ -23,20 +23,25 @@ class AppointmentsView extends StatefulWidget {
 
 class _AppointmentsViewState extends State<AppointmentsView> {
   late final _appts = widget.db.collection<Appointment>(
-      table: 'appointments', fromRow: Appointment.fromRow);
-  late final Stream<List<Appointment>> _rows =
-      _appts.watch(orderBy: [Order.asc('starts_at')]);
+    table: 'appointments',
+    fromRow: Appointment.fromRow,
+  );
+  late final Stream<List<Appointment>> _rows = _appts.watch(
+    orderBy: [Order.asc('starts_at')],
+  );
   // Typed write images (ADR-0024 Option C). _appts stays over the presentation
   // Appointment (watch + patch); duration_min is int? in codegen (matches the
   // dialog's parsed int). rate_cents/hours_min on the invoice are String? (TEXT).
   late final _apptsWrite = widget.db.collection<gen.Appointment>(
-      table: 'appointments',
-      fromRow: gen.Appointment.fromRow,
-      toRow: (a) => a.toPayload());
+    table: 'appointments',
+    fromRow: gen.Appointment.fromRow,
+    toRow: (a) => a.toPayload(),
+  );
   late final _invoicesWrite = widget.db.collection<gen.Invoice>(
-      table: 'invoices',
-      fromRow: gen.Invoice.fromRow,
-      toRow: (i) => i.toPayload());
+    table: 'invoices',
+    fromRow: gen.Invoice.fromRow,
+    toRow: (i) => i.toPayload(),
+  );
 
   Future<void> _add() async {
     final form = await showDialog<Map<String, dynamic>>(
@@ -45,35 +50,38 @@ class _AppointmentsViewState extends State<AppointmentsView> {
     );
     if (form == null) return;
     final appointmentId = uuidV4();
-    final appointment =
-        Map<String, dynamic>.from(form['appointment'] as Map);
-    await _apptsWrite.upsert(gen.Appointment(
-      id: appointmentId,
-      providerId: appointment['provider_id'] as String?,
-      clientId: appointment['client_id'] as String?,
-      startsAt: appointment['starts_at'] as String?,
-      durationMin: appointment['duration_min'] as int?,
-      status: appointment['status'] as String?,
-      createdAt: appointment['created_at'] as String?,
-    ));
+    final appointment = Map<String, dynamic>.from(form['appointment'] as Map);
+    await _apptsWrite.upsert(
+      gen.Appointment(
+        id: appointmentId,
+        providerId: appointment['provider_id'] as String?,
+        clientId: appointment['client_id'] as String?,
+        startsAt: appointment['starts_at'] as String?,
+        durationMin: appointment['duration_min'] as int?,
+        status: appointment['status'] as String?,
+        createdAt: appointment['created_at'] as String?,
+      ),
+    );
     // Auto-generate invoice if requested — stamp the real appointment_id now.
     final invoice = form['invoice'];
     if (invoice is Map<String, dynamic>) {
       invoice['appointment_id'] = appointmentId;
-      await _invoicesWrite.upsert(gen.Invoice(
-        id: uuidV4(),
-        appointmentId: invoice['appointment_id'] as String?,
-        clientId: invoice['client_id'] as String?,
-        providerId: invoice['provider_id'] as String?,
-        amountCents: invoice['amount_cents'] as int?,
-        lineType: invoice['line_type'] as String?,
-        rateCents: invoice['rate_cents']?.toString(),
-        hoursMin: invoice['hours_min']?.toString(),
-        description: invoice['description'] as String?,
-        status: invoice['status'] as String?,
-        issuedAt: invoice['issued_at'] as String?,
-        createdAt: invoice['created_at'] as String?,
-      ));
+      await _invoicesWrite.upsert(
+        gen.Invoice(
+          id: uuidV4(),
+          appointmentId: invoice['appointment_id'] as String?,
+          clientId: invoice['client_id'] as String?,
+          providerId: invoice['provider_id'] as String?,
+          amountCents: invoice['amount_cents'] as int?,
+          lineType: invoice['line_type'] as String?,
+          rateCents: invoice['rate_cents']?.toString(),
+          hoursMin: invoice['hours_min']?.toString(),
+          description: invoice['description'] as String?,
+          status: invoice['status'] as String?,
+          issuedAt: invoice['issued_at'] as String?,
+          createdAt: invoice['created_at'] as String?,
+        ),
+      );
     }
   }
 
@@ -83,55 +91,53 @@ class _AppointmentsViewState extends State<AppointmentsView> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        body: StreamBuilder<List<Appointment>>(
-          stream: _rows,
-          builder: (context, snap) {
-            final appts = snap.data ?? const [];
-            if (appts.isEmpty) {
-              return const EmptyState(
-                icon: Icons.event_outlined,
-                message: 'No appointments yet. Tap + to book one.',
-              );
-            }
-            return ListView.builder(
-              itemCount: appts.length,
-              itemBuilder: (context, i) {
-                final a = appts[i];
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 6),
-                  child: ListTile(
-                    leading: const CircleAvatar(
-                      child: Icon(Icons.event, size: 20),
+    body: StreamBuilder<List<Appointment>>(
+      stream: _rows,
+      builder: (context, snap) {
+        final appts = snap.data ?? const [];
+        if (appts.isEmpty) {
+          return const EmptyState(
+            icon: Icons.event_outlined,
+            message: 'No appointments yet. Tap + to book one.',
+          );
+        }
+        return ListView.builder(
+          itemCount: appts.length,
+          itemBuilder: (context, i) {
+            final a = appts[i];
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: ListTile(
+                leading: const CircleAvatar(child: Icon(Icons.event, size: 20)),
+                title: Text(
+                  a.formattedStart,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    'provider ${shortId(a.providerId)}  •  '
+                    'client ${shortId(a.clientId)}  •  '
+                    '${a.durationMin} min',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
-                    title: Text(a.formattedStart,
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    subtitle: Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Text(
-                        'provider ${shortId(a.providerId)}  •  '
-                        'client ${shortId(a.clientId)}  •  '
-                        '${a.durationMin} min',
-                        style: TextStyle(
-                            fontSize: 13,
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onSurfaceVariant),
-                      ),
-                    ),
-                    trailing: _statusActions(a),
-                    onTap: () => _showDetail(context, a),
                   ),
-                );
-              },
+                ),
+                trailing: _statusActions(a),
+                onTap: () => _showDetail(context, a),
+              ),
             );
           },
-        ),
-        floatingActionButton: FloatingActionButton(
-          onPressed: _add,
-          child: const Icon(Icons.add),
-        ),
-      );
+        );
+      },
+    ),
+    floatingActionButton: FloatingActionButton(
+      onPressed: _add,
+      child: const Icon(Icons.add),
+    ),
+  );
 
   Widget _statusActions(Appointment a) {
     if (a.status == AppointmentStatus.confirmed) {
@@ -172,43 +178,55 @@ class _AppointmentsViewState extends State<AppointmentsView> {
               _row('Client', shortId(a.clientId)),
               if (a.notes != null && a.notes!.isNotEmpty) ...[
                 const Divider(height: 24),
-                Text('Notes',
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: Theme.of(context).colorScheme.outline)),
+                Text(
+                  'Notes',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Theme.of(context).colorScheme.outline,
+                  ),
+                ),
                 const SizedBox(height: 4),
-                Text(a.notes!,
-                    style: const TextStyle(fontSize: 14, height: 1.4)),
+                Text(
+                  a.notes!,
+                  style: const TextStyle(fontSize: 14, height: 1.4),
+                ),
               ],
             ],
           ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close')),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
         ],
       ),
     );
   }
 
   Widget _row(String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(
-          children: [
-            SizedBox(
-                width: 80,
-                child: Text(label,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: Theme.of(context).colorScheme.outline))),
-            Expanded(
-                child: Text(value,
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w500))),
-          ],
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.outline,
+            ),
+          ),
         ),
-      );
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// Appointment creation dialog with optional auto-invoice.
@@ -233,8 +251,10 @@ class _AppointmentDialogState extends State<_AppointmentDialog> {
   @override
   void initState() {
     super.initState();
-    _starts.text =
-        DateTime.now().add(const Duration(hours: 1)).toUtc().toIso8601String();
+    _starts.text = DateTime.now()
+        .add(const Duration(hours: 1))
+        .toUtc()
+        .toIso8601String();
     _load();
   }
 
@@ -274,11 +294,12 @@ class _AppointmentDialogState extends State<_AppointmentDialog> {
 
     Map<String, dynamic>? invoice;
     if (_autoInvoice) {
-      final provider =
-          _providers.where((p) => p.id == _providerId).firstOrNull;
+      final provider = _providers.where((p) => p.id == _providerId).firstOrNull;
       if (provider != null) {
         final billing = BillingService.calculate(
-            provider: provider, durationMinutes: duration);
+          provider: provider,
+          durationMinutes: duration,
+        );
         invoice = BillingService.buildInvoicePayload(
           appointmentId: '', // filled by caller — see below
           clientId: _clientId!,
@@ -299,18 +320,21 @@ class _AppointmentDialogState extends State<_AppointmentDialog> {
   Widget build(BuildContext context) {
     if (_loading) {
       return const AlertDialog(
-          content: SizedBox(
-              height: 48,
-              width: 48,
-              child: Center(child: CircularProgressIndicator())));
+        content: SizedBox(
+          height: 48,
+          width: 48,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
     }
     // Estimate the live invoice amount for the checkbox subtitle.
-    final provider =
-        _providers.where((p) => p.id == _providerId).firstOrNull;
+    final provider = _providers.where((p) => p.id == _providerId).firstOrNull;
     final duration = int.tryParse(_duration.text.trim()) ?? 30;
     final estimated = provider != null
         ? BillingService.calculateAmount(
-            provider: provider, durationMinutes: duration)
+            provider: provider,
+            durationMinutes: duration,
+          )
         : 0;
 
     return AlertDialog(
@@ -329,7 +353,8 @@ class _AppointmentDialogState extends State<_AppointmentDialog> {
                     DropdownMenuItem(
                       value: p.id,
                       child: Text(
-                          '${p.name}${p.specialty == null ? '' : ' — ${p.specialty}'}'),
+                        '${p.name}${p.specialty == null ? '' : ' — ${p.specialty}'}',
+                      ),
                     ),
                 ],
                 onChanged: (v) => setState(() => _providerId = v),
@@ -348,13 +373,16 @@ class _AppointmentDialogState extends State<_AppointmentDialog> {
               TextField(
                 controller: _starts,
                 decoration: const InputDecoration(
-                    labelText: 'Starts at (ISO 8601)'),
+                  labelText: 'Starts at (ISO 8601)',
+                ),
               ),
               const SizedBox(height: 8),
               TextField(
                 controller: _duration,
                 decoration: const InputDecoration(
-                    labelText: 'Duration (min)', suffixText: 'min'),
+                  labelText: 'Duration (min)',
+                  suffixText: 'min',
+                ),
                 keyboardType: TextInputType.number,
                 onChanged: (_) => setState(() {}),
               ),
@@ -373,12 +401,12 @@ class _AppointmentDialogState extends State<_AppointmentDialog> {
                   subtitle: Text(
                     '${provider.rateType.label} · ${formatCents(estimated)}',
                     style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.primary),
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
                   ),
                   value: _autoInvoice,
-                  onChanged: (v) =>
-                      setState(() => _autoInvoice = v ?? false),
+                  onChanged: (v) => setState(() => _autoInvoice = v ?? false),
                 ),
             ],
           ),
@@ -386,8 +414,9 @@ class _AppointmentDialogState extends State<_AppointmentDialog> {
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(context, null),
-            child: const Text('Cancel')),
+          onPressed: () => Navigator.pop(context, null),
+          child: const Text('Cancel'),
+        ),
         FilledButton(onPressed: _submit, child: const Text('Create')),
       ],
     );
