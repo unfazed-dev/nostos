@@ -228,6 +228,32 @@ impl NostosHandle {
         }
     }
 
+    /// Lock the session, briefly waiting for a `subscribe()` that is still in
+    /// flight. FRB dispatches each FFI call as an independent task, and the
+    /// Dart `subscribeTables()` future returns before the Rust `subscribe()`
+    /// body has run — so a `watch()`/`write()` issued immediately after
+    /// `subscribeTables()` can be dispatched FIRST and used to fail with
+    /// "… called before subscribe()" (a nondeterministic startup race caught
+    /// by the atlet order-lifecycle push smoke). Genuine misuse still errors
+    /// after the budget.
+    async fn lock_session(
+        &self,
+        what: &str,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<Session>>, String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let guard = self.session.lock().await;
+            if guard.is_some() {
+                return Ok(guard);
+            }
+            drop(guard);
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("{what} called before subscribe()"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     /// Materialize the WS2 read-views for `tables` in the on-device SQLite
     /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...) AS
     /// col, ... FROM cairn_data WHERE table_name = '<table>'` — see
@@ -366,10 +392,10 @@ impl NostosHandle {
     /// Returns an error string if `subscribe()` hasn't been called or `table`
     /// is not in the subscribed set.
     pub async fn watch(&self, table: String, rows_sink: StreamSink<String>) -> Result<(), String> {
-        let mut guard = self.session.lock().await;
+        let mut guard = self.lock_session("watch()").await?;
         let session = guard
             .as_mut()
-            .ok_or_else(|| "watch() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         if !session.tables.contains(&table) {
             return Err(format!(
                 "watch() table {table:?} is not in the subscribed set — add it to subscribe()"
@@ -439,10 +465,10 @@ impl NostosHandle {
         &self,
         status_sink: StreamSink<WriteQueueStatusFfi>,
     ) -> Result<(), String> {
-        let mut guard = self.session.lock().await;
+        let mut guard = self.lock_session("watch_write_status()").await?;
         let session = guard
             .as_mut()
-            .ok_or_else(|| "watch_write_status() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
 
         let mut rx = session.client.subscribe_write_status();
         // Spawn BEFORE touching the sink, and emit the current value from
@@ -507,10 +533,10 @@ impl NostosHandle {
                 ))
             }
         };
-        let guard = self.session.lock().await;
+        let guard = self.lock_session("write()").await?;
         let session = guard
             .as_ref()
-            .ok_or_else(|| "write() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         if !session.tables.contains(&table) {
             return Err(format!(
                 "write() table {table:?} is not in the subscribed set — add it to subscribe() first"
@@ -541,10 +567,10 @@ impl NostosHandle {
         &self,
         ops: Vec<NostosWriteInput>,
     ) -> Result<Vec<u64>, String> {
-        let guard = self.session.lock().await;
+        let guard = self.lock_session("write_batch()").await?;
         let session = guard
             .as_ref()
-            .ok_or_else(|| "write_batch() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         // Validate ALL ops first — reject before touching the outbox.
         let mut writes = Vec::with_capacity(ops.len());
         for input in &ops {
@@ -590,10 +616,10 @@ impl NostosHandle {
         pk: String,
         element: String,
     ) -> Result<u64, String> {
-        let guard = self.session.lock().await;
+        let guard = self.lock_session("or_set_add()").await?;
         let session = guard
             .as_ref()
-            .ok_or_else(|| "or_set_add() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         session
             .client
             .or_set_add(&table, &pk, &element)
@@ -609,10 +635,10 @@ impl NostosHandle {
         pk: String,
         element: String,
     ) -> Result<u64, String> {
-        let guard = self.session.lock().await;
+        let guard = self.lock_session("or_set_remove()").await?;
         let session = guard
             .as_ref()
-            .ok_or_else(|| "or_set_remove() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         session
             .client
             .or_set_remove(&table, &pk, &element)
@@ -630,10 +656,10 @@ impl NostosHandle {
         pk: String,
         delta: i64,
     ) -> Result<u64, String> {
-        let guard = self.session.lock().await;
+        let guard = self.lock_session("counter_increment()").await?;
         let session = guard
             .as_ref()
-            .ok_or_else(|| "counter_increment() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         session
             .client
             .counter_increment(&table, &pk, delta)
@@ -648,10 +674,10 @@ impl NostosHandle {
         pk: String,
         delta: u64,
     ) -> Result<u64, String> {
-        let guard = self.session.lock().await;
+        let guard = self.lock_session("counter_decrement()").await?;
         let session = guard
             .as_ref()
-            .ok_or_else(|| "counter_decrement() called before subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         session
             .client
             .counter_decrement(&table, &pk, delta)
@@ -684,10 +710,10 @@ impl NostosHandle {
     /// storage task panicked (`ClientError::Join`), or the SQL fails to
     /// prepare / a row fails to decode (`StorageError::Backend`).
     pub async fn query(&self, sql: String) -> Result<String, String> {
-        let guard = self.session.lock().await;
-        let session = guard.as_ref().ok_or_else(|| {
-            "no active subscription — call subscribe() before query()".to_string()
-        })?;
+        let guard = self.lock_session("query()").await?;
+        let session = guard
+            .as_ref()
+            .expect("lock_session only yields a live session");
         // `with_storage` returns `Result<R, ClientError>` where `R` is whatever
         // the closure returns — here `s.query()` itself yields a
         // `Result<Vec<Map>, StorageError>`. Flatten both layers to a
@@ -764,10 +790,10 @@ impl NostosHandle {
     /// name; the Dart public API mirrors the pause/resume pair (WS5) for the
     /// same reason — `connect` clashes with `Nostos.connect`/`NostosDatabase.connect`.
     pub async fn resume(&self, state_sink: StreamSink<NostosConnectionState>) -> Result<(), String> {
-        let mut guard = self.session.lock().await;
+        let mut guard = self.lock_session("resume()").await?;
         let session = guard
             .as_mut()
-            .ok_or_else(|| "resume() requires a prior subscribe()".to_string())?;
+            .expect("lock_session only yields a live session");
         // Abort any lingering loop first (idempotent — usually `None` after
         // disconnect).
         if let Some(old) = session.run_task.take() {
