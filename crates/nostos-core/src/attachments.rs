@@ -315,4 +315,50 @@ mod tests {
         assert_eq!(cols::TIMESTAMP, "timestamp");
         assert_eq!(ATTACHMENTS_TABLE, "attachments");
     }
+
+    #[test]
+    fn sdk_drivers_match_this_contract() {
+        // ADR-0034 drift guard: the Dart and TS drivers duplicate this state
+        // machine shallowly (per-SDK driver loops, by design). This test ties
+        // their string copies to this Rust source of truth so a rename here
+        // (or there) fails CI instead of silently splitting the wire contract.
+        let drivers = [
+            "../../sdk/nostos_flutter/lib/src/attachments.dart",
+            "../../sdk/nostos_web/attachments.js",
+        ];
+        for rel in drivers {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let mut expected = vec![
+                ATTACHMENTS_TABLE,
+                cols::ID,
+                cols::FILENAME,
+                cols::SIZE,
+                cols::MEDIA_TYPE,
+                cols::STATE,
+                cols::TIMESTAMP,
+            ];
+            expected.extend(
+                [
+                    AttachmentState::QueuedUpload,
+                    AttachmentState::QueuedDownload,
+                    AttachmentState::QueuedDelete,
+                    AttachmentState::Synced,
+                    AttachmentState::Archived,
+                ]
+                .iter()
+                .map(|s| s.as_wire_str()),
+            );
+            for ident in expected {
+                let single = format!("'{ident}'");
+                let double = format!("\"{ident}\"");
+                assert!(
+                    src.contains(&single) || src.contains(&double),
+                    "{rel} drifted from the nostos-core attachment contract: \
+                     missing {ident:?} — update the driver or ADR-0034"
+                );
+            }
+        }
+    }
 }
