@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -62,6 +63,10 @@ Future<void> main() async {
   runApp(const AtletApp());
 }
 
+/// Foreground order-banner bridge: MainActivity posts a local heads-up on
+/// the same 'cairn' channel as the FCM pushes (see push pilot, ADR-0037).
+const _orderBannerChannel = MethodChannel('atlet/notify');
+
 /// Single registry for the app's lifetime. Owns which sync engine is live
 /// and enforces plan decision #4 (never both engines live at once) — see
 /// lib/engine_registry.dart. Module-level so it survives HomeScreen
@@ -118,6 +123,13 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<BenchStore>? _benchStoreFuture;
   ConnectivityGuard? _connectivityGuard;
 
+  // PILOT (ADR-0037): foreground order-status banner — the online half of the
+  // push story. While the app is connected, the vendor's status UPDATE
+  // arrives over the live sync socket (a push is suppressed by the offline
+  // gate by design), so the in-app banner IS the foreground notification.
+  StreamSubscription<List<OrderRow>>? _orderBannerSub;
+  final Map<String, String> _lastOrderStatuses = {};
+
   /// Drives the offline banner. Sourced from platform connectivity (the
   /// guard), not the engine's `connected` stream: the banner must show even
   /// when no engine is live (signed out) and must not flicker on the
@@ -168,7 +180,33 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _connectivityGuard?.dispose();
     _connectivityGuard = null;
+    _orderBannerSub?.cancel();
+    _orderBannerSub = null;
     super.dispose();
+  }
+
+  /// Foreground half of the push pilot: snackbar on any order-status change
+  /// seen through the live `watchOrders()` stream. The first emission only
+  /// primes `_lastOrderStatuses` (no banner for rows the snapshot brings in,
+  /// including the user's own checkout).
+  void _wireOrderBanner(NostosAdapter adapter) {
+    _orderBannerSub?.cancel();
+    _lastOrderStatuses.clear();
+    _orderBannerSub = adapter.watchOrders().listen((orders) {
+      for (final o in orders) {
+        final prev = _lastOrderStatuses[o.id];
+        if (prev != null && prev != o.status) {
+          // Local heads-up on the same 'cairn' channel as the FCM pushes —
+          // MainActivity's MethodChannel handler posts it; same-body posts
+          // share an id, so the stream's replayed emissions just replace.
+          unawaited(_orderBannerChannel.invokeMethod(
+            'order_update',
+            {'body': 'Order ${o.id.substring(0, 8)} is ${o.status}'},
+          ));
+        }
+        _lastOrderStatuses[o.id] = o.status;
+      }
+    });
   }
 
   /// Starts [Engine.cairn] if no engine is live yet and a Supabase session
@@ -215,9 +253,14 @@ class _HomeScreenState extends State<HomeScreen> {
       // registry's wipe, above) deregisters the tokens.
       if (_pushPilotEnabled) {
         if (target == Engine.cairn) {
-          unawaited(pushPilot.attach(adapter as NostosAdapter));
+          final nostos = adapter as NostosAdapter;
+          unawaited(pushPilot.attach(nostos));
+          _wireOrderBanner(nostos);
         } else {
           unawaited(pushPilot.detach());
+          _orderBannerSub?.cancel();
+          _orderBannerSub = null;
+          _lastOrderStatuses.clear();
         }
       }
       _notify('Now syncing with ${target.name}.');
