@@ -26,6 +26,11 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- PILOT (ADR-0037): iOS 14+ silently blocks LAN access without this
+	     declaration + user grant — the smoke app talks to the dev sync
+	     server on the local network (see tool/PUSH_SMOKE.md). -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Atlet syncs with the Nostos development server running on your local network.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -49,6 +54,13 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- PILOT (ADR-0037): wake on silent content-available doorbells. Inert
+	     without APNs entitlements + GoogleService-Info.plist (operator-owned,
+	     never committed) — see tool/PUSH_SMOKE.md. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

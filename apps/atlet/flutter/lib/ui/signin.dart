@@ -56,6 +56,39 @@ class _SigninScreenState extends State<SigninScreen> {
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    _resumeRestoredSession();
+  }
+
+  /// Cold-start resume: Supabase restores a persisted session asynchronously
+  /// from local storage, so `initialRoute: '/signin'` alone strands a
+  /// signed-in user on this screen — and the sync engine only auto-starts
+  /// from HomeScreen, so a relaunched app would never reconnect. gotrue
+  /// 2.27 exposes no `initialSession` future, so poll `currentSession`
+  /// briefly (same bounded-poll idiom as nostos_flutter's FFI session gates).
+  /// kimitail: 2s poll ceiling — swap for an auth-state subscription if a
+  /// slow restore ever strands users in practice.
+  Future<void> _resumeRestoredSession() async {
+    Session? session;
+    for (var i = 0; i < 20; i++) {
+      try {
+        session = Supabase.instance.client.auth.currentSession;
+        if (session != null) break;
+      } catch (_) {
+        return; // Supabase not initialized (widget tests)
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (session == null || !mounted) return;
+    // Post-frame: an already-restored session resolves during the initial
+    // route push, and Navigator asserts (_debugLocked) if pushed mid-mount.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onSignedIn();
+    });
+  }
+
+  @override
   void dispose() {
     _email.dispose();
     _password.dispose();

@@ -54,7 +54,6 @@
 library;
 
 import 'dart:io' show Platform;
-import 'dart:typed_data';
 
 import 'package:nostos_flutter/src/attachments.dart';
 import 'package:flutter/services.dart';
@@ -64,7 +63,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 void main() {
   final url = Platform.environment['SUPABASE_URL'];
   final key = Platform.environment['SUPABASE_ANON_KEY'];
-  final bucket = Platform.environment['SUPABASE_ATTACHMENT_BUCKET'] ??
+  final bucket =
+      Platform.environment['SUPABASE_ATTACHMENT_BUCKET'] ??
       'nostos-attachments-test';
   final configured =
       url != null && url.isNotEmpty && key != null && key.isNotEmpty;
@@ -82,21 +82,21 @@ void main() {
       const channel = MethodChannel('plugins.flutter.io/shared_preferences');
       TestWidgetsFlutterBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (MethodCall call) async {
-        switch (call.method) {
-          case 'getAll':
-            return store;
-          case 'store':
-            final args = Map<String, dynamic>.from(call.arguments as Map);
-            store[args['key'] as String] = args['value'] as Object;
-          case 'remove':
-            final args = Map<String, dynamic>.from(call.arguments as Map);
-            store.remove(args['key'] as String);
-          case 'clear':
-            store.clear();
-        }
-        return null;
-      });
-      await Supabase.initialize(url: url!, publishableKey: key!);
+            switch (call.method) {
+              case 'getAll':
+                return store;
+              case 'store':
+                final args = Map<String, dynamic>.from(call.arguments as Map);
+                store[args['key'] as String] = args['value'] as Object;
+              case 'remove':
+                final args = Map<String, dynamic>.from(call.arguments as Map);
+                store.remove(args['key'] as String);
+              case 'clear':
+                store.clear();
+            }
+            return null;
+          });
+      await Supabase.initialize(url: url, publishableKey: key);
     });
   }
 
@@ -123,7 +123,7 @@ void main() {
     },
     skip: !configured
         ? 'needs SUPABASE_URL + SUPABASE_ANON_KEY (operator: real Supabase '
-            'project + a dashboard-created bucket)'
+              'project + a dashboard-created bucket)'
         : false,
     timeout: const Timeout(Duration(seconds: 30)),
   );

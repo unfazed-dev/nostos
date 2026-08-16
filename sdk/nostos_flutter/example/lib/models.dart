@@ -97,32 +97,32 @@ class Provider {
   final String avatarColor;
 
   factory Provider.fromRow(Map<String, dynamic> r) => Provider(
-        id: (r['_pk'] ?? r['id']).toString(),
-        name: (r['name'] ?? '').toString(),
-        specialty: _toStr(r['specialty']),
-        email: _toStr(r['email']),
-        phone: _toStr(r['phone']),
-        rateType: RateType.fromString(_toStr(r['rate_type'])),
-        hourlyRateCents: _toInt(r['hourly_rate_cents']),
-        flatRateCents: _toInt(r['flat_rate_cents']),
-        subscriptionRateCents: _toInt(r['subscription_rate_cents']),
-        bio: _toStr(r['bio']),
-        avatarColor: _toStr(r['avatar_color']) ?? '#2E6FDB',
-      );
+    id: (r['_pk'] ?? r['id']).toString(),
+    name: (r['name'] ?? '').toString(),
+    specialty: _toStr(r['specialty']),
+    email: _toStr(r['email']),
+    phone: _toStr(r['phone']),
+    rateType: RateType.fromString(_toStr(r['rate_type'])),
+    hourlyRateCents: _toInt(r['hourly_rate_cents']),
+    flatRateCents: _toInt(r['flat_rate_cents']),
+    subscriptionRateCents: _toInt(r['subscription_rate_cents']),
+    bio: _toStr(r['bio']),
+    avatarColor: _toStr(r['avatar_color']) ?? '#2E6FDB',
+  );
 
   /// The rate (in cents) relevant to this provider's current rate type.
   int get activeRateCents => switch (rateType) {
-        RateType.hourly => hourlyRateCents,
-        RateType.flat => flatRateCents,
-        RateType.subscription => subscriptionRateCents,
-      };
+    RateType.hourly => hourlyRateCents,
+    RateType.flat => flatRateCents,
+    RateType.subscription => subscriptionRateCents,
+  };
 
   /// Human-readable summary of the provider's pricing, e.g. "$250/hr".
   String get rateLabel => switch (rateType) {
-        RateType.hourly => '${formatCents(hourlyRateCents)}/hr',
-        RateType.flat => '${formatCents(flatRateCents)}/visit',
-        RateType.subscription => '${formatCents(subscriptionRateCents)}/mo',
-      };
+    RateType.hourly => '${formatCents(hourlyRateCents)}/hr',
+    RateType.flat => '${formatCents(flatRateCents)}/visit',
+    RateType.subscription => '${formatCents(subscriptionRateCents)}/mo',
+  };
 
   /// Parse the avatar color hex to a 0xAARRGGBB int (default blue if invalid).
   int get avatarColorValue {
@@ -143,18 +143,18 @@ class Provider {
   }
 
   Map<String, dynamic> toPayload() => {
-        'id': id,
-        'name': name,
-        'specialty': specialty,
-        'email': email,
-        'phone': phone,
-        'rate_type': rateType.name,
-        'hourly_rate_cents': hourlyRateCents,
-        'flat_rate_cents': flatRateCents,
-        'subscription_rate_cents': subscriptionRateCents,
-        'bio': bio,
-        'avatar_color': avatarColor,
-      };
+    'id': id,
+    'name': name,
+    'specialty': specialty,
+    'email': email,
+    'phone': phone,
+    'rate_type': rateType.name,
+    'hourly_rate_cents': hourlyRateCents,
+    'flat_rate_cents': flatRateCents,
+    'subscription_rate_cents': subscriptionRateCents,
+    'bio': bio,
+    'avatar_color': avatarColor,
+  };
 }
 
 // ── Clients ─────────────────────────────────────────────────────────────────
@@ -175,12 +175,12 @@ class Client {
   final String? notes;
 
   factory Client.fromRow(Map<String, dynamic> r) => Client(
-        id: (r['_pk'] ?? r['id']).toString(),
-        name: (r['name'] ?? '').toString(),
-        email: _toStr(r['email']),
-        phone: _toStr(r['phone']),
-        notes: _toStr(r['notes']),
-      );
+    id: (r['_pk'] ?? r['id']).toString(),
+    name: (r['name'] ?? '').toString(),
+    email: _toStr(r['email']),
+    phone: _toStr(r['phone']),
+    notes: _toStr(r['notes']),
+  );
 
   String get initials {
     final parts = name.split(' ');
@@ -209,12 +209,12 @@ class Availability {
   final int endMin;
 
   factory Availability.fromRow(Map<String, dynamic> r) => Availability(
-        id: (r['_pk'] ?? r['id']).toString(),
-        providerId: (r['provider_id'] ?? '').toString(),
-        weekday: _toInt(r['weekday']),
-        startMin: _toInt(r['start_min']),
-        endMin: _toInt(r['end_min']),
-      );
+    id: (r['_pk'] ?? r['id']).toString(),
+    providerId: (r['provider_id'] ?? '').toString(),
+    weekday: _toInt(r['weekday']),
+    startMin: _toInt(r['start_min']),
+    endMin: _toInt(r['end_min']),
+  );
 
   static const _days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   String get day => _days[weekday.clamp(0, 6)];
@@ -273,14 +273,14 @@ class Appointment {
   final String? notes;
 
   factory Appointment.fromRow(Map<String, dynamic> r) => Appointment(
-        id: (r['_pk'] ?? r['id']).toString(),
-        providerId: (r['provider_id'] ?? '').toString(),
-        clientId: (r['client_id'] ?? '').toString(),
-        startsAt: (r['starts_at'] ?? '').toString(),
-        durationMin: _toInt(r['duration_min']),
-        status: AppointmentStatus.fromString(_toStr(r['status'])),
-        notes: _toStr(r['notes']),
-      );
+    id: (r['_pk'] ?? r['id']).toString(),
+    providerId: (r['provider_id'] ?? '').toString(),
+    clientId: (r['client_id'] ?? '').toString(),
+    startsAt: (r['starts_at'] ?? '').toString(),
+    durationMin: _toInt(r['duration_min']),
+    status: AppointmentStatus.fromString(_toStr(r['status'])),
+    notes: _toStr(r['notes']),
+  );
 
   /// Parse starts_at into a DateTime (null if unparseable).
   DateTime? get startsAtDate => DateTime.tryParse(startsAt);
@@ -289,7 +289,20 @@ class Appointment {
   String get formattedStart {
     final d = startsAtDate;
     if (d == null) return startsAt.isEmpty ? '(unscheduled)' : startsAt;
-    final month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.month - 1];
+    final month = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ][d.month - 1];
     final hour = d.hour == 0 ? 12 : (d.hour > 12 ? d.hour - 12 : d.hour);
     final amPm = d.hour >= 12 ? 'PM' : 'AM';
     return '$month ${d.day}, $hour:${d.minute.toString().padLeft(2, '0')} $amPm';
@@ -354,20 +367,20 @@ class Invoice {
   final String? paidAt;
 
   factory Invoice.fromRow(Map<String, dynamic> r) => Invoice(
-        id: (r['_pk'] ?? r['id']).toString(),
-        appointmentId: (r['appointment_id'] ?? '').toString(),
-        clientId: (r['client_id'] ?? '').toString(),
-        amountCents: _toInt(r['amount_cents']),
-        status: InvoiceStatus.fromString(_toStr(r['status'])),
-        providerId: _toStr(r['provider_id']),
-        lineType: RateType.fromString(_toStr(r['line_type'])),
-        rateCents: _toInt(r['rate_cents']),
-        hoursMin: _toInt(r['hours_min']),
-        description: _toStr(r['description']),
-        issuedAt: _toStr(r['issued_at']),
-        dueAt: _toStr(r['due_at']),
-        paidAt: _toStr(r['paid_at']),
-      );
+    id: (r['_pk'] ?? r['id']).toString(),
+    appointmentId: (r['appointment_id'] ?? '').toString(),
+    clientId: (r['client_id'] ?? '').toString(),
+    amountCents: _toInt(r['amount_cents']),
+    status: InvoiceStatus.fromString(_toStr(r['status'])),
+    providerId: _toStr(r['provider_id']),
+    lineType: RateType.fromString(_toStr(r['line_type'])),
+    rateCents: _toInt(r['rate_cents']),
+    hoursMin: _toInt(r['hours_min']),
+    description: _toStr(r['description']),
+    issuedAt: _toStr(r['issued_at']),
+    dueAt: _toStr(r['due_at']),
+    paidAt: _toStr(r['paid_at']),
+  );
 
   String get amount => formatCents(amountCents);
   String get rateFormatted => formatCents(rateCents);
@@ -376,10 +389,10 @@ class Invoice {
   /// A human-readable breakdown of the billing line, e.g.
   /// "1.0 hr @ $250/hr" or "Flat fee" or "Monthly subscription".
   String get lineSummary => switch (lineType) {
-        RateType.hourly => '$hoursFormatted @ ${formatCents(rateCents)}/hr',
-        RateType.flat => 'Flat fee — ${formatCents(rateCents)}',
-        RateType.subscription => 'Monthly — ${formatCents(rateCents)}',
-      };
+    RateType.hourly => '$hoursFormatted @ ${formatCents(rateCents)}/hr',
+    RateType.flat => 'Flat fee — ${formatCents(rateCents)}',
+    RateType.subscription => 'Monthly — ${formatCents(rateCents)}',
+  };
 }
 
 // ── Messages (realtime chat) ────────────────────────────────────────────────
@@ -418,15 +431,15 @@ class Message {
   final String? readAt;
 
   factory Message.fromRow(Map<String, dynamic> r) => Message(
-        id: (r['_pk'] ?? r['id']).toString(),
-        providerId: (r['provider_id'] ?? '').toString(),
-        clientId: (r['client_id'] ?? '').toString(),
-        senderType: SenderType.fromString(_toStr(r['sender_type'])),
-        senderId: (r['sender_id'] ?? '').toString(),
-        body: (r['body'] ?? '').toString(),
-        createdAt: (r['created_at'] ?? '').toString(),
-        readAt: _toStr(r['read_at']),
-      );
+    id: (r['_pk'] ?? r['id']).toString(),
+    providerId: (r['provider_id'] ?? '').toString(),
+    clientId: (r['client_id'] ?? '').toString(),
+    senderType: SenderType.fromString(_toStr(r['sender_type'])),
+    senderId: (r['sender_id'] ?? '').toString(),
+    body: (r['body'] ?? '').toString(),
+    createdAt: (r['created_at'] ?? '').toString(),
+    readAt: _toStr(r['read_at']),
+  );
 
   bool get isFromProvider => senderType == SenderType.provider;
   bool get isRead => readAt != null;

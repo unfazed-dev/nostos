@@ -84,7 +84,8 @@ abstract class NostosEngine {
   ///
   /// Emits the current value immediately on listen. `lastError` is set only for
   /// a *permanently* failed write — ordinary rejections retry and stay silent.
-  Stream<({int pending, int deadLettered, String? lastError})> watchWriteStatus();
+  Stream<({int pending, int deadLettered, String? lastError})>
+  watchWriteStatus();
 
   /// Returns the local outbox id.
   Future<int> write({
@@ -97,7 +98,8 @@ abstract class NostosEngine {
   /// Atomic batch enqueue — all ops land in one storage transaction or none
   /// do (ADR-0032 T3). Returns outbox ids in the same order as `ops`.
   Future<List<int>> writeBatch({
-    required List<({String table, String op, String pk, String? payloadJson})> ops,
+    required List<({String table, String op, String pk, String? payloadJson})>
+    ops,
   });
 
   /// Add an element to an OR-set row (ADR-0030 / ADR-0032 T4). Returns the

@@ -10,7 +10,6 @@
 // the adapter. See ADR-0034 for the design and the weaker-ordering choice.
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math show min;
 import 'dart:typed_data';
@@ -34,11 +33,7 @@ class AttachmentStateWire {
 
   /// All states the active driver considers actionable (a row in any of these
   /// is eligible for a blob op when connectivity allows).
-  static const queued = <String>{
-    queuedUpload,
-    queuedDownload,
-    queuedDelete,
-  };
+  static const queued = <String>{queuedUpload, queuedDownload, queuedDelete};
 }
 
 /// The table name + column names the app MUST declare in its schema. Nostos
@@ -87,6 +82,7 @@ abstract class BlobStore {
   Future<void> put(String id, Uint8List bytes);
   Future<Uint8List?> get(String id);
   Future<void> remove(String id);
+
   /// Remove every blob. Called on signOut. MUST be idempotent.
   Future<void> wipe();
 }
@@ -149,15 +145,16 @@ class SupabaseStorageAdapter implements AttachmentStorageAdapter {
   /// Empty means the attachment id IS the object key.
   final String pathPrefix;
 
-  String _key(String path) =>
-      pathPrefix.isEmpty ? path : '$pathPrefix$path';
+  String _key(String path) => pathPrefix.isEmpty ? path : '$pathPrefix$path';
 
   @override
   Future<void> upload(String path, Uint8List bytes, String mediaType) async {
     // uploadBinary + upsert:true is idempotent under retry (the driver may
     // re-dispatch after a network blip). contentType sets the object's MIME.
     // (supabase-dart folds contentType into FileOptions, not a top-level param.)
-    await Supabase.instance.client.storage.from(bucket).uploadBinary(
+    await Supabase.instance.client.storage
+        .from(bucket)
+        .uploadBinary(
           _key(path),
           bytes,
           fileOptions: FileOptions(contentType: mediaType, upsert: true),
@@ -195,11 +192,11 @@ class AttachmentRow {
   final String filename;
 
   factory AttachmentRow.fromJson(Map<String, dynamic> json) => AttachmentRow(
-        id: json[AttachmentSchema.colId]?.toString() ?? '',
-        state: json[AttachmentSchema.colState]?.toString() ?? '',
-        mediaType: json[AttachmentSchema.colMediaType]?.toString() ?? '',
-        filename: json[AttachmentSchema.colFilename]?.toString() ?? '',
-      );
+    id: json[AttachmentSchema.colId]?.toString() ?? '',
+    state: json[AttachmentSchema.colState]?.toString() ?? '',
+    mediaType: json[AttachmentSchema.colMediaType]?.toString() ?? '',
+    filename: json[AttachmentSchema.colFilename]?.toString() ?? '',
+  );
 }
 
 /// The attachment manager + driver. Construct via [NostosDatabase.attachments].
@@ -214,18 +211,14 @@ class AttachmentRow {
 ///   stream (see [Attachments.start] for the default self-driving loop).
 class Attachments {
   Attachments({
-    required NostosDatabase db,
-    required AttachmentStorageAdapter adapter,
+    required this._db,
+    required this._adapter,
     required BlobStore blobStore,
-    required Future<bool> Function() isOnline,
-    int maxAttempts = 5,
+    required this._isOnline,
+    this._maxAttempts = 5,
     DateTime Function()? clock,
-  })  : _db = db,
-        _adapter = adapter,
-        _blob = blobStore,
-        _isOnline = isOnline,
-        _maxAttempts = maxAttempts,
-        _clock = clock ?? DateTime.now;
+  }) : _blob = blobStore,
+       _clock = clock ?? DateTime.now;
 
   final NostosDatabase _db;
   final AttachmentStorageAdapter _adapter;
@@ -303,11 +296,13 @@ class Attachments {
   /// Queue a download for an attachment whose metadata row already exists (its
   /// `state` is normally `synced` on a second client). Patches `state` to
   /// `queued_download`; the driver fetches bytes on the next online [pump].
-  Future<void> queueDownload(String id) => _transition(id, AttachmentStateWire.queuedDownload);
+  Future<void> queueDownload(String id) =>
+      _transition(id, AttachmentStateWire.queuedDownload);
 
   /// Queue a blob for deletion from the remote bucket. The metadata row is
   /// retained as a tombstone (`archived` after the delete confirms).
-  Future<void> remove(String id) => _transition(id, AttachmentStateWire.queuedDelete);
+  Future<void> remove(String id) =>
+      _transition(id, AttachmentStateWire.queuedDelete);
 
   // ──────────────────────────── driver tick ───────────────────────────
 
@@ -436,14 +431,14 @@ class Attachments {
   }
 
   Future<void> _transition(String id, String toState) => _db.write(
-        table: AttachmentSchema.table,
-        op: 'patch',
-        pk: id,
-        payload: {
-          AttachmentSchema.colState: toState,
-          AttachmentSchema.colTimestamp: _clock().millisecondsSinceEpoch,
-        },
-      );
+    table: AttachmentSchema.table,
+    op: 'patch',
+    pk: id,
+    payload: {
+      AttachmentSchema.colState: toState,
+      AttachmentSchema.colTimestamp: _clock().millisecondsSinceEpoch,
+    },
+  );
 
   String _newId() {
     // UUIDv4 without a dep: use timestamp + random. Good enough for an

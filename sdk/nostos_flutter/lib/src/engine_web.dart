@@ -119,7 +119,8 @@ class WebNostosEngine implements NostosEngine {
   /// degrade surfacing. The Worker pushes the mode on boot (after sqlite-wasm
   /// init or degrade), so a listener bound before boot receives it; a late
   /// listener reads the cached [storageMode] getter.
-  Stream<NostosWebStorageMode> get storageModeStream => _storageController.stream;
+  Stream<NostosWebStorageMode> get storageModeStream =>
+      _storageController.stream;
 
   @override
   Stream<bool> get webStorageDegraded =>
@@ -197,9 +198,8 @@ class WebNostosEngine implements NostosEngine {
 
   @override
   Future<List<int>> writeBatch({
-    required List<
-      ({String table, String op, String pk, String? payloadJson})
-    > ops,
+    required List<({String table, String op, String pk, String? payloadJson})>
+    ops,
   }) async {
     // Wave 4c (ADR-0036): atomic enqueue via the NostosSocket.writeBatch delegate
     // (one storage txn on the engine's enqueue_batch — a mid-batch failure
@@ -208,12 +208,14 @@ class WebNostosEngine implements NostosEngine {
     final res = await _request({
       'cmd': 'writeBatch',
       'ops': ops
-          .map((o) => {
-            'table': o.table,
-            'op': o.op,
-            'pk': o.pk,
-            'payloadJson': o.payloadJson,
-          })
+          .map(
+            (o) => {
+              'table': o.table,
+              'op': o.op,
+              'pk': o.pk,
+              'payloadJson': o.payloadJson,
+            },
+          )
           .toList(),
     });
     final writeIds = res['writeIds'];
@@ -286,7 +288,7 @@ class WebNostosEngine implements NostosEngine {
   @override
   Future<String> query({required String sql}) async {
     final res = await _request({'cmd': 'query', 'sql': sql});
-    return (res['json'] as String? /* c8 ignore next 3 */) ?? '[]';
+    return (res['json'] as String? /* c8 ignore next 3 */ ) ?? '[]';
   }
 
   @override
@@ -401,10 +403,9 @@ class WebNostosEngine implements NostosEngine {
     if (_closed) return;
     _closed = true;
     try {
-      await _request({'cmd': cmd}).timeout(
-        const Duration(seconds: 2),
-        onTimeout: () => {},
-      );
+      await _request({
+        'cmd': cmd,
+      }).timeout(const Duration(seconds: 2), onTimeout: () => {});
     } catch (_) {
       // Best-effort: the Worker may already be gone.
     }

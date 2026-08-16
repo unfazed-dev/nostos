@@ -1,7 +1,4 @@
 node_modules/
 dist/
-example-app/node_modules/
 test-results/
-playwright-report/
-playwright-report/
-*.log
+android/build/

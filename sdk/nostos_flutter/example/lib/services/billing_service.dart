@@ -29,12 +29,11 @@ class BillingResult {
   final int hoursMin; // minutes billed (from appointment duration)
 
   String get description => switch (lineType) {
-        RateType.hourly =>
-          'Consultation — ${formatHours(hoursMin)} @ ${formatCents(rateCents)}/hr',
-        RateType.flat => 'Service — flat fee ${formatCents(rateCents)}',
-        RateType.subscription =>
-          'Subscription — ${formatCents(rateCents)}/mo',
-      };
+    RateType.hourly =>
+      'Consultation — ${formatHours(hoursMin)} @ ${formatCents(rateCents)}/hr',
+    RateType.flat => 'Service — flat fee ${formatCents(rateCents)}',
+    RateType.subscription => 'Subscription — ${formatCents(rateCents)}/mo',
+  };
 }
 
 class BillingService {

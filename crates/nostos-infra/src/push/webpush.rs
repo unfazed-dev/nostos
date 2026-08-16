@@ -177,7 +177,7 @@ impl WebPushRail {
             PushPayload::Silent { table, lsn } => {
                 json!({ "table": table, "lsn": lsn.0.to_string() })
             }
-            PushPayload::Visible { title, body } => json!({ "title": title, "body": body }),
+            PushPayload::Visible { title, body, .. } => json!({ "title": title, "body": body }),
         };
         // set_payload borrows; the buffer must outlive build() (encryption
         // happens there).
@@ -456,6 +456,7 @@ mod tests {
                 &PushPayload::Visible {
                     title: "Tasks changed".into(),
                     body: "New items to sync".into(),
+                    category: None,
                 },
             )
             .await;

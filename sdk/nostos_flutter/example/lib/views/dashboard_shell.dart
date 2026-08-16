@@ -165,75 +165,75 @@ class _DashboardShellState extends State<DashboardShell> {
   // IndexedStack keeps ALL page States mounted simultaneously, so each page's
   // StreamBuilder subscribes ONCE and STAYS subscribed across tab switches.
   Widget _page(int index) => IndexedStack(
-        index: index,
-        children: [
-          ProvidersView(db: widget.db),
-          ClientsView(db: widget.db),
-          AvailabilitiesView(db: widget.db),
-          AppointmentsView(db: widget.db),
-          InvoicesView(db: widget.db),
-          ChatView(db: widget.db),
-        ],
-      );
+    index: index,
+    children: [
+      ProvidersView(db: widget.db),
+      ClientsView(db: widget.db),
+      AvailabilitiesView(db: widget.db),
+      AppointmentsView(db: widget.db),
+      InvoicesView(db: widget.db),
+      ChatView(db: widget.db),
+    ],
+  );
 
   List<NavigationRailDestination> _railDestinations() => const [
-        NavigationRailDestination(
-          icon: Icon(Icons.medical_services_outlined),
-          selectedIcon: Icon(Icons.medical_services),
-          label: Text('Providers'),
-        ),
-        NavigationRailDestination(
-          icon: Icon(Icons.people_outline),
-          selectedIcon: Icon(Icons.people),
-          label: Text('Clients'),
-        ),
-        NavigationRailDestination(
-          icon: Icon(Icons.calendar_month_outlined),
-          selectedIcon: Icon(Icons.calendar_month),
-          label: Text('Availability'),
-        ),
-        NavigationRailDestination(
-          icon: Icon(Icons.event_outlined),
-          selectedIcon: Icon(Icons.event),
-          label: Text('Appointments'),
-        ),
-        NavigationRailDestination(
-          icon: Icon(Icons.receipt_long_outlined),
-          selectedIcon: Icon(Icons.receipt_long),
-          label: Text('Invoices'),
-        ),
-        NavigationRailDestination(
-          icon: Icon(Icons.chat_bubble_outline),
-          selectedIcon: Icon(Icons.chat_bubble),
-          label: Text('Chat'),
-        ),
-      ];
+    NavigationRailDestination(
+      icon: Icon(Icons.medical_services_outlined),
+      selectedIcon: Icon(Icons.medical_services),
+      label: Text('Providers'),
+    ),
+    NavigationRailDestination(
+      icon: Icon(Icons.people_outline),
+      selectedIcon: Icon(Icons.people),
+      label: Text('Clients'),
+    ),
+    NavigationRailDestination(
+      icon: Icon(Icons.calendar_month_outlined),
+      selectedIcon: Icon(Icons.calendar_month),
+      label: Text('Availability'),
+    ),
+    NavigationRailDestination(
+      icon: Icon(Icons.event_outlined),
+      selectedIcon: Icon(Icons.event),
+      label: Text('Appointments'),
+    ),
+    NavigationRailDestination(
+      icon: Icon(Icons.receipt_long_outlined),
+      selectedIcon: Icon(Icons.receipt_long),
+      label: Text('Invoices'),
+    ),
+    NavigationRailDestination(
+      icon: Icon(Icons.chat_bubble_outline),
+      selectedIcon: Icon(Icons.chat_bubble),
+      label: Text('Chat'),
+    ),
+  ];
 
   List<NavigationDestination> _barDestinations() => const [
-        NavigationDestination(
-          icon: Icon(Icons.medical_services_outlined),
-          selectedIcon: Icon(Icons.medical_services),
-          label: 'Providers',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.people_outline),
-          selectedIcon: Icon(Icons.people),
-          label: 'Clients',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.event_outlined),
-          selectedIcon: Icon(Icons.event),
-          label: 'Appts',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.receipt_long_outlined),
-          selectedIcon: Icon(Icons.receipt_long),
-          label: 'Invoices',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.chat_bubble_outline),
-          selectedIcon: Icon(Icons.chat_bubble),
-          label: 'Chat',
-        ),
-      ];
+    NavigationDestination(
+      icon: Icon(Icons.medical_services_outlined),
+      selectedIcon: Icon(Icons.medical_services),
+      label: 'Providers',
+    ),
+    NavigationDestination(
+      icon: Icon(Icons.people_outline),
+      selectedIcon: Icon(Icons.people),
+      label: 'Clients',
+    ),
+    NavigationDestination(
+      icon: Icon(Icons.event_outlined),
+      selectedIcon: Icon(Icons.event),
+      label: 'Appts',
+    ),
+    NavigationDestination(
+      icon: Icon(Icons.receipt_long_outlined),
+      selectedIcon: Icon(Icons.receipt_long),
+      label: 'Invoices',
+    ),
+    NavigationDestination(
+      icon: Icon(Icons.chat_bubble_outline),
+      selectedIcon: Icon(Icons.chat_bubble),
+      label: 'Chat',
+    ),
+  ];
 }

@@ -72,8 +72,8 @@ class NostosConfig {
       supabaseUrl = supabase['url'] as String?;
       // `publishable_key` is Supabase's successor name for the anon key;
       // accept either spelling.
-      supabaseAnonKey = (supabase['anon_key'] ?? supabase['publishable_key'])
-          as String?;
+      supabaseAnonKey =
+          (supabase['anon_key'] ?? supabase['publishable_key']) as String?;
       if (supabaseUrl == null || supabaseAnonKey == null) {
         throw const FormatException(
           'nostos config: "supabase" requires both "url" and "anon_key" '

@@ -1109,6 +1109,7 @@ mod tests {
                     crate::ports::PushTemplate::Visible {
                         title: "Changed".into(),
                         body: "{label} updated".into(),
+                        category: None,
                     },
                 )],
             ))

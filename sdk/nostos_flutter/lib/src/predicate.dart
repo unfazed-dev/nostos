@@ -23,8 +23,9 @@ import 'package:meta/meta.dart';
 /// only way an attacker-controlled string reaches `toSql()` is through a column
 /// name, so this is the injection boundary.
 void _checkIdent(String name, {String what = 'column'}) {
-  final ok = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$')
-      .hasMatch(name);
+  final ok = RegExp(
+    r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$',
+  ).hasMatch(name);
   if (!ok) {
     throw ArgumentError.value(
       name,
@@ -41,7 +42,9 @@ void _checkIdent(String name, {String what = 'column'}) {
 /// of the injection boundary — every value goes through here.
 String _literal(Object v) {
   if (v is int || v is double) return v.toString();
-  if (v is bool) return v ? '1' : '0'; // JSON1 + the WS2 views store bools as 0/1.
+  if (v is bool) {
+    return v ? '1' : '0'; // JSON1 + the WS2 views store bools as 0/1.
+  }
   if (v is String) return "'${v.replaceAll("'", "''")}'";
   throw ArgumentError.value(
     v.runtimeType,
@@ -62,11 +65,14 @@ sealed class Where {
 
   // ── Comparison leaves ──────────────────────────────────────────────────
   static Where eq(String column, Object value) => _Compare(column, '=', value);
-  static Where neq(String column, Object value) => _Compare(column, '!=', value);
+  static Where neq(String column, Object value) =>
+      _Compare(column, '!=', value);
   static Where lt(String column, Object value) => _Compare(column, '<', value);
-  static Where lte(String column, Object value) => _Compare(column, '<=', value);
+  static Where lte(String column, Object value) =>
+      _Compare(column, '<=', value);
   static Where gt(String column, Object value) => _Compare(column, '>', value);
-  static Where gte(String column, Object value) => _Compare(column, '>=', value);
+  static Where gte(String column, Object value) =>
+      _Compare(column, '>=', value);
 
   /// `column IN (v1, v2, …)`. An empty [values] is rejected — `IN ()` is not
   /// valid SQLite, and a caller reaching for it almost certainly meant
@@ -166,12 +172,14 @@ class _Junction extends Where {
 
   @override
   String toSql() {
-    final rendered = parts.map((p) {
-      final s = p.toSql();
-      // Wrap combinator children so AND/OR precedence can't surprise anyone:
-      // `a AND (b OR c)` must not flatten to `a AND b OR c`.
-      return (p is _Junction || p is _Not) ? '($s)' : s;
-    }).join(' $op ');
+    final rendered = parts
+        .map((p) {
+          final s = p.toSql();
+          // Wrap combinator children so AND/OR precedence can't surprise anyone:
+          // `a AND (b OR c)` must not flatten to `a AND b OR c`.
+          return (p is _Junction || p is _Not) ? '($s)' : s;
+        })
+        .join(' $op ');
     return '($rendered)';
   }
 }

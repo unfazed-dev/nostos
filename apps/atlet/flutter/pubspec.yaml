@@ -41,9 +41,12 @@ dependencies:
     path: ../../../sdk/nostos_flutter
   powersync: ^1.16.0
   path_provider: ^2.1.5
-
+  firebase_core: ^4.13.0
+  firebase_messaging: ^16.5.0
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to

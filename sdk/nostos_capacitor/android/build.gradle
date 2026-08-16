@@ -1,14 +1,29 @@
+// Capacitor 8 plugin module. Verified against @capacitor/android 8.5.0
+// (minSdk 24, compileSdk/targetSdk 36, AGP 8.13.0, Java 21). The Kotlin
+// gradle plugin is self-provided here because the Capacitor 8 app template
+// ships no Kotlin classpath (same convention as @capacitor-community plugins).
+buildscript {
+    ext {
+        kotlinVersion = rootProject.ext.has('kotlinVersion') ? rootProject.ext.get('kotlinVersion') : '2.1.0'
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion"
+    }
+}
+
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-// Capacitor plugin template shape (v7/8 era). Assumed — this module has not
-// been compiled here (no Android SDK/gradle on this machine); values fall
-// back to the host app's rootProject properties where possible.
 android {
     namespace 'run.nostos.capacitor'
     compileSdk rootProject.ext.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 36
     defaultConfig {
-        minSdkVersion rootProject.ext.hasProperty('minSdkVersion') ? rootProject.ext.minSdkVersion : 23
+        minSdkVersion rootProject.ext.hasProperty('minSdkVersion') ? rootProject.ext.minSdkVersion : 24
         targetSdkVersion rootProject.ext.hasProperty('targetSdkVersion') ? rootProject.ext.targetSdkVersion : 36
         versionCode 1
         versionName "1.0"

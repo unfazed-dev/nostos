@@ -46,12 +46,12 @@ void main() {
     final repoRoot =
         Platform.environment['NOSTOS_REPO_ROOT'] ??
         '${Directory.current.path}/../../..';
-    server = await Process.start('cargo', [
-      'run',
-      '-p',
-      'nostos-server',
-      '--quiet',
-    ], workingDirectory: repoRoot, environment: {'NOSTOS_BIND': _bind});
+    server = await Process.start(
+      'cargo',
+      ['run', '-p', 'nostos-server', '--quiet'],
+      workingDirectory: repoRoot,
+      environment: {'NOSTOS_BIND': _bind},
+    );
     // Surface server-side failures in the test log instead of a silent hang.
     server.stderr
         .transform(utf8.decoder)
@@ -92,13 +92,18 @@ void main() {
     // schema so applySchema runs locally (creating the WS2 `tasks` view)
     // without the HTTP round-trip. Columns carry no affinity here (hand-built,
     // no /schema fetch) — affinity is nullable for exactly this case (WS6).
-    final schema = NostosSchema(tables: [
-      NostosTable(
-        name: 'tasks',
-        primaryKey: const ['id'],
-        columns: const [NostosColumn(name: 'title'), NostosColumn(name: 'completed')],
-      ),
-    ]);
+    final schema = NostosSchema(
+      tables: [
+        NostosTable(
+          name: 'tasks',
+          primaryKey: const ['id'],
+          columns: const [
+            NostosColumn(name: 'title'),
+            NostosColumn(name: 'completed'),
+          ],
+        ),
+      ],
+    );
 
     final db = await NostosDatabase.connect(
       url: _syncUrl,

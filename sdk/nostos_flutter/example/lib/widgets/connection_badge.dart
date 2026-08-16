@@ -26,11 +26,14 @@ class ConnectionBadge extends StatelessWidget {
       padding: const EdgeInsets.only(right: 4),
       child: Chip(
         avatar: Icon(icon, color: color, size: 16),
-        label: Text(label,
-            style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: scheme.onSurfaceVariant)),
+        label: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
         side: BorderSide.none,
         padding: const EdgeInsets.symmetric(horizontal: 4),
       ),
@@ -65,7 +68,10 @@ class RateBadge extends StatelessWidget {
       child: Text(
         '${provider.rateType.label} · ${provider.rateLabel}',
         style: TextStyle(
-            fontSize: 12, fontWeight: FontWeight.w600, color: onColor),
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          color: onColor,
+        ),
       ),
     );
   }
@@ -83,25 +89,28 @@ class StatusChip extends StatelessWidget {
     final color = positive
         ? Colors.green.shade100
         : (status == 'issued' || status == 'confirmed'
-            ? scheme.primaryContainer
-            : Colors.grey.shade200);
+              ? scheme.primaryContainer
+              : Colors.grey.shade200);
     final onColor = positive
         ? Colors.green.shade900
         : (status == 'issued' || status == 'confirmed'
-            ? scheme.onPrimaryContainer
-            : Colors.grey.shade800);
+              ? scheme.onPrimaryContainer
+              : Colors.grey.shade800);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
       decoration: BoxDecoration(
         color: color,
         borderRadius: BorderRadius.circular(12),
       ),
-      child: Text(status,
-          style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              color: onColor,
-              letterSpacing: 0.3)),
+      child: Text(
+        status,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: onColor,
+          letterSpacing: 0.3,
+        ),
+      ),
     );
   }
 }
@@ -120,31 +129,27 @@ class InitialsAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.15),
-          shape: BoxShape.circle,
-        ),
-        alignment: Alignment.center,
-        child: Text(
-          initials,
-          style: TextStyle(
-            color: color,
-            fontWeight: FontWeight.w700,
-            fontSize: size * 0.36,
-          ),
-        ),
-      );
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.15),
+      shape: BoxShape.circle,
+    ),
+    alignment: Alignment.center,
+    child: Text(
+      initials,
+      style: TextStyle(
+        color: color,
+        fontWeight: FontWeight.w700,
+        fontSize: size * 0.36,
+      ),
+    ),
+  );
 }
 
 /// Empty-state placeholder: icon + message, centered.
 class EmptyState extends StatelessWidget {
-  const EmptyState({
-    super.key,
-    required this.icon,
-    required this.message,
-  });
+  const EmptyState({super.key, required this.icon, required this.message});
   final IconData icon;
   final String message;
 
@@ -161,8 +166,7 @@ class EmptyState extends StatelessWidget {
             const SizedBox(height: 12),
             Text(
               message,
-              style: TextStyle(
-                  color: scheme.outline, fontSize: 14),
+              style: TextStyle(color: scheme.outline, fontSize: 14),
               textAlign: TextAlign.center,
             ),
           ],
@@ -173,5 +177,4 @@ class EmptyState extends StatelessWidget {
 }
 
 /// A short FK id chip: "abc12345…" (the full UUID is uninformative in a list).
-String shortId(String id) =>
-    id.length > 8 ? '${id.substring(0, 8)}…' : id;
+String shortId(String id) => id.length > 8 ? '${id.substring(0, 8)}…' : id;

@@ -158,8 +158,18 @@ pub enum PushTemplate {
     /// Doorbell: at most `{table, lsn}` transits the provider.
     Silent,
     /// Visible notification; `{col}` placeholders in title/body interpolate
-    /// the triggering event's column values at send time.
-    Visible { title: String, body: String },
+    /// the triggering event's column values at send time. `category` names a
+    /// client-registered notification category (iOS `UNNotificationCategory`,
+    /// Android local-notification actions): when set, iOS renders the
+    /// category's action buttons and Android receives a data-only message the
+    /// client renders locally (system-rendered FCM notifications cannot carry
+    /// actions) — an `action`-mode table therefore requires a cooperating
+    /// client on Android.
+    Visible {
+        title: String,
+        body: String,
+        category: Option<String>,
+    },
 }
 
 /// The compiled per-table push configuration (ADR-0037 §1 amendment + §2):

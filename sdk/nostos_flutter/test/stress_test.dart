@@ -14,7 +14,6 @@
 //    scheduling may coalesce).
 
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:nostos_flutter/src/nostos.dart';
 import 'package:nostos_flutter/src/nostos_database.dart';
@@ -29,7 +28,7 @@ class _FakeEngine implements NostosEngine {
   final stateController = StreamController<NostosConnectionState>.broadcast();
   String queryResult = '[]';
   final List<({String table, String op, String pk, String? payloadJson})>
-      writes = [];
+  writes = [];
 
   @override
   Future<String> query({required String sql}) async => queryResult;
@@ -39,17 +38,18 @@ class _FakeEngine implements NostosEngine {
     required List<NostosTableSub> tables,
     Set<String> orSetTables = const <String>{},
     Set<String> counterTables = const <String>{},
-  }) =>
-      stateController.stream;
+  }) => stateController.stream;
 
   @override
   Stream<String> watch({required String table}) => rowsController.stream;
 
-  final _writeStatus = StreamController<
-      ({int pending, int deadLettered, String? lastError})>.broadcast();
+  final _writeStatus =
+      StreamController<
+        ({int pending, int deadLettered, String? lastError})
+      >.broadcast();
   @override
   Stream<({int pending, int deadLettered, String? lastError})>
-      watchWriteStatus() => _writeStatus.stream;
+  watchWriteStatus() => _writeStatus.stream;
 
   @override
   Future<int> write({
@@ -65,7 +65,7 @@ class _FakeEngine implements NostosEngine {
   @override
   Future<List<int>> writeBatch({
     required List<({String table, String op, String pk, String? payloadJson})>
-        ops,
+    ops,
   }) async => List.filled(ops.length, 1);
 
   @override
@@ -161,8 +161,10 @@ void main() {
     // Throughput log (assertion is correctness, not speed).
     final opsPerSec = (n / (sw.elapsedMilliseconds / 1000)).round();
     // ignore: avoid_print
-    print('STRESS write: $n upserts in ${sw.elapsedMilliseconds}ms '
-        '($opsPerSec ops/s)');
+    print(
+      'STRESS write: $n upserts in ${sw.elapsedMilliseconds}ms '
+      '($opsPerSec ops/s)',
+    );
   });
 
   test('stress READ: $n watch ticks — no panic, final decode matches', () async {
@@ -179,10 +181,7 @@ void main() {
 
     final emissions = <List<_Todo>>[];
     final errors = <Object>[];
-    final sub = todos.watch().listen(
-      emissions.add,
-      onError: errors.add,
-    );
+    final sub = todos.watch().listen(emissions.add, onError: errors.add);
 
     final sw = Stopwatch()..start();
     for (var i = 0; i < n; i++) {
@@ -197,14 +196,20 @@ void main() {
     await sub.cancel();
 
     expect(errors, isEmpty, reason: 'watch stream must not error under load');
-    expect(emissions, isNotEmpty, reason: 'watch must have emitted at least once');
+    expect(
+      emissions,
+      isNotEmpty,
+      reason: 'watch must have emitted at least once',
+    );
     expect(emissions.last.length, 1);
     expect(emissions.last.first.id, 'final');
     expect(emissions.last.first.title, 'done');
     final ticksPerSec = (n / (sw.elapsedMilliseconds / 1000)).round();
     // ignore: avoid_print
-    print('STRESS read: $n ticks (pump) in ${sw.elapsedMilliseconds}ms '
-        '($ticksPerSec ticks/s, ${emissions.length} emissions decoded)');
+    print(
+      'STRESS read: $n ticks (pump) in ${sw.elapsedMilliseconds}ms '
+      '($ticksPerSec ticks/s, ${emissions.length} emissions decoded)',
+    );
   });
 
   test('stress MIXED: concurrent upserts + watch ticks — no panic', () async {
@@ -236,11 +241,17 @@ void main() {
     await sub.cancel();
 
     expect(errors, isEmpty);
-    expect(engine.writes.length, n, reason: 'no upsert dropped under concurrency');
+    expect(
+      engine.writes.length,
+      n,
+      reason: 'no upsert dropped under concurrency',
+    );
     final mixedPerSec = (n / (sw.elapsedMilliseconds / 1000)).round();
     // ignore: avoid_print
-    print('STRESS mixed: $n upserts + $n ticks in ${sw.elapsedMilliseconds}ms '
-        '($mixedPerSec cycles/s)');
+    print(
+      'STRESS mixed: $n upserts + $n ticks in ${sw.elapsedMilliseconds}ms '
+      '($mixedPerSec cycles/s)',
+    );
   });
 
   // Flakiness sweep: run the write flood 5x, assert deterministic count every
@@ -269,7 +280,10 @@ void main() {
     print('STRESS flakiness x5 ops/s: $opsPerSec (min=$min max=$max)');
     // Throughput variance is fine; a >10x swing would hint at scheduler
     // pathology. We assert only correctness here.
-    expect(max < min * 10 || min == 0, isTrue,
-        reason: 'throughput swung >10x ($min..$max) — investigate');
+    expect(
+      max < min * 10 || min == 0,
+      isTrue,
+      reason: 'throughput swung >10x ($min..$max) — investigate',
+    );
   });
 }

@@ -171,12 +171,24 @@ impl ApnsRail {
                     "lsn": lsn.0.to_string()
                 }),
             ),
-            PushPayload::Visible { title, body } => (
-                "alert",
-                "10",
-                jsonwebtoken::get_current_timestamp() + u64::from(VISIBLE_TTL_SECS),
-                json!({ "aps": { "alert": { "title": title, "body": body } } }),
-            ),
+            PushPayload::Visible {
+                title,
+                body,
+                category,
+            } => {
+                let mut aps = json!({ "alert": { "title": title, "body": body } });
+                // Direct-APNs parity with the FCM rail's action pushes:
+                // render the client-registered category's buttons.
+                if let Some(category) = category {
+                    aps["category"] = json!(category);
+                }
+                (
+                    "alert",
+                    "10",
+                    jsonwebtoken::get_current_timestamp() + u64::from(VISIBLE_TTL_SECS),
+                    json!({ "aps": aps }),
+                )
+            }
         };
         let url = format!("{}/3/device/{device_token}", self.base);
         let mut req = self
@@ -401,6 +413,7 @@ mod tests {
                 &PushPayload::Visible {
                     title: "Tasks changed".into(),
                     body: "New items to sync".into(),
+                    category: None,
                 },
             )
             .await;

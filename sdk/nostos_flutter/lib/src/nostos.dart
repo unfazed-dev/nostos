@@ -96,7 +96,7 @@ class Nostos {
   ///
   /// Requires a prior [subscribe]. Emits the current value on listen.
   Stream<({int pending, int deadLettered, String? lastError})>
-      get writeStatus => _engine.watchWriteStatus();
+  get writeStatus => _engine.watchWriteStatus();
 
   /// Web-only storage degrade signal (folds into [SyncStatus.webStorageDegraded]
   /// via NostosDatabase). Native never fires. See [NostosEngine.webStorageDegraded].
@@ -111,8 +111,7 @@ class Nostos {
   /// against a projected `<table>`. Synchronous (the FFI is `Result<(),
   /// String>` and throws on error). Most apps won't call this directly —
   /// `NostosDatabase.connect` wires it from a resolved `NostosSchema`.
-  void applySchema(List<ClientTableFfi> tables) =>
-      _engine.applySchema(tables);
+  void applySchema(List<ClientTableFfi> tables) => _engine.applySchema(tables);
 
   /// Subscribe to [tables] over one `/sync` socket (D1/ADR-0022 multi-table).
   /// Each entry may carry its own [NostosTableSub.whereSql] (a safe-SQL
@@ -179,8 +178,7 @@ class Nostos {
   ) {
     List<Map<String, dynamic>>? latest;
     StreamSubscription<List<Map<String, dynamic>>>? sub;
-    final controller =
-        StreamController<List<Map<String, dynamic>>>.broadcast();
+    final controller = StreamController<List<Map<String, dynamic>>>.broadcast();
     void ensureListening() {
       if (sub != null) return;
       sub = source.listen(
@@ -252,9 +250,7 @@ class Nostos {
     Duration? throttle,
   }) {
     if (_subscribedTables.isEmpty) {
-      throw StateError(
-        'watchQuery("$sql") called without subscribe() first.',
-      );
+      throw StateError('watchQuery("$sql") called without subscribe() first.');
     }
     // PowerSync `triggerOnTables` parity: validate against the subscribed set.
     // Multi-table (D1/ADR-0022): any subscribed table is a legal trigger
@@ -272,12 +268,14 @@ class Nostos {
     // Tick source: merge each trigger table's (cached) watch stream — a change
     // to ANY trigger table re-runs the SQL.
     final merged = _mergeTriggers(triggers.map(watch).toList(growable: false));
-    final Stream<List<Map<String, dynamic>>> ticks =
-        throttle == null ? merged : _debounceTicks(merged, throttle);
+    final Stream<List<Map<String, dynamic>>> ticks = throttle == null
+        ? merged
+        : _debounceTicks(merged, throttle);
 
-    return ticks.asyncMap((_) async =>
-        (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
-            .cast<Map<String, dynamic>>());
+    return ticks.asyncMap(
+      (_) async => (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
+          .cast<Map<String, dynamic>>(),
+    );
   }
 
   /// Reactive typed-record watch (WS6, opt-in). Like [watchQuery] but decodes
@@ -295,9 +293,11 @@ class Nostos {
     T Function(Map<String, dynamic> row) fromRow, {
     List<String>? triggerOnTables,
     Duration? throttle,
-  }) =>
-      watchQuery(sql, triggerOnTables: triggerOnTables, throttle: throttle)
-          .map((rows) => rows.map(fromRow).toList(growable: false));
+  }) => watchQuery(
+    sql,
+    triggerOnTables: triggerOnTables,
+    throttle: throttle,
+  ).map((rows) => rows.map(fromRow).toList(growable: false));
 
   /// Enqueue a durable write. Returns the local outbox id once the write is
   /// captured on disk — NOT once the server acks it; the applied row
@@ -337,7 +337,7 @@ class Nostos {
   /// ids in the same order as [writes].
   Future<List<int>> writeBatch(
     List<({String table, String op, String pk, Map<String, dynamic>? payload})>
-        writes,
+    writes,
   ) {
     for (final w in writes) {
       if (!_subscribedTables.contains(w.table)) {
@@ -350,12 +350,14 @@ class Nostos {
     }
     return _engine.writeBatch(
       ops: writes
-          .map((w) => (
-                table: w.table,
-                op: w.op,
-                pk: w.pk,
-                payloadJson: w.payload == null ? null : jsonEncode(w.payload),
-              ))
+          .map(
+            (w) => (
+              table: w.table,
+              op: w.op,
+              pk: w.pk,
+              payloadJson: w.payload == null ? null : jsonEncode(w.payload),
+            ),
+          )
           .toList(),
     );
   }
@@ -516,8 +518,7 @@ class Nostos {
     List<Stream<List<Map<String, dynamic>>>> sources,
   ) {
     if (sources.length == 1) return sources.single;
-    final controller =
-        StreamController<List<Map<String, dynamic>>>.broadcast();
+    final controller = StreamController<List<Map<String, dynamic>>>.broadcast();
     final subs = <StreamSubscription<List<Map<String, dynamic>>>>[];
     controller.onListen = () {
       if (subs.isNotEmpty) return; // already wired (re-listen after cancel)
@@ -630,6 +631,10 @@ class NostosSupabase {
     required String accessToken,
     String? sqlitePath,
   }) {
-    return Nostos.connect(url: nostosUrl, token: accessToken, sqlitePath: sqlitePath);
+    return Nostos.connect(
+      url: nostosUrl,
+      token: accessToken,
+      sqlitePath: sqlitePath,
+    );
   }
 }

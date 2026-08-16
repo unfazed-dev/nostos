@@ -43,9 +43,7 @@ void main(List<String> args) async {
       OS.macOS || OS.iOS => 'lib$_crateName.dylib',
       _ => 'lib$_crateName.so',
     };
-    final targetFile = File.fromUri(
-      input.outputDirectory.resolve(libFileName),
-    );
+    final targetFile = File.fromUri(input.outputDirectory.resolve(libFileName));
     await targetFile.parent.create(recursive: true);
 
     // The manifest key this specific build targets. Must match exactly one
@@ -198,9 +196,10 @@ Future<void> _downloadAndVerify({
 /// (have 'macOS', need 'iOS-simulator')" — which is exactly how the atlet
 /// iOS-simulator run failed (2026-08-07). macOS stays null (host == target
 /// there, the one case the old behaviour was accidentally correct for).
-/// ponytail: Android is left null — a bare `--target aarch64-linux-android`
-/// fails without the NDK linker env (`cargo ndk` handles it); the W6 release
-/// pipeline's prebuilt artifacts are the upgrade path for Android.
+/// Android goes through `cargo ndk` (see `_cargoBuildFallback`) because a
+/// bare `--target aarch64-linux-android` fails without the NDK linker env.
+/// ponytail: 32-bit x86 is left null (target not installed here); the W6
+/// release pipeline's prebuilt artifacts remain the upgrade path for that.
 String? _rustTriple(CodeConfig code) {
   return switch (code.targetOS) {
     OS.iOS => switch (code.iOS.targetSdk) {
@@ -210,6 +209,12 @@ String? _rustTriple(CodeConfig code) {
         Architecture.x64 => 'x86_64-apple-ios',
         _ => null,
       },
+      _ => null,
+    },
+    OS.android => switch (code.targetArchitecture) {
+      Architecture.arm64 => 'aarch64-linux-android',
+      Architecture.arm => 'armv7-linux-androideabi',
+      Architecture.x64 => 'x86_64-linux-android',
       _ => null,
     },
     _ => null,
@@ -223,12 +228,41 @@ Future<void> _cargoBuildFallback({
 }) async {
   final crateDir = Directory.fromUri(input.packageRoot.resolve('rust/')).path;
   final triple = _rustTriple(input.config.code);
-  final result = await Process.run('cargo', [
-    'build',
-    '--release',
-    if (triple != null) ...['--target', triple],
-  ], workingDirectory: crateDir);
+  // Android needs cargo-ndk to set the NDK linker/AR env per triple; a bare
+  // `cargo build --target <android-triple>` fails at link time. NB: the armv7
+  // triple ends in `-androideabi`, so match on `contains`, not a suffix.
+  final isAndroid = triple?.contains('android') ?? false;
+  Map<String, String>? env;
+  if (isAndroid) {
+    env = await _androidNdkEnv(triple!);
+  }
+  final String command;
+  final List<String> args;
+  if (isAndroid) {
+    command = 'cargo';
+    args = ['ndk', '-t', triple!, 'build', '--release'];
+  } else {
+    command = 'cargo';
+    args = [
+      'build',
+      '--release',
+      if (triple != null) ...['--target', triple],
+    ];
+  }
+  final result = await Process.run(
+    command,
+    args,
+    workingDirectory: crateDir,
+    environment: env,
+  );
   if (result.exitCode != 0) {
+    if (isAndroid &&
+        result.stderr.toString().contains('no such subcommand: `ndk`')) {
+      throw Exception(
+        'cross-compiling for Android requires cargo-ndk: '
+        'cargo install cargo-ndk (and an NDK via Android Studio)',
+      );
+    }
     throw Exception('cargo build failed:\n${result.stderr}');
   }
   final builtFile = File(
@@ -240,4 +274,66 @@ Future<void> _cargoBuildFallback({
     throw Exception('cargo build did not produce ${builtFile.path}');
   }
   await builtFile.copy(destination.path);
+}
+
+/// Export CC/AR for the requested Android triple from a located NDK.
+/// cargo-ndk sets the cargo *linker* but not `CC_*`, and the NDK ships only
+/// API-suffixed clang wrappers (`armv7a-linux-androideabi24-clang`), so
+/// cc-rs-based build scripts (`ring`) can't guess the compiler without this.
+/// ponytail: API level hardcoded 24 (capacitor minSdk); prebuilt dir sniffed
+/// from the NDK layout rather than assuming darwin-x86_64.
+Future<Map<String, String>> _androidNdkEnv(String triple) async {
+  const api = 24;
+  final candidates = [
+    Platform.environment['ANDROID_NDK_HOME'],
+    Platform.environment['ANDROID_NDK_ROOT'],
+    if (Platform.environment['ANDROID_HOME'] != null)
+      '${Platform.environment['ANDROID_HOME']}/ndk',
+    if (Platform.isMacOS)
+      '${Platform.environment['HOME']}/Library/Android/sdk/ndk',
+  ].whereType<String>();
+  String? binDir;
+  for (final base in candidates) {
+    final dir = Directory(base);
+    if (!dir.existsSync()) continue;
+    // ANDROID_NDK_HOME points at the NDK root; the sdk/ndk dirs hold versions.
+    final roots =
+        dir.existsSync() && Directory('$base/toolchains').existsSync()
+              ? [base]
+              : dir
+                    .listSync()
+                    .whereType<Directory>()
+                    .map((d) => d.path)
+                    .toList()
+          ..sort();
+    for (final root in roots.reversed) {
+      final prebuilt = Directory('$root/toolchains/llvm/prebuilt');
+      if (!prebuilt.existsSync()) continue;
+      final host = prebuilt.listSync().whereType<Directory>().firstOrNull;
+      if (host == null) continue;
+      binDir = '${host.path}/bin';
+      break;
+    }
+    if (binDir != null) break;
+  }
+  if (binDir == null) {
+    throw Exception(
+      'Android build requires an NDK: set ANDROID_NDK_HOME or install one '
+      'under the Android SDK\'s ndk/ directory via Android Studio',
+    );
+  }
+  final prefix = switch (triple) {
+    'aarch64-linux-android' => 'aarch64-linux-android',
+    'armv7-linux-androideabi' => 'armv7a-linux-androideabi',
+    'x86_64-linux-android' => 'x86_64-linux-android',
+    _ => throw Exception('unsupported Android triple: $triple'),
+  };
+  final cc = '$binDir/$prefix$api-clang';
+  final ar = '$binDir/llvm-ar';
+  final underscored = triple.replaceAll('-', '_');
+  return Map<String, String>.of(Platform.environment)
+    ..['CC_$triple'] = cc
+    ..['CC_$underscored'] = cc
+    ..['AR_$triple'] = ar
+    ..['AR_$underscored'] = ar;
 }

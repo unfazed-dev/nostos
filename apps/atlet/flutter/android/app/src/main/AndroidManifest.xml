@@ -30,6 +30,21 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- PILOT (ADR-0037 §2): replaces FlutterFire's default messaging
+             service so nostos action pushes (data-only {title, body,
+             category}) render natively with action buttons in every app
+             state; doorbells still flow to Dart via super (see
+             AtletMessagingService.kt). -->
+        <service
+            android:name=".AtletMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT"/>
+            </intent-filter>
+        </service>
+        <receiver
+            android:name=".DismissReceiver"
+            android:exported="false"/>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

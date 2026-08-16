@@ -183,7 +183,21 @@ The plugin vendors no Firebase/Apple push SDKs beyond the bridge skeleton:
 - **iOS**: the `aps-environment` entitlement + Push Notifications capability;
   the APNs key/team config on the server; visible-notification authorization
   (`UNUserNotificationCenter.requestAuthorization`) if the app shows alerts;
-  the app-id provisioning. The plugin only registers and forwards.
+  the app-id provisioning. The plugin only registers and forwards — plus one
+  required AppDelegate forwarder (Capacitor 8 apps post the APNs callbacks as
+  NotificationCenter events, same wiring as `@capacitor/push-notifications`):
+
+  ```swift
+  // AppDelegate.swift
+  func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+    NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+  }
+
+  func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+    NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
+  }
+  ```
+
 - **Android**: the full Firebase setup (`google-services.json`,
   `firebase-messaging` dependency, `FirebaseMessagingService` + its manifest
   entry, `POST_NOTIFICATIONS` runtime permission for visible notifications on
@@ -199,15 +213,18 @@ The plugin vendors no Firebase/Apple push SDKs beyond the bridge skeleton:
   notification (or budget-permits the silent push) → the app foregrounds or
   reconnects → `reconnect()`/`connect()` resumes from the checkpoint. Push is
   a nudge; sync reconciles (ADR-0037 §2).
-- The native sides are skeleton-shaped and were not compiled in CI (no
-  Capacitor app project exists in-repo): the Swift side is syntax-checked
-  only, the Kotlin side is reviewed-by-construction against the Capacitor
-  plugin template. Both follow the @capacitor/push-notifications wiring.
+- The native sides were compile-verified against Capacitor 8.5.0 (iOS: SPM
+  `xcodebuild` against `capacitor-swift-pm` 8.5.0 for the iOS simulator;
+  Android: `gradlew :app:assembleDebug` with AGP 8.13.0 / compileSdk 36 /
+  Kotlin), but no Capacitor app project exists in-repo, so they are not
+  exercised in CI. Both follow the @capacitor/push-notifications wiring.
 - Registered tokens are tracked in memory for sign-out deregistration only —
   a webview reload forgets them; the server-side rails prune stale rows
   (APNs 410 / FCM `UNREGISTERED`).
-- On iOS the plugin claims `UNUserNotificationCenter.delegate`; a second push
-  plugin claiming it (e.g. @capacitor/push-notifications) will conflict.
+- On iOS the plugin registers as Capacitor's notification-router push
+  handler (Capacitor owns the `UNUserNotificationCenter` delegate); a second
+  push plugin taking that same router slot (e.g. @capacitor/push-notifications)
+  will conflict. Notification *taps* are not bridged (foreground delivery only).
 
 ## Storage (ceiling + upgrade path)
 
@@ -240,6 +257,13 @@ npm install
 npm run build         # tsc → dist/
 npm run test:unit     # node --test test/push_rest.spec.cjs
 ```
+
+Native sides (compile check — needs Xcode / Android SDK): create a throwaway
+Capacitor v8 app, `npm i` this folder, `npx cap add ios android && npx cap sync`,
+then `xcodebuild build -project ios/App/App.xcodeproj -scheme App -sdk iphonesimulator`
+and `cd android && ./gradlew :app:assembleDebug`. iOS ships both an SPM
+manifest (`Package.swift`, the Capacitor 8 default app template) and
+`NostosCapacitor.podspec` (CocoaPods apps); both must stay in step.
 
 The example app under `example-app/` has a Playwright E2E
 (`example-app/e2e/push-echo.spec.cjs`) that spawns the SDK E2E spine, opens

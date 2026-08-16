@@ -14,59 +14,69 @@ import 'package:nostos_flutter/nostos_flutter.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('signOut wipes local state so the next principal sees nothing (ADR-0029)',
-      () async {
-    final db = '${Directory.systemTemp.path}/nostos_flutter_signout_test.sqlite';
-    final dbFile = File(db);
-    if (dbFile.existsSync()) {
-      dbFile.deleteSync();
-    }
+  test(
+    'signOut wipes local state so the next principal sees nothing (ADR-0029)',
+    () async {
+      final db =
+          '${Directory.systemTemp.path}/nostos_flutter_signout_test.sqlite';
+      final dbFile = File(db);
+      if (dbFile.existsSync()) {
+        dbFile.deleteSync();
+      }
 
-    // User A: connect, subscribe, seed a row that lands in the durable store.
-    final a = await Nostos.connect(
-      url: 'ws://localhost:0',
-      token: 'token-a',
-      sqlitePath: db,
-    );
-    await a.subscribe('tasks');
-    await a.write('tasks', op: 'upsert', pk: 'pk1', payload: {'title': 'seed'});
-    final before = await a.query('SELECT pk FROM cairn_data');
-    expect(
-      before,
-      contains('pk1'),
-      reason: 'seeded row must be present before signOut',
-    );
+      // User A: connect, subscribe, seed a row that lands in the durable store.
+      final a = await Nostos.connect(
+        url: 'ws://localhost:0',
+        token: 'token-a',
+        sqlitePath: db,
+      );
+      await a.subscribe('tasks');
+      await a.write(
+        'tasks',
+        op: 'upsert',
+        pk: 'pk1',
+        payload: {'title': 'seed'},
+      );
+      final before = await a.query('SELECT pk FROM cairn_data');
+      expect(
+        before,
+        contains('pk1'),
+        reason: 'seeded row must be present before signOut',
+      );
 
-    // signOut must return promptly (abort+await quiesce) and wipe the file.
-    await a.signOut();
+      // signOut must return promptly (abort+await quiesce) and wipe the file.
+      await a.signOut();
 
-    // User B reopens the SAME file: A's row must not survive signOut.
-    final b = await Nostos.connect(
-      url: 'ws://localhost:0',
-      token: 'token-b',
-      sqlitePath: db,
-    );
-    await b.subscribe('tasks');
-    final after = await b.query('SELECT pk FROM cairn_data');
-    expect(
-      after,
-      isNot(contains('pk1')),
-      reason: 'prior principal row must not survive signOut',
-    );
-    await b.close();
+      // User B reopens the SAME file: A's row must not survive signOut.
+      final b = await Nostos.connect(
+        url: 'ws://localhost:0',
+        token: 'token-b',
+        sqlitePath: db,
+      );
+      await b.subscribe('tasks');
+      final after = await b.query('SELECT pk FROM cairn_data');
+      expect(
+        after,
+        isNot(contains('pk1')),
+        reason: 'prior principal row must not survive signOut',
+      );
+      await b.close();
 
-    if (dbFile.existsSync()) {
-      dbFile.deleteSync();
-    }
-  });
+      if (dbFile.existsSync()) {
+        dbFile.deleteSync();
+      }
+    },
+  );
 
-  test('signOut with no active subscription is an idempotent no-op (ADR-0029)',
-      () async {
-    final c = await Nostos.connect(
-      url: 'ws://localhost:0',
-      token: 't',
-      sqlitePath: ':memory:',
-    );
-    await c.signOut(); // must not throw
-  });
+  test(
+    'signOut with no active subscription is an idempotent no-op (ADR-0029)',
+    () async {
+      final c = await Nostos.connect(
+        url: 'ws://localhost:0',
+        token: 't',
+        sqlitePath: ':memory:',
+      );
+      await c.signOut(); // must not throw
+    },
+  );
 }

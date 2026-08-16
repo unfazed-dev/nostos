@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -14,6 +17,7 @@ import 'bench/store.dart';
 import 'bench/upload.dart';
 import 'design/tokens.dart';
 import 'engine_registry.dart';
+import 'push/push_pilot.dart';
 import 'ui/analytics.dart';
 import 'ui/connectivity_led.dart';
 import 'ui/home.dart';
@@ -37,14 +41,31 @@ const _supabaseAnonKey = String.fromEnvironment(
 // wire it in if the bench harness ever needs per-build accuracy.
 const _appVersion = '1.0.0+1'; // mirrors pubspec.yaml's `version:`
 
+// PILOT (ADR-0037): opt-in FCM doorbell wiring — see lib/push/push_pilot.dart.
+// Off by default so builds/analyze/tests stay green without operator-owned
+// Firebase config (google-services.json / GoogleService-Info.plist).
+// NOTE: bool.fromEnvironment only accepts the literal string "true" — pass
+// `--dart-define=ATLET_PUSH_PILOT=true`; `=1` silently parses as false.
+const _pushPilotEnabled = bool.fromEnvironment('ATLET_PUSH_PILOT');
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Supabase.initialize(
     url: _supabaseUrl,
     publishableKey: _supabaseAnonKey,
   );
+  if (_pushPilotEnabled) {
+    // Platform config (google-services.json / GoogleService-Info.plist) —
+    // throws here when absent, which is the point of the opt-in flag.
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(nostosDoorbellBackgroundHandler);
+  }
   runApp(const AtletApp());
 }
+
+/// Foreground order-banner bridge: MainActivity posts a local heads-up on
+/// the same 'cairn' channel as the FCM pushes (see push pilot, ADR-0037).
+const _orderBannerChannel = MethodChannel('atlet/notify');
 
 /// Single registry for the app's lifetime. Owns which sync engine is live
 /// and enforces plan decision #4 (never both engines live at once) — see
@@ -102,6 +123,13 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<BenchStore>? _benchStoreFuture;
   ConnectivityGuard? _connectivityGuard;
 
+  // PILOT (ADR-0037): foreground order-status banner — the online half of the
+  // push story. While the app is connected, the vendor's status UPDATE
+  // arrives over the live sync socket (a push is suppressed by the offline
+  // gate by design), so the in-app banner IS the foreground notification.
+  StreamSubscription<List<OrderRow>>? _orderBannerSub;
+  final Map<String, String> _lastOrderStatuses = {};
+
   /// Drives the offline banner. Sourced from platform connectivity (the
   /// guard), not the engine's `connected` stream: the banner must show even
   /// when no engine is live (signed out) and must not flicker on the
@@ -152,7 +180,33 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _connectivityGuard?.dispose();
     _connectivityGuard = null;
+    _orderBannerSub?.cancel();
+    _orderBannerSub = null;
     super.dispose();
+  }
+
+  /// Foreground half of the push pilot: snackbar on any order-status change
+  /// seen through the live `watchOrders()` stream. The first emission only
+  /// primes `_lastOrderStatuses` (no banner for rows the snapshot brings in,
+  /// including the user's own checkout).
+  void _wireOrderBanner(NostosAdapter adapter) {
+    _orderBannerSub?.cancel();
+    _lastOrderStatuses.clear();
+    _orderBannerSub = adapter.watchOrders().listen((orders) {
+      for (final o in orders) {
+        final prev = _lastOrderStatuses[o.id];
+        if (prev != null && prev != o.status) {
+          // Local heads-up on the same 'cairn' channel as the FCM pushes —
+          // MainActivity's MethodChannel handler posts it; same-body posts
+          // share an id, so the stream's replayed emissions just replace.
+          unawaited(_orderBannerChannel.invokeMethod(
+            'order_update',
+            {'body': 'Order ${o.id.substring(0, 8)} is ${o.status}'},
+          ));
+        }
+        _lastOrderStatuses[o.id] = o.status;
+      }
+    });
   }
 
   /// Starts [Engine.cairn] if no engine is live yet and a Supabase session
@@ -184,7 +238,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _notify('Switching to ${target.name}…');
     try {
       final dbDir = (await getApplicationDocumentsDirectory()).path;
-      await engineRegistry.switchTo(
+      final adapter = await engineRegistry.switchTo(
         target,
         SyncSession(
           supabaseUrl: _supabaseUrl,
@@ -193,6 +247,22 @@ class _HomeScreenState extends State<HomeScreen> {
           dbDir: dbDir,
         ),
       );
+      // PILOT (ADR-0037): doorbell registration follows the nostos engine —
+      // push is a nostos feature, PowerSync has no rail. detach() on switch-
+      // away only unwires handlers; the SDK's sign-out hook (run inside the
+      // registry's wipe, above) deregisters the tokens.
+      if (_pushPilotEnabled) {
+        if (target == Engine.cairn) {
+          final nostos = adapter as NostosAdapter;
+          unawaited(pushPilot.attach(nostos));
+          _wireOrderBanner(nostos);
+        } else {
+          unawaited(pushPilot.detach());
+          _orderBannerSub?.cancel();
+          _orderBannerSub = null;
+          _lastOrderStatuses.clear();
+        }
+      }
       _notify('Now syncing with ${target.name}.');
     } catch (e) {
       _notify('Engine switch failed: $e');

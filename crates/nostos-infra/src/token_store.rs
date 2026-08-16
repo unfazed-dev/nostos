@@ -125,6 +125,17 @@ impl PgTokenStore {
     /// tenant boundary (ADR-0018). Returns `Ok(())` in both cases — the
     /// registrant learns nothing about another tenant's row.
     ///
+    /// Token-rotation hygiene: the same statement also sweeps this
+    /// account's sibling tokens not re-registered within 30 days. An
+    /// install rotation cannot know its predecessor's token, and FCM keeps
+    /// accepting sends to it (same device + app), so the rail-level
+    /// `UNREGISTERED` prune never fires — stale rows accumulate one per
+    /// reinstall and every push fans out to all of them. A token whose app
+    /// hasn't re-registered in 30 days is an abandoned install.
+    /// ponytail: 30d constant, per-account piggyback on register (no
+    /// background sweep); make it an env knob when an operator needs a
+    /// different TTL.
+    ///
     /// # Errors
     /// [`TokenStoreError`] if the Postgres round-trip fails.
     pub async fn upsert(
@@ -135,14 +146,21 @@ impl PgTokenStore {
         tenant_id: &str,
     ) -> Result<(), TokenStoreError> {
         let sql = "\
-            INSERT INTO cairn_push_tokens (token, platform, account_id, tenant_id, updated_at) \
-            VALUES ($1, $2, $3, $4, now()) \
-            ON CONFLICT (token) DO UPDATE SET \
-                platform = EXCLUDED.platform, \
-                account_id = EXCLUDED.account_id, \
-                tenant_id = EXCLUDED.tenant_id, \
-                updated_at = now() \
-            WHERE cairn_push_tokens.tenant_id = EXCLUDED.tenant_id";
+            WITH reg AS ( \
+                INSERT INTO cairn_push_tokens (token, platform, account_id, tenant_id, updated_at) \
+                VALUES ($1, $2, $3, $4, now()) \
+                ON CONFLICT (token) DO UPDATE SET \
+                    platform = EXCLUDED.platform, \
+                    account_id = EXCLUDED.account_id, \
+                    tenant_id = EXCLUDED.tenant_id, \
+                    updated_at = now() \
+                WHERE cairn_push_tokens.tenant_id = EXCLUDED.tenant_id \
+                RETURNING token \
+            ) \
+            DELETE FROM cairn_push_tokens \
+            WHERE account_id = $3 AND tenant_id = $4 \
+              AND token <> $1 \
+              AND updated_at < now() - interval '30 days'";
         let client = self.client().await?;
         let params: [&(dyn tokio_postgres::types::ToSql + Sync); 4] =
             [&token, &platform, &account_id, &tenant_id];
