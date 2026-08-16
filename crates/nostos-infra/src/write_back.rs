@@ -693,15 +693,32 @@ mod pg {
             let quoted_pk = quote_ident(PK_COLUMN);
 
             // 3a. No tenant scoping active: unchanged v1 behavior. pk bound as
-            //     $1 (NEVER interpolated), typed by inference (uuid pk → Uuid).
+            //     $1 (NEVER interpolated), typed by inference (uuid pk → Uuid)
+            //     then coerced to the statement's declared param type — a
+            //     uuid-shaped pk in a TEXT column must bind as text (same
+            //     coercion as the upsert path; without it tokio-postgres
+            //     rejects the bind client-side with "error serializing
+            //     parameter 0" — see e2e_pg_writeback_delete_text_pk).
             //     A missing row is success (idempotent) — Postgres's DELETE
             //     returns 0 rows affected, which is not an error.
             let Some(scope) = tenant else {
                 let sql = format!("DELETE FROM {quoted_table} WHERE {quoted_pk} = $1");
                 let client = self.client().await?;
-                let pk_value = SqlValue::from_pk(pk);
-                let params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [pk_value.as_tosql()];
-                return match client.execute(&sql, &params).await {
+                let mut values = vec![SqlValue::from_pk(pk)];
+                let stmt = match client.prepare(&sql).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.drop_client().await;
+                        return Err(WriteBackError::Backend(e.to_string()));
+                    }
+                };
+                if let Err(msg) = coerce_params(&stmt, &mut values) {
+                    self.return_client(client).await;
+                    return Err(WriteBackError::InvalidPayload(msg));
+                }
+                let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                    values.iter().map(SqlValue::as_tosql).collect();
+                return match client.execute(&stmt, &params).await {
                     Ok(_) => {
                         self.return_client(client).await;
                         Ok(())
@@ -748,11 +765,24 @@ mod pg {
                         EXISTS(SELECT 1 FROM {quoted_table} WHERE {quoted_pk} = $1) AS still_exists"
             );
             let client = self.client().await?;
-            let pk_value = SqlValue::from_pk(pk);
-            let tenant_value = SqlValue::from_scalar(scope.value);
-            let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] =
-                [pk_value.as_tosql(), tenant_value.as_tosql()];
-            match client.query_one(&sql, &params).await {
+            // Same prepare-then-coerce as the unscoped branch and the upsert
+            // path: uuid-shaped pk / tenant values in TEXT columns must bind
+            // as text, not as typed Uuids.
+            let mut values = vec![SqlValue::from_pk(pk), SqlValue::from_scalar(scope.value)];
+            let stmt = match client.prepare(&sql).await {
+                Ok(s) => s,
+                Err(e) => {
+                    self.drop_client().await;
+                    return Err(WriteBackError::Backend(e.to_string()));
+                }
+            };
+            if let Err(msg) = coerce_params(&stmt, &mut values) {
+                self.return_client(client).await;
+                return Err(WriteBackError::InvalidPayload(msg));
+            }
+            let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                values.iter().map(SqlValue::as_tosql).collect();
+            match client.query_one(&stmt, &params).await {
                 Ok(row) => {
                     self.return_client(client).await;
                     let deleted_count: i64 = row.get(0);
