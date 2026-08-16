@@ -1063,6 +1063,7 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
                             Some((title, body)) => PushTemplate::Visible {
                                 title: title.trim().to_string(),
                                 body: body.trim().to_string(),
+                                category: None,
                             },
                             None => anyhow::bail!(
                                 "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
@@ -1073,6 +1074,45 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
                     ("visible", None) => anyhow::bail!(
                         "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
                          table:visible:<title>:<body> (got {entry:?})"
+                    ),
+                    // Action push (ADR-0037 §2): a visible notification whose
+                    // banner carries the client-registered `category`'s action
+                    // buttons. Category BEFORE title keeps parsing unambiguous
+                    // (body stays the greedy remainder and may contain colons).
+                    // The category is the contract between the operator's rule
+                    // and the app's registered `UNNotificationCategory` /
+                    // Android local-notification actions — enforce identifier
+                    // discipline so typos fail at startup, not in production.
+                    ("action", Some(cat_title_body)) => match cat_title_body.split_once(':') {
+                        Some((category, title_body)) => {
+                            let category = category.trim();
+                            if !is_plain_identifier(category) {
+                                anyhow::bail!(
+                                    "NOSTOS_PUSH_TABLES: action category {category:?} must \
+                                         match ^[a-z_][a-z0-9_]*$ in {entry:?}"
+                                );
+                            }
+                            match title_body.split_once(':') {
+                                Some((title, body)) => PushTemplate::Visible {
+                                    title: title.trim().to_string(),
+                                    body: body.trim().to_string(),
+                                    category: Some(category.to_string()),
+                                },
+                                None => anyhow::bail!(
+                                    "NOSTOS_PUSH_TABLES: \"action\" entries need a category, \
+                                         a title and a body: \
+                                         table:action:<category>:<title>:<body> (got {entry:?})"
+                                ),
+                            }
+                        }
+                        None => anyhow::bail!(
+                                "NOSTOS_PUSH_TABLES: \"action\" entries need a category, a title \
+                                 and a body: table:action:<category>:<title>:<body> (got {entry:?})"
+                            ),
+                    },
+                    ("action", None) => anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: \"action\" entries need a category, a title and a \
+                         body: table:action:<category>:<title>:<body> (got {entry:?})"
                     ),
                     ("liveactivity", Some(tpl)) => {
                         let tpl = tpl.trim();
@@ -1094,6 +1134,7 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
                         PushTemplate::Visible {
                             title: String::new(),
                             body: String::new(),
+                            category: None,
                         }
                     }
                     ("liveactivity", None) => anyhow::bail!(
@@ -2305,6 +2346,33 @@ mod parse_push_tables_tests {
     use serde_json::json;
 
     #[test]
+    fn parses_action_mode_with_category_and_rejects_bad_categories() {
+        let cfg = parse_push_tables(
+            "orders:action:order_status:Atlet order update:Your order {id} is {status}:really",
+            None,
+        )
+        .expect("valid action config");
+        assert_eq!(
+            cfg.tables.get("orders"),
+            Some(&PushTemplate::Visible {
+                title: "Atlet order update".into(),
+                // Body keeps further colons (greedy remainder semantics).
+                body: "Your order {id} is {status}:really".into(),
+                category: Some("order_status".into()),
+            })
+        );
+
+        let err = parse_push_tables("orders:action:Order Status:t:b", None);
+        assert!(err.is_err(), "category must be a plain identifier");
+
+        let err = parse_push_tables("orders:action:order_status:only-title", None);
+        assert!(err.is_err(), "action entries need category, title AND body");
+
+        let err = parse_push_tables("orders:action", None);
+        assert!(err.is_err(), "bare action mode is rejected");
+    }
+
+    #[test]
     fn parses_silent_default_explicit_and_visible_with_placeholders() {
         let cfg = parse_push_tables(
             "tasks; notes:silent ; orders:visible:New order:Order {id} placed",
@@ -2318,7 +2386,8 @@ mod parse_push_tables_tests {
             cfg.tables.get("orders"),
             Some(&PushTemplate::Visible {
                 title: "New order".into(),
-                body: "Order {id} placed".into()
+                body: "Order {id} placed".into(),
+                category: None
             })
         );
         assert_eq!(cfg.tables.get("absent"), None);
@@ -2362,7 +2431,8 @@ mod parse_push_tables_tests {
             cfg.tables.get("deliveries"),
             Some(&PushTemplate::Visible {
                 title: String::new(),
-                body: String::new()
+                body: String::new(),
+                category: None
             })
         );
         assert_eq!(

@@ -349,13 +349,39 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             message["data"] = json!({ "table": table, "lsn": lsn.0.to_string() });
             (SILENT_TTL_SECS, "NORMAL")
         }
-        PushPayload::Visible { title, body } => {
+        PushPayload::Visible {
+            title,
+            body,
+            category: Some(category),
+        } => {
+            // Action push (ADR-0037 §2 `action` mode), one message shaped per
+            // platform by omission of the top-level `notification` block:
+            //   iOS    — FCM maps the `apns` block into the APNs payload, so
+            //            the system renders `aps.alert` WITH the client-
+            //            registered category's buttons (killed app included).
+            //   Android— no `notification` block means the system renders
+            //            nothing; the HIGH-priority data message wakes the
+            //            app (WhatsApp pattern), whose handler posts a local
+            //            notification carrying the actions. Requires a
+            //            cooperating client — plain `visible` stays the
+            //            zero-client-code mode.
+            message["data"] = json!({
+                "title": title, "body": body, "category": category,
+            });
+            message["apns"] = json!({ "payload": { "aps": {
+                "alert": { "title": title, "body": body },
+                "sound": "default",
+                "category": category,
+            } } });
+            (VISIBLE_TTL_SECS, "HIGH")
+        }
+        PushPayload::Visible { title, body, .. } => {
             message["notification"] = json!({ "title": title, "body": body });
             (VISIBLE_TTL_SECS, "HIGH")
         }
     };
     let mut android = json!({ "priority": priority, "ttl": format!("{ttl}s") });
-    if let PushPayload::Visible { .. } = payload {
+    if let PushPayload::Visible { category: None, .. } = payload {
         // Route to the app's HIGH-importance channel so Android shows a
         // heads-up banner (data-only doorbells keep the fallback channel),
         // and ask for the platform default sound + an explicit double-buzz
@@ -367,9 +393,12 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             "default_sound": true,
             "vibrate_timings": ["0s", "0.3s", "0.2s", "0.3s"],
         });
-        // iOS: APNs plays the default tri-tone + haptic only when the APS
-        // payload carries a sound — without this block the banner lands
-        // silent and still.
+    }
+    // iOS: APNs plays the default tri-tone + haptic only when the APS
+    // payload carries a sound — without it the banner lands silent and
+    // still. Action pushes build their own apns block above (alert +
+    // category); only plain visible ones need it here.
+    if let PushPayload::Visible { category: None, .. } = payload {
         message["apns"] = json!({ "payload": { "aps": { "sound": "default" } } });
     }
     if let Some(key) = collapse_key {
@@ -517,6 +546,7 @@ mod tests {
                 &PushPayload::Visible {
                     title: "Tasks changed".into(),
                     body: "New items to sync".into(),
+                    category: None,
                 },
             )
             .await;
@@ -533,6 +563,48 @@ mod tests {
                                                    "vibrate_timings": ["0s", "0.3s", "0.2s", "0.3s"] } },
                     "apns": { "payload": { "aps": { "sound": "default" } } }
                 }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fcm_action_payload_shapes_both_platforms_in_one_message() {
+        let (rail, mock) =
+            rail_with_mock(vec![CannedResponse::json(200, r#"{"name":"m4"}"#)]).await;
+        let outcome = rail
+            .send(
+                &FcmTarget::Token("tok-1".into()),
+                Some("sync-tasks"),
+                &PushPayload::Visible {
+                    title: "Tasks changed".into(),
+                    body: "New items to sync".into(),
+                    category: Some("order_status".into()),
+                },
+            )
+            .await;
+        assert_eq!(outcome, RailOutcome::Delivered);
+        let send = &mock.requests()[1];
+        let message = &send.json()["message"];
+        // No top-level notification: Android's system must not render (the
+        // app's data handler posts the action notification locally)…
+        assert!(
+            message.get("notification").is_none(),
+            "action pushes must be data-only for Android"
+        );
+        assert_eq!(
+            message["data"],
+            json!({ "title": "Tasks changed", "body": "New items to sync",
+                    "category": "order_status" })
+        );
+        assert_eq!(message["android"]["priority"], json!("HIGH"));
+        // …while iOS renders from the apns override, WITH the category's
+        // registered action buttons.
+        assert_eq!(
+            message["apns"]["payload"]["aps"],
+            json!({
+                "alert": { "title": "Tasks changed", "body": "New items to sync" },
+                "sound": "default",
+                "category": "order_status"
             })
         );
     }

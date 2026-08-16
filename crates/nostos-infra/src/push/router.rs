@@ -682,9 +682,14 @@ fn build_payload(
     payload: Option<&[u8]>,
 ) -> PushPayload {
     match config.tables.get(table) {
-        Some(PushTemplate::Visible { title, body }) => PushPayload::Visible {
+        Some(PushTemplate::Visible {
+            title,
+            body,
+            category,
+        }) => PushPayload::Visible {
             title: interpolate(title, payload),
             body: interpolate(body, payload),
+            category: category.clone(),
         },
         _ => PushPayload::Silent {
             table: table.to_string(),
@@ -1062,6 +1067,7 @@ mod tests {
                 PushTemplate::Visible {
                     title: "New activity".into(),
                     body: "Order {id} changed ({missing})".into(),
+                    category: None,
                 },
             )],
             metrics,
@@ -1078,6 +1084,7 @@ mod tests {
             PushPayload::Visible {
                 title: "New activity".into(),
                 body: "Order ord-42 changed ()".into(),
+                category: None,
             },
             "{{col}} interpolates; a missing column substitutes empty"
         );
@@ -1109,6 +1116,7 @@ mod tests {
                 PushTemplate::Visible {
                     title: String::new(),
                     body: String::new(),
+                    category: None,
                 },
             )],
             live,

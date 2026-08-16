@@ -56,8 +56,16 @@ pub enum PushPayload {
     /// a vendor.
     Silent { table: String, lsn: Lsn },
     /// Visible notification; `title`/`body` are already interpolated
-    /// (template resolution lives in task 2.4, not the rails).
-    Visible { title: String, body: String },
+    /// (template resolution lives in task 2.4, not the rails). `category`:
+    /// the client-registered notification category for action buttons —
+    /// iOS carries it as `aps.category`, FCM-Android switches to a
+    /// data-only message the client renders locally (system-rendered
+    /// notifications take no actions).
+    Visible {
+        title: String,
+        body: String,
+        category: Option<String>,
+    },
 }
 
 impl PushPayload {
