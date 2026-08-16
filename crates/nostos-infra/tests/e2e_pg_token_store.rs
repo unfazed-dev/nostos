@@ -150,6 +150,71 @@ async fn upsert_list_prune_roundtrip() {
     clean_tokens(&["rt-iphone", "rt-android"]).await;
 }
 
+/// Token-rotation hygiene (manual-run postmortem: three live FCM rows, one
+/// per reinstall): an install rotation cannot know its predecessor's token
+/// and FCM keeps accepting sends to it, so the rail-level `UNREGISTERED`
+/// prune never fires. `upsert` must sweep same-account tokens not
+/// re-registered within the TTL — while fresh multi-device rows survive.
+#[tokio::test]
+async fn upsert_sweeps_stale_sibling_tokens() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
+        return;
+    }
+    ensure_table().await;
+    clean_tokens(&["ttl-stale", "ttl-live", "ttl-new"]).await;
+    let store = PgTokenStore::new(&pg_url());
+
+    // An old install's token, plus a second active device on the account.
+    store
+        .upsert("fcm", "ttl-stale", "ttl-acct", "ttl-tenant")
+        .await
+        .expect("stale registration");
+    store
+        .upsert("fcm", "ttl-live", "ttl-acct", "ttl-tenant")
+        .await
+        .expect("live sibling registration");
+
+    // Age ONLY the stale one past the 30-day TTL.
+    sql_client()
+        .await
+        .execute(
+            "UPDATE cairn_push_tokens SET updated_at = now() - interval '31 days' \
+             WHERE token = 'ttl-stale'",
+            &[],
+        )
+        .await
+        .expect("backdate stale token");
+
+    // A fresh install registers its new token — the sweep rides along.
+    store
+        .upsert("fcm", "ttl-new", "ttl-acct", "ttl-tenant")
+        .await
+        .expect("new-install registration");
+
+    let mut devices = store
+        .list_by_account("ttl-tenant", "ttl-acct")
+        .await
+        .expect("list after sweep");
+    devices.sort_by(|a, b| a.token.cmp(&b.token));
+    assert_eq!(
+        devices,
+        vec![
+            nostos_infra::PushToken {
+                platform: "fcm".into(),
+                token: "ttl-live".into()
+            },
+            nostos_infra::PushToken {
+                platform: "fcm".into(),
+                token: "ttl-new".into()
+            },
+        ],
+        "the stale install's token is swept; fresh devices survive"
+    );
+
+    clean_tokens(&["ttl-stale", "ttl-live", "ttl-new"]).await;
+}
+
 /// ADR-0037's identity semantics: re-registering a token under a different
 /// account MIGRATES the row — after a device changes hands, the previous
 /// principal's lookup must return zero devices (no pushing the previous
