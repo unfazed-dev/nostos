@@ -15,15 +15,19 @@ class MainActivity : FlutterActivity() {
         // Heads-up banner channel for nostos visible pushes (ADR-0037): FCM
         // targets this channel_id; without a HIGH-importance channel Android
         // posts them silently on the DEFAULT fallback channel (no banner).
+        // Explicit double-buzz pattern (WhatsApp-style): channel vibration
+        // settings lock at FIRST creation, so already-installed apps keep
+        // whatever they got until the channel is deleted or app data cleared.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    "cairn",
-                    "Nostos updates",
-                    NotificationManager.IMPORTANCE_HIGH,
-                )
+            val channel = NotificationChannel(
+                "cairn",
+                "Nostos updates",
+                NotificationManager.IMPORTANCE_HIGH,
             )
+            channel.enableVibration(true)
+            channel.vibrationPattern = longArrayOf(0, 300, 200, 300)
+            nm.createNotificationChannel(channel)
         }
     }
 

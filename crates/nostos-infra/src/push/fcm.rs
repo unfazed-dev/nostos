@@ -357,8 +357,20 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
     let mut android = json!({ "priority": priority, "ttl": format!("{ttl}s") });
     if let PushPayload::Visible { .. } = payload {
         // Route to the app's HIGH-importance channel so Android shows a
-        // heads-up banner (data-only doorbells keep the fallback channel).
-        android["notification"] = json!({ "channel_id": ANDROID_CHANNEL_ID });
+        // heads-up banner (data-only doorbells keep the fallback channel),
+        // and ask for the platform default sound + an explicit double-buzz
+        // pattern (WhatsApp-style) so the arrival is felt, not just seen.
+        // On API 26+ the channel's own vibration governs; vibrate_timings
+        // covers pre-O devices where the payload is authoritative.
+        android["notification"] = json!({
+            "channel_id": ANDROID_CHANNEL_ID,
+            "default_sound": true,
+            "vibrate_timings": ["0s", "0.3s", "0.2s", "0.3s"],
+        });
+        // iOS: APNs plays the default tri-tone + haptic only when the APS
+        // payload carries a sound — without this block the banner lands
+        // silent and still.
+        message["apns"] = json!({ "payload": { "aps": { "sound": "default" } } });
     }
     if let Some(key) = collapse_key {
         android["collapse_key"] = json!(key);
@@ -517,7 +529,9 @@ mod tests {
                     "token": "tok-1",
                     "notification": { "title": "Tasks changed", "body": "New items to sync" },
                     "android": { "collapse_key": "sync-tasks", "priority": "HIGH", "ttl": "3600s",
-                                 "notification": { "channel_id": "cairn" } }
+                                 "notification": { "channel_id": "cairn", "default_sound": true,
+                                                   "vibrate_timings": ["0s", "0.3s", "0.2s", "0.3s"] } },
+                    "apns": { "payload": { "aps": { "sound": "default" } } }
                 }
             })
         );
