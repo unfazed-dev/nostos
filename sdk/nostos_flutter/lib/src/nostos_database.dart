@@ -836,8 +836,8 @@ class NostosDatabase {
       if (token != null) 'authorization': 'Bearer $token',
     };
     final response = method == 'POST'
-        ? await http.post(uri, headers: headers, body: body)
-        : await http.delete(uri, headers: headers);
+        ? await _retryConn(() => http.post(uri, headers: headers, body: body))
+        : await _retryConn(() => http.delete(uri, headers: headers));
     if (response.statusCode != 204) {
       throw NostosPushTokenException(
         operation: method == 'POST' ? 'register' : 'deregister',
@@ -906,9 +906,29 @@ class NostosDatabase {
   }
 
   static Future<NostosSchema> _fetchSchema(String httpBase) async {
-    final response = await http.get(Uri.parse('$httpBase/schema'));
+    final response = await _retryConn(
+      () => http.get(Uri.parse('$httpBase/schema')),
+    );
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     return NostosSchema.fromSchemaDescriptor(body);
+  }
+
+  /// iOS 14+ gates first-time LAN access behind the Local Network permission:
+  /// the triggering request fails (host-unreachable class errors) while the OS
+  /// prompt is on screen, then succeeds once granted. Retry connection-level
+  /// failures a few times before surfacing them; anything HTTP-level
+  /// (status codes) never lands here. Registering a push token is idempotent
+  /// server-side, so replaying a lost POST is safe.
+  static Future<T> _retryConn<T>(Future<T> Function() fn) async {
+    const attempts = 10;
+    for (var i = 1;; i++) {
+      try {
+        return await fn();
+      } on http.ClientException {
+        if (i >= attempts) rethrow;
+        await Future<void>.delayed(const Duration(seconds: 3));
+      }
+    }
   }
 }
 
