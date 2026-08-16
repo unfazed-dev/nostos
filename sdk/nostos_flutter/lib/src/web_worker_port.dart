@@ -31,7 +31,13 @@ NostosWorkerPort spawnNostosWorker({String? workerUrl}) =>
 
 /// A [NostosWorkerPort] over a real browser [Worker].
 class _JsWorkerPort implements NostosWorkerPort {
-  _JsWorkerPort(String url) : _worker = Worker(url.toJS);
+  // {type: 'module'} is REQUIRED: nostos_worker.js is an ES module (static
+  // imports of the wasm artifact). A classic Worker — the default when
+  // options are omitted — dies at parse, silently, and every request then
+  // hangs forever (the plain-JS e2e harness always passed {type:'module'},
+  // which is why only Flutter-web hit this).
+  _JsWorkerPort(String url)
+    : _worker = Worker(url.toJS, WorkerOptions(type: 'module'));
 
   final Worker _worker;
   final _controller = StreamController<Map<String, Object?>>.broadcast();
@@ -46,8 +52,13 @@ class _JsWorkerPort implements NostosWorkerPort {
     // with a MessageEvent on every inbound postMessage.
     _worker.onmessage = ((MessageEvent e) {
       final raw = e.data?.dartify();
-      if (raw is Map<String, Object?>) {
-        _controller.add(raw);
+      // dartify() of a JS object yields Map<dynamic, dynamic> — the old
+      // `is Map<String, Object?>` guard never matched, so EVERY worker→Dart
+      // message (snapshots, status, request responses) was silently dropped.
+      // Re-key instead. The VM tests miss this by construction: their fake
+      // port feeds plain Dart maps, never a dartify() result.
+      if (raw is Map) {
+        _controller.add(Map<String, Object?>.from(raw));
       }
     }).toJS;
   }

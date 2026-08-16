@@ -459,16 +459,6 @@ fn window_local_storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
 }
 
-/// Yield one turn to the browser event loop so an installed `onopen`/`onmessage`
-/// callback can fire before the caller re-checks `ready_state`. ponytail: a
-/// production connect awaits the `open` event via a oneshot channel rather than
-/// polling `ready_state`; this resolve-on-next-tick is enough for the E3 demo
-/// and for any single-tab caller. WS glue untested in CI.
-fn resolved_promise() -> js_sys::Promise {
-    // A resolved promise resolves on the next microtask — exactly one yield.
-    js_sys::Promise::resolve(&JsValue::UNDEFINED)
-}
-
 // -----------------------------------------------------------------------------
 // NostosSocket glue: connect + the per-message pump. web-sys, NOT host-tested.
 // -----------------------------------------------------------------------------
@@ -633,12 +623,34 @@ pub(crate) async fn connect(
         where_sql: where_sql.clone(),
     });
 
+    // --- open oneshot: connect() must not resolve until the WS `open`
+    //     MACROTASK actually fires. The old ready_state poll awaited a
+    //     resolved promise, which yields only a microtask — `open` could
+    //     never run mid-poll, the loop exhausted instantly, and connect
+    //     returned a still-CONNECTING socket. Every post-connect subscribe
+    //     then failed permanently ("socket not open"); the Flutter-web
+    //     worker's multi-table fanout is the first consumer to hit it
+    //     (single-table consumers subscribe inside on_open and never
+    //     noticed). on_open resolves; on_error/on_close reject (settled-
+    //     promise semantics make later lifecycle events no-ops). ---
+    let open_resolve: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
+    let open_reject: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
+    let open_signal = {
+        let resolve_slot = Rc::clone(&open_resolve);
+        let reject_slot = Rc::clone(&open_reject);
+        js_sys::Promise::new(&mut move |resolve, reject| {
+            *resolve_slot.borrow_mut() = Some(resolve);
+            *reject_slot.borrow_mut() = Some(reject);
+        })
+    };
+
     // --- onopen: send the subscribe frame (the server won't stream until it
     //     decodes a valid subscribe). ---
     let inner_open = Rc::clone(&inner);
     let table_open = table.clone();
     let resume_open = resume_lsn;
     let where_open = where_sql;
+    let open_resolve_open = Rc::clone(&open_resolve);
     let on_open = Closure::new(move |_evt: JsValue| {
         let frame = build_subscribe_frame(&table_open, where_open.as_deref(), resume_open);
         // Sending can fail only if the socket closed between open + send; ignore
@@ -651,6 +663,10 @@ pub(crate) async fn connect(
         // outbox id here — the caller's id is preserved only on the live send
         // path (NostosSocket::write).
         flush_pending(&inner_open);
+        // Signal connect(): the socket is genuinely OPEN now.
+        if let Some(resolve) = open_resolve_open.borrow_mut().take() {
+            let _ = resolve.call0(&JsValue::UNDEFINED);
+        }
     });
 
     // --- onmessage: the pure frame-pump → idle-flush → persist checkpoint → ack. ---
@@ -708,14 +724,19 @@ pub(crate) async fn connect(
     // --- onerror: web-sys gives no useful detail in ErrorEvent; onclose will
     //     run next and flush + persist the in-flight batch. ---
     let inner_err = Rc::clone(&inner);
+    let open_reject_err = Rc::clone(&open_reject);
     let on_error = Closure::new(move |_evt: web_sys::ErrorEvent| {
         // Closing here guarantees onclose fires even if the server didn't send
         // a Close frame (a hard transport error). ponytail: log in production.
         let _ = inner_err.ws.close();
+        if let Some(reject) = open_reject_err.borrow_mut().take() {
+            let _ = reject.call1(&JsValue::UNDEFINED, &JsValue::from_str("ws error"));
+        }
     });
 
     // --- onclose: final flush of any buffered batch, then persist + ack. ---
     let inner_close = Rc::clone(&inner);
+    let open_reject_close = Rc::clone(&open_reject);
     let on_close = Closure::new(move |_evt: web_sys::CloseEvent| {
         let mut engine = inner_close.engine.borrow_mut();
         if let Ok(Some(outcome)) = engine.flush() {
@@ -724,6 +745,9 @@ pub(crate) async fn connect(
             // The socket is closing; the ack may not land, but the persisted
             // checkpoint drives the next connect's resume_lsn regardless.
             let _ = inner_close.ws.send_with_str(&build_ack_frame(lsn));
+        }
+        if let Some(reject) = open_reject_close.borrow_mut().take() {
+            let _ = reject.call1(&JsValue::UNDEFINED, &JsValue::from_str("ws closed"));
         }
     });
 
@@ -735,21 +759,15 @@ pub(crate) async fn connect(
     ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
     ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
-    // Wait for the socket to OPEN before resolving (so the caller's `await`
-    // returns a ready socket). Poll ready_state, yielding to the event loop
-    // between checks so the browser can fire `open`. ponytail: polling
-    // ready_state is crude; a production build awaits the open event through a
-    // oneshot channel wired into the onopen closure. Sufficient for E3.
-    //
-    // ready_state: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED. The 1000-iter
-    // bound is ~17s at one yield-per-tick — ample for a localhost handshake.
-    for _ in 0..1000 {
-        match ws.ready_state() {
-            1 => break,                           // OPEN
-            3 => return Err(close_before_open()), // CLOSED — handshake failed
-            _ => {}                               // CONNECTING / CLOSING — keep waiting
-        }
-        let _ = JsFuture::from(resolved_promise()).await;
+    // Wait for the open oneshot (the production fix the old poll's ponytail
+    // pointed at): on_open resolves it once the subscribe frame is sent and
+    // pending writes flushed; on_error/on_close reject it when the handshake
+    // fails. A socket that neither opens nor errors (network black hole) parks
+    // here until the browser's own handshake timeout fires onerror/onclose —
+    // the same behavior as the native client's connect. ponytail: no explicit
+    // deadline; add one if a hung-connect path ever shows up.
+    if JsFuture::from(open_signal).await.is_err() {
+        return Err(close_before_open());
     }
 
     Ok(crate::NostosSocket::from_inner(

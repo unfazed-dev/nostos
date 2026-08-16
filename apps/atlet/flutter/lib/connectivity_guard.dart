@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 /// Bridges platform connectivity events to the active sync engine so the app
 /// reacts to network loss/regain *immediately* instead of waiting for the
@@ -59,7 +60,10 @@ class ConnectivityGuard {
     });
     // Real usage (no injected stream) or a test that injects a probe: poll.
     // Widget tests that inject only a fake event stream get no real sockets.
-    if (_events == null || _probe != null) {
+    // Web: dart:io sockets don't exist (the stub throws → probe would report
+    // "offline" forever and disconnect a healthy engine) — rely on
+    // connectivity_plus's navigator.onLine events there instead.
+    if (!kIsWeb && (_events == null || _probe != null)) {
       _probeTimer ??=
           Timer.periodic(_probeInterval, (_) => unawaited(_runProbe()));
     }

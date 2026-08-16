@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
 
 import 'runner.dart';
@@ -17,28 +18,47 @@ class BenchStore {
   BenchStore({
     required Directory directory,
     String fileName = 'atlet_runs.jsonl',
-  }) : file = File('${directory.path}/$fileName');
+  })  : file = File('${directory.path}/$fileName'),
+        _memory = null;
 
-  final File file;
+  /// Web: path_provider has no browser implementation (the open future never
+  /// resolves — the Analytics tab spun forever) and dart:io File throws there,
+  /// so keep runs in memory for the session. ponytail: bench history doesn't
+  /// survive a web reload; upgrade to localStorage/OPFS if that ever matters.
+  BenchStore.web()
+    : file = null,
+      _memory = <String>[];
+
+  final File? file;
+  final List<String>? _memory;
 
   static Future<BenchStore> openAppDocuments({
     String fileName = 'atlet_runs.jsonl',
   }) async {
+    if (kIsWeb) return BenchStore.web();
     final dir = await getApplicationDocumentsDirectory();
     return BenchStore(directory: dir, fileName: fileName);
   }
 
   Future<void> append(RunRecord record) async {
-    await file.writeAsString(
-      '${jsonEncode(record.toJson())}\n',
-      mode: FileMode.append,
-      flush: true,
-    );
+    final line = '${jsonEncode(record.toJson())}\n';
+    final f = file;
+    if (f == null) {
+      _memory!.add(line);
+      return;
+    }
+    await f.writeAsString(line, mode: FileMode.append, flush: true);
   }
 
   Future<List<RunRecord>> readAll() async {
-    if (!await file.exists()) return const [];
-    final lines = await file.readAsLines();
+    final List<String> lines;
+    final f = file;
+    if (f == null) {
+      lines = List.of(_memory!);
+    } else {
+      if (!await f.exists()) return const [];
+      lines = await f.readAsLines();
+    }
     return lines
         .where((line) => line.trim().isNotEmpty)
         .map(
