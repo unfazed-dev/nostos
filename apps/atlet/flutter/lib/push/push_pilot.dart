@@ -11,7 +11,7 @@ import '../adapters/nostos_adapter.dart';
 
 /// PILOT (ADR-0037) — FCM doorbell wiring for the Atlet push pilot.
 ///
-/// Opt-in via `--dart-define=ATLET_PUSH_PILOT=1` (see main.dart): Firebase
+/// Opt-in via `--dart-define=ATLET_PUSH_PILOT=true` (see main.dart): Firebase
 /// needs platform config (google-services.json / GoogleService-Info.plist)
 /// that is operator-owned and NOT checked in, so the whole module stays
 /// dormant without the flag — analyze/test/build stay green with no Firebase

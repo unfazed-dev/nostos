@@ -167,7 +167,7 @@ Two behaviors that trip first-timers, both by design:
 
 ## In-app pilot wiring (what the app does with a doorbell)
 
-`--dart-define=ATLET_PUSH_PILOT=1` turns on `lib/push/push_pilot.dart`:
+`--dart-define=ATLET_PUSH_PILOT=true` turns on `lib/push/push_pilot.dart`:
 `Firebase.initializeApp()` + background handler at boot; token registration
 on every nostos engine start and on `onTokenRefresh`; foreground doorbell →
 `resumeSync()`; background doorbell → isolate cold-open of the same SQLite

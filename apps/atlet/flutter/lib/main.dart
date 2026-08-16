@@ -43,6 +43,8 @@ const _appVersion = '1.0.0+1'; // mirrors pubspec.yaml's `version:`
 // PILOT (ADR-0037): opt-in FCM doorbell wiring — see lib/push/push_pilot.dart.
 // Off by default so builds/analyze/tests stay green without operator-owned
 // Firebase config (google-services.json / GoogleService-Info.plist).
+// NOTE: bool.fromEnvironment only accepts the literal string "true" — pass
+// `--dart-define=ATLET_PUSH_PILOT=true`; `=1` silently parses as false.
 const _pushPilotEnabled = bool.fromEnvironment('ATLET_PUSH_PILOT');
 
 Future<void> main() async {

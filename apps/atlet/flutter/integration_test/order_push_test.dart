@@ -15,7 +15,7 @@
 // notification (FlutterFire documented behavior); backgrounded, the same
 // messages land in the system tray — that's the manual demo of this leg.
 //
-// Dart-defines: same as push_smoke_test.dart, plus ATLET_PUSH_PILOT=1 so the
+// Dart-defines: same as push_smoke_test.dart, plus ATLET_PUSH_PILOT=true so the
 // app's push pilot (lib/push/push_pilot.dart) registers the FCM token.
 
 import 'dart:async';

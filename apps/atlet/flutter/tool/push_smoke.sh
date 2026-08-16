@@ -244,7 +244,7 @@ prep_device
     --dart-define=SUPABASE_URL="$SUPABASE_URL" \
     --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
     --dart-define=NOSTOS_SYNC_URL="$SYNC_URL" \
-    --dart-define=ATLET_PUSH_PILOT=1 ) >"$APP_LOG" 2>&1 &
+    --dart-define=ATLET_PUSH_PILOT=true ) >"$APP_LOG" 2>&1 &
 APP_PID=$!
 
 # READY is printed only after: sign-in → token registered → first sync →
@@ -315,7 +315,7 @@ prep_device
     --dart-define=SUPABASE_URL="$SUPABASE_URL" \
     --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
     --dart-define=NOSTOS_SYNC_URL="$SYNC_URL" \
-    --dart-define=ATLET_PUSH_PILOT=1 ) >"$ORDER_LOG" 2>&1 &
+    --dart-define=ATLET_PUSH_PILOT=true ) >"$ORDER_LOG" 2>&1 &
 ORDER_PID=$!
 
 ORDER_ID=""
