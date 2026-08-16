@@ -53,3 +53,12 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // AtletMessagingService (ADR-0037 §2 action pushes) subclasses
+    // FlutterFire's messaging service; the plugin ships firebase-messaging
+    // as `implementation`, which keeps com.google.* off the app's compile
+    // classpath. Same version the plugin resolves, via the BoM.
+    implementation(platform("com.google.firebase:firebase-bom:33.1.2"))
+    implementation("com.google.firebase:firebase-messaging")
+}

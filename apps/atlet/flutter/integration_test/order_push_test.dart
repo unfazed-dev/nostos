@@ -196,21 +196,20 @@ Future<void> main() async {
     debugPrint('PUSH_SMOKE_ORDER=$orderId');
 
     // ---- listen for the vendor's lifecycle pushes ------------------------
-    // Visible pushes carry notification title/body (template: "Your order
-    // {id} is {status}") + the {table, lsn} data. The app's own push pilot
-    // resumes the engine on every doorbell (lib/push/push_pilot.dart); push
-    // sends re-check presence at flush time, so re-pause after each arrival
-    // to stay eligible for the NEXT lifecycle push.
+    // Action pushes (`orders:action:order_status:…` rules) arrive as DATA
+    // messages — no `notification` block (Android renders locally from this
+    // data; iOS's system alert came from the FCM apns override). Match on
+    // the data body. The app's own push pilot resumes the engine on every
+    // doorbell (lib/push/push_pilot.dart); push sends re-check presence at
+    // flush time, so re-pause after each arrival to stay eligible for the
+    // NEXT lifecycle push.
     final shipped = Completer<void>();
     final delivered = Completer<void>();
     final sub = FirebaseMessaging.onMessage.listen((message) {
-      final n = message.notification;
-      // Silent doorbells (data-only {table,lsn}) are leg 1's concern; this
-      // leg's pushes are VISIBLE — `notification` title/body, no data block
-      // (the rail only attaches data to silent payloads). Match on body.
-      if (n == null) return;
-      debugPrint('PUSH_SMOKE_ORDER_MESSAGE title=${n.title} body=${n.body}');
-      final body = n.body ?? '';
+      final data = message.data;
+      if (!data.containsKey('body')) return;
+      debugPrint('PUSH_SMOKE_ORDER_MESSAGE data=$data');
+      final body = data['body'] as String? ?? '';
       if (body.contains('shipped') && !shipped.isCompleted) {
         debugPrint('PUSH_SMOKE_PUSH=shipped');
         shipped.complete();

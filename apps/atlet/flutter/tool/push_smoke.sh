@@ -225,7 +225,7 @@ NOSTOS_SYNC_AUTH=supabase-jwt \
 NOSTOS_SUPABASE_JWT_SECRET="$NOSTOS_SUPABASE_JWT_SECRET" \
 NOSTOS_TENANT_COLUMN=user_id \
 NOSTOS_WRITE_TABLES="$TABLE,cart_items,orders" \
-NOSTOS_PUSH_TABLES="$TABLE;orders:visible:Atlet order update:Your order {id} is {status}" \
+NOSTOS_PUSH_TABLES="$TABLE;orders:action:order_status:Atlet order update:Your order {id} is {status}" \
 NOSTOS_FCM_CREDENTIALS_JSON="$FCM_JSON" \
   cargo run -q -p nostos-server >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
@@ -310,12 +310,13 @@ else
   exit 1
 fi
 
-# ---- 9. ecommerce order-lifecycle leg (visible pushes, ADR-0037 §2) -------
+# ---- 9. ecommerce order-lifecycle leg (action pushes, ADR-0037 §2) -------
 # The REFERENCE MODEL for other SDKs: the real app UI (Shop → cart →
 # checkout → Pay) writes the order through nostos; this script plays the
 # vendor advancing paid → shipped → delivered. Each push-table commit to an
-# offline account sends a VISIBLE notification via the orders:visible
-# template. The device re-arms itself between pushes (the test re-pauses on
+# offline account sends an ACTION push via the orders:action template —
+# iOS renders the order_status category's buttons from the apns override;
+# Android's app renders locally from the data payload. The device re-arms itself between pushes (the test re-pauses on
 # every arrival), so each UPDATE needs the device offline again — the sleep
 # below covers the 2s coalescer + socket teardown.
 ORDER_LOG=/tmp/atlet-push-smoke-order.log

@@ -35,6 +35,14 @@ const String _nostosUrl = String.fromEnvironment(
 bool isNostosDoorbell(Map<String, dynamic>? data) =>
     data != null && data.containsKey('table') && data.containsKey('lsn');
 
+// Action pushes (`{title, body, category}` data, ADR-0037 §2 `action` mode)
+// never render from Dart: iOS draws the system alert + the category's
+// registered buttons from the FCM apns override (Runner/AppDelegate.swift),
+// and Android's AtletMessagingService posts the action notification
+// natively BEFORE Flutter sees the message — foreground, background, or
+// killed. Dart only observes them (e.g. the order-leg smoke's onMessage
+// assertions).
+
 /// Name of the file [PushPilot.attach] drops next to the SQLite store so the
 /// background-isolate handler can re-auth its cold-open. Never a secret
 /// beyond what supabase_flutter already persists on disk for the session.
@@ -53,6 +61,8 @@ const String _sessionFileName = 'nostos_push_pilot_session.json';
 /// observed in practice.
 @pragma('vm:entry-point')
 Future<void> nostosDoorbellBackgroundHandler(RemoteMessage message) async {
+  // Action pushes are rendered natively (see the module doc above) — nothing
+  // for this isolate to do with them.
   if (!isNostosDoorbell(message.data)) return;
   debugPrint('push pilot: background doorbell ${message.data}');
   final dir = await getApplicationDocumentsDirectory();

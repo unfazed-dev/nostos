@@ -156,12 +156,20 @@ atlet app (foregrounded test)                      harness plays the vendor
 Server config (the whole "feature"): one `NOSTOS_PUSH_TABLES` entry —
 
 ```
-orders:visible:Atlet order update:Your order {id} is {status}
+orders:action:order_status:Atlet order update:Your order {id} is {status}
 ```
 
 `{col}` statically interpolates the triggering row (docs/api/push.md), so the
 same template renders "Your order 3f2a… is shipped" and "… is delivered"
 without any per-status config.
+
+`action` mode (vs plain `visible`) adds a client-registered notification
+category (`order_status`): iOS banners carry its action buttons — "Track
+order" / "Mark received", lock screen included with the app killed (see
+Runner/AppDelegate.swift). Android receives a data-only message and the app
+renders the notification locally with its action button (lib/push/
+push_pilot.dart `showActionNotification` — system-rendered FCM notifications
+cannot carry buttons). Plain `visible` remains the zero-client-code mode.
 
 Two behaviors that trip first-timers, both by design:
 

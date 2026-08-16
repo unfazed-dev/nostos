@@ -13,6 +13,25 @@ import UserNotifications
     // onMessage never fires for visible pushes (order-leg smoke). Foreground
     // banners go through the atlet/notify local-notification path below;
     // backgrounded banners are OS-default.
+    //
+    // Action categories (ADR-0037 §2 `action` mode): category registration
+    // is registry-level — no delegate takeover needed. The server's
+    // `aps.category` renders these buttons on lock screen / Notification
+    // Center with the app killed. Category id is the operator contract
+    // (NOSTOS_PUSH_TABLES `table:action:<category>:…`).
+    let track = UNNotificationAction(
+      identifier: "track_order", title: "Track order", options: [.foreground]
+    )
+    let markReceived = UNNotificationAction(
+      identifier: "mark_received", title: "Mark received", options: [.foreground]
+    )
+    UNUserNotificationCenter.current().setNotificationCategories([
+      UNNotificationCategory(
+        identifier: "order_status",
+        actions: [track, markReceived],
+        intentIdentifiers: []
+      )
+    ])
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
