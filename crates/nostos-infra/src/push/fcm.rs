@@ -331,6 +331,11 @@ fn outcome_for(status: u16, body: &Value) -> RailOutcome {
     }
 }
 
+/// Android notification channel nostos's visible pushes target. The client
+/// app must create it at IMPORTANCE_HIGH or Android posts silently on the
+/// DEFAULT fallback channel (no heads-up banner). See ADR-0037 §2.
+const ANDROID_CHANNEL_ID: &str = "cairn";
+
 /// Build the `messages:send` JSON. Doorbell = data-only; visible =
 /// `notification`. The `android` block carries collapse/ttl/priority (the
 /// registry's platform column routes only Android tokens to this rail).
@@ -350,6 +355,11 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
         }
     };
     let mut android = json!({ "priority": priority, "ttl": format!("{ttl}s") });
+    if let PushPayload::Visible { .. } = payload {
+        // Route to the app's HIGH-importance channel so Android shows a
+        // heads-up banner (data-only doorbells keep the fallback channel).
+        android["notification"] = json!({ "channel_id": ANDROID_CHANNEL_ID });
+    }
     if let Some(key) = collapse_key {
         android["collapse_key"] = json!(key);
     }
@@ -506,7 +516,8 @@ mod tests {
                 "message": {
                     "token": "tok-1",
                     "notification": { "title": "Tasks changed", "body": "New items to sync" },
-                    "android": { "collapse_key": "sync-tasks", "priority": "HIGH", "ttl": "3600s" }
+                    "android": { "collapse_key": "sync-tasks", "priority": "HIGH", "ttl": "3600s",
+                                 "notification": { "channel_id": "cairn" } }
                 }
             })
         );
