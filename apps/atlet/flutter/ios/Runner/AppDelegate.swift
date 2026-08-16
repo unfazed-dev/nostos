@@ -8,10 +8,11 @@ import UserNotifications
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    // Foreground order banners (ADR-0037 push pilot): iOS suppresses
-    // notifications while the app is foregrounded unless the delegate says
-    // otherwise — present them as banners, mirroring Android's heads-up.
-    UNUserNotificationCenter.current().delegate = self
+    // NOTE: do NOT assign UNUserNotificationCenter.current().delegate here.
+    // Taking the delegate starves FlutterFire of foreground deliveries —
+    // onMessage never fires for visible pushes (order-leg smoke). Foreground
+    // banners go through the atlet/notify local-notification path below;
+    // backgrounded banners are OS-default.
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -40,14 +41,5 @@ import UserNotifications
         }
       }
     }
-  }
-
-  // Foreground presentation: show the banner + sound instead of dropping it.
-  override func userNotificationCenter(
-    _ center: UNUserNotificationCenter,
-    willPresent notification: UNNotification,
-    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
-  ) {
-    completionHandler([.banner, .sound])
   }
 }

@@ -94,6 +94,7 @@ case "$DEVICE_MODE" in
     fi
     BIND=127.0.0.1                        # 10.0.2.2 (emulator) → host loopback
     SYNC_URL="${NOSTOS_SYNC_URL:-ws://10.0.2.2:$PORT/sync}"
+    FLUTTER_TEST_EXTRA_ARGS=""
     # FCM data messages reach the test's onMessage only while the app is
     # FOREGROUNDED — anything else holding the screen (the launcher, another
     # app) silently starves the smoke. .MainActivity is singleTop, so this is
@@ -125,6 +126,15 @@ case "$DEVICE_MODE" in
     DEVICE_ID="$PUSH_SMOKE_DEVICE_ID"
     BIND=0.0.0.0                          # reachable from the LAN
     SYNC_URL="$NOSTOS_SYNC_URL"
+    # Android-only helpers, no-op'd for iOS: no adb on the leg — the operator
+    # keeps the screen unlocked/awake and taps Allow on the first
+    # notification-permission prompt (persistent afterwards).
+    prep_device() { :; }
+    keep_foreground() { :; }
+    # Keep-foreground/prep are Android-only (no-op'd above). Wireless tethers
+    # can trip the tool's app-launch check; the reliable path is a USB cable —
+    # PUSH_SMOKE_PUBLISH_PORT exists only for a future flutter-drive variant.
+    FLUTTER_TEST_EXTRA_ARGS="${PUSH_SMOKE_PUBLISH_PORT:+--publish-port $PUSH_SMOKE_PUBLISH_PORT}"
     ;;
   *) skip "PUSH_SMOKE_DEVICE must be 'android' or 'ios' (got '$DEVICE_MODE')";;
 esac
@@ -241,6 +251,7 @@ printf "  running atlet push smoke on %s [%s] (log: $APP_LOG)…\n" "$DEVICE_MOD
 prep_device
 ( cd "$APP_DIR" && flutter pub get >/dev/null 2>&1 && \
   flutter test integration_test/push_smoke_test.dart -d "$DEVICE_ID" \
+    $FLUTTER_TEST_EXTRA_ARGS \
     --dart-define=SUPABASE_URL="$SUPABASE_URL" \
     --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
     --dart-define=NOSTOS_SYNC_URL="$SYNC_URL" \
@@ -312,6 +323,7 @@ printf "  running atlet order-lifecycle leg (log: $ORDER_LOG)…\n"
 prep_device
 ( cd "$APP_DIR" && flutter pub get >/dev/null 2>&1 && \
   flutter test integration_test/order_push_test.dart -d "$DEVICE_ID" \
+    $FLUTTER_TEST_EXTRA_ARGS \
     --dart-define=SUPABASE_URL="$SUPABASE_URL" \
     --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
     --dart-define=NOSTOS_SYNC_URL="$SYNC_URL" \

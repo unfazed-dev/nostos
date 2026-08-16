@@ -102,6 +102,8 @@ Future<void> main() async {
 
     final dir = await getApplicationDocumentsDirectory();
     // Scratch store — NOT the real app's cairn.sqlite; the smoke is disposable.
+    // (iOS Local Network permission-window retries live in the SDK's
+    // `_retryConn`, not here.)
     final db = await NostosDatabase.connect(
       url: _nostosUrl,
       token: liveSession.accessToken,

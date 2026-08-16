@@ -108,6 +108,14 @@ Future<void> main() async {
     );
 
     // ---- real UI: Shop → first product → Add to cart → cart → checkout ---
+    // Engine autostart pops a "Now syncing with …" SnackBar over the nav bar
+    // (main.dart _notify) that eats the shop-tab tap — let it dismiss first
+    // (same pattern as the post-add-to-cart wait below).
+    await _until(
+      tester,
+      () => !tester.any(find.byType(SnackBar)),
+      budgetSeconds: 15,
+    );
     await tester.tap(find.byKey(const Key('nav-tab-shop')));
     await tester.pumpAndSettle();
     final productCard = find.byWidgetPredicate(

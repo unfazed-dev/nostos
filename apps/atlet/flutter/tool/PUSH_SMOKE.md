@@ -55,11 +55,24 @@ NOSTOS_SYNC_URL=ws://<mac-LAN-IP>:8080/sync \
 2. Add an **Android app** with package id `internal.atlet.atlet` → download
    `google-services.json` → drop at `apps/atlet/flutter/android/app/google-services.json`.
 3. (iOS leg only) Add an **iOS app** with the Runner bundle id → download
-   `GoogleService-Info.plist` → drop at `apps/atlet/flutter/ios/Runner/`.
-   Enable Push Notifications + Background Modes (remote-notification) in
-   Xcode signing; upload an APNs auth key under Project settings → Cloud
-   Messaging → APNs. `ios/Runner/Info.plist` already carries
-   `UIBackgroundModes: [remote-notification]`.
+   `GoogleService-Info.plist` → drop at `apps/atlet/flutter/ios/Runner/`
+   (it is wired into the Xcode project as a bundle resource; if you recreate
+   it via the Management API instead of the console, remember
+   `configFileContents` returns base64). Everything else is already in the
+   repo: `Runner.entitlements` (`aps-environment`),
+   `UIBackgroundModes: [remote-notification]` in Info.plist, iOS 15 floor.
+   Operator-owned reality checks (all bit live on 2026-08-16):
+   - **Paid Apple Developer team required** — free personal teams cannot
+     provision `aps-environment`; the build fails on the wildcard profile.
+   - Apple may demand the updated **Program License Agreement** be accepted
+     before issuing profiles ("PLA Update available" signing error).
+   - **APNs auth key (.p8)** must be uploaded in the console under Project
+     settings → Cloud Messaging → the Apple app's card (direct URL:
+     `/project/<pid>/settings/cloudmessaging/ios:<appId>`). Without it, sends
+     to the iOS token fail (1 failed per send) while Android still succeeds.
+   - **Debug builds can't launch from the home screen on iOS 14+** (JIT
+     restriction) — install a `--profile` build for interactive use; the
+     `flutter test` legs are fine (Flutter tooling launches them).
 4. Project settings → Service accounts → **Generate new private key** →
    that JSON is the FCM rail credential. Point the env at it (file path or
    raw JSON both work):
