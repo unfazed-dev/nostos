@@ -138,7 +138,52 @@ NostosDatabase _newDb(HttpServer server, {String? token = 'jwt-abc'}) =>
       token: token,
     );
 
+/// First /push-tokens request 401s, the rest 204 — the cold-restored
+/// stale-session shape that once stranded an emulator out of the push
+/// registry (ADR-0037 pilot).
+Future<(HttpServer, List<_Captured>)> _start401Then204Server() async {
+  final server = await HttpServer.bind('127.0.0.1', 0);
+  final requests = <_Captured>[];
+  server.listen((req) async {
+    final reqBody = await utf8.decoder.bind(req).join();
+    final headers = <String, String>{};
+    req.headers.forEach((name, values) {
+      headers[name.toLowerCase()] = values.first;
+    });
+    requests.add(_Captured(req.method, req.uri.path, headers, reqBody));
+    req.response.statusCode =
+        requests.length == 1 ? 401 : 204; // first is the stale token
+    await req.response.close();
+  });
+  return (server, requests);
+}
+
 void main() {
+  test('a 401 triggers one session refresh and a retry — registration '
+      'self-heals instead of stranding the device', () async {
+    final (server, requests) = await _start401Then204Server();
+    var refreshCalls = 0;
+    final db = NostosDatabase.forTest(
+      Nostos.withEngine(_PushFakeEngine()),
+      const NostosSchema(tables: []),
+      httpBase: 'http://127.0.0.1:${server.port}',
+      token: 'stale-jwt',
+      sessionRefresh: () async {
+        refreshCalls++;
+        return 'fresh-jwt';
+      },
+    );
+
+    await db.registerPushToken('fcm', 'tok-123');
+
+    expect(requests, hasLength(2));
+    expect(refreshCalls, 1);
+    expect(requests.first.headers['authorization'], 'Bearer stale-jwt');
+    expect(requests.last.headers['authorization'], 'Bearer fresh-jwt',
+        reason: 'the retry must re-read the credential, not replay it');
+    await server.close();
+  });
+
   test('registerPushToken POSTs the exact JSON body to /push-tokens '
       'with the sync JWT as Bearer', () async {
     final (server, requests) = await _startServer(204);
