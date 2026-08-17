@@ -68,7 +68,7 @@ impl SlotHealth {
 use async_trait::async_trait;
 
 use nostos_domain::{
-    Lsn, Predicate, Principal, ReplicationEvent, SessionId, SyncSession, TenantScope,
+    Lsn, Predicate, PredicateExpr, Principal, ReplicationEvent, SessionId, SyncSession, TenantScope,
 };
 
 /// The outcome of attempting to deliver an event to a session.
@@ -661,6 +661,42 @@ pub trait SnapshotSource: Send + Sync {
         base_lsn: Lsn,
         tenant: Option<TenantScope<'_>>,
     ) -> Result<Vec<ReplicationEvent>, SnapshotError>;
+
+    /// P5 sync streams (docs/plans/p5-sync-streams-design.md §3): a TARGETED
+    /// snapshot for one lazily-added stream — only the rows matching the
+    /// stream's bound predicate, never a full re-snapshot.
+    ///
+    /// # Why a `PredicateExpr`, not the design sketch's `where_clause: &str`
+    /// The port speaks domain types, not SQL text: the pg adapter compiles
+    /// the predicate to `WHERE … $1..$n` internally (shape from the trusted
+    /// server config; every VALUE a positional bind — Decision 2's fourth
+    /// defense), and non-pg adapters (test fakes) evaluate the same tree
+    /// in-memory with `PredicateExpr::matches` — the exact live-path
+    /// semantics. No SQL string ever crosses the application boundary.
+    ///
+    /// `predicate` MUST be fully bound (`predicate_compile::bind_params`):
+    /// a surviving `Param`/`Any` leaf is an adapter-side error, never a
+    /// silently-widened snapshot.
+    ///
+    /// The default errors loudly: an adapter that predates P5 answers every
+    /// stream subscribe with a (non-fatal) `stream_error` instead of
+    /// pretending to snapshot. LSN stamping, payload fidelity, and the tenant
+    /// contract are identical to [`Self::snapshot`].
+    ///
+    /// # Errors
+    /// Same categories as [`Self::snapshot`].
+    async fn snapshot_stream(
+        &self,
+        table: &str,
+        predicate: &PredicateExpr,
+        base_lsn: Lsn,
+        tenant: Option<TenantScope<'_>>,
+    ) -> Result<Vec<ReplicationEvent>, SnapshotError> {
+        let _ = (table, predicate, base_lsn, tenant);
+        Err(SnapshotError::Backend(
+            "stream snapshots are not supported by this adapter".to_string(),
+        ))
+    }
 }
 
 /// Why a [`SnapshotSource::snapshot`] call failed. Surfaced to the transport,
