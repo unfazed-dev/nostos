@@ -136,6 +136,12 @@ struct BenchConfig {
     /// high-N legs; a drop is a real finding either way).
     #[arg(long)]
     allow_drops: bool,
+
+    /// Emit pace in events/sec (0 = unpaced burst, the nostos-bench idiom).
+    /// Unpaced runs answer "how honestly does it shed under a burst"; paced
+    /// runs answer "what rate sustains 0 drops" — both get recorded.
+    #[arg(long, env = "APPLY_BENCH_RATE", default_value_t = 0)]
+    rate: u64,
 }
 
 /// Recorded environment for the artifact (reproducibility — the nostos-bench
@@ -152,6 +158,7 @@ struct Environment {
     on_disk: bool,
     buffer: usize,
     timeout_secs: u64,
+    rate_events_per_sec: u64,
 }
 
 impl Environment {
@@ -171,6 +178,7 @@ impl Environment {
             on_disk: cfg.on_disk,
             buffer: cfg.buffer,
             timeout_secs: cfg.timeout_secs,
+            rate_events_per_sec: cfg.rate,
         }
     }
 }
@@ -265,11 +273,25 @@ impl BenchClient {
 struct CountingReplicator {
     inner: FakeReplicator,
     last_lsn: Arc<AtomicU64>,
+    /// Per-event spacing when `--rate` > 0 (`None` = the unpaced burst).
+    interval: Option<Duration>,
+    next_at: Option<Instant>,
 }
 
 #[async_trait]
 impl ReplicatorStream for CountingReplicator {
     async fn next_event(&mut self) -> Option<ReplicationEvent> {
+        if let Some(interval) = self.interval {
+            // Token-pace (the bench_pg_ingest shape): schedule per event;
+            // a behind-schedule tick simply doesn't sleep — no catch-up
+            // burst, the pace is a ceiling not a compensation.
+            let at = self.next_at.get_or_insert_with(Instant::now);
+            let now = Instant::now();
+            if *at > now {
+                tokio::time::sleep(*at - now).await;
+            }
+            *at += interval;
+        }
         let event = self.inner.next_event().await?;
         self.last_lsn.store(event.lsn.raw(), Ordering::Relaxed);
         Some(event)
@@ -461,6 +483,8 @@ async fn main() {
     let mut replicator = CountingReplicator {
         inner: FakeReplicator::new(FakeReplicatorConfig::small(cfg.events)),
         last_lsn: Arc::new(AtomicU64::new(0)),
+        interval: (cfg.rate > 0).then(|| Duration::from_secs_f64(1.0 / cfg.rate as f64)),
+        next_at: None,
     };
     let last_lsn_handle = Arc::clone(&replicator.last_lsn);
 

@@ -109,3 +109,54 @@ DOWN (nostos-infra `push/remote.rs` tests); a loopback daemon would measure
 rail HTTP, not the fan-out loop. Artifacts: `benches/results/wave4-off/` and
 `benches/results/wave4-on/`. Eval-only (FakeReplicator on loopback); push
 rails not exercised.
+
+## Real-Postgres ingest leg — MEASURED 2026-08-17
+
+The first real-PG number in this file: pgoutput logical replication →
+`PgReplicator` → `FanOutService` → 1,000 loopback WS sinks that decode frame
+payloads (for the lag gauge), driven by a persistent-connection batched
+`generate_series` INSERT generator against the seeded `tasks` table (docker
+Postgres 16-alpine, `wal_level=logical`). Harness:
+`crates/nostos-bench/src/bin/bench_pg_ingest.rs` (`--features pg`). **STAGE
+measurement — NOT comparable to the 833,307 eval-only headline** (different
+replicator, workload shape, sink cost). Quiet window, self-load only; Apple
+M4, release lto=fat.
+
+| Load | frames expected | delivered | drops | stage rate | lag write→recv |
+|---|---|---|---|---|---|
+| Paced 400 rows/sec × 1,000 sinks (20k rows) | 20,000,000 | **100.000%** | **0.000%** | 398,750 frames/sec | p50 295 ms / p99 637 ms (coarse, skew-corrected) |
+| Unpaced (driver observed 21,857 rows/sec; 100k rows) | 100,000,000 | 28.713% | 71.287% | 444,638 frames/sec ceiling | saturated — drain capped at 60 s (partial) |
+
+Read: against a REAL Postgres flood the bounded-buffer contract holds — every
+shed frame is a router counter (router `dropped` == client deficit exactly),
+zero silent loss. The demonstrated 0-drop operating point at 1k
+payload-decoding loopback sinks is 400 rows/sec; the shed ceiling is
+~445k frames/sec at this topology. Guards: slot pre-created (no
+initial-snapshot pollution), 0 frames before load, unique per-run slot
+dropped after, fixture rows deleted — all verified against
+`pg_replication_slots` + row counts, not just harness output. Artifacts:
+`benches/results/pg/`.
+
+## Client-apply leg — MEASURED 2026-08-17
+
+The first real client-apply numbers: N `SyncClient`s applying FakeReplicator
+events through the real `/sync` WS transport — rusqlite writes, durable
+checkpoints, acks. Harness: `crates/nostos-client/examples/apply_bench.rs`.
+**Own stage — never comparable to the fan-out headline.** Quiet window;
+Apple M4, release.
+
+| Profile | clients × events | rows applied | drops | coarse rows/sec |
+|---|---|---|---|---|
+| `:memory:` | 100 × 10,000 | 1,000,000 / 1,000,000 | **0** (router dropped 0) | 140,919 |
+| on-disk, paced 500 events/sec | 25 × 10,000 | 250,000 / 250,000 | **0** | 12,463 |
+| on-disk, unpaced burst | 25 × 10,000 | 128,411 / 250,000 | 121,589 (48.6%, all router-counted) | burst-shed |
+| on-disk, unpaced burst | 100 × 10,000 | 774,947 / 1,000,000 | 225,053 (22.5%, all router-counted) | ~5,989 (drain-capped at 120 s) |
+
+Read: in-memory apply tracks the router at 0 drops through 100 clients.
+On-disk (real fsync) holds 0 drops when the feed is paced (500 events/sec at
+25 clients demonstrated) and sheds honestly under unpaced bursts — drop%
+tracks emit-rate × buffer depth (1024) × drain rate, NOT client count (the
+25-client burst shed MORE than the 100-client one because its emit wall was
+9× shorter). Client-side deficit == router `dropped` exactly on every run;
+durable checkpoints asserted at the final LSN including reopen-from-disk
+readback. Artifacts: `benches/results/apply/`.

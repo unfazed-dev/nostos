@@ -30,9 +30,9 @@
 - p99 per-client receive latency.
 
 ### Out of scope (deliberately, for Week 1)
-- Real `pgoutput` parsing (uses a synthetic `FakeReplicator`; real PG comes Week 2).
+- Real `pgoutput` parsing (the headline uses a synthetic `FakeReplicator`). **Now measured separately (2026-08-17):** the real-PG ingest leg — see RESULTS.md "Real-Postgres ingest leg"; still excluded from the headline itself.
 - WAN latency (in-process loopback on 127.0.0.1).
-- Client-side SQLite apply (no client SDK yet).
+- Client-side SQLite apply. **Now measured separately (2026-08-17):** the client-apply leg — see RESULTS.md "Client-apply leg"; still excluded from the headline itself.
 - Cross-machine distribution (single server process).
 
 These scope limits are **stated in every results artifact.** The claim is specifically about the *server's fan-out ceiling*, not end-to-end application latency.
