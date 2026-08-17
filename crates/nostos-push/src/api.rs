@@ -544,9 +544,11 @@ struct BatchSendAcceptedBody {
 /// Phase 2 admits per item (pending-gate + bounded try_send) with per-item
 /// outcomes in request order: 202 when >=1 item was admitted; 503 only when
 /// EVERY item failed admission — nothing left the daemon, so the whole
-/// batch is safe to retry. Already-admitted items are NOT rolled back when
-/// a later item fails admission: they will legitimately send, and the
-/// per-item results say exactly which to retry.
+/// batch is safe to retry. Note the n tokens are NOT refunded on phase-2
+/// admission failures (an admission attempt costs its token, same as
+/// /v1/send) — a retried batch re-pays. Already-admitted items are NOT
+/// rolled back when a later item fails admission: they will legitimately
+/// send, and the per-item results say exactly which to retry.
 async fn send_batch(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
@@ -555,11 +557,16 @@ async fn send_batch(
 ) -> Result<(StatusCode, Json<BatchSendAcceptedBody>), ApiError> {
     let body: BatchSendRequest = serde_json::from_slice(&raw)
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")))?;
-    if body.items.is_empty() || body.items.len() > MAX_BATCH_ITEMS {
+    // Effective ceiling: a batch larger than the tenant's bucket (burst)
+    // can NEVER acquire n tokens, so reject it at 400 here instead of a
+    // guaranteed 429 (batches of 51..=100 were unreachable at the default
+    // burst of 50 — caught in review 2026-08-17).
+    let effective_cap = MAX_BATCH_ITEMS.min(state.send_limiter.burst() as usize);
+    if body.items.is_empty() || body.items.len() > effective_cap {
         return Err(err(
             StatusCode::BAD_REQUEST,
             format!(
-                "items must contain 1..={MAX_BATCH_ITEMS} entries (got {})",
+                "items must contain 1..={effective_cap} entries (got {}; cap is min({MAX_BATCH_ITEMS}, send burst))",
                 body.items.len()
             ),
         ));
@@ -574,54 +581,63 @@ async fn send_batch(
         ));
     }
     // Phase 1 (atomic): validate + resolve + rail-check every item BEFORE
-    // any admission — any failure aborts the batch with zero sends.
-    let mut resolved = Vec::with_capacity(body.items.len());
-    for (index, item) in body.items.into_iter().enumerate() {
-        if let Err(e) = item.validate() {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("item {index}: invalid request: {e}"),
-            ));
-        }
-        let SendRequest {
-            token,
-            platform,
-            payload,
-            collapse_key,
-            metadata,
-            ..
-        } = item;
-        let payload = match payload.into_push_payload() {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(err(
+    // any admission — any failure aborts the batch with zero sends AND
+    // refunds the n reserved tokens (zero sends attempted; /v1/send charges
+    // 1 token for the same failure — a batch must not charge n).
+    let phase1: Result<Vec<_>, ApiError> = async {
+        let mut resolved = Vec::with_capacity(body.items.len());
+        for (index, item) in body.items.into_iter().enumerate() {
+            if let Err(e) = item.validate() {
+                Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("item {index}: invalid request: {e}"),
+                ))?;
+            }
+            let SendRequest {
+                token,
+                platform,
+                payload,
+                collapse_key,
+                metadata,
+                ..
+            } = item;
+            let payload = payload.into_push_payload().map_err(|e| {
+                err(
                     StatusCode::BAD_REQUEST,
                     format!("item {index}: invalid payload: {e}"),
-                ));
+                )
+            })?;
+            let platform = resolve_platform(&state, &tenant.0, &token, platform, &role)
+                .await
+                .map_err(|(status, Json(v)): (StatusCode, Json<serde_json::Value>)| {
+                    let msg = v
+                        .get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("invalid item")
+                        .to_string();
+                    err(status, format!("item {index}: {msg}"))
+                })?;
+            if !state.rails.configured(platform) {
+                Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "item {index}: push rail for platform '{}' is not configured on this daemon",
+                        platform.as_str()
+                    ),
+                ))?;
             }
-        };
-        let platform = match resolve_platform(&state, &tenant.0, &token, platform, &role).await {
-            Ok(p) => p,
-            Err((status, Json(v))) => {
-                let msg = v
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("invalid item")
-                    .to_string();
-                return Err(err(status, format!("item {index}: {msg}")));
-            }
-        };
-        if !state.rails.configured(platform) {
-            return Err(err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "item {index}: push rail for platform '{}' is not configured on this daemon",
-                    platform.as_str()
-                ),
-            ));
+            resolved.push((index, token, platform, payload, collapse_key, metadata));
         }
-        resolved.push((index, token, platform, payload, collapse_key, metadata));
+        Ok(resolved)
     }
+    .await;
+    let resolved = match phase1 {
+        Ok(r) => r,
+        Err(e) => {
+            state.send_limiter.release_n(&tenant.0, n);
+            return Err(e);
+        }
+    };
     // Phase 2: per-item admission, outcomes in request order.
     let mut results = Vec::with_capacity(resolved.len());
     let mut accepted = 0usize;

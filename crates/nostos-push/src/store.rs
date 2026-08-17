@@ -511,7 +511,10 @@ mod pg {
     /// fixed). Concurrent `CREATE TABLE IF NOT EXISTS` for one name races
     /// on the `pg_type` unique index (two pushd replicas booting at once,
     /// or parallel e2e processes); the xact-scoped lock makes the DDL wait
-    /// its turn instead of failing.
+    /// its turn instead of racing — the wait is BOUNDED by the session
+    /// statement_timeout (30s): a boot stalled longer than that fails the
+    /// lock acquisition (and can be retried) rather than hanging forever
+    /// behind a stuck peer.
     const DDL_LOCK_KEY: i64 = 0x0063_6169_726E;
 
     /// Bounded registry handshake (review 2026-08-17 #2) — the pool-of-one

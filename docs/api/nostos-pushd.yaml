@@ -158,14 +158,17 @@ paths:
       tags: [send]
       summary: Queue up to 100 token-addressed pushes (v0.4.0)
       description: >
-        All-or-nothing phase 1 (parse, item-count cap 1..=100, ONE atomic
-        per-item rate charge — a batch larger than the tenant's burst
-        always 429s, per-item validation, :rail-role gate, rail-configured
-        check; any failure = whole-batch error naming the first failing
-        index, zero items sent), then per-item admission in phase 2 with
-        per-item results in request order. Items ride the same SendRequest
-        schema (same field caps). The effective batch ceiling is
-        min(100, NOSTOS_PUSHD_SEND_BURST).
+        All-or-nothing phase 1 (parse, item-count cap — the EFFECTIVE
+        ceiling min(100, NOSTOS_PUSHD_SEND_BURST), since a batch larger
+        than the tenant's bucket could never acquire n tokens; ONE atomic
+        per-item rate charge, per-item validation, :rail-role gate,
+        rail-configured check; any failure = whole-batch error naming the
+        first failing index, zero items sent, and a phase-1 failure
+        REFUNDS the reserved tokens), then per-item admission in phase 2
+        with per-item results in request order (phase-2 admission
+        failures are NOT refunded — an admission attempt costs its token,
+        same as /v1/send). Items ride the same SendRequest schema (same
+        field caps).
       requestBody:
         required: true
         content:
@@ -177,11 +180,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BatchSendAccepted' }
-        '400': { description: Malformed body, item-count cap violation, or a per-item validation failure (whole batch rejected; error names the index) }
+        '400': { description: Malformed body, item-count over the effective ceiling min(100, send burst), or a per-item validation failure (whole batch rejected; error names the index; reserved tokens refunded) }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { description: A rail-mode item under a Standard-role key (whole batch rejected; error names the index) }
         '404': { description: An item's token is unregistered AND carries no platform field (whole batch rejected; error names the index) }
-        '429': { description: The tenant's bucket cannot cover the whole batch — all-or-nothing, tokens preserved }
+        '429': { description: The tenant's bucket currently holds fewer tokens than the batch size (batch within the effective ceiling) — all-or-nothing, tokens preserved }
         '503': { description: EVERY item failed coalescer admission (nothing sent — safe to retry), or an item's rail is unconfigured (whole-batch phase-1 rejection) }
   /v1/receipts:
     get:

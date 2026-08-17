@@ -59,6 +59,17 @@ impl SendRateLimiter {
         }
     }
 
+    /// The configured burst (bucket capacity) in whole tokens. The batch
+    /// endpoint caps item count at min(MAX_BATCH_ITEMS, burst): a batch
+    /// larger than the bucket can never acquire n tokens, so it is a 400
+    /// (permanent client error), not a 429 (transient). The f64 cast is
+    /// exact: burst enters as a u32 and is only ever clamped to itself.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn burst(&self) -> u32 {
+        self.burst as u32
+    }
+
     /// Consume `n` tokens for `tenant` atomically — ALL or NOTHING: a
     /// short bucket keeps every token, so a batch caller's 429 means ZERO
     /// items were admitted (plan v1.1 batch-send pin, contract 0.4.0).
@@ -83,6 +94,31 @@ impl SendRateLimiter {
         } else {
             false
         }
+    }
+
+    /// Refund `n` tokens to `tenant`, capped at burst (a refund can never
+    /// inflate the bucket past capacity). Batch send uses this when a
+    /// phase-1 validation failure aborts the batch AFTER the all-or-nothing
+    /// acquire: zero sends were attempted, so the reservation is returned
+    /// (a single /v1/send charges 1 token for the same failure — a batch
+    /// must not charge n). Phase-2 per-item admission failures are NOT
+    /// refunded: an admission attempt costs its token, same as /v1/send.
+    pub fn release_n(&self, tenant: &str, n: u32) {
+        if n == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().expect("rate limiter lock");
+        let bucket = buckets
+            .entry(tenant.to_string())
+            .or_insert_with(|| TokenBucket {
+                tokens: self.burst,
+                last: now,
+            });
+        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.rate_per_sec).min(self.burst);
+        bucket.last = now;
+        bucket.tokens = (bucket.tokens + f64::from(n)).min(self.burst);
     }
 
     /// Consume one token for `tenant`, refilling first. `false` = the
@@ -138,6 +174,19 @@ mod tests {
         assert!(limiter.try_acquire("a"));
         assert!(!limiter.try_acquire("a"));
         assert!(limiter.try_acquire_n("b", 5), "other tenant unaffected");
+    }
+
+    #[test]
+    fn release_n_refunds_and_clamps_at_burst() {
+        let limiter = SendRateLimiter::new(1, 5);
+        assert!(limiter.try_acquire_n("a", 5), "drain the bucket");
+        assert!(!limiter.try_acquire("a"), "empty");
+        limiter.release_n("a", 5);
+        assert!(limiter.try_acquire_n("a", 5), "refunded in full");
+        // Clamp: refunding more than capacity cannot inflate the bucket.
+        limiter.release_n("a", 99);
+        assert!(limiter.try_acquire_n("a", 5), "clamped at burst, not 104");
+        assert!(!limiter.try_acquire("a"), "no inflation beyond burst");
     }
 
     #[test]

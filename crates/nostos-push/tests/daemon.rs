@@ -1329,7 +1329,11 @@ async fn batch_send_rail_mode_standard_key_forbidden_403() {
     assert!(body["error"].as_str().expect("error").contains("item 0"));
 }
 
-/// The item cap: 0 or >100 items is a 400 before any rate/lookup work.
+/// The item cap: 0 items or more than the EFFECTIVE ceiling is a 400
+/// before any rate/lookup work. The effective ceiling is
+/// min(MAX_BATCH_ITEMS=100, send burst) — a batch larger than the bucket
+/// could never acquire n tokens, so it is a permanent 400, not a transient
+/// 429 (the default harness burst is 50, so 51 already 400s).
 #[tokio::test]
 async fn batch_send_item_count_cap_400() {
     let (_calls, mock) = MockRail::new(RailOutcome::Delivered);
@@ -1339,7 +1343,7 @@ async fn batch_send_item_count_cap_400() {
         .await;
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "empty batch");
 
-    let items: Vec<Value> = (0..101)
+    let items: Vec<Value> = (0..51)
         .map(|_| json!({"token": "t", "payload": {"silent": {"table": "docs", "lsn": "1"}}}))
         .collect();
     let (status, body) = d
@@ -1348,28 +1352,42 @@ async fn batch_send_item_count_cap_400() {
     assert_eq!(
         status,
         reqwest::StatusCode::BAD_REQUEST,
-        "101 items: {body}"
+        "51 items > effective cap 50: {body}"
     );
-    assert!(body["error"].as_str().expect("error").contains("1..=100"));
+    let msg = body["error"].as_str().expect("error");
+    assert!(msg.contains("1..=50"), "names the effective cap: {msg}");
+    assert!(
+        msg.contains("min(100, send burst)"),
+        "explains the cap: {msg}"
+    );
 }
 
-/// The batch rate check is all-or-nothing AND non-draining: a 4-item batch
-/// against a burst-3 bucket 429s, and the bucket keeps its tokens — a
-/// single /v1/send right after still succeeds.
+/// The batch rate check is all-or-nothing AND non-draining: with rate 0
+/// (no refill) and burst 5, four singles leave exactly 1 token; a 3-item
+/// batch then 429s and the short bucket keeps its token — a single
+/// /v1/send right after still succeeds. (n > burst is now a 400 at the
+/// count check — see batch_send_item_count_cap_400 — so the 429 path is
+/// exercised as n <= burst against a drained bucket.)
 #[tokio::test]
 async fn batch_send_rate_short_bucket_429_non_draining() {
     let (_calls, mock) = MockRail::new(RailOutcome::Delivered);
     let d = spawn_daemon_tuned(
         50,
         rails_for(Platform::Apns, &mock),
-        10,
-        3,
+        0,
+        5,
         CoalescerLimits::default(),
     )
     .await;
     register_apns(&d, KEY_A, "tok-batch-rate").await;
 
-    let items: Vec<Value> = (0..4)
+    // Drain to exactly 1 token (rate 0 = no refill to race).
+    for i in 0..4 {
+        let push_id = send_silent(&d, KEY_A, "tok-batch-rate", json!({"drain": i})).await;
+        assert_eq!(push_id.len(), 36);
+    }
+
+    let items: Vec<Value> = (0..3)
         .map(|i| json!({"token": "tok-batch-rate", "payload": {"silent": {"table": "docs", "lsn": i.to_string()}}}))
         .collect();
     let (status, body) = d
@@ -1378,10 +1396,52 @@ async fn batch_send_rate_short_bucket_429_non_draining() {
     assert_eq!(
         status,
         reqwest::StatusCode::TOO_MANY_REQUESTS,
-        "batch: {body}"
+        "3-item batch vs 1 remaining token: {body}"
     );
 
-    // The failed batch did not drain the bucket: a single send still fits.
+    // The failed batch did not drain the bucket: the 1 remaining token
+    // still buys a single send.
     let push_id = send_silent(&d, KEY_A, "tok-batch-rate", json!({"after": "429"})).await;
     assert_eq!(push_id.len(), 36);
+}
+
+/// A phase-1 validation failure aborts the batch with ZERO sends and
+/// REFUNDS the n reserved tokens: a same-size valid batch immediately
+/// after still fits the bucket (without the refund it would 429).
+#[tokio::test]
+async fn batch_send_phase1_failure_refunds_tokens() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon_tuned(
+        50,
+        rails_for(Platform::Apns, &mock),
+        0,
+        5,
+        CoalescerLimits::default(),
+    )
+    .await;
+    register_apns(&d, KEY_A, "tok-refund").await;
+
+    let mut items: Vec<Value> = (0..5)
+        .map(|i| json!({"token": "tok-refund", "payload": {"silent": {"table": "docs", "lsn": i.to_string()}}}))
+        .collect();
+    // Item 2 fails validation (visible title over the length cap).
+    items[2] = json!({"token": "tok-refund", "payload": {"visible": {"title": "x".repeat(300), "body": "b"}}});
+    let (status, body) = d
+        .post("/v1/send/batch", Some(KEY_A), &json!({"items": items}))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "phase-1: {body}");
+
+    // Refunded: the same burst-5 bucket admits a valid 5-item batch.
+    let items: Vec<Value> = (0..5)
+        .map(|i| json!({"token": "tok-refund", "payload": {"silent": {"table": "docs", "lsn": i.to_string()}}}))
+        .collect();
+    let (status, body) = d
+        .post("/v1/send/batch", Some(KEY_A), &json!({"items": items}))
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::ACCEPTED,
+        "refunded bucket admits the retry: {body}"
+    );
+    let _ = calls;
 }

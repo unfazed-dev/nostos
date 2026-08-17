@@ -29,9 +29,13 @@
 //! one receipt.
 //!
 //! ponytail: no retries in v1 — a transient rail outcome is terminal on the
-//! receipt and callers retry (the RemoteNotifier of Wave 2 will). Upgrade
-//! path: an attempts counter on Pending plus scheduled re-flush, exactly
-//! the embedded router's shape; the receipt stays the source of truth.
+//! receipt and NOTHING re-enqueues: the RemoteNotifier's receipt handler
+//! (push/remote.rs) maps a transient outcome to metrics only, and the
+//! embedded router's transient-retry does not apply to daemon sends. A lost
+//! doorbell is mitigated by the durable LSN checkpoint reconciling on the
+//! next sync — no data loss, just a missed wake-up. Upgrade path: an
+//! attempts counter on Pending plus scheduled re-flush, exactly the
+//! embedded router's shape; the receipt stays the source of truth.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
