@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
 
 import 'runner.dart';
+import 'web_runs_stub.dart' if (dart.library.js_interop) 'web_runs_web.dart';
 
 /// Neutral run-result store: newline-delimited JSON (JSONL) under a
 /// directory (app documents dir in production, an injectable [Directory] in
@@ -23,11 +24,18 @@ class BenchStore {
 
   /// Web: path_provider has no browser implementation (the open future never
   /// resolves — the Analytics tab spun forever) and dart:io File throws there,
-  /// so keep runs in memory for the session. ponytail: bench history doesn't
-  /// survive a web reload; upgrade to localStorage/OPFS if that ever matters.
-  BenchStore.web()
-    : file = null,
-      _memory = <String>[];
+  /// so runs persist to localStorage as one JSONL string. ponytail: ~5MB
+  /// localStorage cap and string-join-per-append; OPFS/IndexedDB if run
+  /// history ever outgrows that.
+  BenchStore.web() : file = null, _memory = _loadWebRuns();
+
+  static const _webKey = 'atlet_runs.jsonl';
+
+  static List<String> _loadWebRuns() {
+    final raw = loadWebRuns(_webKey);
+    if (raw == null || raw.isEmpty) return <String>[];
+    return raw.split('\n');
+  }
 
   final File? file;
   final List<String>? _memory;
@@ -45,6 +53,7 @@ class BenchStore {
     final f = file;
     if (f == null) {
       _memory!.add(line);
+      saveWebRuns(_webKey, _memory.join('\n'));
       return;
     }
     await f.writeAsString(line, mode: FileMode.append, flush: true);
