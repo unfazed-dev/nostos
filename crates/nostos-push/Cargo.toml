@@ -1,0 +1,59 @@
+[package]
+name = "nostos-push"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "nostos-pushd — standalone push daemon (ADR-0038): token-addressed APNs / FCM / Web Push sends with debounce coalescing."
+repository.workspace = true
+homepage.workspace = true
+
+# The daemon binary (ADR-0038 §1: composition root on the nostos-bench /
+# nostos-cloud precedent — lib + bin in one member, NOT a feature crate).
+[[bin]]
+name = "nostos-pushd"
+path = "src/main.rs"
+
+[features]
+default = []
+# ponytail: pg = ["dep:tokio-postgres"] + a PgStore impl of store::Store
+# (pool-of-one, the PgTokenStore pattern) is deferred to v1.1 per plan pin
+# 0.3's time-box rule — the Arc<dyn Store> seam is already in place, so
+# v1.1 adds the impl + feature without touching a single caller. SQLite is
+# the single-binary default and the only store this wave ships.
+
+[dependencies]
+nostos-domain = { workspace = true }
+# Rails + RailSet, reused AS-IS (ADR-0038 §1; plan task 1.5 "no rail forks").
+# Default features keep the webpush rail on — this is a server-shaped crate.
+nostos-infra = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+subtle = { workspace = true }
+# Digest-then-ct_eq for API-key compare (the nostos-server admin_auth.rs
+# idiom) — digests are fixed 32 bytes, so there is no unequal-length branch
+# before the constant-time compare starts.
+sha2 = { workspace = true }
+# push_id = uuid v4 (plan pin 0.4: uuid IS a workspace dep, so v4 it is).
+uuid = { workspace = true }
+# RFC3339 timestamps, the nostos-cloud pattern (its store.rs uses time).
+time = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+# HTTP-level tests against a spawned daemon (the ProviderMock idiom: real
+# axum listener on 127.0.0.1:0 — no mock-HTTP crate). Already a workspace
+# dep via nostos-infra's rails; adding it here pulls nothing new.
+reqwest = { workspace = true }
+
+[lints]
+workspace = true

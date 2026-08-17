@@ -16,14 +16,14 @@ ADR-0037 + `docs/plans/nostos-push-notifications-implementation.md` (24/24, done
 
 ## Wave 1 — daemon core
 
-- [ ] 1.1 Crate skeleton: composition-root main (clap + NOSTOS_* env, same pattern as nostos-server `main.rs:34-41`), lib with send/registry modules.
-- [ ] 1.2 Registry: SQLite store + migrations; PG option (pool-of-one, `PgTokenStore` pattern). Prune on `RailOutcome::Unregistered`.
-- [ ] 1.3 API-key auth middleware (constant-time compare; per-tenant scope; stamped tenant, never client-attested).
-- [ ] 1.4 Token routes: register / deregister (idempotent delete, owner-scoped — mirror `crates/nostos-server/src/push_api.rs` discipline).
-- [ ] 1.5 Send route: build `PushPayload` (silent | visible w/ single-column interpolation, same template syntax as embedded), dispatch to rail by token.platform. Reuse `nostos_infra::push::{apns,fcm,webpush}` AS-IS — no rail forks.
-- [ ] 1.6 Debounce coalescer: per-(tenant,target) time-window buffer (bounded channel off the request path — OpLogWriter-contract discipline); flush with rail-native supersede keys (collapse_key / apns-collapse-id / Topic). Config: `NOSTOS_PUSHD_DIGEST_MS` (default pinned in 0.x).
-- [ ] 1.7 Rail config: identical env contract (NOSTOS_FCM_CREDENTIALS_JSON, NOSTOS_APNS_*, NOSTOS_WEBPUSH_VAPID_*) + `from_env()` unset = rail off.
-- [ ] 1.8 Tests: provider mock (`test_support.ProviderMock` idiom — promote it from #[cfg(test)] to a shared testkit or duplicate); burst-coalesce test; 410/UNREGISTERED prune test; auth rejection tests.
+- [x] 1.1 Crate skeleton: `crates/nostos-push` (lib + `nostos-pushd` bin); config.rs clap+env per pin 0.5 (NOSTOS_PUSHD_BIND/DB/API_KEYS/DEBOUNCE_MS/RECEIPT_RETENTION_SECS). Zero new external deps.
+- [x] 1.2 Registry: store.rs — `Store` trait + SqliteStore (rusqlite bundled, nostos-cloud idiom), schema per pin 0.3 + contract-required receipts.tenant_id/metadata columns (documented). Prune on Unregistered. PG DEFERRED to v1.1 (ponytail; `Arc<dyn Store>` seam ready, zero caller changes).
+- [x] 1.3 API-key auth middleware: auth.rs — subtle ct_eq over SHA-256 digests (admin_auth.rs idiom), tenant stamped into extensions (ADR-0018), fail-fast parse, duplicate-tenant rejected. Raw secrets never retained after boot.
+- [x] 1.4 Token routes: upsert 201 / idempotent delete 204 / foreign-tenant 404 (oracle-safe); deny_unknown_fields.
+- [x] 1.5 Send route: 202+uuid push_id, 404 unknown token, 503 rail-unconfigured (checked pre-enqueue); caller-built payloads (no server-side row interpolation — ADR-0038 §2); rails reused AS-IS via internal `RailDispatch` seam (their test constructors are private — no nostos-infra changes).
+- [x] 1.6 Debounce coalescer: coalescer.rs — bounded mpsc(1024), first-send-fixes-deadline + payload-replace (router.rs semantics) with a debounce-vs-throttle guard (steady stream cannot starve the flush); winner+loser receipt semantics (every push_id exactly one receipt; losers carry `coalesced:<winner>` + their own metadata echo). Env var shipped as NOSTOS_PUSHD_DEBOUNCE_MS (default 2000).
+- [x] 1.7 Rail config: `RailSet::from_env()` reused — identical env contract, no env duplication; /v1/healthz reports which rails are live.
+- [x] 1.8 Tests: 31 green (12 unit + 19 integration over a real spawned axum listener): auth ×7, tokens ×5, send ×6, coalescer burst-20→1-dispatch+all-receipts, two-windows→2, prune-on-Unregistered, fatal/transient mapping, receipts cursor pagination + tenant isolation.
 
 ## Wave 2 — RemoteNotifier delegation
 

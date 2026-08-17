@@ -1,0 +1,109 @@
+//! # nostos-pushd — the composition root binary (ADR-0038 §1, plan 1.1)
+//!
+//! Reads config, builds the registry store + rails from the shared env
+//! contract, spawns the coalescer and the retention sweeper, and binds
+//! axum. The only place the concrete adapters are wired — swapping the
+//! SQLite store for the v1.1 PgStore is a construction-site change here,
+//! zero edits in the route/coalescer layers (the hexagonal payoff).
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Context;
+use clap::Parser;
+use tracing::info;
+
+use nostos_push::auth::ApiKeys;
+use nostos_push::coalescer;
+use nostos_push::config::Config;
+use nostos_push::rail::Rails;
+use nostos_push::store::SqliteStore;
+use nostos_push::{build_router, AppState};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cfg = Config::parse();
+    init_tracing();
+
+    // Fail fast (pin 0.2): a daemon with no usable key list must never
+    // start serving an auth surface that can only answer 401.
+    let api_keys = ApiKeys::parse(&cfg.api_keys).context("invalid NOSTOS_PUSHD_API_KEYS")?;
+    info!(tenants = api_keys.len(), "API keys loaded");
+
+    let store: Arc<dyn nostos_push::store::Store> = Arc::new(
+        SqliteStore::open(&cfg.db).with_context(|| format!("opening pushd database {}", cfg.db))?,
+    );
+
+    // Rails configure themselves from their own env vars (plan task 1.7);
+    // a misconfigured rail aborts the boot rather than failing per-send.
+    let rails = Rails::from_env().context("push rail configuration")?;
+    let health = rails.health();
+    info!(
+        apns = health.apns,
+        fcm = health.fcm,
+        webpush = health.webpush,
+        db = %cfg.db,
+        debounce_ms = cfg.debounce_ms,
+        receipt_retention_secs = cfg.receipt_retention_secs,
+        "nostos-pushd starting"
+    );
+
+    coalescer::spawn_retention_sweeper(Arc::clone(&store), cfg.receipt_retention_secs);
+    let coalescer = coalescer::spawn_coalescer(
+        Arc::clone(&store),
+        rails.clone(),
+        Duration::from_millis(cfg.debounce_ms),
+    );
+    let state = AppState {
+        store,
+        rails,
+        api_keys,
+        sender: coalescer.tx.clone(),
+    };
+
+    let addr: SocketAddr = cfg
+        .bind
+        .parse()
+        .with_context(|| format!("invalid bind address: {}", cfg.bind))?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind {addr}"))?;
+    info!(%addr, "nostos-pushd listening");
+
+    axum::serve(listener, build_router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("server error")?;
+    Ok(())
+}
+
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .try_init();
+}
+
+/// SIGTERM / Ctrl-C — the coalescer's channel closes with the state (all
+/// sender clones dropped at process exit), which triggers its final drain.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("installing SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+}

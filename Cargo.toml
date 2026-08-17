@@ -50,6 +50,7 @@ members = [
     "crates/nostos-client",
     "crates/nostos-ffi-wasm",
     "crates/nostos-cli",
+    "crates/nostos-push",
 ]
 
 [workspace.package]
