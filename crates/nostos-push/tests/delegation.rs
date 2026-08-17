@@ -32,7 +32,8 @@ use nostos_infra::push::router::{InMemoryTokenRegistry, PushTokenRegistry, Route
 use nostos_infra::push::{PushPayload, RailOutcome};
 use nostos_infra::InMemorySessionStore;
 use nostos_push::auth::ApiKeys;
-use nostos_push::coalescer;
+use nostos_push::coalescer::{self, CoalescerLimits};
+use nostos_push::limit::SendRateLimiter;
 use nostos_push::rail::{RailDispatch, Rails};
 use nostos_push::store::{SqliteStore, Store};
 use nostos_push::{build_router, AppState};
@@ -129,12 +130,18 @@ async fn spawn_daemon() -> (SocketAddr, Arc<Mutex<usize>>, String) {
         Arc::clone(&store),
         rails.clone(),
         Duration::from_millis(1500),
+        CoalescerLimits::default(),
     );
     let state = AppState {
         store,
         rails,
-        api_keys: ApiKeys::parse(&format!("tenant-a:{KEY}")).expect("keys"),
+        // The daemon-side key MUST carry the :rail role (plan task 4.1,
+        // finding 1): RemoteNotifier sends in rail mode (unregistered
+        // token + platform), which a Standard key may not.
+        api_keys: ApiKeys::parse(&format!("tenant-a:{KEY}:rail")).expect("keys"),
         sender: coalescer.tx.clone(),
+        send_limiter: Arc::new(SendRateLimiter::new(10, 50)),
+        gate: coalescer.gate.clone(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

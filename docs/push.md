@@ -126,16 +126,28 @@ Sends are coalesced per (tenant, token) inside the debounce window; outcomes lan
 
 ## 5. Recipe 3 — delegation via RemoteNotifier
 
-**Lands with Wave 2 — see ADR-0038.** When it ships, a nostos-server pointed at a daemon stops sending through its own rails and delegates instead:
+Shipped (Wave 2, ADR-0038 §3). A nostos-server pointed at a daemon stops sending through its own rails and delegates instead — set both variables in the **nostos-server** environment:
 
 ```shell
 NOSTOS_PUSH_REMOTE_URL=https://push.internal:8090
-NOSTOS_PUSH_REMOTE_KEY=acme:secret-word
+NOSTOS_PUSH_REMOTE_KEY=secret-word      # the SECRET only — no suffix
 ```
 
-Precedence: both set → delegate to the daemon; unset → embedded router (Recipe 1); neither credential contract present → `NoopNotifier`. The daemon's receipt log flows back so push-LSN → client-ack correlation survives the network hop. No token registry is ever shared between server and daemon — delegation sends carry `(token, payload)`, nothing else.
+On the **daemon** side, the matching `NOSTOS_PUSHD_API_KEYS` entry for that key MUST carry the `:rail` role suffix — delegation sends are rail-mode sends (unregistered token + `platform` field), and since the 2026-08-17 security closeout a Standard key gets `403` on them:
 
-Until Wave 2 lands, these two variables do nothing; configure Recipe 1 or 2 directly.
+```shell
+NOSTOS_PUSHD_API_KEYS="acme:s3cr3t,hq:secret-word:rail"
+```
+
+Precedence: both set → delegate to the daemon; unset → embedded router (Recipe 1); neither credential contract present → `NoopNotifier`. The daemon's receipt log flows back through the RemoteNotifier's poll, so push-LSN → client-ack correlation survives the network hop: `delivered` receipts advance the correlation map, `unregistered` receipts prune the server-side registry row, coalesced receipts (detail `coalesced:<winner>`) feed only correlation — never the sent/failed counters. No token registry is ever shared between server and daemon — delegation sends carry `(token, platform, payload)`, nothing else.
+
+### Security behavior (2026-08-17 audit closeout, contract 0.3.0)
+
+- **Rate limits**: `POST /v1/send` is token-bucket limited per tenant — `NOSTOS_PUSHD_SEND_RATE_PER_SEC` (default 10) sustained, `NOSTOS_PUSHD_SEND_BURST` (default 50) instantaneous; exhaustion is `429`. The coalescer also caps open debounce windows (`NOSTOS_PUSHD_PENDING_KEYS_MAX`, default 10 000) — a send for a NEW key past the ceiling is `429`.
+- **Field caps** → `400`: title 256, body 1024, token 2048 (same bound as the registry, so a registered Web Push subscription token always sends), collapse_key 256, category 128, serialized metadata ≤ 4096 bytes.
+- **Role gating** → `403`: rail mode (unregistered token + `platform`) requires a `:rail`-role key; registered-token sends accept either role.
+- **Ownership** → `409`: registering a token held by another tenant is refused (never silently reassigned) — the old owner DELETEs first. `DELETE /v1/tokens/{token}` is `204` for every not-yours case (no token-existence oracle).
+- **Healthz** → `{"status":"ok"}` only; the rails booleans live behind auth on `GET /v1/status`.
 
 ---
 

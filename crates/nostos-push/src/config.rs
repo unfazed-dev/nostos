@@ -48,6 +48,34 @@ pub struct Config {
         default_value_t = 604_800
     )]
     pub receipt_retention_secs: u64,
+
+    /// Sustained /v1/send rate per tenant, requests/sec (2026-08-17
+    /// security audit, plan task 4.1 — finding 2).
+    /// ponytail: 10/sec is a daemon-shape default, not a measurement;
+    /// the upgrade path is per-key limits once key CRUD lands (v1.1) —
+    /// until then one daemon, one policy.
+    #[arg(long, env = "NOSTOS_PUSHD_SEND_RATE_PER_SEC", default_value_t = 10)]
+    pub send_rate_per_sec: u32,
+
+    /// /v1/send burst size per tenant (max instantaneous requests before
+    /// the 429s start; refills at the sustained rate above). Same audit
+    /// ponytail as the rate knob.
+    #[arg(long, env = "NOSTOS_PUSHD_SEND_BURST", default_value_t = 50)]
+    pub send_burst: u32,
+
+    /// Max distinct (tenant, token) keys with an open debounce window in
+    /// the coalescer (audit finding 2). A send for a NEW key beyond this
+    /// is refused with 429 at the route.
+    /// ponytail: 10k is a pinned safe ceiling, not a measurement; upgrade
+    /// path is deriving it from observed window occupancy.
+    #[arg(long, env = "NOSTOS_PUSHD_PENDING_KEYS_MAX", default_value_t = 10_000)]
+    pub pending_keys_max: usize,
+
+    /// Max coalesced-away sends retained per key (audit finding 2); the
+    /// oldest beyond the cap is receipted as coalesced at flush. Same
+    /// audit ponytail as the pending-key ceiling.
+    #[arg(long, env = "NOSTOS_PUSHD_LOSERS_MAX", default_value_t = 64)]
+    pub losers_max: usize,
 }
 
 #[cfg(test)]
@@ -65,6 +93,10 @@ mod tests {
         assert_eq!(cfg.api_keys, "acme:s3cr3t");
         assert_eq!(cfg.debounce_ms, 2000);
         assert_eq!(cfg.receipt_retention_secs, 604_800);
+        assert_eq!(cfg.send_rate_per_sec, 10);
+        assert_eq!(cfg.send_burst, 50);
+        assert_eq!(cfg.pending_keys_max, 10_000);
+        assert_eq!(cfg.losers_max, 64);
     }
 
     #[test]

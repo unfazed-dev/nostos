@@ -1,9 +1,17 @@
-//! REST surface — the OpenAPI contract at docs/api/nostos-pushd.yaml,
-//! implemented EXACTLY (plan task 1.4 for tokens, 1.5 for send; receipts
-//! per pin 0.4). Route discipline mirrors nostos-server push_api.rs:
-//! deny_unknown_fields DTOs, auth ordering handled by middleware before
-//! any handler runs, owner-scoped deletes, and the {"error": string}
-//! error shape on every non-2xx this crate produces.
+//! REST surface — the OpenAPI contract at docs/api/nostos-pushd.yaml
+//! (version 0.3.0, bumped by the 2026-08-17 security-audit closeout, plan
+//! task 4.1), implemented EXACTLY (plan task 1.4 for tokens, 1.5 for send;
+//! receipts per pin 0.4). Route discipline mirrors nostos-server
+//! push_api.rs: deny_unknown_fields DTOs, auth ordering handled by
+//! middleware before any handler runs, owner-scoped deletes, and the
+//! {"error": string} error shape on every non-2xx this crate produces.
+//!
+//! Audit closeout behaviors (plan task 4.1): rail-mode dispatch requires a
+//! Rail-role key (403 otherwise — finding 1); /v1/send is rate-limited per
+//! tenant (429) and field-capped (400 — finding 2); cross-tenant token
+//! registration is a 409 (finding 3); /v1/healthz is status-only with the
+//! rails booleans behind authed /v1/status (finding 5); DELETE is 204 for
+//! every not-yours case (finding 6).
 //!
 //! Bodies are parsed from raw Bytes (not the Json extractor) so a
 //! malformed body gets THIS crate's 400 error shape, not axum's default
@@ -21,10 +29,11 @@ use nostos_domain::Lsn;
 use nostos_infra::push::PushPayload;
 use tokio::sync::mpsc;
 
-use crate::auth::{auth_middleware, ApiKeys, TenantId};
-use crate::coalescer::SendJob;
+use crate::auth::{auth_middleware, ApiKeys, KeyRole, TenantId};
+use crate::coalescer::{SendJob, SharedPendingGate};
+use crate::limit::SendRateLimiter;
 use crate::rail::Rails;
-use crate::store::{Platform, Store};
+use crate::store::{Platform, Store, UpsertOutcome};
 
 /// Shared route state. Cloned per request; cheap (Arcs + a channel sender).
 #[derive(Clone)]
@@ -34,6 +43,12 @@ pub struct AppState {
     pub api_keys: ApiKeys,
     /// Bounded coalescer inbox — try_send only.
     pub sender: mpsc::Sender<SendJob>,
+    /// Per-tenant token bucket for /v1/send (audit finding 2) — 429 when
+    /// exhausted. Arc: the map mutates under its own lock.
+    pub send_limiter: Arc<SendRateLimiter>,
+    /// The coalescer's pending-key admission gate (audit finding 2) — 429
+    /// when a NEW (tenant, token) key would exceed the ceiling.
+    pub gate: SharedPendingGate,
 }
 
 /// The contract's error body everywhere: {"error": string}.
@@ -48,12 +63,13 @@ fn internal(message: &str) -> ApiError {
 }
 
 /// Wire the whole router: /v1/healthz unauthenticated, every other /v1
-/// route behind the bearer middleware (which stamps the tenant).
+/// route behind the bearer middleware (which stamps the tenant + role).
 pub fn build_router(state: AppState) -> Router {
     let open = Router::new()
         .route("/v1/healthz", get(healthz))
         .with_state(state.clone());
     let authed = Router::new()
+        .route("/v1/status", get(status))
         .route("/v1/tokens", post(register_token))
         .route("/v1/tokens/:token", delete(delete_token))
         .route("/v1/send", post(send))
@@ -66,17 +82,32 @@ pub fn build_router(state: AppState) -> Router {
     open.merge(authed)
 }
 
-// ---------------------------------------------------------------- healthz
+// --------------------------------------------------------- healthz / status
 
 #[derive(serde::Serialize)]
 struct HealthzBody {
     status: &'static str,
+}
+
+/// GET /v1/healthz — unauthenticated LIVENESS only (audit finding 5): the
+/// response is {"status":"ok"} and nothing else. Which rails are
+/// configured is deployment detail an anonymous caller must not learn; it
+/// moved to the authenticated GET /v1/status.
+async fn healthz(State(_state): State<AppState>) -> Json<HealthzBody> {
+    Json(HealthzBody { status: "ok" })
+}
+
+#[derive(serde::Serialize)]
+struct StatusBody {
+    status: &'static str,
     rails: crate::rail::RailsHealth,
 }
 
-/// GET /v1/healthz — unauthenticated liveness + which rails from_env() built.
-async fn healthz(State(state): State<AppState>) -> Json<HealthzBody> {
-    Json(HealthzBody {
+/// GET /v1/status — authenticated readiness (audit finding 5): liveness
+/// plus which rails from_env() built — the pre-0.3.0 healthz shape, now
+/// behind the bearer gate.
+async fn status(State(state): State<AppState>) -> Json<StatusBody> {
+    Json(StatusBody {
         status: "ok",
         rails: state.rails.health(),
     })
@@ -106,7 +137,10 @@ const MIN_TOKEN_LEN: usize = 8;
 /// garbage, not a token).
 const MAX_TOKEN_LEN: usize = 2048;
 
-/// POST /v1/tokens — register (upsert) the caller's device token.
+/// POST /v1/tokens — register (upsert) the caller's device token. A token
+/// already held by ANOTHER tenant is a 409 (audit finding 3): ownership
+/// never silently reassigns — the migration path is the old owner's
+/// DELETE, then this POST.
 async fn register_token(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
@@ -121,24 +155,30 @@ async fn register_token(
             format!("token must be {MIN_TOKEN_LEN}..={MAX_TOKEN_LEN} chars"),
         ));
     }
-    state
+    match state
         .store
         .upsert_token(&tenant.0, token, body.platform, body.account_tag.as_deref())
         .await
-        .map_err(|e| {
+    {
+        Ok(UpsertOutcome::Registered) => Ok((
+            StatusCode::CREATED,
+            Json(TokenRegisteredBody { registered: true }),
+        )),
+        Ok(UpsertOutcome::Conflict) => Err(err(
+            StatusCode::CONFLICT,
+            "token is already registered to another tenant — its owner must DELETE it first",
+        )),
+        Err(e) => {
             tracing::error!(error = %e, "token upsert failed");
-            internal("token registry unavailable")
-        })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(TokenRegisteredBody { registered: true }),
-    ))
+            Err(internal("token registry unavailable"))
+        }
+    }
 }
 
-/// DELETE /v1/tokens/{token} — deregister. Idempotent 204 for the caller's
-/// own row (or a row that never existed); 404 when the token belongs to
-/// another tenant (oracle-safe — the response distinguishes nothing the
-/// caller could not learn from their own sends).
+/// DELETE /v1/tokens/{token} — deregister, idempotent 204. Not-yours is
+/// ALSO a 204 (audit finding 6): distinguishing foreign from missing was a
+/// token-existence oracle for other tenants, so the 404 is gone — the
+/// response confirms nothing the caller did not already know.
 async fn delete_token(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
@@ -150,11 +190,10 @@ async fn delete_token(
         .delete_token_owner_scoped(&tenant.0, &token)
         .await
     {
-        Ok(DeleteOutcome::Deleted | DeleteOutcome::Missing) => Ok(StatusCode::NO_CONTENT),
-        Ok(DeleteOutcome::Foreign) => Err(err(
-            StatusCode::NOT_FOUND,
-            "token not registered for this tenant",
-        )),
+        // Foreign and Missing are BOTH 204 now — see the handler doc.
+        Ok(DeleteOutcome::Deleted | DeleteOutcome::Foreign | DeleteOutcome::Missing) => {
+            Ok(StatusCode::NO_CONTENT)
+        }
         Err(e) => {
             tracing::error!(error = %e, "token delete failed");
             Err(internal("token registry unavailable"))
@@ -228,6 +267,19 @@ impl SendPayloadDto {
             }),
         }
     }
+
+    /// Field caps for the visible variant (audit finding 2) — the DTO owns
+    /// its own bounds so every caller gets them for free.
+    fn validate_caps(&self) -> Result<(), String> {
+        if let Self::Visible(v) = self {
+            check_len("payload.visible.title", &v.visible.title, MAX_TITLE_LEN)?;
+            check_len("payload.visible.body", &v.visible.body, MAX_BODY_LEN)?;
+            if let Some(category) = &v.visible.category {
+                check_len("payload.visible.category", category, MAX_CATEGORY_LEN)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// priority: low | high, default low. Accepted and validated for
@@ -243,18 +295,50 @@ enum Priority {
     High,
 }
 
+// Field caps (audit finding 2, plan task 4.1): enforced at the DTO layer
+// after deserialize, answering 400 — a hostile body must not ride the
+// handler into the coalescer or a rail unbounded. Lengths are chars
+// (matches serde's view); metadata is capped on its SERIALIZED byte size.
+/// Visible title cap.
+const MAX_TITLE_LEN: usize = 256;
+/// Visible body cap.
+const MAX_BODY_LEN: usize = 1024;
+/// Send-path token cap — the SAME 2048 the registry path enforces
+/// (8..=2048): the two must agree, or a token POST /v1/tokens accepted
+/// (Web Push subscription JSON — endpoint + p256dh + auth — commonly runs
+/// 400-700 chars and can exceed smaller caps) would 400 only at send
+/// time. APNs (64 hex) and FCM (~150-180) sit far below either bound.
+const MAX_SEND_TOKEN_LEN: usize = 2048;
+/// Caller collapse-key override cap.
+const MAX_COLLAPSE_KEY_LEN: usize = 256;
+/// Visible category cap.
+const MAX_CATEGORY_LEN: usize = 128;
+/// Serialized metadata cap, bytes.
+const MAX_METADATA_BYTES: usize = 4096;
+
+fn check_len(field: &str, value: &str, max: usize) -> Result<(), String> {
+    if value.chars().count() > max {
+        Err(format!("field '{field}' exceeds the {max}-character cap"))
+    } else {
+        Ok(())
+    }
+}
+
 /// POST /v1/send body.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendRequest {
     token: String,
-    /// Rail mode (contract 0.2.0, plan pin 2.0): present AND the token not
-    /// in this daemon's registry => dispatch directly on the named rail —
-    /// registry-free delegation for trusted delegators (the sync side's
-    /// RemoteNotifier). A REGISTERED token ignores the field: the registry
-    /// row's platform wins, because the daemon registry is the source of
-    /// truth for tokens it owns (dual registration is exactly the
-    /// drift-prone second registry ADR-0037 §1 rejects).
+    /// Rail mode (contract 0.2.0, plan pin 2.0; role-gated since contract
+    /// 0.3.0 / plan task 4.1): present AND the token not in this daemon's
+    /// registry => dispatch directly on the named rail — registry-free
+    /// delegation, NOW restricted to Rail-role keys (the ":rail" suffix in
+    /// NOSTOS_PUSHD_API_KEYS) so a Standard tenant key cannot push to any
+    /// token it happens to know. A REGISTERED token ignores the field: the
+    /// registry row's platform wins, because the daemon registry is the
+    /// source of truth for tokens it owns (dual registration is exactly
+    /// the drift-prone second registry ADR-0037 §1 rejects) — and the
+    /// registry path is open to BOTH roles.
     platform: Option<Platform>,
     payload: SendPayloadDto,
     collapse_key: Option<String>,
@@ -268,6 +352,29 @@ struct SendRequest {
     metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
+impl SendRequest {
+    /// DTO-layer field caps (audit finding 2) -> 400.
+    fn validate(&self) -> Result<(), String> {
+        check_len("token", &self.token, MAX_SEND_TOKEN_LEN)?;
+        if let Some(collapse_key) = &self.collapse_key {
+            check_len("collapse_key", collapse_key, MAX_COLLAPSE_KEY_LEN)?;
+        }
+        self.payload.validate_caps()?;
+        if let Some(metadata) = &self.metadata {
+            let serialized = serde_json::Value::Object(metadata.clone());
+            let bytes = serde_json::to_vec(&serialized)
+                .map_err(|e| format!("metadata is not serializable: {e}"))?;
+            if bytes.len() > MAX_METADATA_BYTES {
+                return Err(format!(
+                    "serialized metadata is {} bytes — over the {MAX_METADATA_BYTES}-byte cap",
+                    bytes.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(serde::Serialize)]
 struct SendAcceptedBody {
     push_id: String,
@@ -276,24 +383,37 @@ struct SendAcceptedBody {
 
 /// POST /v1/send — queue one token-addressed push (202 + push_id).
 ///
-/// Ordering per the brief: parse (400) -> registry lookup (404 when the
-/// token is unregistered AND no platform field — rail mode, contract 0.2.0)
-/// -> rail configured check BEFORE enqueueing (503) -> bounded try_send (503
+/// Ordering per the brief + audit closeout (plan task 4.1): rate limit
+/// (429 — before any parsing, the cheap shed) -> parse (400) -> field caps
+/// (400) -> registry lookup (404 when the token is unregistered AND no
+/// platform field — rail mode) -> rail-mode role gate (403 for a Standard
+/// key) -> rail configured check BEFORE enqueueing (503) -> pending-gate
+/// admission (429 on the coalescer's key ceiling) -> bounded try_send (503
 /// on full). No priority use yet — see [Priority].
 async fn send(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
+    Extension(role): Extension<KeyRole>,
     raw: Bytes,
 ) -> Result<(StatusCode, Json<SendAcceptedBody>), ApiError> {
+    if !state.send_limiter.try_acquire(&tenant.0) {
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "send rate limit exceeded for this tenant — retry later",
+        ));
+    }
     let body: SendRequest = serde_json::from_slice(&raw)
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")))?;
+    body.validate()
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid request: {e}")))?;
     let payload = body
         .payload
         .into_push_payload()
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid payload: {e}")))?;
-    // Platform resolution (contract 0.2.0): the registry row wins for a
-    // registered token; rail mode (unregistered + platform field) dispatches
-    // directly with no registry row; unregistered + no field is today's 404.
+    // Platform resolution (contract 0.3.0): the registry row wins for a
+    // registered token; rail mode (unregistered + platform field) is the
+    // Rail-role-only delegation path; unregistered + no field is today's
+    // 404.
     let record = state
         .store
         .lookup_token(&tenant.0, &body.token)
@@ -304,12 +424,25 @@ async fn send(
         })?;
     let platform = match record {
         Some(record) => record.platform,
-        None => body.platform.ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                "token not registered for this tenant",
-            )
-        })?,
+        None => match body.platform {
+            Some(_) if role != KeyRole::Rail => {
+                // Audit finding 1: rail mode is the trusted-delegator path —
+                // a Standard tenant key must not dispatch to tokens outside
+                // this daemon's registry.
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "rail mode (unregistered token + platform field) requires a :rail-role \
+                     API key",
+                ));
+            }
+            Some(platform) => platform,
+            None => {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "token not registered for this tenant",
+                ))
+            }
+        },
     };
     if !state.rails.configured(platform) {
         return Err(err(
@@ -322,15 +455,28 @@ async fn send(
     }
     let push_id = uuid::Uuid::new_v4().to_string();
     let job = SendJob {
-        tenant_id: tenant.0,
-        token: body.token,
+        tenant_id: tenant.0.clone(),
+        token: body.token.clone(),
         platform,
         push_id: push_id.clone(),
         payload,
         collapse_key: body.collapse_key,
         metadata: body.metadata.map(serde_json::Value::Object),
     };
+    // Pending-key admission (audit finding 2): a NEW (tenant, token) key
+    // past the coalescer's ceiling is refused here; joins for an
+    // already-open key always pass. Admission and try_send have no await
+    // between them, so a cancelled request cannot leak a gate slot; a full
+    // channel releases the slot it just took.
+    let job_key = (tenant.0, body.token);
+    if !state.gate.lock().expect("pending gate").admit(&job_key) {
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "coalescer pending-key ceiling reached — retry",
+        ));
+    }
     state.sender.try_send(job).map_err(|_| {
+        state.gate.lock().expect("pending gate").release(&job_key);
         err(
             StatusCode::SERVICE_UNAVAILABLE,
             "coalescer queue full — retry",

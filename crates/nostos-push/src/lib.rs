@@ -11,6 +11,7 @@
 //! | [`api`] | 1.4 — token routes; 1.5 — send route (contract-exact) |
 //! | [`coalescer`] | 1.6 — per-(tenant, token) debounce, receipts, prune |
 //! | [`rail`] | 1.7 — the rails' env contract via from_env(); 1.5 dispatch seam |
+//! | [`limit`] | 4.1 — per-tenant send token bucket (2026-08-17 audit) |
 //!
 //! Scope law (ADR-0038 §2): token-addressed sends, daemon-owned registry,
 //! debounce coalescing — NOT a marketing platform (no topics, scheduling,
@@ -22,6 +23,7 @@ pub mod api;
 pub mod auth;
 pub mod coalescer;
 pub mod config;
+pub mod limit;
 pub mod rail;
 pub mod store;
 

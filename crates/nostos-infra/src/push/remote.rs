@@ -393,6 +393,11 @@ async fn receipt_loop(
     registry: Arc<dyn PushTokenRegistry>,
     metrics: Arc<Metrics>,
 ) {
+    // ponytail: the receipts cursor is not persisted — a nostos-server
+    // restart re-reads the retention window from seq 0 (metrics skew only:
+    // the prune is idempotent and the LSN correlation map is
+    // monotonicity-guarded, so replayed receipts cannot corrupt state).
+    // Upgrade path: cursor persistence (v1.1).
     let mut since: i64 = 0;
     let mut failures: u32 = 0;
     loop {

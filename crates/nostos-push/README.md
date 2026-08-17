@@ -13,9 +13,15 @@ behind one REST API and one env-var credential contract. ADR-0038.
   | FCM HTTP v1 | `NOSTOS_FCM_CREDENTIALS_JSON` (service-account JSON, inline) |
   | APNs | `NOSTOS_APNS_KEY_P8` (p8 PEM or path), `NOSTOS_APNS_KEY_ID`, `NOSTOS_APNS_TEAM_ID`, `NOSTOS_APNS_BUNDLE_ID`, optional `NOSTOS_APNS_SANDBOX=1` |
   | Web Push | `NOSTOS_WEBPUSH_VAPID_PRIVATE_KEY`, `NOSTOS_WEBPUSH_VAPID_SUBJECT` (mailto:) |
-- Tenant-scoped API keys (`NOSTOS_PUSHD_API_KEYS="tenant:secret,…"`), a
-  SQLite token registry with prune-on-410/UNREGISTERED, and a per-target
+- Tenant-scoped API keys (`NOSTOS_PUSHD_API_KEYS="tenant:secret[:rail],…"` —
+  the optional `:rail` suffix grants the Rail role required for rail-mode
+  sends; a secret may not itself end with `:rail`, the reserved suffix),
+  a SQLite token registry with prune-on-410/UNREGISTERED, and a per-target
   debounce coalescer using rail-native supersede keys.
+- Abuse ceilings on the send path (config per the 2026-08-17 audit):
+  per-tenant rate limit + burst (`NOSTOS_PUSHD_SEND_RATE_PER_SEC`=10 /
+  `NOSTOS_PUSHD_SEND_BURST`=50 -> 429), request field caps (-> 400), and
+  coalescer ceilings (10k pending keys, 64 losers per key).
 - The API contract is versioned and pinned: `docs/api/nostos-pushd.yaml`.
 
 ## What it is NOT
@@ -39,8 +45,8 @@ nostos push init --webpush --vapid-subject mailto:ops@example.com
 # 2. Sanity — credential shape/reachability, never end-to-end delivery:
 nostos push check
 
-# 3. Run:
-NOSTOS_PUSHD_API_KEYS="acme:s3cr3t" nostos-pushd
+# 3. Run (append ":rail" to a key that nostos-server delegates with):
+NOSTOS_PUSHD_API_KEYS="acme:s3cr3t,hq:delegator-key:rail" nostos-pushd
 
 # 4. Register + send (see docs/api/nostos-pushd.yaml):
 #    POST /v1/tokens  {"token": "…", "platform": "fcm"}

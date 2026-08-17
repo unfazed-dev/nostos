@@ -17,6 +17,12 @@
 //! tenant-scoped — without the column the oracle-safe isolation test is
 //! unimplementable) and receipts.metadata (the Receipt schema echoes the
 //! send's metadata; it is the push-LSN correlation channel of plan 0.4).
+//!
+//! Token ownership is exclusive per tenant (2026-08-17 security audit,
+//! plan task 4.1, finding 3): registering a token held by ANOTHER tenant
+//! returns [UpsertOutcome::Conflict] (the route answers 409) instead of
+//! silently reassigning ownership. The migration path is DELETE-then-POST
+//! — the old owner deletes, the new tenant registers.
 
 use std::sync::Arc;
 
@@ -96,16 +102,30 @@ impl Outcome {
     }
 }
 
-/// What an owner-scoped delete found (plan task 1.4): the oracle-safe 404
-/// needs to distinguish "belongs to another tenant" from "never existed".
+/// What an owner-scoped delete found (plan task 1.4). Since the audit
+/// closeout (plan task 4.1, finding 6) the route answers 204 for BOTH
+/// not-yours cases — Foreign vs Missing stays distinguishable here for
+/// callers that need it, but no longer leaks over HTTP (the split was a
+/// token-existence oracle for other tenants).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteOutcome {
     /// The caller's row — gone now.
     Deleted,
-    /// The token exists but belongs to another tenant — 404.
+    /// The token exists but belongs to another tenant.
     Foreign,
     /// No such token anywhere — idempotent 204.
     Missing,
+}
+
+/// What a token upsert did (plan task 4.1, finding 3): ownership never
+/// silently crosses tenants — a conflicting registration is the caller's
+/// 409, not a reassignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// The caller's row was inserted or refreshed.
+    Registered,
+    /// The token is already held by ANOTHER tenant — nothing was written.
+    Conflict,
 }
 
 /// The looked-up registry row for a (tenant, token) pair.
@@ -147,17 +167,21 @@ pub struct StoredReceipt {
 /// tokio Mutex around the connection (the nostos-cloud pattern).
 #[async_trait]
 pub trait Store: Send + Sync {
-    /// Upsert the caller's token row. A device that changed tenants
-    /// re-registers and ownership follows the latest registration — device
-    /// tokens are provider-issued and globally unique, so the "overwrite"
-    /// case is a migration, not an exfiltration (lookups stay tenant-scoped).
+    /// Upsert the caller's token row — for the caller's OWN rows only.
+    /// A token held by another tenant is [UpsertOutcome::Conflict] (409 at
+    /// the route): device tokens are provider-issued and globally unique,
+    /// so a cross-tenant re-register is either an operator moving a device
+    /// between tenants (the old owner DELETEs first — the documented
+    /// migration path) or a tenant trying to capture a token it should not
+    /// own (audit finding 3). Re-registering one's own row refreshes
+    /// platform/account_tag as before.
     async fn upsert_token(
         &self,
         tenant_id: &str,
         token: &str,
         platform: Platform,
         account_tag: Option<&str>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<UpsertOutcome>;
 
     /// Owner-scoped delete distinguishing the oracle-safe 404 cases.
     async fn delete_token_owner_scoped(
@@ -276,17 +300,31 @@ impl Store for SqliteStore {
         token: &str,
         platform: Platform,
         account_tag: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<UpsertOutcome> {
         let now = now_rfc3339();
         let c = self.conn.lock().await;
+        // Ownership check first (audit finding 3): the old ON CONFLICT DO
+        // UPDATE silently reassigned tenant_id — a cross-tenant capture the
+        // route must refuse. Check-then-write is atomic here because the
+        // single connection sits behind the held mutex.
+        let owner: Option<String> = c
+            .query_row(
+                "SELECT tenant_id FROM push_tokens WHERE token=?1",
+                rusqlite::params![token],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if owner.is_some_and(|owner| owner != tenant_id) {
+            return Ok(UpsertOutcome::Conflict);
+        }
         c.execute(
             "INSERT INTO push_tokens (token, platform, tenant_id, account_tag, created_at, \
              updated_at) VALUES (?1,?2,?3,?4,?5,?5)
              ON CONFLICT(token) DO UPDATE SET
-                platform=?2, tenant_id=?3, account_tag=?4, updated_at=?5",
+                platform=?2, account_tag=?4, updated_at=?5",
             rusqlite::params![token, platform.as_str(), tenant_id, account_tag, now],
         )?;
-        Ok(())
+        Ok(UpsertOutcome::Registered)
     }
 
     async fn delete_token_owner_scoped(
@@ -302,8 +340,9 @@ impl Store for SqliteStore {
         if n == 1 {
             return Ok(DeleteOutcome::Deleted);
         }
-        // Not the caller's row — but is it anyone's? That distinction is the
-        // oracle-safe 404: foreign = 404, never-existed = idempotent 204.
+        // Not the caller's row — Foreign vs Missing is kept for callers
+        // that need it; the ROUTE answers 204 either way (audit finding 6:
+        // the split was a token-existence oracle).
         let owner: Option<String> = c
             .query_row(
                 "SELECT tenant_id FROM push_tokens WHERE token=?1",
@@ -434,7 +473,7 @@ impl Outcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeleteOutcome, NewReceipt, Outcome, Platform, SqliteStore, Store};
+    use super::{DeleteOutcome, NewReceipt, Outcome, Platform, SqliteStore, Store, UpsertOutcome};
 
     fn receipt(push_id: &str, tenant: &str, provider_ts: &str) -> NewReceipt {
         NewReceipt {
@@ -490,18 +529,60 @@ mod tests {
     #[tokio::test]
     async fn upsert_re_registration_refreshes_platform() {
         let s = SqliteStore::in_memory().expect("store");
-        s.upsert_token("a", "tok-123456", Platform::Apns, None)
-            .await
-            .unwrap();
-        s.upsert_token("a", "tok-123456", Platform::Webpush, Some("tag"))
-            .await
-            .unwrap();
+        assert_eq!(
+            s.upsert_token("a", "tok-123456", Platform::Apns, None)
+                .await
+                .unwrap(),
+            UpsertOutcome::Registered
+        );
+        assert_eq!(
+            s.upsert_token("a", "tok-123456", Platform::Webpush, Some("tag"))
+                .await
+                .unwrap(),
+            UpsertOutcome::Registered
+        );
         let rec = s
             .lookup_token("a", "tok-123456")
             .await
             .unwrap()
             .expect("row");
         assert_eq!(rec.platform, Platform::Webpush);
+    }
+
+    /// Audit finding 3: cross-tenant upsert is a Conflict (409 at the
+    /// route), ownership never silently reassigns, and the documented
+    /// migration path — old owner deletes, new tenant registers — works.
+    #[tokio::test]
+    async fn cross_tenant_upsert_conflicts_until_owner_deletes() {
+        let s = SqliteStore::in_memory().expect("store");
+        s.upsert_token("a", "tok-123456", Platform::Apns, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.upsert_token("b", "tok-123456", Platform::Fcm, None)
+                .await
+                .unwrap(),
+            UpsertOutcome::Conflict
+        );
+        // Ownership and platform survived the refused attempt.
+        let rec = s.lookup_token("a", "tok-123456").await.unwrap();
+        assert_eq!(rec.expect("row").platform, Platform::Apns);
+        assert_eq!(s.lookup_token("b", "tok-123456").await.unwrap(), None);
+        // Migration path: a deletes, then b registers successfully.
+        assert_eq!(
+            s.delete_token_owner_scoped("a", "tok-123456")
+                .await
+                .unwrap(),
+            DeleteOutcome::Deleted
+        );
+        assert_eq!(
+            s.upsert_token("b", "tok-123456", Platform::Fcm, None)
+                .await
+                .unwrap(),
+            UpsertOutcome::Registered
+        );
+        let rec = s.lookup_token("b", "tok-123456").await.unwrap();
+        assert_eq!(rec.expect("row").platform, Platform::Fcm);
     }
 
     #[tokio::test]

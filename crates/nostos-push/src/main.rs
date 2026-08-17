@@ -15,8 +15,9 @@ use clap::Parser;
 use tracing::info;
 
 use nostos_push::auth::ApiKeys;
-use nostos_push::coalescer;
+use nostos_push::coalescer::{self, CoalescerLimits};
 use nostos_push::config::Config;
+use nostos_push::limit::SendRateLimiter;
 use nostos_push::rail::Rails;
 use nostos_push::store::SqliteStore;
 use nostos_push::{build_router, AppState};
@@ -50,16 +51,23 @@ async fn main() -> anyhow::Result<()> {
     );
 
     coalescer::spawn_retention_sweeper(Arc::clone(&store), cfg.receipt_retention_secs);
+    let limits = CoalescerLimits {
+        pending_keys_max: cfg.pending_keys_max,
+        losers_max: cfg.losers_max,
+    };
     let coalescer = coalescer::spawn_coalescer(
         Arc::clone(&store),
         rails.clone(),
         Duration::from_millis(cfg.debounce_ms),
+        limits,
     );
     let state = AppState {
         store,
         rails,
         api_keys,
         sender: coalescer.tx.clone(),
+        send_limiter: Arc::new(SendRateLimiter::new(cfg.send_rate_per_sec, cfg.send_burst)),
+        gate: coalescer.gate.clone(),
     };
 
     let addr: SocketAddr = cfg
