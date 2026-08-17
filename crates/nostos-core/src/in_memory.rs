@@ -317,11 +317,15 @@ impl Outbox for InMemoryStorage {
                 self.rows.remove(&(write.table.clone(), write.pk.clone()));
             }
             // Both no-ops (clippy-fused: identical empty bodies). Patch needs a
-            // read-merge-write the opaque store can't do (ponytail: defer until a
-            // client issues one — demo + Supabase use upsert/delete); Increment
-            // is server-authoritative (ADR-0030 Decision 1 — can't compute
-            // col+delta locally). Both reconcile via the server's replicated
-            // echo (apply_batch upserts the authoritative image).
+            // read-merge-write this opaque store can't do — unlike SqliteStorage,
+            // which implements optimistic Patch because real clients DO issue
+            // patches (the "patch edits don't render offline" regression).
+            // ponytail: the two Storage impls diverge here (audit 2026-08-17
+            // L4) — an offline Patch on this backend stays invisible until the
+            // server's replicated echo reconciles (apply_batch upserts the
+            // authoritative image). Upgrade: store typed JSON and merge
+            // columns. Increment is server-authoritative (ADR-0030 Decision 1
+            // — can't compute col+delta locally).
             WriteOp::Patch | WriteOp::Increment => {}
         }
         Ok(())

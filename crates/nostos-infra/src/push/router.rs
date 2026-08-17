@@ -557,8 +557,12 @@ fn upsert_pending(
     }
 }
 
-/// Send every due (and, at shutdown, every pending) entry: presence
-/// re-check, token list, template resolution, rail sends, prune/retry.
+/// Send every DUE entry (deadline <= now): presence re-check, token list,
+/// template resolution, rail sends, prune/retry. Note (audit 2026-08-17
+/// L6): the coalesce shutdown arm calls this as a "final drain", but the
+/// deadline filter still applies — not-yet-due hints are silently
+/// discarded at shutdown (no send, no metric). Harmless by design: the
+/// doorbell is best-effort and the durable LSN checkpoint reconciles.
 async fn flush(
     pending: &mut HashMap<(String, String), Pending>,
     sink: &Arc<dyn PushSink>,
