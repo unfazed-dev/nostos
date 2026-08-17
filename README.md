@@ -29,6 +29,8 @@ PowerSync is the incumbent — and still carries real, current limits Nostos exp
 
 Meanwhile **ElectricSQL abandoned 2-way offline sync (read-path only)**, **Zero is web-only**, **Zero disabled offline writes**, and **Supabase Realtime has no offline layer**. Nostos fills the open cell. (PowerSync shipped dynamic **Sync Streams** to GA in May 2026, so the old "static buckets only" framing no longer holds — see the honest comparison in [`docs/COMPARISON.md`](docs/COMPARISON.md).)
 
+**Migrating from PowerSync or Realm?** See the guides in [`docs/migrations/`](docs/migrations/): [`from-powersync.md`](docs/migrations/from-powersync.md) · [`from-realm.md`](docs/migrations/from-realm.md).
+
 Full strategic brief: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
 ---
