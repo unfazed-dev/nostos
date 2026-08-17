@@ -29,7 +29,8 @@
 //! - drops — `events × clients − rows_applied` (client-side deficit: events
 //!   the router dropped, never matched, or that predated a session's
 //!   subscribe), cross-checked against the router's own `dropped`/`faulted`
-//!   counters.
+//!   counters: router dropped+faulted must be ≤ the deficit — a violation
+//!   fails the run (the two counting paths would be disagreeing).
 //! - drain lag — last event emitted (`FanOutService::run` returns) → every
 //!   client's durable checkpoint observed at the final LSN. Coarse
 //!   wall-clock at 25 ms poll granularity.
@@ -613,6 +614,17 @@ async fn main() {
             "{drops} drops (events × clients − rows_applied); at smoke scale this should be 0              (pass --allow-drops to record-and-continue on an exploratory leg)"
         ));
     }
+    // Router cross-check — actually performed, not just recorded: every
+    // frame the router dropped or faulted never reached a client, so the
+    // router-accounted loss must be ≤ the client-side deficit (the deficit
+    // additionally covers in-flight/unapplied frames). A violation means
+    // the two counting paths disagree and every drop number is suspect.
+    let router_accounted = outcome.dropped.saturating_add(outcome.faulted);
+    if router_accounted > drops {
+        failures.push(format!(
+            "router cross-check FAILED: router dropped+faulted ({router_accounted}) exceeds the client-side deficit ({drops}) — counting paths disagree; numbers suspect"
+        ));
+    }
     if lagged_total > 0 {
         failures.push(format!(
             "broadcast drain lagged {lagged_total} commits — rows_applied UNDER-countS;              the metric is compromised at this scale"
@@ -648,6 +660,14 @@ async fn main() {
         "expected rows (events × clients): {expected}; emit wall: {:.3}s; total wall: {:.3}s",
         emit_wall.as_secs_f64(),
         elapsed.as_secs_f64()
+    );
+    println!(
+        "router cross-check: dropped+faulted {router_accounted} accounts for {:.1}% of the {drops} client-side deficit (rest = in-flight/unapplied at drain)",
+        if drops > 0 {
+            router_accounted as f64 / drops as f64 * 100.0
+        } else {
+            100.0
+        }
     );
     for (i, (bench, db)) in benches.iter().zip(&db_paths).enumerate() {
         let session_cp = bench

@@ -35,8 +35,9 @@
 //! from the slot's consistent point — and `slot_epoch` stays 0 by design (it
 //! only bumps on the missing/Lost recreate chute). Readiness is therefore
 //! "slot exists AND `pg_replication_slots.active = true`" (the walsender has
-//! attached), plus a `frames_before_load == 0` contamination guard on every
-//! artifact. Uniqueness + cleanup follow the e2e: unique slot name per run,
+//! attached). A `frames_before_load` contamination guard rides every artifact:
+//! pre-load frames are SUBTRACTED from `frames_delivered` and a non-zero value is
+//! flagged in the summary (the shared-DB note explains why). Uniqueness + cleanup follow the e2e: unique slot name per run,
 //! logged; guaranteed drop + row delete on every exit path this binary
 //! controls (a panic can still leak the slot — its name is logged so an
 //! operator can `pg_drop_replication_slot` it).
@@ -344,8 +345,17 @@ async fn main() -> Result<()> {
     info!(slot = %slot, consistent_point = %consistent, "slot pre-created (Healthy path: no initial snapshot)");
 
     let metrics = Arc::new(Metrics::new());
-    let pg_cfg = PgReplicatorConfig::from_url(&cfg.pg_url, &slot, PUBLICATION)
-        .map_err(|e| anyhow::anyhow!("invalid PG url {}: {e}", cfg.pg_url))?;
+    // Error paths between pre-create and teardown MUST drop the slot
+    // explicitly: the teardown below only runs once the driver is spawned,
+    // and a WAL-retaining slot otherwise leaks (module doc's "guaranteed
+    // drop" was a lie on these two paths until 2026-08-17).
+    let pg_cfg = match PgReplicatorConfig::from_url(&cfg.pg_url, &slot, PUBLICATION) {
+        Ok(c) => c,
+        Err(e) => {
+            drop_slot(&sql, &slot).await;
+            return Err(anyhow::anyhow!("invalid PG url {}: {e}", cfg.pg_url));
+        }
+    };
     let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
     let fanout_drv = Arc::clone(&fanout);
     let driver = tokio::spawn(async move {
@@ -360,7 +370,11 @@ async fn main() -> Result<()> {
 
     // Readiness: the walsender has attached (epoch stays 0 on the Healthy
     // path — see module docs for why this replaces the e2e's epoch wait).
-    wait_slot_active(&sql, &slot, Duration::from_secs(15)).await?;
+    if let Err(e) = wait_slot_active(&sql, &slot, Duration::from_secs(15)).await {
+        driver.abort();
+        drop_slot(&sql, &slot).await;
+        return Err(e);
+    }
 
     // ---- measurement ----
     let measurement = measure(&cfg, &sql, sum_received, org).await;
@@ -478,7 +492,10 @@ where
             .with_context(|| format!("batched INSERT of {n} rows failed"))?;
         written += inserted;
 
-        if cfg.rate > 0 {
+        // Skip the pace-sleep after the FINAL batch: sleeping there only
+        // inflates insert_wall_secs (and understates rows_per_sec_observed)
+        // by one batch interval — the drain phase starts after this loop.
+        if cfg.rate > 0 && written < cfg.events {
             next_at += Duration::from_secs_f64(n as f64 / cfg.rate as f64);
             let now = Instant::now();
             if next_at > now {
@@ -514,7 +531,10 @@ where
         rows_written: written,
         insert_wall_secs,
         frames_before_load,
-        frames_delivered: sum_received(),
+        // Subtract pre-load contamination so it cannot inflate the
+        // delivery ratio (pre-created slot ⇒ expected 0; a non-zero value
+        // is flagged in the summary print).
+        frames_delivered: sum_received().saturating_sub(frames_before_load),
         drain_secs,
         total_secs,
         timed_out,
@@ -798,10 +818,15 @@ fn print_summary(r: &RunRecord) {
         ),
         None => println!("lag write→recv    : SKIPPED (no parseable created_at in any frame)"),
     }
-    println!(
-        "frames before load: {} (contamination guard, must be 0)",
-        r.frames_before_load
-    );
+    if r.frames_before_load == 0 {
+        println!("frames before load: 0 (contamination guard — clean)");
+    } else {
+        println!(
+            "frames before load: {} — WARNING: pre-load contamination detected; \
+             excluded from frames_delivered, verify no concurrent writer ran",
+            r.frames_before_load
+        );
+    }
     println!("slot dropped      : {}", r.slot_dropped);
     println!("rows deleted      : {}", r.rows_deleted_after_run);
     println!("\nFRAMING: {FRAMING}");
