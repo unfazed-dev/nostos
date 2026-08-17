@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0-beta.5';
 
   @override
-  int get rustContentHash => -58849922;
+  int get rustContentHash => 431468753;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -142,6 +142,17 @@ abstract class RustLibApi extends BaseApi {
     required List<TableSubFfi> tables,
     required List<String> orSetTables,
     required List<String> counterTables,
+  });
+
+  Future<String> crateApiNostosNostosHandleSubscribeStream({
+    required NostosHandle that,
+    required String name,
+    required String paramsJson,
+  });
+
+  Future<void> crateApiNostosNostosHandleUnsubscribeStream({
+    required NostosHandle that,
+    required String id,
   });
 
   Stream<String> crateApiNostosNostosHandleWatch({
@@ -695,6 +706,84 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> crateApiNostosNostosHandleSubscribeStream({
+    required NostosHandle that,
+    required String name,
+    required String paramsJson,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(name, serializer);
+          sse_encode_String(paramsJson, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleSubscribeStreamConstMeta,
+        argValues: [that, name, paramsJson],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleSubscribeStreamConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_subscribe_stream",
+        argNames: ["that", "name", "paramsJson"],
+      );
+
+  @override
+  Future<void> crateApiNostosNostosHandleUnsubscribeStream({
+    required NostosHandle that,
+    required String id,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostosNostosHandleUnsubscribeStreamConstMeta,
+        argValues: [that, id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostosNostosHandleUnsubscribeStreamConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosHandle_unsubscribe_stream",
+        argNames: ["that", "id"],
+      );
+
+  @override
   Stream<String> crateApiNostosNostosHandleWatch({
     required NostosHandle that,
     required String table,
@@ -714,7 +803,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 14,
+              funcId: 16,
               port: port_,
             );
           },
@@ -758,7 +847,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 15,
+              funcId: 17,
               port: port_,
             );
           },
@@ -804,7 +893,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 18,
             port: port_,
           );
         },
@@ -842,7 +931,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 19,
             port: port_,
           );
         },
@@ -872,7 +961,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 20,
             port: port_,
           );
         },
@@ -1872,6 +1961,40 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
     orSetTables: orSetTables,
     counterTables: counterTables,
   );
+
+  /// P5 sync streams (docs/plans/p5-sync-streams-design.md §4): subscribe to
+  /// a server-defined, client-parameterized stream on the LIVE session —
+  /// unlike `subscribe()`, NOTHING is torn down; the `subscribe_stream`
+  /// frame goes out on the open socket (or the next reconnect if offline).
+  /// Returns the client-chosen stream id for [`Self::unsubscribe_stream`].
+  ///
+  /// `params_json` is a JSON OBJECT string (`{"owner":"u1"}`) — the same
+  /// no-codegen trick P3 used for `op` (parity plan :106). Values must be
+  /// JSON scalars; the server binds them value-level into the stream's
+  /// `:param` placeholders (design Decision 2 — never textual).
+  ///
+  /// # Errors
+  /// Returns an error string if `params_json` is not a JSON object or
+  /// `subscribe()` hasn't been called. Server-side rejects (unknown stream,
+  /// bad params) arrive asynchronously as `stream_error` frames and are
+  /// logged; they do NOT fail this call.
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  }) => RustLib.instance.api.crateApiNostosNostosHandleSubscribeStream(
+    that: this,
+    name: name,
+    paramsJson: paramsJson,
+  );
+
+  /// Drop a stream by the id [`Self::subscribe_stream`] returned. Unknown
+  /// id = no-op (idempotent). v1 leaves local rows in place — eviction is
+  /// separate; PowerSync behaves the same.
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called.
+  Future<void> unsubscribeStream({required String id}) => RustLib.instance.api
+      .crateApiNostosNostosHandleUnsubscribeStream(that: this, id: id);
 
   /// Attach a row stream for `table`: emits the current full row set
   /// immediately (the durable snapshot already on disk — visible offline)

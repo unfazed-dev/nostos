@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `emit_snapshot`, `hex_encode`, `row_to_json_object`, `run_connection_loop`
+// These functions are ignored because they are not marked as `pub`: `emit_snapshot`, `hex_encode`, `lock_session`, `row_to_json_object`, `run_connection_loop`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Session`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
@@ -225,6 +225,35 @@ abstract class NostosHandle implements RustOpaqueInterface {
     required List<String> orSetTables,
     required List<String> counterTables,
   });
+
+  /// P5 sync streams (docs/plans/p5-sync-streams-design.md §4): subscribe to
+  /// a server-defined, client-parameterized stream on the LIVE session —
+  /// unlike `subscribe()`, NOTHING is torn down; the `subscribe_stream`
+  /// frame goes out on the open socket (or the next reconnect if offline).
+  /// Returns the client-chosen stream id for [`Self::unsubscribe_stream`].
+  ///
+  /// `params_json` is a JSON OBJECT string (`{"owner":"u1"}`) — the same
+  /// no-codegen trick P3 used for `op` (parity plan :106). Values must be
+  /// JSON scalars; the server binds them value-level into the stream's
+  /// `:param` placeholders (design Decision 2 — never textual).
+  ///
+  /// # Errors
+  /// Returns an error string if `params_json` is not a JSON object or
+  /// `subscribe()` hasn't been called. Server-side rejects (unknown stream,
+  /// bad params) arrive asynchronously as `stream_error` frames and are
+  /// logged; they do NOT fail this call.
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  });
+
+  /// Drop a stream by the id [`Self::subscribe_stream`] returned. Unknown
+  /// id = no-op (idempotent). v1 leaves local rows in place — eviction is
+  /// separate; PowerSync behaves the same.
+  ///
+  /// # Errors
+  /// Returns an error string if `subscribe()` hasn't been called.
+  Future<void> unsubscribeStream({required String id});
 
   /// Attach a row stream for `table`: emits the current full row set
   /// immediately (the durable snapshot already on disk — visible offline)

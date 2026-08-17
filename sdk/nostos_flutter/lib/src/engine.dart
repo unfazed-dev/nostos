@@ -87,6 +87,22 @@ abstract class NostosEngine {
   Stream<({int pending, int deadLettered, String? lastError})>
   watchWriteStatus();
 
+  /// P5 sync streams (docs/plans/p5-sync-streams-design.md §4): subscribe to a
+  /// server-defined, client-parameterized stream on the LIVE session — unlike
+  /// [subscribe], nothing is torn down; the frame goes out on the open socket
+  /// (or the next reconnect if offline). Returns the client-chosen stream id.
+  ///
+  /// [paramsJson] is a JSON object string (`{"owner":"u1"}`); values must be
+  /// JSON scalars. Server-side rejects (unknown stream, bad params) arrive
+  /// asynchronously as `stream_error` frames and are logged — they do NOT
+  /// fail this call.
+  Future<String> subscribeStream({required String name, required String paramsJson});
+
+  /// Drop a stream by the id [subscribeStream] returned. Unknown id = no-op.
+  /// v1 leaves local rows in place — eviction is separate; PowerSync behaves
+  /// the same.
+  Future<void> unsubscribeStream({required String id});
+
   /// Returns the local outbox id.
   Future<int> write({
     required String table,

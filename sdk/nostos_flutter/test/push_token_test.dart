@@ -44,6 +44,17 @@ class _PushFakeEngine implements NostosEngine {
     Set<String> counterTables = const <String>{},
   }) => stateController.stream;
   @override
+
+  @override
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  }) async => 'fake-stream';
+
+  @override
+  Future<void> unsubscribeStream({required String id}) async {}
+
+  @override
   Stream<String> watch({required String table}) => const Stream<String>.empty();
   @override
   Stream<({int pending, int deadLettered, String? lastError})>

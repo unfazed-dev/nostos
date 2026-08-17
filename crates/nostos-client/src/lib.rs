@@ -28,6 +28,7 @@ pub mod client;
 pub mod sqlite;
 
 pub use client::{
-    ClientError, SessionOutcome, SyncClient, SyncClientConfig, TableSub, WriteQueueStatus,
+    ClientError, SessionOutcome, StreamDecl, StreamHandle, StreamSubscription, SyncClient,
+    SyncClientConfig, TableSub, WriteQueueStatus,
 };
 pub use sqlite::SqliteStorage;
