@@ -54,13 +54,15 @@
 //! reconnect that re-receives the tail of an already-applied transaction is a
 //! no-op — the server's dedup + the client's idempotent upsert converge.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use nostos_core::{ApplyEngine, ApplyOutcome, Frame, Outbox, PendingWrite};
 use nostos_domain::Lsn;
-use nostos_infra::wire::{decode_control_frame, decode_frames, decode_resume_info, ClientMessage};
+use nostos_infra::wire::{
+    decode_frames, decode_resume_info, decode_snapshot_boundary, decode_stream_error, ClientMessage,
+};
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
@@ -88,6 +90,31 @@ impl TableSub {
         Self {
             name: name.into(),
             where_sql: None,
+        }
+    }
+}
+
+/// A config-declared sync stream (P5 §4 — docs/plans/p5-sync-streams-design.md):
+/// sugar for calling `sync_stream(name, params).subscribe()` at connect time.
+/// `params` binds the server-defined stream's `:param` placeholders —
+/// value-level, never textual (design Decision 2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamDecl {
+    /// The server-defined stream name (`[streams.<name>]` in nostos_rules.toml).
+    pub name: String,
+    /// Bind values for the template's `:param` placeholders (JSON scalars only).
+    pub params: serde_json::Map<String, serde_json::Value>,
+}
+
+impl StreamDecl {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        params: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            params,
         }
     }
 }
@@ -164,6 +191,13 @@ pub struct SyncClientConfig {
     /// stream over the single `/sync` socket. Empty (the default) = single-
     /// table, the historical behavior. The server caps a socket at 32 tables.
     pub extra_tables: Vec<TableSub>,
+    /// Server-defined sync streams to activate at connect (P5 §4) — config
+    /// sugar; the same streams could be added lazily via
+    /// [`SyncClient::sync_stream`]. Streams ride the socket's ONE global
+    /// checkpoint (ADR-0009): there is no per-stream resume in v1, so every
+    /// reconnect re-subscribes them and each re-add takes a fresh targeted
+    /// snapshot. They count against the same per-socket 32-subscription cap.
+    pub streams: Vec<StreamDecl>,
     /// Maximum number of `WriteResult{ok:false}` rejections before a write is
     /// dead-lettered (quarantined). Once a write's attempt count (bumped on
     /// every rejection) reaches this threshold, the flush loop calls
@@ -217,6 +251,7 @@ impl Default for SyncClientConfig {
             flush_quiesce: Some(DEFAULT_FLUSH_QUIESCE),
             where_sql: None,
             extra_tables: Vec::new(),
+            streams: Vec::new(),
             dead_letter_max_attempts: DEFAULT_DEAD_LETTER_MAX_ATTEMPTS,
             or_set_tables: HashSet::new(),
             counter_tables: HashSet::new(),
@@ -281,6 +316,137 @@ pub struct WriteQueueStatus {
     pub last_error: Option<String>,
 }
 
+/// A mid-session stream command (P5 §4) — the client→session-task queue. The
+/// write path (ADR-0013 D3) already proved the notify+drain shape; streams
+/// reuse it. In-memory only: server-side stream sessions die with the socket,
+/// so nothing here needs durability — on reconnect the session re-sends the
+/// ACTIVE set and drains the queue (both idempotent server-side: subscribe is
+/// replace-by-id, unsubscribe of an unknown id is a no-op).
+#[derive(Debug)]
+enum StreamCommand {
+    Subscribe {
+        id: String,
+        name: String,
+        params: serde_json::Map<String, serde_json::Value>,
+    },
+    Unsubscribe {
+        id: String,
+    },
+}
+
+/// The client's stream state (P5 §4): which streams are active (re-sent on
+/// every reconnect) plus commands queued while no session loop was draining.
+#[derive(Debug, Default)]
+struct StreamRegistry {
+    /// Active streams by client-chosen id: `(name, params)`.
+    active: HashMap<String, (String, serde_json::Map<String, serde_json::Value>)>,
+    /// Commands queued but not yet sent on a live socket.
+    pending: Vec<StreamCommand>,
+    /// Monotonic id allocator for `sync_stream(...).subscribe()`.
+    next_id: u64,
+}
+
+/// A live sync-stream subscription (P5 §4). `unsubscribe()` (or drop) queues
+/// `unsubscribe_stream` and stops the reconnect re-send. v1 leaves local rows
+/// in place on unsubscribe — eviction is separate; PowerSync behaves the same.
+pub struct StreamHandle {
+    id: String,
+    streams: Arc<std::sync::Mutex<StreamRegistry>>,
+    notify: Arc<Notify>,
+    done: bool,
+}
+
+impl StreamHandle {
+    /// The client-chosen stream id (matches `subscribe_stream`'s `id` and the
+    /// `stream` key on this stream's snapshot boundary frames).
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Unsubscribe now (idempotent; also runs on drop).
+    pub fn unsubscribe(mut self) {
+        self.unsub_inner();
+    }
+
+    fn unsub_inner(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        {
+            let mut registry = self.streams.lock().expect("stream registry lock poisoned");
+            registry.active.remove(&self.id);
+            registry.pending.push(StreamCommand::Unsubscribe {
+                id: self.id.clone(),
+            });
+        }
+        self.notify.notify_one();
+    }
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        self.unsub_inner();
+    }
+}
+
+/// The builder returned by [`SyncClient::sync_stream`] — PowerSync's
+/// `syncStream(name, params).subscribe()` shape (P5 §4).
+pub struct StreamSubscription<'a, S>
+where
+    S: nostos_core::Storage + Outbox + Send + 'static,
+{
+    client: &'a SyncClient<S>,
+    name: String,
+    params: serde_json::Map<String, serde_json::Value>,
+}
+
+impl<S> StreamSubscription<'_, S>
+where
+    S: nostos_core::Storage + Outbox + Send + 'static,
+{
+    /// Activate the stream: queue the `subscribe_stream` frame for the live
+    /// socket (or the next connect) and record it for reconnect re-send.
+    ///
+    /// Non-async in v1 (a deliberate deviation from the design sketch's
+    /// `.subscribe().await?`): there is no server round-trip ack to await —
+    /// rejects arrive asynchronously as `stream_error` frames and are logged
+    /// loud. Params are a typed JSON map, so the object shape is enforced at
+    /// the type level and there is nothing to validate here.
+    pub fn subscribe(self) -> StreamHandle {
+        let (id, streams, notify) = {
+            let mut registry = self
+                .client
+                .streams
+                .lock()
+                .expect("stream registry lock poisoned");
+            let id = format!("s-{}", registry.next_id);
+            registry.next_id += 1;
+            registry
+                .active
+                .insert(id.clone(), (self.name.clone(), self.params.clone()));
+            registry.pending.push(StreamCommand::Subscribe {
+                id: id.clone(),
+                name: self.name,
+                params: self.params,
+            });
+            (
+                id,
+                Arc::clone(&self.client.streams),
+                Arc::clone(&self.client.stream_notify),
+            )
+        };
+        notify.notify_one();
+        StreamHandle {
+            id,
+            streams,
+            notify,
+            done: false,
+        }
+    }
+}
+
 pub struct SyncClient<S>
 where
     S: nostos_core::Storage + Outbox + Send + 'static,
@@ -335,6 +501,14 @@ where
     /// because the run loops must WAKE from a parked `select!` on the request,
     /// not just notice it on the next iteration.
     disconnect_gate: tokio::sync::watch::Sender<bool>,
+    /// P5 sync streams: active set + pending command queue (see
+    /// `StreamRegistry`). std Mutex — critical sections are tiny and never
+    /// span an await (same discipline as `hlc_state`). Arc'd so a
+    /// `StreamHandle` outlives the client borrow that created it.
+    streams: Arc<std::sync::Mutex<StreamRegistry>>,
+    /// Wakes the session loop when a stream command lands mid-session (same
+    /// pattern as `write_notify`).
+    stream_notify: Arc<Notify>,
 }
 
 impl<S> SyncClient<S>
@@ -364,6 +538,20 @@ where
         let (changes, _) = tokio::sync::broadcast::channel(64);
         let token = std::sync::RwLock::new(config.token.clone());
         let (disconnect_gate, _) = tokio::sync::watch::channel(false);
+        // P5: config-declared streams seed the ACTIVE set directly (no
+        // pending entry needed — run_once re-sends the active set on every
+        // connect, which covers the first one too).
+        let streams = {
+            let mut registry = StreamRegistry::default();
+            for decl in &config.streams {
+                let id = format!("cfg-{}", registry.next_id);
+                registry.next_id += 1;
+                registry
+                    .active
+                    .insert(id, (decl.name.clone(), decl.params.clone()));
+            }
+            Arc::new(std::sync::Mutex::new(registry))
+        };
         Self {
             url: url.into(),
             config,
@@ -374,6 +562,8 @@ where
             write_status,
             hlc_state: std::sync::Mutex::new(None),
             disconnect_gate,
+            streams,
+            stream_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -430,6 +620,33 @@ where
     #[must_use]
     pub fn subscribe_changes(&self) -> tokio::sync::broadcast::Receiver<ApplyOutcome> {
         self.changes.subscribe()
+    }
+
+    /// Declare a parameterized sync-stream subscription (P5 —
+    /// docs/plans/p5-sync-streams-design.md §4), PowerSync's
+    /// `syncStream(name, params).subscribe()` shape.
+    ///
+    /// Lazy: the `subscribe_stream` frame goes out on the live socket if one
+    /// is connected, else on the next (re)connect. The stream re-subscribes
+    /// on EVERY reconnect (each re-add takes a fresh targeted snapshot — no
+    /// per-stream resume in v1; the socket's one checkpoint + idempotent
+    /// apply already prevent duplicate rows) until the returned
+    /// [`StreamHandle`] is unsubscribed or dropped. Rows surface through the
+    /// existing reactive layer ([`Self::subscribe_changes`] + storage) —
+    /// streams control WHICH rows land, not how reads react.
+    ///
+    /// The server answers rejects with a non-fatal `stream_error` frame
+    /// (unknown stream, bad params), logged loud; the socket stays up.
+    pub fn sync_stream(
+        &self,
+        name: impl Into<String>,
+        params: serde_json::Map<String, serde_json::Value>,
+    ) -> StreamSubscription<'_, S> {
+        StreamSubscription {
+            client: self,
+            name: name.into(),
+            params,
+        }
     }
 
     /// Read the current durable checkpoint (delegates through the engine).
@@ -972,6 +1189,37 @@ where
         Ok(())
     }
 
+    /// Drain the queued stream commands onto the live socket (P5 §4). Every
+    /// send is idempotent server-side (subscribe replaces by id; unsubscribe
+    /// of an unknown id is a no-op), so a command that raced a reconnect is
+    /// safe to send twice — the reconnect path re-sends the active set AND
+    /// drains this queue verbatim rather than trying to dedup the two.
+    async fn drain_stream_commands<W>(&self, write: &mut W) -> Result<(), ClientError>
+    where
+        W: Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    {
+        let cmds = {
+            let mut registry = self.streams.lock().expect("stream registry lock poisoned");
+            std::mem::take(&mut registry.pending)
+        };
+        for cmd in cmds {
+            let frame = match cmd {
+                StreamCommand::Subscribe { id, name, params } => ClientMessage::SubscribeStream {
+                    id,
+                    stream: name,
+                    params,
+                },
+                StreamCommand::Unsubscribe { id } => ClientMessage::UnsubscribeStream { id },
+            };
+            let json = serde_json::to_string(&frame).expect("stream frame serializes");
+            write
+                .send(Message::Text(json))
+                .await
+                .map_err(|e| ClientError::Send(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Send an `Ack` for a landed commit and broadcast it on [`Self::changes`].
     /// Shared by the frame-triggered commit path and the quiesce-triggered
     /// force-flush path in [`Self::run_once`] — both are "a batch just became
@@ -1107,6 +1355,38 @@ where
             resume_lsn = resume_lsn.raw(),
             "subscribed"
         );
+
+        // P5 §4: re-send every ACTIVE stream after the primary subscribe on
+        // every (re)connect — each re-add takes a fresh targeted snapshot (no
+        // per-stream resume in v1; the socket checkpoint + idempotent apply
+        // prevent duplicate rows). Then drain the pending queue VERBATIM:
+        // subscribes queued while disconnected are covered by the active
+        // re-send (idempotent replace server-side), and a queued unsubscribe
+        // is a no-op on a fresh socket — so verbatim draining loses nothing
+        // and a command that raced the handshake is never dropped.
+        {
+            let active: Vec<(String, String, serde_json::Map<String, serde_json::Value>)> = {
+                let registry = self.streams.lock().expect("stream registry lock poisoned");
+                registry
+                    .active
+                    .iter()
+                    .map(|(id, (name, params))| (id.clone(), name.clone(), params.clone()))
+                    .collect()
+            };
+            for (id, name, params) in active {
+                let frame = ClientMessage::SubscribeStream {
+                    id,
+                    stream: name,
+                    params,
+                };
+                let json = serde_json::to_string(&frame).expect("subscribe_stream serializes");
+                write
+                    .send(Message::Text(json))
+                    .await
+                    .map_err(|e| ClientError::Send(e.to_string()))?;
+            }
+            self.drain_stream_commands(&mut write).await?;
+        }
 
         let mut frames_received: u64 = 0;
         let mut commits: u64 = 0;
@@ -1287,6 +1567,17 @@ where
                         continue;
                     }
 
+                    // P5 §1: a `stream_error` is the server's NON-fatal stream
+                    // reject (unknown stream, bad params). v1 surfaces it loud
+                    // in logs only — the active set keeps the entry, so a
+                    // reconnect retries (a server-side stream-definition fix
+                    // hot-reloads and the next attempt succeeds). The row path
+                    // never sees it (no lsn/op/pk → wouldn't decode as a frame).
+                    if let Some((stream_id, error)) = decode_stream_error(&bytes) {
+                        warn!(stream_id = %stream_id, %error, "stream_error from server");
+                        continue;
+                    }
+
                     // Snapshot-reconcile boundary (ADR-0014 offline-delete fix):
                     // a `{"type":"snapshot_begin"|"snapshot_end","table":"<t>"}`
                     // control frame is its own wire shape — it does NOT decode
@@ -1296,7 +1587,21 @@ where
                     // between begin/end on this pump), and `snapshot_end` reaps
                     // any local PKs the snapshot did NOT re-confirm — those are
                     // rows hard-deleted server-side while the client was offline.
-                    if let Some((table, begin)) = decode_control_frame(&bytes) {
+                    //
+                    // P5 (design §1): a STREAM-targeted boundary carries an
+                    // extra `"stream":"<id>"` key and brackets only the SUBSET
+                    // of the table matching the stream's bound predicate.
+                    // Driving the table-scoped reap from it would DELETE every
+                    // local row outside that subset (e.g. the base table
+                    // subscription's rows) — so stream-tagged boundaries are
+                    // logged but NEVER reach the engine. Only untagged,
+                    // table-level boundaries reconcile.
+                    if let Some((table, stream, begin)) = decode_snapshot_boundary(&bytes) {
+                        if let Some(stream_id) = stream {
+                            debug!(table = %table, stream = %stream_id, begin,
+                                "stream snapshot boundary — subset bracket, no reconcile");
+                            continue;
+                        }
                         let engine = Arc::clone(&self.engine);
                         // Clone for the 'static spawn_blocking closure; the
                         // original `table` stays alive for the debug! log below.
@@ -1383,6 +1688,13 @@ where
                 // ---- Branch 3: a write() enqueued mid-session ----
                 () = self.write_notify.notified() => {
                     self.flush_outbox(&mut write, &mut sent_this_conn).await?;
+                }
+
+                // ---- Branch 5 (P5 §4): a stream command queued mid-session.
+                //      Placed after write_notify deliberately: outbox writes
+                //      are user data, stream commands are read-path shaping. ----
+                () = self.stream_notify.notified() => {
+                    self.drain_stream_commands(&mut write).await?;
                 }
 
                 // ---- Branch 4: disconnect() requested — wind down cleanly.
@@ -2052,4 +2364,97 @@ mod tests {
     // proven in crates/nostos-client/tests/chaos_resume.rs against a real
     // in-process server + FakeReplicator — that's where zero-loss/zero-dup is
     // asserted over a genuine socket, not a unit test here.
+
+    // ---- P5 sync streams: registry/handle mechanics (socket-free) ----
+
+    fn stream_client(config: SyncClientConfig) -> SyncClient<crate::SqliteStorage> {
+        SyncClient::new(
+            "ws://localhost:9999/sync",
+            crate::SqliteStorage::open_in_memory().expect("open"),
+            config,
+        )
+    }
+
+    fn params(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn sync_stream_subscribe_activates_and_queues() {
+        let client = stream_client(SyncClientConfig::default());
+        let handle = client
+            .sync_stream("lists", params(&[("owner", serde_json::json!("u1"))]))
+            .subscribe();
+        assert_eq!(handle.id(), "s-0");
+        let registry = client.streams.lock().expect("lock");
+        assert_eq!(registry.active.len(), 1);
+        assert!(registry.active["s-0"].0 == "lists");
+        assert!(
+            matches!(registry.pending.first(), Some(StreamCommand::Subscribe { id, .. }) if id == "s-0")
+        );
+    }
+
+    #[test]
+    fn stream_ids_are_unique_per_subscribe() {
+        let client = stream_client(SyncClientConfig::default());
+        let a = client.sync_stream("lists", params(&[])).subscribe();
+        let b = client.sync_stream("inbox", params(&[])).subscribe();
+        assert_ne!(a.id(), b.id());
+        assert_eq!(client.streams.lock().expect("lock").active.len(), 2);
+    }
+
+    #[test]
+    fn unsubscribe_removes_from_active_and_queues_command() {
+        let client = stream_client(SyncClientConfig::default());
+        let handle = client.sync_stream("lists", params(&[])).subscribe();
+        let id = handle.id().to_string();
+        handle.unsubscribe();
+        let registry = client.streams.lock().expect("lock");
+        assert!(registry.active.is_empty());
+        assert!(
+            matches!(registry.pending.last(), Some(StreamCommand::Unsubscribe { id: i }) if *i == id)
+        );
+    }
+
+    #[test]
+    fn drop_unsubscribes_idempotently() {
+        let client = stream_client(SyncClientConfig::default());
+        let handle = client.sync_stream("lists", params(&[])).subscribe();
+        let id = handle.id().to_string();
+        drop(handle);
+        let pending = client.streams.lock().expect("lock").pending.len();
+        // Exactly ONE unsubscribe queued by drop (done flag prevents a second).
+        let active_empty = client.streams.lock().expect("lock").active.is_empty();
+        assert!(active_empty);
+        let unsubs = {
+            let registry = client.streams.lock().expect("lock");
+            registry
+                .pending
+                .iter()
+                .filter(|c| matches!(c, StreamCommand::Unsubscribe { id: i } if *i == id))
+                .count()
+        };
+        let _ = pending;
+        assert_eq!(unsubs, 1);
+    }
+
+    #[test]
+    fn config_declared_streams_seed_the_active_set() {
+        let config = SyncClientConfig {
+            streams: vec![StreamDecl::new(
+                "lists",
+                params(&[("owner", serde_json::json!("u1"))]),
+            )],
+            ..SyncClientConfig::default()
+        };
+        let client = stream_client(config);
+        let registry = client.streams.lock().expect("lock");
+        assert_eq!(registry.active.len(), 1);
+        assert_eq!(registry.active["cfg-0"].0, "lists");
+        // No pending entry: run_once's active re-send covers the first connect.
+        assert!(registry.pending.is_empty());
+    }
 }
