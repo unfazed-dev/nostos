@@ -168,7 +168,9 @@ paths:
         with per-item results in request order (phase-2 admission
         failures are NOT refunded — an admission attempt costs its token,
         same as /v1/send). Items ride the same SendRequest schema (same
-        field caps).
+        field caps). Duplicate (tenant, token) items within one batch
+        coalesce latest-wins in the debounce window — one push is sent,
+        but each accepted item still yields its own receipt.
       requestBody:
         required: true
         content:
