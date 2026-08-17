@@ -63,7 +63,16 @@ async fn drop_slot(sql: &tokio_postgres::Client, slot: &str) {
 /// Idempotently create the fixture table + its own publication. A dedicated
 /// publication (rather than reusing `cairn_pub`, which is scoped to `tasks`)
 /// keeps this test's event stream isolated.
+///
+/// The TRUNCATE makes the fixture RE-ENTRANT (2026-08-17): rows accumulated
+/// across historical runs (22 found) eventually exceeded the tests' 8-event
+/// collection window, so a fresh-slot snapshot paged only stale rows and the
+/// run's own row never appeared. Safe under the file's documented
+/// `--test-threads=1` convention (same as e2e_pg_snapshot.rs on `tasks`).
 async fn ensure_typed_probe(sql: &tokio_postgres::Client) {
+    sql.batch_execute("TRUNCATE TABLE typed_probe;")
+        .await
+        .expect("truncate typed_probe (re-entrant fixture)");
     sql.batch_execute(
         "CREATE TABLE IF NOT EXISTS typed_probe ( \
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(), \
