@@ -74,10 +74,12 @@ PowerSync's split model.
   interceptor (the Nostos analog of `uploadData`) for custom validation/conflict,
   defaulting to the auto `PgWriteBack`. Preserves the collapsed model's DX while
   matching PowerSync's flexibility.
-- **P5 — Declarative sync-rules expressiveness.** Move beyond a single
-  `where_sql` per subscription toward Sync-Streams-style parameterized queries
-  + on-demand `subscribe(name, params)` (lazy sync). Phase-2 flavored; defer
-  until P1–P3 land.
+- **P5 — Declarative sync-rules expressiveness.** ✅ v1 SHIPPED 2026-08-18
+  (ADR-0039): server-defined named streams in `nostos_rules.toml`
+  (`[streams.<name>]`), client-parameterized with value-level `:param`
+  binding, lazy `syncStream(name, params).subscribe()` on the Rust client +
+  Flutter SDK. v1 ceiling: single-table templates (JOIN/CTE membership
+  rejected at startup; upgrade paths on record in the ADR).
 - **P6 — Schema contract + schemaless views.** Adopt/derive the `id text
   primary key` convention; consider PowerSync's "sync schemaless data, apply
   client schema via SQLite views" model (it removes explicit client migrations
@@ -191,7 +193,7 @@ engine rewrite. The Flutter SDK already proves the pattern (path-deps to
 | basic `watch(sql)` re-run | all SDKs | Flutter `watchQuery` (P1) | ✅ parity |
 | `triggerOnTables` / `throttle` | all SDKs | re-run every tick, no throttle | ⚠️ refinement gap |
 | incremental / differential watch | **JS-only** | none | ⚠️ behind (PS is JS-only too) |
-| Sync Streams (param, lazy, CTE/JOIN) | all 5 main SDKs | single `where_sql` predicate | ❌ behind (P5 deferred) |
+| Sync Streams (param, lazy, CTE/JOIN) | all 5 main SDKs | named, client-parameterized streams + lazy `syncStream(name, params)` (P5, ADR-0039) — v1: single-table templates, no JOIN/CTE | ✅ v1 parity (JOIN/CTE ceiling documented) |
 | durable upload queue + retry | `uploadData` (5s retry, stalled detection) | durable outbox + dead-letter (P2) + auto `PgWriteBack` | ✅ parity, **different model** (Nostos = zero-backend) |
 | op-types PUT/PATCH/DELETE | all SDKs | core+wire+server ✅; **Flutter bridge rejects `"patch"`** | ❌ NOT at SDK parity — see gap below |
 | column-level LWW conflict | server-side per-field + override hooks | whole-row LWW (ADR-0014a); column-level at engine for Patch | ⚠️ partial (engine-only for Patch; no override hook = P4) |
@@ -248,8 +250,8 @@ reachable end-to-end.
    straight to napi). Honest scope: offline-only (no live `subscribe`/replicator
    path verified yet) + a `u64→f64` id-precision `ponytail:`. Nostos is now
    **10/10 platforms** (Flutter + JS-Web + Node + Rust + Tauri + Swift + Kotlin + Capacitor + .NET + React Native; RN/Capacitor/.NET landed 2026-07-12 — see `docs/plans/sdk-parity-final-three.md` + ADR-0020). Note: `nostos-ffi-wasm` + `sdk/nostos_web` are ONE platform (JavaScript Web, matching PowerSync's single `@powersync/web`); the authoritative figure vs PowerSync's 10 is now **10/10** (10/10 with a live-E2E path — .NET C# smoke live via `dotnet/smoke` 2026-07-13; RN-iOS TurboModule pending, RN-Android emu-verified).
-4. P5 Sync Streams — biggest remaining *feature* gap for the "equivalent SDK"
-   claim.
+4. ~~P5 Sync Streams~~ — ✅ v1 SHIPPED 2026-08-18 (ADR-0039; single-table
+   template ceiling, JOIN/CTE out). No longer a feature gap.
 5. ✅ **DONE** — `nostos-client` documented as the Rust SDK (README + public-API
    surface); 4/10. crates.io publish is a release-op, not a code gap.
 6. ✅ **DONE** — **Web JS SDK** (`sdk/nostos_web`, `@nostos-sync/web`). `wasm-pack
