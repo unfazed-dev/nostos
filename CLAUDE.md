@@ -35,10 +35,14 @@ on warnings.
 - `make ci` — fmt-check + clippy (-D warnings) + full test suite. Gate for every change.
 - `cargo test -p <crate>` — focused iteration.
 - `docker compose -f docker/docker-compose.yml up -d` then
-  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg`
+  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg -- --test-threads=1`
   — the real-Postgres e2e. Without `NOSTOS_E2E_PG=1` the tests self-skip and
   report a false-positive pass. (Check docker/docker-compose.yml for the
-  actual port/credentials.)
+  actual port/credentials.) The `--test-threads=1` is REQUIRED: several pg
+  e2e binaries TRUNCATE the shared `tasks` table and assert exact snapshot
+  contents — every test file documents this, and a parallel within-binary
+  run races (caught 2026-08-17: snapshot test saw the concurrent test's
+  seed row as a 4th row).
 - `make bench` — throughput benchmark. Record environment; report drop rates; never compare
   eval-only numbers against end-to-end numbers.
 - `cargo run -p nostos-client --example reactive_scroll` — end-to-end native demo.
