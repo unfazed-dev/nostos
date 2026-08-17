@@ -40,6 +40,10 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 nostos-core = { workspace = true }
+# Examples/tests-only: wiring the in-process FanOutService (apply_bench,
+# reactive_scroll) needs nostos-application's ports. The nostos-push precedent
+# (its Cargo.toml dev-deps nostos-application): dev-deps do not change the
+# lib's dependency direction — [dependencies] above stays core/domain/infra.
 nostos-application = { workspace = true }
 nostos-infra = { workspace = true }
 async-trait = { workspace = true }
@@ -52,6 +56,9 @@ bytes = { workspace = true }
 tokio-postgres = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+# apply_bench example CLI (derive idiom, same as nostos-bench / nostos-pushd).
+# Examples build against dev-deps, so the lib gains no dependency.
+clap = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,140 @@
+{
+  "label": "SMOKE",
+  "stage_note": "client-apply leg: N SyncClients applying FakeReplicator events through the real /sync WS transport on 127.0.0.1 loopback. Measures its own stage only; NOT comparable to the eval-only fan-out headline in benches/results/RESULTS.md (different stage, different units — docs/BENCHMARK-METHODOLOGY.md).",
+  "environment": {
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "hostname": "unfazed-macbook-air.local",
+    "os": "macos",
+    "cpu_cores": 10,
+    "profile": "release",
+    "clients": 8,
+    "events": 2000,
+    "on_disk": true,
+    "buffer": 1024,
+    "timeout_secs": 120
+  },
+  "totals": {
+    "expected_rows": 16000,
+    "rows_applied": 16000,
+    "drops_client_side": 0,
+    "drop_rate": 0.0,
+    "ops_per_sec_coarse": 35442.997809691406,
+    "completed_all_checkpoints": true,
+    "elapsed_secs": 0.451429083,
+    "emit_wall_secs": 0.069987167,
+    "drain_lag_ms_poll25": 381.441916
+  },
+  "router": {
+    "matched": 16000,
+    "delivered": 16000,
+    "dropped": 0,
+    "faulted": 0
+  },
+  "final_lsn": 19991,
+  "per_client": [
+    {
+      "id": 0,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-0.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    },
+    {
+      "id": 1,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-1.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    },
+    {
+      "id": 2,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-2.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    },
+    {
+      "id": 3,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-3.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    },
+    {
+      "id": 4,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-4.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    },
+    {
+      "id": 5,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-5.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    },
+    {
+      "id": 6,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-6.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    },
+    {
+      "id": 7,
+      "db": "/var/folders/z_/vsddl0v124771l0kwkndsptw0000gn/T//nostos-apply-bench-32599/client-7.db",
+      "rows_applied": 2000,
+      "commits_observed": 250,
+      "broadcast_lagged": 0,
+      "frames_received": 2000,
+      "session_commits": 250,
+      "session_checkpoint_lsn": 19991,
+      "durable_checkpoint_lsn": 19991,
+      "reopened_checkpoint_lsn": 19991,
+      "session_error": null
+    }
+  ]
+}
