@@ -39,7 +39,6 @@
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tokio_postgres::NoTls;
 
 /// One registered push token, as returned by [`PgTokenStore::list_by_account`].
 /// `platform` names the rail (`'apns' | 'fcm' | 'webpush'`); the store treats
@@ -90,13 +89,9 @@ impl PgTokenStore {
         if let Some(c) = guard.take() {
             return Ok(c);
         }
-        let (client, conn) = tokio_postgres::connect(&self.pg_url, NoTls)
+        crate::pg_connect::pg_connect_bounded(&self.pg_url)
             .await
-            .map_err(|e| TokenStoreError(format!("connect: {e}")))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-        Ok(client)
+            .map_err(TokenStoreError)
     }
 
     /// Return a client to the pool (called after a successful statement).

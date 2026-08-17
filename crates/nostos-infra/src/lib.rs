@@ -23,6 +23,7 @@ mod jwks;
 /// Persisted operation-log writers (ADR-0025 slice 2). `RecordingOpLogWriter`
 /// (always available, in-memory — bench/test) + `PgOpLogWriter` (feature "pg").
 pub mod oplog;
+mod pg_connect;
 /// The push provider rails (ADR-0037 §1, plan tasks 2.1–2.4): FCM HTTP v1 /
 /// APNs / Web Push senders with one shared `RailOutcome`, plus `router`'s
 /// `PushRouter` — the coalescer that implements the application
