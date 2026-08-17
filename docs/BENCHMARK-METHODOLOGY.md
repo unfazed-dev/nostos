@@ -6,17 +6,18 @@
 
 ## 1. The claim
 
-**Nostos's Rust server sustains ≥5× PowerSync's published server throughput ceiling when fanning Postgres-style replication events out to thousands of concurrent WebSocket clients.**
+**Nostos's Rust server sustains high-throughput aggregate fan-out — Postgres-style replication events delivered to thousands of concurrent WebSocket clients — with zero drops.** The measured figure and its scope live in [benches/results/RESULTS.md](../benches/results/RESULTS.md).
 
-PowerSync's published ceilings ([docs](https://docs.powersync.com/resources/performance-and-limits)):
+**No PowerSync ratio is claimed.** PowerSync publishes no comparable aggregate fan-out figure anywhere in its docs, blog, or benchmark repos. Its published rates ([docs](https://docs.powersync.com/resources/performance-and-limits), verified 2026-08-06) belong to different pipeline stages:
 
-| Metric | PowerSync ceiling | Source |
+| Metric | PowerSync rate | Pipeline stage |
 |---|---|---|
-| Small-row throughput | ~2,000–4,000 ops/sec | PowerSync docs |
-| Large-row throughput | ~5 MB/sec | PowerSync docs |
-| Small-transaction rate | ~60 txn/sec | PowerSync docs |
+| Replication ingest (small rows) | ~2,000–4,000 ops/sec | Postgres → PowerSync Service — a different stage from fan-out |
+| Replication ingest (large rows) | ~5 MB/sec | same ingest stage, and a different *unit* — never set against ops/sec |
+| Small-transaction rate | ~60 txn/sec | ingest-side transaction rate |
+| Per-client sync | ~2,000–20,000 ops/sec | Service → *one* client — not an aggregate across clients |
 
-These are ceilings of a **Node.js server process.** Nostos's server is **Rust.** The benchmark measures the equivalent workload on Nostos and reports the ratio.
+> **Retired framing (Correction 2026-08-06):** an earlier revision of this section claimed a "≥5×" ratio by dividing Nostos's aggregate fan-out figure by PowerSync's replication-ingest rate — two different stages of two different pipelines under one "ops/sec" label. That framing is retired; the full record lives in RESULTS.md's "Correction (2026-08-06)". Same-stage, same-units comparisons only, ever. Nostos's server is Rust where PowerSync's is Node.js, but an architecture difference is not a benchmark — only a measured same-stage comparison would be, and none exists today.
 
 ---
 
