@@ -722,11 +722,18 @@ async fn main() -> anyhow::Result<()> {
     // — bail loudly instead of falling back.
     let ruleset = match nostos_infra::rules_file::load(std::path::Path::new(&cfg.rules_file)) {
         Ok(Some(raw)) => {
+            // P5: name the loaded streams at boot — the boot-time template
+            // validation (design §2) is only observable if the operator can
+            // SEE which stream definitions passed it.
+            let stream_names: Vec<&str> = raw.streams.iter().map(|s| s.name.as_str()).collect();
+            let stream_count = raw.streams.len();
             let compiled = nostos_application::ActiveRuleset::compile(&raw)
                 .context("nostos_rules.toml failed to compile")?;
             info!(
                 sync_mode = compiled.mode().as_str(),
                 tables = compiled.synced_tables().len(),
+                streams = stream_count,
+                stream_names = ?stream_names,
                 checksum = format!("{:x}", compiled.checksum()),
                 "sync rules loaded"
             );
