@@ -143,6 +143,12 @@ pub struct SyncRouterState {
     /// overrides via [`Self::with_rules_file_path`] to match
     /// `--rules-file`/`NOSTOS_RULES_FILE`.
     pub rules_file_path: std::path::PathBuf,
+    /// Replicator→fan-out driver liveness (audit 2026-08-17 M6). The
+    /// composition root flips this when the driver task EXITS (stream end);
+    /// `/healthz` folds it into a 503 `"degraded"` so a load balancer
+    /// stops routing to a zombie server that accepts `/sync` but delivers
+    /// no live events. `None` = not wired (tests) = treated live.
+    pub driver_dead: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl SyncRouterState {
@@ -168,7 +174,15 @@ impl SyncRouterState {
             rules_changed,
             rules_tx,
             rules_file_path: std::path::PathBuf::from("nostos_rules.toml"),
+            driver_dead: None,
         }
+    }
+
+    /// Wire the driver-liveness flag (M6) — see [`Self::driver_dead`].
+    #[must_use]
+    pub fn with_driver_dead(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.driver_dead = Some(flag);
+        self
     }
 
     /// Set the per-session bounded buffer depth.
@@ -608,7 +622,10 @@ async fn run_session(
                 // tables is free.
                 res = rules_rx.changed() => {
                     if res.is_err() {
-                        continue; // sender dropped (server shutting down)
+                        // Sender dropped (shutdown / miswired with_rules):
+                        // changed() resolves Err immediately FOREVER, so a
+                        // continue here is a 100%-CPU busy-spin (audit L11).
+                        break;
                     }
                     let new_ruleset = rules_shared.read().await.clone();
                     let narrowed = {
@@ -943,7 +960,16 @@ async fn register_subscribe(
     let snapshot_base = { subs.lock().await.synthetic_cursor };
     let delivered = if let Some(snap) = snapshotter {
         match snap
-            .snapshot(&req.table, nostos_domain::Lsn::new(snapshot_base))
+            .snapshot(
+                &req.table,
+                nostos_domain::Lsn::new(snapshot_base),
+                // Tenant-scoped exactly like the live read path: the same
+                // `Principal::tenant_scope` seam, so a multi-tenant
+                // subscriber's snapshot can never widen past its tenant
+                // (audit 2026-08-17: the unscoped call leaked every
+                // tenant's rows on subscribe).
+                principal.tenant_scope(tenant_column),
+            )
             .await
         {
             Ok(events) => {
