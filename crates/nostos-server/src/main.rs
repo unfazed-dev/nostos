@@ -463,6 +463,22 @@ async fn main() -> anyhow::Result<()> {
     // real column name, injecting `"" = <tenant>` into every predicate — a
     // column no row has, so every authenticated subscription silently
     // snapshot/streamed zero rows.
+    // Fail-closed config gate (audit 2026-08-17 M1): `tenant_column == "id"`
+    // INVERTS the write-path upsert guard into a tautology — the ON CONFLICT
+    // guard becomes `WHERE "id" = EXCLUDED."id"`, true by definition on
+    // any conflict, so a cross-tenant upsert silently overwrites the victim's
+    // row (ADR-0018 bypassed; patch/delete still fail closed, which is what
+    // made the old comment's fail-closed story look right). The v1 PK
+    // convention is the column named "id", so that name can never be a
+    // tenant column: bail loudly at boot instead of shipping the inversion.
+    if cfg.sync_auth == "supabase-jwt" && cfg.tenant_column == "id" {
+        anyhow::bail!(
+            "NOSTOS_TENANT_COLUMN=id is invalid: \"id\" is the primary-key column \
+             (v1 convention), and using it as the tenant column silently \
+             disables cross-tenant upsert protection — pick a real tenant \
+             column (e.g. org_id) or set NOSTOS_TENANT_COLUMN empty to opt out"
+        );
+    }
     let tenant_col = if cfg.sync_auth == "supabase-jwt" && !cfg.tenant_column.is_empty() {
         Some(cfg.tenant_column.as_str())
     } else {
@@ -590,6 +606,9 @@ async fn main() -> anyhow::Result<()> {
     // path, the op-log is pg-only, and FakeReplicator has no producer window.
     #[cfg(feature = "pg")]
     let mut repl_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // Driver-liveness flag (M6): flipped when the replicator→fan-out driver
+    // task exits on its own; folded into /healthz. Wired into state below.
+    let driver_dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
     match cfg.replicator.as_str() {
         "fake" => {
             let mut repl = FakeReplicator::new(
@@ -598,11 +617,17 @@ async fn main() -> anyhow::Result<()> {
                     .recycling_keys(cfg.fake_distinct_keys),
             );
             let fanout_drv = Arc::clone(&fanout);
+            let dead = Arc::clone(&driver_dead);
             let drv = tokio::spawn(async move {
                 let extract = |_e: &ReplicationEvent, _col: &str| -> Option<ColumnValue> {
                     Some(ColumnValue::Any)
                 };
                 let outcome = fanout_drv.run(&mut repl, extract).await;
+                tracing::error!(
+                    ?outcome,
+                    "replicator→fan-out driver EXITED — live fan-out stopped; /healthz now degraded (M6)"
+                );
+                dead.store(true, std::sync::atomic::Ordering::Relaxed);
                 info!(?outcome, "replicator stream ended");
             });
             std::mem::forget(drv);
@@ -635,6 +660,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
                 let fanout_drv = Arc::clone(&fanout);
+                let dead = Arc::clone(&driver_dead);
                 let drv = tokio::spawn(async move {
                     // Extract a column from the JSON payload: parse the small
                     // object and return the named field. Typed (ADR-0037 plan
@@ -645,7 +671,11 @@ async fn main() -> anyhow::Result<()> {
                         extract_typed_column(e.payload_bytes(), col)
                     };
                     let outcome = fanout_drv.run(&mut repl, extract).await;
-                    info!(?outcome, "PgReplicator stream ended");
+                    tracing::error!(
+                        ?outcome,
+                        "replicator→fan-out driver EXITED — live fan-out stopped; /healthz now degraded (M6)"
+                    );
+                    dead.store(true, std::sync::atomic::Ordering::Relaxed);
                 });
                 repl_handle = Some(drv);
                 info!(
@@ -853,6 +883,7 @@ async fn main() -> anyhow::Result<()> {
             &cfg.pg_publication,
         ));
         state_builder = state_builder.with_schema_source(schema_source);
+        state_builder = state_builder.with_driver_dead(Arc::clone(&driver_dead));
         info!(publication = %cfg.pg_publication, "schema endpoint: PgSchemaSource");
     }
     let state = state_builder;
@@ -959,7 +990,21 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "pg")]
     {
         if let Some(w) = op_log_shutdown {
-            w.shutdown().await;
+            // Bound the drain (audit 2026-08-17 M8): the flush task may be
+            // inside a PG connect/execute, and a partitioned PG during
+            // SIGTERM must not hang graceful shutdown forever. The
+            // statement_timeout (30s) already bounds the statements; 35s
+            // here is the last backstop — on expiry we log and exit, and
+            // the dropped tail is recovered by snapshot-reconcile.
+            if tokio::time::timeout(std::time::Duration::from_secs(35), w.shutdown())
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "op-log drain exceeded 35s during shutdown; exiting — unflushed tail \
+                     rows reconcile via snapshot on reconnect"
+                );
+            }
         }
     }
     let _ = rules_shutdown_tx.send(true);
@@ -1367,14 +1412,32 @@ fn format_thousands(n: u64) -> String {
 // ---- health + metrics endpoints (ADR: operability, T1-6/T1-7) ----
 
 /// `GET /healthz` — liveness/readiness. Returns the live session count and
-/// tier, both cheap to read (O(1) atomic on the store). A load balancer polls
-/// this to decide whether to route traffic.
-async fn healthz(State(state): State<SyncRouterState>) -> Json<serde_json::Value> {
+/// replicator-driver liveness, both cheap to read (O(1) atomic). A load
+/// balancer polls this to decide whether to route traffic. When the
+/// replicator→fan-out driver has EXITED (stream end — audit 2026-08-17 M6)
+/// the server is a zombie: it accepts `/sync` and serves snapshots but
+/// delivers no live events. The endpoint then answers 503 `"degraded"`
+/// so the LB drains it. (A driver PANIC is not folded in — the tokio panic
+/// hook already screams on stderr; the exit path is the silent one.)
+async fn healthz(State(state): State<SyncRouterState>) -> (StatusCode, Json<serde_json::Value>) {
     let sessions = state.manager.session_count().await;
-    Json(serde_json::json!({
-        "status": "ok",
-        "sessions": sessions,
-    }))
+    let driver_dead = state
+        .driver_dead
+        .as_ref()
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+    let (code, status, driver) = if driver_dead {
+        (StatusCode::SERVICE_UNAVAILABLE, "degraded", "dead")
+    } else {
+        (StatusCode::OK, "ok", "live")
+    };
+    (
+        code,
+        Json(serde_json::json!({
+            "status": status,
+            "sessions": sessions,
+            "replicator_driver": driver,
+        })),
+    )
 }
 
 /// `GET /schema` — the publication's typed schema (WS1): tables, columns, and
