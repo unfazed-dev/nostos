@@ -1342,17 +1342,16 @@ impl NostosSocket {
             .map_err(|e| JsValue::from_str(&format!("subscribe: send failed: {e:?}")))
     }
 
-    /// Reconnect retaining engine state (Wave 4a). If the socket is closed,
-    /// opens a new WebSocket with the stored connection params. The engine
-    /// (rows, checkpoint, outbox) survives — the server resumes streaming from
-    /// the persisted checkpoint. Returns `true` if a reconnect was initiated,
-    /// `false` if the socket was already open.
-    ///
-    /// ponytail: this creates a new `NostosSocket` internally because the
-    /// existing `ws` field is not `RefCell` (changing it would ripple through
-    /// the transport). The JS caller should use the returned socket and drop
-    /// the old one. A future refactor should make `ws` interior-mutable so
-    /// resume can hot-swap in place.
+    /// Re-assert the subscription on an already-open socket (heartbeat
+    /// re-send of the subscribe frame with the persisted checkpoint;
+    /// returns `false`). If the socket is CLOSED this returns `Err` —
+    /// call `connect()` instead. (Audit 2026-08-17 L3: an earlier version of
+    /// this doc promised a socket-creating resume returning `true` — never
+    /// implemented. The `ws` field is not interior-mutable, so an in-place
+    /// hot-swap would ripple through the transport; that refactor is the
+    /// upgrade path for a true resume.) The engine (rows, checkpoint,
+    /// outbox) survives a reconnect — the server resumes streaming from
+    /// the persisted checkpoint.
     #[wasm_bindgen(js_name = resume)]
     #[allow(clippy::unused_async)] // async so JS callers can `await`; no Rust await needed (synchronous socket check)
     pub async fn resume(&self) -> Result<bool, JsValue> {

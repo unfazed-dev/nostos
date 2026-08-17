@@ -540,10 +540,18 @@ fn flush_pending(inner: &Rc<SocketInner>) {
 /// ([`pump_committed`]) + snapshot shape (`NostosEngine::rows_for`) are the
 /// host-tested pure cores this pushes from.
 pub(crate) fn emit_change(slot: &OnChangeSlot) {
-    if let Some(cb) = slot.borrow().as_ref() {
-        // `Closure: AsRef<JsValue>` → `unchecked_ref::<Function>` → `call0`.
+    // Clone the callback's JsValue out and DROP the RefCell borrow BEFORE
+    // invoking JS (audit 2026-08-17 M5): a callback that re-enters
+    // onChange/offChange would otherwise hit borrow_mut on the still-held
+    // borrow — BorrowMutError, and release wasm is panic=abort, so the
+    // whole in-page engine dies. (The ScopedClosure itself is not Clone;
+    // its JsValue handle is.)
+    let cb: Option<JsValue> = slot
+        .borrow()
+        .as_ref()
+        .map(|c| AsRef::<JsValue>::as_ref(c).clone());
+    if let Some(cb) = cb {
         let _ = cb
-            .as_ref()
             .unchecked_ref::<js_sys::Function>()
             .call0(&JsValue::UNDEFINED);
     }
