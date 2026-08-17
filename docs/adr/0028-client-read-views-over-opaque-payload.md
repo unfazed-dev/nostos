@@ -81,14 +81,16 @@ That naming is what makes `SELECT * FROM tasks` work with no prefix to learn, an
 it is why raw DML against a synced table hits a **view** rather than missing
 entirely — the loud-failure property below depends on it.
 
-> **Known edge, non-public schemas.** `view_name` collapses the dot, so a
-> relation in a non-`public` schema becomes the view `myschema_tasks`, while
-> `Collection.watch` builds `SELECT * FROM myschema.tasks`
-> (`nostos_database.dart:495`) — which SQLite reads as schema `myschema`, table
-> `tasks`, and fails. Only `public` (the stripped case) is exercised; the
-> `sdk-e2e` flutter slice runs `NOSTOS_REPLICATOR=fake` with a bare `tasks`, so
-> nothing covers this. Untested, not known-broken — but do not assume a
-> non-public schema works.
+> **Known edge, non-public schemas — RESOLVED 2026-08-17.** The mismatch
+> this note predicted was real: `view_name` collapses the dot (view
+> `myschema_tasks`) while the Dart structured paths built
+> `SELECT * FROM myschema.tasks`, which SQLite reads as schema `myschema`.
+> Fixed on the Dart side: every structured path (`_composeQuery`, `count`,
+> `exists`) now normalizes through `_viewName()`, the exact mirror of the
+> Rust rule, so `Collection` over a schema-qualified table hits its view.
+> Pinned by `sdk/nostos_flutter/test/view_name_test.dart`. Raw-SQL callers
+> (`NostosDatabase.watch`/`getAll`) get NO normalization by design — they must
+> write the collapsed view name themselves (documented on `_viewName`).
 
 ## Decision
 

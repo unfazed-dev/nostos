@@ -981,10 +981,23 @@ class NostosDatabase {
   }
 }
 
+/// SQLite view name for a synced table (ADR-0028): the client engine
+/// creates one view per synced table, but SQLite has no schema-qualified
+/// local names, so a server-side `myschema.tasks` arrives as the view
+/// `myschema_tasks` — the Rust `view_name()` rule, dots collapse to
+/// underscores. Every structured query path normalizes through here so a
+/// [Collection] over a non-public-schema table hits its view instead of
+/// failing with "no such table: myschema.tasks". Raw-SQL callers
+/// ([NostosDatabase.watch]/[NostosDatabase.getAll]) get no normalization —
+/// they must write the collapsed view name themselves.
+String _viewName(String table) => table.replaceAll('.', '_');
+
 /// Compose a `SELECT * FROM <table>` SQL string from the structured
-/// [where]/[orderBy]/[limit]/[offset] (ADR-0032 T2). All inputs are
-/// injection-safe: column names are identifier-validated in [Where.toSql]/
-/// [Order.toSql], and values are emitted as literals (see `predicate.dart`).
+/// [where]/[orderBy]/[limit]/[offset] (ADR-0032 T2). The table name is
+/// normalized through [_viewName] (schema-qualified names collapse to the
+/// engine's view name). All inputs are injection-safe: column names are
+/// identifier-validated in [Where.toSql]/[Order.toSql], and values are
+/// emitted as literals (see `predicate.dart`).
 String _composeQuery(
   String table, {
   Where? where,
@@ -992,7 +1005,7 @@ String _composeQuery(
   int? limit,
   int? offset,
 }) {
-  var sql = 'SELECT * FROM $table';
+  var sql = 'SELECT * FROM ${_viewName(table)}';
   final w = where?.toSql();
   if (w != null) sql += ' WHERE $w';
   if (orderBy != null && orderBy.isNotEmpty) {
@@ -1115,9 +1128,10 @@ class Collection<T> {
   /// unrelated column writes.
   Stream<int> count({Where? where}) {
     final whereFragment = where?.toSql();
+    final view = _viewName(table);
     final sql = whereFragment == null
-        ? 'SELECT COUNT(*) AS count FROM $table'
-        : 'SELECT COUNT(*) AS count FROM $table WHERE $whereFragment';
+        ? 'SELECT COUNT(*) AS count FROM $view'
+        : 'SELECT COUNT(*) AS count FROM $view WHERE $whereFragment';
     return _db.watch(sql).map((rows) {
       final v = rows.isEmpty ? null : rows.first['count'];
       return v is num ? v.toInt() : 0;
@@ -1129,9 +1143,10 @@ class Collection<T> {
   /// any…" UI (empty-vs-nonempty badges, conditional affordances).
   Stream<bool> exists({Where? where}) {
     final whereFragment = where?.toSql();
+    final view = _viewName(table);
     final sql = whereFragment == null
-        ? 'SELECT EXISTS(SELECT 1 FROM $table) AS hit'
-        : 'SELECT EXISTS(SELECT 1 FROM $table WHERE $whereFragment) AS hit';
+        ? 'SELECT EXISTS(SELECT 1 FROM $view) AS hit'
+        : 'SELECT EXISTS(SELECT 1 FROM $view WHERE $whereFragment) AS hit';
     return _db.watch(sql).map((rows) {
       final v = rows.isEmpty ? null : rows.first['hit'];
       return v is num ? v.toInt() != 0 : false;
