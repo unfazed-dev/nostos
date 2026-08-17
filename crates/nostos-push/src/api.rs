@@ -73,6 +73,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/tokens", post(register_token))
         .route("/v1/tokens/:token", delete(delete_token))
         .route("/v1/send", post(send))
+        .route("/v1/send/batch", post(send_batch))
         .route("/v1/receipts", get(receipts))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -410,40 +411,7 @@ async fn send(
         .payload
         .into_push_payload()
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid payload: {e}")))?;
-    // Platform resolution (contract 0.3.0): the registry row wins for a
-    // registered token; rail mode (unregistered + platform field) is the
-    // Rail-role-only delegation path; unregistered + no field is today's
-    // 404.
-    let record = state
-        .store
-        .lookup_token(&tenant.0, &body.token)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "token lookup failed");
-            internal("token registry unavailable")
-        })?;
-    let platform = match record {
-        Some(record) => record.platform,
-        None => match body.platform {
-            Some(_) if role != KeyRole::Rail => {
-                // Audit finding 1: rail mode is the trusted-delegator path —
-                // a Standard tenant key must not dispatch to tokens outside
-                // this daemon's registry.
-                return Err(err(
-                    StatusCode::FORBIDDEN,
-                    "rail mode (unregistered token + platform field) requires a :rail-role \
-                     API key",
-                ));
-            }
-            Some(platform) => platform,
-            None => {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "token not registered for this tenant",
-                ))
-            }
-        },
-    };
+    let platform = resolve_platform(&state, &tenant.0, &body.token, body.platform, &role).await?;
     if !state.rails.configured(platform) {
         return Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -489,6 +457,223 @@ async fn send(
             status: "accepted",
         }),
     ))
+}
+
+/// Platform resolution (contract 0.3.0): the registry row wins for a
+/// registered token; rail mode (unregistered + platform field) is the
+/// Rail-role-only delegation path; unregistered + no field is a 404.
+/// Shared by /v1/send and /v1/send/batch (contract 0.4.0) so the role gate
+/// can never drift between the two routes.
+async fn resolve_platform(
+    state: &AppState,
+    tenant: &str,
+    token: &str,
+    platform_field: Option<Platform>,
+    role: &KeyRole,
+) -> Result<Platform, ApiError> {
+    let record = state.store.lookup_token(tenant, token).await.map_err(|e| {
+        tracing::error!(error = %e, "token lookup failed");
+        internal("token registry unavailable")
+    })?;
+    match record {
+        Some(record) => Ok(record.platform),
+        None => match platform_field {
+            Some(_) if *role != KeyRole::Rail => {
+                // Audit finding 1: rail mode is the trusted-delegator path —
+                // a Standard tenant key must not dispatch to tokens outside
+                // this daemon's registry.
+                Err(err(
+                    StatusCode::FORBIDDEN,
+                    "rail mode (unregistered token + platform field) requires a :rail-role \
+                     API key",
+                ))
+            }
+            Some(platform) => Ok(platform),
+            None => Err(err(
+                StatusCode::NOT_FOUND,
+                "token not registered for this tenant",
+            )),
+        },
+    }
+}
+
+// ------------------------------------------------------------ batch send
+
+/// Contract cap (0.4.0): max items per /v1/send/batch request — 100 × the
+/// ~7.5KB worst-case per-item fields stays well under the axum body limit.
+/// Note the effective ceiling is also the tenant's send-burst bucket: a
+/// batch larger than NOSTOS_PUSHD_SEND_BURST always 429s (all-or-nothing).
+const MAX_BATCH_ITEMS: usize = 100;
+
+/// POST /v1/send/batch body — items ride the SAME SendRequest DTO (same
+/// caps, same deny_unknown_fields) as /v1/send.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchSendRequest {
+    items: Vec<SendRequest>,
+}
+
+/// One slot of the batch response, in request order: `push_id` when the
+/// item was admitted, `error` when it wasn't.
+#[derive(serde::Serialize)]
+struct BatchSendItemResult {
+    index: usize,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+}
+
+#[derive(serde::Serialize)]
+struct BatchSendAcceptedBody {
+    results: Vec<BatchSendItemResult>,
+}
+
+/// POST /v1/send/batch — up to 100 token-addressed pushes (contract 0.4.0,
+/// plan v1.1 pin). Two phases:
+///
+/// Phase 1 is ATOMIC — nothing is admitted or sent on a failure: parse +
+/// item-count cap (400) -> ONE non-draining acquire_n on the tenant bucket
+/// (429 for the whole batch; a single-send's parse-before-rate order is
+/// inverted here because N is unknowable before parsing — the body stays
+/// axum-size-capped, and the bucket is still checked before any registry
+/// I/O) -> per-item validate + platform resolution + rail-configured check
+/// (400/403/404/503 naming the FIRST failing index).
+///
+/// Phase 2 admits per item (pending-gate + bounded try_send) with per-item
+/// outcomes in request order: 202 when >=1 item was admitted; 503 only when
+/// EVERY item failed admission — nothing left the daemon, so the whole
+/// batch is safe to retry. Already-admitted items are NOT rolled back when
+/// a later item fails admission: they will legitimately send, and the
+/// per-item results say exactly which to retry.
+async fn send_batch(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<TenantId>,
+    Extension(role): Extension<KeyRole>,
+    raw: Bytes,
+) -> Result<(StatusCode, Json<BatchSendAcceptedBody>), ApiError> {
+    let body: BatchSendRequest = serde_json::from_slice(&raw)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")))?;
+    if body.items.is_empty() || body.items.len() > MAX_BATCH_ITEMS {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "items must contain 1..={MAX_BATCH_ITEMS} entries (got {})",
+                body.items.len()
+            ),
+        ));
+    }
+    // One token PER ITEM, atomically: an insufficient bucket 429s the whole
+    // batch and keeps every token (try_acquire_n never partially drains).
+    let n = u32::try_from(body.items.len()).unwrap_or(u32::MAX);
+    if !state.send_limiter.try_acquire_n(&tenant.0, n) {
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "send rate limit exceeded for this tenant — retry later (batches are all-or-nothing)",
+        ));
+    }
+    // Phase 1 (atomic): validate + resolve + rail-check every item BEFORE
+    // any admission — any failure aborts the batch with zero sends.
+    let mut resolved = Vec::with_capacity(body.items.len());
+    for (index, item) in body.items.into_iter().enumerate() {
+        if let Err(e) = item.validate() {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("item {index}: invalid request: {e}"),
+            ));
+        }
+        let SendRequest {
+            token,
+            platform,
+            payload,
+            collapse_key,
+            metadata,
+            ..
+        } = item;
+        let payload = match payload.into_push_payload() {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("item {index}: invalid payload: {e}"),
+                ));
+            }
+        };
+        let platform = match resolve_platform(&state, &tenant.0, &token, platform, &role).await {
+            Ok(p) => p,
+            Err((status, Json(v))) => {
+                let msg = v
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("invalid item")
+                    .to_string();
+                return Err(err(status, format!("item {index}: {msg}")));
+            }
+        };
+        if !state.rails.configured(platform) {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "item {index}: push rail for platform '{}' is not configured on this daemon",
+                    platform.as_str()
+                ),
+            ));
+        }
+        resolved.push((index, token, platform, payload, collapse_key, metadata));
+    }
+    // Phase 2: per-item admission, outcomes in request order.
+    let mut results = Vec::with_capacity(resolved.len());
+    let mut accepted = 0usize;
+    for (index, token, platform, payload, collapse_key, metadata) in resolved {
+        let push_id = uuid::Uuid::new_v4().to_string();
+        let job = SendJob {
+            tenant_id: tenant.0.clone(),
+            token: token.clone(),
+            platform,
+            push_id: push_id.clone(),
+            payload,
+            collapse_key,
+            metadata: metadata.map(serde_json::Value::Object),
+        };
+        // Admission and try_send have no await between them (the /v1/send
+        // discipline): a dropped request cannot leak a gate slot; a full
+        // channel releases the slot it just took.
+        let key = (tenant.0.clone(), token);
+        let outcome = if state.gate.lock().expect("pending gate").admit(&key) {
+            if state.sender.try_send(job).is_err() {
+                state.gate.lock().expect("pending gate").release(&key);
+                Err("coalescer_queue_full")
+            } else {
+                Ok(())
+            }
+        } else {
+            Err("coalescer_pending_ceiling")
+        };
+        match outcome {
+            Ok(()) => {
+                accepted += 1;
+                results.push(BatchSendItemResult {
+                    index,
+                    status: "accepted",
+                    push_id: Some(push_id),
+                    error: None,
+                });
+            }
+            Err(code) => results.push(BatchSendItemResult {
+                index,
+                status: "rejected",
+                push_id: None,
+                error: Some(code),
+            }),
+        }
+    }
+    let status = if accepted == 0 {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, Json(BatchSendAcceptedBody { results })))
 }
 
 // --------------------------------------------------------------- receipts

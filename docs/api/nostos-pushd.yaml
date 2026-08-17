@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: nostos-pushd
-  version: 0.3.0
+  version: 0.4.0
   description: >
     Standalone push daemon (ADR-0038): token-addressed APNs / FCM HTTP v1 /
     Web Push sends with debounce coalescing. NOT a marketing platform —
@@ -14,6 +14,14 @@ info:
     DELETE /v1/tokens/{token} is 204 for every not-yours case, and
     /v1/healthz is status-only with the rails booleans moved to the
     authenticated /v1/status.
+
+    v0.4.0 (2026-08-17, plan v1.1): POST /v1/send/batch — up to 100
+    SendRequests per call. Phase 1 is all-or-nothing (per-item validation,
+    role and rail checks, and ONE atomic per-item token-bucket charge): any
+    failure is a whole-batch 4xx/429 naming the first failing index, with
+    ZERO items sent. Phase 2 admits per item; 202 returns per-item results
+    in request order; 503 only when EVERY item failed admission (safe to
+    retry the whole batch).
 servers:
   - url: http://localhost:8090
 tags: [tokens, send, receipts, meta]
@@ -145,6 +153,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '503': { description: The token's rail is not configured on this daemon }
+  /v1/send/batch:
+    post:
+      tags: [send]
+      summary: Queue up to 100 token-addressed pushes (v0.4.0)
+      description: >
+        All-or-nothing phase 1 (parse, item-count cap 1..=100, ONE atomic
+        per-item rate charge — a batch larger than the tenant's burst
+        always 429s, per-item validation, :rail-role gate, rail-configured
+        check; any failure = whole-batch error naming the first failing
+        index, zero items sent), then per-item admission in phase 2 with
+        per-item results in request order. Items ride the same SendRequest
+        schema (same field caps). The effective batch ceiling is
+        min(100, NOSTOS_PUSHD_SEND_BURST).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchSendRequest' }
+      responses:
+        '202':
+          description: At least one item admitted — per-item results in request order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchSendAccepted' }
+        '400': { description: Malformed body, item-count cap violation, or a per-item validation failure (whole batch rejected; error names the index) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: A rail-mode item under a Standard-role key (whole batch rejected; error names the index) }
+        '404': { description: An item's token is unregistered AND carries no platform field (whole batch rejected; error names the index) }
+        '429': { description: The tenant's bucket cannot cover the whole batch — all-or-nothing, tokens preserved }
+        '503': { description: EVERY item failed coalescer admission (nothing sent — safe to retry), or an item's rail is unconfigured (whole-batch phase-1 rejection) }
   /v1/receipts:
     get:
       tags: [receipts]
@@ -280,6 +318,34 @@ components:
         push_id: { type: string }
         status: { type: string, enum: [accepted] }
       required: [push_id, status]
+    BatchSendRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SendRequest' }
+          minItems: 1
+          maxItems: 100
+      required: [items]
+    BatchSendItemResult:
+      type: object
+      description: >
+        One per request item, in request order. push_id present on
+        accepted; error code present on rejected.
+      properties:
+        index: { type: integer }
+        status: { type: string, enum: [accepted, rejected] }
+        push_id: { type: string }
+        error: { type: string, enum: [coalescer_pending_ceiling, coalescer_queue_full] }
+      required: [index, status]
+    BatchSendAccepted:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BatchSendItemResult' }
+      required: [results]
     Receipt:
       type: object
       properties:

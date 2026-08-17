@@ -1234,3 +1234,154 @@ async fn tokens_cross_tenant_register_409_then_delete_then_register_201() {
     );
     assert_eq!(body["registered"], json!(true));
 }
+
+// ------------------------------------------- batch send (contract 0.4.0)
+
+/// Happy path: two registered tokens, one batch -> 202, per-item push_ids
+/// in request order, and both sends deliver + receipt after the window.
+#[tokio::test]
+async fn batch_send_happy_path_202_receipts_in_order() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    register_apns(&d, KEY_A, "tok-batch-1").await;
+    register_apns(&d, KEY_A, "tok-batch-2").await;
+
+    let (status, body) = d
+        .post(
+            "/v1/send/batch",
+            Some(KEY_A),
+            &json!({
+                "items": [
+                    {"token": "tok-batch-1", "payload": {"silent": {"table": "docs", "lsn": "1"}}, "metadata": {"i": 0}},
+                    {"token": "tok-batch-2", "payload": {"silent": {"table": "docs", "lsn": "2"}}, "metadata": {"i": 1}},
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "batch: {body}");
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2, "one result per item");
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r["index"], json!(i), "results ride in request order");
+        assert_eq!(r["status"], json!("accepted"));
+        assert!(r["push_id"].as_str().is_some_and(|s| s.len() == 36));
+        assert!(r.get("error").is_none(), "accepted items carry no error");
+    }
+
+    let receipts = wait_for_receipts(&d, KEY_A, 2).await;
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(*calls.lock().expect("calls"), 2, "both items dispatched");
+}
+
+/// Atomic phase 1: item 1 is over the title cap -> the WHOLE batch 400s
+/// naming the index, and item 0 (valid) is never admitted — zero rail
+/// calls, zero receipts.
+#[tokio::test]
+async fn batch_send_one_invalid_item_fails_whole_batch_400() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    register_apns(&d, KEY_A, "tok-batch-ok").await;
+
+    let (status, body) = d
+        .post(
+            "/v1/send/batch",
+            Some(KEY_A),
+            &json!({
+                "items": [
+                    {"token": "tok-batch-ok", "payload": {"silent": {"table": "docs", "lsn": "1"}}},
+                    {"token": "tok-batch-ok", "payload": {"visible": {"title": "x".repeat(300), "body": "b"}}},
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "batch: {body}");
+    let msg = body["error"].as_str().expect("error message");
+    assert!(msg.contains("item 1"), "names the failing index: {msg}");
+
+    tokio::time::sleep(Duration::from_millis(300)).await; // > debounce window
+    assert!(*calls.lock().expect("calls") == 0, "nothing dispatched");
+    let (_, receipts) = d.get("/v1/receipts", KEY_A).await;
+    assert_eq!(
+        receipts["receipts"].as_array().expect("receipts").len(),
+        0,
+        "nothing receipted"
+    );
+}
+
+/// Rail mode in a batch under a STANDARD key -> whole-batch 403 (finding 1
+/// holds at batch granularity), naming the failing item.
+#[tokio::test]
+async fn batch_send_rail_mode_standard_key_forbidden_403() {
+    let (_calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    let (status, body) = d
+        .post(
+            "/v1/send/batch",
+            Some(KEY_A),
+            &json!({
+                "items": [
+                    {"token": "unregistered-token-1", "platform": "apns", "payload": {"silent": {"table": "docs", "lsn": "1"}}},
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "batch: {body}");
+    assert!(body["error"].as_str().expect("error").contains("item 0"));
+}
+
+/// The item cap: 0 or >100 items is a 400 before any rate/lookup work.
+#[tokio::test]
+async fn batch_send_item_count_cap_400() {
+    let (_calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    let (status, _) = d
+        .post("/v1/send/batch", Some(KEY_A), &json!({"items": []}))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "empty batch");
+
+    let items: Vec<Value> = (0..101)
+        .map(|_| json!({"token": "t", "payload": {"silent": {"table": "docs", "lsn": "1"}}}))
+        .collect();
+    let (status, body) = d
+        .post("/v1/send/batch", Some(KEY_A), &json!({"items": items}))
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "101 items: {body}"
+    );
+    assert!(body["error"].as_str().expect("error").contains("1..=100"));
+}
+
+/// The batch rate check is all-or-nothing AND non-draining: a 4-item batch
+/// against a burst-3 bucket 429s, and the bucket keeps its tokens — a
+/// single /v1/send right after still succeeds.
+#[tokio::test]
+async fn batch_send_rate_short_bucket_429_non_draining() {
+    let (_calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon_tuned(
+        50,
+        rails_for(Platform::Apns, &mock),
+        10,
+        3,
+        CoalescerLimits::default(),
+    )
+    .await;
+    register_apns(&d, KEY_A, "tok-batch-rate").await;
+
+    let items: Vec<Value> = (0..4)
+        .map(|i| json!({"token": "tok-batch-rate", "payload": {"silent": {"table": "docs", "lsn": i.to_string()}}}))
+        .collect();
+    let (status, body) = d
+        .post("/v1/send/batch", Some(KEY_A), &json!({"items": items}))
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "batch: {body}"
+    );
+
+    // The failed batch did not drain the bucket: a single send still fits.
+    let push_id = send_silent(&d, KEY_A, "tok-batch-rate", json!({"after": "429"})).await;
+    assert_eq!(push_id.len(), 36);
+}

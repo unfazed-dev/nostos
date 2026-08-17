@@ -59,6 +59,32 @@ impl SendRateLimiter {
         }
     }
 
+    /// Consume `n` tokens for `tenant` atomically — ALL or NOTHING: a
+    /// short bucket keeps every token, so a batch caller's 429 means ZERO
+    /// items were admitted (plan v1.1 batch-send pin, contract 0.4.0).
+    pub fn try_acquire_n(&self, tenant: &str, n: u32) -> bool {
+        if n == 0 {
+            return true;
+        }
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().expect("rate limiter lock");
+        let bucket = buckets
+            .entry(tenant.to_string())
+            .or_insert_with(|| TokenBucket {
+                tokens: self.burst,
+                last: now,
+            });
+        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.rate_per_sec).min(self.burst);
+        bucket.last = now;
+        if bucket.tokens >= f64::from(n) {
+            bucket.tokens -= f64::from(n);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Consume one token for `tenant`, refilling first. `false` = the
     /// caller must answer 429.
     pub fn try_acquire(&self, tenant: &str) -> bool {
@@ -97,6 +123,21 @@ mod tests {
         let fresh = SendRateLimiter::new(1, 1);
         assert!(fresh.try_acquire("b"));
         assert!(!fresh.try_acquire("b"));
+    }
+
+    #[test]
+    fn acquire_n_is_all_or_nothing() {
+        let limiter = SendRateLimiter::new(1, 5);
+        assert!(limiter.try_acquire_n("a", 3), "3 of 5 burst");
+        assert!(
+            !limiter.try_acquire_n("a", 3),
+            "only 2 left — short bucket keeps them"
+        );
+        // The failed acquire_n did NOT drain: the 2 remaining tokens still buy 2 singles.
+        assert!(limiter.try_acquire("a"));
+        assert!(limiter.try_acquire("a"));
+        assert!(!limiter.try_acquire("a"));
+        assert!(limiter.try_acquire_n("b", 5), "other tenant unaffected");
     }
 
     #[test]

@@ -51,6 +51,7 @@ NOSTOS_PUSHD_API_KEYS="acme:s3cr3t,hq:delegator-key:rail" nostos-pushd
 # 4. Register + send (see docs/api/nostos-pushd.yaml):
 #    POST /v1/tokens  {"token": "…", "platform": "fcm"}
 #    POST /v1/send    {"token": "…", "payload": {"visible": {"title": "Hi", "body": "…"}}}
+#    POST /v1/send/batch  {"items": [ …up to 100 SendRequests… ]}  (contract v0.4.0)
 #    GET  /v1/receipts?since=0
 ```
 
@@ -81,6 +82,14 @@ When to use it: more than one pushd replica, a registry that must outlive
 a container filesystem, or ops that already back Postgres. The pool is a
 single connection per daemon (the `PgTokenStore` pattern) — right-sized
 for the daemon's low-write shape.
+
+Transport note (security review 2026-08-17, Medium #1): the registry
+connection is `NoTls` — the workspace-wide posture (the replicator's
+control plane is the same). SCRAM keeps the password off the wire, but
+without TLS the *server* is not authenticated: run pushd and Postgres on a
+private segment or a unix socket until TLS support lands. Handshake (15s)
+and per-statement (30s) timeouts are set so a blackholed PG fails fast
+instead of stalling every tenant behind the pool-of-one.
 
 Real-Postgres store tests: `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=… cargo test -p
 nostos-push --features pg` (self-skip without the flag — a skipped run is
