@@ -36,6 +36,8 @@ enum Commands {
     Gen(commands::gen::GenArgs),
     /// Generate/edit/validate nostos_rules.toml (per-table sync rules, ADR-0031).
     Rules(commands::rules::RulesArgs),
+    /// Configure/validate push credentials in .env (ADR-0037/0038).
+    Push(commands::push::PushArgs),
 }
 
 #[tokio::main]
@@ -56,5 +58,6 @@ async fn main() -> Result<()> {
         Commands::Pull(args) => commands::pull::run(args, &cwd).await,
         Commands::Gen(args) => commands::gen::run(args, &cwd).await,
         Commands::Rules(args) => commands::rules::run(args, &cwd).await,
+        Commands::Push(args) => commands::push::run(args, &cwd).await,
     }
 }

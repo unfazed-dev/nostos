@@ -35,9 +35,9 @@ ADR-0037 + `docs/plans/nostos-push-notifications-implementation.md` (24/24, done
 
 ## Wave 3 — developer ergonomics (serves embedded AND daemon; can land first)
 
-- [ ] 3.1 `nostos push init`: interactive — which rails; writes gitignored .env entries (NEVER nostos.toml — secret-free convention); validates p8 PEM shape, service-account JSON fields; mints VAPID keypair on request.
-- [ ] 3.2 `nostos push check`: credential reachability dry-run per configured rail (APNs JWT mint + sandbox probe, FCM OAuth token mint, VAPID signature self-check). Reports reachability, not end-to-end delivery (honest limits).
-- [ ] 3.3 Docs page: push with nostos — embedded (env vars), daemon (standalone), delegation (RemoteNotifier) — one page, three recipes.
+- [x] 3.1 `nostos push init` (commands/push.rs): FLAG-DRIVEN non-interactive (matches deploy/rules-init, CI-scriptable — interactive prompting rejected); all-or-nothing validation before any write; .env update-in-place with single-line guard + skip-reporting, --force to overwrite, NEVER nostos.toml; p8 PEM + 10-char key-id validation, service-account 3-field validation, VAPID keypair mint (p256) with public-key print only when the key is actually written. DEVIATION (verified first-hand against fcm.rs:103-108): FCM credentials stored as inline minified JSON even when a path is given — the FCM rail's from_env parses JSON directly with no path resolution; storing a path would write a config the server cannot boot.
+- [x] 3.2 `nostos push check`: per configured rail — APNs ES256 provider-JWT mint + claims shape (live-smoked with a real openssl p8), --probe = TLS handshake only (rustls/webpki, never sends); FCM OAuth2 JWT-bearer token mint against the live Google endpoint (400 on fake creds = correct rejection); VAPID offline shape check. .env + process-env override; exit 0 only when every configured rail passes; honest-limits caveat printed.
+- [x] 3.3 Docs page: docs/push.md — three recipes (embedded env-var table, daemon quickstart against docs/api/nostos-pushd.yaml, delegation marked lands-with-Wave-2) + honest-limits caveats. 14 new tests, 58 total in -p nostos-cli, all green.
 
 ## Wave 4 — launch gate (the blocker checklist)
 
