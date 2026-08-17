@@ -422,7 +422,9 @@ async fn receipt_loop(
     // flush on a caught-up page. Atomic tmp+rename, deliberately NO fsync:
     // a crash loses at most ~1s of cursor and the daemon replay that
     // follows is monotonicity-guarded (metrics-only skew, never state
-    // corruption).
+    // corruption). A FORGED state file (local write access to an
+    // operator-set path) can only skip receipts forward — worst case a
+    // delayed unregistered-prune; delivery counters stay monotonic.
     let mut cursor_file = state_path.map(CursorFile::load);
     let mut since: i64 = cursor_file.as_ref().map_or(0, |f| f.persisted);
     let mut failures: u32 = 0;
@@ -656,7 +658,24 @@ fn write_cursor(path: &Path, since: i64) -> std::io::Result<()> {
     .map_err(std::io::Error::other)?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    std::fs::write(&tmp, body)?;
+    // create_new: never follow a pre-placed symlink at <path>.tmp into
+    // clobbering its target (review 2026-08-17 finding 4). A stale .tmp
+    // orphan from a crashed earlier write is removed and retried ONCE.
+    let write_fresh = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, body.as_bytes()))
+    };
+    match write_fresh() {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&tmp)?;
+            write_fresh()?;
+        }
+        Err(e) => return Err(e),
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -1376,6 +1395,21 @@ mod tests {
         // receipts are applied.
         soon(|| metrics.snapshot().push_sent == 2).await;
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Review finding 4 (2026-08-17): a stale `<path>.tmp` orphan (from a
+    /// crashed earlier write) is removed and the fresh cursor still lands —
+    /// and `create_new` means a pre-placed SYMLINK at the tmp path is
+    /// treated as that orphan, never followed into a clobber.
+    #[test]
+    fn write_cursor_overwrites_a_stale_tmp_orphan() {
+        let path = temp_state_path("stale-tmp");
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        std::fs::write(&tmp, "stale").expect("seed stale tmp");
+        write_cursor(&path, 42).expect("write over stale tmp");
+        assert_eq!(read_cursor(&path), Some(42));
         let _ = std::fs::remove_file(&path);
     }
 

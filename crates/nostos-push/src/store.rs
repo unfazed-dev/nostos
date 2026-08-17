@@ -514,6 +514,10 @@ mod pg {
     /// its turn instead of failing.
     const DDL_LOCK_KEY: i64 = 0x0063_6169_726E;
 
+    /// Bounded registry handshake (review 2026-08-17 #2) — the pool-of-one
+    /// serializes every caller behind this wait.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
     /// Postgres-backed [`Store`] (ADR-0038 §4, v1.1) — the pool-of-one
     /// `PgTokenStore` construction pattern: one lazily-opened
     /// `tokio_postgres::Client` behind a tokio `Mutex`, transparently
@@ -597,14 +601,26 @@ mod pg {
 
     /// Connect one client and drive its socket on a detached task (the
     /// `PgTokenStore` pattern: tokio-postgres drives the connection;
-    /// dropping the `Client` closes it).
+    /// dropping the `Client` closes it). The handshake is bounded (review
+    /// 2026-08-17 #2): a blackholed PG fails fast instead of holding the
+    /// pool-of-one mutex for the OS TCP timeout, and a session
+    /// `statement_timeout` bounds every statement for the same reason
+    /// (every caller serializes behind the one connection).
     async fn connect(pg_url: &str) -> anyhow::Result<tokio_postgres::Client> {
-        let (client, conn) = tokio_postgres::connect(pg_url, NoTls)
-            .await
-            .context("connecting the pushd registry to Postgres (NOSTOS_PUSHD_DATABASE_URL)")?;
+        let (client, conn) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_postgres::connect(pg_url, NoTls),
+        )
+        .await
+        .context("timed out connecting the pushd registry to Postgres (NOSTOS_PUSHD_DATABASE_URL)")?
+        .context("connecting the pushd registry to Postgres (NOSTOS_PUSHD_DATABASE_URL)")?;
         tokio::spawn(async move {
             let _ = conn.await;
         });
+        client
+            .batch_execute("SET statement_timeout = '30s'")
+            .await
+            .context("setting the registry session statement_timeout")?;
         Ok(client)
     }
 
