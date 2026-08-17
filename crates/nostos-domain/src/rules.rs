@@ -85,6 +85,19 @@ pub struct HandRule {
     pub scope: Option<String>,
 }
 
+/// One server-defined sync stream (`[streams.<name>]`, P5 sync streams —
+/// docs/plans/p5-sync-streams-design.md Decision 1). Streams are
+/// server-defined and client-parameterized: `template` is the ADR-0012
+/// safe-subset grammar extended with `:param` placeholders in literal
+/// position (parsed ONCE at startup; clients supply only values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamRule {
+    pub name: String,
+    pub table: String,
+    /// Raw predicate template text, e.g. `owner_id = :owner AND priority >= :min`.
+    pub template: String,
+}
+
 /// The whole `nostos_rules.toml`, parsed but not yet compiled.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncRules {
@@ -92,6 +105,11 @@ pub struct SyncRules {
     pub mode: SyncMode,
     pub tables: Vec<TableRule>,
     pub hand: Vec<HandRule>,
+    /// Server-defined sync streams (P5). Mode-independent: unlike
+    /// `tables`/`hand`, this section is active under EVERY `sync_mode`, so it
+    /// is always validated and always participates in the checksum (a streams
+    /// edit = a rules edit → resnapshot).
+    pub streams: Vec<StreamRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -110,6 +128,18 @@ pub enum RulesError {
          indistinguishable from a different rule set with an ordinary name"
     )]
     InvalidTableName(String),
+    #[error("duplicate stream `{0}`")]
+    DuplicateStream(String),
+    #[error(
+        "stream name `{0}` contains a control character (tab, newline, or similar); \
+         `canonical()`'s line format uses these as delimiters"
+    )]
+    InvalidStreamName(String),
+    #[error("stream `{name}`: template parse error: {source}")]
+    StreamTemplate {
+        name: String,
+        source: crate::predicate_compile::ParseError,
+    },
 }
 
 /// `canonical()` joins rows as tab-separated fields, one row per newline.
@@ -132,12 +162,15 @@ fn active_scope_text(scope: Option<&str>) -> Option<&str> {
 
 impl SyncRules {
     /// Structural validation + every active-section scope parses.
-    /// Inactive sections are NOT validated (a stale hand section must not
-    /// block `toggles` mode).
+    /// Inactive table sections are NOT validated (a stale hand section must
+    /// not block `toggles` mode). The `streams` section (P5) is active under
+    /// EVERY mode, so its templates are always validated — a bad template is
+    /// a loud boot error, never a subscribe-time surprise (design Decision 2).
     pub fn validate(&self) -> Result<(), RulesError> {
         if self.version != RULES_VERSION {
             return Err(RulesError::UnsupportedVersion(self.version));
         }
+        self.validate_streams()?;
         match self.mode {
             SyncMode::All => Ok(()),
             SyncMode::Toggles => {
@@ -179,10 +212,41 @@ impl SyncRules {
         }
     }
 
-    /// Canonical text over `(version, mode, ACTIVE section only)`: tables
-    /// sorted by name, scopes via `ScopeExpr::canonical()`, one
-    /// `table\tsync\tscope` line each. `All` canonicalizes to just the
-    /// mode line, so toggling table entries under `all` does not resync.
+    /// Streams validation (mode-independent): names/tables free of control
+    /// characters, no duplicate stream names, every template parses under the
+    /// ADR-0012 grammar + `:param` extension. The grammar itself rejects
+    /// JOIN/CTE/subquery shapes and misplaced placeholders — there is no
+    /// separate keyword blacklist to drift out of date.
+    fn validate_streams(&self) -> Result<(), RulesError> {
+        let mut seen = HashSet::with_capacity(self.streams.len());
+        for stream in &self.streams {
+            if !table_name_is_valid(&stream.name) {
+                return Err(RulesError::InvalidStreamName(stream.name.clone()));
+            }
+            if !seen.insert(stream.name.as_str()) {
+                return Err(RulesError::DuplicateStream(stream.name.clone()));
+            }
+            if !table_name_is_valid(&stream.table) {
+                return Err(RulesError::InvalidTableName(stream.table.clone()));
+            }
+            crate::predicate_compile::parse_predicate_expr(stream.template.trim()).map_err(
+                |source| RulesError::StreamTemplate {
+                    name: stream.name.clone(),
+                    source,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Canonical text over `(version, mode, ACTIVE table section, streams)`:
+    /// tables sorted by name, scopes via `ScopeExpr::canonical()`, one
+    /// `table\tsync\tscope` line each. `All` canonicalizes the table sections
+    /// to just the mode line, so toggling table entries under `all` does not
+    /// resync. Streams (P5) are mode-INDEPENDENT — they always emit one
+    /// `stream\tname\ttable\ttemplate` line (sorted by name), so a streams
+    /// edit changes the checksum under every mode (design: a streams edit =
+    /// a rules edit → resnapshot).
     ///
     /// A scope that fails to parse falls back to its trimmed raw text
     /// rather than panicking — `canonical()` cannot fail, only `validate()`
@@ -211,6 +275,17 @@ impl SyncRules {
                 }
             }
         }
+        let mut streams: Vec<&StreamRule> = self.streams.iter().collect();
+        streams.sort_by(|a, b| a.name.cmp(&b.name));
+        for stream in streams {
+            let _ = writeln!(
+                out,
+                "stream\t{}\t{}\t{}",
+                stream.name,
+                stream.table,
+                canonical_template(&stream.template)
+            );
+        }
         out
     }
 
@@ -228,6 +303,19 @@ fn canonical_scope(scope: Option<&str>) -> String {
             ScopeExpr::parse(text).map_or_else(|_| text.to_string(), |expr| expr.canonical())
         }
     }
+}
+
+/// Canonical form of a stream template (P5): the parsed `PredicateExpr`'s
+/// JSON (deterministic field order, control characters escaped) when it
+/// parses — so whitespace/ordering noise in the TOML doesn't resync — else
+/// the raw text with whitespace collapsed (`canonical()` cannot fail; only
+/// `validate()` can). Both forms are single-line and control-char-free, so
+/// the canonical line format's tab/newline delimiters stay unambiguous.
+fn canonical_template(template: &str) -> String {
+    let collapsed: String = template.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::predicate_compile::parse_predicate_expr(&collapsed).map_or(collapsed.clone(), |expr| {
+        serde_json::to_string(&expr).unwrap_or(collapsed)
+    })
 }
 
 #[cfg(test)]
@@ -259,6 +347,8 @@ mod tests {
                 table("a", true, Some("p = 3")),
             ],
             hand: vec![],
+
+            streams: vec![],
         };
         let b = SyncRules {
             version: RULES_VERSION,
@@ -268,6 +358,8 @@ mod tests {
                 table("b", true, Some("y=2   AND   x=1")),
             ],
             hand: vec![],
+
+            streams: vec![],
         };
         assert_eq!(a.checksum(), b.checksum());
     }
@@ -282,6 +374,8 @@ mod tests {
             mode: SyncMode::All,
             tables: tables.clone(),
             hand: hand_rules.clone(),
+
+            streams: vec![],
         };
         let toggles = SyncRules {
             mode: SyncMode::Toggles,
@@ -305,6 +399,8 @@ mod tests {
             mode: SyncMode::All,
             tables: vec![],
             hand: vec![],
+
+            streams: vec![],
         };
         let with_table = SyncRules {
             tables: vec![table("t", true, Some("a = 1"))],
@@ -320,6 +416,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("t", true, Some("a = 1 OR b = 2"))],
             hand: vec![],
+
+            streams: vec![],
         };
         assert!(matches!(
             rules.validate(),
@@ -335,6 +433,8 @@ mod tests {
             tables: vec![table("t", true, None)],
             // Syntactically broken, but hand mode is inactive under Toggles.
             hand: vec![hand("t", Some("a = 1 OR b = 2"))],
+
+            streams: vec![],
         };
         assert_eq!(rules.validate(), Ok(()));
     }
@@ -346,6 +446,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("t", true, None), table("t", false, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         assert_eq!(
             rules.validate(),
@@ -360,6 +462,8 @@ mod tests {
             mode: SyncMode::All,
             tables: vec![],
             hand: vec![],
+
+            streams: vec![],
         };
         assert_eq!(
             rules.validate(),
@@ -374,6 +478,8 @@ mod tests {
             mode: SyncMode::Hand,
             tables: vec![],
             hand: vec![hand("t", Some("org_id = claims.org_id"))],
+
+            streams: vec![],
         };
         assert_eq!(rules.validate(), Ok(()));
     }
@@ -399,12 +505,16 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("a", true, None), table("b", false, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         let x2 = SyncRules {
             version: RULES_VERSION,
             mode: SyncMode::Toggles,
             tables: vec![table("a\ttrue\t\nb", false, None)],
             hand: vec![],
+
+            streams: vec![],
         };
 
         assert_eq!(z.validate(), Ok(()));
@@ -419,6 +529,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("t\rable", true, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         assert_eq!(
             cr_table.validate(),
@@ -430,6 +542,8 @@ mod tests {
             mode: SyncMode::Hand,
             tables: vec![],
             hand: vec![hand("ta\nble", None)],
+
+            streams: vec![],
         };
         assert_eq!(
             hand_bad.validate(),
@@ -444,6 +558,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("t", true, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         let empty_scope = SyncRules {
             tables: vec![table("t", true, Some("   "))],

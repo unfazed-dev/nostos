@@ -1932,6 +1932,7 @@ mod tests {
                 scope: scope.map(str::to_string),
             }],
             hand: Vec::new(),
+            streams: Vec::new(),
         }
     }
 

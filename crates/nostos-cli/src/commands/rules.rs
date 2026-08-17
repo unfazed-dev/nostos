@@ -228,6 +228,7 @@ pub fn rules_from_tables(tables: &[String], mode: SyncMode, sync_default: bool) 
         mode,
         tables,
         hand: Vec::new(),
+        streams: Vec::new(),
     }
 }
 
@@ -699,6 +700,8 @@ mod tests {
                 table: "tasks".to_string(),
                 scope: Some("org_id = claims.org_id".to_string()),
             }],
+
+            streams: vec![],
         };
 
         apply_edit(&mut rules, &EditCommand::Toggle(1)).expect("toggle in toggles mode");
@@ -740,6 +743,7 @@ mod tests {
                 },
             ],
             hand: vec![],
+            streams: vec![],
         };
 
         let report = check_report(&rules).expect("well-formed rules must report Ok");
@@ -775,6 +779,8 @@ mod tests {
                 scope: Some("a = 1 OR b = 2".to_string()),
             }],
             hand: vec![],
+
+            streams: vec![],
         };
 
         let err = check_report(&rules).expect_err("an unparseable scope must fail the check");
@@ -804,6 +810,8 @@ mod tests {
                 table: "tasks".to_string(),
                 scope: Some("org_id = claims.org_id".to_string()),
             }],
+
+            streams: vec![],
         };
         let report = check_report(&with_hand).expect("well-formed rules must report Ok");
         assert!(
@@ -832,6 +840,8 @@ mod tests {
             mode: SyncMode::All,
             tables: vec![],
             hand: vec![],
+
+            streams: vec![],
         };
 
         let report = check_report(&rules).expect("well-formed rules must report Ok");
@@ -874,6 +884,8 @@ mod tests {
                     scope: Some("org_id = claims.org_id".to_string()),
                 },
             ],
+
+            streams: vec![],
         };
 
         let report = check_report(&rules).expect("well-formed rules must report Ok");
@@ -911,6 +923,8 @@ mod tests {
                 },
             ],
             hand: vec![],
+
+            streams: vec![],
         };
 
         let report = check_report(&rules).expect("well-formed rules must report Ok");

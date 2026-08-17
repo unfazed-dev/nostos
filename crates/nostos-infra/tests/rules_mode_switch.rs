@@ -73,6 +73,8 @@ fn toggles_to_hand_transfers_truth() {
             table: "notes".to_string(),
             scope: None,
         }],
+
+        streams: vec![],
     };
     rules_file::save(&path, &rules).expect("save");
 
@@ -114,6 +116,8 @@ fn hand_to_toggles_deactivates_hand_file() {
             table: "notes".to_string(),
             scope: None,
         }],
+
+        streams: vec![],
     };
     rules_file::save(&path, &rules).expect("save");
 
@@ -165,6 +169,8 @@ fn all_ignores_but_preserves_both_sections() {
             table: "notes".to_string(),
             scope: Some("org_id = claims.org_id".to_string()),
         }],
+
+        streams: vec![],
     };
     rules_file::save(&path, &rules).expect("save");
     rules_file::set_mode(&path, SyncMode::All).expect("set_mode");
@@ -220,6 +226,8 @@ fn all_to_toggles_restores_the_toggle_artifact() {
             },
         ],
         hand: Vec::new(),
+
+        streams: vec![],
     };
     rules_file::save(&path, &rules).expect("save");
 
@@ -261,6 +269,8 @@ fn mode_flip_alone_changes_checksum() {
             table: "notes".to_string(),
             scope: Some("org_id = claims.org_id".to_string()),
         }],
+
+        streams: vec![],
     };
 
     let all_sum = rules_for(SyncMode::All).checksum();

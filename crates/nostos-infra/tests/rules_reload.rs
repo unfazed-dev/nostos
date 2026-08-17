@@ -79,6 +79,7 @@ fn toggles_rules(tables: Vec<TableRule>) -> SyncRules {
         mode: nostos_domain::SyncMode::Toggles,
         tables,
         hand: Vec::new(),
+        streams: Vec::new(),
     }
 }
 
