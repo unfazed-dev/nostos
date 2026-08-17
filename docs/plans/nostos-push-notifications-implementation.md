@@ -114,13 +114,14 @@ task. Research basis: `nostos-push-notifications-research-2026-08-14.md`.
 ## Closeout
 
 - [x] 7.1 Honest bench: push coalescing factor + fan-out latency delta with
-  push on/off (RESULTS.md, same-stage comparison rules). **Pending clean pair**:
-  quiet-window `NOSTOS_BENCH_PUSH=1` run vs preserved pre-change binary
-  (`target/tmp/nostos-bench-before`) — 2026-08-15 attempts were invalidated by
-  machine load 21 (simulator + xcodebuild): post-change 161k, pre-change 224k,
-  both grace-aborted, spread across contended runs 112k–336k = noise-dominated.
+  push on/off (RESULTS.md, same-stage comparison rules). **Clean pair LANDED
+  2026-08-15** (quiet window, preserved pre-change binary vs push-enabled:
+  833,319 vs 833,308 ops/sec — 0.001% delta, statistically invisible; the
+  load-21 invalidated attempts are recorded in RESULTS.md so nobody cites
+  them). Re-verified 2026-08-17 with the ADR-0038 daemon/delegation code
+  in-tree (RESULTS.md wave-4 section: 833,169 vs 833,304 — noise).
   Unit-level worst case (channel-full, stalled consumer) proven: 100% delivery.
-  Artifacts: `target/tmp/bench-push-after-quiet/`, `bench-push-before-calib/`.
+  Artifacts: `benches/results/wave4-off/`, `benches/results/wave4-on/`.
 - [x] 7.2 Docs: READMEs (all SDKs), `docs/api/*.md` push sections, footgun
   callout (token/credential config = the new `NOSTOS_WRITE_TABLES`-style step).
 - [x] 7.3 Security pass: token trust boundary, template tenant isolation,

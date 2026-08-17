@@ -85,3 +85,27 @@ here so nobody cites them. Push rails (APNs/FCM/WebPush round-trips) are not
 exercised by this bench. Coalescing factor is E2E-pinned, not benched:
 100-event burst → exactly 1 push per offline account
 (`burst_to_offline_account_yields_exactly_one_push`).
+
+## Push delegation code in-tree (ADR-0038 wave 4.2) — RE-VERIFIED 2026-08-17
+
+Same-stage pair re-run with the nostos-pushd daemon + RemoteNotifier delegation
+code landed (commits fd6fbcf / 6baae31 / c40ee72): same harness, profile and
+window discipline as the 2026-08-15 pair above — 1,000 clients × 100,000
+events, release lto=fat, Apple M4 (Darwin 25.6.0 arm64), quiet machine
+(self-load only; docker build deliberately killed to keep the window clean):
+
+| Run | ops/sec | drop% | delivered |
+|---|---|---|---|
+| OFF (NoopNotifier baseline) | 833,169 | 0.00% | 99,998,157 |
+| ON (`NOSTOS_BENCH_PUSH=1`) | 833,304 | 0.00% | 99,997,299 |
+
++0.016% — noise; envelope unchanged from the 833,307 headline and the
+2026-08-15 pair. push_hints=0 as before (anonymous bench sessions): the
+per-event hot-path cost stays the per-candidate principal null-check.
+RemoteNotifier is not separately benched: its `notify()` shares the
+CountingNotifier's exact hot-loop shape (`try_send` into bounded mpsc +
+drop-on-full counter), and it is unit-pinned non-blocking with the daemon
+DOWN (nostos-infra `push/remote.rs` tests); a loopback daemon would measure
+rail HTTP, not the fan-out loop. Artifacts: `benches/results/wave4-off/` and
+`benches/results/wave4-on/`. Eval-only (FakeReplicator on loopback); push
+rails not exercised.
