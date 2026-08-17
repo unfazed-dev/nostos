@@ -4,6 +4,7 @@
 #   postgres     — the source DB (logical replication enabled)
 #   nostos-server — the sync engine (real PgReplicator → fan-out → WebSocket)
 #   nostos-cloud  — the control plane (accounts, projects, billing, admin SPA, landing)
+#   nostos-pushd  — the standalone push daemon (ADR-0038; APNs/FCM/Web Push)
 #
 #   docker compose -f docker/docker-compose.stack.yml up --build
 #
@@ -93,6 +94,33 @@ services:
     volumes:
       - cloud-data:/data
 
+  nostos-pushd:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: nostos:latest
+    container_name: nostos-stack-pushd
+    environment:
+      NOSTOS_PUSHD_BIND: "0.0.0.0:8090"
+      NOSTOS_PUSHD_DB: "/data/cairn-pushd.db"
+      # Required — tenant:secret API-key pairs, comma-separated:
+      NOSTOS_PUSHD_API_KEYS: "demo:change-me-in-production"
+      # Optional rails — unset = rail off (from_env semantics, ADR-0038 §1):
+      # NOSTOS_FCM_CREDENTIALS_JSON: /run/secrets/fcm.json
+      # NOSTOS_APNS_KEY_P8: /run/secrets/apns.p8
+      # NOSTOS_APNS_KEY_ID: your-key-id
+      # NOSTOS_APNS_TEAM_ID: your-team-id
+      # NOSTOS_APNS_BUNDLE_ID: com.example.app
+      # NOSTOS_WEBPUSH_VAPID_PRIVATE_KEY: base64url-p256-scalar
+      # NOSTOS_WEBPUSH_VAPID_SUBJECT: mailto:ops@example.com
+      RUST_LOG: "info,nostos_push=debug"
+    command: ["nostos-pushd"]
+    ports:
+      - "8090:8090"
+    volumes:
+      - pushd-data:/data
+
 volumes:
   pgdata:
   cloud-data:
+  pushd-data:
