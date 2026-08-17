@@ -54,6 +54,12 @@ clap = { workspace = true }
 # axum listener on 127.0.0.1:0 — no mock-HTTP crate). Already a workspace
 # dep via nostos-infra's rails; adding it here pulls nothing new.
 reqwest = { workspace = true }
+# The delegation e2e (tests/delegation.rs, plan task 2.4) drives the REAL
+# nostos-infra RemoteNotifier, which implements nostos-application's
+# PushNotifier port — the port types (PushHint, Metrics, SessionStore) are
+# test-only here. Dev-deps do not change the lib's dependency direction
+# (pin 0.5: the daemon lib itself stays nostos-domain + nostos-infra only).
+nostos-application = { workspace = true }
 
 [lints]
 workspace = true

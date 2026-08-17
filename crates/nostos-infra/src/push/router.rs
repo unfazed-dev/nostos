@@ -675,7 +675,13 @@ async fn flush(
 /// tables are resolved by the caller (`interpolate_state`) BEFORE this — a
 /// `liveactivity` table's `PushTables` row is a placeholder `Visible` that
 /// exists only so fan-out attaches tuple bytes (see `parse_push_tables`).
-fn build_payload(
+///
+/// `pub(crate)`: the ONE piece of resolution machinery shared with the
+/// delegation path (`remote.rs`'s RemoteNotifier, ADR-0038 §3) — template
+/// semantics must not be reinvented next door. The rest of the flush loop
+/// is NOT shared: it is welded to synchronous `RailOutcome`s, while the
+/// remote path learns outcomes from the receipts poll.
+pub(crate) fn build_payload(
     config: &RouterConfig,
     table: &str,
     lsn: Lsn,

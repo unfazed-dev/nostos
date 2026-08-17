@@ -1973,6 +1973,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "nostos-application",
  "nostos-domain",
  "nostos-infra",
  "reqwest",

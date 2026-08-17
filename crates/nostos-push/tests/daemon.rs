@@ -634,3 +634,125 @@ async fn receipts_tenant_isolation() {
     assert_eq!(ids_a, vec![id_a.as_str()], "tenant a sees only its own");
     assert_eq!(ids_b, vec![id_b.as_str()], "tenant b sees only its own");
 }
+
+// -------------------------------------------------- rail mode (contract
+// 0.2.0, plan pin 2.0): unregistered token + platform field => direct
+// dispatch; unregistered + no field => the unchanged standalone 404.
+
+/// Rail-mode send: unregistered token + platform => 202, one dispatch, one
+/// receipt — no registry row is ever created.
+#[tokio::test]
+async fn rail_mode_unregistered_token_with_platform_dispatches() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(80, rails_for(Platform::Apns, &mock)).await;
+
+    // NOT registered — the platform field is the whole address.
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &json!({
+                "token": "rail-mode-token-0123456789abcdef",
+                "platform": "apns",
+                "payload": {"silent": {"table": "tasks", "lsn": "77"}},
+                "metadata": {"account": "u1", "lsn": "77"},
+            }),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "rail mode: {body}");
+    let push_id = body["push_id"].as_str().expect("push_id").to_string();
+
+    let receipts = wait_for_receipts(&d, KEY_A, 1).await;
+    // Let any (wrong) second window fire before counting.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(*calls.lock().unwrap(), 1, "exactly one rail dispatch");
+    assert_eq!(receipts[0]["push_id"], json!(push_id));
+    assert_eq!(receipts[0]["outcome"], json!("delivered"));
+    assert_eq!(
+        receipts[0]["metadata"]["account"],
+        json!("u1"),
+        "metadata echo (the correlation channel)"
+    );
+
+    // No registry row was created: the next send WITHOUT the platform
+    // field still 404s (rail mode never writes the registry).
+    let (status, _) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &json!({
+                "token": "rail-mode-token-0123456789abcdef",
+                "payload": {"silent": {"table": "tasks", "lsn": "78"}},
+            }),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+}
+
+/// Rail mode with a garbage platform value is a 400 (enum validated on
+/// deserialize — before any registry access).
+#[tokio::test]
+async fn rail_mode_garbage_platform_400() {
+    let (_, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &json!({
+                "token": "rail-mode-token-0123456789abcdef",
+                "platform": "apns-liveactivity",
+                "payload": {"silent": {"table": "t", "lsn": "1"}},
+            }),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].is_string(), "error shape: {body}");
+}
+
+/// Unregistered + no platform field: the standalone registry semantics are
+/// unchanged — 404, no dispatch.
+#[tokio::test]
+async fn rail_mode_absent_platform_unregistered_still_404() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &json!({"token": "never-registered-token", "payload": {"silent": {"table": "t", "lsn": "1"}}}),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body}");
+    assert!(body["error"].is_string());
+    assert_eq!(*calls.lock().unwrap(), 0, "no dispatch happens");
+}
+
+/// Precedence: a REGISTERED token ignores the platform field — the registry
+/// row's platform wins (the daemon registry is the source of truth).
+#[tokio::test]
+async fn rail_mode_registered_token_ignores_platform_field() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    // TOKEN_A is registered as apns; only the fcm-side rail is NOT wired,
+    // so honoring the (wrong) fcm field would 503 — the registry must win.
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &json!({
+                "token": TOKEN_A,
+                "platform": "fcm",
+                "payload": {"silent": {"table": "t", "lsn": "1"}},
+            }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::ACCEPTED,
+        "registry platform wins over the advisory field: {body}"
+    );
+    wait_for_receipts(&d, KEY_A, 1).await;
+    assert_eq!(*calls.lock().unwrap(), 1, "dispatched on the apns rail");
+}

@@ -175,6 +175,21 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_PUSH_DEBOUNCE_MS", default_value_t = 2000)]
     push_debounce_ms: u64,
 
+    /// Remote nostos-pushd origin for push DELEGATION (ADR-0038 §3, plan
+    /// task 2.3), e.g. `http://127.0.0.1:8090`. Both this AND
+    /// `NOSTOS_PUSH_REMOTE_KEY` must be set (exactly one of the two is a
+    /// config error). When set, `RemoteNotifier` replaces the embedded
+    /// `PushRouter`: presence/token resolution/templates stay here, the
+    /// daemon is the coalescing rail + receipt log.
+    #[arg(long, env = "NOSTOS_PUSH_REMOTE_URL", default_value = "")]
+    push_remote_url: String,
+
+    /// Bearer API key for the remote daemon (a tenant key from its
+    /// `NOSTOS_PUSHD_API_KEYS`). Sent as `Authorization: Bearer <key>` on
+    /// every delegated send and receipts poll.
+    #[arg(long, env = "NOSTOS_PUSH_REMOTE_KEY", default_value = "")]
+    push_remote_key: String,
+
     /// Logical-replication slot name.
     #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "cairn_slot")]
     pg_slot: String,
@@ -472,38 +487,63 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "pg"))]
     let push_registry: std::sync::Arc<dyn nostos_infra::PushTokenRegistry> =
         Arc::new(nostos_infra::InMemoryTokenRegistry::new());
-    // The notifier: the coalescer router when anything can deliver (a rail
-    // configured, or push tables listed); NoopNotifier otherwise — push
-    // stays entirely off the fan-out path (the bench baseline pays nothing).
-    let push_notifier: Arc<dyn nostos_application::ports::PushNotifier> =
-        if rails.is_empty() && push_cfg.tables.tables.is_empty() {
-            info!("push: off (no rails configured, no NOSTOS_PUSH_TABLES)");
-            Arc::new(nostos_application::ports::NoopNotifier)
-        } else {
-            if rails.is_empty() {
-                warn!(
-                    "NOSTOS_PUSH_TABLES is set but no push rail is configured — \
+    // The notifier — PRECEDENCE (ADR-0038 §3, plan task 2.3); the decision
+    // itself is [`push_wiring`] below so the precedence is unit-tested.
+    let wiring = push_wiring(
+        &cfg.push_remote_url,
+        &cfg.push_remote_key,
+        !(rails.is_empty() && push_cfg.tables.tables.is_empty()),
+    )
+    .map_err(anyhow::Error::msg)
+    .context("invalid push delegation config")?;
+    let push_notifier: Arc<dyn nostos_application::ports::PushNotifier> = if wiring
+        == PushWiring::Remote
+    {
+        info!(
+            url = %cfg.push_remote_url,
+            tables = push_cfg.tables.tables.len(),
+            live_activity_tables = push_cfg.live_activities.len(),
+            "push: RemoteNotifier delegation to nostos-pushd active (embedded PushRouter skipped)"
+        );
+        Arc::new(nostos_infra::push::remote::RemoteNotifier::new(
+            &cfg.push_remote_url,
+            &cfg.push_remote_key,
+            Arc::clone(&push_registry),
+            Arc::clone(&store),
+            nostos_infra::push::router::RouterConfig {
+                tables: push_cfg.tables.clone(),
+                live_activities: push_cfg.live_activities.clone(),
+            },
+            Arc::clone(&metrics),
+        ))
+    } else if wiring == PushWiring::Noop {
+        info!("push: off (no rails configured, no NOSTOS_PUSH_TABLES)");
+        Arc::new(nostos_application::ports::NoopNotifier)
+    } else {
+        if rails.is_empty() {
+            warn!(
+                "NOSTOS_PUSH_TABLES is set but no push rail is configured — \
                      hints enqueue but no provider can deliver"
-                );
-            }
-            info!(
-                tables = push_cfg.tables.tables.len(),
-                live_activity_tables = push_cfg.live_activities.len(),
-                debounce_ms = cfg.push_debounce_ms,
-                "push: PushRouter coalescer active"
             );
-            Arc::new(nostos_infra::PushRouter::new(
-                Arc::new(rails),
-                Arc::clone(&push_registry),
-                Arc::clone(&store),
-                nostos_infra::push::router::RouterConfig {
-                    tables: push_cfg.tables.clone(),
-                    live_activities: push_cfg.live_activities,
-                },
-                std::time::Duration::from_millis(cfg.push_debounce_ms),
-                Arc::clone(&metrics),
-            ))
-        };
+        }
+        info!(
+            tables = push_cfg.tables.tables.len(),
+            live_activity_tables = push_cfg.live_activities.len(),
+            debounce_ms = cfg.push_debounce_ms,
+            "push: PushRouter coalescer active"
+        );
+        Arc::new(nostos_infra::PushRouter::new(
+            Arc::new(rails),
+            Arc::clone(&push_registry),
+            Arc::clone(&store),
+            nostos_infra::push::router::RouterConfig {
+                tables: push_cfg.tables.clone(),
+                live_activities: push_cfg.live_activities,
+            },
+            std::time::Duration::from_millis(cfg.push_debounce_ms),
+            Arc::clone(&metrics),
+        ))
+    };
 
     let fanout = Arc::new({
         let builder = FanOutService::new(Arc::clone(&store))
@@ -1159,6 +1199,43 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
         },
         live_activities,
     })
+}
+
+/// Which push notifier the composition root wires — the ADR-0038 §3
+/// precedence as a pure decision (plan task 2.3):
+///
+/// 1. `NOSTOS_PUSH_REMOTE_URL` + `NOSTOS_PUSH_REMOTE_KEY` BOTH set ⇒
+///    [`PushWiring::Remote`] (delegation; the embedded router is skipped
+///    entirely — rails live daemon-side).
+/// 2. Exactly one of the two set ⇒ config error (refuse to start).
+/// 3. Both unset ⇒ [`PushWiring::Embedded`] when anything can deliver
+///    (`embedded_armed`: a rail configured or push tables listed),
+///    [`PushWiring::Noop`] otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushWiring {
+    Remote,
+    Embedded,
+    Noop,
+}
+
+fn push_wiring(
+    remote_url: &str,
+    remote_key: &str,
+    embedded_armed: bool,
+) -> Result<PushWiring, String> {
+    let url = !remote_url.trim().is_empty();
+    let key = !remote_key.trim().is_empty();
+    match (url, key) {
+        (true, true) => Ok(PushWiring::Remote),
+        (false, false) => Ok(if embedded_armed {
+            PushWiring::Embedded
+        } else {
+            PushWiring::Noop
+        }),
+        _ => Err("push delegation requires BOTH NOSTOS_PUSH_REMOTE_URL and \
+             NOSTOS_PUSH_REMOTE_KEY (exactly one is set)"
+            .to_string()),
+    }
 }
 
 /// Builds the `/rules`/`/sync`/`/schema` CORS layer from `NOSTOS_CORS_ORIGINS`.
@@ -2336,6 +2413,40 @@ mod put_rules_handler_tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(state.rules.read().await.checksum(), initial_checksum);
+    }
+}
+
+/// The ADR-0038 §3 wiring precedence (plan task 2.3) — see [`push_wiring`].
+#[cfg(test)]
+mod push_wiring_tests {
+    use super::{push_wiring, PushWiring};
+
+    #[test]
+    fn both_remote_vars_set_wins_over_everything() {
+        // Delegation beats the embedded path even with rails+tables armed:
+        // rails live daemon-side when delegating.
+        assert_eq!(
+            push_wiring("http://127.0.0.1:8090", "tenant-secret", true),
+            Ok(PushWiring::Remote)
+        );
+        assert_eq!(
+            push_wiring("http://127.0.0.1:8090", "tenant-secret", false),
+            Ok(PushWiring::Remote)
+        );
+    }
+
+    #[test]
+    fn exactly_one_remote_var_is_a_config_error() {
+        assert!(push_wiring("http://127.0.0.1:8090", "", true).is_err());
+        assert!(push_wiring("", "tenant-secret", false).is_err());
+        // Blank-but-set counts as unset (same rule as the rail envs).
+        assert!(push_wiring("   ", "", false).is_ok());
+    }
+
+    #[test]
+    fn unset_falls_back_to_embedded_or_noop() {
+        assert_eq!(push_wiring("", "", true), Ok(PushWiring::Embedded));
+        assert_eq!(push_wiring("", "", false), Ok(PushWiring::Noop));
     }
 }
 

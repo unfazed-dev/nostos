@@ -248,6 +248,14 @@ enum Priority {
 #[serde(deny_unknown_fields)]
 struct SendRequest {
     token: String,
+    /// Rail mode (contract 0.2.0, plan pin 2.0): present AND the token not
+    /// in this daemon's registry => dispatch directly on the named rail —
+    /// registry-free delegation for trusted delegators (the sync side's
+    /// RemoteNotifier). A REGISTERED token ignores the field: the registry
+    /// row's platform wins, because the daemon registry is the source of
+    /// truth for tokens it owns (dual registration is exactly the
+    /// drift-prone second registry ADR-0037 §1 rejects).
+    platform: Option<Platform>,
     payload: SendPayloadDto,
     collapse_key: Option<String>,
     /// Validated on deserialize (invalid enum values are a 400) but not
@@ -268,9 +276,10 @@ struct SendAcceptedBody {
 
 /// POST /v1/send — queue one token-addressed push (202 + push_id).
 ///
-/// Ordering per the brief: parse (400) -> registry lookup (404) -> rail
-/// configured check BEFORE enqueueing (503) -> bounded try_send (503 on
-/// full). No priority use yet — see [Priority].
+/// Ordering per the brief: parse (400) -> registry lookup (404 when the
+/// token is unregistered AND no platform field — rail mode, contract 0.2.0)
+/// -> rail configured check BEFORE enqueueing (503) -> bounded try_send (503
+/// on full). No priority use yet — see [Priority].
 async fn send(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantId>,
@@ -282,6 +291,9 @@ async fn send(
         .payload
         .into_push_payload()
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid payload: {e}")))?;
+    // Platform resolution (contract 0.2.0): the registry row wins for a
+    // registered token; rail mode (unregistered + platform field) dispatches
+    // directly with no registry row; unregistered + no field is today's 404.
     let record = state
         .store
         .lookup_token(&tenant.0, &body.token)
@@ -289,19 +301,22 @@ async fn send(
         .map_err(|e| {
             tracing::error!(error = %e, "token lookup failed");
             internal("token registry unavailable")
-        })?
-        .ok_or_else(|| {
+        })?;
+    let platform = match record {
+        Some(record) => record.platform,
+        None => body.platform.ok_or_else(|| {
             err(
                 StatusCode::NOT_FOUND,
                 "token not registered for this tenant",
             )
-        })?;
-    if !state.rails.configured(record.platform) {
+        })?,
+    };
+    if !state.rails.configured(platform) {
         return Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
                 "push rail for platform '{}' is not configured on this daemon",
-                record.platform.as_str()
+                platform.as_str()
             ),
         ));
     }
@@ -309,7 +324,7 @@ async fn send(
     let job = SendJob {
         tenant_id: tenant.0,
         token: body.token,
-        platform: record.platform,
+        platform,
         push_id: push_id.clone(),
         payload,
         collapse_key: body.collapse_key,

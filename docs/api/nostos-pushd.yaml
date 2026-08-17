@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: nostos-pushd
-  version: 0.1.0
+  version: 0.2.0
   description: >
     Standalone push daemon (ADR-0038): token-addressed APNs / FCM HTTP v1 /
     Web Push sends with debounce coalescing. NOT a marketing platform —
@@ -74,13 +74,19 @@ paths:
             schema: { $ref: '#/components/schemas/SendRequest' }
       responses:
         '202':
-          description: Accepted into the coalescer
+          description: >
+            Accepted into the coalescer. When the token is NOT in this
+            daemon's registry and the optional `platform` field is present,
+            the send dispatches directly on that rail (rail mode —
+            registry-free delegation for trusted delegators such as
+            nostos-server's RemoteNotifier; no registry row is created).
+            Registered tokens always resolve through the registry.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SendAccepted' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { description: Token not registered for this tenant }
+        '404': { description: Token not registered for this tenant AND no `platform` field supplied (rail mode not requested) }
         '503': { description: The token's rail is not configured on this daemon }
   /v1/receipts:
     get:
@@ -177,6 +183,15 @@ components:
       additionalProperties: false
       properties:
         token: { type: string }
+        platform:
+          type: string
+          enum: [apns, fcm, webpush]
+          description: >
+            Rail mode (v0.2.0): present AND the token unregistered => dispatch
+            directly on the named rail with no registry row. Precedence: a
+            token that IS registered ignores this field — the registry row's
+            platform always wins (the daemon registry is the source of truth
+            for tokens it owns).
         payload:
           oneOf:
             - $ref: '#/components/schemas/SilentPayload'
