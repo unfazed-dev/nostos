@@ -1,0 +1,210 @@
+openapi: 3.0.3
+info:
+  title: nostos-pushd
+  version: 0.1.0
+  description: >
+    Standalone push daemon (ADR-0038): token-addressed APNs / FCM HTTP v1 /
+    Web Push sends with debounce coalescing. NOT a marketing platform —
+    no topics, scheduling, segments, A/B (ADR-0037 boundary). Delivery is
+    best-effort; outcomes are reported via the receipt log, never guaranteed.
+servers:
+  - url: http://localhost:8090
+tags: [tokens, send, receipts, meta]
+paths:
+  /v1/healthz:
+    get:
+      tags: [meta]
+      summary: Liveness — unauthenticated
+      security: []
+      responses:
+        '200':
+          description: Daemon is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  rails:
+                    type: object
+                    description: Which rails are configured (from_env)
+                    properties:
+                      apns: { type: boolean }
+                      fcm: { type: boolean }
+                      webpush: { type: boolean }
+                required: [status, rails]
+  /v1/tokens:
+    post:
+      tags: [tokens]
+      summary: Register (upsert) a device token for the caller's tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenRegistration' }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenRegistered' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/tokens/{token}:
+    delete:
+      tags: [tokens]
+      summary: Deregister a token (idempotent, owner-scoped)
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted (or did not exist for this tenant) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Token belongs to another tenant (oracle-safe) }
+  /v1/send:
+    post:
+      tags: [send]
+      summary: Queue one token-addressed push (coalesced per tenant+token)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendRequest' }
+      responses:
+        '202':
+          description: Accepted into the coalescer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendAccepted' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Token not registered for this tenant }
+        '503': { description: The token's rail is not configured on this daemon }
+  /v1/receipts:
+    get:
+      tags: [receipts]
+      summary: Poll the append-only receipt log (monotonic seq cursor)
+      parameters:
+        - name: since
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, maximum: 1000 }
+      responses:
+        '200':
+          description: Receipts with seq > since, ascending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  receipts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Receipt' }
+                required: [receipts]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Tenant API key from NOSTOS_PUSHD_API_KEYS (tenant stamped server-side)
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or unknown API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+    TokenRegistration:
+      type: object
+      additionalProperties: false
+      properties:
+        token: { type: string, minLength: 8 }
+        platform: { type: string, enum: [apns, fcm, webpush] }
+        account_tag:
+          type: string
+          description: Opaque caller-side account grouping (coalescing key suffix)
+      required: [token, platform]
+    TokenRegistered:
+      type: object
+      properties:
+        registered: { type: boolean }
+      required: [registered]
+    SilentPayload:
+      type: object
+      additionalProperties: false
+      description: Doorbell — content-free wake (ADR-0037 section 2)
+      properties:
+        silent:
+          type: object
+          additionalProperties: false
+          properties:
+            table: { type: string }
+            lsn: { type: string, description: LSN as decimal string }
+          required: [table, lsn]
+      required: [silent]
+    VisiblePayload:
+      type: object
+      additionalProperties: false
+      properties:
+        visible:
+          type: object
+          additionalProperties: false
+          properties:
+            title: { type: string }
+            body: { type: string }
+            category:
+              type: string
+              description: Client-registered notification category (action buttons)
+          required: [title, body]
+      required: [visible]
+    SendRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        token: { type: string }
+        payload:
+          oneOf:
+            - $ref: '#/components/schemas/SilentPayload'
+            - $ref: '#/components/schemas/VisiblePayload'
+        collapse_key:
+          type: string
+          description: Override supersede key; default derived per (tenant, token)
+        priority: { type: string, enum: [low, high], default: low }
+        metadata:
+          type: object
+          description: Echoed into the receipt (push-LSN correlation channel)
+      required: [token, payload]
+    SendAccepted:
+      type: object
+      properties:
+        push_id: { type: string }
+        status: { type: string, enum: [accepted] }
+      required: [push_id, status]
+    Receipt:
+      type: object
+      properties:
+        seq: { type: integer }
+        push_id: { type: string }
+        token: { type: string }
+        outcome: { type: string, enum: [delivered, unregistered, transient, fatal] }
+        detail: { type: string }
+        metadata: { type: object }
+        provider_ts: { type: string, format: date-time }
+      required: [seq, push_id, token, outcome, provider_ts]
+security:
+  - bearerAuth: []
