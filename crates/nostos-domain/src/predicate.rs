@@ -48,6 +48,13 @@ pub enum ColumnValue {
     Number(i64),
     Float(f64),
     Bool(bool),
+    /// A `:name` placeholder in a server-side sync-stream template (P5 —
+    /// docs/plans/p5-sync-streams-design.md, Decision 2). Produced only by
+    /// `predicate_compile`'s parser in literal position and replaced with a
+    /// typed value by `bind_params` before the predicate ever evaluates. If
+    /// one survives unbound to match time it must NEVER match — a placeholder
+    /// never silently over-delivers.
+    Param(String),
     /// Sentinel for "any value" — used as a wildcard in filters.
     Any,
 }
@@ -75,6 +82,14 @@ impl ColumnValue {
     #[must_use]
     pub fn boolean(b: bool) -> Self {
         Self::Bool(b)
+    }
+
+    /// A `:name` placeholder marker (P5 sync streams). Bound to a concrete
+    /// typed value by `predicate_compile::bind_params` before match time.
+    #[inline]
+    #[must_use]
+    pub fn param(name: impl Into<String>) -> Self {
+        Self::Param(name.into())
     }
 }
 
@@ -416,6 +431,13 @@ fn matches_filter_eq(f: &PredicateFilter, extract: &dyn Fn(&str) -> Option<Colum
 /// over-delivers when the column can't be read (see module docs).
 #[inline]
 fn matches_filter_ne(f: &PredicateFilter, extract: &dyn Fn(&str) -> Option<ColumnValue>) -> bool {
+    // An unbound `Param` placeholder must never match (P5 sync streams,
+    // docs/plans/p5-sync-streams-design.md Decision 2). Without this guard the
+    // `!matches_value(...)` below would invert the placeholder's non-match into
+    // a match-EVERYTHING — the exact over-delivery the marker exists to prevent.
+    if matches!(f.value, ColumnValue::Param(_)) {
+        return false;
+    }
     match extract(&f.column) {
         Some(actual) => !matches_value(&f.value, &actual),
         None => false,
@@ -437,8 +459,17 @@ fn matches_filter_ne(f: &PredicateFilter, extract: &dyn Fn(&str) -> Option<Colum
 // does not apply here.
 #[allow(clippy::float_cmp)]
 fn matches_value(filter: &ColumnValue, actual: &ColumnValue) -> bool {
+    // match_same_arms: the `Param` arm is spelled out ON PURPOSE even though
+    // the `_` fallthrough returns the same `false` — an unbound placeholder
+    // matching is the cross-tenant over-delivery bug P5 Decision 2 exists to
+    // prevent, so the non-match is stated explicitly, not implied.
+    #[allow(clippy::match_same_arms)]
     match (filter, actual) {
         (ColumnValue::Any, _) => true,
+        // An unbound `Param` placeholder never matches anything (P5 sync
+        // streams, Decision 2) — binding replaces it before match time; if one
+        // survives, it is a non-match, never a wildcard.
+        (ColumnValue::Param(_), _) => false,
         (ColumnValue::Text(a), ColumnValue::Text(b)) => a == b,
         (ColumnValue::Number(a), ColumnValue::Number(b)) => a == b,
         (ColumnValue::Bool(a), ColumnValue::Bool(b)) => a == b,
@@ -862,6 +893,60 @@ mod tests {
             ("priority", ColumnValue::text("1")),
             ("active", ColumnValue::text("false")),
             ("score", ColumnValue::text("0.5")),
+        ])));
+    }
+
+    // ---- P5 sync streams: an unbound `Param` placeholder NEVER matches ----
+    // (docs/plans/p5-sync-streams-design.md Decision 2 — these are the
+    // security-relevant semantics: a placeholder that survives to match time
+    // is a bug, and the safe answer to a bug is non-match, never a wildcard.)
+
+    #[test]
+    fn unbound_param_eq_never_matches() {
+        let p = Predicate::eq("tasks", "owner", ColumnValue::param("owner"));
+        assert!(!p.matches(row_view(&[("owner", ColumnValue::text("u1"))])));
+        // Missing column is still defensive non-match.
+        assert!(!p.matches(row_view(&[])));
+        // Not even a Param-typed row value (which should never exist) matches.
+        assert!(!p.matches(row_view(&[("owner", ColumnValue::param("owner"))])));
+    }
+
+    #[test]
+    fn unbound_param_ne_does_not_invert_into_match_everything() {
+        // The matches_filter_ne guard: without it, `!= :owner` would invert
+        // the placeholder's non-match into a match-EVERYTHING — cross-tenant
+        // over-delivery. Locked down for both differing and equal row values.
+        let p = Predicate::ne("tasks", "owner", ColumnValue::param("owner"));
+        assert!(!p.matches(row_view(&[("owner", ColumnValue::text("u1"))])));
+        assert!(!p.matches(row_view(&[("owner", ColumnValue::text("other"))])));
+        assert!(!p.matches(row_view(&[])));
+    }
+
+    #[test]
+    fn unbound_param_ordered_leaves_never_match() {
+        // Lt/Gt/Le/Ge route through cmp_op, whose fallthrough is None → false.
+        for p in [
+            Predicate::lt("tasks", "priority", ColumnValue::param("min")),
+            Predicate::gt("tasks", "priority", ColumnValue::param("min")),
+            Predicate::le("tasks", "priority", ColumnValue::param("min")),
+            Predicate::ge("tasks", "priority", ColumnValue::param("min")),
+        ] {
+            assert!(!p.matches(row_view(&[("priority", ColumnValue::number(5))])));
+        }
+    }
+
+    #[test]
+    fn unbound_param_inside_boolean_tree_still_never_delivers() {
+        // Or/Not can't rescue a placeholder: false OR match, NOT false.
+        let tree = PredicateExpr::Or(vec![
+            PredicateExpr::eq("owner", ColumnValue::param("owner")),
+            PredicateExpr::eq("status", ColumnValue::text("open")),
+        ]);
+        // Placeholder branch false; the concrete branch decides.
+        assert!(tree.matches(row_view(&[("status", ColumnValue::text("open"))])));
+        assert!(!tree.matches(row_view(&[
+            ("owner", ColumnValue::text("u1")),
+            ("status", ColumnValue::text("archived")),
         ])));
     }
 }

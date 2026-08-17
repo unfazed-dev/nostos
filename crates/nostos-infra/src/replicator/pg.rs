@@ -892,22 +892,41 @@ impl PgReplicator {
                 None
             }
             BaseEvent::Begin(begin) => {
-                // ponytail: xid is i32 from pg; clamp negatives to 0 (they never
-                // occur for real transactions). u32::try_from is infallible after max(0).
-                self.current_txn = Some(u64::from(
-                    u32::try_from(begin.transaction_id.max(0)).unwrap_or(0),
-                ));
+                // xid arrives as a SIGNED i32 decode of PG's u32 TransactionId:
+                // every xid ≥ 2^31 reads negative (audit 2026-08-17 H2 — the
+                // old clamp-to-0 collapsed all such transactions into one
+                // "txn 0", silently losing per-transaction atomicity on the
+                // client and stalling apply under sustained load). Reinterpret
+                // the bits as unsigned to recover the real xid.
+                self.current_txn = Some(xid_of(begin.transaction_id));
                 None
             }
             BaseEvent::Commit(_) => {
                 self.current_txn = None;
                 None
             }
-            BaseEvent::Insert(ins) => {
-                self.full_row_op(ins.oid, &ins.data, nostos_domain::Operation::Insert, lsn)
-            }
+            BaseEvent::Insert(ins) => self.full_row_op(
+                ins.oid,
+                &ins.data,
+                None,
+                nostos_domain::Operation::Insert,
+                lsn,
+            ),
             BaseEvent::Update(upd) => {
-                self.full_row_op(upd.oid, &upd.data, nostos_domain::Operation::Update, lsn)
+                // Pass the OLD tuple through (Some under REPLICA IDENTITY
+                // FULL) so unchanged-toasted columns in the new tuple can
+                // be restored to their real values (M2).
+                let old = upd.old_data_or_primary_key.as_ref().and_then(|o| match o {
+                    pgoutput::events::base::tuple_data::OldDataOrPrimaryKeyTupleData::OldTupleData(t) => Some(t),
+                    pgoutput::events::base::tuple_data::OldDataOrPrimaryKeyTupleData::PrimaryKeyTupleData(_) => None,
+                });
+                self.full_row_op(
+                    upd.oid,
+                    &upd.data,
+                    old,
+                    nostos_domain::Operation::Update,
+                    lsn,
+                )
             }
             BaseEvent::Delete(del) => {
                 self.pk_only_op(del.oid, del.old_data_or_primary_key.as_ref(), lsn)
@@ -987,13 +1006,14 @@ impl PgReplicator {
         &self,
         oid: i32,
         data: &TupleData<BinaryValueTraitOff>,
+        old: Option<&TupleData<BinaryValueTraitOff>>,
         op: nostos_domain::Operation,
         lsn: Lsn,
     ) -> Option<NostosEvent> {
         let meta = self.relations.get(&oid)?;
         let table = meta.qualified_name.clone();
         let pk = pk_string(meta, data);
-        let payload = Bytes::from(tuple_to_json_payload(meta, data));
+        let payload = Bytes::from(tuple_to_json_payload(meta, data, old));
         let row = match op {
             nostos_domain::Operation::Insert => RowOp::Insert { table, pk, payload },
             nostos_domain::Operation::Update => RowOp::Update { table, pk, payload },
@@ -1032,7 +1052,7 @@ impl PgReplicator {
                 tuple,
             )) => (
                 pk_string(meta, tuple),
-                Some(Bytes::from(tuple_to_json_payload(meta, tuple))),
+                Some(Bytes::from(tuple_to_json_payload(meta, tuple, None))),
             ),
             Some(pgoutput::events::base::tuple_data::OldDataOrPrimaryKeyTupleData::PrimaryKeyTupleData(
                 tuple,
@@ -1159,7 +1179,11 @@ fn pk_string(meta: &RelationMeta, data: &TupleData<BinaryValueTraitOff>) -> Stri
 /// `typed::append_typed_value`, keyed by its Postgres type OID — the same
 /// function `snapshot::build_json_payload` uses, so a streamed row and a
 /// snapshot row of identical data render byte-identically.
-fn tuple_to_json_payload(meta: &RelationMeta, data: &TupleData<BinaryValueTraitOff>) -> Vec<u8> {
+fn tuple_to_json_payload(
+    meta: &RelationMeta,
+    data: &TupleData<BinaryValueTraitOff>,
+    old: Option<&TupleData<BinaryValueTraitOff>>,
+) -> Vec<u8> {
     // Manual JSON build to avoid a serde_json dependency in this hot path;
     // tuples are small (a handful of columns).
     let mut out = String::from('{');
@@ -1172,15 +1196,20 @@ fn tuple_to_json_payload(meta: &RelationMeta, data: &TupleData<BinaryValueTraitO
         out.push_str("\":");
         let cell: Option<&str> = match data.get(i) {
             Some(TupleDataColumn::Value(v)) => Some(v.as_str()),
-            // ponytail: a toasted-unchanged column has no resent value in
-            // this tuple image. Every toastable builtin OID (bytea/json/
-            // jsonb/numeric/text) maps to `typed`'s quoted-string branch, so
-            // "" is a type-safe (if ambiguous with a real empty value)
-            // placeholder — matches the pre-typed-mapping behavior. Upgrade
-            // path: `REPLICA IDENTITY FULL` (forces PG to always resend), or
-            // a distinct wire sentinel the client can recognize as
-            // "unchanged, keep the prior value" instead of "empty".
-            Some(TupleDataColumn::PGUnchangedToastedValue) => Some(""),
+            // Unchanged-toasted marker (audit 2026-08-17 M2): PG emits `u`
+            // in the NEW tuple of an UPDATE when a toasted column was not
+            // modified — rendering it as "" would silently CLOBBER the
+            // client's copy of a >2KB value. Under REPLICA IDENTITY FULL
+            // (required on synced tables — pg-init sets it) the OLD tuple
+            // carries the full pre-update row image, and the value there is
+            // definitionally the unchanged one: substitute it. Without FULL
+            // there is no local source of truth — keep the "" placeholder
+            // (the pre-fix behavior; the real fix there is the wire
+            // sentinel, still deferred).
+            Some(TupleDataColumn::PGUnchangedToastedValue) => match old.and_then(|t| t.get(i)) {
+                Some(TupleDataColumn::Value(v)) => Some(v.as_str()),
+                _ => Some(""),
+            },
             Some(TupleDataColumn::PGNull) | None => None,
         };
         typed::append_typed_value(&mut out, *type_oid, cell);
@@ -1312,9 +1341,27 @@ pub enum PgReplicatorError {
     Lsn(String),
 }
 
+/// Recover the real transaction id from pgoutput's SIGNED decode of PG's
+/// u32 TransactionId: xids ≥ 2^31 arrive negative; reinterpret the bits,
+/// never clamp (clamping collapsed every such transaction into "txn 0" —
+/// audit 2026-08-17 H2).
+fn xid_of(transaction_id: i32) -> u64 {
+    u64::from(transaction_id.cast_unsigned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn begin_xid_is_reinterpreted_unsigned_not_clamped() {
+        assert_eq!(xid_of(0), 0);
+        assert_eq!(xid_of(42), 42);
+        // -1 is the u32::MAX xid; i32::MIN is exactly 2^31. The old clamp
+        // turned all of these into 0.
+        assert_eq!(xid_of(-1), u64::from(u32::MAX));
+        assert_eq!(xid_of(i32::MIN), u64::from(1u32 << 31));
+    }
 
     #[test]
     fn parses_libpq_url_with_credentials() {
@@ -1373,7 +1420,7 @@ mod tests {
             TupleDataColumn::Value("7".to_string()),
             TupleDataColumn::Value("t".to_string()),
         ];
-        let payload = String::from_utf8(tuple_to_json_payload(&meta, &data)).unwrap();
+        let payload = String::from_utf8(tuple_to_json_payload(&meta, &data, None)).unwrap();
         assert_eq!(
             payload,
             "{\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"title\":\"hello\",\"priority\":7,\"done\":true}"
@@ -1394,7 +1441,35 @@ mod tests {
             TupleDataColumn::PGNull,
             TupleDataColumn::PGUnchangedToastedValue,
         ];
-        let payload = String::from_utf8(tuple_to_json_payload(&meta, &data)).unwrap();
-        assert_eq!(payload, "{\"id\":null,\"body\":\"\"}");
+        let payload = String::from_utf8(tuple_to_json_payload(&meta, &data, None)).unwrap();
+        assert_eq!(payload, "{\"id\":null,\"body\":\"\"}".to_string());
+    }
+
+    #[test]
+    fn toasted_marker_substitutes_the_old_tuple_value() {
+        use pgoutput::events::base::tuple_data::TupleDataColumn;
+        let meta = RelationMeta {
+            qualified_name: "tasks".into(),
+            pk_indices: vec![0],
+            columns: vec![("id".into(), 25), ("body".into(), 25)],
+        };
+        // UPDATE touching only a small column: the toasted body arrives as
+        // the u marker in the NEW tuple; REPLICA IDENTITY FULLs OLD tuple
+        // carries the real (>2KB) value, which is definitionally unchanged.
+        let new_data: TupleData<BinaryValueTraitOff> = vec![
+            TupleDataColumn::Value("row-1".to_string()),
+            TupleDataColumn::PGUnchangedToastedValue,
+        ];
+        let old_data: TupleData<BinaryValueTraitOff> = vec![
+            TupleDataColumn::Value("row-1".to_string()),
+            TupleDataColumn::Value("x".repeat(4096)),
+        ];
+        let payload =
+            String::from_utf8(tuple_to_json_payload(&meta, &new_data, Some(&old_data))).unwrap();
+        assert_eq!(
+            payload,
+            format!("{{\"id\":\"row-1\",\"body\":\"{}\"}}", "x".repeat(4096)),
+            "the toasted column keeps its real value, never the empty clobber"
+        );
     }
 }

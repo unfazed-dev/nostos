@@ -62,7 +62,16 @@ impl JwksVerifier {
     pub(crate) fn new(jwks_url: String, ttl: Duration) -> Self {
         Self {
             jwks_url,
-            http: reqwest::Client::new(),
+            // Bound the JWKS fetch (audit 2026-08-17 M3): the refresh path
+            // holds the cache WRITE lock across the fetch, so an IdP that
+            // accepts TCP but stops responding would otherwise stall EVERY
+            // auth verify behind the write-preferring RwLock for good.
+            // 10s/5s mirrors the push rails' shared-client template.
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             ttl,
             cache: RwLock::new(Cache::default()),
         }
@@ -118,7 +127,9 @@ impl JwksVerifier {
         // Cache miss or stale: refresh under the write lock. ponytail: this
         // serializes concurrent refreshes onto one fetch-then-broadcast
         // rather than a notify/watch — fetches are rare (TTL-bounded) and
-        // cheap (one small HTTP GET), so the brief lock contention is fine.
+        // cheap (one small HTTP GET), and the client is timeout-bounded
+        // (10s — audit M3), so the lock contention is bounded too. Upgrade
+        // path: fetch outside the write lock with single-flight.
         let mut cache = self.cache.write().await;
         let is_fresh = cache.fetched_at.is_some_and(|t| t.elapsed() < self.ttl);
         if is_fresh {

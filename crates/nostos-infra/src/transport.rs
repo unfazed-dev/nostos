@@ -45,7 +45,7 @@ use nostos_domain::{
 use crate::router::TokioEventSink;
 use crate::wire::{
     decode_client_message, encode_event, encode_events, encode_resume_info,
-    encode_snapshot_boundary, encode_write_result, ClientMessage,
+    encode_snapshot_boundary, encode_stream_error, encode_write_result, ClientMessage,
 };
 
 /// Default per-session bounded-buffer depth. Slow clients that fall this far
@@ -143,6 +143,12 @@ pub struct SyncRouterState {
     /// overrides via [`Self::with_rules_file_path`] to match
     /// `--rules-file`/`NOSTOS_RULES_FILE`.
     pub rules_file_path: std::path::PathBuf,
+    /// Replicator→fan-out driver liveness (audit 2026-08-17 M6). The
+    /// composition root flips this when the driver task EXITS (stream end);
+    /// `/healthz` folds it into a 503 `"degraded"` so a load balancer
+    /// stops routing to a zombie server that accepts `/sync` but delivers
+    /// no live events. `None` = not wired (tests) = treated live.
+    pub driver_dead: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl SyncRouterState {
@@ -168,7 +174,15 @@ impl SyncRouterState {
             rules_changed,
             rules_tx,
             rules_file_path: std::path::PathBuf::from("nostos_rules.toml"),
+            driver_dead: None,
         }
+    }
+
+    /// Wire the driver-liveness flag (M6) — see [`Self::driver_dead`].
+    #[must_use]
+    pub fn with_driver_dead(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.driver_dead = Some(flag);
+        self
     }
 
     /// Set the per-session bounded buffer depth.
@@ -608,7 +622,10 @@ async fn run_session(
                 // tables is free.
                 res = rules_rx.changed() => {
                     if res.is_err() {
-                        continue; // sender dropped (server shutting down)
+                        // Sender dropped (shutdown / miswired with_rules):
+                        // changed() resolves Err immediately FOREVER, so a
+                        // continue here is a 100%-CPU busy-spin (audit L11).
+                        break;
                     }
                     let new_ruleset = rules_shared.read().await.clone();
                     let narrowed = {
@@ -943,7 +960,16 @@ async fn register_subscribe(
     let snapshot_base = { subs.lock().await.synthetic_cursor };
     let delivered = if let Some(snap) = snapshotter {
         match snap
-            .snapshot(&req.table, nostos_domain::Lsn::new(snapshot_base))
+            .snapshot(
+                &req.table,
+                nostos_domain::Lsn::new(snapshot_base),
+                // Tenant-scoped exactly like the live read path: the same
+                // `Principal::tenant_scope` seam, so a multi-tenant
+                // subscriber's snapshot can never widen past its tenant
+                // (audit 2026-08-17: the unscoped call leaked every
+                // tenant's rows on subscribe).
+                principal.tenant_scope(tenant_column),
+            )
             .await
         {
             Ok(events) => {
@@ -1083,6 +1109,27 @@ async fn handle_decoded_message(
         // here is impossible in the current flow, but stay defensive.
         ClientMessage::Subscribe { .. } => {
             debug!("subscribe reached decoded-message handler");
+        }
+        // P5 sync streams: the wire variants exist (wire.rs), but mid-session
+        // routing (stream registry → per-stream session) is a later slice of
+        // docs/plans/p5-sync-streams-design.md. Until then the honest answer
+        // is the design's non-fatal `stream_error` reject (§1) — never a
+        // socket close, never a silent drop.
+        ClientMessage::SubscribeStream { id, .. } => {
+            let frame = encode_stream_error(
+                &id,
+                "sync streams are not enabled on this server yet (P5 routing pending)",
+            );
+            let _ = server_frames_tx.try_send(frame);
+            debug!(stream_id = %id, "subscribe_stream rejected: routing pending");
+        }
+        ClientMessage::UnsubscribeStream { id } => {
+            let frame = encode_stream_error(
+                &id,
+                "sync streams are not enabled on this server yet (P5 routing pending)",
+            );
+            let _ = server_frames_tx.try_send(frame);
+            debug!(stream_id = %id, "unsubscribe_stream rejected: routing pending");
         }
     }
 }
@@ -1347,10 +1394,16 @@ async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
                 client_epoch: epoch,
                 client_rules_checksum: rules_checksum,
             }),
-            // An ACK or a Write before subscribing is out of order — reject by
+            // An ACK, a Write, or a stream subscribe/unsubscribe (P5 §1 —
+            // streams are lazy mid-session adds riding the socket's one
+            // global checkpoint, so the base `Subscribe` must establish the
+            // session first) before subscribing is out of order — reject by
             // closing the socket (same discipline as early ACK). The caller
             // returns from run_session, dropping the connection.
-            ClientMessage::Ack { .. } | ClientMessage::Write { .. } => None,
+            ClientMessage::Ack { .. }
+            | ClientMessage::Write { .. }
+            | ClientMessage::SubscribeStream { .. }
+            | ClientMessage::UnsubscribeStream { .. } => None,
         };
     }
     None

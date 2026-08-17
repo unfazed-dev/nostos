@@ -102,6 +102,29 @@ pub enum ClientMessage {
         /// asynchronous: the write task may be behind the client's send loop).
         client_write_id: String,
     },
+    /// Subscribe to a named, client-parameterized sync stream (P5 sync
+    /// streams — `docs/plans/p5-sync-streams-design.md` §1). `id` is
+    /// client-chosen (unique per socket; reuse = idempotent replace);
+    /// `stream` names a server-defined stream; `params` binds the
+    /// stream's `:param` placeholders — value-level binding, never
+    /// textual, so no client byte ever enters SQL (design Decision 2).
+    /// Streams ride the socket's ONE global checkpoint (ADR-0009), so there
+    /// is deliberately no per-stream `resume_lsn`/`epoch`.
+    #[serde(rename = "subscribe_stream")]
+    SubscribeStream {
+        id: String,
+        stream: String,
+        /// Bindings for the stream definition's `:param` placeholders.
+        /// Typed JSON values; the server turns each into a `ColumnValue`
+        /// leaf at subscribe time. Absent = no params.
+        #[serde(default)]
+        params: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Drop a previously-subscribed sync stream by its client-chosen `id`
+    /// (P5 §1). v1 leaves local rows in place — eviction is separate;
+    /// PowerSync behaves the same.
+    #[serde(rename = "unsubscribe_stream")]
+    UnsubscribeStream { id: String },
 }
 
 /// One column-equality filter in a `Subscribe` message.
@@ -178,6 +201,24 @@ pub fn encode_write_result(client_write_id: &str, ok: bool, error: Option<&str>)
         out.push_str(",\"error\":");
         push_json_string(&mut out, err);
     }
+    out.push('}');
+    out.into_bytes()
+}
+
+/// Encode a `stream_error` frame (server → client) as JSON bytes — the
+/// non-fatal reject for a `subscribe_stream`/`unsubscribe_stream` request
+/// (unknown stream, bad params; P5 sync streams,
+/// `docs/plans/p5-sync-streams-design.md` §1). Mirrors the non-fatal
+/// mid-session subscribe reject instead of closing the socket. Same
+/// hand-built, allocation-light style as [`encode_write_result`]; both
+/// strings are free-form, so both go through JSON escaping.
+#[must_use]
+pub fn encode_stream_error(id: &str, error: &str) -> Vec<u8> {
+    let mut out = String::with_capacity(40 + id.len() + error.len());
+    out.push_str("{\"type\":\"stream_error\",\"id\":");
+    push_json_string(&mut out, id);
+    out.push_str(",\"error\":");
+    push_json_string(&mut out, error);
     out.push('}');
     out.into_bytes()
 }
@@ -324,10 +365,25 @@ mod hex {
 /// through the same `server_frames_tx` channel as write-acks).
 #[must_use]
 pub fn encode_snapshot_boundary(table: &str, begin: bool) -> Vec<u8> {
+    encode_snapshot_boundary_impl(table, None, begin)
+}
+
+/// Encode a snapshot boundary control frame for a per-stream TARGETED
+/// snapshot (P5 sync streams — `docs/plans/p5-sync-streams-design.md`
+/// §1/§3): the same shape as [`encode_snapshot_boundary`] plus a
+/// `"stream"` key carrying the client-chosen stream id, so the client can
+/// attribute the bracketed rows to the right stream. Table-level snapshots
+/// keep using [`encode_snapshot_boundary`] — no `stream` key on the wire.
+#[must_use]
+pub fn encode_snapshot_boundary_for_stream(table: &str, stream: &str, begin: bool) -> Vec<u8> {
+    encode_snapshot_boundary_impl(table, Some(stream), begin)
+}
+
+fn encode_snapshot_boundary_impl(table: &str, stream: Option<&str>, begin: bool) -> Vec<u8> {
     // Hand-built JSON keeps this allocation-light and matches
-    // `encode_write_result`'s style. Only the table name is free-form, so it's
-    // the only field that needs JSON escaping.
-    let mut out = String::with_capacity(48 + table.len());
+    // `encode_write_result`'s style. Only the table + stream names are
+    // free-form, so they're the only fields that need JSON escaping.
+    let mut out = String::with_capacity(48 + table.len() + stream.map_or(0, str::len));
     out.push_str("{\"type\":\"");
     out.push_str(if begin {
         "snapshot_begin"
@@ -336,6 +392,10 @@ pub fn encode_snapshot_boundary(table: &str, begin: bool) -> Vec<u8> {
     });
     out.push_str("\",\"table\":");
     push_json_string(&mut out, table);
+    if let Some(stream) = stream {
+        out.push_str(",\"stream\":");
+        push_json_string(&mut out, stream);
+    }
     out.push('}');
     out.into_bytes()
 }
@@ -348,8 +408,24 @@ pub fn encode_snapshot_boundary(table: &str, begin: bool) -> Vec<u8> {
 ///
 /// The client pump calls this BEFORE [`decode_frames`] so control frames
 /// never enter the row-apply path.
+///
+/// Kept at its pre-P5 shape for existing callers; [`decode_snapshot_boundary`]
+/// is the superset that also exposes the optional P5 `stream` id.
 #[must_use]
 pub fn decode_control_frame(data: &[u8]) -> Option<(String, bool)> {
+    decode_snapshot_boundary(data).map(|(table, _, begin)| (table, begin))
+}
+
+/// Decode a snapshot boundary control frame, exposing the optional `stream`
+/// id (P5 sync streams — `docs/plans/p5-sync-streams-design.md` §1).
+/// Returns `(table, stream, begin)`; `stream` is `None` for table-level
+/// snapshots (the `stream` key is simply absent on the wire). Unknown keys
+/// are ignored (forward compatibility — an older peer's extra fields never
+/// break decode). Same accept/reject discipline as the pre-P5 decoder:
+/// `None` for arrays, row frames, `write_result` acks, malformed bytes,
+/// and snapshot frames missing `table`.
+#[must_use]
+pub fn decode_snapshot_boundary(data: &[u8]) -> Option<(String, Option<String>, bool)> {
     // Cheap peek: arrays (`[`) and anything that isn't an object (`{`) cannot
     // be a control frame — bail before paying for a full parse. This mirrors
     // `decode_frames`' first-byte dispatch.
@@ -365,7 +441,11 @@ pub fn decode_control_frame(data: &[u8]) -> Option<(String, bool)> {
         _ => return None,
     };
     let table = v.get("table")?.as_str()?.to_string();
-    Some((table, begin))
+    let stream = v
+        .get("stream")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some((table, stream, begin))
 }
 
 /// Encode a `resume_info` control frame advertising the server's current slot
@@ -836,5 +916,109 @@ mod tests {
         assert!(decode_control_frame(br#"{"type":"something_else","table":"t"}"#).is_none());
         // A snapshot_begin missing the `table` field is malformed → None.
         assert!(decode_control_frame(br#"{"type":"snapshot_begin"}"#).is_none());
+    }
+
+    // ---- P5 sync streams frames (docs/plans/p5-sync-streams-design.md §1) ----
+
+    #[test]
+    fn subscribe_stream_decodes_with_params() {
+        let raw = br#"{"type":"subscribe_stream","id":"s1","stream":"lists","params":{"owner":"u1","min":3}}"#;
+        let msg = decode_client_message(raw).expect("subscribe_stream decodes");
+        match msg {
+            ClientMessage::SubscribeStream { id, stream, params } => {
+                assert_eq!(id, "s1");
+                assert_eq!(stream, "lists");
+                assert_eq!(params["owner"], serde_json::json!("u1"));
+                assert_eq!(params["min"], serde_json::json!(3));
+            }
+            other => panic!("expected SubscribeStream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_stream_without_params_defaults_to_empty() {
+        let raw = br#"{"type":"subscribe_stream","id":"s1","stream":"lists"}"#;
+        let msg = decode_client_message(raw).expect("subscribe_stream decodes");
+        match msg {
+            ClientMessage::SubscribeStream { params, .. } => assert!(params.is_empty()),
+            other => panic!("expected SubscribeStream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsubscribe_stream_decodes() {
+        let raw = br#"{"type":"unsubscribe_stream","id":"s1"}"#;
+        let msg = decode_client_message(raw).expect("unsubscribe_stream decodes");
+        match msg {
+            ClientMessage::UnsubscribeStream { id } => assert_eq!(id, "s1"),
+            other => panic!("expected UnsubscribeStream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_error_frame_encodes_the_documented_shape() {
+        let bytes = encode_stream_error("s1", "unknown stream 'lists'");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "stream_error");
+        assert_eq!(v["id"], "s1");
+        assert_eq!(v["error"], "unknown stream 'lists'");
+        // A stream_error is NOT a snapshot boundary — the control-frame
+        // decoder must ignore it (it shares the same server_frames_tx pipe).
+        assert!(decode_control_frame(&bytes).is_none());
+        assert!(decode_snapshot_boundary(&bytes).is_none());
+    }
+
+    #[test]
+    fn stream_error_escapes_free_form_strings() {
+        let bytes = encode_stream_error("s\"1", "bad \"params\" for :owner");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"], "s\"1");
+        assert_eq!(v["error"], "bad \"params\" for :owner");
+    }
+
+    #[test]
+    fn stream_targeted_snapshot_boundary_round_trips() {
+        let begin = encode_snapshot_boundary_for_stream("lists", "s1", true);
+        assert_eq!(
+            decode_snapshot_boundary(&begin),
+            Some(("lists".to_string(), Some("s1".to_string()), true))
+        );
+        let end = encode_snapshot_boundary_for_stream("lists", "s1", false);
+        assert_eq!(
+            decode_snapshot_boundary(&end),
+            Some(("lists".to_string(), Some("s1".to_string()), false))
+        );
+        // The pre-P5 decoder keeps working on the same bytes and simply
+        // drops the stream id (old clients stay safe, design §1).
+        assert_eq!(
+            decode_control_frame(&begin),
+            Some(("lists".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn table_level_snapshot_boundary_has_no_stream_key() {
+        let bytes = encode_snapshot_boundary("tasks", true);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v.get("stream").is_none());
+        assert_eq!(
+            decode_snapshot_boundary(&bytes),
+            Some(("tasks".to_string(), None, true))
+        );
+        assert_eq!(
+            decode_control_frame(&bytes),
+            Some(("tasks".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn snapshot_boundary_ignores_unknown_keys_forward_compat() {
+        // A future frame with extra keys still decodes (design §1: old
+        // clients are safe against newer servers).
+        let raw = br#"{"type":"snapshot_begin","table":"tasks","stream":"s1","future":42}"#;
+        assert_eq!(
+            decode_snapshot_boundary(raw),
+            Some(("tasks".to_string(), Some("s1".to_string()), true))
+        );
     }
 }

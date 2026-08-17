@@ -33,6 +33,24 @@ path = "src/bin/probe_10k.rs"
 name = "nostos-reconnect-storm"
 path = "src/bin/reconnect_storm.rs"
 
+# Real-Postgres ingest leg: drives a PERSISTENT-connection batched-INSERT load
+# into the live `tasks` table and measures what reaches N loopback WS sinks
+# through PgReplicator → FanOutService. A STAGE measurement (real-PG ingest +
+# fan-out delivery) — never comparable to the eval-only FakeReplicator fan-out
+# headline in benches/results/RESULTS.md. Gated behind `pg` so the default
+# build pulls no Postgres crates (mirrors nostos-infra's `pg` gate).
+[[bin]]
+name = "nostos-bench-pg-ingest"
+path = "src/bin/bench_pg_ingest.rs"
+required-features = ["pg"]
+
+[features]
+# Real-Postgres ingest bench leg. Enables nostos-infra's PgReplicator plus the
+# client-side crates the generator/sinks need (tokio-postgres for the load
+# connection, uuid for per-run org_ids + slot suffixes, chrono for the
+# write_ts→recv lag gauge and artifact timestamps).
+pg = ["dep:tokio-postgres", "dep:uuid", "dep:chrono", "nostos-infra/pg"]
+
 [dependencies]
 nostos-domain = { workspace = true }
 nostos-application = { workspace = true }
@@ -50,6 +68,11 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 nix = { version = "0.29", features = ["resource"] }
+
+# pg-only (optional — enabled by the bench `pg` feature; see [features] above)
+tokio-postgres = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 [lints]
 workspace = true

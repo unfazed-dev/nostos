@@ -33,9 +33,14 @@ use tokio::sync::mpsc;
 /// Rows per multi-row INSERT flush. Bounds statement size + write latency.
 /// ponytail: tuned constant, no measurement yet; revisit against real-PG
 /// write-amplification in slice 6.
+// Read only by the feature-`pg` flush loop; dead in non-pg builds.
+#[allow(dead_code)]
 const BATCH_MAX: usize = 500;
 
 /// One buffered op-log entry awaiting a batched flush.
+// Fields are read by the feature-`pg` flush loop + tests; the always-on
+// RecordingOpLogWriter only pays the try_send cost and drops them.
+#[allow(dead_code)]
 struct OpEntry {
     lsn: i64,
     table: String,

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" font-family="sans-serif" font-size="12">
+<rect width="100%" height="100%" fill="white"/>
+<text x="64" y="20" font-size="16" font-weight="bold">Nostos throughput vs PowerSync ceiling (ops/sec)</text>
+<line x1="64" y1="360" x2="680" y2="360" stroke="#eee"/>
+<text x="56" y="364" text-anchor="end" fill="#666">0</text>
+<line x1="64" y1="280" x2="680" y2="280" stroke="#eee"/>
+<text x="56" y="284" text-anchor="end" fill="#666">239536</text>
+<line x1="64" y1="200" x2="680" y2="200" stroke="#eee"/>
+<text x="56" y="204" text-anchor="end" fill="#666">479072</text>
+<line x1="64" y1="120" x2="680" y2="120" stroke="#eee"/>
+<text x="56" y="124" text-anchor="end" fill="#666">718608</text>
+<line x1="64" y1="40" x2="680" y2="40" stroke="#eee"/>
+<text x="56" y="44" text-anchor="end" fill="#666">958144</text>
+<rect x="187" y="82" width="369" height="278" fill="#7c3aed"/>
+<text x="371" y="76" text-anchor="middle" font-weight="bold">833,169</text>
+<text x="371" y="382" text-anchor="middle" fill="#444">1000 clients</text>
+<line x1="64" y1="358" x2="680" y2="358" stroke="#dc2626" stroke-width="2" stroke-dasharray="6,4"/>
+<text x="676" y="352" fill="#dc2626" font-weight="bold">PowerSync ceiling ~4000 ops/sec</text>
+</svg>

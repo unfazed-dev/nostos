@@ -557,8 +557,12 @@ fn upsert_pending(
     }
 }
 
-/// Send every due (and, at shutdown, every pending) entry: presence
-/// re-check, token list, template resolution, rail sends, prune/retry.
+/// Send every DUE entry (deadline <= now): presence re-check, token list,
+/// template resolution, rail sends, prune/retry. Note (audit 2026-08-17
+/// L6): the coalesce shutdown arm calls this as a "final drain", but the
+/// deadline filter still applies — not-yet-due hints are silently
+/// discarded at shutdown (no send, no metric). Harmless by design: the
+/// doorbell is best-effort and the durable LSN checkpoint reconciles.
 async fn flush(
     pending: &mut HashMap<(String, String), Pending>,
     sink: &Arc<dyn PushSink>,
@@ -675,7 +679,13 @@ async fn flush(
 /// tables are resolved by the caller (`interpolate_state`) BEFORE this — a
 /// `liveactivity` table's `PushTables` row is a placeholder `Visible` that
 /// exists only so fan-out attaches tuple bytes (see `parse_push_tables`).
-fn build_payload(
+///
+/// `pub(crate)`: the ONE piece of resolution machinery shared with the
+/// delegation path (`remote.rs`'s RemoteNotifier, ADR-0038 §3) — template
+/// semantics must not be reinvented next door. The rest of the flush loop
+/// is NOT shared: it is welded to synchronous `RailOutcome`s, while the
+/// remote path learns outcomes from the receipts poll.
+pub(crate) fn build_payload(
     config: &RouterConfig,
     table: &str,
     lsn: Lsn,
@@ -753,7 +763,12 @@ fn column_to_str(v: Option<ColumnValue>) -> String {
         Some(ColumnValue::Number(n)) => n.to_string(),
         Some(ColumnValue::Float(f)) => f.to_string(),
         Some(ColumnValue::Bool(b)) => b.to_string(),
-        Some(ColumnValue::Any) | None => String::new(),
+        // `Param` placeholders exist only inside unbound stream templates
+        // (P5, docs/plans/p5-sync-streams-design.md Decision 2) — `bind_params`
+        // replaces them before a predicate ever evaluates, and push templates
+        // interpolate ROW columns, never stream params. Unreachable here; an
+        // empty render (same as `Any`/`None`) can never over-deliver.
+        Some(ColumnValue::Param(_) | ColumnValue::Any) | None => String::new(),
     }
 }
 

@@ -67,3 +67,21 @@ seam is `build_predicate` — one function.
   `crates/nostos-domain/src/principal.rs`.
 - Test: `crates/nostos-infra/tests/auth_sync.rs`
   (`tenant_filter_is_server_enforced_not_client_attested`).
+
+## Addendum (2026-08-17): the snapshot path joins the seam
+
+The subscribe-time snapshot (`SnapshotSource`) shipped with a ponytail: an
+UNFILTERED SELECT, documented as "multi-tenant deploys must NOT wire a
+snapshotter". The audit of 2026-08-17 (H1) found the composition root wiring
+`PgSnapshotter` unconditionally under `NOSTOS_REPLICATOR=pg` — the ponytail's
+precondition was enforced nowhere, so any subscriber in a supabase-jwt
+deployment received EVERY tenant's rows on subscribe (live fan-out was
+filtered; the snapshot was not).
+
+Fix: `SnapshotSource::snapshot` now takes `Option<TenantScope>` — the same
+`Principal::tenant_scope` seam this ADR's read path and ADR-0018's write path
+use, so all three enforcement points cannot drift. `PgSnapshotter` appends
+WHERE "<tenant_col>"::text = $1 with the tenant value BOUND (the ::text
+column cast keeps the bind type-correct for uuid/int tenant columns).
+`None` (anonymous / single-tenant) stays legitimately unfiltered. Regression
+test: `crates/nostos-infra/tests/e2e_pg_snapshot_tenant_scope.rs` (PG-gated).

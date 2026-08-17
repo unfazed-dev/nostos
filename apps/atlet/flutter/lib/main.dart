@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -54,7 +55,9 @@ Future<void> main() async {
     url: _supabaseUrl,
     publishableKey: _supabaseAnonKey,
   );
-  if (_pushPilotEnabled) {
+  // Firebase is the mobile rail only. On web the pilot uses raw Web Push
+  // (push_pilot_web.dart) — no Firebase init, no web config to throw on.
+  if (_pushPilotEnabled && !kIsWeb) {
     // Platform config (google-services.json / GoogleService-Info.plist) —
     // throws here when absent, which is the point of the opt-in flag.
     await Firebase.initializeApp();
@@ -199,10 +202,15 @@ class _HomeScreenState extends State<HomeScreen> {
           // Local heads-up on the same 'cairn' channel as the FCM pushes —
           // MainActivity's MethodChannel handler posts it; same-body posts
           // share an id, so the stream's replayed emissions just replace.
-          unawaited(_orderBannerChannel.invokeMethod(
-            'order_update',
-            {'body': 'Order ${o.id.substring(0, 8)} is ${o.status}'},
-          ));
+          // Web has no MethodChannel: the snackbar IS the foreground banner.
+          if (kIsWeb) {
+            _notify('Order ${o.id.substring(0, 8)} is ${o.status}');
+          } else {
+            unawaited(_orderBannerChannel.invokeMethod(
+              'order_update',
+              {'body': 'Order ${o.id.substring(0, 8)} is ${o.status}'},
+            ));
+          }
         }
         _lastOrderStatuses[o.id] = o.status;
       }
@@ -237,7 +245,10 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     _notify('Switching to ${target.name}…');
     try {
-      final dbDir = (await getApplicationDocumentsDirectory()).path;
+      // path_provider has no web impl; the web engine's storage is
+      // OPFS-backed and ignores sqlitePath (ADR-0036), so dbDir is an
+      // unused placeholder there.
+      final dbDir = kIsWeb ? '' : (await getApplicationDocumentsDirectory()).path;
       final adapter = await engineRegistry.switchTo(
         target,
         SyncSession(

@@ -1,0 +1,25 @@
+{
+  "environment": {
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "profile": "small",
+    "buffer": 1024,
+    "events": 100000,
+    "hostname": "unfazed-macbook-air.local",
+    "cpu_cores": 10
+  },
+  "runs": [
+    {
+      "clients": 1000,
+      "events_total": 100000,
+      "events_delivered": 99997299,
+      "ops_per_sec": 833303.6010146966,
+      "drop_rate": 0.000027010000000049494,
+      "p50_us": 1.0,
+      "p99_us": 2.0,
+      "elapsed_secs": 120.001040291,
+      "profile": "small"
+    }
+  ],
+  "powersync_ceiling_ops_per_sec_low": 2000,
+  "powersync_ceiling_ops_per_sec_high": 4000
+}

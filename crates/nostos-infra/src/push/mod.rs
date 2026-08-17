@@ -107,6 +107,7 @@ pub(crate) fn env_nonempty(name: &str) -> Option<String> {
 
 pub mod apns;
 pub mod fcm;
+pub mod remote;
 pub mod router;
 // OpenSSL-backed (ece): behind the `webpush` feature so client builds
 // (iOS staticlib) don't cross-compile openssl-sys. Default-on for servers.

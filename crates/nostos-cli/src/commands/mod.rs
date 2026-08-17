@@ -5,4 +5,5 @@ pub mod gen;
 pub mod init;
 pub mod link;
 pub mod pull;
+pub mod push;
 pub mod rules;

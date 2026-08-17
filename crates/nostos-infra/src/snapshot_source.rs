@@ -53,10 +53,9 @@ use std::sync::OnceLock;
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex;
-use tokio_postgres::NoTls;
 
 use nostos_application::ports::{SnapshotError, SnapshotSource};
-use nostos_domain::{Lsn, ReplicationEvent, RowOp};
+use nostos_domain::{Lsn, ReplicationEvent, RowOp, TenantScope};
 
 /// Reuse the streaming path's OID-keyed JSON mapping (ADR-0019) so snapshot
 /// rows render byte-identically to streamed rows. Both helpers are `pub(crate)`
@@ -110,13 +109,9 @@ impl PgSnapshotter {
         if let Some(c) = guard.take() {
             return Ok(c);
         }
-        let (client, conn) = tokio_postgres::connect(&self.pg_url, NoTls)
+        crate::pg_connect::pg_connect_bounded(&self.pg_url)
             .await
-            .map_err(|e| SnapshotError::Backend(format!("connect: {e}")))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-        Ok(client)
+            .map_err(SnapshotError::Backend)
     }
 
     /// Return a client to the pool after a successful read.
@@ -139,6 +134,7 @@ impl SnapshotSource for PgSnapshotter {
         &self,
         table: &str,
         base_lsn: Lsn,
+        tenant: Option<TenantScope<'_>>,
     ) -> Result<Vec<ReplicationEvent>, SnapshotError> {
         // 1. TRUST BOUNDARY: validate the table identifier BEFORE any SQL is
         //    built. The name is client-controlled (subscribe frame); the regex
@@ -194,8 +190,36 @@ impl SnapshotSource for PgSnapshotter {
             .map(|(n, _)| format!("{}::text", quote_ident(n)))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("SELECT {select_list} FROM {quoted_table}");
-        let rows = match client.query(&sql, &[]).await {
+        // Tenant scoping (the trait's enforced contract): when the
+        // connection's principal carries a TenantScope, restrict the
+        // snapshot to that tenant. The column name is operator config
+        // (trusted) and is identifier-quoted; the value is BOUND as $1,
+        // never interpolated — mirrors the read path's server-injected
+        // tenant clause (ADR-0011). None = anonymous / single-tenant
+        // deployment, where an unfiltered snapshot is legitimate.
+        // Bind target declared at function scope so the parameter
+        // reference outlives the query call (the match arms' copies of the
+        // Copy scope would not).
+        let tenant_value: Option<&str> = tenant.map(|s| s.value);
+        let sql = match tenant {
+            // `::text` on the COLUMN side: the bound value is always a
+            // string (JWT claim), while tenant columns may be uuid/int —
+            // `uuid = text` has no operator and would error. Casting
+            // the column compares canonical text forms, uniform across
+            // types (an index on the column is bypassed — same trade the
+            // live path's literal-coercion clause avoids, accepted here
+            // for bind-safety; snapshots are per-subscribe, not hot).
+            Some(scope) => format!(
+                "SELECT {select_list} FROM {quoted_table} WHERE {}::text = $1",
+                quote_ident(scope.column)
+            ),
+            None => format!("SELECT {select_list} FROM {quoted_table}"),
+        };
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+        if let Some(v) = &tenant_value {
+            params.push(v);
+        }
+        let rows = match client.query(&sql, &params).await {
             Ok(r) => r,
             Err(e) => {
                 self.drop_client().await;

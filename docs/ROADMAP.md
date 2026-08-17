@@ -68,6 +68,7 @@
 - Free Nostos Cloud alpha.
 - Migration guides + the auditable benchmark repo as the centerpiece.
 - Supabase partnership outreach (be their officially-recommended offline layer).
+- Sync-aware push (ADR-0037) + **nostos-pushd** standalone push daemon (ADR-0038, launch-blocker decision 2026-08-17) — the only push server with a sync-aware upgrade path; `nostos push init|check` credential ergonomics.
 
 ---
 
@@ -110,4 +111,4 @@
 - 🚀 **GA** — production-ready for the phase's scope.
 - 📈 **Scaling** — optimization & hardening.
 
-Today: **Phase 3 🚧 — v0.1 prepared, launch gated on operator.** v0.1 scope is code-complete: real-PG default + snapshot, `where_sql` predicate subscriptions, WS batching, write-back v1 with offline outbox, WASM transport + `/demo` page, two Flutter fixtures, stranger-tested README quickstart. RESULTS.md carries the honest 1k/5k/10k picture (**1k headline refreshed 2026-07: 833k ops/sec aggregate fan-out @ 0% drops** — PowerSync publishes no comparable aggregate fan-out figure, only 2–4k ops/sec replication ingest and 2–20k ops/sec per-client sync; the Week-1 baseline of 142k ops/sec is preserved as historical. 10k drop ceiling diagnosed — table-sharded router is the Phase 2 fix). Launch post drafts in `docs/launch/`, local `v0.1.0` tag; **publication, the RN SDK, Nostos Cloud alpha, and Show HN timing remain operator calls** (see `docs/plans/complete-nostos-fully-wired-operational.md` Phase F2).
+Today: **Phase 3 🚧 — v0.1 prepared, launch gated on operator.** v0.1 scope is code-complete: real-PG default + snapshot, `where_sql` predicate subscriptions, WS batching, write-back v1 with offline outbox, WASM transport + `/demo` page, two Flutter fixtures, stranger-tested README quickstart. RESULTS.md carries the honest 1k/5k/10k picture (**1k headline refreshed 2026-07: 833k ops/sec aggregate fan-out @ 0% drops** — PowerSync publishes no comparable aggregate fan-out figure, only 2–4k ops/sec replication ingest and 2–20k ops/sec per-client sync; the Week-1 baseline of 142k ops/sec is preserved as historical. 10k drop ceiling diagnosed — table-sharded router is the Phase 2 fix). Push: ADR-0037 sync-aware push piloted in atlet on real APNs/FCM rails (plan 24/24); ADR-0038 nostos-pushd daemon + RemoteNotifier delegation implemented per `docs/plans/nostos-push-daemon-implementation.md`. Launch post drafts in `docs/launch/`, local `v0.1.0` tag; **publication, the RN SDK, Nostos Cloud alpha, and Show HN timing remain operator calls** (see `docs/plans/complete-nostos-fully-wired-operational.md` Phase F2).

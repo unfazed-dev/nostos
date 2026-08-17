@@ -23,6 +23,13 @@ mod jwks;
 /// Persisted operation-log writers (ADR-0025 slice 2). `RecordingOpLogWriter`
 /// (always available, in-memory — bench/test) + `PgOpLogWriter` (feature "pg").
 pub mod oplog;
+/// Bounded lazy PG connect shared by the pool-of-one adapters (audit
+/// 2026-08-17 M8). pg-only: every caller is a `pg`-gated adapter, and the
+/// helper's signature names `tokio_postgres::Client` (optional dep) — an
+/// ungated `mod` here broke the standalone no-feature `cargo check -p
+/// nostos-infra` (workspace CI stayed green only via feature unification).
+#[cfg(feature = "pg")]
+mod pg_connect;
 /// The push provider rails (ADR-0037 §1, plan tasks 2.1–2.4): FCM HTTP v1 /
 /// APNs / Web Push senders with one shared `RailOutcome`, plus `router`'s
 /// `PushRouter` — the coalescer that implements the application

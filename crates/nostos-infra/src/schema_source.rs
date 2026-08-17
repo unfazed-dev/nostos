@@ -36,7 +36,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
-use tokio_postgres::NoTls;
 
 use nostos_application::ports::{
     SchemaColumn, SchemaDescriptor, SchemaError, SchemaSource, SchemaTable, TableStat,
@@ -79,13 +78,9 @@ impl PgSchemaSource {
         if let Some(c) = guard.take() {
             return Ok(c);
         }
-        let (client, conn) = tokio_postgres::connect(&self.pg_url, NoTls)
+        crate::pg_connect::pg_connect_bounded(&self.pg_url)
             .await
-            .map_err(|e| SchemaError::Backend(format!("connect: {e}")))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-        Ok(client)
+            .map_err(SchemaError::Backend)
     }
 
     /// Return a client to the pool after a successful read.
@@ -180,13 +175,9 @@ impl PgTableStats {
         if let Some(c) = guard.take() {
             return Ok(c);
         }
-        let (client, conn) = tokio_postgres::connect(&self.pg_url, NoTls)
+        crate::pg_connect::pg_connect_bounded(&self.pg_url)
             .await
-            .map_err(|e| SchemaError::Backend(format!("connect: {e}")))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-        Ok(client)
+            .map_err(SchemaError::Backend)
     }
 
     async fn return_client(&self, client: tokio_postgres::Client) {

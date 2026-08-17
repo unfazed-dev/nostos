@@ -8,8 +8,11 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../adapters/nostos_adapter.dart';
+import 'push_pilot_web_stub.dart'
+    if (dart.library.js_interop) 'push_pilot_web.dart';
 
-/// PILOT (ADR-0037) — FCM doorbell wiring for the Atlet push pilot.
+/// PILOT (ADR-0037) — push rails for the Atlet pilot: FCM on mobile, raw
+/// Web Push (VAPID, no Firebase) on web — see push_pilot_web.dart.
 ///
 /// Opt-in via `--dart-define=ATLET_PUSH_PILOT=true` (see main.dart): Firebase
 /// needs platform config (google-services.json / GoogleService-Info.plist)
@@ -103,6 +106,19 @@ class PushPilot {
   /// re-register.
   Future<void> attach(NostosAdapter adapter) async {
     _adapter = adapter;
+    // Web arm: raw Web Push against cairn's own rail (ADR-0037 §1) — no
+    // Firebase objects exist here, the service worker owns delivery.
+    if (kIsWeb) {
+      try {
+        await attachWebPush(adapter, debugPrint);
+      } on Exception catch (e) {
+        // Covers NostosPushTokenException (server rejected) and the browser
+        // http ClientException (server unreachable) — registration retries
+        // on the next attach, same contract as the mobile arm.
+        debugPrint('push pilot: web token registration failed: $e');
+      }
+      return;
+    }
     await _messageSub?.cancel();
     _messageSub = FirebaseMessaging.onMessage.listen((message) {
       if (!isNostosDoorbell(message.data)) return;
@@ -139,6 +155,7 @@ class PushPilot {
     _messageSub = null;
     await _refreshSub?.cancel();
     _refreshSub = null;
+    if (kIsWeb) return; // no session file — the bg-isolate wake is FCM/mobile
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$_sessionFileName');
     // Best-effort: a stale file only ever produces the bg handler's

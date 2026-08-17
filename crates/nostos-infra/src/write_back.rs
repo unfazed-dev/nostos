@@ -181,7 +181,6 @@ mod pg {
     use std::sync::Arc;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
-    use tokio_postgres::NoTls;
 
     /// The strict identifier regex: a bare lowercase SQL identifier
     /// (`^[a-z_][a-z0-9_]*$`). Applied to the table name AND every payload
@@ -293,14 +292,10 @@ mod pg {
             if let Some(c) = guard.take() {
                 return Ok(c);
             }
-            // Open a fresh connection.
-            let (client, conn) = tokio_postgres::connect(&self.pg_url, NoTls)
+            // Open a fresh connection (bounded — audit M8).
+            crate::pg_connect::pg_connect_bounded(&self.pg_url)
                 .await
-                .map_err(|e| WriteBackError::Backend(format!("connect: {e}")))?;
-            tokio::spawn(async move {
-                let _ = conn.await;
-            });
-            Ok(client)
+                .map_err(WriteBackError::Backend)
         }
 
         /// Return a client to the pool (called after a successful statement).
@@ -317,8 +312,11 @@ mod pg {
         }
 
         /// ADR-0030 slice 3: merge a flushed OR-set payload element-wise into the
-        /// configured column (read-modify-write under the pool-of-one connection
-        /// — single writer per row, no extra locking). No-tenant only; the
+        /// configured column (read-modify-write with the pool guard HELD across
+        /// the whole RMW — single writer per row, audit 2026-08-17 M4: the old
+        /// check-out-then-query pattern let a concurrent merge open a SECOND
+        /// connection, and two same-row merges could both SELECT the same
+        /// state — one element silently lost). No-tenant only; the
         /// tenant + OR-set case falls through to the clobber path in `upsert`
         /// (tenant-scoped shared sets are fixture co-design; the pomodoro
         /// community row is the shared, unscoped case).
@@ -339,7 +337,18 @@ mod pg {
             let quoted_col = quote_ident(col);
             let pk_value = SqlValue::from_pk(pk);
 
-            let client = self.client().await?;
+            // Hold the pool guard across the WHOLE read-modify-write so a
+            // concurrent same-row merge serializes behind us instead of
+            // opening a second connection and reading the same pre-merge
+            // state. On error the slot stays None (client dropped with the
+            // guard); the next call reconnects — same as drop_client.
+            let mut guard = self.client.lock().await;
+            let client = match guard.take() {
+                Some(c) => c,
+                None => crate::pg_connect::pg_connect_bounded(&self.pg_url)
+                    .await
+                    .map_err(WriteBackError::Backend)?,
+            };
             // Read the existing element-set (NULL / absent row → empty → just the
             // incoming set). Cast jsonb → text so the bytes round-trip through
             // serde_json unchanged.
@@ -351,7 +360,6 @@ mod pg {
                 Ok(Some(row)) => row.get::<_, Option<String>>(0),
                 Ok(None) => None,
                 Err(e) => {
-                    self.drop_client().await;
                     return Err(WriteBackError::Backend(e.to_string()));
                 }
             };
@@ -372,19 +380,17 @@ mod pg {
                 vec![pk_value.as_tosql(), col_value.as_tosql()];
             match client.execute(&sql, &ins_params).await {
                 Ok(_) => {
-                    self.return_client(client).await;
+                    *guard = Some(client);
                     Ok(())
                 }
-                Err(e) => {
-                    self.drop_client().await;
-                    Err(WriteBackError::Backend(e.to_string()))
-                }
+                Err(e) => Err(WriteBackError::Backend(e.to_string())),
             }
         }
 
         /// ADR-0030 addendum: merge a PN-Counter payload per-replica elementwise
-        /// max into the configured JSONB column (read-modify-write under the
-        /// pool-of-one connection — single writer per row, no extra locking).
+        /// max into the configured JSONB column (read-modify-write with the
+        /// pool guard HELD across the whole RMW — single writer per row,
+        /// audit M4).
         /// Mirrors `or_set_merge` but uses the counter merge primitive.
         async fn counter_merge(
             &self,
@@ -403,7 +409,18 @@ mod pg {
             let quoted_col = quote_ident(col);
             let pk_value = SqlValue::from_pk(pk);
 
-            let client = self.client().await?;
+            // Hold the pool guard across the WHOLE read-modify-write so a
+            // concurrent same-row merge serializes behind us instead of
+            // opening a second connection and reading the same pre-merge
+            // state. On error the slot stays None (client dropped with the
+            // guard); the next call reconnects — same as drop_client.
+            let mut guard = self.client.lock().await;
+            let client = match guard.take() {
+                Some(c) => c,
+                None => crate::pg_connect::pg_connect_bounded(&self.pg_url)
+                    .await
+                    .map_err(WriteBackError::Backend)?,
+            };
             let select_sql =
                 format!("SELECT {quoted_col}::text FROM {quoted_table} WHERE {quoted_pk} = $1");
             let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -412,7 +429,6 @@ mod pg {
                 Ok(Some(row)) => row.get::<_, Option<String>>(0),
                 Ok(None) => None,
                 Err(e) => {
-                    self.drop_client().await;
                     return Err(WriteBackError::Backend(e.to_string()));
                 }
             };
@@ -432,13 +448,10 @@ mod pg {
                 vec![pk_value.as_tosql(), col_value.as_tosql()];
             match client.execute(&sql, &ins_params).await {
                 Ok(_) => {
-                    self.return_client(client).await;
+                    *guard = Some(client);
                     Ok(())
                 }
-                Err(e) => {
-                    self.drop_client().await;
-                    Err(WriteBackError::Backend(e.to_string()))
-                }
+                Err(e) => Err(WriteBackError::Backend(e.to_string())),
             }
         }
     }

@@ -1,0 +1,366 @@
+openapi: 3.0.3
+info:
+  title: nostos-pushd
+  version: 0.4.0
+  description: >
+    Standalone push daemon (ADR-0038): token-addressed APNs / FCM HTTP v1 /
+    Web Push sends with debounce coalescing. NOT a marketing platform —
+    no topics, scheduling, segments, A/B (ADR-0037 boundary). Delivery is
+    best-effort; outcomes are reported via the receipt log, never guaranteed.
+
+    v0.3.0 (2026-08-17 security-audit closeout, plan task 4.1): rail mode
+    requires a :rail-role key (403), /v1/send is rate-limited per tenant
+    (429) and field-capped (400), cross-tenant token registration is 409,
+    DELETE /v1/tokens/{token} is 204 for every not-yours case, and
+    /v1/healthz is status-only with the rails booleans moved to the
+    authenticated /v1/status.
+
+    v0.4.0 (2026-08-17, plan v1.1): POST /v1/send/batch — up to 100
+    SendRequests per call. Phase 1 is all-or-nothing (per-item validation,
+    role and rail checks, and ONE atomic per-item token-bucket charge): any
+    failure is a whole-batch 4xx/429 naming the first failing index, with
+    ZERO items sent. Phase 2 admits per item; 202 returns per-item results
+    in request order; 503 only when EVERY item failed admission (safe to
+    retry the whole batch).
+servers:
+  - url: http://localhost:8090
+tags: [tokens, send, receipts, meta]
+paths:
+  /v1/healthz:
+    get:
+      tags: [meta]
+      summary: Liveness — unauthenticated, status only
+      security: []
+      description: >
+        Public liveness probe. Deliberately reveals nothing else (v0.3.0):
+        which rails are configured is deployment detail available only on
+        the authenticated /v1/status.
+      responses:
+        '200':
+          description: Daemon is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                required: [status]
+  /v1/status:
+    get:
+      tags: [meta]
+      summary: Readiness — authenticated, includes configured rails
+      description: >
+        Liveness plus which rails from_env() built — the pre-v0.3.0
+        /v1/healthz shape, now behind the bearer gate.
+      responses:
+        '200':
+          description: Daemon is up; rails booleans reflect configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  rails:
+                    type: object
+                    description: Which rails are configured (from_env)
+                    properties:
+                      apns: { type: boolean }
+                      fcm: { type: boolean }
+                      webpush: { type: boolean }
+                required: [status, rails]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/tokens:
+    post:
+      tags: [tokens]
+      summary: Register (upsert) a device token for the caller's tenant
+      description: >
+        Idempotent for the caller's OWN rows. A token already held by
+        ANOTHER tenant is a 409 (v0.3.0) — ownership never silently
+        reassigns; the migration path is the old owner's DELETE, then
+        this POST.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenRegistration' }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenRegistered' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Token is already registered to another tenant (its owner must DELETE it first)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/tokens/{token}:
+    delete:
+      tags: [tokens]
+      summary: Deregister a token (idempotent, owner-scoped)
+      description: >
+        204 for the caller's own row, for a row that never existed, AND for
+        a row belonging to another tenant (v0.3.0): the responses are
+        indistinguishable so DELETE cannot be used as a token-existence
+        oracle across tenants.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted (or not yours / never existed — identical) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/send:
+    post:
+      tags: [send]
+      summary: Queue one token-addressed push (coalesced per tenant+token)
+      description: >
+        Rate-limited per tenant (token bucket, 429 when exhausted — v0.3.0)
+        and field-capped (400 — see the SendRequest schemas' maxLength).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendRequest' }
+      responses:
+        '202':
+          description: >
+            Accepted into the coalescer. When the token is NOT in this
+            daemon's registry and the optional `platform` field is present,
+            the send dispatches directly on that rail (rail mode —
+            registry-free delegation for trusted delegators such as
+            nostos-server's RemoteNotifier; no registry row is created;
+            requires a :rail-role API key, v0.3.0). Registered tokens
+            always resolve through the registry and accept either role.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendAccepted' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Rail mode requested (unregistered token + platform field) with a Standard-role API key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { description: Token not registered for this tenant AND no `platform` field supplied (rail mode not requested) }
+        '429':
+          description: Per-tenant send rate exhausted, or the coalescer's pending-key ceiling is full
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503': { description: The token's rail is not configured on this daemon }
+  /v1/send/batch:
+    post:
+      tags: [send]
+      summary: Queue up to 100 token-addressed pushes (v0.4.0)
+      description: >
+        All-or-nothing phase 1 (parse, item-count cap — the EFFECTIVE
+        ceiling min(100, NOSTOS_PUSHD_SEND_BURST), since a batch larger
+        than the tenant's bucket could never acquire n tokens; ONE atomic
+        per-item rate charge, per-item validation, :rail-role gate,
+        rail-configured check; any failure = whole-batch error naming the
+        first failing index, zero items sent, and a phase-1 failure
+        REFUNDS the reserved tokens), then per-item admission in phase 2
+        with per-item results in request order (phase-2 admission
+        failures are NOT refunded — an admission attempt costs its token,
+        same as /v1/send). Items ride the same SendRequest schema (same
+        field caps). Duplicate (tenant, token) items within one batch
+        coalesce latest-wins in the debounce window — one push is sent,
+        but each accepted item still yields its own receipt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchSendRequest' }
+      responses:
+        '202':
+          description: At least one item admitted — per-item results in request order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchSendAccepted' }
+        '400': { description: Malformed body, item-count over the effective ceiling min(100, send burst), or a per-item validation failure (whole batch rejected; error names the index; reserved tokens refunded) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: A rail-mode item under a Standard-role key (whole batch rejected; error names the index) }
+        '404': { description: An item's token is unregistered AND carries no platform field (whole batch rejected; error names the index) }
+        '429': { description: The tenant's bucket currently holds fewer tokens than the batch size (batch within the effective ceiling) — all-or-nothing, tokens preserved }
+        '503': { description: EVERY item failed coalescer admission (nothing sent — safe to retry), or an item's rail is unconfigured (whole-batch phase-1 rejection) }
+  /v1/receipts:
+    get:
+      tags: [receipts]
+      summary: Poll the append-only receipt log (monotonic seq cursor)
+      parameters:
+        - name: since
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, maximum: 1000 }
+      responses:
+        '200':
+          description: Receipts with seq > since, ascending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  receipts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Receipt' }
+                required: [receipts]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Tenant API key from NOSTOS_PUSHD_API_KEYS (tenant stamped
+        server-side). Entries are tenant:secret[:rail] — the optional
+        literal :rail suffix grants the Rail role, required for rail-mode
+        sends (unregistered token + platform field); a secret may not
+        itself end with :rail (reserved suffix, boot error). The bearer
+        value clients present is the SECRET only, never the suffix.
+  responses:
+    BadRequest:
+      description: Malformed request or a field over its cap
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or unknown API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+    TokenRegistration:
+      type: object
+      additionalProperties: false
+      properties:
+        token: { type: string, minLength: 8, maxLength: 2048 }
+        platform: { type: string, enum: [apns, fcm, webpush] }
+        account_tag:
+          type: string
+          description: Opaque caller-side account grouping (coalescing key suffix)
+      required: [token, platform]
+    TokenRegistered:
+      type: object
+      properties:
+        registered: { type: boolean }
+      required: [registered]
+    SilentPayload:
+      type: object
+      additionalProperties: false
+      description: Doorbell — content-free wake (ADR-0037 section 2)
+      properties:
+        silent:
+          type: object
+          additionalProperties: false
+          properties:
+            table: { type: string }
+            lsn: { type: string, description: LSN as decimal string }
+          required: [table, lsn]
+      required: [silent]
+    VisiblePayload:
+      type: object
+      additionalProperties: false
+      properties:
+        visible:
+          type: object
+          additionalProperties: false
+          properties:
+            title: { type: string, maxLength: 256 }
+            body: { type: string, maxLength: 1024 }
+            category:
+              type: string
+              maxLength: 128
+              description: Client-registered notification category (action buttons)
+          required: [title, body]
+      required: [visible]
+    SendRequest:
+      type: object
+      additionalProperties: false
+      description: Field caps (v0.3.0) — an over-cap field is a 400 before any registry access
+      properties:
+        token: { type: string, maxLength: 2048, description: "Same bound as the registry path (POST /v1/tokens) so a registered Web Push subscription token is always sendable" }
+        platform:
+          type: string
+          enum: [apns, fcm, webpush]
+          description: >
+            Rail mode (v0.2.0; role-gated v0.3.0): present AND the token
+            unregistered => dispatch directly on the named rail with no
+            registry row. REQUIRES an API key with the :rail role — a
+            Standard key gets 403. Precedence: a token that IS registered
+            ignores this field — the registry row's platform always wins
+            (the daemon registry is the source of truth for tokens it
+            owns).
+        payload:
+          oneOf:
+            - $ref: '#/components/schemas/SilentPayload'
+            - $ref: '#/components/schemas/VisiblePayload'
+        collapse_key:
+          type: string
+          maxLength: 256
+          description: Override supersede key; default derived per (tenant, token)
+        priority: { type: string, enum: [low, high], default: low }
+        metadata:
+          type: object
+          description: >
+            Echoed into the receipt (push-LSN correlation channel). The
+            serialized JSON form must be <= 4096 bytes (400 otherwise).
+      required: [token, payload]
+    SendAccepted:
+      type: object
+      properties:
+        push_id: { type: string }
+        status: { type: string, enum: [accepted] }
+      required: [push_id, status]
+    BatchSendRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SendRequest' }
+          minItems: 1
+          maxItems: 100
+      required: [items]
+    BatchSendItemResult:
+      type: object
+      description: >
+        One per request item, in request order. push_id present on
+        accepted; error code present on rejected.
+      properties:
+        index: { type: integer }
+        status: { type: string, enum: [accepted, rejected] }
+        push_id: { type: string }
+        error: { type: string, enum: [coalescer_pending_ceiling, coalescer_queue_full] }
+      required: [index, status]
+    BatchSendAccepted:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BatchSendItemResult' }
+      required: [results]
+    Receipt:
+      type: object
+      properties:
+        seq: { type: integer }
+        push_id: { type: string }
+        token: { type: string }
+        outcome: { type: string, enum: [delivered, unregistered, transient, fatal] }
+        detail: { type: string }
+        metadata: { type: object }
+        provider_ts: { type: string, format: date-time }
+      required: [seq, push_id, token, outcome, provider_ts]
+security:
+  - bearerAuth: []

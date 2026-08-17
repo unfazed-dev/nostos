@@ -23,6 +23,7 @@ same-stage, same-units comparisons per docs/BENCHMARK-METHODOLOGY.md. (Week-1 ba
 | nostos-ffi-wasm | wasm-bindgen bridge over nostos-core | core |
 | nostos-bench | throughput harness — honest numbers (drops reported, env recorded) | domain, application, infra |
 | nostos-cloud | control plane: auth / Stripe / licensing (separate binary) | domain |
+| nostos-push | standalone push daemon nostos-pushd (composition root, ADR-0038) | domain, infra |
 
 `unsafe` is forbidden workspace-wide (all Cargo workspace members). The one
 exception is machine-generated FFI glue in the non-member crate
@@ -34,10 +35,14 @@ on warnings.
 - `make ci` — fmt-check + clippy (-D warnings) + full test suite. Gate for every change.
 - `cargo test -p <crate>` — focused iteration.
 - `docker compose -f docker/docker-compose.yml up -d` then
-  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg`
+  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg -- --test-threads=1`
   — the real-Postgres e2e. Without `NOSTOS_E2E_PG=1` the tests self-skip and
   report a false-positive pass. (Check docker/docker-compose.yml for the
-  actual port/credentials.)
+  actual port/credentials.) The `--test-threads=1` is REQUIRED: several pg
+  e2e binaries TRUNCATE the shared `tasks` table and assert exact snapshot
+  contents — every test file documents this, and a parallel within-binary
+  run races (caught 2026-08-17: snapshot test saw the concurrent test's
+  seed row as a 4th row).
 - `make bench` — throughput benchmark. Record environment; report drop rates; never compare
   eval-only numbers against end-to-end numbers.
 - `cargo run -p nostos-client --example reactive_scroll` — end-to-end native demo.

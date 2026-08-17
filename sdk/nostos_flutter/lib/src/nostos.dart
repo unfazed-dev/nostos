@@ -273,8 +273,12 @@ class Nostos {
         : _debounceTicks(merged, throttle);
 
     return ticks.asyncMap(
-      (_) async => (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
-          .cast<Map<String, dynamic>>(),
+      (_) async {
+        final rows = (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
+            .cast<Map<String, dynamic>>()
+            .toList();
+        return rows;
+      },
     );
   }
 

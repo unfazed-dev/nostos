@@ -177,7 +177,17 @@ impl WebPushRail {
             PushPayload::Silent { table, lsn } => {
                 json!({ "table": table, "lsn": lsn.0.to_string() })
             }
-            PushPayload::Visible { title, body, .. } => json!({ "title": title, "body": body }),
+            PushPayload::Visible {
+                title,
+                body,
+                category,
+                ..
+            } => match category {
+                // `category` rides the (encrypted) payload so the client SW
+                // can map it to action buttons — same field FCM/APNs carry.
+                Some(c) => json!({ "title": title, "body": body, "category": c }),
+                None => json!({ "title": title, "body": body }),
+            },
         };
         // set_payload borrows; the buffer must outlive build() (encryption
         // happens there).

@@ -41,6 +41,9 @@ dependencies:
     path: ../../../sdk/nostos_flutter
   powersync: ^1.16.0
   path_provider: ^2.1.5
+  # Push pilot web arm (lib/push/push_pilot_web.dart): browser Push API.
+  # Only imported on web via conditional import, mirroring nostos_flutter.
+  web: ^1.1.0
   firebase_core: ^4.13.0
   firebase_messaging: ^16.5.0
 dev_dependencies:

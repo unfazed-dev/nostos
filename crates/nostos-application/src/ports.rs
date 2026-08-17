@@ -630,19 +630,26 @@ pub trait OpLogWriter: Send + Sync {
 /// so there is no value-binding injection surface here; the table name is the
 /// only client-controlled string that reaches SQL.
 ///
-/// ponytail: no tenant-predicate scoping in v1 — anonymous / single-tenant
-/// only. The snapshot SELECT is unfiltered, so a multi-tenant deploy must NOT
-/// wire a `SnapshotSource` until this is upgraded to take the server-injected
-/// [`TenantScope`] (mirrors the read-path predicate injection — ADR-0011). The
-/// upgrade is: pass `Option<TenantScope>` through `snapshot`, append a
-/// `WHERE "<tenant_col>" = $1` clause, bind the principal's tenant value.
+/// # Tenant scoping (read-path parity, ADR-0011) — enforced 2026-08-17
+/// after the audit caught the composition root violating the old v1
+/// ponytail: `main.rs` wires `PgSnapshotter` unconditionally under
+/// `NOSTOS_REPLICATOR=pg`, including in multi-tenant deployments, so an
+/// unfiltered snapshot leaked EVERY tenant's rows to any subscriber.
+/// `tenant` is the server-computed [`TenantScope`] for the connection's
+/// principal — `Principal::tenant_scope`, the SAME seam the live read
+/// path (`build_predicate`) and the write path (`dispatch_write`) use,
+/// so all three enforcement points cannot drift. Implementations MUST
+/// restrict the snapshot to that scope (`WHERE "<tenant_col>" = $1`,
+/// value BOUND as a parameter, never interpolated). `None` means an
+/// anonymous / single-tenant deployment, where an unfiltered snapshot
+/// is legitimate.
 #[async_trait]
 pub trait SnapshotSource: Send + Sync {
-    /// Read every row of `table` as an `Insert` event, each stamped with a
-    /// unique LSN strictly greater than `base_lsn`. The payload of each event
-    /// MUST match the streaming path's tuple-image shape (ADR-0019) so the
-    /// client's idempotent apply (`upsert by pk`) treats a snapshot row exactly
-    /// like a streamed insert.
+    /// Read every in-scope row of `table` as an `Insert` event, each
+    /// stamped with a unique LSN strictly greater than `base_lsn`. The
+    /// payload of each event MUST match the streaming path's tuple-image
+    /// shape (ADR-0019) so the client's idempotent apply (`upsert by pk`)
+    /// treats a snapshot row exactly like a streamed insert.
     ///
     /// # Errors
     /// - [`SnapshotError::InvalidTable`] if `table` fails the identifier regex.
@@ -652,6 +659,7 @@ pub trait SnapshotSource: Send + Sync {
         &self,
         table: &str,
         base_lsn: Lsn,
+        tenant: Option<TenantScope<'_>>,
     ) -> Result<Vec<ReplicationEvent>, SnapshotError>;
 }
 

@@ -29,7 +29,7 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 | `adr-and-docs-completion-audit-2026-07-30.md` | **Read alongside the assessment below.** Audits all 28 ADRs + `docs/` against code. Finding: the engine is **more complete than its own ADRs claim** — six status lines understate reality, including ADR-0013 (direct write-back, the headline moat, filed "Deferred" long after shipping). All six corrected. Four genuine gaps; only token-refresh and web durability plausibly block a launch. | verified |
 | `nostos-completion-assessment-2026-07-29.md` | Overall project state: what is done, what gates launch. Carries the A1–A10 addendum **and the 2026-07-30 A11 / README-drift addendum** (five defects in places no test executes: an unreachable Tauri command, a malformed csproj, a failing RN typecheck, and two READMEs that misdescribed shipped behaviour). Engineering column is empty; the SDKs are packaged but **not published**. | verified |
 | `flutter-supabase-plug-and-play-launch.md` | The master plan — W0–W8 launch sequencing and the ≤5-min stranger-test gate. | inferred |
-| `reconnect-glitch-fix-2026-07-19.md` | Reconnect UI glitch. Its own header says "Phase 1 implementing; Phase 2 tracked" — Phase 2 is still open. | inferred |
+| `reconnect-glitch-fix-2026-07-19.md` | Reconnect UI glitch. Phase 2 (the epoch resume-gate) has SHIPPED — ` + BT + `transport.rs` + BT + ` skips the snapshot on epoch+checksum match (` + BT + `snapshot_on_epoch_mismatch` test); this row's "still open" note was stale (corrected 2026-08-17). | verified |
 
 ## GATED-ON-GO — live, awaiting an operator decision
 

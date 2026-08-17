@@ -15,11 +15,23 @@
 //! not_expr   := "NOT" not_expr | atom
 //! atom       := "(" expr ")" | comparison
 //! comparison := IDENT OP literal
-//! literal    := NUMBER | FLOAT | "true" | "false" | "'TEXT'" | IDENT
+//! literal    := NUMBER | FLOAT | "true" | "false" | "'TEXT'" | IDENT | PARAM
+//! PARAM      := ":" IDENT   (placeholder — literal position ONLY)
 //! OP         := "=" | "!=" | "<" | ">" | "<=" | ">="
 //! ```
 //!
 //! Precedence (standard): `NOT` > `AND` > `OR`; parentheses override.
+//!
+//! ## Placeholders (P5 sync streams)
+//!
+//! A server-side stream template may use `:name` placeholders in LITERAL
+//! position only — the right-hand side of a comparison (design:
+//! docs/plans/p5-sync-streams-design.md, Decisions 1-2). A placeholder parses
+//! to a [`ColumnValue::Param`] marker leaf; [`bind_params`] substitutes typed
+//! values at subscribe time (value-level binding — no client byte ever enters
+//! a query string, the injection answer). A placeholder in column position or
+//! standing alone is a parse error; inside a quoted string it is ordinary
+//! text, never a placeholder.
 //!
 //! ## Literal typing
 //!
@@ -33,6 +45,8 @@
 //! Six comparison operators + `AND`/`OR`/`NOT` + parens. No `IN`/`LIKE`/
 //! `BETWEEN`/`IS NULL`/joins/aggregates — add when a real query demands. The AST
 //! is the existing `PredicateExpr` (no new types).
+
+use std::collections::{HashMap, HashSet};
 
 use crate::predicate::{ColumnValue, PredicateExpr, PredicateFilter};
 
@@ -83,6 +97,7 @@ enum Token {
     NumberInt(i64),
     NumberFloat(f64),
     Text(String),     // single-quoted string
+    Param(String),    // `:ident` placeholder (P5 sync streams; literal position only)
     Op(&'static str), // one of the 6 comparison operators
     And,
     Or,
@@ -122,6 +137,25 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 let s: String = chars[start..i].iter().collect();
                 tokens.push(Token::Text(s));
                 i += 1; // consume closing quote
+            }
+            ':' => {
+                // `:ident` placeholder (P5 sync streams). The token is
+                // position-agnostic; the PARSER restricts it to literal
+                // position by only accepting it in `parse_literal`.
+                let start = i + 1;
+                let mut j = start;
+                while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                if j == start || !(chars[start].is_alphabetic() || chars[start] == '_') {
+                    return Err(ParseError::UnexpectedToken {
+                        found: ":".into(),
+                        expected: "an identifier after ':'",
+                    });
+                }
+                let name: String = chars[start..j].iter().collect();
+                tokens.push(Token::Param(name));
+                i = j;
             }
             '=' | '!' | '<' | '>' => {
                 // Two-char operators: !=, <=, >=. Single-char: =, <, >.
@@ -335,11 +369,17 @@ impl Parser {
         Ok(leaf)
     }
 
-    /// literal := NUMBER | FLOAT | "'TEXT'" | IDENT
+    /// literal := NUMBER | FLOAT | "'TEXT'" | IDENT | PARAM
     /// (true/false were tokenized as Text("true"/"false") — but typed comparison
     /// needs a Bool. Detect them here and emit Bool; everything else is Text.)
+    ///
+    /// This is the ONLY position a `Param` token is accepted — a placeholder
+    /// in column position or standing alone fails parsing here or in
+    /// `parse_atom`/`parse_comparison`, so an illegally-placed `Param` can
+    /// never survive into a parsed tree (P5 sync streams, Decision 2).
     fn parse_literal(&mut self) -> Result<ColumnValue, ParseError> {
         match self.advance() {
+            Some(Token::Param(name)) => Ok(ColumnValue::Param(name)),
             Some(Token::NumberInt(n)) => Ok(ColumnValue::Number(n)),
             Some(Token::NumberFloat(n)) => Ok(ColumnValue::Float(n)),
             Some(Token::Text(s)) => {
@@ -364,6 +404,103 @@ impl Parser {
             }),
         }
     }
+}
+
+// --- parameter binding (P5 sync streams) ------------------------------------
+
+/// A bind error — the params object didn't match the template's placeholders.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BindError {
+    #[error("missing value for placeholder :{name}")]
+    MissingParam { name: String },
+    #[error("unexpected param {name:?}: no placeholder :{name} in the template")]
+    ExtraParam { name: String },
+    #[error("param {name:?} is itself a placeholder; params must bind to concrete values")]
+    NestedParam { name: String },
+}
+
+/// Substitute every [`ColumnValue::Param`] placeholder leaf in `expr` with its
+/// typed value from `params` (P5 sync streams, docs/plans/p5-sync-streams-
+/// design.md Decision 2: binding is value-level, never textual).
+///
+/// The template is parsed ONCE at server startup; this runs per subscribe with
+/// the client's params. Binding is strict and loud, mirroring the
+/// `InvalidWhereSql` reject at the transport boundary:
+///
+/// - every placeholder must have a param ([`BindError::MissingParam`]);
+/// - every param must be used by the template ([`BindError::ExtraParam`]);
+/// - a param value that is itself a `Param` is rejected
+///   ([`BindError::NestedParam`]), so a successfully bound tree contains NO
+///   placeholder leaves.
+///
+/// Param names are ordinary strings at this layer — a param naming the tenant
+/// column binds like any other; the tenant override lives in transport
+/// (design Decision 3), not here.
+pub fn bind_params<S: std::hash::BuildHasher>(
+    expr: &PredicateExpr,
+    params: &HashMap<String, ColumnValue, S>,
+) -> Result<PredicateExpr, BindError> {
+    let mut used = HashSet::new();
+    let bound = bind_expr(expr, params, &mut used)?;
+    for name in params.keys() {
+        if !used.contains(name) {
+            return Err(BindError::ExtraParam { name: name.clone() });
+        }
+    }
+    Ok(bound)
+}
+
+fn bind_expr<S: std::hash::BuildHasher>(
+    expr: &PredicateExpr,
+    params: &HashMap<String, ColumnValue, S>,
+    used: &mut HashSet<String>,
+) -> Result<PredicateExpr, BindError> {
+    match expr {
+        PredicateExpr::Any => Ok(PredicateExpr::Any),
+        PredicateExpr::Eq(f) => Ok(PredicateExpr::Eq(bind_filter(f, params, used)?)),
+        PredicateExpr::Ne(f) => Ok(PredicateExpr::Ne(bind_filter(f, params, used)?)),
+        PredicateExpr::Lt(f) => Ok(PredicateExpr::Lt(bind_filter(f, params, used)?)),
+        PredicateExpr::Gt(f) => Ok(PredicateExpr::Gt(bind_filter(f, params, used)?)),
+        PredicateExpr::Le(f) => Ok(PredicateExpr::Le(bind_filter(f, params, used)?)),
+        PredicateExpr::Ge(f) => Ok(PredicateExpr::Ge(bind_filter(f, params, used)?)),
+        PredicateExpr::And(parts) => parts
+            .iter()
+            .map(|p| bind_expr(p, params, used))
+            .collect::<Result<Vec<_>, _>>()
+            .map(PredicateExpr::And),
+        PredicateExpr::Or(parts) => parts
+            .iter()
+            .map(|p| bind_expr(p, params, used))
+            .collect::<Result<Vec<_>, _>>()
+            .map(PredicateExpr::Or),
+        PredicateExpr::Not(inner) => Ok(PredicateExpr::Not(Box::new(bind_expr(
+            inner, params, used,
+        )?))),
+    }
+}
+
+fn bind_filter<S: std::hash::BuildHasher>(
+    f: &PredicateFilter,
+    params: &HashMap<String, ColumnValue, S>,
+    used: &mut HashSet<String>,
+) -> Result<PredicateFilter, BindError> {
+    let value = match &f.value {
+        ColumnValue::Param(name) => {
+            let v = params
+                .get(name)
+                .ok_or_else(|| BindError::MissingParam { name: name.clone() })?;
+            if matches!(v, ColumnValue::Param(_)) {
+                return Err(BindError::NestedParam { name: name.clone() });
+            }
+            used.insert(name.clone());
+            v.clone()
+        }
+        other => other.clone(),
+    };
+    Ok(PredicateFilter {
+        column: f.column.clone(),
+        value,
+    })
 }
 
 #[cfg(test)]
@@ -594,5 +731,240 @@ mod tests {
             parse_predicate_expr("a ! 1"),
             Err(ParseError::UnexpectedToken { .. })
         ));
+    }
+
+    // ---- P5 sync streams: `:param` placeholders (design §6) --------------
+    // docs/plans/p5-sync-streams-design.md Decisions 1-2: placeholders parse
+    // in LITERAL position only, bind value-level at subscribe time, and every
+    // mismatch is a loud error — never a silent pass.
+
+    #[test]
+    fn param_parses_in_literal_position() {
+        let e = parse_predicate_expr("owner = :owner").unwrap();
+        assert_eq!(e, PredicateExpr::eq("owner", ColumnValue::param("owner")));
+    }
+
+    #[test]
+    fn param_in_all_six_operators() {
+        assert_eq!(
+            parse_predicate_expr("a = :p").unwrap(),
+            PredicateExpr::eq("a", ColumnValue::param("p"))
+        );
+        assert_eq!(
+            parse_predicate_expr("a != :p").unwrap(),
+            PredicateExpr::ne("a", ColumnValue::param("p"))
+        );
+        assert_eq!(
+            parse_predicate_expr("a < :p").unwrap(),
+            PredicateExpr::lt("a", ColumnValue::param("p"))
+        );
+        assert_eq!(
+            parse_predicate_expr("a > :p").unwrap(),
+            PredicateExpr::gt("a", ColumnValue::param("p"))
+        );
+        assert_eq!(
+            parse_predicate_expr("a <= :p").unwrap(),
+            PredicateExpr::le("a", ColumnValue::param("p"))
+        );
+        assert_eq!(
+            parse_predicate_expr("a >= :p").unwrap(),
+            PredicateExpr::ge("a", ColumnValue::param("p"))
+        );
+    }
+
+    #[test]
+    fn param_in_compound_template() {
+        // The design's §2 example shape.
+        let e = parse_predicate_expr("owner_id = :owner AND priority >= :min").unwrap();
+        assert_eq!(
+            e,
+            PredicateExpr::And(vec![
+                PredicateExpr::eq("owner_id", ColumnValue::param("owner")),
+                PredicateExpr::ge("priority", ColumnValue::param("min")),
+            ])
+        );
+    }
+
+    #[test]
+    fn param_underscore_and_digit_suffix_names() {
+        let e = parse_predicate_expr("a = :min_2").unwrap();
+        assert_eq!(e, PredicateExpr::eq("a", ColumnValue::param("min_2")));
+    }
+
+    #[test]
+    fn param_in_column_position_is_a_parse_error() {
+        assert!(parse_predicate_expr(":owner = 1").is_err());
+    }
+
+    #[test]
+    fn param_standing_alone_is_a_parse_error() {
+        assert!(parse_predicate_expr(":owner").is_err());
+        assert!(parse_predicate_expr("a = 1 AND :owner").is_err());
+    }
+
+    #[test]
+    fn param_colon_without_identifier_is_a_parse_error() {
+        assert!(matches!(
+            parse_predicate_expr("a = :"),
+            Err(ParseError::UnexpectedToken { .. })
+        ));
+        // A digit-led name is not an identifier.
+        assert!(matches!(
+            parse_predicate_expr("a = :1abc"),
+            Err(ParseError::UnexpectedToken { .. })
+        ));
+    }
+
+    #[test]
+    fn quoted_colon_ident_is_ordinary_text_not_a_placeholder() {
+        let e = parse_predicate_expr("a = ':owner'").unwrap();
+        assert_eq!(e, PredicateExpr::eq("a", ColumnValue::text(":owner")));
+    }
+
+    #[test]
+    fn join_subquery_and_metachar_shapes_stay_rejected() {
+        // Startup validation (design §2/§6): the grammar never grew to fit
+        // these, so JOIN/CTE/subquery/injection-shaped templates fail loudly
+        // at parse time — config errors at boot, never at subscribe.
+        assert!(parse_predicate_expr("a = 1 AND b IN (SELECT id FROM t)").is_err());
+        assert!(parse_predicate_expr("a = 1 JOIN t ON t.a = 1").is_err());
+        assert!(parse_predicate_expr("owner = :owner; DROP TABLE tasks;--").is_err());
+        assert!(parse_predicate_expr("owner = :owner UNION SELECT * FROM tasks").is_err());
+    }
+
+    // ---- bind_params (design Decision 2) ----
+
+    fn stream_template() -> PredicateExpr {
+        parse_predicate_expr("owner = :owner AND priority >= :min").unwrap()
+    }
+
+    fn params(pairs: &[(&str, ColumnValue)]) -> HashMap<String, ColumnValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn bind_substitutes_typed_leaves_shape_preserved() {
+        let bound = bind_params(
+            &stream_template(),
+            &params(&[
+                ("owner", ColumnValue::text("u1")),
+                ("min", ColumnValue::number(3)),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            bound,
+            PredicateExpr::And(vec![
+                PredicateExpr::eq("owner", ColumnValue::text("u1")),
+                PredicateExpr::ge("priority", ColumnValue::number(3)),
+            ])
+        );
+    }
+
+    #[test]
+    fn bind_missing_param_is_a_loud_error() {
+        let err = bind_params(
+            &stream_template(),
+            &params(&[("owner", ColumnValue::text("u1"))]),
+        )
+        .unwrap_err();
+        assert_eq!(err, BindError::MissingParam { name: "min".into() });
+    }
+
+    #[test]
+    fn bind_extra_param_is_a_loud_error() {
+        // The abuse shape: a param the template never asked for (e.g. aimed at
+        // the tenant column) never silently passes through.
+        let err = bind_params(
+            &stream_template(),
+            &params(&[
+                ("owner", ColumnValue::text("u1")),
+                ("min", ColumnValue::number(3)),
+                ("org_id", ColumnValue::text("tenant-b")),
+            ]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            BindError::ExtraParam {
+                name: "org_id".into()
+            }
+        );
+    }
+
+    #[test]
+    fn bind_nested_placeholder_is_rejected() {
+        let err = bind_params(
+            &stream_template(),
+            &params(&[
+                ("owner", ColumnValue::param("evil")),
+                ("min", ColumnValue::number(3)),
+            ]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            BindError::NestedParam {
+                name: "owner".into()
+            }
+        );
+    }
+
+    #[test]
+    fn bind_through_not_and_or() {
+        let e = parse_predicate_expr("NOT (a = :x OR b = :y)").unwrap();
+        let bound = bind_params(
+            &e,
+            &params(&[
+                ("x", ColumnValue::number(1)),
+                ("y", ColumnValue::boolean(true)),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            bound,
+            PredicateExpr::Not(Box::new(PredicateExpr::Or(vec![
+                PredicateExpr::eq("a", ColumnValue::number(1)),
+                PredicateExpr::eq("b", ColumnValue::boolean(true)),
+            ])))
+        );
+    }
+
+    #[test]
+    fn a_fully_bound_tree_evaluates_against_rows() {
+        // The structural guarantee behind Decision 2: after Ok(bind_params)
+        // the tree holds only typed leaves and evaluates normally.
+        let bound = bind_params(
+            &stream_template(),
+            &params(&[
+                ("owner", ColumnValue::text("u1")),
+                ("min", ColumnValue::number(3)),
+            ]),
+        )
+        .unwrap();
+        let yes = row(&[
+            ("owner", ColumnValue::text("u1")),
+            ("priority", ColumnValue::number(5)),
+        ]);
+        let wrong_owner = row(&[
+            ("owner", ColumnValue::text("u2")),
+            ("priority", ColumnValue::number(5)),
+        ]);
+        let too_low = row(&[
+            ("owner", ColumnValue::text("u1")),
+            ("priority", ColumnValue::number(1)),
+        ]);
+        assert!(bound.matches(yes));
+        assert!(!bound.matches(wrong_owner));
+        assert!(!bound.matches(too_low));
+        // ...while the UNBOUND template matches nothing at all.
+        let unbound = stream_template();
+        assert!(!unbound.matches(row(&[
+            ("owner", ColumnValue::text("u1")),
+            ("priority", ColumnValue::number(5)),
+        ])));
     }
 }

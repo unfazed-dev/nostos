@@ -29,11 +29,20 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
+# Push credential validation/minting (ADR-0038 plan tasks 3.1-3.2): ES256
+# APNs provider JWT + RS256 FCM assertion (from_ec_pem/from_rsa_pem, the
+# exact calls the nostos-infra rails use), plus VAPID P-256 keypair mint.
+jsonwebtoken = { workspace = true }
+p256 = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 uuid = { workspace = true }
+# Mint RSA/EC test keys for the p8 + service-account validation tests
+# (mirrors nostos-infra's push-rail dev-dependency set).
+rsa = { workspace = true }
 
 [lints]
 workspace = true

@@ -1784,6 +1784,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "chrono",
  "clap",
  "futures-util",
  "nix",
@@ -1793,9 +1794,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-postgres",
  "tokio-tungstenite 0.23.1",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1804,9 +1807,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jsonwebtoken",
  "nostos-domain",
  "nostos-infra",
+ "p256",
+ "rand 0.8.6",
  "reqwest",
+ "rsa",
  "rustls",
  "serde",
  "serde_json",
@@ -1827,6 +1834,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "clap",
  "futures-util",
  "hmac 0.12.1",
  "nostos-application",
@@ -1959,6 +1967,31 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "time",
+]
+
+[[package]]
+name = "nostos-push"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "nostos-application",
+ "nostos-domain",
+ "nostos-infra",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "time",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

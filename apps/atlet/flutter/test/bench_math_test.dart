@@ -197,7 +197,7 @@ void main() {
         ),
       );
 
-      final lines = await store.file.readAsLines();
+      final lines = await store.file!.readAsLines();
       expect(lines, hasLength(2));
     });
   });
