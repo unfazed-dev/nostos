@@ -57,6 +57,35 @@ NOSTOS_PUSHD_API_KEYS="acme:s3cr3t,hq:delegator-key:rail" nostos-pushd
 Docker: the `nostos-pushd` service in `docker/docker-compose.stack.yml`
 (ADR-0038; builds from the root Dockerfile).
 
+## Postgres registry (v1.1)
+
+SQLite is the default and needs nothing. For a shared / containerized
+registry, build with the `pg` feature and point the daemon at Postgres:
+
+```sh
+cargo build --release -p nostos-push --features pg
+NOSTOS_PUSHD_DATABASE_URL="postgres://user:pass@host:5432/db" nostos-pushd
+```
+
+- Set + `pg` build → the PgStore: same trait, same semantics (tenant
+  isolation, cross-tenant 409s, monotonic receipt seq, age sweep), DDL
+  created idempotently at boot. Cross-tenant re-registration is refused by
+  a single atomic `INSERT … ON CONFLICT … DO UPDATE … WHERE owner matches`,
+  so it stays race-safe even with several daemon replicas on one database.
+- Set on a build without the feature → the daemon refuses to start, naming
+  the rebuild — it never silently downgrades you to SQLite.
+- Unset → the SQLite registry (`NOSTOS_PUSHD_DB`), byte-for-byte the v1.0
+  behavior.
+
+When to use it: more than one pushd replica, a registry that must outlive
+a container filesystem, or ops that already back Postgres. The pool is a
+single connection per daemon (the `PgTokenStore` pattern) — right-sized
+for the daemon's low-write shape.
+
+Real-Postgres store tests: `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=… cargo test -p
+nostos-push --features pg` (self-skip without the flag — a skipped run is
+not a verified pass).
+
 ## The upgrade path (why this daemon exists)
 
 nostos-pushd is the only push server with a sync-aware upgrade path. Adopt

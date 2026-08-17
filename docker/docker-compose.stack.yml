@@ -103,6 +103,10 @@ services:
     environment:
       NOSTOS_PUSHD_BIND: "0.0.0.0:8090"
       NOSTOS_PUSHD_DB: "/data/cairn-pushd.db"
+      # Optional (v1.1) — Postgres registry instead of the SQLite default
+      # above; the image builds nostos-pushd with --features pg, so setting
+      # this URL switches the registry (NOSTOS_PUSHD_DB is then ignored):
+      # NOSTOS_PUSHD_DATABASE_URL: "postgres://cairn:cairn@postgres:5432/cairn"
       # Required — tenant:secret API-key pairs, comma-separated:
       # Keys nostos-server delegates with (NOSTOS_PUSH_REMOTE_KEY) MUST carry
       # the ":rail" role suffix, e.g. "hq:delegator-key:rail".

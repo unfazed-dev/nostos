@@ -47,3 +47,17 @@ nostos-pushd ships AS PART of the Phase-3 OSS launch. **Recorded risk:** Phase 3
 ## The test that matters
 
 Standalone: register a token via REST, send visible + silent through each rail against the provider mock (`push/mod.rs` `test_support` idiom); a burst of 20 sends to one target ⇒ exactly 1 coalesced push; an APNs 410 prunes the row. Delegation: with `NOSTOS_PUSH_REMOTE_URL` set, ADR-0037's test-that-matters passes unchanged (two devices share an account, one offline ⇒ exactly one coalesced push ⇒ LSN caught up on open) with sends transiting nostos-pushd and the receipt landing in push-LSN correlation. Bench gate: fan-out hot-loop latency unchanged with RemoteNotifier enabled.
+
+---
+
+## Addendum (2026-08-17): v1.1 Postgres registry shipped
+
+§4's "Postgres option" is now real: `PgStore` in `crates/nostos-push/src/store.rs`
+behind `pg = ["dep:tokio-postgres"]` — a pool-of-one client on the `PgTokenStore`
+pattern, with idempotent boot DDL (advisory-lock-serialized). Selected at
+runtime by `NOSTOS_PUSHD_DATABASE_URL`: set on a non-`pg` build it is a hard
+startup error naming the rebuild; unset, SQLite is untouched. Cross-tenant
+re-registration is one atomic `INSERT … ON CONFLICT … DO UPDATE … WHERE`
+owner matches (zero rows ⇒ 409 Conflict) — race-safe without the SQLite
+mutex. The five registry behaviors are re-pinned against real Postgres
+behind the `NOSTOS_E2E_PG` gate.

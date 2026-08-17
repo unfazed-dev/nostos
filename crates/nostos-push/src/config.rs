@@ -22,9 +22,18 @@ pub struct Config {
     pub bind: String,
 
     /// SQLite database path for the daemon-owned token + receipt registry
-    /// (plan pin 0.3). ":memory:" works for tests.
+    /// (plan pin 0.3). ":memory:" works for tests. Ignored when
+    /// `database_url` (NOSTOS_PUSHD_DATABASE_URL) is set.
     #[arg(long, env = "NOSTOS_PUSHD_DB", default_value = "./cairn-pushd.db")]
     pub db: String,
+
+    /// Postgres registry URL (v1.1, ADR-0038 §4 addendum) — selects the
+    /// PgStore over the SQLite default. Requires a build with the `pg`
+    /// feature: set on a build without it, startup fails fast with the
+    /// rebuild hint instead of silently falling back to SQLite. Unset =
+    /// the SQLite registry above, untouched.
+    #[arg(long, env = "NOSTOS_PUSHD_DATABASE_URL")]
+    pub database_url: Option<String>,
 
     /// Tenant API keys, comma-separated "tenant:secret" pairs (plan pin
     /// 0.2). Parsed and validated at boot — empty or malformed input aborts
@@ -90,6 +99,7 @@ mod tests {
         let cfg = Config::parse_from(["nostos-pushd", "--api-keys", "acme:s3cr3t"]);
         assert_eq!(cfg.bind, "127.0.0.1:8090");
         assert_eq!(cfg.db, "./cairn-pushd.db");
+        assert_eq!(cfg.database_url, None, "SQLite stays the default registry");
         assert_eq!(cfg.api_keys, "acme:s3cr3t");
         assert_eq!(cfg.debounce_ms, 2000);
         assert_eq!(cfg.receipt_retention_secs, 604_800);

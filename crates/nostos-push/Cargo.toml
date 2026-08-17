@@ -17,11 +17,12 @@ path = "src/main.rs"
 
 [features]
 default = []
-# ponytail: pg = ["dep:tokio-postgres"] + a PgStore impl of store::Store
-# (pool-of-one, the PgTokenStore pattern) is deferred to v1.1 per plan pin
-# 0.3's time-box rule — the Arc<dyn Store> seam is already in place, so
-# v1.1 adds the impl + feature without touching a single caller. SQLite is
-# the single-binary default and the only store this wave ships.
+# v1.1 Postgres registry (ADR-0038 §4 + addendum): the PgStore impl of
+# store::Store — pool-of-one tokio-postgres client, the PgTokenStore
+# pattern. Off by default (SQLite stays the single-binary default); select
+# it at runtime with NOSTOS_PUSHD_DATABASE_URL. Setting that env var on a
+# build without this feature is a hard startup error naming the rebuild.
+pg = ["dep:tokio-postgres"]
 
 [dependencies]
 nostos-domain = { workspace = true }
@@ -35,6 +36,10 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
+# Postgres registry backend (feature "pg", v1.1) — pool-of-one client, the
+# nostos-infra PgTokenStore / oplog precedent. Optional: already a workspace
+# dependency, so enabling pg adds no new crates to the graph.
+tokio-postgres = { workspace = true, optional = true }
 subtle = { workspace = true }
 # Digest-then-ct_eq for API-key compare (the nostos-server admin_auth.rs
 # idiom) — digests are fixed 32 bytes, so there is no unequal-length branch

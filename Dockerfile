@@ -3,7 +3,8 @@
 #
 # Builds all three binaries from the workspace in a single builder stage, then
 # copies them into a slim runtime image. The `pg` feature is enabled on
-# nostos-server so the real PgReplicator ships in the image.
+# nostos-server (the real PgReplicator) and on nostos-push (the v1.1 PgStore
+# registry, selected at runtime by NOSTOS_PUSHD_DATABASE_URL).
 #
 #   docker build -t nostos .
 #   docker run --rm nostos nostos-server   # default entrypoint arg
@@ -16,10 +17,12 @@ WORKDIR /nostos
 # Install needed system libs (none beyond what the base image provides for our
 # deps; rusqlite uses `bundled` sqlite, reqwest uses rustls — no system deps).
 COPY . .
-# Build both binaries with the pg feature on nostos-server. Release profile.
+# Build all three binaries; the pg feature is on for nostos-server (the
+# real PgReplicator) and nostos-push (the PgStore registry, v1.1).
+# Release profile.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/nostos/target \
-    cargo build --release -p nostos-server --features pg -p nostos-cloud -p nostos-push && \
+    cargo build --release -p nostos-server --features pg -p nostos-cloud -p nostos-push --features pg && \
     cp target/release/nostos-server /usr/local/bin/ && \
     cp target/release/nostos-cloud  /usr/local/bin/ && \
     cp target/release/nostos-pushd  /usr/local/bin/

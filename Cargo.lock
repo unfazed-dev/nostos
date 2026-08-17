@@ -1784,6 +1784,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "chrono",
  "clap",
  "futures-util",
  "nix",
@@ -1793,9 +1794,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-postgres",
  "tokio-tungstenite 0.23.1",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1831,6 +1834,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "clap",
  "futures-util",
  "hmac 0.12.1",
  "nostos-application",
@@ -1984,6 +1988,7 @@ dependencies = [
  "subtle",
  "time",
  "tokio",
+ "tokio-postgres",
  "tracing",
  "tracing-subscriber",
  "uuid",

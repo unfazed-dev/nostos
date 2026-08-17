@@ -6,11 +6,10 @@
 //! a migrate() that is idempotent CREATE IF NOT EXISTS. The [Store] trait
 //! exists so the storage engine is a seam, not a fait accompli.
 //!
-//! ponytail: the Postgres impl (pool-of-one PgTokenStore pattern, behind a
-//! pg feature) is deferred to v1.1 per pin 0.3's time-box rule — it adds a
-//! second full SQL surface + live-PG test leg without changing one byte of
-//! the callers above this trait. Upgrade path: a `pg` feature + a
-//! PgStore in this module; AppState keeps holding Arc<dyn Store>.
+//! The v1.1 Postgres registry ([`PgStore`], behind the `pg` feature —
+//! ADR-0038 §4 addendum) is the pool-of-one PgTokenStore pattern: same
+//! trait, same semantics, selected at runtime by NOSTOS_PUSHD_DATABASE_URL
+//! while AppState keeps holding Arc<dyn Store>.
 //!
 //! Two columns sit beyond pin 0.3's abbreviated list, both demanded by the
 //! ratified API contract: receipts.tenant_id (GET /v1/receipts is
@@ -454,6 +453,362 @@ impl Store for SqliteStore {
             rusqlite::params![cutoff],
         )?;
         Ok(u64::try_from(n).unwrap_or(0))
+    }
+}
+
+// ===========================================================================
+// PgStore — the v1.1 Postgres registry (feature "pg", ADR-0038 §4).
+// ===========================================================================
+
+/// The v1.1 Postgres registry (ADR-0038 §4 addendum): same trait, same
+/// semantics as [`SqliteStore`], selected at runtime by
+/// `NOSTOS_PUSHD_DATABASE_URL`. Only present under the `pg` feature.
+#[cfg(feature = "pg")]
+pub use self::pg::PgStore;
+
+#[cfg(feature = "pg")]
+mod pg {
+    use super::{
+        now_rfc3339, DeleteOutcome, NewReceipt, Outcome, Platform, Store, StoredReceipt,
+        TokenRecord, UpsertOutcome, TS_FORMAT,
+    };
+    use anyhow::Context as _;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use time::OffsetDateTime;
+    use tokio::sync::Mutex;
+    use tokio_postgres::NoTls;
+
+    /// Boot DDL mirroring the SQLite schema (pin 0.3) with PG types.
+    /// Timestamps stay TEXT in the same fixed-width RFC3339 form
+    /// ([`TS_FORMAT`] / [`now_rfc3339`]) so sweep cutoffs compare
+    /// identically as plain strings, and `metadata` stays serialized-JSON
+    /// TEXT for the same read-back parse — zero semantic drift from the
+    /// SQLite twin. `seq` is a PG identity column (the SQLite
+    /// AUTOINCREMENT rowid role): monotonic, assigned server-side.
+    const DDL: &str = "CREATE TABLE IF NOT EXISTS push_tokens ( \
+            token TEXT PRIMARY KEY, \
+            platform TEXT NOT NULL CHECK(platform IN ('apns','fcm','webpush')), \
+            tenant_id TEXT NOT NULL, \
+            account_tag TEXT, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL); \
+        CREATE INDEX IF NOT EXISTS idx_push_tokens_tenant_account \
+            ON push_tokens(tenant_id, account_tag); \
+        CREATE TABLE IF NOT EXISTS receipts ( \
+            seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, \
+            tenant_id TEXT NOT NULL, \
+            push_id TEXT NOT NULL, \
+            token TEXT NOT NULL, \
+            outcome TEXT NOT NULL, \
+            detail TEXT, \
+            metadata TEXT, \
+            provider_ts TEXT NOT NULL); \
+        CREATE INDEX IF NOT EXISTS idx_receipts_tenant_seq \
+            ON receipts(tenant_id, seq);";
+
+    /// Advisory-lock key for boot DDL ("nostos" ASCII — arbitrary but
+    /// fixed). Concurrent `CREATE TABLE IF NOT EXISTS` for one name races
+    /// on the `pg_type` unique index (two pushd replicas booting at once,
+    /// or parallel e2e processes); the xact-scoped lock makes the DDL wait
+    /// its turn instead of failing.
+    const DDL_LOCK_KEY: i64 = 0x0063_6169_726E;
+
+    /// Postgres-backed [`Store`] (ADR-0038 §4, v1.1) — the pool-of-one
+    /// `PgTokenStore` construction pattern: one lazily-opened
+    /// `tokio_postgres::Client` behind a tokio `Mutex`, transparently
+    /// reopened after a connection death (any statement error drops the
+    /// client; the next call reconnects).
+    ///
+    /// ponytail: single connection, and the guard is held across each
+    /// statement so store access serializes exactly like the SQLite twin
+    /// (which holds its mutex across its queries). Pool when a real load
+    /// shows contention — the daemon is low-write by design.
+    #[derive(Clone)]
+    pub struct PgStore {
+        pg_url: String,
+        /// Pool-of-one. `Mutex` (not `OnceCell`) so a dead connection can
+        /// be replaced: take the lock, execute, and on a fatal error drop
+        /// the inner `Client` (the next call reconnects).
+        client: Arc<Mutex<Option<tokio_postgres::Client>>>,
+    }
+
+    impl PgStore {
+        /// Open (connect + run the idempotent DDL) the registry at a
+        /// libpq-style URL. Boot-time only. The URL is never logged — it
+        /// can carry credentials.
+        ///
+        /// # Errors
+        /// Bubbles connect/SQL errors (unreachable host, bad credentials).
+        pub async fn open(pg_url: &str) -> anyhow::Result<Self> {
+            let store = Self {
+                pg_url: pg_url.to_string(),
+                client: Arc::new(Mutex::new(None)),
+            };
+            store.migrate().await?;
+            Ok(store)
+        }
+
+        /// Idempotent CREATE IF NOT EXISTS boot migration (the
+        /// nostos-cloud `migrate()` role), serialized across concurrent
+        /// boots by [`DDL_LOCK_KEY`].
+        async fn migrate(&self) -> anyhow::Result<()> {
+            self.with_client(|mut c| async move {
+                let tx = c
+                    .transaction()
+                    .await
+                    .context("opening the DDL transaction")?;
+                tx.execute("SELECT pg_advisory_xact_lock($1)", &[&DDL_LOCK_KEY])
+                    .await
+                    .context("taking the boot-DDL advisory lock")?;
+                tx.batch_execute(DDL)
+                    .await
+                    .context("running the pushd registry DDL")?;
+                tx.commit().await.context("committing the DDL")?;
+                Ok((c, ()))
+            })
+            .await
+        }
+
+        /// Run `f` with the pool-of-one client (lazily connected). The
+        /// guard is held across the statement — the SQLite twin holds its
+        /// mutex across its queries, so serialization semantics are
+        /// identical and multi-statement methods (the owner-scoped
+        /// delete's follow-up lookup) stay race-free. On error the client
+        /// is dropped inside `f`'s future: the slot stays empty and the
+        /// next call reconnects (the `PgTokenStore` fatal-error story).
+        /// Deliberately NO auto-retry: a timed-out `append_receipt` may
+        /// have committed, and replaying it would double-append a receipt.
+        async fn with_client<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+        where
+            F: FnOnce(tokio_postgres::Client) -> Fut,
+            Fut: std::future::Future<Output = anyhow::Result<(tokio_postgres::Client, T)>>,
+        {
+            let mut guard = self.client.lock().await;
+            let client = match guard.take() {
+                Some(c) => c,
+                None => connect(&self.pg_url).await?,
+            };
+            let (client, out) = f(client).await?;
+            *guard = Some(client);
+            Ok(out)
+        }
+    }
+
+    /// Connect one client and drive its socket on a detached task (the
+    /// `PgTokenStore` pattern: tokio-postgres drives the connection;
+    /// dropping the `Client` closes it).
+    async fn connect(pg_url: &str) -> anyhow::Result<tokio_postgres::Client> {
+        let (client, conn) = tokio_postgres::connect(pg_url, NoTls)
+            .await
+            .context("connecting the pushd registry to Postgres (NOSTOS_PUSHD_DATABASE_URL)")?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        Ok(client)
+    }
+
+    #[async_trait]
+    impl Store for PgStore {
+        async fn upsert_token(
+            &self,
+            tenant_id: &str,
+            token: &str,
+            platform: Platform,
+            account_tag: Option<&str>,
+        ) -> anyhow::Result<UpsertOutcome> {
+            let now = now_rfc3339();
+            let platform = platform.as_str();
+            self.with_client(|c| async move {
+                // ONE atomic statement (audit finding 3): the conflict
+                // update is gated on the existing row's owner, so a
+                // cross-tenant re-register updates ZERO rows — the
+                // zero-row result IS the Conflict signal. Unlike the
+                // SQLite twin there is no check-then-act to keep atomic:
+                // race-safe by construction, even across processes.
+                let params: [&(dyn tokio_postgres::types::ToSql + Sync); 5] =
+                    [&token, &platform, &tenant_id, &account_tag, &now];
+                let n = c
+                    .execute(
+                        "INSERT INTO push_tokens \
+                         (token, platform, tenant_id, account_tag, created_at, updated_at) \
+                         VALUES ($1, $2, $3, $4, $5, $5) \
+                         ON CONFLICT (token) DO UPDATE SET \
+                             platform = $2, account_tag = $4, updated_at = $5 \
+                         WHERE push_tokens.tenant_id = $3",
+                        &params,
+                    )
+                    .await?;
+                Ok((
+                    c,
+                    if n == 0 {
+                        UpsertOutcome::Conflict
+                    } else {
+                        UpsertOutcome::Registered
+                    },
+                ))
+            })
+            .await
+        }
+
+        async fn delete_token_owner_scoped(
+            &self,
+            tenant_id: &str,
+            token: &str,
+        ) -> anyhow::Result<DeleteOutcome> {
+            self.with_client(|c| async move {
+                let n = c
+                    .execute(
+                        "DELETE FROM push_tokens WHERE token = $1 AND tenant_id = $2",
+                        &[&token, &tenant_id],
+                    )
+                    .await?;
+                if n == 1 {
+                    return Ok((c, DeleteOutcome::Deleted));
+                }
+                // Not the caller's row — Foreign vs Missing is kept for
+                // callers that need it; the ROUTE answers 204 either way
+                // (audit finding 6, same as the SQLite twin).
+                let owner = c
+                    .query_opt(
+                        "SELECT tenant_id FROM push_tokens WHERE token = $1",
+                        &[&token],
+                    )
+                    .await?;
+                Ok((
+                    c,
+                    match owner {
+                        Some(_) => DeleteOutcome::Foreign,
+                        None => DeleteOutcome::Missing,
+                    },
+                ))
+            })
+            .await
+        }
+
+        async fn lookup_token(
+            &self,
+            tenant_id: &str,
+            token: &str,
+        ) -> anyhow::Result<Option<TokenRecord>> {
+            self.with_client(|c| async move {
+                let row = c
+                    .query_opt(
+                        "SELECT platform, account_tag FROM push_tokens \
+                         WHERE token = $1 AND tenant_id = $2",
+                        &[&token, &tenant_id],
+                    )
+                    .await?;
+                Ok((
+                    c,
+                    row.map(|r| {
+                        let platform: String = r.get(0);
+                        TokenRecord {
+                            // Unparseable platform = corruption; the SQLite
+                            // twin panics here too (only this crate writes
+                            // the column).
+                            platform: Platform::parse(&platform)
+                                .unwrap_or_else(|| panic!("corrupt platform column: {platform}")),
+                            account_tag: r.get(1),
+                        }
+                    }),
+                ))
+            })
+            .await
+        }
+
+        async fn append_receipt(&self, receipt: &NewReceipt) -> anyhow::Result<i64> {
+            let metadata = receipt.metadata.as_ref().map(serde_json::Value::to_string);
+            let tenant_id = receipt.tenant_id.as_str();
+            let push_id = receipt.push_id.as_str();
+            let token = receipt.token.as_str();
+            let outcome = receipt.outcome.as_str();
+            let detail = receipt.detail.as_deref();
+            let provider_ts = receipt.provider_ts.as_str();
+            self.with_client(|c| async move {
+                // RETURNING seq — the identity column hands back the
+                // assigned monotonic seq in the same round trip (stronger
+                // than the SQLite twin's last_insert_rowid, and race-free
+                // by construction).
+                let params: [&(dyn tokio_postgres::types::ToSql + Sync); 7] = [
+                    &tenant_id,
+                    &push_id,
+                    &token,
+                    &outcome,
+                    &detail,
+                    &metadata,
+                    &provider_ts,
+                ];
+                let row = c
+                    .query_one(
+                        "INSERT INTO receipts \
+                         (tenant_id, push_id, token, outcome, detail, metadata, provider_ts) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                         RETURNING seq",
+                        &params,
+                    )
+                    .await?;
+                let seq: i64 = row.get(0);
+                Ok((c, seq))
+            })
+            .await
+        }
+
+        async fn list_receipts(
+            &self,
+            tenant_id: &str,
+            since: i64,
+            limit: u32,
+        ) -> anyhow::Result<Vec<StoredReceipt>> {
+            let max = i64::from(limit);
+            self.with_client(|c| async move {
+                let params: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
+                    [&tenant_id, &since, &max];
+                let rows = c
+                    .query(
+                        "SELECT seq, push_id, token, outcome, detail, metadata, provider_ts \
+                         FROM receipts WHERE tenant_id = $1 AND seq > $2 \
+                         ORDER BY seq ASC LIMIT $3",
+                        &params,
+                    )
+                    .await?;
+                let mut out = Vec::with_capacity(rows.len());
+                for r in rows {
+                    let outcome: String = r.get(3);
+                    let metadata: Option<String> = r.get(5);
+                    out.push(StoredReceipt {
+                        seq: r.get(0),
+                        push_id: r.get(1),
+                        token: r.get(2),
+                        // Unparseable outcome = corruption; fatal is the
+                        // honest floor (same as the SQLite twin).
+                        outcome: Outcome::parse(&outcome).unwrap_or(Outcome::Fatal),
+                        detail: r.get(4),
+                        metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+                        provider_ts: r.get(6),
+                    });
+                }
+                Ok((c, out))
+            })
+            .await
+        }
+
+        async fn sweep_receipts(&self, retention_secs: u64) -> anyhow::Result<u64> {
+            // Same string-comparison sweep as the SQLite twin: provider_ts
+            // is fixed-width RFC3339 TEXT, so a fixed-width cutoff
+            // compares correctly as a plain string.
+            let cutoff = (OffsetDateTime::now_utc()
+                - time::Duration::seconds(i64::try_from(retention_secs).unwrap_or(i64::MAX)))
+            .format(TS_FORMAT)
+            .expect("fixed-shape format");
+            self.with_client(|c| async move {
+                let n = c
+                    .execute("DELETE FROM receipts WHERE provider_ts < $1", &[&cutoff])
+                    .await?;
+                Ok((c, n))
+            })
+            .await
+        }
     }
 }
 
