@@ -44,9 +44,9 @@ ADR-0037 + `docs/plans/nostos-push-notifications-implementation.md` (24/24, done
 - [ ] 4.1 Security review: token registry is PII-adjacent; API-key storage (hashed at rest?); tenant isolation; rate limits on /v1/send; no row data in payloads (doorbell discipline, ADR-0037 §2 — daemon visible templates are operator-configured, never row-derived beyond interpolation).
 - [ ] 4.2 Bench gate: `make bench` with RemoteNotifier enabled — hot-loop latency unchanged; recorded in benches/results/RESULTS.md per docs/BENCHMARK-METHODOLOGY.md.
 - [ ] 4.3 docker compose leg: nostos-pushd service + env template.
-- [ ] 4.4 README + docs: what it is / isn't (NOT a marketing platform — ADR-0037 boundary; no delivery guarantees — honest limits).
-- [ ] 4.5 CI: nostos-push in fmt/clippy (-D warnings)/test matrix; unsafe-forbidden lint covers the new crate.
-- [ ] 4.6 Launch narrative: daemon as land-and-expand top-of-funnel — "the only push server with a sync-aware upgrade path."
+- [x] 4.4 README + docs: crates/nostos-push/README.md (is / is-not / upgrade path) + docs/push.md three recipes + honest-limits caveats throughout.
+- [x] 4.5 CI: NO workflow edit needed — ci.yml and make ci run workspace-wide (fmt --all, clippy --workspace --all-targets, test --workspace); nostos-push membership verified by green workspace gates (orchestrator re-ran: clippy exit 0, 36 nostos-push tests passing). unsafe-forbidden lint covers all members by definition.
+- [x] 4.6 Launch narrative: ROADMAP Phase-3 deliverables + status footer now carry the push/nostos-pushd line and the land-and-expand framing; same line in crates/nostos-push/README.md and docs/push.md.
 
 ## Explicitly out of scope (ADR-0038 §2 — do not re-litigate without an ADR)
 
