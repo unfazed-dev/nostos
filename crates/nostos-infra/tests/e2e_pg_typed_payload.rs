@@ -70,9 +70,9 @@ async fn drop_slot(sql: &tokio_postgres::Client, slot: &str) {
 /// run's own row never appeared. Safe under the file's documented
 /// `--test-threads=1` convention (same as e2e_pg_snapshot.rs on `tasks`).
 async fn ensure_typed_probe(sql: &tokio_postgres::Client) {
-    sql.batch_execute("TRUNCATE TABLE typed_probe;")
-        .await
-        .expect("truncate typed_probe (re-entrant fixture)");
+    // CREATE must precede TRUNCATE: a freshly seeded database (e.g. a wiped
+    // Docker volume) has no typed_probe yet — truncate-first fails with
+    // 42P01 (caught 2026-08-17 on a recreated nostos-postgres volume).
     sql.batch_execute(
         "CREATE TABLE IF NOT EXISTS typed_probe ( \
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(), \
@@ -91,6 +91,9 @@ async fn ensure_typed_probe(sql: &tokio_postgres::Client) {
     )
     .await
     .expect("create typed_probe");
+    sql.batch_execute("TRUNCATE TABLE typed_probe;")
+        .await
+        .expect("truncate typed_probe (re-entrant fixture)");
     sql.batch_execute(&format!(
         "DO $$ BEGIN \
          IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = '{PUBLICATION}') THEN \
