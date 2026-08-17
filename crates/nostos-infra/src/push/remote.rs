@@ -36,7 +36,8 @@
 //!    daemon's pinned `coalesced:<winner>` detail, plan 1.6) never touched
 //!    a rail, so they feed only the correlation map, never the counters.
 //!    Poll failures back off exponentially; the cursor makes re-polls
-//!    idempotent.
+//!    idempotent, and optionally persists across restarts
+//!    (`NOSTOS_PUSH_REMOTE_STATE_PATH` — see [`CursorFile`]).
 //!
 //! ## Daemon outage (ponytail: no durable spool in v1)
 //!
@@ -63,16 +64,17 @@
 //! the coalescing rail in delegation mode (pin 2.0), so this side also
 //! deliberately carries NO debounce window of its own.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use nostos_application::ports::{Metrics, PushHint, PushNotifier, SessionStore};
 use nostos_domain::Lsn;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::router::{build_payload, PushTokenRegistry, RouterConfig, PLATFORM_APNS_LIVE_ACTIVITY};
 
@@ -89,6 +91,10 @@ const RECEIPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// Receipt page size — the contract's maximum, so the log drains in as few
 /// polls as possible.
 const RECEIPT_PAGE: usize = 1000;
+/// Minimum spacing between cursor-state writes while pages stream in; a
+/// caught-up (short) page always flushes a pending newer value immediately.
+/// Metrics-only honesty: no fsync — a crash loses at most this much cursor.
+const CURSOR_WRITE_INTERVAL: Duration = Duration::from_secs(1);
 /// The daemon's pinned loser-receipt detail prefix (plan 1.6): a receipt
 /// whose detail starts with this never caused a rail send.
 const COALESCED_DETAIL_PREFIX: &str = "coalesced:";
@@ -107,6 +113,8 @@ impl RemoteNotifier {
     /// runtime (it spawns the background tasks). `base_url` is the
     /// daemon's origin (e.g. `http://127.0.0.1:8090`); `api_key` is the
     /// bearer key minted from the daemon's `NOSTOS_PUSHD_API_KEYS`.
+    /// `receipts_state_path` opts the receipts cursor into on-disk
+    /// persistence across restarts (`None` keeps it in-memory, logged).
     #[must_use]
     pub fn new(
         base_url: &str,
@@ -115,6 +123,7 @@ impl RemoteNotifier {
         store: Arc<dyn SessionStore>,
         config: RouterConfig,
         metrics: Arc<Metrics>,
+        receipts_state_path: Option<PathBuf>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(HINT_CHANNEL_CAPACITY);
         let base = base_url.trim_end_matches('/');
@@ -132,6 +141,17 @@ impl RemoteNotifier {
         };
         let receipt_registry = Arc::clone(&delegation.registry);
         let receipt_metrics = Arc::clone(&delegation.metrics);
+        if let Some(path) = &receipts_state_path {
+            info!(
+                path = %path.display(),
+                "remote push receipts cursor persists across restarts"
+            );
+        } else {
+            info!(
+                "remote push receipts cursor is in-memory (NOSTOS_PUSH_REMOTE_STATE_PATH \
+                 unset — a restart replays the daemon's receipt log, metrics-only skew)"
+            );
+        }
         tokio::spawn(deliver_loop(rx, delegation));
         tokio::spawn(receipt_loop(
             client,
@@ -139,6 +159,7 @@ impl RemoteNotifier {
             api_key.to_string(),
             receipt_registry,
             receipt_metrics,
+            receipts_state_path,
         ));
         Self { tx, metrics }
     }
@@ -385,20 +406,25 @@ struct ReceiptDto {
 
 /// Poll the receipt log forever, advancing the `since` cursor page by
 /// page. Failures back off; a full page loops immediately to drain a
-/// backlogged log.
+/// backlogged log. When `state_path` is set the cursor persists across
+/// restarts (see [`CursorFile`]).
 async fn receipt_loop(
     client: reqwest::Client,
     receipts_url: String,
     api_key: String,
     registry: Arc<dyn PushTokenRegistry>,
     metrics: Arc<Metrics>,
+    state_path: Option<PathBuf>,
 ) {
-    // ponytail: the receipts cursor is not persisted — a nostos-server
-    // restart re-reads the retention window from seq 0 (metrics skew only:
-    // the prune is idempotent and the LSN correlation map is
-    // monotonicity-guarded, so replayed receipts cannot corrupt state).
-    // Upgrade path: cursor persistence (v1.1).
-    let mut since: i64 = 0;
+    // The cursor persists across restarts when a state file is configured
+    // (NOSTOS_PUSH_REMOTE_STATE_PATH): loaded once here, written back after
+    // every advance — throttled to at most one write per second, plus a
+    // flush on a caught-up page. Atomic tmp+rename, deliberately NO fsync:
+    // a crash loses at most ~1s of cursor and the daemon replay that
+    // follows is monotonicity-guarded (metrics-only skew, never state
+    // corruption).
+    let mut cursor_file = state_path.map(CursorFile::load);
+    let mut since: i64 = cursor_file.as_ref().map_or(0, |f| f.persisted);
     let mut failures: u32 = 0;
     loop {
         let page = client
@@ -438,7 +464,13 @@ async fn receipt_loop(
         for r in &body.receipts {
             apply_receipt(r, &registry, &metrics).await;
         }
-        if body.receipts.len() < RECEIPT_PAGE {
+        let caught_up = body.receipts.len() < RECEIPT_PAGE;
+        // Persist AFTER applying: a crash between the two replays
+        // idempotent receipts, while persisting first would skip them.
+        if let Some(file) = cursor_file.as_mut() {
+            file.maybe_persist(since, caught_up);
+        }
+        if caught_up {
             tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
         }
     }
@@ -519,6 +551,116 @@ fn backoff(failures: u32) -> Duration {
     (RECEIPT_BACKOFF_MIN * (1u32 << shifts)).min(RECEIPT_BACKOFF_MAX)
 }
 
+// -------------------------------------------------- receipts cursor state
+
+/// The state file's entire content: `{"receipts_since": N}`. One serde DTO
+/// so read and write share a single shape definition.
+#[derive(Serialize, Deserialize)]
+struct CursorDto {
+    receipts_since: i64,
+}
+
+/// Throttled writer for the receipts-cursor state file. Metrics-only
+/// honesty (see the module doc): no fsync — a crash may lose up to
+/// [`CURSOR_WRITE_INTERVAL`] of cursor, and the daemon replay that follows
+/// is monotonicity-guarded.
+struct CursorFile {
+    path: PathBuf,
+    /// The newest value durably on disk — [`CursorFile::maybe_persist`] is
+    /// a no-op while the in-memory cursor equals it.
+    persisted: i64,
+    /// When the last write landed, for the one-per-second throttle.
+    last_write: Option<Instant>,
+}
+
+impl CursorFile {
+    /// Load the cursor: a missing file is a fresh start (debug log), and an
+    /// unparseable or unreadable one warns and ALSO starts at 0 — the
+    /// daemon replays its retention window, which skews metrics but cannot
+    /// corrupt state.
+    fn load(path: PathBuf) -> Self {
+        let persisted = match std::fs::read_to_string(&path) {
+            Ok(content) => match serde_json::from_str::<CursorDto>(&content) {
+                Ok(dto) => dto.receipts_since,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "remote push receipts cursor file unparseable — starting at 0"
+                    );
+                    0
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!(
+                    path = %path.display(),
+                    "remote push receipts cursor file absent — fresh start at 0"
+                );
+                0
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "remote push receipts cursor file unreadable — starting at 0"
+                );
+                0
+            }
+        };
+        Self {
+            path,
+            persisted,
+            last_write: None,
+        }
+    }
+
+    /// Write `since` back once it advances past [`Self::persisted`], at most
+    /// once per [`CURSOR_WRITE_INTERVAL`] — except a caught-up (short) page
+    /// flushes a pending newer value immediately, so the resting cursor
+    /// always lands on disk instead of waiting out the throttle. A failed
+    /// write warns and stays pending; the next advance-or-caught-up retries.
+    fn maybe_persist(&mut self, since: i64, caught_up: bool) {
+        if since == self.persisted {
+            return;
+        }
+        let throttled = !caught_up
+            && self
+                .last_write
+                .is_some_and(|t| t.elapsed() < CURSOR_WRITE_INTERVAL);
+        if throttled {
+            return;
+        }
+        if let Err(e) = write_cursor(&self.path, since) {
+            warn!(
+                error = %e,
+                path = %self.path.display(),
+                "remote push receipts cursor persist failed"
+            );
+            return;
+        }
+        self.persisted = since;
+        self.last_write = Some(Instant::now());
+    }
+}
+
+/// Atomic cursor write: create parent dirs as needed, serialize to
+/// `<path>.tmp`, rename over `<path>` — a crash mid-write can never leave a
+/// torn state file.
+fn write_cursor(path: &Path, since: i64) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string(&CursorDto {
+        receipts_since: since,
+    })
+    .map_err(std::io::Error::other)?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +675,8 @@ mod tests {
     use nostos_domain::{ReplicationEvent, SessionId, SyncSession};
     use std::collections::{HashMap, HashSet};
     use std::net::SocketAddr;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     // ---- test doubles ----
@@ -583,6 +727,9 @@ mod tests {
         addr: SocketAddr,
         sends: Arc<Mutex<Vec<RecordedSend>>>,
         receipts: Arc<Mutex<Vec<Value>>>,
+        /// Every `since` value polled, in order — the restart-resume
+        /// tests assert on the FIRST poll a fresh notifier makes.
+        sinces: Arc<Mutex<Vec<i64>>>,
     }
 
     impl MockDaemon {
@@ -591,6 +738,7 @@ mod tests {
         async fn start(hang_sends: bool) -> Self {
             let sends: Arc<Mutex<Vec<RecordedSend>>> = Arc::new(Mutex::new(Vec::new()));
             let receipts: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+            let sinces: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
             let s1 = Arc::clone(&sends);
             let send_handler = move |headers: HeaderMap, body: String| {
                 let sends = Arc::clone(&s1);
@@ -612,8 +760,10 @@ mod tests {
                 }
             };
             let r1 = Arc::clone(&receipts);
+            let s2 = Arc::clone(&sinces);
             let receipts_handler = move |uri: Uri| {
                 let receipts = Arc::clone(&r1);
+                let sinces = Arc::clone(&s2);
                 async move {
                     let since: i64 = uri
                         .query()
@@ -621,6 +771,7 @@ mod tests {
                         .and_then(|p| p.strip_prefix("since="))
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0);
+                    sinces.lock().expect("sinces").push(since);
                     let list: Vec<Value> = receipts
                         .lock()
                         .expect("receipts")
@@ -645,6 +796,7 @@ mod tests {
                 addr,
                 sends,
                 receipts,
+                sinces,
             }
         }
 
@@ -658,6 +810,10 @@ mod tests {
 
         fn add_receipt(&self, r: Value) {
             self.receipts.lock().expect("receipts").push(r);
+        }
+
+        fn sinces(&self) -> Vec<i64> {
+            self.sinces.lock().expect("sinces").clone()
         }
     }
 
@@ -679,11 +835,20 @@ mod tests {
         online: &[&str],
         config: RouterConfig,
         metrics: Arc<Metrics>,
+        state_path: Option<PathBuf>,
     ) -> RemoteNotifier {
         let store: Arc<dyn SessionStore> = Arc::new(FakeStore {
             online: Mutex::new(online.iter().map(|s| (*s).to_string()).collect()),
         });
-        RemoteNotifier::new(base_url, "secret-key", registry, store, config, metrics)
+        RemoteNotifier::new(
+            base_url,
+            "secret-key",
+            registry,
+            store,
+            config,
+            metrics,
+            state_path,
+        )
     }
 
     /// Poll (bounded) until `f` holds — the deliver/receipt tasks are async.
@@ -725,6 +890,7 @@ mod tests {
             &[],
             RouterConfig::default(),
             Arc::clone(&metrics),
+            None,
         );
 
         let start = std::time::Instant::now();
@@ -762,6 +928,7 @@ mod tests {
             &[],
             RouterConfig::default(),
             Arc::clone(&metrics),
+            None,
         );
 
         let total = u64::try_from(HINT_CHANNEL_CAPACITY + 64).expect("fits");
@@ -843,7 +1010,14 @@ mod tests {
             .await
             .unwrap();
         let metrics = Arc::new(Metrics::new());
-        let n = notifier(&mock.url(), registry, &[], RouterConfig::default(), metrics);
+        let n = notifier(
+            &mock.url(),
+            registry,
+            &[],
+            RouterConfig::default(),
+            metrics,
+            None,
+        );
 
         n.notify(hint("t1", "u1", "tasks", 4242)).await;
         drop(n); // ends the deliver task after draining pending hints
@@ -895,6 +1069,7 @@ mod tests {
             &["u-on"],
             RouterConfig::default(),
             metrics,
+            None,
         );
 
         n.notify(hint("t1", "", "tasks", 7)).await;
@@ -945,6 +1120,7 @@ mod tests {
                 live_activities: HashMap::new(),
             },
             metrics,
+            None,
         );
 
         let mut h = hint("t1", "u1", "orders", 9);
@@ -983,6 +1159,7 @@ mod tests {
             &[],
             RouterConfig::default(),
             Arc::clone(&metrics),
+            None,
         );
 
         n.notify(hint("t1", "u1", "tasks", 1)).await;
@@ -1019,6 +1196,7 @@ mod tests {
                 live_activities,
             },
             metrics,
+            None,
         );
 
         n.notify(hint("t1", "u1", "deliveries", 5)).await;
@@ -1058,6 +1236,7 @@ mod tests {
             &[],
             RouterConfig::default(),
             Arc::clone(&metrics),
+            None,
         );
 
         mock.add_receipt(serde_json::json!({
@@ -1114,5 +1293,150 @@ mod tests {
             metrics.push_last_lsn.lock().unwrap().get("u1").copied(),
             Some(4243)
         );
+    }
+
+    // ---- receipts cursor persistence (restart-resume) ----
+
+    /// A unique state-file path per test: temp dir + pid + atomic counter
+    /// (the workspace has no tempfile dep — see the root Cargo.toml).
+    fn temp_state_path(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "nostos-remote-cursor-{}-{label}-{n}.json",
+            std::process::id()
+        ))
+    }
+
+    /// The persisted cursor, parsed — `None` when absent or unparseable.
+    fn read_cursor(path: &Path) -> Option<i64> {
+        let content = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<CursorDto>(&content)
+            .ok()
+            .map(|dto| dto.receipts_since)
+    }
+
+    /// Restart-resume: the first notifier drains receipts and persists the
+    /// cursor; a SECOND notifier on the same state path starts its FIRST
+    /// receipts poll at the persisted value — the replayed window is
+    /// never re-fetched.
+    #[tokio::test]
+    async fn receipts_cursor_resumes_across_restart() {
+        let path = temp_state_path("resume");
+        let _ = std::fs::remove_file(&path);
+
+        // First life: seq 1..=3 already sit in the log when the poll
+        // starts, and the caught-up flush persists the advanced cursor.
+        let mock = MockDaemon::start(false).await;
+        for seq in 1..=3i64 {
+            mock.add_receipt(serde_json::json!({
+                "seq": seq, "push_id": format!("p{seq}"), "token": "tok-1",
+                "outcome": "delivered",
+                "metadata": {"table": "tasks", "lsn": "10", "account": "u1"}
+            }));
+        }
+        let n1 = notifier(
+            &mock.url(),
+            Arc::new(InMemoryTokenRegistry::new()),
+            &[],
+            RouterConfig::default(),
+            Arc::new(Metrics::new()),
+            Some(path.clone()),
+        );
+        soon(|| read_cursor(&path) == Some(3)).await;
+        drop(n1); // the receipts task itself runs for the process lifetime
+
+        // Second life against a FRESH daemon log (the daemon kept its
+        // receipts; only the server restarted): the first poll must carry
+        // since=<persisted>, never since=0.
+        let mock2 = MockDaemon::start(false).await;
+        for seq in 4..=5i64 {
+            mock2.add_receipt(serde_json::json!({
+                "seq": seq, "push_id": format!("p{seq}"), "token": "tok-1",
+                "outcome": "delivered",
+                "metadata": {"table": "tasks", "lsn": "11", "account": "u2"}
+            }));
+        }
+        let metrics = Arc::new(Metrics::new());
+        let _n2 = notifier(
+            &mock2.url(),
+            Arc::new(InMemoryTokenRegistry::new()),
+            &[],
+            RouterConfig::default(),
+            Arc::clone(&metrics),
+            Some(path.clone()),
+        );
+        soon(|| !mock2.sinces().is_empty()).await;
+        assert_eq!(
+            mock2.sinces()[0],
+            3,
+            "the first poll after restart starts at the persisted cursor"
+        );
+        // And the resumed poll works from there: both post-cursor
+        // receipts are applied.
+        soon(|| metrics.snapshot().push_sent == 2).await;
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A corrupt state file ⇒ the first poll starts at since=0 (warn +
+    /// fresh, asserted behaviorally) and the next advance self-heals the
+    /// file with valid JSON.
+    #[tokio::test]
+    async fn corrupt_state_file_starts_at_zero_and_self_heals() {
+        let path = temp_state_path("corrupt");
+        std::fs::write(&path, b"{\"receipts_since\": not-a-number").unwrap();
+
+        let mock = MockDaemon::start(false).await;
+        mock.add_receipt(serde_json::json!({
+            "seq": 7, "push_id": "p7", "token": "tok-1", "outcome": "delivered",
+            "metadata": {"table": "tasks", "lsn": "1", "account": "u1"}
+        }));
+        let _n = notifier(
+            &mock.url(),
+            Arc::new(InMemoryTokenRegistry::new()),
+            &[],
+            RouterConfig::default(),
+            Arc::new(Metrics::new()),
+            Some(path.clone()),
+        );
+        soon(|| !mock.sinces().is_empty()).await;
+        assert_eq!(
+            mock.sinces()[0],
+            0,
+            "an unparseable cursor file restarts the poll at seq 0"
+        );
+        soon(|| read_cursor(&path) == Some(7)).await;
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A state path under not-yet-existing directories: the first persist
+    /// creates them (`create_dir_all` on the parent).
+    #[tokio::test]
+    async fn state_file_creates_missing_parent_dirs() {
+        let base = temp_state_path("dirs");
+        let stem = base.file_stem().expect("stem").to_str().expect("utf-8");
+        let dir = std::env::temp_dir().join(format!("{stem}-nested/deeper"));
+        let path = dir.join("cursor.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mock = MockDaemon::start(false).await;
+        mock.add_receipt(serde_json::json!({
+            "seq": 2, "push_id": "p2", "token": "tok-1", "outcome": "delivered",
+            "metadata": {"table": "tasks", "lsn": "1", "account": "u1"}
+        }));
+        let _n = notifier(
+            &mock.url(),
+            Arc::new(InMemoryTokenRegistry::new()),
+            &[],
+            RouterConfig::default(),
+            Arc::new(Metrics::new()),
+            Some(path.clone()),
+        );
+        soon(|| read_cursor(&path) == Some(2)).await;
+        assert!(dir.is_dir(), "the missing parent dirs were created");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

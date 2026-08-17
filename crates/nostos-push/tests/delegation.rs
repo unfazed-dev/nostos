@@ -202,6 +202,7 @@ async fn delegation_leg_coalesced_dispatch_and_receipt_correlation() {
         sessions,
         RouterConfig::default(),
         Arc::clone(&metrics),
+        None, // in-memory receipts cursor — persistence is server-side wiring
     );
 
     // The burst: BURST hints at the offline account, a few at the ONLINE

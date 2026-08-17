@@ -190,6 +190,16 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_PUSH_REMOTE_KEY", default_value = "")]
     push_remote_key: String,
 
+    /// Optional state-file path for the delegation receipts cursor
+    /// (ADR-0038 §3 restart-resume). When set (and delegation is active),
+    /// the receipts poll persists its `since` cursor across nostos-server
+    /// restarts: loaded at startup (missing file = fresh start at 0),
+    /// written back atomically (tmp+rename) at most once per second.
+    /// Unset = in-memory cursor: a restart replays the daemon's receipt
+    /// log (metrics-only skew — delivery state is monotonicity-guarded).
+    #[arg(long, env = "NOSTOS_PUSH_REMOTE_STATE_PATH", default_value = "")]
+    push_remote_state_path: String,
+
     /// Logical-replication slot name.
     #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "cairn_slot")]
     pg_slot: String,
@@ -505,6 +515,8 @@ async fn main() -> anyhow::Result<()> {
             live_activity_tables = push_cfg.live_activities.len(),
             "push: RemoteNotifier delegation to nostos-pushd active (embedded PushRouter skipped)"
         );
+        let receipts_state = (!cfg.push_remote_state_path.trim().is_empty())
+            .then(|| std::path::PathBuf::from(cfg.push_remote_state_path.clone()));
         Arc::new(nostos_infra::push::remote::RemoteNotifier::new(
             &cfg.push_remote_url,
             &cfg.push_remote_key,
@@ -515,6 +527,7 @@ async fn main() -> anyhow::Result<()> {
                 live_activities: push_cfg.live_activities.clone(),
             },
             Arc::clone(&metrics),
+            receipts_state,
         ))
     } else if wiring == PushWiring::Noop {
         info!("push: off (no rails configured, no NOSTOS_PUSH_TABLES)");

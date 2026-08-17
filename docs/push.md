@@ -131,6 +131,9 @@ Shipped (Wave 2, ADR-0038 §3). A nostos-server pointed at a daemon stops sendin
 ```shell
 NOSTOS_PUSH_REMOTE_URL=https://push.internal:8090
 NOSTOS_PUSH_REMOTE_KEY=secret-word      # the SECRET only — no suffix
+# Optional: persist the receipts cursor across nostos-server restarts
+# (unset = in-memory; a restart replays the log — metrics-only skew)
+NOSTOS_PUSH_REMOTE_STATE_PATH=/var/lib/nostos/push-receipts-cursor.json
 ```
 
 On the **daemon** side, the matching `NOSTOS_PUSHD_API_KEYS` entry for that key MUST carry the `:rail` role suffix — delegation sends are rail-mode sends (unregistered token + `platform` field), and since the 2026-08-17 security closeout a Standard key gets `403` on them:
