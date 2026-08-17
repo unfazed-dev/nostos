@@ -45,7 +45,7 @@ use nostos_domain::{
 use crate::router::TokioEventSink;
 use crate::wire::{
     decode_client_message, encode_event, encode_events, encode_resume_info,
-    encode_snapshot_boundary, encode_write_result, ClientMessage,
+    encode_snapshot_boundary, encode_stream_error, encode_write_result, ClientMessage,
 };
 
 /// Default per-session bounded-buffer depth. Slow clients that fall this far
@@ -1110,6 +1110,27 @@ async fn handle_decoded_message(
         ClientMessage::Subscribe { .. } => {
             debug!("subscribe reached decoded-message handler");
         }
+        // P5 sync streams: the wire variants exist (wire.rs), but mid-session
+        // routing (stream registry → per-stream session) is a later slice of
+        // docs/plans/p5-sync-streams-design.md. Until then the honest answer
+        // is the design's non-fatal `stream_error` reject (§1) — never a
+        // socket close, never a silent drop.
+        ClientMessage::SubscribeStream { id, .. } => {
+            let frame = encode_stream_error(
+                &id,
+                "sync streams are not enabled on this server yet (P5 routing pending)",
+            );
+            let _ = server_frames_tx.try_send(frame);
+            debug!(stream_id = %id, "subscribe_stream rejected: routing pending");
+        }
+        ClientMessage::UnsubscribeStream { id } => {
+            let frame = encode_stream_error(
+                &id,
+                "sync streams are not enabled on this server yet (P5 routing pending)",
+            );
+            let _ = server_frames_tx.try_send(frame);
+            debug!(stream_id = %id, "unsubscribe_stream rejected: routing pending");
+        }
     }
 }
 
@@ -1373,10 +1394,16 @@ async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
                 client_epoch: epoch,
                 client_rules_checksum: rules_checksum,
             }),
-            // An ACK or a Write before subscribing is out of order — reject by
+            // An ACK, a Write, or a stream subscribe/unsubscribe (P5 §1 —
+            // streams are lazy mid-session adds riding the socket's one
+            // global checkpoint, so the base `Subscribe` must establish the
+            // session first) before subscribing is out of order — reject by
             // closing the socket (same discipline as early ACK). The caller
             // returns from run_session, dropping the connection.
-            ClientMessage::Ack { .. } | ClientMessage::Write { .. } => None,
+            ClientMessage::Ack { .. }
+            | ClientMessage::Write { .. }
+            | ClientMessage::SubscribeStream { .. }
+            | ClientMessage::UnsubscribeStream { .. } => None,
         };
     }
     None
