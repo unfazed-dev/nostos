@@ -213,6 +213,10 @@ fn value_canonical(v: &ScopeValue) -> String {
         ScopeValue::Literal(ColumnValue::Float(f)) => f.to_string(),
         ScopeValue::Literal(ColumnValue::Bool(b)) => b.to_string(),
         ScopeValue::Literal(ColumnValue::Any) => "*".to_string(),
+        // Unreachable in practice: scopes never carry placeholders (only
+        // `predicate_compile` emits `Param`, in stream templates — P5 sync
+        // streams design, Decision 2). Rendered for exhaustiveness only.
+        ScopeValue::Literal(ColumnValue::Param(name)) => format!(":{name}"),
     }
 }
 

@@ -763,7 +763,12 @@ fn column_to_str(v: Option<ColumnValue>) -> String {
         Some(ColumnValue::Number(n)) => n.to_string(),
         Some(ColumnValue::Float(f)) => f.to_string(),
         Some(ColumnValue::Bool(b)) => b.to_string(),
-        Some(ColumnValue::Any) | None => String::new(),
+        // `Param` placeholders exist only inside unbound stream templates
+        // (P5, docs/plans/p5-sync-streams-design.md Decision 2) — `bind_params`
+        // replaces them before a predicate ever evaluates, and push templates
+        // interpolate ROW columns, never stream params. Unreachable here; an
+        // empty render (same as `Any`/`None`) can never over-deliver.
+        Some(ColumnValue::Param(_) | ColumnValue::Any) | None => String::new(),
     }
 }
 
