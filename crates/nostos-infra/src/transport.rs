@@ -1020,10 +1020,15 @@ async fn register_subscribe(
     }
 
     // Snapshot-on-subscribe for THIS table only. base_lsn is the socket's
-    // monotonic synthetic cursor (NOT the frame's resume_lsn) so cross-table
-    // snapshot LSN ranges never collide on the shared sink's dedup ring. A
-    // failed snapshot is non-fatal: the client still gets live fan-out.
-    let snapshot_base = { subs.lock().await.synthetic_cursor };
+    // frontier-aware synthetic cursor (see `snapshot_base_lsn`) so cross-table
+    // snapshot LSN ranges never collide on the shared sink's dedup ring AND a
+    // mid-session subscribe after acked live traffic is not dropped by the
+    // sink's own ack gate. A failed snapshot is non-fatal: the client still
+    // gets live fan-out.
+    let snapshot_base = {
+        let s = subs.lock().await;
+        snapshot_base_lsn(s.synthetic_cursor, sink_concrete)
+    };
     let delivered = if let Some(snap) = snapshotter {
         match snap
             .snapshot(
@@ -1075,10 +1080,12 @@ async fn register_subscribe(
         0
     };
 
-    // Advance the cursor by the rows we just delivered + record the session.
+    // Advance the cursor past the rows we just delivered + record the session.
+    // The base may have come from the sink FRONTIER (above the old cursor), so
+    // set — don't increment.
     {
         let mut s = subs.lock().await;
-        s.synthetic_cursor = s.synthetic_cursor.saturating_add(delivered as u64);
+        s.synthetic_cursor = snapshot_base.saturating_add(delivered as u64);
         s.ids.push(id);
         s.tables.insert(req.table.clone());
     }
@@ -1179,8 +1186,13 @@ async fn register_stream(
 
     // Live fan-out starts at registration, BEFORE the snapshot query (design
     // §3): the client's per-row LSN gate + idempotent upsert make the overlap
-    // safe — the same argument as op-log replay.
-    let snapshot_base = { subs.lock().await.synthetic_cursor };
+    // safe — the same argument as op-log replay. The base is frontier-aware
+    // (`snapshot_base_lsn`) so a stream added after acked live traffic is not
+    // dropped by the sink's own ack gate.
+    let snapshot_base = {
+        let s = subs.lock().await;
+        snapshot_base_lsn(s.synthetic_cursor, sink_concrete)
+    };
     let delivered = if let Some(snap) = snapshotter {
         match snap
             .snapshot_stream(
@@ -1220,7 +1232,8 @@ async fn register_stream(
 
     {
         let mut s = subs.lock().await;
-        s.synthetic_cursor = s.synthetic_cursor.saturating_add(delivered as u64);
+        // Set (not increment): the base may have come from the sink frontier.
+        s.synthetic_cursor = snapshot_base.saturating_add(delivered as u64);
         s.streams.insert(
             id.to_string(),
             StreamSub {
@@ -1244,6 +1257,23 @@ async fn unregister_stream(id: &str, subs: &Arc<Mutex<SocketSubs>>, manager: &Ar
     } else {
         debug!(stream = %id, "unsubscribe_stream for unknown id: no-op");
     }
+}
+
+/// The base LSN for a mid-session snapshot on a LIVE socket (ADR-0022
+/// multi-table + P5 sync streams): `max(synthetic cursor, acked, delivered)`.
+/// The sink's `admit` gate drops any frame at or below the acked cursor and
+/// the dedup ring drops exact re-deliveries — so a snapshot stamped from a
+/// STALE synthetic cursor after live traffic was acked would be silently
+/// dropped by the server itself before the client ever saw it (caught by the
+/// P5 demo: a lazy stream add after live rows had acked delivered zero rows).
+/// Stamping above the socket frontier keeps every snapshot row deliverable.
+/// The narrow synthetic-vs-WAL collision window documented in
+/// `snapshot_source.rs` (resuming-client ponytail) applies here unchanged —
+/// this is exactly the resuming-client shape.
+fn snapshot_base_lsn(subs_cursor: u64, sink: &TokioEventSink) -> u64 {
+    let acked = sink.last_acked_lsn().map_or(0, nostos_application::Lsn::raw);
+    let delivered = sink.last_delivered_lsn().map_or(0, nostos_application::Lsn::raw);
+    subs_cursor.max(acked).max(delivered)
 }
 
 /// Apply a decoded inbound Ack/Write client message. `Subscribe` is routed by
@@ -1690,6 +1720,7 @@ mod tests {
     use nostos_application::ports::SessionStore;
     use nostos_domain::{Lsn, RowOp};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
     use tokio::sync::mpsc;
 
     /// A canned op-log reader for the reconnect-resume branch tests (ADR-0025
@@ -2747,6 +2778,65 @@ mod tests {
             "the replaced session was disconnected, not leaked"
         );
         assert_eq!(subs.lock().await.streams.len(), 1);
+    }
+
+    /// Regression (caught by the P5 demo): a stream added AFTER the socket
+    /// has acked live traffic must still deliver its snapshot — the sink's
+    /// `admit` gate drops frames at or below the acked cursor, so the
+    /// snapshot base must ride the socket frontier, not the stale synthetic
+    /// cursor.
+    #[tokio::test]
+    async fn stream_snapshot_after_acked_live_traffic_still_delivers() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let snap: Arc<dyn SnapshotSource> = Arc::new(FakeStreamSnapshotter {
+            rows: vec![("l9", vec![("owner_id", ColumnValue::text("u1"))])],
+        });
+        let ruleset = stream_ruleset("lists", "lists", "owner_id = :owner");
+        let principal = Principal::new("acct", "tenant-acme");
+
+        // Simulate live traffic already delivered + acked at LSN 500.
+        sink.record_ack(Lsn::new(500));
+
+        register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1"})),
+            &subs,
+            &manager,
+            Some(&snap),
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .unwrap();
+
+        // begin → row → end: the row's synthetic LSN (501) clears the ack
+        // gate (500). Without the frontier-aware base it would be stamped 1
+        // and dropped invisibly.
+        let mut saw_row = false;
+        let mut end_seen = false;
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
+        {
+            match msg {
+                crate::router::SinkMsg::Event(ev) => {
+                    assert!(ev.lsn.raw() > 500, "snapshot row must stamp above the acked frontier");
+                    saw_row = true;
+                }
+                crate::router::SinkMsg::Control(bytes) => {
+                    let (_, _, begin) =
+                        crate::wire::decode_snapshot_boundary(&bytes).unwrap();
+                    if !begin {
+                        end_seen = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(saw_row, "snapshot row delivered after acked live traffic");
+        assert!(end_seen, "end boundary delivered");
     }
 
     #[tokio::test]
