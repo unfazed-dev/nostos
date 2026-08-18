@@ -117,8 +117,9 @@ untagged, table-level boundaries reconcile (`nostos-client/src/client.rs`).
   with a strictly stronger injection/tenancy story than client-authored SQL.
 - The `where_sql` path is untouched; streams coexist with predicate
   subscriptions on one socket.
-- PG-gated e2e (`tests/e2e_pg_sync_streams.rs`, §6 items 1–6) is written and
-  compiles; its live-PG execution is currently blocked by a corrupt Docker
-  Desktop VM on the dev machine (container FS read-only) — the suite
-  self-skips without `NOSTOS_E2E_PG=1`, so PG-less CI stays green. Run it
-  before marketing claims.
+- PG-gated e2e (`tests/e2e_pg_sync_streams.rs`, §6 items 1–6) ran live against
+  real Postgres 2026-08-18: **all 5 tests green**, including the cross-tenant
+  abuse gate — alongside the full serialized pg suite (replication, snapshot,
+  tenant-scope, write-back, op-log replay, write-amp, nostos-push PgStore) with
+  zero failures. The suite self-skips without `NOSTOS_E2E_PG=1`, so PG-less CI
+  stays green.
