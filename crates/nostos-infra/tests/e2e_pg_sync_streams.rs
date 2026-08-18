@@ -44,6 +44,15 @@ fn pg_url() -> String {
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
+/// Init tracing so server-side stream/snapshot logs surface under
+/// --nocapture (diagnoses routing vs snapshot failures).
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("nostos=debug,info")
+        .with_test_writer()
+        .try_init();
+}
+
 async fn sql_client() -> tokio_postgres::Client {
     let (client, conn) = tokio_postgres::connect(&pg_url(), tokio_postgres::NoTls)
         .await
@@ -151,6 +160,18 @@ async fn spawn_stream_server(
     (addr, shutdown_tx, server)
 }
 
+/// Hex-decode a row frame's payload (the wire carries hex; tests need the
+/// JSON inside).
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 /// What the socket received, classified. Row frames are the raw JSON values
 /// (single objects or C3-batched arrays, flattened).
 #[derive(Default)]
@@ -200,25 +221,37 @@ where
             vec![v]
         };
         for f in frames {
-            let Some(t) = f.get("type").and_then(|t| t.as_str()) else {
-                continue;
-            };
-            match t {
-                "snapshot_begin" | "snapshot_end" => {
+            // Row frames have NO "type" key ({"lsn","op","table","pk",
+            // "payload"}); control frames do. Dispatch on that.
+            match f.get("type").and_then(|t| t.as_str()) {
+                Some("snapshot_begin") | Some("snapshot_end") => {
+                    let t = f["type"].as_str().unwrap();
                     let table = f["table"].as_str().unwrap_or("").to_string();
                     let stream = f.get("stream").and_then(|s| s.as_str()).map(str::to_string);
                     out.boundaries.push((table, stream, t == "snapshot_begin"));
                 }
-                "stream_error" => {
+                Some("stream_error") => {
                     out.stream_errors.push((
                         f["id"].as_str().unwrap_or("").to_string(),
                         f["error"].as_str().unwrap_or("").to_string(),
                     ));
                 }
-                "resume_info" | "write_result" => {}
-                _ => {
-                    // A row frame: lsn/op/table/pk/payload.
+                Some("resume_info") | Some("write_result") => {}
+                Some(_) => {}
+                None => {
+                    // A row frame: lsn/op/table/pk + HEX-encoded payload —
+                    // decode the hex, then parse the payload JSON inside.
                     if f.get("lsn").is_some() {
+                        if let Some(hex) = f["payload"].as_str() {
+                            if let Some(bytes) = decode_hex(hex) {
+                                if let Ok(payload) =
+                                    serde_json::from_slice::<serde_json::Value>(&bytes)
+                                {
+                                    out.rows.push(payload);
+                                    continue;
+                                }
+                            }
+                        }
                         out.rows.push(f["payload"].clone());
                     }
                 }
@@ -280,6 +313,7 @@ async fn lazy_stream_snapshot_then_live_delta() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
+    init_tracing();
     let slot = format!("e2e_stream1_{}", std::process::id());
     let sql = sql_client().await;
     drop_slot(&sql, &slot).await;
@@ -331,11 +365,17 @@ async fn lazy_stream_snapshot_then_live_delta() {
     // Lazy mid-session stream add → targeted snapshot of exactly the matches.
     send_subscribe_stream(&mut ws, "s1", "titled", serde_json::json!({"t": title_hit})).await;
     let got = collect_for(&mut ws, Duration::from_secs(5)).await;
+    assert!(
+        got.stream_errors.is_empty(),
+        "unexpected stream_error: {:?}",
+        got.stream_errors
+    );
     assert_eq!(
         got.rows_containing(&title_hit),
         2,
-        "stream snapshot must deliver exactly the 2 matching rows; got {:?}",
-        got.rows
+        "stream snapshot must deliver exactly the 2 matching rows; got rows {:?}, boundaries {:?}",
+        got.rows,
+        got.boundaries
     );
     assert_eq!(
         got.rows_containing(&title_miss),
@@ -388,6 +428,7 @@ async fn unsubscribe_stops_flow_and_two_streams_dedup() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
+    init_tracing();
     let slot = format!("e2e_stream2_{}", std::process::id());
     let sql = sql_client().await;
     drop_slot(&sql, &slot).await;
@@ -445,16 +486,16 @@ async fn unsubscribe_stops_flow_and_two_streams_dedup() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Matching `shared` post-unsubscribe: s1 is gone, s2 still matches — the
-    // row arrives exactly once via s2.
-    let shared2 = format!("{shared}-b");
+    // Post-unsubscribe: insert ANOTHER row with the same `shared` title —
+    // s1 is gone, s2 still matches it exactly → the row arrives exactly once
+    // via s2.
     sql.execute(
         "INSERT INTO tasks (org_id, title) VALUES ($1, $2)",
-        &[&uuid::Uuid::new_v4(), &shared2],
+        &[&uuid::Uuid::new_v4(), &shared],
     )
     .await
     .unwrap();
-    // A row only s1's replacement would catch — s1 is GONE, so nothing.
+    // A row matching neither stream — nothing must arrive.
     sql.execute(
         "INSERT INTO tasks (org_id, title) VALUES ($1, $2)",
         &[&uuid::Uuid::new_v4(), &only_b],
@@ -463,7 +504,7 @@ async fn unsubscribe_stops_flow_and_two_streams_dedup() {
     .unwrap();
     let got = collect_for(&mut ws, Duration::from_secs(5)).await;
     assert_eq!(
-        got.rows_containing(&shared2),
+        got.rows_containing(&shared),
         1,
         "s2 must still deliver after s1 unsubscribed; got {:?}",
         got.rows
@@ -490,6 +531,7 @@ async fn cross_tenant_param_abuse_never_leaks() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
+    init_tracing();
     let slot = format!("e2e_stream3_{}", std::process::id());
     let sql = sql_client().await;
     drop_slot(&sql, &slot).await;
@@ -499,15 +541,18 @@ async fn cross_tenant_param_abuse_never_leaks() {
     let other_org = uuid::Uuid::new_v4().to_string();
     let acme_title = format!("acme-{}", uuid::Uuid::new_v4());
     let other_title = format!("other-{}", uuid::Uuid::new_v4());
+    // org_id is `UUID NOT NULL` — bind typed UUIDs (a String bind fails ToSql).
+    let acme_uuid = uuid::Uuid::parse_str(&acme_org).unwrap();
+    let other_uuid = uuid::Uuid::parse_str(&other_org).unwrap();
     sql.execute(
         "INSERT INTO tasks (org_id, title) VALUES ($1, $2)",
-        &[&acme_org, &acme_title],
+        &[&acme_uuid, &acme_title],
     )
     .await
     .unwrap();
     sql.execute(
         "INSERT INTO tasks (org_id, title) VALUES ($1, $2)",
-        &[&other_org, &other_title],
+        &[&other_uuid, &other_title],
     )
     .await
     .unwrap();
@@ -600,13 +645,13 @@ async fn cross_tenant_param_abuse_never_leaks() {
     let other_live = format!("other-live-{}", uuid::Uuid::new_v4());
     sql.execute(
         "INSERT INTO tasks (org_id, title) VALUES ($1, $2)",
-        &[&acme_org, &acme_live],
+        &[&acme_uuid, &acme_live],
     )
     .await
     .unwrap();
     sql.execute(
         "INSERT INTO tasks (org_id, title) VALUES ($1, $2)",
-        &[&other_org, &other_live],
+        &[&other_uuid, &other_live],
     )
     .await
     .unwrap();
@@ -635,6 +680,7 @@ async fn reconnect_resubscribes_and_resnapshots() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
+    init_tracing();
     let slot = format!("e2e_stream5_{}", std::process::id());
     let sql = sql_client().await;
     drop_slot(&sql, &slot).await;
@@ -688,6 +734,7 @@ async fn stream_on_rules_denied_table_errors_non_fatally() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
+    init_tracing();
     let slot = format!("e2e_stream6_{}", std::process::id());
     let sql = sql_client().await;
     drop_slot(&sql, &slot).await;
