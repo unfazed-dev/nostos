@@ -722,11 +722,18 @@ async fn main() -> anyhow::Result<()> {
     // — bail loudly instead of falling back.
     let ruleset = match nostos_infra::rules_file::load(std::path::Path::new(&cfg.rules_file)) {
         Ok(Some(raw)) => {
+            // P5: name the loaded streams at boot — the boot-time template
+            // validation (design §2) is only observable if the operator can
+            // SEE which stream definitions passed it.
+            let stream_names: Vec<&str> = raw.streams.iter().map(|s| s.name.as_str()).collect();
+            let stream_count = raw.streams.len();
             let compiled = nostos_application::ActiveRuleset::compile(&raw)
                 .context("nostos_rules.toml failed to compile")?;
             info!(
                 sync_mode = compiled.mode().as_str(),
                 tables = compiled.synced_tables().len(),
+                streams = stream_count,
+                stream_names = ?stream_names,
                 checksum = format!("{:x}", compiled.checksum()),
                 "sync rules loaded"
             );
@@ -1700,10 +1707,12 @@ async fn apply_put_rules(
 
     // Truth-switching must never delete an artifact (rules_file.rs): the
     // toggle editor only ever owns `[tables.*]`, so any hand-authored
-    // `[[rules]]` already on disk must survive this write untouched.
-    let hand = match nostos_infra::rules_file::load(&state.rules_file_path) {
-        Ok(Some(existing)) => existing.hand,
-        Ok(None) => Vec::new(),
+    // `[[rules]]` already on disk must survive this write untouched. Same
+    // for `[streams.*]` (P5): the toggle editor does not own stream
+    // definitions either — a PUT must never silently delete them.
+    let (hand, streams) = match nostos_infra::rules_file::load(&state.rules_file_path) {
+        Ok(Some(existing)) => (existing.hand, existing.streams),
+        Ok(None) => (Vec::new(), Vec::new()),
         Err(e) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1722,6 +1731,7 @@ async fn apply_put_rules(
         mode,
         tables,
         hand,
+        streams,
     };
 
     // Step 1: validate via the same compile path `nostos rules check` uses —
@@ -2065,6 +2075,7 @@ mod watch_rules_tests {
             mode: SyncMode::Toggles,
             tables,
             hand: Vec::new(),
+            streams: Vec::new(),
         }
     }
 
@@ -2260,6 +2271,7 @@ mod rules_handler_tests {
                 },
             ],
             hand: vec![],
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         let checksum = ruleset.checksum();
@@ -2411,6 +2423,7 @@ mod put_rules_handler_tests {
                 scope: Some("a = 1 OR b = 2".to_string()),
             }],
             hand: vec![],
+            streams: vec![],
         };
         let expected_error = ActiveRuleset::compile(&bad_rules)
             .expect_err("fixture must be invalid")

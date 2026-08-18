@@ -59,6 +59,16 @@ class RustNostosEngine implements NostosEngine {
   Stream<String> watch({required String table}) => _handle.watch(table: table);
 
   @override
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  }) => _handle.subscribeStream(name: name, paramsJson: paramsJson);
+
+  @override
+  Future<void> unsubscribeStream({required String id}) =>
+      _handle.unsubscribeStream(id: id);
+
+  @override
   Stream<({int pending, int deadLettered, String? lastError})>
   watchWriteStatus() => _handle.watchWriteStatus().map(
     (s) => (

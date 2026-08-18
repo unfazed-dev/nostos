@@ -55,7 +55,9 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 
 use nostos_application::ports::{SnapshotError, SnapshotSource};
-use nostos_domain::{Lsn, ReplicationEvent, RowOp, TenantScope};
+use nostos_domain::{
+    ColumnValue, Lsn, PredicateExpr, PredicateFilter, ReplicationEvent, RowOp, TenantScope,
+};
 
 /// Reuse the streaming path's OID-keyed JSON mapping (ADR-0019) so snapshot
 /// rows render byte-identically to streamed rows. Both helpers are `pub(crate)`
@@ -126,6 +128,41 @@ impl PgSnapshotter {
         let mut guard = self.client.lock().await;
         *guard = None;
     }
+
+    /// Prepare `SELECT * FROM <table>` and read the column names + type OIDs
+    /// from the statement's metadata (zero rows needed — a prepared statement
+    /// carries its column descriptors without executing). The OIDs drive the
+    /// OID-keyed JSON mapping so the snapshot payload is byte-identical to
+    /// the streaming path's (ADR-0019). Shared by `snapshot` and
+    /// `snapshot_stream`.
+    async fn prepare_columns(
+        &self,
+        client: &tokio_postgres::Client,
+        quoted_table: &str,
+    ) -> Result<Vec<(String, i32)>, SnapshotError> {
+        let prep = match client
+            .prepare(&format!("SELECT * FROM {quoted_table}"))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                self.drop_client().await;
+                return Err(SnapshotError::Backend(format!("prepare: {e}")));
+            }
+        };
+        // (name, type OID). OIDs are u32 on the wire; append_typed_value takes
+        // i32 (Postgres OIDs are always < 2^31). A convert failure yields -1,
+        // which append_typed_value treats as "unrecognized" → string
+        // passthrough — never a panic, never a dropped row.
+        Ok(prep
+            .columns()
+            .iter()
+            .map(|c| {
+                let oid = i32::try_from(c.type_().oid()).unwrap_or(-1);
+                (c.name().to_string(), oid)
+            })
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -147,37 +184,11 @@ impl SnapshotSource for PgSnapshotter {
 
         let client = self.client().await?;
 
-        // 2. Prepare `SELECT * FROM <table>` to read the column names + type
-        //    OIDs from the statement's metadata (zero rows needed — a prepared
-        //    statement carries its column descriptors without executing). The
-        //    OIDs drive the OID-keyed JSON mapping so the snapshot payload is
-        //    byte-identical to the streaming path's (ADR-0019).
-        let prep = match client
-            .prepare(&format!("SELECT * FROM {quoted_table}"))
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                self.drop_client().await;
-                return Err(SnapshotError::Backend(format!("prepare: {e}")));
-            }
-        };
-        // (name, type OID). OIDs are u32 on the wire; append_typed_value takes
-        // i32 (Postgres OIDs are always < 2^31). A convert failure yields -1,
-        // which append_typed_value treats as "unrecognized" → string
-        // passthrough — never a panic, never a dropped row.
-        let cols: Vec<(&str, i32)> = prep
-            .columns()
-            .iter()
-            .map(|c| {
-                let oid = i32::try_from(c.type_().oid()).unwrap_or(-1);
-                (c.name(), oid)
-            })
-            .collect();
-
-        // PK column index (v1: the column named "id"). ponytail: read from
-        // pg_constraint for composite/renamed PKs (mirrors PgWriteBack).
-        let pk_index = cols.iter().position(|(n, _)| *n == PK_COLUMN);
+        // 2. Column names + type OIDs from a prepared statement's metadata
+        //    (zero rows needed). The OIDs drive the OID-keyed JSON mapping so
+        //    the snapshot payload is byte-identical to the streaming path's
+        //    (ADR-0019).
+        let cols = self.prepare_columns(&client, &quoted_table).await?;
 
         // 3. Build the text-cast SELECT. Every column is cast to `::text` so
         //    each cell comes back as the Postgres TEXT wire form — the exact
@@ -185,11 +196,7 @@ impl SnapshotSource for PgSnapshotter {
         //    which is what `replicator::snapshot` parses). Column names came
         //    from the catalog (trusted), but quote them anyway — defense in
         //    depth, same as the startup snapshot's `quote_ident`.
-        let select_list = cols
-            .iter()
-            .map(|(n, _)| format!("{}::text", quote_ident(n)))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let select_list = select_list_text(&cols);
         // Tenant scoping (the trait's enforced contract): when the
         // connection's principal carries a TenantScope, restrict the
         // snapshot to that tenant. The column name is operator config
@@ -227,48 +234,234 @@ impl SnapshotSource for PgSnapshotter {
             }
         };
 
-        // 4. Build one Insert event per row. Each gets a UNIQUE LSN strictly
-        //    above `base_lsn` so the per-session sink's LSN gate
-        //    (`TokioEventSink::deliver` drops `lsn <= acked && acked != 0`,
-        //    and the dedup ring drops exact-LSN duplicates) does NOT swallow
-        //    snapshot rows. For a fresh client base_lsn = 0, so events are
-        //    stamped 1, 2, 3, … — far below any real WAL LSN, so live fan-out
-        //    events (which carry real Postgres WAL positions, typically in the
-        //    millions+) always sort above the synthetic range and are never
-        //    mis-dropped.
-        //
-        //    ponytail: LSNs share the single u64 space with real WAL LSNs. For
-        //    a RESUMING client (base_lsn = a real WAL position N), synthetic
-        //    LSNs N+1..N+M could in principle collide with a real WAL event in
-        //    that narrow window, dropping one live event. This is not
-        //    attacker-reachable and the primary target case (fresh subscribe,
-        //    base_lsn = 0) is unaffected. Upgrade path: a per-session synthetic
-        //    LSN band (e.g. reserve a high bit), or skip-snapshot-on-resume
-        //    (a resuming client already has the table state from its prior
-        //    session). Revisit when a resume-mode design partner reports it.
-        let mut events = Vec::with_capacity(rows.len());
-        for (i, row) in rows.iter().enumerate() {
-            let payload = build_payload(&cols, row);
-            // PK: the "id" column's text value if present, else the row index
-            // (a stable fallback so the event is still well-formed; the client
-            // upserts by pk and a missing-id table is out of v1 scope).
-            let pk = pk_index
-                .and_then(|idx| row.try_get::<usize, Option<String>>(idx).ok().flatten())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| i.to_string());
-            let lsn = Lsn::new(base_lsn.raw().saturating_add(1).saturating_add(i as u64));
-            events.push(ReplicationEvent::new(
-                lsn,
-                RowOp::Insert {
-                    table: table.to_string(),
-                    pk,
-                    payload: Bytes::from(payload),
-                },
-            ));
-        }
+        // 4. One Insert event per row, stamped above `base_lsn` (see
+        //    `rows_to_events` for the gate-safety argument).
+        let events = rows_to_events(table, &cols, &rows, base_lsn);
 
         self.return_client(client).await;
         Ok(events)
+    }
+
+    /// P5 sync streams (design §3): a TARGETED per-stream snapshot. The
+    /// stream's bound predicate compiles to `WHERE <shape>` with every VALUE
+    /// as a positional `$n` bind (Decision 2's fourth defense — no client
+    /// byte and no template literal is ever interpolated), and the tenant
+    /// clause appends from the principal exactly as in `snapshot` — closing,
+    /// for stream snapshots, the old unfiltered-snapshot ponytail
+    /// (`ports.rs:633-638`) at this seam too.
+    async fn snapshot_stream(
+        &self,
+        table: &str,
+        predicate: &PredicateExpr,
+        base_lsn: Lsn,
+        tenant: Option<TenantScope<'_>>,
+    ) -> Result<Vec<ReplicationEvent>, SnapshotError> {
+        // 1. Same trust boundary as `snapshot`: the table identifier first.
+        if let Err(bad) = validate_ident(table) {
+            return Err(SnapshotError::InvalidTable(bad));
+        }
+        let quoted_table = quote_ident(table);
+
+        // 2. Compile the predicate to WHERE text + binds BEFORE touching the
+        //    connection — pure and fail-fast (an unbound `Param` leaf is an
+        //    error here, never a widened snapshot).
+        let (mut where_sql, mut binds) = compile_stream_where(predicate)?;
+
+        // 3. Tenant clause LAST, bound, with the same `::text` column cast as
+        //    `snapshot` (JWT claims are strings; tenant columns may be
+        //    uuid/int). `AND`ed outside the template's own parentheses.
+        let tenant_value: Option<String> = tenant.map(|s| s.value.to_string());
+        if let (Some(scope), Some(value)) = (tenant, tenant_value.as_ref()) {
+            binds.push(ColumnValue::Text(value.clone()));
+            where_sql = format!(
+                "({where_sql}) AND {}::text = ${}",
+                quote_ident(scope.column),
+                binds.len()
+            );
+        }
+
+        let client = self.client().await?;
+        let cols = self.prepare_columns(&client, &quoted_table).await?;
+        let select_list = select_list_text(&cols);
+        let sql = format!("SELECT {select_list} FROM {quoted_table} WHERE {where_sql}");
+        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            binds.iter().map(column_value_as_sql).collect();
+        let rows = match client.query(&sql, &params).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.drop_client().await;
+                return Err(SnapshotError::Backend(format!("query: {e}")));
+            }
+        };
+
+        let events = rows_to_events(table, &cols, &rows, base_lsn);
+        self.return_client(client).await;
+        Ok(events)
+    }
+}
+
+/// The `SELECT` list with every column `::text`-cast (see `snapshot` step 3).
+fn select_list_text(cols: &[(String, i32)]) -> String {
+    cols.iter()
+        .map(|(n, _)| format!("{}::text", quote_ident(n)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Build one Insert event per row. Each gets a UNIQUE LSN strictly above
+/// `base_lsn` so the per-session sink's LSN gate (`TokioEventSink::deliver`
+/// drops `lsn <= acked && acked != 0`, and the dedup ring drops exact-LSN
+/// duplicates) does NOT swallow snapshot rows. For a fresh client base_lsn =
+/// 0, so events are stamped 1, 2, 3, … — far below any real WAL LSN, so live
+/// fan-out events (which carry real Postgres WAL positions, typically in the
+/// millions+) always sort above the synthetic range and are never mis-dropped.
+///
+/// ponytail: LSNs share the single u64 space with real WAL LSNs. For a
+/// RESUMING client (base_lsn = a real WAL position N), synthetic LSNs
+/// N+1..N+M could in principle collide with a real WAL event in that narrow
+/// window, dropping one live event. This is not attacker-reachable and the
+/// primary target case (fresh subscribe, base_lsn = 0) is unaffected.
+/// Upgrade path: a per-session synthetic LSN band (e.g. reserve a high bit),
+/// or skip-snapshot-on-resume (a resuming client already has the table state
+/// from its prior session). Revisit when a resume-mode design partner
+/// reports it.
+fn rows_to_events(
+    table: &str,
+    cols: &[(String, i32)],
+    rows: &[tokio_postgres::Row],
+    base_lsn: Lsn,
+) -> Vec<ReplicationEvent> {
+    // PK column index (v1: the column named "id"). ponytail: read from
+    // pg_constraint for composite/renamed PKs (mirrors PgWriteBack).
+    let pk_index = cols.iter().position(|(n, _)| n == PK_COLUMN);
+    let mut events = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let payload = build_payload(cols, row);
+        // PK: the "id" column's text value if present, else the row index
+        // (a stable fallback so the event is still well-formed; the client
+        // upserts by pk and a missing-id table is out of v1 scope).
+        let pk = pk_index
+            .and_then(|idx| row.try_get::<usize, Option<String>>(idx).ok().flatten())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| i.to_string());
+        let lsn = Lsn::new(base_lsn.raw().saturating_add(1).saturating_add(i as u64));
+        events.push(ReplicationEvent::new(
+            lsn,
+            RowOp::Insert {
+                table: table.to_string(),
+                pk,
+                payload: Bytes::from(payload),
+            },
+        ));
+    }
+    events
+}
+
+/// Compile a fully-bound stream predicate into SQL `WHERE` text + positional
+/// binds (P5 sync streams, design Decision 2/§3).
+///
+/// - Every VALUE — template literal or `:param`-bound — becomes a `$n` bind;
+///   nothing is ever interpolated into the SQL text.
+/// - The SHAPE (column names, operators, boolean structure) comes from the
+///   operator-authored template (trusted config); column identifiers are
+///   STILL validated against the strict identifier regex and quoted —
+///   belt-and-braces, same discipline as the table name.
+/// - Typed rendering: Number/Float/Bool bind natively and compare against
+///   the raw column. A `Text` value renders `"col"::text <op> $n` — the same
+///   column-side cast the tenant clause uses, because string params (e.g.
+///   JWT-derived claims) must compare cleanly against uuid/int columns. The
+///   index-bypass trade is accepted exactly as documented on `snapshot`'s
+///   tenant clause: stream snapshots are per-subscribe, not hot.
+/// - A surviving `Param` or `Any` leaf, or a bare `Any` root, is a loud
+///   error — the transport's bind step must have replaced every placeholder
+///   before this point.
+fn compile_stream_where(expr: &PredicateExpr) -> Result<(String, Vec<ColumnValue>), SnapshotError> {
+    let mut binds = Vec::new();
+    let sql = compile_expr(expr, &mut binds)?;
+    Ok((sql, binds))
+}
+
+fn bad_template(reason: &str) -> SnapshotError {
+    SnapshotError::Backend(format!("stream predicate: {reason}"))
+}
+
+fn compile_expr(
+    expr: &PredicateExpr,
+    binds: &mut Vec<ColumnValue>,
+) -> Result<String, SnapshotError> {
+    match expr {
+        PredicateExpr::Eq(f) => compile_leaf(f, "=", binds),
+        PredicateExpr::Ne(f) => compile_leaf(f, "!=", binds),
+        PredicateExpr::Lt(f) => compile_leaf(f, "<", binds),
+        PredicateExpr::Gt(f) => compile_leaf(f, ">", binds),
+        PredicateExpr::Le(f) => compile_leaf(f, "<=", binds),
+        PredicateExpr::Ge(f) => compile_leaf(f, ">=", binds),
+        PredicateExpr::And(parts) | PredicateExpr::Or(parts) => {
+            if parts.is_empty() {
+                return Err(bad_template("empty boolean group"));
+            }
+            let joiner = if matches!(expr, PredicateExpr::And(_)) {
+                " AND "
+            } else {
+                " OR "
+            };
+            let mut sqls = Vec::with_capacity(parts.len());
+            for p in parts {
+                sqls.push(format!("({})", compile_expr(p, binds)?));
+            }
+            Ok(sqls.join(joiner))
+        }
+        PredicateExpr::Not(inner) => Ok(format!("NOT ({})", compile_expr(inner, binds)?)),
+        // The grammar's parser never yields `Any` (every leaf is a
+        // comparison); if one arrives here the caller built the tree by
+        // hand — refuse rather than snapshot the whole table.
+        PredicateExpr::Any => Err(bad_template(
+            "match-all is not a valid stream template; a stream must narrow",
+        )),
+    }
+}
+
+fn compile_leaf(
+    f: &PredicateFilter,
+    op: &str,
+    binds: &mut Vec<ColumnValue>,
+) -> Result<String, SnapshotError> {
+    if let Err(bad) = validate_ident(&f.column) {
+        return Err(bad_template(&format!(
+            "column identifier {bad:?} fails the strict regex"
+        )));
+    }
+    let quoted_col = quote_ident(&f.column);
+    match &f.value {
+        ColumnValue::Param(name) => Err(bad_template(&format!(
+            "unbound placeholder :{name} survived to snapshot time (bind_params must run first)"
+        ))),
+        ColumnValue::Any => Err(bad_template("wildcard `Any` is not a stream value")),
+        // String values compare against the column's canonical TEXT form so
+        // string params work against uuid/int columns (see fn docs).
+        value @ ColumnValue::Text(_) => {
+            binds.push(value.clone());
+            Ok(format!("{quoted_col}::text {op} ${}", binds.len()))
+        }
+        value => {
+            binds.push(value.clone());
+            Ok(format!("{quoted_col} {op} ${}", binds.len()))
+        }
+    }
+}
+
+/// Borrow a [`ColumnValue`] as a `tokio_postgres` bind parameter. Number →
+/// i64, Float → f64, Bool → bool, Text → &str — each already implements
+/// `ToSql`. `Param`/`Any` never reach here (compile_leaf rejects them).
+fn column_value_as_sql(v: &ColumnValue) -> &(dyn tokio_postgres::types::ToSql + Sync) {
+    match v {
+        ColumnValue::Number(n) => n,
+        ColumnValue::Float(f) => f,
+        ColumnValue::Bool(b) => b,
+        ColumnValue::Text(s) => s,
+        ColumnValue::Param(_) | ColumnValue::Any => {
+            unreachable!("compile_leaf rejects Param/Any before binds are collected")
+        }
     }
 }
 
@@ -278,7 +471,7 @@ impl SnapshotSource for PgSnapshotter {
 /// and every column name goes through the SAME `json_escape_into`. A SQL NULL
 /// cell (`Option<String>::None`) renders as JSON `null` — not a fabricated
 /// `""`/`false`/`0` — exactly like the streaming path.
-fn build_payload(cols: &[(&str, i32)], row: &tokio_postgres::Row) -> Vec<u8> {
+fn build_payload(cols: &[(String, i32)], row: &tokio_postgres::Row) -> Vec<u8> {
     let mut out = String::with_capacity(128);
     out.push('{');
     for (i, (name, oid)) in cols.iter().enumerate() {
@@ -400,5 +593,110 @@ mod tests {
         let base = Lsn::new(0);
         let first = base.raw().saturating_add(1).saturating_add(0);
         assert_eq!(first, 1);
+    }
+
+    // ---- P5: compile_stream_where (pure; the §6 unit coverage for §3) ----
+
+    fn bound(template: &str, params: &[(&str, ColumnValue)]) -> PredicateExpr {
+        let expr = nostos_domain::parse_predicate_expr(template).unwrap();
+        let map: std::collections::HashMap<String, ColumnValue> = params
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
+        nostos_domain::predicate_compile::bind_params(&expr, &map).unwrap()
+    }
+
+    #[test]
+    fn stream_where_binds_every_value_positionally() {
+        let expr = bound(
+            "owner_id = :owner AND priority >= :min",
+            &[
+                ("owner", ColumnValue::text("u1")),
+                ("min", ColumnValue::number(3)),
+            ],
+        );
+        let (sql, binds) = compile_stream_where(&expr).unwrap();
+        assert_eq!(sql, "(\"owner_id\"::text = $1) AND (\"priority\" >= $2)");
+        assert_eq!(binds, vec![ColumnValue::text("u1"), ColumnValue::number(3)]);
+    }
+
+    #[test]
+    fn stream_where_all_six_operators() {
+        for (tpl, op) in [
+            ("a = :p", "="),
+            ("a != :p", "!="),
+            ("a < :p", "<"),
+            ("a > :p", ">"),
+            ("a <= :p", "<="),
+            ("a >= :p", ">="),
+        ] {
+            let expr = bound(tpl, &[("p", ColumnValue::number(1))]);
+            let (sql, binds) = compile_stream_where(&expr).unwrap();
+            assert_eq!(sql, format!("\"a\" {op} $1"), "template {tpl}");
+            assert_eq!(binds, vec![ColumnValue::number(1)]);
+        }
+    }
+
+    #[test]
+    fn stream_where_parenthesizes_or_and_not() {
+        let expr = bound(
+            "NOT (a = :x OR b = :y)",
+            &[
+                ("x", ColumnValue::number(1)),
+                ("y", ColumnValue::boolean(true)),
+            ],
+        );
+        let (sql, _) = compile_stream_where(&expr).unwrap();
+        assert_eq!(sql, "NOT ((\"a\" = $1) OR (\"b\" = $2))");
+    }
+
+    #[test]
+    fn stream_where_text_values_get_column_text_cast() {
+        // String params must compare cleanly against uuid/int columns — the
+        // same column-side ::text cast the tenant clause uses.
+        let expr = bound("owner_id = :owner", &[("owner", ColumnValue::text("u1"))]);
+        let (sql, _) = compile_stream_where(&expr).unwrap();
+        assert_eq!(sql, "\"owner_id\"::text = $1");
+        // Numbers/bools/floats bind natively, no cast (numeric ordering is
+        // exact — a lexical ::text compare would invert 9 vs 10).
+        let expr = bound("priority >= :min", &[("min", ColumnValue::number(3))]);
+        let (sql, _) = compile_stream_where(&expr).unwrap();
+        assert_eq!(sql, "\"priority\" >= $1");
+    }
+
+    #[test]
+    fn stream_where_rejects_unbound_placeholder_leaf() {
+        // A hand-built tree (never bound) must error loudly, never widen.
+        let expr = PredicateExpr::eq("owner", ColumnValue::param("owner"));
+        let err = compile_stream_where(&expr).expect_err("unbound Param must error");
+        assert!(err.to_string().contains(":owner"), "got: {err}");
+    }
+
+    #[test]
+    fn stream_where_rejects_any_root_and_wildcard_leaf() {
+        let err = compile_stream_where(&PredicateExpr::Any).expect_err("Any root must error");
+        assert!(err.to_string().contains("match-all"), "got: {err}");
+        let expr = PredicateExpr::eq("owner", ColumnValue::Any);
+        assert!(compile_stream_where(&expr).is_err());
+    }
+
+    #[test]
+    fn stream_where_rejects_bad_column_identifier() {
+        // A hand-built tree with a non-regex column never reaches SQL.
+        let expr = PredicateExpr::eq("owner\"; DROP TABLE tasks;--", ColumnValue::number(1));
+        assert!(compile_stream_where(&expr).is_err());
+    }
+
+    #[test]
+    fn stream_where_binds_literals_too() {
+        // Template literals (operator-authored) are bound, not interpolated —
+        // one uniform defense, no literal-to-SQL rendering at all.
+        let expr = nostos_domain::parse_predicate_expr("status = 'open' AND pri > 2").unwrap();
+        let (sql, binds) = compile_stream_where(&expr).unwrap();
+        assert_eq!(sql, "(\"status\"::text = $1) AND (\"pri\" > $2)");
+        assert_eq!(
+            binds,
+            vec![ColumnValue::text("open"), ColumnValue::number(2)]
+        );
     }
 }

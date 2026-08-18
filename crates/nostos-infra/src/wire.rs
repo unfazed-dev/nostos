@@ -490,6 +490,25 @@ pub fn decode_resume_info(data: &[u8]) -> Option<(u64, Option<u64>)> {
     Some((epoch, rules_checksum))
 }
 
+/// Decode a `stream_error` control frame (server → client; P5 sync streams
+/// §1), returning `(id, error)`. `None` for anything else — same accept/reject
+/// discipline as [`decode_resume_info`]: unknown/malformed shapes are not
+/// stream errors.
+#[must_use]
+pub fn decode_stream_error(data: &[u8]) -> Option<(String, String)> {
+    let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
+    if first != Some(b'{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+    if v.get("type")?.as_str()? != "stream_error" {
+        return None;
+    }
+    let id = v.get("id")?.as_str()?.to_string();
+    let error = v.get("error")?.as_str()?.to_string();
+    Some((id, error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,5 +1039,21 @@ mod tests {
             decode_snapshot_boundary(raw),
             Some(("tasks".to_string(), Some("s1".to_string()), true))
         );
+    }
+
+    #[test]
+    fn stream_error_decode_round_trips_and_rejects_other_shapes() {
+        let bytes = encode_stream_error("s1", "unknown stream 'lists'");
+        assert_eq!(
+            decode_stream_error(&bytes),
+            Some(("s1".to_string(), "unknown stream 'lists'".to_string()))
+        );
+        // Not a stream error: row frames, boundaries, write acks, garbage.
+        let event = encode_event(&ev_n(7));
+        assert!(decode_stream_error(&event).is_none());
+        let boundary = encode_snapshot_boundary("tasks", true);
+        assert!(decode_stream_error(&boundary).is_none());
+        assert!(decode_stream_error(b"not json").is_none());
+        assert!(decode_stream_error(br#"{"type":"stream_error","id":"s1"}"#).is_none());
     }
 }

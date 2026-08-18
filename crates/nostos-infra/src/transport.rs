@@ -20,7 +20,7 @@
 //!    cursor (driving the ack-driven slot advance, ADR-0009).
 //! 7. On disconnect, close the sink + unregister.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -38,14 +38,15 @@ use nostos_application::ports::{
 };
 use nostos_application::{ActiveRuleset, RuleDecision, SessionManager};
 use nostos_domain::{
-    compose_sync_epoch, ColumnValue, Predicate, Principal, ReplicationEvent, SessionId, SyncMode,
-    SyncSession,
+    compose_sync_epoch, ColumnValue, Predicate, PredicateExpr, Principal, ReplicationEvent,
+    SessionId, SyncMode, SyncSession,
 };
 
 use crate::router::TokioEventSink;
 use crate::wire::{
     decode_client_message, encode_event, encode_events, encode_resume_info,
-    encode_snapshot_boundary, encode_stream_error, encode_write_result, ClientMessage,
+    encode_snapshot_boundary, encode_snapshot_boundary_for_stream, encode_stream_error,
+    encode_write_result, ClientMessage,
 };
 
 /// Default per-session bounded-buffer depth. Slow clients that fall this far
@@ -406,6 +407,7 @@ async fn run_session(
         ids: Vec::new(),
         tables: HashSet::new(),
         synthetic_cursor: subscribe.resume_lsn.unwrap_or(0),
+        streams: HashMap::new(),
     }));
 
     // Pre-encoded control frame channel (write_result acks + snapshot-reconcile
@@ -630,10 +632,23 @@ async fn run_session(
                     let new_ruleset = rules_shared.read().await.clone();
                     let narrowed = {
                         let s = subs_for_reload.lock().await;
-                        s.tables.iter().any(|table| {
+                        let table_changed = s.tables.iter().any(|table| {
                             old_ruleset.decide(table, &principal_for_reload)
                                 != new_ruleset.decide(table, &principal_for_reload)
-                        })
+                        });
+                        // P5: a live stream is sensitive to (a) its table's
+                        // rule decision and (b) its own template definition —
+                        // a streams edit = a rules edit → resnapshot (design
+                        // §2 checksum participation; after the reconnect the
+                        // client re-subscribes its streams against fresh
+                        // definitions). Same coarse close-the-socket ponytail
+                        // as the table path below.
+                        let stream_changed = s.streams.values().any(|sub| {
+                            old_ruleset.stream(&sub.name) != new_ruleset.stream(&sub.name)
+                                || old_ruleset.decide(&sub.table, &principal_for_reload)
+                                    != new_ruleset.decide(&sub.table, &principal_for_reload)
+                        });
+                        table_changed || stream_changed
                     };
                     if narrowed {
                         debug!("closing socket: sync rules changed under a live session (ADR-0031 D3)");
@@ -740,6 +755,37 @@ async fn run_session(
                         warn!(reject = ?e, table = %req.table, "mid-session subscribe rejected; socket continues");
                     }
                 }
+                Some(ClientMessage::SubscribeStream { id, stream, params }) => {
+                    // P5: lazy mid-session stream add. Fresh ruleset read per
+                    // frame (same ADR-0031 D3 discipline as Subscribe above —
+                    // a stream added after a live rules reload is decided
+                    // against the CURRENT ruleset).
+                    let current_ruleset = rules_for_reader.read().await.clone();
+                    if let Err(reason) = register_stream(
+                        &id,
+                        &stream,
+                        &params,
+                        &subs_reader,
+                        &manager_reader,
+                        snapshotter.as_ref(),
+                        &ack_sink,
+                        &write_principal,
+                        tenant_column_for_writes.as_deref(),
+                        &current_ruleset,
+                    )
+                    .await
+                    {
+                        // Non-fatal reject (design §1): stream_error frame,
+                        // socket stays up. try_send is best-effort — a full
+                        // channel means the client is gone or backlogged, and
+                        // the writer loop ends on the next failed send anyway.
+                        let _ = server_frames_tx.try_send(encode_stream_error(&id, &reason));
+                        debug!(stream = %stream, id = %id, %reason, "subscribe_stream rejected");
+                    }
+                }
+                Some(ClientMessage::UnsubscribeStream { id }) => {
+                    unregister_stream(&id, &subs_reader, &manager_reader).await;
+                }
                 Some(other) => {
                     handle_decoded_message(
                         other,
@@ -763,7 +809,14 @@ async fn run_session(
     sink_concrete.close();
     let ids: Vec<SessionId> = {
         let mut s = subs.lock().await;
-        std::mem::take(&mut s.ids)
+        let mut all = std::mem::take(&mut s.ids);
+        // P5: stream sessions disconnect with the socket too.
+        all.extend(
+            std::mem::take(&mut s.streams)
+                .into_values()
+                .map(|sub| sub.session),
+        );
+        all
     };
     for id in ids {
         manager.disconnect(id).await;
@@ -815,6 +868,19 @@ struct SocketSubs {
     tables: HashSet<String>,
     /// Monotonic snapshot-LSN allocator; passed as `base_lsn` to each snapshot.
     synthetic_cursor: u64,
+    /// Active sync streams by client-chosen id (P5). A separate namespace
+    /// from `tables`, but counted TOGETHER against `MAX_TABLES_PER_SOCKET`
+    /// (each lazy add = one snapshot SELECT — design §2 Caps). `name`/`table`
+    /// are retained so the rules-reload check (ADR-0031 D3) detects a
+    /// stream-definition or table-decision change under a live socket.
+    streams: HashMap<String, StreamSub>,
+}
+
+/// One active sync stream on a socket (P5).
+struct StreamSub {
+    session: SessionId,
+    name: String,
+    table: String,
 }
 
 /// The `(epoch, rules_checksum)` pair to advertise on `resume_info` for a
@@ -954,10 +1020,15 @@ async fn register_subscribe(
     }
 
     // Snapshot-on-subscribe for THIS table only. base_lsn is the socket's
-    // monotonic synthetic cursor (NOT the frame's resume_lsn) so cross-table
-    // snapshot LSN ranges never collide on the shared sink's dedup ring. A
-    // failed snapshot is non-fatal: the client still gets live fan-out.
-    let snapshot_base = { subs.lock().await.synthetic_cursor };
+    // frontier-aware synthetic cursor (see `snapshot_base_lsn`) so cross-table
+    // snapshot LSN ranges never collide on the shared sink's dedup ring AND a
+    // mid-session subscribe after acked live traffic is not dropped by the
+    // sink's own ack gate. A failed snapshot is non-fatal: the client still
+    // gets live fan-out.
+    let snapshot_base = {
+        let s = subs.lock().await;
+        snapshot_base_lsn(s.synthetic_cursor, sink_concrete)
+    };
     let delivered = if let Some(snap) = snapshotter {
         match snap
             .snapshot(
@@ -1009,14 +1080,211 @@ async fn register_subscribe(
         0
     };
 
-    // Advance the cursor by the rows we just delivered + record the session.
+    // Advance the cursor past the rows we just delivered + record the session.
+    // The base may have come from the sink FRONTIER (above the old cursor), so
+    // set — don't increment.
     {
         let mut s = subs.lock().await;
-        s.synthetic_cursor = s.synthetic_cursor.saturating_add(delivered as u64);
+        s.synthetic_cursor = snapshot_base.saturating_add(delivered as u64);
         s.ids.push(id);
         s.tables.insert(req.table.clone());
     }
     Ok(())
+}
+
+/// Convert a `subscribe_stream` `params` object into typed bind values (P5
+/// §1). JSON scalars map to the obvious leaf; null/array/object params are
+/// rejected — a stream param is always a scalar (the grammar's literal
+/// position has no composite shape).
+fn stream_params_to_values(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> Result<HashMap<String, ColumnValue>, String> {
+    let mut out = HashMap::with_capacity(params.len());
+    for (k, v) in params {
+        let value = match v {
+            serde_json::Value::String(s) => ColumnValue::text(s),
+            serde_json::Value::Bool(b) => ColumnValue::boolean(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    ColumnValue::number(i)
+                } else {
+                    // u64 beyond i64::MAX or a float literal: f64 is the
+                    // common numeric supertype. Precision loss for huge u64s
+                    // is JSON's documented reality, not a nostos choice.
+                    ColumnValue::float(n.as_f64().unwrap_or(f64::NAN))
+                }
+            }
+            _ => return Err(format!("param '{k}' must be a string, number, or boolean")),
+        };
+        out.insert(k.clone(), value);
+    }
+    Ok(out)
+}
+
+/// Register a sync stream on this socket (P5 design §2): look up the
+/// server-defined stream, bind its `:param` placeholders value-level (never
+/// textual — Decision 2), wrap rules+tenant exactly like a table subscribe
+/// (Decision 3), register ONE `SyncSession` per stream instance via
+/// `SessionManager::connect` (same store/sink path as `register_subscribe`),
+/// then take a targeted per-stream snapshot (§3) delivered on the same FIFO
+/// channel with the stream id on the boundary frames.
+///
+/// EVERY reject is non-fatal: the caller maps `Err` into a `stream_error`
+/// frame and the socket stays up (design §1). Idempotent `id` reuse retires
+/// the old session AFTER the new one registers — both live briefly on the
+/// same table shard and the sink's LSN dedup ring tolerates the overlap.
+#[allow(clippy::too_many_arguments)] // same genuine subscribe surface as register_subscribe
+async fn register_stream(
+    id: &str,
+    name: &str,
+    params: &serde_json::Map<String, serde_json::Value>,
+    subs: &Arc<Mutex<SocketSubs>>,
+    manager: &Arc<SessionManager>,
+    snapshotter: Option<&Arc<dyn SnapshotSource>>,
+    sink_concrete: &Arc<TokioEventSink>,
+    principal: &Principal,
+    tenant_column: Option<&str>,
+    ruleset: &ActiveRuleset,
+) -> Result<(), String> {
+    let stream = ruleset
+        .stream(name)
+        .ok_or_else(|| format!("unknown stream '{name}'"))?;
+    let values = stream_params_to_values(params)?;
+    let bound = nostos_domain::predicate_compile::bind_params(&stream.template, &values)
+        .map_err(|e| format!("stream '{name}': {e}"))?;
+    let table = stream.table.clone();
+
+    // Cap + idempotent-replace check (short lock, no await — mirrors
+    // register_subscribe).
+    let replaced = {
+        let s = subs.lock().await;
+        let replacing = s
+            .streams
+            .get(id)
+            .map(|old| (old.session, old.table.clone()));
+        if replacing.is_none() && s.tables.len() + s.streams.len() >= MAX_TABLES_PER_SOCKET {
+            return Err(format!(
+                "per-socket subscription cap ({MAX_TABLES_PER_SOCKET}) reached"
+            ));
+        }
+        replacing
+    };
+
+    let predicate =
+        build_stream_predicate(&table, bound.clone(), principal, tenant_column, ruleset)
+            .map_err(|rejection| rejection.to_string())?;
+    let session = SyncSession::new_authenticated(predicate, principal.clone());
+    let sink_dyn: Arc<dyn EventSink> = Arc::clone(sink_concrete) as Arc<dyn EventSink>;
+    let session_id = manager
+        .connect(session, sink_dyn)
+        .await
+        .map_err(|_| "device session cap reached".to_string())?;
+
+    if let Some((old_session, _)) = replaced {
+        manager.disconnect(old_session).await;
+    }
+
+    // Live fan-out starts at registration, BEFORE the snapshot query (design
+    // §3): the client's per-row LSN gate + idempotent upsert make the overlap
+    // safe — the same argument as op-log replay. The base is frontier-aware
+    // (`snapshot_base_lsn`) so a stream added after acked live traffic is not
+    // dropped by the sink's own ack gate.
+    let snapshot_base = {
+        let s = subs.lock().await;
+        snapshot_base_lsn(s.synthetic_cursor, sink_concrete)
+    };
+    let delivered = if let Some(snap) = snapshotter {
+        match snap
+            .snapshot_stream(
+                &table,
+                &bound,
+                nostos_domain::Lsn::new(snapshot_base),
+                principal.tenant_scope(tenant_column),
+            )
+            .await
+        {
+            Ok(events) => {
+                // Same FIFO discipline as table snapshots (ADR-0025 hole #2),
+                // with the stream id on the boundary frames (wire §1).
+                let _ = sink_concrete
+                    .deliver_control(encode_snapshot_boundary_for_stream(&table, id, true));
+                let count = events.len();
+                for ev in events {
+                    // Backpressure-aware: a dropped snapshot row would let the
+                    // client's `end` reap a pk the server still has.
+                    let _ = sink_concrete.deliver_awaiting(ev).await;
+                }
+                let _ = sink_concrete
+                    .deliver_control(encode_snapshot_boundary_for_stream(&table, id, false));
+                debug!(table = %table, stream = %id, count, "stream snapshot delivered");
+                count
+            }
+            Err(e) => {
+                // A failed stream snapshot is non-fatal (design §3).
+                warn!(table = %table, stream = %id, error = %e,
+                    "stream snapshot failed; continuing with live fan-out");
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    {
+        let mut s = subs.lock().await;
+        // Set (not increment): the base may have come from the sink frontier.
+        s.synthetic_cursor = snapshot_base.saturating_add(delivered as u64);
+        s.streams.insert(
+            id.to_string(),
+            StreamSub {
+                session: session_id,
+                name: name.to_string(),
+                table,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Drop a stream by its client-chosen id (P5 §1). Unknown id = idempotent
+/// no-op. v1 leaves local rows in place — eviction is separate; PowerSync
+/// behaves the same.
+async fn unregister_stream(id: &str, subs: &Arc<Mutex<SocketSubs>>, manager: &Arc<SessionManager>) {
+    let removed = { subs.lock().await.streams.remove(id) };
+    if let Some(sub) = removed {
+        // Remove the stream's session from the store — fan-out resolves
+        // candidates from the store per event, so removal stops delivery for
+        // every event processed after this point. Do NOT close the sink: the
+        // stream session shares the socket-wide `TokioEventSink` with the base
+        // subscriptions and every other stream (`register_stream` clones
+        // `sink_concrete`), so `sink.close()` here killed ALL later delivery
+        // on the socket — including a re-registered stream's own snapshot
+        // (caught by the P5 demo: phase-5 re-parameterize delivered 0 rows
+        // after phase-4 unsubscribe).
+        manager.disconnect(sub.session).await;
+        debug!(stream = %id, table = %sub.table, session = %sub.session, "stream unsubscribed");
+    } else {
+        debug!(stream = %id, "unsubscribe_stream for unknown id: no-op");
+    }
+}
+
+/// The base LSN for a mid-session snapshot on a LIVE socket (ADR-0022
+/// multi-table + P5 sync streams): `max(synthetic cursor, acked, delivered)`.
+/// The sink's `admit` gate drops any frame at or below the acked cursor and
+/// the dedup ring drops exact re-deliveries — so a snapshot stamped from a
+/// STALE synthetic cursor after live traffic was acked would be silently
+/// dropped by the server itself before the client ever saw it (caught by the
+/// P5 demo: a lazy stream add after live rows had acked delivered zero rows).
+/// Stamping above the socket frontier keeps every snapshot row deliverable.
+/// The narrow synthetic-vs-WAL collision window documented in
+/// `snapshot_source.rs` (resuming-client ponytail) applies here unchanged —
+/// this is exactly the resuming-client shape.
+fn snapshot_base_lsn(subs_cursor: u64, sink: &TokioEventSink) -> u64 {
+    let acked = sink.last_acked_lsn().map_or(0, nostos_application::Lsn::raw);
+    let delivered = sink
+        .last_delivered_lsn()
+        .map_or(0, nostos_application::Lsn::raw);
+    subs_cursor.max(acked).max(delivered)
 }
 
 /// Apply a decoded inbound Ack/Write client message. `Subscribe` is routed by
@@ -1110,26 +1378,13 @@ async fn handle_decoded_message(
         ClientMessage::Subscribe { .. } => {
             debug!("subscribe reached decoded-message handler");
         }
-        // P5 sync streams: the wire variants exist (wire.rs), but mid-session
-        // routing (stream registry → per-stream session) is a later slice of
-        // docs/plans/p5-sync-streams-design.md. Until then the honest answer
-        // is the design's non-fatal `stream_error` reject (§1) — never a
-        // socket close, never a silent drop.
-        ClientMessage::SubscribeStream { id, .. } => {
-            let frame = encode_stream_error(
-                &id,
-                "sync streams are not enabled on this server yet (P5 routing pending)",
-            );
-            let _ = server_frames_tx.try_send(frame);
-            debug!(stream_id = %id, "subscribe_stream rejected: routing pending");
-        }
-        ClientMessage::UnsubscribeStream { id } => {
-            let frame = encode_stream_error(
-                &id,
-                "sync streams are not enabled on this server yet (P5 routing pending)",
-            );
-            let _ = server_frames_tx.try_send(frame);
-            debug!(stream_id = %id, "unsubscribe_stream rejected: routing pending");
+        // P5 sync streams: the reader routes both stream frames to
+        // `register_stream`/`unregister_stream`; these arms are the defensive
+        // fallback for any future call site — no-op pass-through (never reject).
+        ClientMessage::SubscribeStream { .. } | ClientMessage::UnsubscribeStream { .. } => {
+            // No-op: the reader loop handles these; this arm exists only for
+            // defensive completeness if `handle_decoded_message` is called
+            // directly in future refactoring.
         }
     }
 }
@@ -1342,6 +1597,51 @@ fn build_predicate(
     Ok(p)
 }
 
+/// Build the server-enforced predicate for a sync stream (P5 design Decision
+/// 3). The stream's BOUND template (params already substituted value-level by
+/// `predicate_compile::bind_params`) folds in at exactly the `where_sql`
+/// seam: rules scope FIRST and fail-closed (a stream on a `NotSynced` table
+/// is rejected through the same `RuleDecision` path — design §5), tenant
+/// clause LAST so it wraps everything (ADR-0011).
+///
+/// A param naming the TENANT column narrows here to a fail-closed AND-wrap:
+/// `tenant = :rogue AND tenant = <principal>` is the impossible predicate, so
+/// an escape attempt yields ZERO rows — never the other tenant's data, and
+/// never the principal's rows under a borrowed template (e2e §6 item 3 pins
+/// this over real PG). No client filters exist on the stream path: the whole
+/// shape is server config.
+fn build_stream_predicate(
+    table: &str,
+    bound: PredicateExpr,
+    principal: &Principal,
+    tenant_column: Option<&str>,
+    ruleset: &ActiveRuleset,
+) -> Result<Predicate, SubscribeRejection> {
+    let rules_expr = match ruleset.decide(table, principal) {
+        RuleDecision::Allow(expr) => expr,
+        RuleDecision::DeniedTable => {
+            return Err(SubscribeRejection::NotSynced {
+                table: table.to_string(),
+                mode: ruleset.mode(),
+            });
+        }
+        RuleDecision::DeniedClaim(claim) => {
+            return Err(SubscribeRejection::MissingClaim {
+                table: table.to_string(),
+                claim,
+            });
+        }
+    };
+    let mut p = Predicate {
+        table: table.to_string(),
+        expr: rules_expr.and(bound),
+    };
+    if let Some(s) = principal.tenant_scope(tenant_column) {
+        p = p.and_eq(s.column, ColumnValue::text(s.value));
+    }
+    Ok(p)
+}
+
 /// The parsed first-frame subscribe request (internal shape; the wire type is
 /// `ClientMessage::Subscribe`).
 struct SubscribeRequest {
@@ -1419,6 +1719,7 @@ mod tests {
     use nostos_application::ports::SessionStore;
     use nostos_domain::{Lsn, RowOp};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
     use tokio::sync::mpsc;
 
     /// A canned op-log reader for the reconnect-resume branch tests (ADR-0025
@@ -1470,6 +1771,7 @@ mod tests {
             ids: Vec::new(),
             tables: HashSet::new(),
             synthetic_cursor: 0,
+            streams: HashMap::new(),
         }));
         let store: Arc<dyn SessionStore> = Arc::new(crate::store::InMemorySessionStore::new());
         let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
@@ -1932,6 +2234,7 @@ mod tests {
                 scope: scope.map(str::to_string),
             }],
             hand: Vec::new(),
+            streams: Vec::new(),
         }
     }
 
@@ -2057,5 +2360,547 @@ mod tests {
         };
         assert!(!predicate.expr.matches(with_owner("someone_else")));
         assert!(!predicate.expr.matches(with_owner("owner1")));
+    }
+
+    // ---- P5 sync streams (docs/plans/p5-sync-streams-design.md §2/§3/§6) ----
+
+    /// A `SnapshotSource` fake for stream tests: serves rows from memory,
+    /// evaluating the bound predicate with the SAME `PredicateExpr::matches`
+    /// semantics as live fan-out and applying the tenant scope the way the
+    /// pg adapter's appended tenant clause does (the port contract).
+    struct FakeStreamSnapshotter {
+        rows: Vec<(&'static str, Vec<(&'static str, ColumnValue)>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl SnapshotSource for FakeStreamSnapshotter {
+        async fn snapshot(
+            &self,
+            table: &str,
+            _base_lsn: Lsn,
+            _tenant: Option<nostos_domain::TenantScope<'_>>,
+        ) -> Result<Vec<ReplicationEvent>, nostos_application::ports::SnapshotError> {
+            panic!("table snapshot unused in stream tests (table {table})")
+        }
+
+        async fn snapshot_stream(
+            &self,
+            table: &str,
+            predicate: &PredicateExpr,
+            base_lsn: Lsn,
+            tenant: Option<nostos_domain::TenantScope<'_>>,
+        ) -> Result<Vec<ReplicationEvent>, nostos_application::ports::SnapshotError> {
+            let mut out = Vec::new();
+            for (pk, cols) in &self.rows {
+                let view = |name: &str| {
+                    cols.iter()
+                        .find(|(c, _)| *c == name)
+                        .map(|(_, v)| v.clone())
+                };
+                // The pg adapter appends `AND "tenant_col"::text = $k` — the
+                // fake applies the same restriction in memory.
+                let tenant_ok = match tenant {
+                    Some(scope) => view(scope.column) == Some(ColumnValue::text(scope.value)),
+                    None => true,
+                };
+                if tenant_ok && predicate.matches(view) {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in cols {
+                        let jv = match v {
+                            ColumnValue::Text(s) => serde_json::Value::String(s.clone()),
+                            ColumnValue::Number(n) => serde_json::Value::from(*n),
+                            ColumnValue::Float(f) => serde_json::Value::from(*f),
+                            ColumnValue::Bool(b) => serde_json::Value::from(*b),
+                            ColumnValue::Param(_) | ColumnValue::Any => serde_json::Value::Null,
+                        };
+                        map.insert((*k).to_string(), jv);
+                    }
+                    let lsn = base_lsn.raw() + 1 + out.len() as u64;
+                    out.push(ReplicationEvent::new(
+                        Lsn::new(lsn),
+                        RowOp::Insert {
+                            table: table.to_string(),
+                            pk: (*pk).to_string(),
+                            payload: serde_json::to_vec(&map).unwrap().into(),
+                        },
+                    ));
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    fn stream_ruleset(name: &str, table: &str, template: &str) -> ActiveRuleset {
+        ActiveRuleset::compile(&nostos_domain::SyncRules {
+            version: nostos_domain::RULES_VERSION,
+            mode: SyncMode::All,
+            tables: vec![],
+            hand: vec![],
+            streams: vec![nostos_domain::StreamRule {
+                name: name.into(),
+                table: table.into(),
+                template: template.into(),
+            }],
+        })
+        .unwrap()
+    }
+
+    fn stream_params(v: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn stream_registers_and_snapshots_matching_rows_only() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let snap: Arc<dyn SnapshotSource> = Arc::new(FakeStreamSnapshotter {
+            rows: vec![
+                (
+                    "l1",
+                    vec![
+                        ("owner_id", ColumnValue::text("u1")),
+                        ("priority", ColumnValue::number(5)),
+                    ],
+                ),
+                (
+                    "l2",
+                    vec![
+                        ("owner_id", ColumnValue::text("u2")),
+                        ("priority", ColumnValue::number(9)),
+                    ],
+                ),
+                (
+                    "l3",
+                    vec![
+                        ("owner_id", ColumnValue::text("u1")),
+                        ("priority", ColumnValue::number(1)),
+                    ],
+                ),
+            ],
+        });
+        let ruleset = stream_ruleset("lists", "lists", "owner_id = :owner AND priority >= :min");
+        let principal = Principal::new("acct", "tenant-acme");
+        register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1", "min": 3})),
+            &subs,
+            &manager,
+            Some(&snap),
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .unwrap();
+
+        // begin(s1) → row l1 → end(s1): only the matching row, boundaries
+        // tagged with the stream id.
+        let begin = rx.recv().await.unwrap();
+        let crate::router::SinkMsg::Control(bytes) = begin else {
+            panic!("expected begin control frame, got {begin:?}")
+        };
+        assert_eq!(
+            crate::wire::decode_snapshot_boundary(&bytes),
+            Some(("lists".to_string(), Some("s1".to_string()), true))
+        );
+        let row = rx.recv().await.unwrap();
+        let crate::router::SinkMsg::Event(ev) = row else {
+            panic!("expected row event, got {row:?}")
+        };
+        let RowOp::Insert { pk, .. } = &ev.op else {
+            panic!("expected insert")
+        };
+        assert_eq!(pk, "l1");
+        let end = rx.recv().await.unwrap();
+        let crate::router::SinkMsg::Control(bytes) = end else {
+            panic!("expected end control frame, got {end:?}")
+        };
+        assert_eq!(
+            crate::wire::decode_snapshot_boundary(&bytes),
+            Some(("lists".to_string(), Some("s1".to_string()), false))
+        );
+        assert!(rx.try_recv().is_err(), "exactly one row matched");
+
+        // Bookkeeping + cursor advance (1 snapshot row).
+        let s = subs.lock().await;
+        assert!(s.streams.contains_key("s1"));
+        assert_eq!(s.synthetic_cursor, 1);
+        drop(s);
+        assert_eq!(manager.session_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn stream_unknown_name_rejected() {
+        let (subs, manager, sink, _rx) = harness().await;
+        let ruleset = ActiveRuleset::all_mode();
+        let principal = Principal::new("acct", "tenant-acme");
+        let err = register_stream(
+            "s1",
+            "nope",
+            &stream_params(&serde_json::json!({})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .expect_err("unknown stream must reject");
+        assert!(err.contains("unknown stream 'nope'"), "got: {err}");
+        assert_eq!(manager.session_count().await, 0, "no session on reject");
+    }
+
+    #[tokio::test]
+    async fn stream_bad_params_rejected() {
+        let (subs, manager, sink, _rx) = harness().await;
+        let ruleset = stream_ruleset("lists", "lists", "owner_id = :owner AND priority >= :min");
+        let principal = Principal::new("acct", "tenant-acme");
+
+        // Missing :min.
+        let err = register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1"})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .expect_err("missing param must reject");
+        assert!(
+            err.contains("missing value for placeholder :min"),
+            "got: {err}"
+        );
+
+        // Extra param (the tenant-escape shape: never silently passed).
+        let err = register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1", "min": 3, "org_id": "tenant-b"})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .expect_err("extra param must reject");
+        assert!(err.contains("unexpected param"), "got: {err}");
+
+        // Non-scalar param.
+        let err = register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1", "min": [3]})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .expect_err("array param must reject");
+        assert!(
+            err.contains("must be a string, number, or boolean"),
+            "got: {err}"
+        );
+
+        assert_eq!(manager.session_count().await, 0, "no sessions on rejects");
+    }
+
+    #[tokio::test]
+    async fn stream_on_rules_denied_table_rejected() {
+        let (subs, manager, sink, _rx) = harness().await;
+        // toggles mode with `lists` sync=false → fail-closed (design §5).
+        let mut rules = toggles_rules("lists", false, None);
+        rules.streams = vec![nostos_domain::StreamRule {
+            name: "lists".into(),
+            table: "lists".into(),
+            template: "owner_id = :owner".into(),
+        }];
+        let ruleset = ActiveRuleset::compile(&rules).unwrap();
+        let principal = Principal::new("acct", "tenant-acme");
+        let err = register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1"})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .expect_err("stream on a denied table must reject");
+        assert!(err.contains("not synced"), "got: {err}");
+        assert_eq!(manager.session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn stream_tenant_column_escape_yields_zero_rows() {
+        // The unit-level abuse gate (e2e §6 item 3 does it over real PG):
+        // `org_id = :org` bound to another tenant's id ANDs against the
+        // principal's tenant clause — the impossible predicate, zero rows.
+        let (subs, manager, sink, mut rx) = harness().await;
+        let snap: Arc<dyn SnapshotSource> = Arc::new(FakeStreamSnapshotter {
+            rows: vec![
+                ("t1", vec![("org_id", ColumnValue::text("tenant-acme"))]),
+                ("t2", vec![("org_id", ColumnValue::text("tenant-b"))]),
+            ],
+        });
+        let ruleset = stream_ruleset("by_org", "tasks", "org_id = :org");
+        let principal = Principal::new("acct", "tenant-acme");
+        register_stream(
+            "s1",
+            "by_org",
+            &stream_params(&serde_json::json!({"org": "tenant-b"})),
+            &subs,
+            &manager,
+            Some(&snap),
+            &sink,
+            &principal,
+            Some("org_id"),
+            &ruleset,
+        )
+        .await
+        .unwrap();
+
+        // begin + end arrive (snapshot ran), ZERO rows between them — never
+        // an interpolation error, never another tenant's row.
+        let first = rx.recv().await.unwrap();
+        assert!(
+            matches!(first, crate::router::SinkMsg::Control(_)),
+            "begin frame first"
+        );
+        let second = rx.recv().await.unwrap();
+        assert!(
+            matches!(second, crate::router::SinkMsg::Control(_)),
+            "end frame second — no rows"
+        );
+        assert!(rx.try_recv().is_err());
+
+        let s = subs.lock().await;
+        assert!(s.streams.contains_key("s1"));
+    }
+
+    #[test]
+    fn stream_predicate_tenant_wrap_is_fail_closed() {
+        // build_stream_predicate directly: bound tenant-param + injected
+        // tenant clause = unsatisfiable (Decision 3's drop-and-override
+        // narrows to AND-wrap here; zero rows, never cross-tenant data).
+        let ruleset = stream_ruleset("by_org", "tasks", "org_id = :org");
+        let template = nostos_domain::parse_predicate_expr("org_id = :org").unwrap();
+        let bound = nostos_domain::predicate_compile::bind_params(
+            &template,
+            &std::collections::HashMap::from([("org".to_string(), ColumnValue::text("tenant-b"))]),
+        )
+        .unwrap();
+        let principal = Principal::new("acct", "tenant-acme");
+        let p =
+            build_stream_predicate("tasks", bound, &principal, Some("org_id"), &ruleset).unwrap();
+        let row = |org: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                (col == "org_id").then(|| ColumnValue::text(org))
+            }
+        };
+        assert!(!p.matches(row("tenant-b")));
+        assert!(!p.matches(row("tenant-acme")));
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_stream_removes_session_and_unknown_id_is_noop() {
+        let (subs, manager, sink, _rx) = harness().await;
+        let ruleset = stream_ruleset("lists", "lists", "owner_id = :owner");
+        let principal = Principal::new("acct", "tenant-acme");
+        register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1"})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .unwrap();
+        assert_eq!(manager.session_count().await, 1);
+
+        unregister_stream("s1", &subs, &manager).await;
+        assert_eq!(manager.session_count().await, 0, "session disconnected");
+        assert!(!subs.lock().await.streams.contains_key("s1"));
+
+        // Regression (P5 demo phase 5): the stream session shares the
+        // socket-wide sink — unsubscribe must NOT close it, or every later
+        // delivery on the socket (base subs, re-registered streams) drops.
+        assert_eq!(
+            sink.deliver_control(vec![0]),
+            nostos_application::ports::DeliveryDecision::Delivered,
+            "shared socket sink must stay open after stream unsubscribe"
+        );
+
+        // Unknown id: idempotent no-op, no error, no panic.
+        unregister_stream("s1", &subs, &manager).await;
+        unregister_stream("never-seen", &subs, &manager).await;
+    }
+
+    #[tokio::test]
+    async fn stream_id_reuse_replaces_session() {
+        let (subs, manager, sink, _rx) = harness().await;
+        let ruleset = stream_ruleset("lists", "lists", "owner_id = :owner");
+        let principal = Principal::new("acct", "tenant-acme");
+        for owner in ["u1", "u2"] {
+            register_stream(
+                "s1",
+                "lists",
+                &stream_params(&serde_json::json!({"owner": owner})),
+                &subs,
+                &manager,
+                None,
+                &sink,
+                &principal,
+                None,
+                &ruleset,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            manager.session_count().await,
+            1,
+            "the replaced session was disconnected, not leaked"
+        );
+        assert_eq!(subs.lock().await.streams.len(), 1);
+    }
+
+    /// Regression (caught by the P5 demo): a stream added AFTER the socket
+    /// has acked live traffic must still deliver its snapshot — the sink's
+    /// `admit` gate drops frames at or below the acked cursor, so the
+    /// snapshot base must ride the socket frontier, not the stale synthetic
+    /// cursor.
+    #[tokio::test]
+    async fn stream_snapshot_after_acked_live_traffic_still_delivers() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let snap: Arc<dyn SnapshotSource> = Arc::new(FakeStreamSnapshotter {
+            rows: vec![("l9", vec![("owner_id", ColumnValue::text("u1"))])],
+        });
+        let ruleset = stream_ruleset("lists", "lists", "owner_id = :owner");
+        let principal = Principal::new("acct", "tenant-acme");
+
+        // Simulate live traffic already delivered + acked at LSN 500.
+        sink.record_ack(Lsn::new(500));
+
+        register_stream(
+            "s1",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1"})),
+            &subs,
+            &manager,
+            Some(&snap),
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .unwrap();
+
+        // begin → row → end: the row's synthetic LSN (501) clears the ack
+        // gate (500). Without the frontier-aware base it would be stamped 1
+        // and dropped invisibly.
+        let mut saw_row = false;
+        let mut end_seen = false;
+        while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
+        {
+            match msg {
+                crate::router::SinkMsg::Event(ev) => {
+                    assert!(
+                        ev.lsn.raw() > 500,
+                        "snapshot row must stamp above the acked frontier"
+                    );
+                    saw_row = true;
+                }
+                crate::router::SinkMsg::Control(bytes) => {
+                    let (_, _, begin) = crate::wire::decode_snapshot_boundary(&bytes).unwrap();
+                    if !begin {
+                        end_seen = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(saw_row, "snapshot row delivered after acked live traffic");
+        assert!(end_seen, "end boundary delivered");
+    }
+
+    #[tokio::test]
+    async fn stream_cap_counts_tables_and_streams_together() {
+        let (subs, manager, sink, _rx) = harness().await;
+        let ruleset = stream_ruleset("lists", "lists", "owner_id = :owner");
+        let principal = Principal::new("acct", "tenant-acme");
+        // Fill to the cap with streams alone.
+        for i in 0..MAX_TABLES_PER_SOCKET {
+            register_stream(
+                &format!("s{i}"),
+                "lists",
+                &stream_params(&serde_json::json!({"owner": "u1"})),
+                &subs,
+                &manager,
+                None,
+                &sink,
+                &principal,
+                None,
+                &ruleset,
+            )
+            .await
+            .unwrap();
+        }
+        let err = register_stream(
+            "one-too-many",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u1"})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .expect_err("33rd subscription must reject");
+        assert!(err.contains("cap"), "got: {err}");
+
+        // An existing id still replaces under a full cap (not a growth).
+        register_stream(
+            "s0",
+            "lists",
+            &stream_params(&serde_json::json!({"owner": "u2"})),
+            &subs,
+            &manager,
+            None,
+            &sink,
+            &principal,
+            None,
+            &ruleset,
+        )
+        .await
+        .unwrap();
+        assert_eq!(subs.lock().await.streams.len(), MAX_TABLES_PER_SOCKET);
     }
 }

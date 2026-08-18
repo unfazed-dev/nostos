@@ -161,6 +161,17 @@ class _FakeEngine implements NostosEngine {
   Future<String> query({required String sql}) async => queryResult;
 
   @override
+
+  @override
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  }) async => 'fake-stream';
+
+  @override
+  Future<void> unsubscribeStream({required String id}) async {}
+
+  @override
   Future<int> write({
     required String table,
     required String op,

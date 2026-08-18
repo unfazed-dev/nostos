@@ -199,6 +199,7 @@ async fn rules_checksum_roundtrip() {
             scope: None,
         }],
         hand: vec![],
+        streams: vec![],
     };
     let ruleset_v2 = ActiveRuleset::compile(&rules_v2).expect("compile v2 rules");
     assert_ne!(

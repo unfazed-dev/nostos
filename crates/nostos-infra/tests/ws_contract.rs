@@ -570,6 +570,8 @@ async fn subscribe_to_unsynced_table_is_rejected_before_events() {
             scope: None,
         }],
         hand: Vec::new(),
+
+        streams: vec![],
     };
     let ruleset = ActiveRuleset::compile(&rules).unwrap();
     let auth: Arc<dyn SyncAuth> = Arc::new(nostos_infra::AllowAnonymous::new());

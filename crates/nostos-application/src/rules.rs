@@ -18,6 +18,17 @@ use std::collections::BTreeMap;
 use nostos_domain::{PredicateExpr, RULES_VERSION};
 use nostos_domain::{Principal, RulesError, ScopeExpr, SyncMode, SyncRules};
 
+/// A server-defined sync stream with its template parsed ONCE at ruleset
+/// compile time (P5 sync streams — docs/plans/p5-sync-streams-design.md
+/// Decision 2). The `template` tree still holds `ColumnValue::Param` marker
+/// leaves; `predicate_compile::bind_params` substitutes typed values per
+/// subscribe. No client byte is ever parsed — binding is value-level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledStream {
+    pub table: String,
+    pub template: PredicateExpr,
+}
+
 /// A validated, pre-compiled ruleset. Built once per load; cheap to consult
 /// per subscribe (no parsing on the hot path).
 #[derive(Debug, Clone)]
@@ -28,6 +39,9 @@ pub struct ActiveRuleset {
     /// a table missing from this map is not synced at all (unlisted, or
     /// `sync = false`) — see [`Self::decide`].
     scopes: BTreeMap<String, ScopeExpr>,
+    /// stream name -> compiled stream (P5). Parsed once at compile; present
+    /// under every mode (streams are mode-independent).
+    streams: BTreeMap<String, CompiledStream>,
 }
 
 /// The outcome of evaluating one subscribe against the active ruleset.
@@ -67,12 +81,15 @@ fn compile_scope(table: &str, raw: Option<&str>) -> Result<ScopeExpr, RulesError
 
 impl ActiveRuleset {
     /// Compile from a validated `SyncRules`. Selects the active section by
-    /// mode; the inactive section is dropped, never consulted.
+    /// mode; the inactive section is dropped, never consulted. Stream
+    /// templates (P5) are parsed here, once, under every mode — `validate`
+    /// already proved they parse, so the re-parse cannot fail.
     ///
     /// # Errors
     /// Propagates [`SyncRules::validate`]'s error (unsupported version,
-    /// unknown mode, bad scope, duplicate/invalid table name), or a scope
-    /// parse failure if `rules` was not already validated.
+    /// unknown mode, bad scope, duplicate/invalid table name, bad stream
+    /// template), or a scope parse failure if `rules` was not already
+    /// validated.
     pub fn compile(rules: &SyncRules) -> Result<Self, RulesError> {
         rules.validate()?;
         let checksum = rules.checksum();
@@ -95,10 +112,28 @@ impl ActiveRuleset {
                 }
             }
         }
+        let mut streams = BTreeMap::new();
+        for stream in &rules.streams {
+            let template =
+                nostos_domain::parse_predicate_expr(stream.template.trim()).map_err(|source| {
+                    RulesError::StreamTemplate {
+                        name: stream.name.clone(),
+                        source,
+                    }
+                })?;
+            streams.insert(
+                stream.name.clone(),
+                CompiledStream {
+                    table: stream.table.clone(),
+                    template,
+                },
+            );
+        }
         Ok(Self {
             mode: rules.mode,
             checksum,
             scopes,
+            streams,
         })
     }
 
@@ -111,11 +146,13 @@ impl ActiveRuleset {
             mode: SyncMode::All,
             tables: Vec::new(),
             hand: Vec::new(),
+            streams: Vec::new(),
         };
         Self {
             mode: SyncMode::All,
             checksum: rules.checksum(),
             scopes: BTreeMap::new(),
+            streams: BTreeMap::new(),
         }
     }
 
@@ -129,6 +166,15 @@ impl ActiveRuleset {
     #[must_use]
     pub fn checksum(&self) -> u64 {
         self.checksum
+    }
+
+    /// Look up a compiled sync stream by name (P5). `None` for unknown names
+    /// — the transport answers with a non-fatal `stream_error`, not a socket
+    /// close (design §1).
+    #[inline]
+    #[must_use]
+    pub fn stream(&self, name: &str) -> Option<&CompiledStream> {
+        self.streams.get(name)
     }
 
     /// Decide one subscribe. Under `All`, always `Allow(PredicateExpr::any())`
@@ -227,6 +273,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("tasks", true, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         let p = principal_with(&[]);
@@ -240,6 +288,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("notes", false, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         let p = principal_with(&[]);
@@ -253,6 +303,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("tasks", true, Some("owner_id = claims.sub"))],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         let p = principal_with(&[]); // account_id "u1" (via principal_with)
@@ -269,6 +321,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("tasks", true, Some("org_id = claims.org_id"))],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         let p = principal_with(&[]); // no org_id claim
@@ -284,6 +338,8 @@ mod tests {
             mode: SyncMode::Hand,
             tables: vec![table("notes", true, None)],
             hand: vec![hand("tasks", None)],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         let p = principal_with(&[]);
@@ -301,6 +357,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("tasks", true, None)],
             hand: vec![hand("notes", None)],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         let p = principal_with(&[]);
@@ -318,6 +376,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("tasks", true, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         assert_eq!(ruleset.checksum(), rules.checksum());
@@ -330,6 +390,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("tasks", true, Some("owner_id = claims.sub"))],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         assert_eq!(
@@ -345,6 +407,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("notes", true, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         assert_eq!(ruleset.scope_text("notes"), Some(String::new()));
@@ -357,6 +421,8 @@ mod tests {
             mode: SyncMode::Toggles,
             tables: vec![table("tasks", true, None)],
             hand: vec![],
+
+            streams: vec![],
         };
         let ruleset = ActiveRuleset::compile(&rules).unwrap();
         assert_eq!(ruleset.scope_text("nonexistent"), None);
@@ -376,8 +442,59 @@ mod tests {
             mode: SyncMode::All,
             tables: vec![table("tasks", true, Some("a = 1"))],
             hand: vec![hand("notes", None)],
+
+            streams: vec![],
         };
         let compiled = ActiveRuleset::compile(&rules).unwrap();
         assert_eq!(ActiveRuleset::all_mode().checksum(), compiled.checksum());
+    }
+
+    // ---- P5 sync streams: templates compile once at load ----
+
+    #[test]
+    fn streams_compile_once_and_lookup_by_name() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::All,
+            tables: vec![],
+            hand: vec![],
+            streams: vec![nostos_domain::StreamRule {
+                name: "lists".to_string(),
+                table: "lists".to_string(),
+                template: "owner_id = :owner AND priority >= :min".to_string(),
+            }],
+        };
+        let ruleset = ActiveRuleset::compile(&rules).unwrap();
+        let stream = ruleset.stream("lists").expect("stream compiled");
+        assert_eq!(stream.table, "lists");
+        // The template holds Param marker leaves until subscribe-time binding.
+        assert_eq!(
+            stream.template,
+            PredicateExpr::And(vec![
+                PredicateExpr::eq("owner_id", ColumnValue::param("owner")),
+                PredicateExpr::ge("priority", ColumnValue::param("min")),
+            ])
+        );
+        assert!(ruleset.stream("unknown").is_none());
+    }
+
+    #[test]
+    fn bad_stream_template_fails_compile_even_in_all_mode() {
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::All,
+            tables: vec![],
+            hand: vec![],
+            streams: vec![nostos_domain::StreamRule {
+                name: "evil".to_string(),
+                table: "tasks".to_string(),
+                template: "owner = :owner UNION SELECT * FROM tasks".to_string(),
+            }],
+        };
+        let err = ActiveRuleset::compile(&rules).expect_err("must fail loudly at boot");
+        match err {
+            RulesError::StreamTemplate { name, .. } => assert_eq!(name, "evil"),
+            other => panic!("expected StreamTemplate, got {other:?}"),
+        }
     }
 }

@@ -63,6 +63,17 @@ struct RuleEntry {
     scope: Option<String>,
 }
 
+/// One `[streams.<name>]` entry — the P5 sync-streams section
+/// (docs/plans/p5-sync-streams-design.md Decision 1). `where` is the
+/// predicate template with `:param` placeholders; it is a Rust keyword, so
+/// the field is `template` here and renamed only at the serde boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StreamEntry {
+    table: String,
+    #[serde(rename = "where")]
+    template: String,
+}
+
 /// The serde-facing mirror of `nostos_rules.toml`. Kept private and separate
 /// from [`SyncRules`] so the domain type never derives `serde` against a
 /// TOML-specific shape (`BTreeMap<String, TableEntry>` for `[tables.*]`
@@ -76,6 +87,11 @@ struct RulesFileMirror {
     tables: BTreeMap<String, TableEntry>,
     #[serde(default)]
     rules: Vec<RuleEntry>,
+    /// `[streams.<name>]` — name-keyed like `[tables.*]` (P5). Absent in
+    /// pre-P5 files → empty (serde default); unknown to old binaries, which
+    /// ignore it (no `deny_unknown_fields`).
+    #[serde(default)]
+    streams: BTreeMap<String, StreamEntry>,
 }
 
 impl RulesFileMirror {
@@ -101,11 +117,25 @@ impl RulesFileMirror {
                 scope: h.scope.clone(),
             })
             .collect();
+        let streams = rules
+            .streams
+            .iter()
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    StreamEntry {
+                        table: s.table.clone(),
+                        template: s.template.clone(),
+                    },
+                )
+            })
+            .collect();
         Self {
             version: rules.version,
             sync_mode: rules.mode.as_str().to_string(),
             tables,
             rules: rules_vec,
+            streams,
         }
     }
 
@@ -136,11 +166,21 @@ impl RulesFileMirror {
                 scope: r.scope,
             })
             .collect();
+        let streams = self
+            .streams
+            .into_iter()
+            .map(|(name, entry)| nostos_domain::StreamRule {
+                name,
+                table: entry.table,
+                template: entry.template,
+            })
+            .collect();
         Ok(SyncRules {
             version: self.version,
             mode,
             tables,
             hand,
+            streams,
         })
     }
 }
@@ -271,6 +311,7 @@ mod tests {
                 table: "tasks".to_string(),
                 scope: Some("org_id = claims.org_id AND status != 'archived'".to_string()),
             }],
+            streams: Vec::new(),
         }
     }
 
@@ -338,5 +379,167 @@ mod tests {
             } => assert_eq!(v, RULES_VERSION + 1),
             other => panic!("expected Invalid/UnsupportedVersion, got {other:?}"),
         }
+    }
+
+    // ---- P5 sync streams: the `[streams]` section ----
+
+    #[test]
+    fn streams_round_trip_through_the_file() {
+        let path = temp_rules_path();
+        let mut rules = sample_rules(SyncMode::Toggles);
+        rules.streams = vec![
+            nostos_domain::StreamRule {
+                name: "lists".to_string(),
+                table: "lists".to_string(),
+                template: "owner_id = :owner AND priority >= :min".to_string(),
+            },
+            nostos_domain::StreamRule {
+                name: "inbox".to_string(),
+                table: "messages".to_string(),
+                template: "folder = :folder".to_string(),
+            },
+        ];
+        save(&path, &rules).expect("save");
+
+        // The TOML shape is the documented `[streams.<name>]` with a `where` key.
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.contains("[streams.lists]"), "got:\n{text}");
+        assert!(
+            text.contains("where = 'owner_id = :owner AND priority >= :min'")
+                || text.contains("where = \"owner_id = :owner AND priority >= :min\""),
+            "got:\n{text}"
+        );
+
+        let loaded = load(&path).expect("load").expect("file exists");
+        // Streams are name-keyed in the file (`[streams.<name>]`), so the
+        // round-trip is order-normalizing: compare as sorted sets.
+        let mut loaded_streams = loaded.streams.clone();
+        loaded_streams.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut expected_streams = rules.streams.clone();
+        expected_streams.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(loaded_streams, expected_streams);
+        assert_eq!(loaded.tables, rules.tables);
+        assert_eq!(loaded.hand, rules.hand);
+        assert_eq!(loaded_streams.len(), 2);
+    }
+
+    #[test]
+    fn pre_p5_file_without_streams_loads_empty() {
+        let path = temp_rules_path();
+        std::fs::write(&path, "version = 1\nsync_mode = \"all\"\n").expect("write minimal file");
+        let loaded = load(&path).expect("load").expect("file exists");
+        assert!(loaded.streams.is_empty());
+    }
+
+    #[test]
+    fn bad_stream_template_is_a_loud_boot_error_in_any_mode() {
+        // Even under `all` (where table sections are inert), a malformed
+        // stream template fails validation at load (design §2).
+        let path = temp_rules_path();
+        let mut rules = sample_rules(SyncMode::All);
+        rules.streams = vec![nostos_domain::StreamRule {
+            name: "evil".to_string(),
+            table: "tasks".to_string(),
+            template: "owner = :owner; DROP TABLE tasks;--".to_string(),
+        }];
+        save(&path, &rules).expect("save");
+
+        let err = load(&path).expect_err("injection-shaped template must error");
+        match err {
+            RulesFileError::Invalid {
+                source: RulesError::StreamTemplate { name, .. },
+                ..
+            } => assert_eq!(name, "evil"),
+            other => panic!("expected Invalid/StreamTemplate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_stream_name_is_rejected() {
+        // `[streams.<name>]` is name-keyed, so a file cannot express a
+        // duplicate (TOML rejects a repeated table as malformed). The check
+        // guards in-memory constructions (e.g. a future management endpoint);
+        // exercise it at the domain layer directly.
+        let rules = SyncRules {
+            version: RULES_VERSION,
+            mode: SyncMode::All,
+            tables: Vec::new(),
+            hand: Vec::new(),
+            streams: vec![
+                nostos_domain::StreamRule {
+                    name: "lists".to_string(),
+                    table: "lists".to_string(),
+                    template: "owner = :o".to_string(),
+                },
+                nostos_domain::StreamRule {
+                    name: "lists".to_string(),
+                    table: "other".to_string(),
+                    template: "owner = :o".to_string(),
+                },
+            ],
+        };
+        let err = rules
+            .validate()
+            .expect_err("duplicate stream name must error");
+        match err {
+            RulesError::DuplicateStream(name) => assert_eq!(name, "lists"),
+            other => panic!("expected DuplicateStream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streams_edit_changes_the_checksum_under_every_mode() {
+        // Design checklist: a streams edit = a rules edit → resnapshot. Under
+        // `all` the table sections are inert, but streams must still move the
+        // checksum.
+        for mode in [SyncMode::All, SyncMode::Toggles, SyncMode::Hand] {
+            let base = sample_rules(mode);
+            let mut with_stream = base.clone();
+            with_stream.streams = vec![nostos_domain::StreamRule {
+                name: "lists".to_string(),
+                table: "lists".to_string(),
+                template: "owner = :owner".to_string(),
+            }];
+            assert_ne!(
+                base.checksum(),
+                with_stream.checksum(),
+                "mode {mode:?}: adding a stream must change the checksum"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_template_whitespace_noise_does_not_change_checksum() {
+        let mut a = sample_rules(SyncMode::All);
+        a.streams = vec![nostos_domain::StreamRule {
+            name: "lists".to_string(),
+            table: "lists".to_string(),
+            template: "owner = :owner AND priority >= :min".to_string(),
+        }];
+        let mut b = sample_rules(SyncMode::All);
+        b.streams = vec![nostos_domain::StreamRule {
+            name: "lists".to_string(),
+            table: "lists".to_string(),
+            template: "  owner=:owner   AND\n priority  >=  :min ".to_string(),
+        }];
+        assert_eq!(a.checksum(), b.checksum());
+    }
+
+    #[test]
+    fn set_mode_preserves_streams() {
+        let path = temp_rules_path();
+        let mut rules = sample_rules(SyncMode::Toggles);
+        rules.streams = vec![nostos_domain::StreamRule {
+            name: "lists".to_string(),
+            table: "lists".to_string(),
+            template: "owner = :owner".to_string(),
+        }];
+        save(&path, &rules).expect("save");
+
+        set_mode(&path, SyncMode::Hand).expect("set_mode");
+
+        let loaded = load(&path).expect("load").expect("file exists");
+        assert_eq!(loaded.mode, SyncMode::Hand);
+        assert_eq!(loaded.streams, rules.streams);
     }
 }

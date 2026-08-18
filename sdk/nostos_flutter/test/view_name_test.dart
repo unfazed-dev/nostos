@@ -42,6 +42,17 @@ class _RecordingEngine implements NostosEngine {
       stateController.stream;
 
   @override
+
+  @override
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  }) async => 'fake-stream';
+
+  @override
+  Future<void> unsubscribeStream({required String id}) async {}
+
+  @override
   Stream<String> watch({required String table}) => rowsController.stream;
 
   final _writeStatus =

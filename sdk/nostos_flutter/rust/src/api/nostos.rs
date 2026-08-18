@@ -24,10 +24,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nostos_client::sqlite::ClientTable;
-use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig, TableSub};
+use nostos_client::{ClientError, SqliteStorage, StreamHandle, SyncClient, SyncClientConfig, TableSub};
 use nostos_core::{PendingWrite, WriteOp};
 use flutter_rust_bridge::frb;
 use tokio::sync::broadcast::error::RecvError;
@@ -195,6 +195,11 @@ struct Session {
     config: SyncClientConfig,
     /// One re-snapshot pump per `watch(table)` call.
     watch_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Live sync streams by client-chosen id (P5 §4). Dropping a handle
+    /// queues the `unsubscribe_stream` frame; dropping the SESSION (a
+    /// `subscribe()` replace or `close()`) drops them all, which is harmless
+    /// — the old client's registry dies with it.
+    stream_handles: HashMap<String, StreamHandle>,
 }
 
 impl Drop for Session {
@@ -377,7 +382,55 @@ impl NostosHandle {
             run_task: Some(run_task),
             config: stashed_config,
             watch_tasks: Vec::new(),
+            stream_handles: HashMap::new(),
         });
+        Ok(())
+    }
+
+    /// P5 sync streams (docs/plans/p5-sync-streams-design.md §4): subscribe to
+    /// a server-defined, client-parameterized stream on the LIVE session —
+    /// unlike `subscribe()`, NOTHING is torn down; the `subscribe_stream`
+    /// frame goes out on the open socket (or the next reconnect if offline).
+    /// Returns the client-chosen stream id for [`Self::unsubscribe_stream`].
+    ///
+    /// `params_json` is a JSON OBJECT string (`{"owner":"u1"}`) — the same
+    /// no-codegen trick P3 used for `op` (parity plan :106). Values must be
+    /// JSON scalars; the server binds them value-level into the stream's
+    /// `:param` placeholders (design Decision 2 — never textual).
+    ///
+    /// # Errors
+    /// Returns an error string if `params_json` is not a JSON object or
+    /// `subscribe()` hasn't been called. Server-side rejects (unknown stream,
+    /// bad params) arrive asynchronously as `stream_error` frames and are
+    /// logged; they do NOT fail this call.
+    pub async fn subscribe_stream(&self, name: String, params_json: String) -> Result<String, String> {
+        let params_value: serde_json::Value = serde_json::from_str(&params_json)
+            .map_err(|e| format!("params_json is not valid JSON: {e}"))?;
+        let params = params_value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| {
+                "params_json must be a JSON object (e.g. {\"owner\":\"u1\"})".to_string()
+            })?;
+        let mut guard = self.lock_session("subscribe_stream()").await?;
+        let session = guard.as_mut().expect("lock_session only yields a live session");
+        let handle = session.client.sync_stream(&name, params).subscribe();
+        let id = handle.id().to_string();
+        session.stream_handles.insert(id.clone(), handle);
+        Ok(id)
+    }
+
+    /// Drop a stream by the id [`Self::subscribe_stream`] returned. Unknown
+    /// id = no-op (idempotent). v1 leaves local rows in place — eviction is
+    /// separate; PowerSync behaves the same.
+    ///
+    /// # Errors
+    /// Returns an error string if `subscribe()` hasn't been called.
+    pub async fn unsubscribe_stream(&self, id: String) -> Result<(), String> {
+        let mut guard = self.lock_session("unsubscribe_stream()").await?;
+        let session = guard.as_mut().expect("lock_session only yields a live session");
+        // Dropping the handle queues the unsubscribe (StreamHandle::drop).
+        session.stream_handles.remove(&id);
         Ok(())
     }
 

@@ -180,6 +180,21 @@ class WebNostosEngine implements NostosEngine {
   watchWriteStatus() => _writeStatusController.stream;
 
   @override
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  }) => throw UnimplementedError(
+    'sync streams are native-only in v1 (P5 §4: the web/WASM client has no '
+    'mid-session subscribe channel yet)',
+  );
+
+  @override
+  Future<void> unsubscribeStream({required String id}) => throw UnimplementedError(
+    'sync streams are native-only in v1 (P5 §4: the web/WASM client has no '
+    'mid-session subscribe channel yet)',
+  );
+
+  @override
   Future<int> write({
     required String table,
     required String op,

@@ -139,6 +139,18 @@ class Nostos {
   Future<void> subscribe(String table, {String? where}) =>
       subscribeTables([NostosTableSub(name: table, whereSql: where)]);
 
+  /// P5 sync streams (docs/plans/p5-sync-streams-design.md), PowerSync-shaped:
+  /// `db.syncStream('lists', {'owner': uid}).subscribe()`. The stream is
+  /// server-defined (`[streams.<name>]` in `nostos_rules.toml`) and
+  /// client-parameterized — [params] binds the template's `:param`
+  /// placeholders value-level (never textual; injection-safe by
+  /// construction). Lazy: subscribing does NOT tear down the session; the
+  /// frame rides the live socket or the next reconnect. Rows surface through
+  /// the existing [watch]/[watchQuery] layer — streams control which rows
+  /// land in SQLite.
+  NostosSyncStream syncStream(String name, [Map<String, dynamic> params = const {}]) =>
+      NostosSyncStream._(_engine, name, params);
+
   /// The reactive row stream for [table]: the full current row set, re-emitted
   /// immediately with the durable on-disk snapshot (visible offline, before
   /// any network event) and again after every applied change. [table] must be
@@ -641,4 +653,45 @@ class NostosSupabase {
       sqlitePath: sqlitePath,
     );
   }
+}
+
+/// A declared sync stream (P5) — the PowerSync `syncStream(name, params)`
+/// shape. Call [subscribe] to activate it on the live session.
+class NostosSyncStream {
+  const NostosSyncStream._(this._engine, this.name, this.params);
+
+  final NostosEngine _engine;
+
+  /// The server-defined stream name (`[streams.<name>]` in nostos_rules.toml).
+  final String name;
+
+  /// Bind values for the template's `:param` placeholders (JSON scalars).
+  final Map<String, dynamic> params;
+
+  /// Activate the stream: the `subscribe_stream` frame goes out on the live
+  /// socket (or the next reconnect), and the stream re-subscribes on every
+  /// reconnect until the returned subscription's [NostosStreamSubscription.unsubscribe].
+  Future<NostosStreamSubscription> subscribe() async {
+    final id = await _engine.subscribeStream(
+      name: name,
+      paramsJson: jsonEncode(params),
+    );
+    return NostosStreamSubscription._(_engine, id);
+  }
+}
+
+/// A live sync-stream subscription (P5). [unsubscribe] stops the flow; v1
+/// leaves local rows in place (eviction is separate; PowerSync behaves the
+/// same).
+class NostosStreamSubscription {
+  const NostosStreamSubscription._(this._engine, this.id);
+
+  final NostosEngine _engine;
+
+  /// The client-chosen stream id (matches the `subscribe_stream` frame and
+  /// the `stream` key on this stream's snapshot boundary frames).
+  final String id;
+
+  /// Unsubscribe now. Unknown/already-removed id = no-op (idempotent).
+  Future<void> unsubscribe() => _engine.unsubscribeStream(id: id);
 }
