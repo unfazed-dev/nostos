@@ -1252,8 +1252,17 @@ async fn register_stream(
 async fn unregister_stream(id: &str, subs: &Arc<Mutex<SocketSubs>>, manager: &Arc<SessionManager>) {
     let removed = { subs.lock().await.streams.remove(id) };
     if let Some(sub) = removed {
+        // Remove the stream's session from the store — fan-out resolves
+        // candidates from the store per event, so removal stops delivery for
+        // every event processed after this point. Do NOT close the sink: the
+        // stream session shares the socket-wide `TokioEventSink` with the base
+        // subscriptions and every other stream (`register_stream` clones
+        // `sink_concrete`), so `sink.close()` here killed ALL later delivery
+        // on the socket — including a re-registered stream's own snapshot
+        // (caught by the P5 demo: phase-5 re-parameterize delivered 0 rows
+        // after phase-4 unsubscribe).
         manager.disconnect(sub.session).await;
-        debug!(stream = %id, table = %sub.table, "stream unsubscribed");
+        debug!(stream = %id, table = %sub.table, session = %sub.session, "stream unsubscribed");
     } else {
         debug!(stream = %id, "unsubscribe_stream for unknown id: no-op");
     }
@@ -1272,7 +1281,9 @@ async fn unregister_stream(id: &str, subs: &Arc<Mutex<SocketSubs>>, manager: &Ar
 /// this is exactly the resuming-client shape.
 fn snapshot_base_lsn(subs_cursor: u64, sink: &TokioEventSink) -> u64 {
     let acked = sink.last_acked_lsn().map_or(0, nostos_application::Lsn::raw);
-    let delivered = sink.last_delivered_lsn().map_or(0, nostos_application::Lsn::raw);
+    let delivered = sink
+        .last_delivered_lsn()
+        .map_or(0, nostos_application::Lsn::raw);
     subs_cursor.max(acked).max(delivered)
 }
 
@@ -1369,23 +1380,11 @@ async fn handle_decoded_message(
         }
         // P5 sync streams: the reader routes both stream frames to
         // `register_stream`/`unregister_stream`; these arms are the defensive
-        // fallback for any future call site — the design's non-fatal
-        // `stream_error` reject (§1), never a socket close, never a drop.
-        ClientMessage::SubscribeStream { id, .. } => {
-            let frame = encode_stream_error(
-                &id,
-                "sync streams are not enabled on this server yet (P5 routing pending)",
-            );
-            let _ = server_frames_tx.try_send(frame);
-            debug!(stream_id = %id, "subscribe_stream rejected: routing pending");
-        }
-        ClientMessage::UnsubscribeStream { id } => {
-            let frame = encode_stream_error(
-                &id,
-                "sync streams are not enabled on this server yet (P5 routing pending)",
-            );
-            let _ = server_frames_tx.try_send(frame);
-            debug!(stream_id = %id, "unsubscribe_stream rejected: routing pending");
+        // fallback for any future call site — no-op pass-through (never reject).
+        ClientMessage::SubscribeStream { .. } | ClientMessage::UnsubscribeStream { .. } => {
+            // No-op: the reader loop handles these; this arm exists only for
+            // defensive completeness if `handle_decoded_message` is called
+            // directly in future refactoring.
         }
     }
 }
@@ -2746,6 +2745,15 @@ mod tests {
         assert_eq!(manager.session_count().await, 0, "session disconnected");
         assert!(!subs.lock().await.streams.contains_key("s1"));
 
+        // Regression (P5 demo phase 5): the stream session shares the
+        // socket-wide sink — unsubscribe must NOT close it, or every later
+        // delivery on the socket (base subs, re-registered streams) drops.
+        assert_eq!(
+            sink.deliver_control(vec![0]),
+            nostos_application::ports::DeliveryDecision::Delivered,
+            "shared socket sink must stay open after stream unsubscribe"
+        );
+
         // Unknown id: idempotent no-op, no error, no panic.
         unregister_stream("s1", &subs, &manager).await;
         unregister_stream("never-seen", &subs, &manager).await;
@@ -2817,17 +2825,18 @@ mod tests {
         // and dropped invisibly.
         let mut saw_row = false;
         let mut end_seen = false;
-        while let Ok(Some(msg)) =
-            tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
+        while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
         {
             match msg {
                 crate::router::SinkMsg::Event(ev) => {
-                    assert!(ev.lsn.raw() > 500, "snapshot row must stamp above the acked frontier");
+                    assert!(
+                        ev.lsn.raw() > 500,
+                        "snapshot row must stamp above the acked frontier"
+                    );
                     saw_row = true;
                 }
                 crate::router::SinkMsg::Control(bytes) => {
-                    let (_, _, begin) =
-                        crate::wire::decode_snapshot_boundary(&bytes).unwrap();
+                    let (_, _, begin) = crate::wire::decode_snapshot_boundary(&bytes).unwrap();
                     if !begin {
                         end_seen = true;
                         break;

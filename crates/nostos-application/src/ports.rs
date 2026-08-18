@@ -97,6 +97,12 @@ pub trait EventSink: Send + Sync {
     /// returns promptly with a [`DeliveryDecision`].
     async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision;
 
+    /// Close the sink: subsequent `deliver()` calls return `Dropped` immediately.
+    /// Used by unsubscribe to stop fan-out to a stream's session.
+    fn close(&self) {
+        // Default no-op for test doubles that don't need close semantics.
+    }
+
     /// The highest LSN the *client* has acknowledged applying (via an ACK
     /// frame). `None` means "this sink does not track acks" (test doubles) or
     /// "no ack received yet." Read by [`SessionStore::min_acked_lsn`] to drive

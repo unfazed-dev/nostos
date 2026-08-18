@@ -163,7 +163,7 @@ async fn spawn_stream_server(
 /// Hex-decode a row frame's payload (the wire carries hex; tests need the
 /// JSON inside).
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -224,7 +224,7 @@ where
             // Row frames have NO "type" key ({"lsn","op","table","pk",
             // "payload"}); control frames do. Dispatch on that.
             match f.get("type").and_then(|t| t.as_str()) {
-                Some("snapshot_begin") | Some("snapshot_end") => {
+                Some("snapshot_begin" | "snapshot_end") => {
                     let t = f["type"].as_str().unwrap();
                     let table = f["table"].as_str().unwrap_or("").to_string();
                     let stream = f.get("stream").and_then(|s| s.as_str()).map(str::to_string);
@@ -236,7 +236,7 @@ where
                         f["error"].as_str().unwrap_or("").to_string(),
                     ));
                 }
-                Some("resume_info") | Some("write_result") => {}
+                // resume_info / write_result / any other control frame: ignore.
                 Some(_) => {}
                 None => {
                     // A row frame: lsn/op/table/pk + HEX-encoded payload —

@@ -31,10 +31,10 @@
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::format_push_string
+    clippy::format_push_string,
+    clippy::items_after_statements
 )]
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -60,9 +60,8 @@ use nostos_infra::transport::{sync_handler, SyncRouterState};
 /// Build a `tasks` row event whose payload mirrors the PG tuple-image shape
 /// (`PgReplicator::tuple_to_json_payload` — every value a string).
 fn tasks_event(lsn: u64, owner: &str, status: &str, priority: i64) -> ReplicationEvent {
-    let payload = format!(
-        "{{\"owner_id\":\"{owner}\",\"status\":\"{status}\",\"priority\":\"{priority}\"}}"
-    );
+    let payload =
+        format!("{{\"owner_id\":\"{owner}\",\"status\":\"{status}\",\"priority\":\"{priority}\"}}");
     ReplicationEvent::new(
         Lsn::new(lsn),
         RowOp::Insert {
@@ -78,7 +77,10 @@ fn tasks_event(lsn: u64, owner: &str, status: &str, priority: i64) -> Replicatio
 /// predicate engine, ADR-0012 slice 2).
 fn extract_json(event: &ReplicationEvent, col: &str) -> Option<ColumnValue> {
     let parsed: serde_json::Value = serde_json::from_slice(event.payload_bytes()).ok()?;
-    parsed.get(col).and_then(|v| v.as_str()).map(ColumnValue::text)
+    parsed
+        .get(col)
+        .and_then(|v| v.as_str())
+        .map(ColumnValue::text)
 }
 
 /// A `SnapshotSource` standing in for `PgSnapshotter`: `tasks` starts EMPTY
@@ -110,7 +112,11 @@ impl SnapshotSource for SeedSnapshotter {
     ) -> Result<Vec<ReplicationEvent>, SnapshotError> {
         let mut out = Vec::new();
         for (pk, cols) in &self.seed_rows {
-            let view = |name: &str| cols.iter().find(|(c, _)| *c == name).map(|(_, v)| v.clone());
+            let view = |name: &str| {
+                cols.iter()
+                    .find(|(c, _)| *c == name)
+                    .map(|(_, v)| v.clone())
+            };
             if predicate.matches(view) {
                 let mut payload = String::from("{");
                 for (i, (k, v)) in cols.iter().enumerate() {
@@ -169,19 +175,38 @@ fn seed_rows() -> Vec<(String, Vec<(String, ColumnValue)>)> {
             vec![
                 ("owner_id".to_string(), ColumnValue::text(owner)),
                 ("status".to_string(), ColumnValue::text(status)),
-                ("priority".to_string(), ColumnValue::text(priority.to_string())),
+                (
+                    "priority".to_string(),
+                    ColumnValue::text(priority.to_string()),
+                ),
             ],
         )
     })
     .collect()
 }
 
+/// Poll the in-process server's session store until exactly `want` sessions
+/// remain (or panic after ~2s). The demo uses this to make the fire-and-forget
+/// `unsubscribe()` observable: the client returns before the server has
+/// processed the frame, and only the demo — which owns the server — can see
+/// when the stream's session is really gone.
+async fn wait_for_sessions(store: &Arc<dyn SessionStore>, want: usize) {
+    for _ in 0..200 {
+        if store.len().await == want {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "server still has {} sessions, wanted {want}",
+        store.len().await
+    );
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string()),
-        )
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string()))
         .try_init();
 
     println!("=== nostos sync_streams demo — P5 lazy parameterized streams (ADR-0039) ===");
@@ -235,9 +260,11 @@ async fn main() {
         svc.run(&mut stream, extract_json).await;
     });
     let live_lsn = AtomicU64::new(10); // live LSNs: 10, 20, 30, ...
-    let mut pump = |owner: &str, status: &str, priority: i64| {
+    let pump = |owner: &str, status: &str, priority: i64| {
         let lsn = live_lsn.fetch_add(10, Ordering::Relaxed);
-        live_tx.send(tasks_event(lsn, owner, status, priority)).unwrap();
+        live_tx
+            .send(tasks_event(lsn, owner, status, priority))
+            .unwrap();
     };
 
     // --- The client: durable SQLite; base subscription deliberately quiet. ---
@@ -272,7 +299,9 @@ async fn main() {
             .with_storage(|s| {
                 let conn = s.conn_for_test();
                 let mut stmt = conn
-                    .prepare("SELECT pk, payload FROM cairn_data WHERE table_name = 'tasks' ORDER BY pk")
+                    .prepare(
+                        "SELECT pk, payload FROM cairn_data WHERE table_name = 'tasks' ORDER BY pk",
+                    )
                     .expect("prepare");
                 let rows = stmt
                     .query_map([], |r| {
@@ -318,7 +347,11 @@ async fn main() {
                 .clone(),
         )
         .subscribe();
-    let rows = phase("phase 2: targeted snapshot backfilled alice's rows", &client).await;
+    let rows = phase(
+        "phase 2: targeted snapshot backfilled alice's rows",
+        &client,
+    )
+    .await;
     assert_eq!(rows.len(), 2, "exactly alice's pri>=3 rows backfill");
     assert!(rows.iter().all(|(_, p)| p.contains("alice")));
 
@@ -329,11 +362,20 @@ async fn main() {
     pump("bob", "open", 9);
     let rows = phase("phase 3: only the matching live row landed", &client).await;
     assert_eq!(rows.len(), 3, "one live match joined the 2 backfilled rows");
-    assert!(rows.iter().any(|(_, p)| p.contains("\"priority\":\"9\"") && p.contains("alice")));
+    assert!(rows
+        .iter()
+        .any(|(_, p)| p.contains("\"priority\":\"9\"") && p.contains("alice")));
 
     // --- Phase 4: unsubscribe stops the flow. ---
     println!("\n[phase 4] unsubscribe() — another alice/pri9 row must NOT arrive");
     alice.unsubscribe();
+    // `unsubscribe()` is fire-and-forget by design (ADR-0039 v1: no per-stream
+    // ack frame) — the command still has to travel the socket and be processed
+    // by the server's reader loop. Pumping immediately would race it and the
+    // fan-out could deliver the row through the not-yet-removed stream session.
+    // The demo owns the in-process server, so wait until the stream's session
+    // is actually gone (base subscription = 1 remaining) before pumping.
+    wait_for_sessions(&store, 1).await;
     pump("alice", "open", 9);
     let rows = phase("phase 4: post-unsubscribe live row blocked", &client).await;
     assert_eq!(rows.len(), 3, "no new rows after unsubscribe");
@@ -341,7 +383,9 @@ async fn main() {
     // --- Phase 5: re-parameterize lazily — bob's rows backfill. This is also
     //     the regression proof for `snapshot_base_lsn`: the socket has acked
     //     live traffic by now, and the snapshot still clears the ack gate. ---
-    println!("\n[phase 5] sync_stream(\"mine\", {{owner: bob, min: 1}}).subscribe() — re-parameterize");
+    println!(
+        "\n[phase 5] sync_stream(\"mine\", {{owner: bob, min: 1}}).subscribe() — re-parameterize"
+    );
     let _bob = client
         .sync_stream(
             "mine",

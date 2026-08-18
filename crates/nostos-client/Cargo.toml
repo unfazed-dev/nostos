@@ -59,6 +59,8 @@ sha2 = { workspace = true }
 # apply_bench example CLI (derive idiom, same as nostos-bench / nostos-pushd).
 # Examples build against dev-deps, so the lib gains no dependency.
 clap = { workspace = true }
+# sync_streams example needs tracing-subscriber for RUST_LOG output
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

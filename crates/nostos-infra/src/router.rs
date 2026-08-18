@@ -260,6 +260,11 @@ impl EventSink for TokioEventSink {
         }
     }
 
+    fn close(&self) {
+        // Set the open flag to false so admit() drops all frames.
+        self.open.store(false, Ordering::Release);
+    }
+
     #[inline]
     fn last_acked_lsn(&self) -> Option<Lsn> {
         let v = self.acked_lsn.load(Ordering::Acquire);
