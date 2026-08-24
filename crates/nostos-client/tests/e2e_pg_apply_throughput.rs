@@ -397,11 +397,6 @@ async fn real_pg_to_client_apply_sustained_throughput() {
 /// reconciles — the run must still converge to ALL N rows, eventually.
 /// Requires NOSTOS_RESYNC_SIGNAL on the server state (set here directly).
 ///
-/// ponytail: IGNORED pending integration debug — the client receives the
-/// signal and clears state (verified live 2026-08-24), but the follow-up
-/// reconnect does not yet converge to a fresh snapshot. Goal
-/// goal-e84f41b2 tracks the fix; un-ignore when green.
-#[ignore = "resync->resnapshot integration under debug (goal-e84f41b2)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
     if std::env::var(E2E_FLAG).is_err() {
@@ -515,6 +510,7 @@ async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
         "SELECT count(*) FROM cairn_data WHERE payload LIKE '%\"title\":\"{title_prefix}%'"
     );
     let mut db_count: i64;
+    let mut next_progress = Instant::now();
     loop {
         assert!(
             Instant::now() < deadline,
@@ -533,6 +529,14 @@ async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
             .unwrap_or(-1);
         if db_count >= n {
             break;
+        }
+        if Instant::now() >= next_progress {
+            let m = metrics.snapshot();
+            eprintln!(
+                "[resync-progress] applied={db_count} matched={} delivered={} dropped={}",
+                m.matched, m.delivered, m.dropped
+            );
+            next_progress = Instant::now() + Duration::from_secs(5);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

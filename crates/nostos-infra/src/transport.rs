@@ -455,44 +455,6 @@ async fn run_session(
         .send(encode_resume_info(advertised_epoch, advertised_checksum))
         .await;
 
-    // 5. Register the FIRST table. A where_sql rejection or the global device
-    //    cap is FATAL here (close the socket with a reason before any event
-    //    flows, same as the single-table path); subsequent rejects are
-    //    non-fatal (the reader logs + keeps serving existing subscriptions).
-    if let Err(reject) = register_subscribe(
-        &subscribe,
-        &subs,
-        &manager,
-        snapshotter.as_ref(),
-        server_epoch,
-        state.oplog_reader.as_ref(),
-        &sink_concrete,
-        &principal,
-        state.tenant_column.as_deref(),
-        &ruleset,
-    )
-    .await
-    {
-        match reject {
-            SubscribeReject::Rejected(reason) => {
-                debug!(%reason, "closing socket: first subscribe rejected");
-                let frame = axum::extract::ws::CloseFrame {
-                    code: axum::extract::ws::close_code::INVALID,
-                    reason: reason.into(),
-                };
-                let _ = socket
-                    .send(axum::extract::ws::Message::Close(Some(frame)))
-                    .await;
-                return;
-            }
-            // Device cap or (impossible here) per-socket cap: close cleanly.
-            SubscribeReject::DeviceCapReached | SubscribeReject::CapExceeded => {
-                let _ = socket.close().await;
-                return;
-            }
-        }
-    }
-
     // 6. Split the socket: writer drains the shared sink, reader parses ACK/
     //    Write frames AND handles additional Subscribe frames (registering more
     //    tables on the SAME sink). Same single-writer serialization as before:
@@ -542,16 +504,18 @@ async fn run_session(
     // emits one `resync_required` per shed episode when the signal is on.
     let resync_sink = Arc::clone(&sink_concrete);
     let resync_enabled = state.resync_signal;
-    let resync_tables: Vec<String> = {
-        let s = subs.lock().await;
-        s.tables.iter().cloned().collect()
-    };
+    let resync_subs = Arc::clone(&subs);
     let mut last_signaled_shed: u64 = 0;
 
+    // ADR-0040 reorder: the writer owns the socket half, so first-register
+    // rejections request their polite Close through this channel.
+    let (close_tx, close_rx) = tokio::sync::mpsc::channel::<axum::extract::ws::CloseFrame>(1);
+    let writer_ruleset = ruleset.clone();
     let write_loop = tokio::spawn(async move {
         use futures_util::sink::SinkExt as _;
         let mut writer = writer;
-        let mut old_ruleset = ruleset;
+        let mut close_rx = close_rx;
+        let mut old_ruleset = writer_ruleset;
         // C3 batched-writes: the first frame is awaited (no busy-spin, no
         // latency tax when idle). Once one is in hand, drain up to
         // `MAX_BATCH_FRAMES - 1` MORE frames that are *immediately available*
@@ -575,9 +539,12 @@ async fn run_session(
             if resync_enabled {
                 let sheds = resync_sink.capacity_sheds();
                 if sheds != last_signaled_shed {
+                    let tables = {
+                        let s = resync_subs.lock().await;
+                        s.tables.iter().cloned().collect::<Vec<_>>().join(",")
+                    };
                     last_signaled_shed = sheds;
-                    let frame =
-                        encode_resync_required(&resync_tables.join(","), "capacity shed detected");
+                    let frame = encode_resync_required(&tables, "capacity shed detected");
                     if writer.send(Message::Binary(frame)).await.is_err() {
                         break; // client gone
                     }
@@ -640,6 +607,14 @@ async fn run_session(
                     if writer.send(Message::Binary(bytes)).await.is_err() {
                         break; // client gone
                     }
+                }
+                // ADR-0040: first-register (and cap) rejects arrive here as a
+                // polite Close with the wire-contract reason.
+                maybe_close = close_rx.recv() => {
+                    if let Some(frame) = maybe_close {
+                        let _ = writer.send(Message::Close(Some(frame))).await;
+                    }
+                    break;
                 }
                 // ADR-0029 §Decision-4 (live-socket): token-expiry deadline.
                 // Inert (never notified) for no-`exp`/anonymous sessions.
@@ -713,9 +688,61 @@ async fn run_session(
                 }
             }
         }
+        // Give the peer a moment to read a just-forwarded Close before the
+        // socket drops out from under it (otherwise the client can observe
+        // an empty-reason close — ADR-0040 reorder follow-up).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let _ = writer;
         closed_tx.notify_waiters();
     });
+    // 5. Register the FIRST table. A where_sql rejection or the global device
+    //    cap is FATAL here (close the socket with a reason before any event
+    //    flows, same as the single-table path); subsequent rejects are
+    //    non-fatal (the reader logs + keeps serving existing subscriptions).
+    if let Err(reject) = register_subscribe(
+        &subscribe,
+        &subs,
+        &manager,
+        snapshotter.as_ref(),
+        server_epoch,
+        state.oplog_reader.as_ref(),
+        &sink_concrete,
+        &principal,
+        state.tenant_column.as_deref(),
+        &ruleset,
+    )
+    .await
+    {
+        match reject {
+            SubscribeReject::Rejected(reason) => {
+                // Post-split the writer owns the socket half: request the
+                // polite Close through it so the wire contract keeps the
+                // rejection reason (asserted by ws_contract tests).
+                debug!(%reason, "first subscribe rejected: closing socket");
+                let _ = close_tx
+                    .send(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::INVALID,
+                        reason: reason.into(),
+                    })
+                    .await;
+                // Hold the socket open long enough for the writer's forwarded
+                // Close to reach the peer before run_session drops its halves.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                return;
+            }
+            // Device cap or (impossible here) per-socket cap: close cleanly.
+            SubscribeReject::DeviceCapReached | SubscribeReject::CapExceeded => {
+                let _ = close_tx
+                    .send(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::NORMAL,
+                        reason: "".into(),
+                    })
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                return;
+            }
+        }
+    }
 
     // Reader: decode each inbound frame ONCE, then route:
     //   Subscribe → register_subscribe (register another table on the shared

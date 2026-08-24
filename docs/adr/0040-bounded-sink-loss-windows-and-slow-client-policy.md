@@ -1,6 +1,6 @@
 # ADR-0040: Bounded-sink loss windows and slow-client policy
 
-- **Status:** Accepted (operator ratification 2026-08-24 — Option 1: client-initiated re-subscribe on gap detection, with buffer-sizing guidance documented)
+- **Status:** Accepted (operator ratification 2026-08-24) — **implemented same day**: `NOSTOS_RESYNC_SIGNAL` server flag (default off), client `ResyncRequired` handler (clear→disconnect→resume→Err so `run_with_reconnect` re-subscribes into a fresh snapshot), and writer-hoist fix for the first-subscribe snapshot deadlock this investigation uncovered; e2e eventual-correctness green (`resync_signal_recovers_capacity_shed_at_default_buffer`)
 - **Date:** 2026-08-24
 - **Evidence:** `benches/results/RESULTS.md` §"Real-PG → client-apply end-to-end"
   (2026-08-24); harness
