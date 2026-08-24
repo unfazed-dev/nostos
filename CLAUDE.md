@@ -22,8 +22,9 @@ same-stage, same-units comparisons per docs/BENCHMARK-METHODOLOGY.md. (Week-1 ba
 | nostos-client | native client: SqliteStorage (rusqlite) + tokio SyncClient | core, domain, infra |
 | nostos-ffi-wasm | wasm-bindgen bridge over nostos-core | core |
 | nostos-bench | throughput harness — honest numbers (drops reported, env recorded) | domain, application, infra |
-| nostos-cloud | control plane: auth / Stripe / licensing (separate binary) | domain |
+| nostos-license | HMAC-signed offline license claims — minted by nostos-cloud, verified by nostos-server; keeps crypto deps out of domain | domain |
 | nostos-push | standalone push daemon nostos-pushd (composition root, ADR-0038) | domain, infra |
+| nostos-cli | the `nostos` CLI — rules init/edit/check, dev/doctor/deploy for a sync backend | domain, infra |
 
 `unsafe` is forbidden workspace-wide (all Cargo workspace members). The one
 exception is machine-generated FFI glue in the non-member crate
