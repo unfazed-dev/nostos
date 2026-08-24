@@ -20,6 +20,12 @@ PowerSync publishes no comparable aggregate fan-out figure. Its published rates 
 
 ## Interpretation
 
+> **Pending before the Show HN post (operator decision 2026-08-19):** one measured
+> real-PG → client-apply end-to-end number in this file, however modest. The
+> eval-only headline below stands as-is for the v0.1.0 publish; the write-amp
+> harness's ~42 events/sec floor is explicitly NOT that number (test-driver-bound,
+> see ADR-0025 caveat below).
+
 - **Peak sustained throughput: 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
 - **Max drop rate across runs: 0.00%** (lower is better; >1% is flagged as not fully honest throughput in the methodology).
 - The synthetic `FakeReplicator` generates events faster than the router pushes them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. Real `pgoutput` parsing cost is added in Week 2.
