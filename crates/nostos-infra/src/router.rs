@@ -81,6 +81,10 @@ pub struct TokioEventSink {
     /// entries and deliveries to one session are already serialized by the
     /// bounded channel, so contention is negligible).
     dedup: Mutex<DedupRing>,
+    /// Capacity sheds: events dropped because the buffer was FULL (ADR-0040
+    /// loss signal). Deliberately EXCLUDES dedup drops and closed-sink drops
+    /// — only capacity loss tells a client its stream has a gap.
+    capacity_sheds: AtomicU64,
 }
 
 /// Fixed-capacity ring of delivered LSNs for intra-connection dedup.
@@ -130,8 +134,16 @@ impl TokioEventSink {
             acked_lsn: AtomicU64::new(0),
             delivered_lsn: AtomicU64::new(0),
             dedup: Mutex::new(DedupRing::new()),
+            capacity_sheds: AtomicU64::new(0),
         };
         (sink, rx)
+    }
+
+    /// Capacity-shed count for this sink (ADR-0040 continuity signal). The
+    /// transport's writer loop watches the delta and emits `resync_required`.
+    #[must_use]
+    pub fn capacity_sheds(&self) -> u64 {
+        self.capacity_sheds.load(Ordering::Relaxed)
     }
 
     /// Mark this sink as closed (transport task ended). Further deliveries
@@ -252,7 +264,10 @@ impl EventSink for TokioEventSink {
                 self.delivered_lsn.store(lsn_raw, Ordering::Release);
                 DeliveryDecision::Delivered
             }
-            Err(mpsc::error::TrySendError::Full(_)) => DeliveryDecision::Dropped,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.capacity_sheds.fetch_add(1, Ordering::Relaxed);
+                DeliveryDecision::Dropped
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.open.store(false, Ordering::Release);
                 DeliveryDecision::Dropped

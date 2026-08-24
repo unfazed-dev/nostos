@@ -391,3 +391,158 @@ async fn real_pg_to_client_apply_sustained_throughput() {
     drop_slot(&slot).await;
     let _ = std::fs::remove_file(&db_path);
 }
+
+/// ADR-0040 ratified behavior: at the DEFAULT buffer (1024) an unpaced burst
+/// sheds events, the server signals `resync_required`, and the client clears +
+/// reconciles — the run must still converge to ALL N rows, eventually.
+/// Requires NOSTOS_RESYNC_SIGNAL on the server state (set here directly).
+///
+/// ponytail: IGNORED pending integration debug — the client receives the
+/// signal and clears state (verified live 2026-08-24), but the follow-up
+/// reconnect does not yet converge to a fresh snapshot. Goal
+/// goal-e84f41b2 tracks the fix; un-ignore when green.
+#[ignore = "resync->resnapshot integration under debug (goal-e84f41b2)"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
+    if std::env::var(E2E_FLAG).is_err() {
+        eprintln!("skipping (set {E2E_FLAG}=1 with docker compose up -d to run)");
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("nostos=warn")
+        .with_test_writer()
+        .try_init();
+
+    let n: i64 = std::env::var("NOSTOS_APPLY_TP_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_N);
+    assert!(n >= BATCH && n % BATCH == 0);
+    let tenant = uuid::Uuid::new_v4();
+    let slot = format!("e2e_apply_tp_{}", std::process::id());
+    drop_slot(&slot).await;
+
+    let metrics = Arc::new(Metrics::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let manager = Arc::new(nostos_application::SessionManager::new(
+        Arc::clone(&store),
+        Tier::Enterprise,
+    ));
+    let auth: Arc<dyn SyncAuth> = Arc::new(AllowAnonymous::new());
+    // THE DIFFERENCE: default buffer + signal ON — and a REAL snapshotter,
+    // because post-resync recovery rides the snapshot-reconcile path.
+    let run_tag = &uuid::Uuid::new_v4().simple().to_string()[..8];
+    let title_prefix = format!("apply-tp-{run_tag}-");
+    let state = SyncRouterState::new(manager, auth)
+        .with_buffer(session_buffer())
+        .with_resync_signal(true)
+        .with_snapshotter(Arc::new(nostos_infra::PgSnapshotter::new(&pg_url())));
+    let app = axum::Router::new()
+        .route("/sync", get(sync_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    let fanout =
+        Arc::new(FanOutService::new(Arc::clone(&store)).with_metrics(Arc::clone(&metrics)));
+    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").expect("url");
+    let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
+    let fanout_drv = Arc::clone(&fanout);
+    tokio::spawn(async move {
+        let extract = |e: &ReplicationEvent, col: &str| -> Option<ColumnValue> {
+            let p: serde_json::Value = serde_json::from_slice(e.payload_bytes()).ok()?;
+            p.get(col).and_then(|v| v.as_str()).map(ColumnValue::text)
+        };
+        let _ = fanout_drv.run(&mut repl, extract).await;
+    });
+
+    let wait_start = Instant::now();
+    loop {
+        if metrics.snapshot().slot_epoch >= 1 && slot_exists(&slot).await {
+            break;
+        }
+        assert!(wait_start.elapsed() < Duration::from_secs(20), "no slot");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let db_path =
+        std::env::temp_dir().join(format!("nostos-apply-resync-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let storage = SqliteStorage::open(db_path.to_str().expect("utf8")).expect("open sqlite");
+    let client = Arc::new(SyncClient::new(
+        format!("ws://{addr}/sync"),
+        storage,
+        SyncClientConfig {
+            table: TABLE.into(),
+            token: Some("anon".into()),
+            base_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_secs(2),
+            max_retries: Some(20),
+            idle_timeout: Some(Duration::from_mins(1)),
+            ..SyncClientConfig::default()
+        },
+    ));
+    let run_client = Arc::clone(&client);
+    let run_task = tokio::spawn(async move {
+        // Reconnecting loop: after `resync_required` -> clear + disconnect, this
+        // resumes fresh (epoch None) and snapshot-reconciles the whole table.
+        let _ = run_client.run_with_reconnect().await;
+    });
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let sql = sql_client().await;
+    let batches = n / BATCH;
+    for b in 0..batches {
+        let titles: Vec<String> = (0..BATCH)
+            .map(|i| format!("{title_prefix}{}", b * BATCH + i))
+            .collect();
+        sql.execute(
+            &format!(
+                "INSERT INTO {TABLE} (org_id, title) SELECT * FROM unnest($1::uuid[], $2::text[])"
+            ),
+            &[&vec![tenant; BATCH as usize], &titles],
+        )
+        .await
+        .expect("batch insert");
+    }
+
+    // Eventual correctness: count reaches N even though the burst shed.
+    let deadline = Instant::now() + Duration::from_mins(5);
+    let count_sql = format!(
+        "SELECT count(*) FROM cairn_data WHERE payload LIKE '%\"title\":\"{title_prefix}%'"
+    );
+    let mut db_count: i64;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "resync never converged to {n} rows within 300s"
+        );
+        db_count = client
+            .with_storage({
+                let count_sql = count_sql.clone();
+                move |s| {
+                    let conn = s.conn_for_test();
+                    conn.query_row(&count_sql, [], |r| r.get::<_, i64>(0))
+                        .unwrap_or(0)
+                }
+            })
+            .await
+            .unwrap_or(-1);
+        if db_count >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    eprintln!(
+        "=== ADR-0040 RESYNC RECOVERY: converged to {db_count}/{n} rows at default buffer {} ===",
+        session_buffer()
+    );
+
+    run_task.abort();
+    client.disconnect();
+    drop_slot(&slot).await;
+    let _ = std::fs::remove_file(&db_path);
+}

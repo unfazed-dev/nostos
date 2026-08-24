@@ -1,6 +1,6 @@
 # ADR-0040: Bounded-sink loss windows and slow-client policy
 
-- **Status:** Proposed (pending operator ratification)
+- **Status:** Accepted (operator ratification 2026-08-24 — Option 1: client-initiated re-subscribe on gap detection, with buffer-sizing guidance documented)
 - **Date:** 2026-08-24
 - **Evidence:** `benches/results/RESULTS.md` §"Real-PG → client-apply end-to-end"
   (2026-08-24); harness

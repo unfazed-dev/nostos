@@ -51,6 +51,11 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_SESSION_BUFFER", default_value_t = 1024)]
     session_buffer: usize,
 
+    /// ADR-0040: emit `resync_required` to a client whose stream shed
+    /// events (buffer full), so it clears local state and reconciles.
+    #[arg(long, env = "NOSTOS_RESYNC_SIGNAL", default_value_t = false)]
+    resync_signal: bool,
+
     /// Op-log writer's bounded internal channel depth (ADR-0025 slice 2). The
     /// fan-out loop `try_send`s each event into this buffer; a background task
     /// drains + flushes to `cairn_oplog`. On full, the entry is dropped (the
@@ -712,6 +717,7 @@ async fn main() -> anyhow::Result<()> {
     // ---- build the axum router + transport ----
     let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
         .with_buffer(cfg.session_buffer)
+        .with_resync_signal(cfg.resync_signal)
         .with_metrics(Arc::clone(&metrics));
     if let Some(col) = tenant_col {
         state_builder = state_builder.with_tenant_column(col);

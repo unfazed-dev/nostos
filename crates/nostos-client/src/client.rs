@@ -61,7 +61,8 @@ use std::time::Duration;
 use nostos_core::{ApplyEngine, ApplyOutcome, Frame, Outbox, PendingWrite};
 use nostos_domain::Lsn;
 use nostos_infra::wire::{
-    decode_frames, decode_resume_info, decode_snapshot_boundary, decode_stream_error, ClientMessage,
+    decode_frames, decode_resume_info, decode_resync_required, decode_snapshot_boundary,
+    decode_stream_error, ClientMessage,
 };
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{Mutex, Notify};
@@ -1575,6 +1576,18 @@ where
                     // never sees it (no lsn/op/pk → wouldn't decode as a frame).
                     if let Some((stream_id, error)) = decode_stream_error(&bytes) {
                         warn!(stream_id = %stream_id, %error, "stream_error from server");
+                        continue;
+                    }
+
+                    // ADR-0040: `resync_required` = the server shed events on
+                    // this stream (capacity loss; no replay path for a live
+                    // session). Recovery: wipe rows/checkpoint/epoch (`clear`
+                    // zeroes epoch too), drop the socket — the reconnect then
+                    // resumes with epoch None and snapshot-reconciles fresh.
+                    if let Some((table, reason)) = decode_resync_required(&bytes) {
+                        warn!(table = %table, %reason, "resync_required from server");
+                        self.clear_local_state().await?;
+                        self.disconnect();
                         continue;
                     }
 
