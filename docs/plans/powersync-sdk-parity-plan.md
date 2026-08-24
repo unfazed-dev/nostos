@@ -107,7 +107,7 @@ PowerSync's split model.
   `cross_tenant_patch_is_rejected_row_unchanged`) + the 8 prior writeback tests
   = 11/11. No codegen needed (`write()` takes `op` as a string).
 - **P4 — opt-in `UploadConnector`: deferred** (builds on P3's WriteOp model).
-- **P5/P6: deferred** (Phase-2).
+- **P5 — Sync Streams: ✅ v1 SHIPPED 2026-08-18** (ADR-0039; named client-parameterized streams, single-table templates, JOIN/CTE ceiling documented). **P6 — Schema contract + schemaless views: deferred** (Phase-2).
 
 ADR-0013 v2 addendum records the P1+P2 decisions (quarantine-not-delete;
 query-on-concrete-type). `supabase-flutter-smoke-results.md` is the engine
@@ -316,7 +316,7 @@ this-session verifiability noted:
 | .NET | uniffi-cs / cbindgen + DllImport | ✅ live (`dotnet/smoke` PUSH+ECHO E2E 2026-07-13) | done |
 | Capacitor | JS facade over the web JS core | partial | small-medium |
 
-Remaining *feature* gaps (independent of platforms): P5 Sync Streams;
+Remaining *feature* gaps (independent of platforms):
 incremental/differential `watch` (PowerSync is JS-only there too); attachments;
 ORM hooks (Drift/Drizzle/Room/GRDB); SQLCipher encryption.
 
