@@ -4,8 +4,9 @@
 Rust-native local-first sync engine: Postgres logical replication → Rust fan-out server →
 on-device SQLite, offline-capable, Apache-2.0 end to end. Competes with PowerSync on server
 throughput (Rust vs Node) and license (Apache-2.0 vs FSL). Moat proof: 833,307 ops/sec
-aggregate fan-out @ 1k clients, 0.00% drops (eval-only: FakeReplicator on loopback; real-PG +
-client-apply pending) — see benches/results/RESULTS.md. PowerSync publishes no comparable
+aggregate fan-out @ 1k clients, 0.00% drops (eval-only: FakeReplicator loopback), plus the
+FULL-PATH real-PG → client-apply figure measured 2026-08-24: ~34.8k–36.2k rows/sec sustained,
+zero-drop at buffer 32768 — see benches/results/RESULTS.md. PowerSync publishes no comparable
 aggregate fan-out figure — its published rates are 2–4k ops/sec replication ingest and 2–20k
 ops/sec per-client sync (a different pipeline stage); never cite a cross-stage ratio, only
 same-stage, same-units comparisons per docs/BENCHMARK-METHODOLOGY.md. (Week-1 baseline was
