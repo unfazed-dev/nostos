@@ -20,6 +20,13 @@ PowerSync publishes no comparable aggregate fan-out figure. Its published rates 
 
 ## Interpretation
 
+> **Show-HN precondition (operator decision 2026-08-19): FULFILLED 2026-08-24** —
+> the measured real-PG → client-apply end-to-end number is in
+> [Real-PG → client-apply end-to-end](#real-pg--client-apply-end-to-end-adr-0009-full-path--measured-2026-08-24)
+> below. The eval-only headline stands unchanged; the write-amp harness's
+> ~42 events/sec floor remains explicitly NOT that number (test-driver-bound,
+> see ADR-0025 caveat below).
+
 - **Peak sustained throughput: 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
 - **Max drop rate across runs: 0.00%** (lower is better; >1% is flagged as not fully honest throughput in the methodology).
 - The synthetic `FakeReplicator` generates events faster than the router pushes them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. Real `pgoutput` parsing cost is added in Week 2.
@@ -160,3 +167,39 @@ tracks emit-rate × buffer depth (1024) × drain rate, NOT client count (the
 9× shorter). Client-side deficit == router `dropped` exactly on every run;
 durable checkpoints asserted at the final LSN including reopen-from-disk
 readback. Artifacts: `benches/results/apply/`.
+
+## Real-PG → client-apply end-to-end (ADR-0009 full path) — MEASURED 2026-08-24
+
+The first FULL-PATH number: real Postgres WAL logical decoding
+(`PgReplicator`/`pgoutput`) → `FanOutService` → loopback WebSocket →
+`SyncClient` `ApplyEngine` → durable `SqliteStorage` commits, measured to
+client-side durability (not wire delivery). Harness:
+`crates/nostos-client/tests/e2e_pg_apply_throughput.rs` (`--features pg`,
+dedicated empty-at-subscribe `bench_apply` table so the first-connect snapshot
+is zero rows and the window is pure live path). Fulfills the Show-HN
+precondition above.
+
+| Run | rows | wall | end-to-end rate | in-window drops |
+|---|---|---|---|---|
+| release, buffer 32768 | 20,000 / 20,000 | 0.552s | **36,230 rows/sec** | **0** |
+| release, buffer 32768 (repro) | 20,000 / 20,000 | 0.575s | **34,772 rows/sec** | **0** |
+
+Environment: rustc 1.95.0, Apple silicon aarch64 (10 cores), postgres:16-alpine
+container (`wal_level=logical`, volume-persistent), batch = 500-row
+transactions via `unnest`, op-log OFF (mirrors the eval headline's config),
+single client, loopback. PG-side row count == client SQLite count exactly on
+every run; window `matched == delivered` and `dropped == 0`.
+
+Framing per the methodology: this is the same-stage comparator for PowerSync's
+published **per-client sync rate (2–20k ops/sec)** — cite side-by-side, never
+as a cross-environment multiple. It is NOT comparable to the 833,307 eval-only
+fan-out ceiling (different stage: no decode, no client apply there).
+
+**Buffer-depth finding (consistent with the client-apply leg above):** at the
+default session buffer of 1024, the same 20k-row unpaced burst delivered
+14,012 with 5,988 dropped (29.9%) — drop-on-full sheds honestly, but a fresh
+connected client has no replay source (op-log OFF), so shed = lost until
+reconnect/reconcile. On a large pre-populated table the first-connect snapshot
+itself floods the sink the same way (observed matched=69009 storm on ~28k
+rows). Named follow-up (ponytail candidate): slow-client policy for connected
+sessions — op-log replay trigger or server-side resnapshot on gap detection.

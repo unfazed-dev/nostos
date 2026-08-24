@@ -61,7 +61,8 @@ use std::time::Duration;
 use nostos_core::{ApplyEngine, ApplyOutcome, Frame, Outbox, PendingWrite};
 use nostos_domain::Lsn;
 use nostos_infra::wire::{
-    decode_frames, decode_resume_info, decode_snapshot_boundary, decode_stream_error, ClientMessage,
+    decode_frames, decode_resume_info, decode_resync_required, decode_snapshot_boundary,
+    decode_stream_error, ClientMessage,
 };
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{Mutex, Notify};
@@ -1578,6 +1579,24 @@ where
                         continue;
                     }
 
+                    // ADR-0040: `resync_required` = the server shed events on
+                    // this stream (capacity loss; no replay path for a live
+                    // session). Recovery: wipe rows/checkpoint/epoch (`clear`
+                    // zeroes epoch too), end THIS session, re-arm the gate,
+                    // and surface an Err so `run_with_reconnect` retries into
+                    // a fresh subscribe whose snapshot reconciles the gap.
+                    // (A bare `disconnect()` would make the Ok path terminate
+                    // the whole loop — the exact bug this sequence avoids.)
+                    if let Some((table, reason)) = decode_resync_required(&bytes) {
+                        warn!(table = %table, %reason, "resync_required from server");
+                        debug!(table = %table, %reason, "[ADR-0040] resync signal received; clearing local state");
+                        self.clear_local_state().await?;
+                        debug!("[ADR-0040] local state cleared; disconnecting for fresh reconcile");
+                        self.disconnect();
+                        self.resume();
+                        return Err(ClientError::ResyncRequired(reason));
+                    }
+
                     // Snapshot-reconcile boundary (ADR-0014 offline-delete fix):
                     // a `{"type":"snapshot_begin"|"snapshot_end","table":"<t>"}`
                     // control frame is its own wire shape — it does NOT decode
@@ -1811,6 +1830,10 @@ pub enum ClientError {
     OrSetTableNotTagged(String),
     #[error("counter op on table not tagged as a PN-Counter: {0} — tag it in SyncClientConfig::counter_tables, SqliteStorage::with_counter_tables, and NOSTOS_COUNTER_COLUMNS")]
     CounterTableNotTagged(String),
+    #[error(
+        "resync_required from server: {0} — local state cleared; the reconnect snapshot-reconciles"
+    )]
+    ResyncRequired(String),
 }
 
 /// Decode a hex string to bytes. The wire payload is hex-encoded (see

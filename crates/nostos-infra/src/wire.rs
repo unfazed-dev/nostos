@@ -509,6 +509,39 @@ pub fn decode_stream_error(data: &[u8]) -> Option<(String, String)> {
     Some((id, error))
 }
 
+/// Encode a `resync_required` frame (server -> client; ADR-0040) as JSON
+/// bytes - the non-fatal "your stream shed events; reconcile now" signal.
+/// Emitted once per shed episode when `NOSTOS_RESYNC_SIGNAL` is enabled.
+/// Same hand-built style as [`encode_stream_error`].
+#[must_use]
+pub fn encode_resync_required(table: &str, reason: &str) -> Vec<u8> {
+    let mut out = String::with_capacity(60 + table.len() + reason.len());
+    out.push_str("{\"type\":\"resync_required\",\"table\":");
+    push_json_string(&mut out, table);
+    out.push_str(",\"reason\":");
+    push_json_string(&mut out, reason);
+    out.push('}');
+    out.into_bytes()
+}
+
+/// Decode a `resync_required` control frame (server -> client; ADR-0040),
+/// returning `(table, reason)`. `None` for anything else - same accept/reject
+/// discipline as [`decode_stream_error`].
+#[must_use]
+pub fn decode_resync_required(data: &[u8]) -> Option<(String, String)> {
+    let first = data.iter().copied().find(|b| !b.is_ascii_whitespace());
+    if first != Some(b'{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(data).ok()?;
+    if v.get("type")?.as_str()? != "resync_required" {
+        return None;
+    }
+    let table = v.get("table")?.as_str()?.to_string();
+    let reason = v.get("reason")?.as_str()?.to_string();
+    Some((table, reason))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,6 +1026,17 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["id"], "s\"1");
         assert_eq!(v["error"], "bad \"params\" for :owner");
+    }
+
+    #[test]
+    fn resync_required_round_trips_and_rejects_other_shapes() {
+        let bytes = encode_resync_required("tasks", "capacity shed detected");
+        let (table, reason) = decode_resync_required(&bytes).expect("round trip");
+        assert_eq!(table, "tasks");
+        assert_eq!(reason, "capacity shed detected");
+        // Not resync frames:
+        assert!(decode_resync_required(b"not json").is_none());
+        assert!(decode_resync_required(b"{\"type\":\"stream_error\"}").is_none());
     }
 
     #[test]

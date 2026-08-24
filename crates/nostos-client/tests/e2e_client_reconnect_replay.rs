@@ -259,7 +259,7 @@ async fn real_client_reconnect_applies_replayed_gap_including_delete() {
     let _kick = insert_task(&tenant, "e2e-client-replay-kick").await;
 
     // Real client over an on-disk SQLite (re-opened later to inspect the state).
-    let dir = std::env::temp_dir().join(format!("nostos-client-replay-{}.sqlite", tenant));
+    let dir = std::env::temp_dir().join(format!("nostos-client-replay-{tenant}.sqlite"));
     let _ = std::fs::remove_file(&dir);
     let storage = SqliteStorage::open(dir.to_str().expect("path")).expect("open client sqlite");
     let config = SyncClientConfig {
