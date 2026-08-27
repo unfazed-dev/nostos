@@ -1,6 +1,16 @@
 name: nostos_flutter
 description: "Plug-and-play local-first sync for Flutter — Rust-owned SQLite + WebSocket sync loop, no connector class, no client-side schema artifact."
-version: 0.1.0
+# Pre-release head, not a published version: 0.1.0 was never published to
+# pub.dev (no GitHub remote, release pipeline never ran — see README's
+# Releases section), and the repo's v0.1.0 git tag predates this sdk/ tree
+# entirely, so no tag has ever carried this package. 40+ commits of API
+# drift (typed reads/writeBatch/predicates, CRDT tiers, web engine,
+# syncStream, push-token REST) make the tree a superset of what the 0.1.0
+# CHANGELOG entry describes — the -dev suffix keeps the moving head
+# unambiguous for path-dep consumers and can't be accidentally published
+# as stable. First flutter-carrying tag (v0.2.0) is cut when the release
+# pipeline runs for real — an operator call.
+version: 0.2.0-dev.1
 # NOSTOS-IDENTITY-PENDING: no domain registered — see docs/IDENTITY.md
 homepage: https://github.com/unfazed-dev/nostos
 repository: https://github.com/unfazed-dev/nostos
