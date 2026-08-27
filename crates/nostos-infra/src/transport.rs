@@ -78,7 +78,12 @@ const MAX_TABLES_PER_SOCKET: usize = 32;
 /// widen the verification can't prove safe in place; either way the client's
 /// reconnect (Task 11's checksum/epoch path) re-scopes it into the current
 /// ruleset.
-pub(crate) const RULES_CHANGED_CLOSE_REASON: &str = "rules changed; reconnect to re-scope";
+/// The wire-contract close reason for "ruleset changed under you; reconnect
+/// to re-scope" — PUBLIC because clients (nostos-client) must distinguish this
+/// one legitimate INVALID(1008) close from a subscribe REJECTION (same code,
+/// different reason). Do not change the string: it is a cross-process
+/// contract asserted by ws_contract tests and matched client-side.
+pub const RULES_CHANGED_CLOSE_REASON: &str = "rules changed; reconnect to re-scope";
 
 /// Shared state injected into the axum router.
 #[derive(Clone)]

@@ -510,6 +510,21 @@ where
     /// Wakes the session loop when a stream command lands mid-session (same
     /// pattern as `write_notify`).
     stream_notify: Arc<Notify>,
+    /// TRUE only while the CURRENT session is PROVEN: the server accepted the
+    /// subscribe(s) and at least one post-acceptance frame has arrived (a
+    /// replication event, snapshot boundary, or write ack — `resume_info`
+    /// deliberately does NOT count: the transport sends it BEFORE registering
+    /// the first table, so a session that is about to be rejected still sees
+    /// one). This is the honest `connected` signal UI layers were missing
+    /// (observed 2026-08-27: a rules-rejected subscribe loop flapped
+    /// `Connected` on a grace-window heuristic while ZERO rows ever arrived,
+    /// and `waitForFirstSync()` completed against a session that never
+    /// synced). `watch` (not broadcast): a late subscriber must read the
+    /// current value, and intermediate flaps coalesce. `run_once` clears it
+    /// at session start; [`Self::reset_subscribed`] lets a caller clear it
+    /// synchronously before spawning the next attempt (bridge loops need
+    /// this to avoid selecting on a stale `true` from the previous session).
+    subscribed: tokio::sync::watch::Sender<bool>,
 }
 
 impl<S> SyncClient<S>
@@ -539,6 +554,7 @@ where
         let (changes, _) = tokio::sync::broadcast::channel(64);
         let token = std::sync::RwLock::new(config.token.clone());
         let (disconnect_gate, _) = tokio::sync::watch::channel(false);
+        let (subscribed, _) = tokio::sync::watch::channel(false);
         // P5: config-declared streams seed the ACTIVE set directly (no
         // pending entry needed — run_once re-sends the active set on every
         // connect, which covers the first one too).
@@ -563,6 +579,7 @@ where
             write_status,
             hlc_state: std::sync::Mutex::new(None),
             disconnect_gate,
+            subscribed,
             streams,
             stream_notify: Arc::new(Notify::new()),
         }
@@ -1281,15 +1298,64 @@ where
         self.disconnect_gate.send_replace(false);
     }
 
+    /// The honest session-proven signal (see the `subscribed` field): a
+    /// receiver that flips `true` once the CURRENT session's subscribe has
+    /// been accepted AND a post-acceptance frame has arrived. A UI layer
+    /// that renders "synced" off this cannot lie the way a connect-grace
+    /// heuristic did (2026-08-27: rejected-subscribe loops showed
+    /// `Connected` with zero rows ever delivered).
+    ///
+    /// The value resets to `false` at the start of every `run_once`. A caller
+    /// driving its own retry loop should [`Self::reset_subscribed`] before
+    /// spawning the next attempt so it never selects on a stale `true`.
+    #[must_use]
+    pub fn subscribed(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.subscribed.subscribe()
+    }
+
+    /// Synchronously clear the session-proven signal (see [`Self::subscribed`]).
+    /// For bridge/retry loops that must not observe the PREVIOUS session's
+    /// `true` while the next `run_once` is still between creation and its
+    /// first poll (the internal reset only runs once the future is polled).
+    pub fn reset_subscribed(&self) {
+        self.subscribed.send_if_modified(|v| {
+            if !*v {
+                false
+            } else {
+                *v = false;
+                true
+            }
+        });
+    }
+
+
+    /// Mark the current session PROVEN. Private: only the receive loop may
+    /// say the server accepted us (a post-acceptance frame arrived).
+    fn mark_subscribed(&self) {
+        self.subscribed.send_if_modified(|v| {
+            if *v {
+                false
+            } else {
+                *v = true;
+                true
+            }
+        });
+    }
+
     /// Run one connection attempt to completion: connect, subscribe, apply until
     /// the stream ends or errors. Does NOT reconnect on its own — see
     /// [`Self::run_with_reconnect`]. Returns the session outcome.
     ///
     /// # Errors
     /// Returns the underlying error if the connection can't be established or
-    /// the apply loop hits a non-recoverable storage error.
+    /// the apply loop hits a non-recoverable storage error. A first-subscribe
+    /// rejection surfaces as [`ClientError::SubscribeRejected`] carrying the
+    /// server's close reason.
     pub async fn run_once(&self) -> Result<SessionOutcome, ClientError> {
         let mut disconnect_rx = self.disconnect_gate.subscribe();
+        // New session: the previous session's PROVEN flag is stale until the
+        // server accepts THIS session's subscribe (see `subscribed`).
+        self.reset_subscribed();
         // Already-requested disconnect (loop spawned after disconnect()): a
         // clean no-op session so run_with_reconnect terminates instead of
         // reconnecting forever against a sleeping client.
@@ -1441,7 +1507,44 @@ where
                     let bytes = match msg {
                         Message::Text(t) => t.into_bytes(),
                         Message::Binary(b) => b,
-                        Message::Close(_) => {
+                        Message::Close(frame) => {
+                            // A first-subscribe rejection closes the socket
+                            // with code INVALID (1008) + the rejection
+                            // reason (see `run_session`'s fatal-reject path).
+                            // Swallowing it (the old behavior) turned a
+                            // rules misconfiguration into an infinite,
+                            // silent reconnect loop that still LOOKED
+                            // connected-ish to UI layers (2026-08-27 incident:
+                            // `waitForFirstSync()` completed against a
+                            // session that never synced). Surface it as a
+                            // distinct error so retry loops can treat it as
+                            // fatal and operators see the reason. The one
+                            // INVALID close that is NOT a rejection is the
+                            // rules-changed reconnect request — same code,
+                            // reserved reason string (the transport's
+                            // `RULES_CHANGED_CLOSE_REASON`).
+                            // Trigger on the REASON, not the code: every
+                            // diagnostic close the transport sends carries a
+                            // non-empty reason, while the clean paths do not
+                            // (device-cap closes with `reason: ""`; idle
+                            // closes are bare). Matching a specific code is
+                            // fragile across stacks — the server's axum
+                            // `close_code::INVALID` arrives as tungstenite
+                            // `CloseCode::Invalid` here, whose numeric value
+                            // is NOT what a code-number match would guess.
+                            // The one reserved diagnostic reason that is NOT
+                            // a rejection is rules-changed (a reconnect
+                            // request).
+                            let reason = frame
+                                .as_ref()
+                                .map(|f| f.reason.clone().into_owned())
+                                .unwrap_or_default();
+                            let is_rules_changed =
+                                reason == nostos_infra::transport::RULES_CHANGED_CLOSE_REASON;
+                            if !reason.is_empty() && !is_rules_changed {
+                                warn!(%reason, "subscribe rejected; server closed with reason");
+                                return Err(ClientError::SubscribeRejected(reason));
+                            }
                             debug!("server sent close; ending session");
                             break;
                         }
@@ -1456,6 +1559,10 @@ where
                     // the outbox ack. Anything else falls through to the replication
                     // path below.
                     if let Some(result) = decode_write_result(&bytes) {
+                        // A write ack proves the server accepted this session
+                        // (the transport only processes writes for registered
+                        // tables) — mark the session PROVEN (see `subscribed`).
+                        self.mark_subscribed();
                         // Correlate by client_write_id == outbox id.
                         let id: u64 = if let Ok(id) = result.client_write_id.parse() {
                             id
@@ -1616,6 +1723,13 @@ where
                     // logged but NEVER reach the engine. Only untagged,
                     // table-level boundaries reconcile.
                     if let Some((table, stream, begin)) = decode_snapshot_boundary(&bytes) {
+                        // A snapshot boundary only ever follows an ACCEPTED
+                        // subscribe (the transport brackets the snapshot it
+                        // takes at registration) — including the empty-table
+                        // case, where begin/end still bracket zero rows. This
+                        // is the guaranteed first PROVEN frame; the decode
+                        // loop below marks the streaming path.
+                        self.mark_subscribed();
                         if let Some(stream_id) = stream {
                             debug!(table = %table, stream = %stream_id, begin,
                                 "stream snapshot boundary — subset bracket, no reconcile");
@@ -1649,6 +1763,11 @@ where
                     for frame in decode_frames(&bytes) {
                         frames_received += 1;
                         last_frame_at = tokio::time::Instant::now();
+                        // Replication events prove the session doubly
+                        // (acceptance + data); marked here so the flag is set
+                        // even if this table's snapshot bracket was consumed
+                        // before this client attached (resume path).
+                        self.mark_subscribed();
 
                         // Hex-decode the payload once, at the boundary (the wire
                         // carries hex; downstream everything is raw bytes).
@@ -1791,6 +1910,14 @@ where
                     });
                 }
                 Err(e) => {
+                    // A subscribe rejection is FATAL: the server told us this
+                    // session's rules deny the table — reconnecting re-sends
+                    // the same denied subscribe forever (the 2026-08-27
+                    // silent-loop incident). Return the reason to the caller;
+                    // the operator fixes the ruleset, then the app reconnects.
+                    if matches!(e, ClientError::SubscribeRejected(_)) {
+                        return Err(e);
+                    }
                     warn!(attempt, error = %e, "session failed; backing off");
                     if let Some(max) = self.config.max_retries {
                         if attempt >= max {
@@ -1818,6 +1945,13 @@ where
 pub enum ClientError {
     #[error("connect failed: {0}")]
     Connect(String),
+    /// The server REJECTED the session's first subscribe (rules denied the
+    /// table, where_sql rejected, ...) and closed with its reason. NOT
+    /// transient: retrying cannot heal a rules misconfiguration, so retry
+    /// loops ([`SyncClient::run_with_reconnect`], the nostos_flutter bridge)
+    /// treat this as fatal — surface it, fix the rules, resubscribe.
+    #[error("subscribe rejected by server: {0}")]
+    SubscribeRejected(String),
     #[error("send failed: {0}")]
     Send(String),
     #[error("receive failed: {0}")]

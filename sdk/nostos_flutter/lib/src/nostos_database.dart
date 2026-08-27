@@ -1031,10 +1031,18 @@ class NostosDatabase {
   /// immediately if sync has already happened (so it is safe to call on every
   /// reconnect / app start). Use this instead of polling [SyncStatus.hasSynced].
   ///
-  /// ponytail: `lastSyncedAt` is a proxy stamped on each `connected`
-  /// transition, not a precise "download completed / reconcile done" signal
-  /// (which the engine does not yet expose — ADR-0024). It is the same proxy
-  /// [SyncStatus.hasSynced] uses; upgrading one upgrades the other.
+  /// HONESTY NOTE (2026-08-27 hardening): on the NATIVE engine `connected` is
+  /// now a PROVEN signal — the server accepted this session's subscribe AND a
+  /// post-acceptance frame (snapshot boundary / event / write ack) arrived —
+  /// so completing here means rows actually flowed or were reconciled. A
+  /// rules-rejected subscribe no longer flaps `connected`; it surfaces as
+  /// `disconnected` with the reconnect loop stopped (the reason is in the
+  /// engine logs). The WEB engine still uses its own connection heuristic.
+  ///
+  /// ponytail: `lastSyncedAt` is stamped on each PROVEN `connected`
+  /// transition, still not a precise "download completed / reconcile done"
+  /// signal (which the engine does not yet expose — ADR-0024). It is the same
+  /// proxy [SyncStatus.hasSynced] uses; upgrading one upgrades the other.
   ///
   /// On a [NostosDatabase.local] database this resolves immediately — there is
   /// no server, so there is no first sync to wait for; the local row set is
