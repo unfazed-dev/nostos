@@ -46,11 +46,70 @@ void main() {
     final repoRoot =
         Platform.environment['NOSTOS_REPO_ROOT'] ??
         '${Directory.current.path}/../../..';
+
+    // 1) Compile FIRST, under its own generous budget. The /healthz window in
+    //    step 2 exists to measure server BOOT (~1s warm) — a cold compile of
+    //    the server graph (fingerprint walk + build) can take tens of minutes
+    //    on slow/external storage (observed 2026-08-27: cargo spent >50min in
+    //    fingerprint::calculate on an external SSD before any rustc), which
+    //    made the old 2-minute run-window fail for reasons that had nothing
+    //    to do with the server. Compiling up front keeps the boot window
+    //    meaningful: if the healthz poll fails below, it is a genuine server
+    //    failure. Budget default 15min; raise via NOSTOS_IT_COMPILE_BUDGET_MIN
+    //    on cold or slow machines.
+    final compileBudget = Duration(
+      minutes:
+          int.tryParse(
+            Platform.environment['NOSTOS_IT_COMPILE_BUDGET_MIN'] ?? '',
+          ) ??
+          15,
+    );
+    // Rule-file isolation: the server resolves nostos_rules.toml relative
+    // to ITS cwd (repo root), and the operator's atlet dev rules there are
+    // hand-mode with claim-gated scopes — the 'tasks' table this test uses
+    // is not listed, so every subscribe would be rejected and watch() would
+    // starve (observed 2026-08-27 as a 15s TimeoutException). Point the
+    // server at an explicit all-mode rules file instead — same semantics as
+    // the documented zero-config default (no file found → all).
+    final rulesDir = await Directory.systemTemp.createTemp('nostos_it_rules_');
+    final rulesPath = '${rulesDir.path}/nostos_rules_all.toml';
+    File(rulesPath).writeAsStringSync('version = 1\nsync_mode = "all"\n');
+    final compile = await Process.start('cargo', [
+      'build',
+      '-p',
+      'nostos-server',
+      '--quiet',
+    ], workingDirectory: repoRoot);
+    // Drain stderr so a full pipe can never deadlock the build; keep it for
+    // the failure message.
+    final compileErr = <String>[];
+    compile.stderr.transform(utf8.decoder).listen(compileErr.add);
+    final compileExit = await compile.exitCode.timeout(
+      compileBudget,
+      onTimeout: () {
+        compile.kill();
+        return -1;
+      },
+    );
+    if (compileExit != 0) {
+      final budgetHint = compileExit == -1
+          ? 'Budget exceeded — raise NOSTOS_IT_COMPILE_BUDGET_MIN. '
+          : '';
+      fail(
+        'cargo build -p nostos-server did not succeed (exit $compileExit) '
+        'within ${compileBudget.inMinutes}min. '
+        '$budgetHint'
+        'stderr: ${compileErr.join()}',
+      );
+    }
+
+    // 2) Boot the (now warm) server and poll /healthz — this window measures
+    //    boot only.
     server = await Process.start(
       'cargo',
       ['run', '-p', 'nostos-server', '--quiet'],
       workingDirectory: repoRoot,
-      environment: {'NOSTOS_BIND': _bind},
+      environment: {'NOSTOS_BIND': _bind, 'NOSTOS_RULES_FILE': rulesPath},
     );
     // Surface server-side failures in the test log instead of a silent hang.
     server.stderr
@@ -67,13 +126,13 @@ void main() {
         client.close();
         if (res.statusCode == 200) return;
       } catch (_) {
-        // Not up yet (still compiling, or port not bound) — keep polling.
+        // Not up yet (port not bound) — keep polling.
       }
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
     fail(
       'nostos-server did not become healthy at $_healthUrl within 2 minutes '
-      '(first run compiles the binary — check stderr output above)',
+      'of a warm binary — check stderr output above for a boot failure',
     );
   });
 
