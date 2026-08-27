@@ -290,6 +290,10 @@ before building a consumer app.
 - `example/integration_test/nostos_server_test.dart` — the real end-to-end
   proof: `flutter test integration_test/nostos_server_test.dart -d macos`
   from `example/`, against a genuine `cargo run -p nostos-server` subprocess.
+  Warm `target/` first (`cargo build -p nostos-server` from the repo root):
+  the test's setUpAll allows only 2 minutes for the server's `/healthz`,
+  which a cold compile of the server graph can exceed on slow storage
+  (observed 2026-08-27 — the failure is the window, not the server).
   Requires disabling the macOS App Sandbox for **debug builds only**
   (`example/macos/Runner/DebugProfile.entitlements`) — a sandboxed app
   cannot spawn arbitrary subprocesses; `Release.entitlements` (what you'd
@@ -314,6 +318,47 @@ before building a consumer app.
 - **`write()`/`subscribe()` enforce single-table-per-instance** by comparing
   against the last `subscribe`d table and throwing `StateError` on a
   mismatch — see the API section above.
+
+## Versioning & compatibility
+
+Two pins define a working consumer setup (verified 2026-08-27 on Flutter
+3.44.9 / Dart 3.12: `pub get` resolves both exactly, `flutter analyze` clean,
+72 unit tests green with the real native-assets dylib loaded through the
+build hook — the FFI pairing itself is exercised, not just resolved):
+
+| pin | value | why exact |
+|---|---|---|
+| `nostos_flutter` | `0.2.0-dev.1` (path dep until first pub.dev publish) | pre-release head; see CHANGELOG |
+| `flutter_rust_bridge` | `2.13.0-beta.5` | beta-versioned native-assets backend; 2.12.0 silently lacks `--integration-backend` (see pubspec comment + docs/plans/w4-packaging-fallback.md) |
+
+**Tag truth:** the repo's `v0.1.0` git tag (2026-07-05) predates the entire
+`sdk/` tree — no git tag has ever carried this package. "Track nostos's
+`v0.1.0` tag" is therefore not a thing a Flutter consumer can do; pin the
+commit (or the `0.2.0-dev.1` head) instead. The first flutter-carrying tag is
+cut when the release pipeline runs for real — an operator call.
+
+## Reference app (atlet) & adapter conformance
+
+[`apps/atlet`](../apps/atlet) in this repo is the reference consumer, kept
+green in CI (analyze + full `flutter test`, 107 tests):
+
+- `lib/adapters/nostos_adapter.dart` — side-by-side with
+  `powersync_adapter.dart` behind the frozen `SyncAdapter` contract v1.1
+  (`apps/atlet/spec/adapter.md`): init/addSession/deleteSession/
+  watchSessions/watchProducts/connected/setConnected/signOut.
+- `lib/push/push_pilot.dart` — the push reference: FCM mobile + VAPID web,
+  gated by `--dart-define=ATLET_PUSH_PILOT=true`, with the
+  `nostosDoorbellBackgroundHandler` background-isolate wake pattern (an FCM
+  data-only `{table, lsn}` doorbell → cold-open the durable store →
+  `waitForFirstSync` — see the Push section above).
+
+**Conformance caveat (read before adopting):** the adapter-conformance pilot
+scorecard (`apps/atlet/spec/conformance-flutter.md`) records that **only
+checklist item 5** (no engine-type leakage) genuinely passed — items 1–4 were
+never executed against a live backend for either adapter. A live-backend
+conformance pass is the **first task** when a client project actually adopts
+this SDK; the spec's prerequisites section names the operator-provisioned
+environment that entails.
 
 ## Releases
 

@@ -185,6 +185,20 @@ jobs:
       - name: flutter test
         working-directory: sdk/nostos_flutter
         run: flutter test
+      # The reference consumer (docs/plans/nostos-integration-tauri-flutter-push.md
+      # Track C): apps/atlet pins nostos_flutter by path and carries the frozen
+      # SyncAdapter contract v1.1 + the push pilot. Gating it here keeps the
+      # reference honest — an SDK change that breaks the documented adoption
+      # path (adapters, push_pilot, conformance tests) fails CI instead of
+      # drifting. Same runner/toolchain as the SDK steps above (atlet's path
+      # dep pulls the same native-assets cargo fallback); 107 tests, ~7s
+      # after deps.
+      - name: atlet reference app — pub get + analyze + test
+        working-directory: apps/atlet/flutter
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
       # The doc-signature guard: parses the fenced Dart in README.md / USAGE.md
       # / docs/api/flutter.md and fails when a snippet names a NostosDatabase
       # factory parameter that does not exist in lib/. `make ci` is Rust-only and
