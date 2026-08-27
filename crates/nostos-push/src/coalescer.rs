@@ -28,14 +28,17 @@
 //! an outcome it has not observed), so every push_id still yields exactly
 //! one receipt.
 //!
-//! ponytail: no retries in v1 — a transient rail outcome is terminal on the
-//! receipt and NOTHING re-enqueues: the RemoteNotifier's receipt handler
-//! (push/remote.rs) maps a transient outcome to metrics only, and the
-//! embedded router's transient-retry does not apply to daemon sends. A lost
-//! doorbell is mitigated by the durable LSN checkpoint reconciling on the
-//! next sync — no data loss, just a missed wake-up. Upgrade path: an
-//! attempts counter on Pending plus scheduled re-flush, exactly the
-//! embedded router's shape; the receipt stays the source of truth.
+//! TRANSIENT RETRY (the former v1 ponytail, closed 2026-08-27 per the arxa
+//! integration plan B2): a transient rail outcome (429/5xx/network) re-
+//! debounces the whole window up to RetryPolicy::max_attempts total sends —
+//! exactly the embedded router's shape (attempts counter on the pending
+//! entry + scheduled re-flush). The receipt stays the source of truth:
+//! receipts are written only at the terminal attempt, so every push_id
+//! still yields exactly one. Shutdown drains terminal (no retry at
+//! process exit); an exhausted transient receipts outcome=transient with a
+//! retries-exhausted detail. A doorbell lost past the budget is mitigated
+//! by the durable LSN checkpoint reconciling on the next sync — no data
+//! loss, just a missed wake-up.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -64,6 +67,39 @@ pub struct CoalescerLimits {
     /// Max coalesced-away jobs retained per key. Beyond the cap the oldest
     /// loser is evicted to the flush-time receipt batch.
     pub losers_max: usize,
+}
+
+/// Transient-outcome retry budget (B2 of the arxa integration plan; the
+/// embedded router MAX_ATTEMPTS=2 / RETRY_DELAY=500ms shape, env-exposed
+/// here per the daemon knob convention). `max_attempts` is TOTAL sends
+/// (1 initial + max_attempts-1 deferred); the delay is the re-debounce
+/// wait before each deferred send.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Total sends per window (1 initial + deferred retries). 1 disables
+    /// retry (v1 behavior). 0 clamps to 1 at use sites — a send always
+    /// happens at least once.
+    pub max_attempts: u8,
+    /// Wait before each deferred retry.
+    pub delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 2,
+            delay: Duration::from_millis(500),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// The effective total-send budget, floored at 1 (a configured 0 means
+    /// "no retries", never "no send").
+    #[must_use]
+    pub fn effective_max_attempts(&self) -> u8 {
+        self.max_attempts.max(1)
+    }
 }
 
 impl Default for CoalescerLimits {
@@ -133,8 +169,12 @@ pub type SharedPendingGate = Arc<Mutex<PendingGate>>;
 
 /// One debounced (tenant, token) target.
 struct Pending {
-    /// Fixed by the FIRST send in the window; later sends never move it.
+    /// Fixed by the FIRST send in the window; later sends never move it —
+    /// EXCEPT the retry re-debounce, which sets it to now + delay (the
+    /// embedded router shape).
     deadline: Instant,
+    /// Sends attempted so far (transient-retry budget, B2).
+    attempts: u8,
     /// Latest payload wins; the send that actually goes out.
     winner: SendJob,
     /// Earlier sends coalesced away — each still gets its receipt. Capped
@@ -181,6 +221,7 @@ pub fn spawn_coalescer(
     rails: Rails,
     debounce: Duration,
     limits: CoalescerLimits,
+    retry: RetryPolicy,
 ) -> Coalescer {
     let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
     let gate: SharedPendingGate = Arc::new(Mutex::new(PendingGate::new(limits.pending_keys_max)));
@@ -190,6 +231,7 @@ pub fn spawn_coalescer(
         rails,
         debounce,
         limits,
+        retry,
         Arc::clone(&gate),
     ));
     Coalescer { tx, gate }
@@ -203,6 +245,7 @@ async fn coalesce(
     rails: Rails,
     debounce: Duration,
     limits: CoalescerLimits,
+    retry: RetryPolicy,
     gate: SharedPendingGate,
 ) {
     let mut pending: HashMap<(String, String), Pending> = HashMap::new();
@@ -216,9 +259,13 @@ async fn coalesce(
                 if let Some(job) = maybe {
                     absorb(job, &mut pending, debounce, limits);
                 } else {
+                    // Shutdown drain: dispatch TERMINAL (allow_retry=false) —
+                    // a re-debounce would have nowhere left to wait; the
+                    // transient outcome receipts as-is and the LSN
+                    // checkpoint reconciles the data later.
                     let drained: Vec<((String, String), Pending)> = pending.drain().collect();
                     for (key, p) in drained {
-                        dispatch_one(p, &store, &rails).await;
+                        dispatch_one(p, &store, &rails, &retry, false).await;
                         gate.lock().expect("pending gate").release(&key);
                     }
                     gate.lock().expect("pending gate").clear();
@@ -226,7 +273,7 @@ async fn coalesce(
                 }
             }
             () = sleep_until(next) => {
-                flush_due(&mut pending, &store, &rails, &gate).await;
+                flush_due(&mut pending, &store, &rails, &retry, &gate).await;
             }
         }
     }
@@ -272,6 +319,7 @@ fn absorb(
                 key,
                 Pending {
                     deadline: Instant::now() + debounce,
+                    attempts: 0,
                     winner: job,
                     losers: VecDeque::new(),
                     evicted: Vec::new(),
@@ -288,6 +336,7 @@ async fn flush_due(
     pending: &mut HashMap<(String, String), Pending>,
     store: &Arc<dyn Store>,
     rails: &Rails,
+    retry: &RetryPolicy,
     gate: &SharedPendingGate,
 ) {
     let now = Instant::now();
@@ -298,29 +347,78 @@ async fn flush_due(
         .collect();
     for key in due {
         if let Some(p) = pending.remove(&key) {
-            dispatch_one(p, store, rails).await;
-            gate.lock().expect("pending gate").release(&key);
+            match dispatch_one(p, store, rails, retry, true).await {
+                // Transient + budget left: re-debounce the window (deadline
+                // now + delay, attempts bumped inside dispatch_one) and KEEP
+                // the gate slot — the window is still open. A NEW send for
+                // the same key in the gap lands in absorb against the
+                // re-inserted window (latest-wins payload rides the retry).
+                Some(p2) => {
+                    pending.insert(key, p2);
+                }
+                // Terminal: receipts written, slot freed.
+                None => {
+                    gate.lock().expect("pending gate").release(&key);
+                }
+            }
         }
     }
 }
 
 /// Flush one target: rail send, winner + loser (+ evicted) receipts, prune
-/// on Unregistered (plan task 1.2's prune trigger).
-async fn dispatch_one(p: Pending, store: &Arc<dyn Store>, rails: &Rails) {
-    let winner = p.winner;
-    let collapse_key = winner
+/// on Unregistered (plan task 1.2's prune trigger). Returns Some(pending)
+/// when the rail answered transient AND the retry budget has room — the
+/// caller re-debounces the whole window (receipts deliberately NOT written:
+/// one receipt per push_id, only at the terminal attempt); None when
+/// terminal (receipts written). `allow_retry=false` forces the terminal
+/// path (shutdown drain).
+async fn dispatch_one(
+    mut p: Pending,
+    store: &Arc<dyn Store>,
+    rails: &Rails,
+    retry: &RetryPolicy,
+    allow_retry: bool,
+) -> Option<Pending> {
+    let collapse_key = p
+        .winner
         .collapse_key
         .clone()
-        .unwrap_or_else(|| default_collapse_key(&winner.tenant_id, &winner.token));
+        .unwrap_or_else(|| default_collapse_key(&p.winner.tenant_id, &p.winner.token));
+    // Dispatch through borrows — p must stay whole for the Some(p) return.
     let rail_outcome = rails
         .dispatch(
-            winner.platform,
-            &winner.token,
+            p.winner.platform,
+            &p.winner.token,
             Some(&collapse_key),
-            &winner.payload,
+            &p.winner.payload,
         )
         .await;
+    // Transient + budget left (the embedded router shape): re-debounce the
+    // whole entry — the retry re-sends the winning payload and the eventual
+    // outcome still receipts every push_id exactly once.
+    if allow_retry
+        && rail_outcome == RailOutcome::TransientRetryable
+        && p.attempts + 1 < retry.effective_max_attempts()
+    {
+        p.attempts += 1;
+        p.deadline = Instant::now() + retry.delay;
+        return Some(p);
+    }
+    let exhausted_transient = rail_outcome == RailOutcome::TransientRetryable && allow_retry;
     let (outcome, rail_detail) = Outcome::from_rail(&rail_outcome);
+    // Terminal path: p is consumed piecemeal from here (never returned).
+    let winner = p.winner;
+    // A transient past the budget carries the exhaustion on the winner
+    // receipt detail — operators see WHY it never delivered without
+    // correlating rail logs.
+    let rail_detail = if exhausted_transient && rail_detail.is_none() {
+        Some(format!(
+            "retries exhausted after {} attempts",
+            p.attempts + 1
+        ))
+    } else {
+        rail_detail
+    };
     let provider_ts = crate::store::now_rfc3339();
 
     // Winner receipt — the send that actually went out.
@@ -376,6 +474,7 @@ async fn dispatch_one(p: Pending, store: &Arc<dyn Store>, rails: &Rails) {
             }
         }
     }
+    None // terminal: receipts written, caller frees the gate slot
 }
 
 /// Periodic receipt retention sweep (NOSTOS_PUSHD_RECEIPT_RETENTION_SECS).
@@ -399,6 +498,7 @@ pub fn spawn_retention_sweeper(store: Arc<dyn Store>, retention_secs: u64) {
 #[cfg(test)]
 mod tests {
     use super::{CoalescerLimits, PendingGate};
+    use std::time::Duration;
 
     #[test]
     fn gate_admits_until_ceiling_then_refuses_new_keys() {
@@ -421,5 +521,29 @@ mod tests {
         let limits = CoalescerLimits::default();
         assert_eq!(limits.pending_keys_max, 10_000);
         assert_eq!(limits.losers_max, 64);
+    }
+
+    #[test]
+    fn retry_policy_defaults_match_the_embedded_router() {
+        let p = super::RetryPolicy::default();
+        assert_eq!(
+            p.max_attempts, 2,
+            "1 initial + 1 deferred (router MAX_ATTEMPTS)"
+        );
+        assert_eq!(p.delay, Duration::from_millis(500), "router RETRY_DELAY");
+        assert_eq!(p.effective_max_attempts(), 2);
+    }
+
+    #[test]
+    fn retry_policy_zero_clamps_to_one_send() {
+        let p = super::RetryPolicy {
+            max_attempts: 0,
+            delay: Duration::from_millis(1),
+        };
+        assert_eq!(
+            p.effective_max_attempts(),
+            1,
+            "a configured 0 means no retries, never no send"
+        );
     }
 }

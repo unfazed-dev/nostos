@@ -83,11 +83,16 @@ async fn main() -> anyhow::Result<()> {
         pending_keys_max: cfg.pending_keys_max,
         losers_max: cfg.losers_max,
     };
+    let retry = coalescer::RetryPolicy {
+        max_attempts: cfg.retry_max_attempts,
+        delay: Duration::from_millis(cfg.retry_delay_ms),
+    };
     let coalescer = coalescer::spawn_coalescer(
         Arc::clone(&store),
         rails.clone(),
         Duration::from_millis(cfg.debounce_ms),
         limits,
+        retry,
     );
     let state = AppState {
         store,
