@@ -1,6 +1,6 @@
 ## Default Permission
 
-Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all eight commands unconditionally.
+Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally.
 
 #### This default permission set includes the following:
 
@@ -12,6 +12,8 @@ Nostos Tauri plugin — default permissions for the connect/subscribe/write/quer
 - `allow-watch`
 - `allow-set-token`
 - `allow-sign-out`
+- `allow-register-push-token`
+- `allow-deregister-push-token`
 
 ## Permission Table
 
@@ -77,6 +79,32 @@ Denies the connect command without any pre-configured scope.
 <tr>
 <td>
 
+`nostos-tauri:allow-deregister-push-token`
+
+</td>
+<td>
+
+Enables the deregister_push_token command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:deny-deregister-push-token`
+
+</td>
+<td>
+
+Denies the deregister_push_token command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `nostos-tauri:allow-query`
 
 </td>
@@ -96,6 +124,32 @@ Enables the query command without any pre-configured scope.
 <td>
 
 Denies the query command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:allow-register-push-token`
+
+</td>
+<td>
+
+Enables the register_push_token command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`nostos-tauri:deny-register-push-token`
+
+</td>
+<td>
+
+Denies the register_push_token command without any pre-configured scope.
 
 </td>
 </tr>

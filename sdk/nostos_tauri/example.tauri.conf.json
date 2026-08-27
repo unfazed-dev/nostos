@@ -1,0 +1,13 @@
+{
+  // Example plugins.cairn block for an app consuming the nostos plugin.
+  // Copy the "cairn" object into your app's tauri.conf.json "plugins".
+  // Every field is optional; a populated block lets connect() run argless.
+  "plugins": {
+    "cairn": {
+      "syncUrl": "ws://127.0.0.1:8080/sync",
+      "token": null,
+      "table": "tasks",
+      "dbPath": "cairn.db"
+    }
+  }
+}

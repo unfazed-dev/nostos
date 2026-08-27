@@ -20,15 +20,62 @@ tauri::Builder::default()
 
 ## Invoke from JS
 
-Five commands, namespaced `plugin:cairn|<command>`:
+Ten commands, namespaced `plugin:cairn|<command>`:
 
 | command | args | returns |
 |---|---|---|
-| `connect` | `{ url, token, dbPath }` | `void` — opens SQLite, builds the client, **no network I/O** |
+| `connect` | `{ url?, token?, dbPath? }` | `void` — opens SQLite, builds the client, **no network I/O**. All args optional — falls back to the `plugins.cairn` config block |
 | `subscribe` | `{ table }` | `void` — starts the live replication run loop |
 | `write` | `{ table, op, pk, payloadJson }` | `number` — the outbox id |
 | `query` | `{ sql }` | `string` — JSON array of rows |
 | `checkpoint` | — | `number` — the durable LSN |
+| `watch` | `{ table, onEvent: Channel }` | `void` — reactive full-snapshot push (ADR-0024) |
+| `set_token` | `{ token }` | `void` — swap the live credential |
+| `sign_out` | — | `void` — ADR-0029 wipe + push deregistration |
+| `register_push_token` | `{ platform, token }` | `void` — `POST /push-tokens` (ADR-0037 §3) |
+| `deregister_push_token` | `{ token }` | `void` — `DELETE /push-tokens/{token}` |
+
+**Typed JS/TS bindings live in [`guest-js/`](guest-js/)** — the
+`@nostos-sync/tauri` package (ESM + `.d.ts` + README) wrapping every command
+with the unified-verb sugar tier (`upsert`/`patch`/`deleteRow`/…). No
+build step: plain `.js` + hand-written `.d.ts`, consumed as a path
+dependency.
+
+## Config (tauri.conf.json)
+
+The plugin reads a `plugins.cairn` block (see
+`example.tauri.conf.json`):
+
+```jsonc
+{
+  "plugins": {
+    "nostos": {
+      "syncUrl": "ws://127.0.0.1:8080/sync",
+      "token": null,
+      "table": "tasks",
+      "dbPath": "cairn.db"
+    }
+  }
+}
+```
+
+Every field is optional (absent block == all-defaults); a populated block
+lets `connect()` run argless. Precedence: **per-call args > config > floor**
+(`"tasks"` / `"cairn.db"`). `deny_unknown_fields` turns a typo'd key
+into a loud plugin-init error.
+
+## Push tokens (ADR-0037 §3)
+
+`register_push_token` POSTs `{"platform":"fcm|apns|webpush","token":…}`
+to the same origin the sync WS targets (derived from the URL), with the
+sync JWT as Bearer — the byte-identical pinned contract the Flutter
+(`nostos_database.dart`) and Node SDKs use. On iOS/Android the token comes
+from the Tauri mobile shell's APNs/FCM hooks. Desktop has no OS rail: an
+online session already receives everything over WS, and doorbells only
+target offline devices, so desktop apps usually do not register.
+`sign_out` deregisters session-registered tokens best-effort (pre-clear
+JWT) — a leaked registration would push the previous principal's data to
+the next user.
 
 **Argument names are camelCase, not the Rust snake_case.** `db_path` → `dbPath`,
 `payload_json` → `payloadJson`. This is not a guess: `#[tauri::command]` defaults
@@ -70,8 +117,8 @@ crosses the command boundary. If you pinned an earlier commit, that is the bug.
 
 ### Permissions
 
-The plugin's `default` permission set grants all five commands unconditionally.
-Add it to your capability file:
+The plugin's `default` permission set grants all ten commands unconditionally.
+Add it to your capability file (see `guest-js/example.capability.json`):
 
 ```json
 { "permissions": ["cairn:default"] }
@@ -85,12 +132,13 @@ runtime while everything compiles.
 
 ## Runtime shape
 
-The five `#[tauri::command]` handlers are thin wrappers over `impl NostosState`
+The ten `#[tauri::command]` handlers are thin wrappers over `impl NostosState`
 async methods. `NostosState` **also** owns its own `tokio::runtime::Runtime` — the
 home of the long-lived `subscribe()` run loop — so live replication continues
 independently of command-handler scheduling.
 
-Received rows are observed by polling `query`. `write` resolves when the write is
+Rows are observed reactively via `watch` (full snapshot per change tick,
+ADR-0024) or by polling `query`. `write` resolves when the write is
 durable in the local outbox, **not** when the server acks it; see
 [ADR-0027](../../docs/adr/0027-write-outcome-visibility-in-the-client-sdk.md).
 
@@ -100,18 +148,26 @@ durable in the local outbox, **not** when the server acks it; see
 make sdk-e2e tauri          # from the repo root
 ```
 
-**Read this before trusting that result.** The slice is `cargo test` — it proves
-the same `SyncClient<SqliteStorage>` integrates, and it calls `NostosState`
-methods directly. It does **not** invoke through Tauri's IPC/ACL layer, so it
-cannot catch a command missing from `generate_handler!` or `default.toml` (which
-is exactly how the `subscribe` gap survived). A WebDriver-driven Tauri app
-asserting on `invoke()` is the real coverage, and it is not written.
+**Read this before trusting that result.** The slice is `cargo test` (15 tests:
+offline round-trip, sign-out wipe, reactive watch, live spine E2E, six
+push-token contract pins, two config-fallback tests) — it proves the same
+`SyncClient<SqliteStorage>` integrates, and it calls `NostosState` methods
+directly. It does **not** invoke through Tauri's IPC/ACL layer, so it cannot
+catch a command missing from `generate_handler!` or `default.toml` (which is
+exactly how the `subscribe` gap survived). A WebDriver-driven Tauri app
+asserting on `invoke()` is the real coverage — Track A4's conformance fixture.
 
 ## Ceiling (ponytail)
 
-- **One table per `NostosState`**, hardcoded to `tasks` in `connect` — `subscribe`
-  errors if `table` mismatches. Multi-table is the
+- **One table per `NostosState`** — configurable via `plugins.cairn.table`
+  (floor `tasks`); `subscribe`/`write`/`watch` error if `table` mismatches.
+  Multi-table is the
   [provider-dashboard plan](../../docs/plans/nostos-provider-dashboard-multitable.md).
-- **No row-tick events.** Rows are polled via `query`; a Tauri `Channel` that
-  emits on apply is the upgrade point.
-- **No published crate.** A11.
+- **No published crate / npm package.** A11; `@nostos-sync/tauri` is consumed as a
+  path dependency.
+- **Push REST has no retry.** A failed POST/DELETE surfaces once (the server
+  prunes stale rows rail-side); a retry policy for transient APNs/FCM 5xx is
+  the Track B2 upstream item.
+- **Registered push tokens are in-memory only.** A process restart forgets
+  them (server-side rail pruning covers the stale case) — the
+  `registered_push_tokens` ponytail in `src/lib.rs`.

@@ -1,7 +1,7 @@
 "$schema" = "schemas/schema.json"
 
 [default]
-description = "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all eight commands unconditionally."
+description = "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally."
 permissions = [
     "allow-connect",
     "allow-subscribe",
@@ -11,4 +11,6 @@ permissions = [
     "allow-watch",
     "allow-set-token",
     "allow-sign-out",
+    "allow-register-push-token",
+    "allow-deregister-push-token",
 ]

@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the connect command without any pre-configured scope."
         },
         {
+          "description": "Enables the deregister_push_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-deregister-push-token",
+          "markdownDescription": "Enables the deregister_push_token command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the deregister_push_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-deregister-push-token",
+          "markdownDescription": "Denies the deregister_push_token command without any pre-configured scope."
+        },
+        {
           "description": "Enables the query command without any pre-configured scope.",
           "type": "string",
           "const": "allow-query",
@@ -329,6 +341,18 @@
           "type": "string",
           "const": "deny-query",
           "markdownDescription": "Denies the query command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the register_push_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-register-push-token",
+          "markdownDescription": "Enables the register_push_token command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the register_push_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-register-push-token",
+          "markdownDescription": "Denies the register_push_token command without any pre-configured scope."
         },
         {
           "description": "Enables the set_token command without any pre-configured scope.",
@@ -391,10 +415,10 @@
           "markdownDescription": "Denies the write command without any pre-configured scope."
         },
         {
-          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all eight commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`",
+          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`\n- `allow-register-push-token`\n- `allow-deregister-push-token`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all eight commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`"
+          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`\n- `allow-register-push-token`\n- `allow-deregister-push-token`"
         }
       ]
     }
