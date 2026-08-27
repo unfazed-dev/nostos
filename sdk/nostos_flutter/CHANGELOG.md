@@ -11,6 +11,15 @@ runs for real — see the README's Versioning and Releases sections.
 Since the 0.1.0 entry was written (40+ commits), the surface grew to a
 superset — highlights, newest first:
 
+- `NostosDatabase.local({sqliteDir, schema, …})` — the no-server entry point:
+  declared schema + on-device SQLite + durable outbox with the sync loop
+  paused before it can dial, so every feature works identically with
+  local-only storage. Upgrade to sync by reopening the SAME SQLite file with
+  a real `/sync` URL — zero migration. Server-only calls fail loudly:
+  `resumeSync` and the push-token REST verbs throw `StateError`, and
+  `waitForFirstSync` resolves immediately (there is no first sync).
+  `Nostos.withEngine` also grew optional `orSetTables`/`counterTables` so
+  fake-engine tests can pin the CRDT tier declarations.
 - `syncStream(name, params).subscribe()` — PowerSync-shaped parameterized
   streams on the live session (P5 slice 8); web engine throws
   `UnimplementedError` (native-only v1).

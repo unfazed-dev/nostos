@@ -35,14 +35,20 @@ class NostosDatabase {
     this.schema,
     this._httpBase,
     this._seedToken,
-    this._supabaseAuth,
-  ) {
+    this._supabaseAuth, {
+    this._localOnly = false,
+  }) {
     // ADR-0037 §3: every SDK deregisters its push tokens in its sign-out hook
     // — a leaked registration would push the previous principal's data to the
     // next user. Registered at construction (not inside registerPushToken) so
     // the hook exists even for a session that registers nothing.
     _signOutHooks.add(_deregisterPushTokensOnSignOut);
   }
+
+  /// Whether this database was opened via [NostosDatabase.local] — no server,
+  /// no sync, no push rail. Gates the fail-loudly guards on [resumeSync] and
+  /// the push-token REST calls, and resolves [waitForFirstSync] immediately.
+  final bool _localOnly;
 
   /// Test-only: wrap an injected [Nostos] (itself injectable via
   /// `Nostos.withEngine`) to exercise the typed mappers ([watchMapped] /
@@ -215,6 +221,89 @@ class NostosDatabase {
       return false;
     }
   }
+
+  /// The `/sync` URL a [local] database is constructed with. Never dialed:
+  /// [pauseSync] aborts the connect loop immediately after subscribe, and the
+  /// loop's disconnect-gate check precedes any network attempt (a loop spawned
+  /// after the gate is set returns a clean no-op session) — so this address
+  /// only matters if a dial somehow slips the race, in which case the loopback
+  /// discard port refuses instantly and nothing leaves the device.
+  static const String _localPlaceholderUrl = 'ws://127.0.0.1:9/sync';
+
+  /// Open a LOCAL-ONLY database: on-device SQLite + the durable outbox, with
+  /// no server and no sync loop. Every nostos feature works identically —
+  /// declared schema, typed reads, watches, writes (enqueued durably), CRDT
+  /// verbs — except anything that by definition needs a server (sync,
+  /// push-token REST), which fails loudly instead of silently no-opping.
+  ///
+  /// This is the free-tier parity entry point: a user without a database gets
+  /// the full app on local storage, and upgrading to sync is a reopen of the
+  /// SAME SQLite file with a real `/sync` URL ([connect]/[open]/[supabase]) —
+  /// zero data migration.
+  ///
+  /// [schema] is REQUIRED (there is no server to fetch one from) and must
+  /// declare at least one table; it is applied exactly as in [connect], so the
+  /// read-views exist before the first watch/query. [sqliteDir] +
+  /// [sqliteFilename] locate the durable store (same rule as [open]).
+  /// [orSetTables] / [counterTables] tag the CRDT tiers exactly as in
+  /// [connect].
+  ///
+  /// Semantics inherited from [pauseSync]: reads, writes, and `watch` pumps
+  /// keep working while the socket is gone. Guards specific to this mode:
+  /// [resumeSync] throws [StateError] (there is nothing to resume — reopen
+  /// with a URL instead), the push-token calls throw [StateError] (there is
+  /// no server to knock), and [waitForFirstSync] resolves immediately (there
+  /// is no first sync to await).
+  static Future<NostosDatabase> local({
+    required String sqliteDir,
+    String sqliteFilename = 'cairn.sqlite',
+    required NostosSchema schema,
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
+  }) async {
+    final nostos = await Nostos.connect(
+      url: _localPlaceholderUrl,
+      sqlitePath: '$sqliteDir/$sqliteFilename',
+      orSetTables: orSetTables,
+      counterTables: counterTables,
+    );
+    return _openLocal(nostos, schema);
+  }
+
+  /// Test seam for [local]: drives the exact local-open path around an
+  /// injected [Nostos] (e.g. `Nostos.withEngine(fake)`), so pure-Dart tests pin
+  /// the schema/apply/subscribe/pause ordering and the local-mode guards
+  /// without the native library. See `test/local_database_test.dart`.
+  @visibleForTesting
+  static Future<NostosDatabase> localForTest(Nostos nostos, NostosSchema schema) =>
+      _openLocal(nostos, schema);
+
+  /// Shared local-open path behind [local] and [localForTest]: apply the
+  /// declared schema, subscribe every declared table (so `watch` / `getAll` /
+  /// `write` membership holds exactly as after a synced open), then pause the
+  /// sync loop before it can dial.
+  static Future<NostosDatabase> _openLocal(Nostos nostos, NostosSchema schema) async {
+    if (schema.tables.isEmpty) {
+      throw ArgumentError.value(
+        schema.tables,
+        'schema.tables',
+        'NostosDatabase.local requires a declared schema with at least one '
+            'table — there is no server to fetch one from',
+      );
+    }
+    nostos.applySchema(schema.toClientTables());
+    final db = NostosDatabase._(nostos, schema, '', null, false, localOnly: true);
+    await db.subscribeTables([
+      for (final table in schema.tables) NostosTableSub(name: table.name),
+    ]);
+    // Abort ONLY the connect loop; the client, the store, and every watch
+    // pump stay alive (see pauseSync). The run task is aborted + reaped
+    // (NostosHandle.disconnect), and the loop's gate check precedes any dial,
+    // so the placeholder URL is never meaningfully contacted.
+    await db.pauseSync();
+    return db;
+  }
+
 
   /// Open a [Nostos] connection for a Supabase-authenticated app.
   ///
@@ -764,7 +853,20 @@ class NostosDatabase {
   /// the connect loop on the same client; the durable outbox drains on
   /// reconnect and live updates resume. Emits `connecting → connected …` on
   /// [connectionState]. Requires a prior [subscribe] (throws otherwise).
-  void resumeSync() => _nostos.resume();
+  ///
+  /// Throws [StateError] on a [NostosDatabase.local] database — there is no
+  /// sync to resume (the placeholder URL would flap forever). Reopen the same
+  /// SQLite file with a real `/sync` URL to start syncing.
+  void resumeSync() {
+    if (_localOnly) {
+      throw StateError(
+        'resumeSync() on a NostosDatabase.local database: there is no sync to '
+        'resume. To start syncing, reopen the same SQLite file via '
+        'NostosDatabase.connect/open/supabase with a real /sync URL.',
+      );
+    }
+    _nostos.resume();
+  }
 
   /// Legacy alias of [pauseSync]. Prefer `pauseSync()` (ADR-0032); this name is
   /// kept for back-compat with code written against the pre-contract surface.
@@ -810,6 +912,13 @@ class NostosDatabase {
   /// [NostosPushTokenException] when the server replies anything other than
   /// `204`. Registered tokens are deregistered automatically by [signOut].
   Future<void> registerPushToken(String platform, String token) async {
+    if (_localOnly) {
+      throw StateError(
+        'registerPushToken() on a NostosDatabase.local database: there is no '
+        'server to register with. Push requires a sync URL — reopen via '
+        'NostosDatabase.connect/open/supabase.',
+      );
+    }
     if (!_pushPlatforms.contains(platform)) {
       throw ArgumentError.value(
         platform,
@@ -836,6 +945,12 @@ class NostosDatabase {
   /// Throws [NostosPushTokenException] when the server replies anything other
   /// than `204`.
   Future<void> deregisterPushToken(String token) async {
+    if (_localOnly) {
+      throw StateError(
+        'deregisterPushToken() on a NostosDatabase.local database: there is no '
+        'server to deregister from.',
+      );
+    }
     await _pushTokensRest(
       'DELETE',
       '/push-tokens/${Uri.encodeComponent(token)}',
@@ -920,7 +1035,12 @@ class NostosDatabase {
   /// transition, not a precise "download completed / reconcile done" signal
   /// (which the engine does not yet expose — ADR-0024). It is the same proxy
   /// [SyncStatus.hasSynced] uses; upgrading one upgrades the other.
+  ///
+  /// On a [NostosDatabase.local] database this resolves immediately — there is
+  /// no server, so there is no first sync to wait for; the local row set is
+  /// already the whole truth.
   Future<void> waitForFirstSync() {
+    if (_localOnly) return Future<void>.value();
     if (_status?.value.lastSyncedAt != null) return Future<void>.value();
     _ensureStatusWired();
     final completer = Completer<void>();

@@ -30,8 +30,18 @@ class Nostos {
   /// Test-only constructor: inject a fake [NostosEngine] to exercise this
   /// class's wiring (subscribe/watch/write, table-mismatch errors, JSON
   /// decode fallback) without the native library. See `test/nostos_test.dart`.
+  /// [orSetTables] / [counterTables] mirror the [connect] declarations so a
+  /// fake-level test can prove the CRDT tiers reach `engine.subscribe`.
   @visibleForTesting
-  Nostos.withEngine(NostosEngine engine) : this._(engine);
+  Nostos.withEngine(
+    NostosEngine engine, {
+    Set<String>? orSetTables,
+    Set<String>? counterTables,
+  }) : this._(
+          engine,
+          orSetTables: orSetTables,
+          counterTables: counterTables,
+        );
 
   final NostosEngine _engine;
 

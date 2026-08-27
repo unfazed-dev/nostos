@@ -181,6 +181,10 @@ prunes them when the rail reports the token dead (410 / `UNREGISTERED`).
   → reads the live session from `Supabase.instance`; throws `StateError` if none.
 - `NostosDatabase.open({required NostosConfig config, NostosSchema? schema, required String sqliteDir})`
   → config/codegen-driven; what `example/` uses.
+- `NostosDatabase.local({required String sqliteDir, required NostosSchema schema, Set<String>? orSetTables, Set<String>? counterTables})`
+  → local-only: full read/write/watch/CRDT surface on on-device SQLite with the
+  sync loop paused before it can dial. No server, no token, no push rail
+  (those calls throw `StateError`). Reopen the same file with a real URL to sync.
 - Then: `subscribe` / `subscribeTables`, `watch(sql)` / `getAll(sql)`,
   `write(table:, op:, pk:, payload:)`, `collection<T>(…)`, `syncStatus`,
   `disconnect` / `resume` / `close`, `registerPushToken(platform, token)` /
@@ -290,10 +294,12 @@ before building a consumer app.
 - `example/integration_test/nostos_server_test.dart` — the real end-to-end
   proof: `flutter test integration_test/nostos_server_test.dart -d macos`
   from `example/`, against a genuine `cargo run -p nostos-server` subprocess.
-  Warm `target/` first (`cargo build -p nostos-server` from the repo root):
-  the test's setUpAll allows only 2 minutes for the server's `/healthz`,
-  which a cold compile of the server graph can exceed on slow storage
-  (observed 2026-08-27 — the failure is the window, not the server).
+  The harness compiles the server FIRST under its own generous budget
+  (default 15min; raise via `NOSTOS_IT_COMPILE_BUDGET_MIN` on slow storage —
+  a cold fingerprint walk + compile of the server graph can take tens of
+  minutes on an external SSD, observed 2026-08-27), then boots it and
+  requires `/healthz` within 2 minutes. That boot window now measures boot
+  only: failing it means a genuine server failure, not a missed compile.
   Requires disabling the macOS App Sandbox for **debug builds only**
   (`example/macos/Runner/DebugProfile.entitlements`) — a sandboxed app
   cannot spawn arbitrary subprocesses; `Release.entitlements` (what you'd
