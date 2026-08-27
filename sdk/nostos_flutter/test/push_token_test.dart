@@ -18,7 +18,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:nostos_flutter/nostos_flutter.dart';
-import 'package:nostos_flutter/src/engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Fake NostosEngine — every method is a harmless stub; only `signOut` is

@@ -22,6 +22,10 @@ library;
 // `Nostos` is the low-level handle; `NostosDatabase` (below) is the taught surface.
 export 'src/nostos.dart'
     show Nostos, NostosSupabase, NostosConnectionState, NostosTableSub;
+// The fake-able engine seam (engine.dart's library doc is written FOR test
+// doubles) — without this, barrel consumers can name Nostos.withEngine but
+// cannot implement the interface it takes.
+export 'src/engine.dart' show NostosEngine, ClientTableFfi;
 export 'src/nostos_config.dart' show NostosConfig;
 // `Table` and `Column` are intentionally NOT re-exported at the package
 // root because they shadow Flutter's `Table`/`Column` widgets (a hard
