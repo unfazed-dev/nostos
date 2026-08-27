@@ -780,6 +780,50 @@ async fn receipt_outcomes_mapped_with_detail() {
     );
 }
 
+// ------------------------------------------- per-tenant limits + Retry-After (B2)
+
+/// The limiter's 429 carries a Retry-After header derived from the
+/// tenant's deficit — rate 0/burst 2: two sends pass, the third 429s with
+/// Retry-After: 1 (the off-switch floor; a zero rate never recovers).
+#[tokio::test]
+async fn rate_limited_429_carries_retry_after() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon_tuned(
+        30,
+        rails_for(Platform::Apns, &mock),
+        0,
+        2,
+        CoalescerLimits::default(),
+        RetryPolicy::default(),
+    )
+    .await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    assert!(*calls.lock().unwrap() < 999); // rails wired
+    let _ = send_silent(&d, KEY_A, TOKEN_A, json!({})).await;
+    let _ = send_silent(&d, KEY_A, TOKEN_A, json!({})).await;
+
+    let resp = d
+        .client
+        .post(d.url("/v1/send"))
+        .bearer_auth(KEY_A)
+        .json(&json!({
+            "token": TOKEN_A,
+            "payload": {"silent": {"table": "docs", "lsn": "1"}},
+        }))
+        .send()
+        .await
+        .expect("third send");
+    assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let ra = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ra.chars().all(|c| c.is_ascii_digit()) && !ra.is_empty(),
+        "Retry-After must be whole seconds, got {ra:?}"
+    );
+}
 // -------------------------------------------------------------- receipts
 
 #[tokio::test]

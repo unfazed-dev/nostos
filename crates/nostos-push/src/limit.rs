@@ -16,11 +16,13 @@
 //! only from a matched key, never from the request), so it needs no
 //! eviction of its own.
 //!
-//! ponytail: the knobs are process-wide, not per-tenant — one daemon, one
-//! policy; the upgrade path (v1.1) is per-key limits in the registry store
-//! once key CRUD lands, plus a `Retry-After` header derived from the
-//! bucket deficit. Defaults: NOSTOS_PUSHD_SEND_RATE_PER_SEC=10,
-//! NOSTOS_PUSHD_SEND_BURST=50.
+//! Per-tenant policy (B2 of the arxa integration plan — the former v1.1
+//! ponytail, closed 2026-08-27): store-backed API keys carry optional
+//! per-tenant (rate_per_sec, burst) overrides resolved at bucket creation;
+//! tenants without an override (and env-only keys) use the daemon-wide
+//! NOSTOS_PUSHD_SEND_RATE_PER_SEC / NOSTOS_PUSHD_SEND_BURST defaults. 429s
+//! now carry `Retry-After`, derived from the bucket deficit — the ponytail
+//! second half.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -38,12 +40,28 @@ struct TokenBucket {
     last: Instant,
 }
 
+/// One tenant's resolved policy: defaults or the key's override.
+#[derive(Debug, Clone, Copy)]
+struct Policy {
+    rate_per_sec: f64,
+    burst: f64,
+}
+
 /// The per-tenant limiter shared by every /v1/send handler clone.
 #[derive(Debug)]
 pub struct SendRateLimiter {
-    rate_per_sec: f64,
-    burst: f64,
+    default_policy: Policy,
+    overrides: HashMap<String, Policy>,
     buckets: Mutex<HashMap<String, TokenBucket>>,
+}
+
+/// What a failed acquire tells the caller (the 429's Retry-After).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rejected {
+    /// Whole seconds until `n` tokens are available (at least 1 — HTTP
+    /// Retry-After is coarse; a sub-second deficit still asks the caller
+    /// to wait one tick).
+    pub retry_after_secs: u64,
 }
 
 impl SendRateLimiter {
@@ -52,47 +70,108 @@ impl SendRateLimiter {
     /// everything (an operator's explicit off-switch).
     #[must_use]
     pub fn new(rate_per_sec: u32, burst: u32) -> Self {
+        Self::with_overrides(rate_per_sec, burst, HashMap::new())
+    }
+
+    /// Build with per-tenant overrides (store-backed keys, B2). A tenant
+    /// missing from the map uses the defaults.
+    #[must_use]
+    pub fn with_overrides(
+        rate_per_sec: u32,
+        burst: u32,
+        overrides: HashMap<String, (u32, u32)>,
+    ) -> Self {
         Self {
-            rate_per_sec: f64::from(rate_per_sec),
-            burst: f64::from(burst),
+            default_policy: Policy {
+                rate_per_sec: f64::from(rate_per_sec),
+                burst: f64::from(burst),
+            },
+            overrides: overrides
+                .into_iter()
+                .map(|(t, (r, b))| {
+                    (
+                        t,
+                        Policy {
+                            rate_per_sec: f64::from(r),
+                            burst: f64::from(b),
+                        },
+                    )
+                })
+                .collect(),
             buckets: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The configured burst (bucket capacity) in whole tokens. The batch
-    /// endpoint caps item count at min(MAX_BATCH_ITEMS, burst): a batch
-    /// larger than the bucket can never acquire n tokens, so it is a 400
-    /// (permanent client error), not a 429 (transient). The f64 cast is
-    /// exact: burst enters as a u32 and is only ever clamped to itself.
+    /// The tenant's resolved policy (override or default).
+    fn policy(&self, tenant: &str) -> Policy {
+        self.overrides
+            .get(tenant)
+            .copied()
+            .unwrap_or(self.default_policy)
+    }
+
+    /// The tenant's effective burst (the batch cap uses the CALLER's
+    /// budget, not the daemon default).
     #[must_use]
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn burst(&self) -> u32 {
-        self.burst as u32
+    pub fn burst_for(&self, tenant: &str) -> u32 {
+        self.policy(tenant).burst as u32
+    }
+
+    /// The daemon-default burst in whole tokens — retained for the boot
+    /// log and tests; the batch cap uses `burst_for(tenant)` (the CALLER's
+    /// budget, per-key overrides included).
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn default_burst(&self) -> u32 {
+        self.default_policy.burst as u32
     }
 
     /// Consume `n` tokens for `tenant` atomically — ALL or NOTHING: a
     /// short bucket keeps every token, so a batch caller's 429 means ZERO
     /// items were admitted (plan v1.1 batch-send pin, contract 0.4.0).
-    pub fn try_acquire_n(&self, tenant: &str, n: u32) -> bool {
+    /// `Err` carries the Retry-After (deficit / refill rate, >= 1s).
+    pub fn try_acquire_n(&self, tenant: &str, n: u32) -> Result<(), Rejected> {
         if n == 0 {
-            return true;
+            return Ok(());
         }
+        let policy = self.policy(tenant);
         let now = Instant::now();
         let mut buckets = self.buckets.lock().expect("rate limiter lock");
         let bucket = buckets
             .entry(tenant.to_string())
             .or_insert_with(|| TokenBucket {
-                tokens: self.burst,
+                tokens: policy.burst,
                 last: now,
             });
         let elapsed = now.duration_since(bucket.last).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * self.rate_per_sec).min(self.burst);
+        bucket.tokens = (bucket.tokens + elapsed * policy.rate_per_sec).min(policy.burst);
         bucket.last = now;
         if bucket.tokens >= f64::from(n) {
             bucket.tokens -= f64::from(n);
-            true
+            Ok(())
         } else {
-            false
+            Err(Self::retry_after(policy, bucket.tokens, n))
+        }
+    }
+
+    /// Retry-After for a rejected acquire: whole seconds until `n` tokens
+    /// exist at the refill rate, floored at 1 (HTTP Retry-After is
+    /// coarse). A zero refill rate (the off-switch) never recovers —
+    /// answer 1s so callers do not back off forever on a config the
+    /// operator can flip back.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn retry_after(policy: Policy, tokens: f64, n: u32) -> Rejected {
+        if policy.rate_per_sec <= 0.0 {
+            return Rejected {
+                retry_after_secs: 1,
+            };
+        }
+        let deficit = f64::from(n) - tokens;
+        // >= 1.0 by the max, finite by construction (rate > 0 checked).
+        let secs = (deficit / policy.rate_per_sec).ceil().max(1.0);
+        Rejected {
+            retry_after_secs: secs as u64,
         }
     }
 
@@ -107,94 +186,89 @@ impl SendRateLimiter {
         if n == 0 {
             return;
         }
+        let policy = self.policy(tenant);
         let now = Instant::now();
         let mut buckets = self.buckets.lock().expect("rate limiter lock");
         let bucket = buckets
             .entry(tenant.to_string())
             .or_insert_with(|| TokenBucket {
-                tokens: self.burst,
+                tokens: policy.burst,
                 last: now,
             });
         let elapsed = now.duration_since(bucket.last).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * self.rate_per_sec).min(self.burst);
+        bucket.tokens = (bucket.tokens + elapsed * policy.rate_per_sec).min(policy.burst);
         bucket.last = now;
-        bucket.tokens = (bucket.tokens + f64::from(n)).min(self.burst);
+        bucket.tokens = (bucket.tokens + f64::from(n)).min(policy.burst);
     }
 
-    /// Consume one token for `tenant`, refilling first. `false` = the
-    /// caller must answer 429.
-    pub fn try_acquire(&self, tenant: &str) -> bool {
-        let now = Instant::now();
-        let mut buckets = self.buckets.lock().expect("rate limiter lock");
-        let bucket = buckets
-            .entry(tenant.to_string())
-            .or_insert_with(|| TokenBucket {
-                tokens: self.burst,
-                last: now,
-            });
-        let elapsed = now.duration_since(bucket.last).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * self.rate_per_sec).min(self.burst);
-        bucket.last = now;
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
+    /// Consume one token for `tenant`, refilling first. `Err` = the caller
+    /// must answer 429 WITH the carried Retry-After.
+    pub fn try_acquire(&self, tenant: &str) -> Result<(), Rejected> {
+        self.try_acquire_n(tenant, 1)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{SendRateLimiter, DEFAULT_BURST, DEFAULT_RATE_PER_SEC};
+    use std::collections::HashMap;
 
     #[test]
     fn burst_exhausts_then_refills() {
         let limiter = SendRateLimiter::new(1, 2);
-        assert!(limiter.try_acquire("a"));
-        assert!(limiter.try_acquire("a"), "burst of 2");
-        assert!(!limiter.try_acquire("a"), "exhausted -> 429");
+        assert!(limiter.try_acquire("a").is_ok());
+        assert!(limiter.try_acquire("a").is_ok(), "burst of 2");
+        assert!(limiter.try_acquire("a").is_err(), "exhausted -> 429");
         // Refill is elapsed-based; without sleeping we cannot observe a full
         // token, but the math is exercised by the clamp path below.
         let fresh = SendRateLimiter::new(1, 1);
-        assert!(fresh.try_acquire("b"));
-        assert!(!fresh.try_acquire("b"));
+        assert!(fresh.try_acquire("b").is_ok());
+        assert!(fresh.try_acquire("b").is_err());
     }
 
     #[test]
     fn acquire_n_is_all_or_nothing() {
         let limiter = SendRateLimiter::new(1, 5);
-        assert!(limiter.try_acquire_n("a", 3), "3 of 5 burst");
+        assert!(limiter.try_acquire_n("a", 3).is_ok(), "3 of 5 burst");
         assert!(
-            !limiter.try_acquire_n("a", 3),
+            limiter.try_acquire_n("a", 3).is_err(),
             "only 2 left — short bucket keeps them"
         );
         // The failed acquire_n did NOT drain: the 2 remaining tokens still buy 2 singles.
-        assert!(limiter.try_acquire("a"));
-        assert!(limiter.try_acquire("a"));
-        assert!(!limiter.try_acquire("a"));
-        assert!(limiter.try_acquire_n("b", 5), "other tenant unaffected");
+        assert!(limiter.try_acquire("a").is_ok());
+        assert!(limiter.try_acquire("a").is_ok());
+        assert!(limiter.try_acquire("a").is_err());
+        assert!(
+            limiter.try_acquire_n("b", 5).is_ok(),
+            "other tenant unaffected"
+        );
     }
 
     #[test]
     fn release_n_refunds_and_clamps_at_burst() {
         let limiter = SendRateLimiter::new(1, 5);
-        assert!(limiter.try_acquire_n("a", 5), "drain the bucket");
-        assert!(!limiter.try_acquire("a"), "empty");
+        assert!(limiter.try_acquire_n("a", 5).is_ok(), "drain the bucket");
+        assert!(limiter.try_acquire("a").is_err(), "empty");
         limiter.release_n("a", 5);
-        assert!(limiter.try_acquire_n("a", 5), "refunded in full");
+        assert!(limiter.try_acquire_n("a", 5).is_ok(), "refunded in full");
         // Clamp: refunding more than capacity cannot inflate the bucket.
         limiter.release_n("a", 99);
-        assert!(limiter.try_acquire_n("a", 5), "clamped at burst, not 104");
-        assert!(!limiter.try_acquire("a"), "no inflation beyond burst");
+        assert!(
+            limiter.try_acquire_n("a", 5).is_ok(),
+            "clamped at burst, not 104"
+        );
+        assert!(
+            limiter.try_acquire("a").is_err(),
+            "no inflation beyond burst"
+        );
     }
 
     #[test]
     fn tenants_are_isolated() {
         let limiter = SendRateLimiter::new(1, 1);
-        assert!(limiter.try_acquire("a"));
-        assert!(!limiter.try_acquire("a"));
-        assert!(limiter.try_acquire("b"), "other tenant unaffected");
+        assert!(limiter.try_acquire("a").is_ok());
+        assert!(limiter.try_acquire("a").is_err());
+        assert!(limiter.try_acquire("b").is_ok(), "other tenant unaffected");
     }
 
     #[test]
@@ -202,5 +276,44 @@ mod tests {
         assert_eq!(super::DEFAULT_RATE_PER_SEC, 10);
         assert_eq!(DEFAULT_BURST, 50);
         let _ = DEFAULT_RATE_PER_SEC;
+    }
+
+    // ------------------------------------------------ per-tenant overrides (B2)
+
+    #[test]
+    fn per_tenant_override_isolates_budgets() {
+        let mut overrides = HashMap::new();
+        overrides.insert("vip".to_string(), (1, 10));
+        let limiter = SendRateLimiter::with_overrides(1, 1, overrides);
+        // Default tenant: burst 1.
+        assert!(limiter.try_acquire("pleb").is_ok());
+        assert!(limiter.try_acquire("pleb").is_err());
+        // Overridden tenant: burst 10.
+        for _ in 0..10 {
+            assert!(limiter.try_acquire("vip").is_ok(), "override burst 10");
+        }
+        assert!(limiter.try_acquire("vip").is_err());
+        assert_eq!(limiter.burst_for("vip"), 10);
+        assert_eq!(limiter.burst_for("pleb"), 1);
+        assert_eq!(limiter.default_burst(), 1);
+    }
+
+    #[test]
+    fn retry_after_is_deficit_over_rate_floored_at_one() {
+        let limiter = SendRateLimiter::new(2, 3);
+        assert!(limiter.try_acquire_n("a", 3).is_ok(), "drain");
+        let r = limiter.try_acquire_n("a", 5).expect_err("rejected");
+        // Deficit 5 at rate 2/sec = 2.5s -> ceil 3s.
+        assert_eq!(r.retry_after_secs, 3, "deficit/rate ceil");
+        // A sub-second deficit still floors at 1s (HTTP coarseness).
+        let tight = SendRateLimiter::new(100, 1);
+        assert!(tight.try_acquire("a").is_ok());
+        let r2 = tight.try_acquire("a").expect_err("rejected");
+        assert_eq!(r2.retry_after_secs, 1, "floored at 1");
+        // The off-switch (rate 0) answers 1s, not infinity.
+        let off = SendRateLimiter::new(0, 1);
+        assert!(off.try_acquire("a").is_ok());
+        let r3 = off.try_acquire("a").expect_err("rejected");
+        assert_eq!(r3.retry_after_secs, 1, "zero rate answers 1s");
     }
 }

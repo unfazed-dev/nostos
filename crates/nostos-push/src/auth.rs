@@ -20,10 +20,15 @@
 //! A secret that itself ends in `:rail` is rejected at boot: the suffix
 //! is reserved, so such a secret is unexpressible without ambiguity.
 //!
-//! ponytail: CLI key CRUD + hashed-at-rest storage deferred to v1.1 (pin
-//! 0.2) — keys live in .env under the same threat model as the rail
-//! secrets; upgrade path is a keyed table in the registry store plus this
-//! same identify seam returning digests from disk instead of env.
+//! Key storage (B2 of the arxa integration plan, 2026-08-27 — the former
+//! v1.1 ponytail, closed): keys ALSO live hashed-at-rest in the registry
+//! store (api_keys table) via `nostos push key add/list/revoke`; the daemon
+//! merges them at boot, store winning on a tenant collision (the store is
+//! the managed surface; env stays the bootstrap). Entries carry optional
+//! per-tenant send-limit overrides (rate_per_sec/burst) consumed by the
+//! limiter — per-key limits, the limit.rs ponytail's other half. Raw
+//! secrets are NEVER stored: the CLI mints one, prints it once, and
+//! persists only its SHA-256.
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -56,14 +61,17 @@ pub enum KeyRole {
     Rail,
 }
 
-/// One env-seeded key: the tenant it authenticates, its role, plus the
-/// SHA-256 digest of its secret (raw secrets are never retained after
-/// boot).
+/// One key (env-seeded or store-backed): the tenant it authenticates, its
+/// role, the SHA-256 digest of its secret (raw secrets are never retained
+/// after boot / never stored at all), plus optional per-tenant send-limit
+/// overrides (B2 — store-backed keys only; env keys use daemon defaults).
 #[derive(Debug, Clone)]
 struct ApiKeyEntry {
     tenant: String,
     role: KeyRole,
     secret_digest: [u8; 32],
+    rate_per_sec: Option<u32>,
+    burst: Option<u32>,
 }
 
 /// The parsed, boot-validated key list (plan pin 0.2; role suffix per plan
@@ -135,6 +143,8 @@ impl ApiKeys {
                 tenant: tenant.to_string(),
                 role,
                 secret_digest: Sha256::digest(secret.as_bytes()).into(),
+                rate_per_sec: None,
+                burst: None,
             });
         }
         Ok(Self { entries })
@@ -151,12 +161,43 @@ impl ApiKeys {
         self.entries.is_empty()
     }
 
-    /// Resolve a presented bearer secret to its (tenant, role). Iterates
-    /// the key list comparing digests in constant time; the first match
-    /// wins. The presented string is matched against the SECRET only — the
-    /// `:rail` suffix is configuration, never part of what a client sends.
+    /// Merge store-backed keys (B2): the STORE WINS on a tenant collision —
+    /// it is the managed surface (`nostos push key add`), while env keys are
+    /// the bootstrap. Store entries carry their per-tenant limit overrides;
+    /// a malformed stored role is skipped loudly (warn) rather than
+    /// poisoning auth.
+    pub fn merge_stored(&mut self, stored: Vec<crate::store::StoredApiKey>) {
+        for k in stored {
+            let role = match k.role.as_str() {
+                "standard" => KeyRole::Standard,
+                "rail" => KeyRole::Rail,
+                other => {
+                    tracing::warn!(tenant = %k.tenant_id, role = other, "stored API key has unknown role — skipping");
+                    continue;
+                }
+            };
+            let entry = ApiKeyEntry {
+                tenant: k.tenant_id.clone(),
+                role,
+                secret_digest: k.secret_digest,
+                rate_per_sec: k.rate_per_sec,
+                burst: k.burst,
+            };
+            match self.entries.iter_mut().find(|e| e.tenant == k.tenant_id) {
+                Some(slot) => *slot = entry,
+                None => self.entries.push(entry),
+            }
+        }
+    }
+
+    /// Resolve a presented bearer secret to its key context: the tenant,
+    /// the role, and the per-tenant limit overrides (None = daemon
+    /// defaults). Iterates the key list comparing digests in constant
+    /// time; the first match wins. The presented string is matched against
+    /// the SECRET only — the `:rail` suffix is configuration, never part
+    /// of what a client sends.
     #[must_use]
-    pub fn identify(&self, presented: &str) -> Option<(&str, KeyRole)> {
+    pub fn identify(&self, presented: &str) -> Option<KeyContext<'_>> {
         let candidate = Sha256::digest(presented.as_bytes());
         self.entries
             .iter()
@@ -166,8 +207,35 @@ impl ApiKeys {
                     .ct_eq(candidate.as_slice())
                     .into()
             })
-            .map(|e| (e.tenant.as_str(), e.role))
+            .map(|e| KeyContext {
+                tenant: e.tenant.as_str(),
+                role: e.role,
+                rate_per_sec: e.rate_per_sec,
+                burst: e.burst,
+            })
     }
+
+    /// Per-tenant limit overrides for the limiter (tenant -> (rate,
+    /// burst)), from store-backed keys. Env-only keys contribute nothing.
+    #[must_use]
+    pub fn limit_overrides(&self) -> std::collections::HashMap<String, (u32, u32)> {
+        self.entries
+            .iter()
+            .filter_map(|e| match (e.rate_per_sec, e.burst) {
+                (Some(r), Some(b)) => Some((e.tenant.clone(), (r, b))),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// What a matched key establishes about the caller (identify result).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyContext<'a> {
+    pub tenant: &'a str,
+    pub role: KeyRole,
+    pub rate_per_sec: Option<u32>,
+    pub burst: Option<u32>,
 }
 
 /// Axum middleware (plan task 1.3): bearer gate + tenant/role stamping.
@@ -186,11 +254,12 @@ pub async fn auth_middleware(
     let Some(presented) = presented else {
         return unauthorized("missing bearer API key");
     };
-    let Some((tenant, role)) = state.api_keys.identify(presented) else {
+    let Some(key) = state.api_keys.identify(presented) else {
         return unauthorized("unknown API key");
     };
-    req.extensions_mut().insert(TenantId(tenant.to_string()));
-    req.extensions_mut().insert(role);
+    req.extensions_mut()
+        .insert(TenantId(key.tenant.to_string()));
+    req.extensions_mut().insert(key.role);
     next.run(req).await
 }
 
@@ -201,14 +270,38 @@ fn unauthorized(message: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiKeys, KeyRole};
+    use super::{ApiKeys, KeyContext, KeyRole};
+    use crate::store::StoredApiKey;
+    use sha2::{Digest, Sha256};
+
+    /// identify into the assertable triple (tenant, role).
+    fn triple(key: Option<KeyContext<'_>>) -> Option<(&str, KeyRole)> {
+        key.map(|k| (k.tenant, k.role))
+    }
+
+    /// One store-backed key row with defaults (no limits).
+    fn stored(tenant: &str, secret: &str, role: &str) -> StoredApiKey {
+        StoredApiKey {
+            tenant_id: tenant.to_string(),
+            secret_digest: Sha256::digest(secret.as_bytes()).into(),
+            role: role.to_string(),
+            rate_per_sec: None,
+            burst: None,
+        }
+    }
 
     #[test]
     fn parses_pairs_and_identifies() {
         let keys = ApiKeys::parse("acme:s3cr3t, globex:other").expect("valid list");
         assert_eq!(keys.len(), 2);
-        assert_eq!(keys.identify("s3cr3t"), Some(("acme", KeyRole::Standard)));
-        assert_eq!(keys.identify("other"), Some(("globex", KeyRole::Standard)));
+        assert_eq!(
+            triple(keys.identify("s3cr3t")),
+            Some(("acme", KeyRole::Standard))
+        );
+        assert_eq!(
+            triple(keys.identify("other")),
+            Some(("globex", KeyRole::Standard))
+        );
         assert_eq!(keys.identify("wrong"), None);
         assert_eq!(keys.identify(""), None);
     }
@@ -216,10 +309,61 @@ mod tests {
     #[test]
     fn rail_suffix_grants_rail_role() {
         let keys = ApiKeys::parse("acme:s3cr3t, hq:delegator-key:rail").expect("valid list");
-        assert_eq!(keys.identify("s3cr3t"), Some(("acme", KeyRole::Standard)));
+        assert_eq!(
+            triple(keys.identify("s3cr3t")),
+            Some(("acme", KeyRole::Standard))
+        );
         // The client presents the SECRET only — no suffix on the wire.
-        assert_eq!(keys.identify("delegator-key"), Some(("hq", KeyRole::Rail)));
+        assert_eq!(
+            triple(keys.identify("delegator-key")),
+            Some(("hq", KeyRole::Rail))
+        );
         assert_eq!(keys.identify("delegator-key:rail"), None);
+    }
+
+    // ---------------------------------------------- store-backed keys (B2)
+
+    #[test]
+    fn merge_stored_adds_and_overrides_env() {
+        let mut keys = ApiKeys::parse("acme:env-secret").expect("valid");
+        keys.merge_stored(vec![
+            stored("acme", "store-secret", "standard"),
+            stored("globex", "globex-secret", "rail"),
+        ]);
+        // The store WINS for acme (managed surface); globex is new.
+        assert_eq!(keys.identify("env-secret"), None, "env key replaced");
+        let k = keys.identify("store-secret").expect("store key identifies");
+        assert_eq!((k.tenant, k.role), ("acme", KeyRole::Standard));
+        let g = keys.identify("globex-secret").expect("new tenant");
+        assert_eq!((g.tenant, g.role), ("globex", KeyRole::Rail));
+    }
+
+    #[test]
+    fn merge_stored_carries_limit_overrides() {
+        let mut keys = ApiKeys::parse("acme:s3cr3t").expect("valid");
+        keys.merge_stored(vec![StoredApiKey {
+            tenant_id: "acme".into(),
+            secret_digest: Sha256::digest(b"s3cr3t").into(),
+            role: "standard".into(),
+            rate_per_sec: Some(20),
+            burst: Some(100),
+        }]);
+        let k = keys.identify("s3cr3t").expect("identifies");
+        assert_eq!((k.rate_per_sec, k.burst), (Some(20), Some(100)));
+        let overrides = keys.limit_overrides();
+        assert_eq!(overrides.get("acme"), Some(&(20, 100)));
+    }
+
+    #[test]
+    fn merge_stored_skips_unknown_role_loudly() {
+        let mut keys = ApiKeys::parse("acme:s3cr3t").expect("valid");
+        keys.merge_stored(vec![stored("bad", "x", "admin")]);
+        assert_eq!(
+            keys.identify("x"),
+            None,
+            "malformed row never authenticates"
+        );
+        assert_eq!(keys.identify("s3cr3t").map(|k| k.tenant), Some("acme"));
     }
 
     #[test]
@@ -249,7 +393,10 @@ mod tests {
     #[test]
     fn secret_may_contain_colons() {
         let keys = ApiKeys::parse("acme:aa:bb:cc").expect("colon-bearing secret");
-        assert_eq!(keys.identify("aa:bb:cc"), Some(("acme", KeyRole::Standard)));
+        assert_eq!(
+            triple(keys.identify("aa:bb:cc")),
+            Some(("acme", KeyRole::Standard))
+        );
     }
 
     #[test]

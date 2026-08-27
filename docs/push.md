@@ -146,7 +146,8 @@ Precedence: both set → delegate to the daemon; unset → embedded router (Reci
 
 ### Security behavior (2026-08-17 audit closeout, contract 0.3.0)
 
-- **Rate limits**: `POST /v1/send` is token-bucket limited per tenant — `NOSTOS_PUSHD_SEND_RATE_PER_SEC` (default 10) sustained, `NOSTOS_PUSHD_SEND_BURST` (default 50) instantaneous; exhaustion is `429`. The coalescer also caps open debounce windows (`NOSTOS_PUSHD_PENDING_KEYS_MAX`, default 10 000) — a send for a NEW key past the ceiling is `429`.
+- **Rate limits**: `POST /v1/send` is token-bucket limited per tenant — `NOSTOS_PUSHD_SEND_RATE_PER_SEC` (default 10) sustained, `NOSTOS_PUSHD_SEND_BURST` (default 50) instantaneous; exhaustion is `429` **with a `Retry-After` header** (deficit/refill, whole seconds). Per-tenant overrides: `nostos push key add --tenant X --rate-per-sec N --burst M` stores limits with the key (B2) — the daemon applies them at boot.
+- **API keys at rest**: `nostos push key add/list/revoke` manages keys hashed (SHA-256) in the registry DB; secrets are printed once at mint and never stored. The daemon merges stored keys OVER its env keys at boot (store wins per tenant). The coalescer also caps open debounce windows (`NOSTOS_PUSHD_PENDING_KEYS_MAX`, default 10 000) — a send for a NEW key past the ceiling is `429`.
 - **Field caps** → `400`: title 256, body 1024, token 2048 (same bound as the registry, so a registered Web Push subscription token always sends), collapse_key 256, category 128, serialized metadata ≤ 4096 bytes.
 - **Role gating** → `403`: rail mode (unregistered token + `platform`) requires a `:rail`-role key; registered-token sends accept either role.
 - **Ownership** → `409`: registering a token held by another tenant is refused (never silently reassigned) — the old owner DELETEs first. `DELETE /v1/tokens/{token}` is `204` for every not-yours case (no token-existence oracle).

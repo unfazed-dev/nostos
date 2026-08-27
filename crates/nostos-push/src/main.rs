@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 
 use nostos_push::auth::ApiKeys;
 use nostos_push::coalescer::{self, CoalescerLimits};
@@ -32,8 +32,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Fail fast (pin 0.2): a daemon with no usable key list must never
     // start serving an auth surface that can only answer 401.
-    let api_keys = ApiKeys::parse(&cfg.api_keys).context("invalid NOSTOS_PUSHD_API_KEYS")?;
-    info!(tenants = api_keys.len(), "API keys loaded");
+    let mut api_keys = ApiKeys::parse(&cfg.api_keys).context("invalid NOSTOS_PUSHD_API_KEYS")?;
+    info!(tenants = api_keys.len(), "API keys loaded from env");
 
     // Registry store (ADR-0038 §4): Postgres when NOSTOS_PUSHD_DATABASE_URL
     // is set (v1.1, feature `pg`), the SQLite default otherwise. Either
@@ -78,6 +78,26 @@ async fn main() -> anyhow::Result<()> {
         "nostos-pushd starting"
     );
 
+    // Store-backed keys (B2): hashed-at-rest rows in the registry (managed
+    // via `nostos push key add/list/revoke`), merged OVER the env bootstrap —
+    // the store wins on a tenant collision (managed surface). Per-tenant
+    // limit overrides ride the same rows into the send limiter.
+    match store.list_api_keys().await {
+        Ok(stored) if stored.is_empty() => {}
+        Ok(stored) => {
+            info!(keys = stored.len(), "API keys loaded from registry store");
+            api_keys.merge_stored(stored);
+        }
+        Err(e) => warn!(error = %e, "registry API-key load failed — continuing with env keys"),
+    }
+    let limiter_overrides = api_keys.limit_overrides();
+    if !limiter_overrides.is_empty() {
+        info!(
+            tenants = limiter_overrides.len(),
+            "per-tenant send limits active"
+        );
+    }
+
     coalescer::spawn_retention_sweeper(Arc::clone(&store), cfg.receipt_retention_secs);
     let limits = CoalescerLimits {
         pending_keys_max: cfg.pending_keys_max,
@@ -99,7 +119,11 @@ async fn main() -> anyhow::Result<()> {
         rails,
         api_keys,
         sender: coalescer.tx.clone(),
-        send_limiter: Arc::new(SendRateLimiter::new(cfg.send_rate_per_sec, cfg.send_burst)),
+        send_limiter: Arc::new(SendRateLimiter::with_overrides(
+            cfg.send_rate_per_sec,
+            cfg.send_burst,
+            limiter_overrides,
+        )),
         gate: coalescer.gate.clone(),
     };
 
