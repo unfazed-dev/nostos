@@ -1319,26 +1319,23 @@ where
     /// first poll (the internal reset only runs once the future is polled).
     pub fn reset_subscribed(&self) {
         self.subscribed.send_if_modified(|v| {
-            if !*v {
-                false
-            } else {
+            let changed = *v;
+            if changed {
                 *v = false;
-                true
             }
+            changed
         });
     }
-
 
     /// Mark the current session PROVEN. Private: only the receive loop may
     /// say the server accepted us (a post-acceptance frame arrived).
     fn mark_subscribed(&self) {
         self.subscribed.send_if_modified(|v| {
-            if *v {
-                false
-            } else {
+            let changed = !*v;
+            if changed {
                 *v = true;
-                true
             }
+            changed
         });
     }
 
@@ -1368,6 +1365,26 @@ where
             });
         }
         let url = self.connect_url();
+        // ADR-0041 spike: dial-by-scheme. iroh:// URLs run the same
+        // WebSocket handshake over an iroh bidirectional stream (see
+        // iroh_dial); everything below this point is transport-agnostic —
+        // the halves satisfy the same Sink/Stream bounds either way.
+        #[cfg(feature = "iroh")]
+        let ws = if url.starts_with("iroh://") {
+            crate::iroh_dial::SyncWs::Iroh(
+                crate::iroh_dial::dial_sync_ws(&url)
+                    .await
+                    .map_err(ClientError::Connect)?,
+            )
+        } else {
+            crate::iroh_dial::SyncWs::Tcp(
+                tokio_tungstenite::connect_async(&url)
+                    .await
+                    .map_err(|e| ClientError::Connect(e.to_string()))?
+                    .0,
+            )
+        };
+        #[cfg(not(feature = "iroh"))]
         let (ws, _resp) = tokio_tungstenite::connect_async(&url)
             .await
             .map_err(|e| ClientError::Connect(e.to_string()))?;

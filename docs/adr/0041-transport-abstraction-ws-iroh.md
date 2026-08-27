@@ -1,6 +1,6 @@
 # ADR-0041: Transport abstraction — `ws` | `iroh` as a first-class server/client option
 
-- **Status:** Proposed (upstream decision pending — the gate per the integration plan is explicit acceptance or rejection with recorded rationale).
+- **Status:** Proposed — D4 spike branch `spike/iroh-transport` exists and is green (see Spike Results below); upstream accept/reject still pending.
 - **Date:** 2026-08-27
 - **References:** `crates/nostos-infra/src/transport/` (the sync handler seam), `crates/nostos-server/src/main.rs` router assembly (`/sync` mount), `crates/nostos-client/src/client.rs` generic session loop, ADR-0025 (LSN/epoch resume — unchanged by this proposal), ADR-0032 (unified API — unchanged), iroh 0.91.2 docs (docs.rs, fetched 2026-08-27).
 
@@ -50,6 +50,17 @@ Serverless mesh or P2P sync between clients, gossip, client-relay-client topolog
 The adapter conformance suite (the A4 shape: connect → subscribe → offline write → online → serverAcked, plus signOut wipe and no-engine-type-leak) passes **identically over both transports** — same fixture, same marks, URL swapped `ws://` ↔ `iroh://`. And the field leg: a phone on cellular (no shared LAN) pairs via QR and completes an offline→online resume through the relay path.
 
 ---
+
+### Spike Results (2026-08-27, branch `spike/iroh-transport`)
+
+The D4 spike is implemented and green. What shipped:
+
+- **Version pin:** iroh **1.1.0** + iroh-tickets 1.0.0 (the proposal's 0.91.2 citations predate the 1.x stable line; `EndpointAddr` replaced `NodeAddr`, and tickets moved to `iroh-tickets`). MSRV 1.91 — under the workspace's 1.95. Everything lives behind OFF-by-default cargo features: `nostos-infra/iroh` (accept-loop bridge + ticket URL), `nostos-client/iroh` (dial-by-scheme), `nostos-server/iroh` (`--transport`/`NOSTOS_TRANSPORT=ws|iroh`). Default builds gain zero dependency weight.
+- **Client:** `run_once` now selects transport by URL scheme. `iroh://<node><path>?ticket=<urlencoded EndpointTicket>` dials the endpoint, opens a bidirectional stream, and runs the STANDARD WebSocket client handshake over it — the session loop is untouched (its halves always satisfied the same `Sink`/`Stream` bounds; a small `SyncWs` enum unifies the two stream types).
+- **Server:** under `NOSTOS_TRANSPORT=iroh` the HTTP surface binds loopback-only and an iroh accept loop bridges every accepted bidirectional stream to it as raw bytes. The boot log prints the QR-native `dial_url=iroh://…/sync?ticket=…`. ponytail (recorded in code): the BRIDGE is spike behavior — one loopback TCP hop per connection, the arxa-proven pattern — the native end-state if accepted is a `run_session` refactor onto a small frame-io trait so iroh streams drive the session core directly.
+- **Conformance (the test that matters):** `crates/nostos-client/tests/iroh_ws_conformance.rs` runs the SAME fixture and assertions twice — `ws://` and `iroh://` — both green: seeded snapshot rows arrive, checkpoint advances, second session reconnects idempotently. Run: `cargo test -p nostos-client --features iroh --test iroh_ws_conformance`.
+- **Operator check:** `cargo run -p nostos-client --features iroh --example iroh_dial_check -- '<printed iroh:// url>'` dials any deployed server's URL from any machine and reports frames/checkpoint.
+- **Not yet done (accept-gated):** the field leg (phone on cellular, relay path); Flutter/tauri SDK wiring (the FRB bridge would need the feature enabled); the native session-core refactor; self-hosted relay guidance. Default relay usage routes through n0's fleet — a privacy consideration to document before any accepted default, not silence.
 
 ### Verification notes (2026-08-27, this proposal's evidence pass)
 

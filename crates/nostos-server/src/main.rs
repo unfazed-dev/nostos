@@ -272,6 +272,14 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_TENANT_COLUMN", default_value = "org_id")]
     tenant_column: String,
 
+    /// Sync transport (ADR-0041 spike): "ws" (default — bind NOSTOS_BIND and
+    /// serve /sync over HTTP/WS exactly as today) or "iroh" (bind the HTTP
+    /// surface on loopback only and serve sync sessions over an iroh
+    /// endpoint, printing the QR-native iroh:// dial URL). Requires a build
+    /// with `--features iroh`.
+    #[arg(long, env = "NOSTOS_TRANSPORT", default_value = "ws")]
+    transport: String,
+
     /// Allowed CORS origins for browser clients, comma-separated (e.g.
     /// "https://app.example.com,http://localhost:3000"). Empty (default) =
     /// permissive (any origin) for local dev; set explicitly for production.
@@ -1017,15 +1025,73 @@ async fn main() -> anyhow::Result<()> {
                 .layer(TraceLayer::new_for_http()),
         );
 
-    let addr: SocketAddr = cfg
-        .bind
-        .parse()
-        .with_context(|| format!("invalid bind address: {}", cfg.bind))?;
-    info!(%addr, ws_path = %cfg.ws_path, "Nostos sync server listening");
+    // ---- transport selection (ADR-0041 spike) ----
+    // iroh: the HTTP surface (healthz/metrics/schema/push REST + the /sync
+    // upgrade route) binds LOOPBACK-ONLY and an iroh accept loop bridges
+    // every accepted bidirectional stream to it — the sync URL clients dial
+    // is the printed iroh:// one. ponytail: loopback-only HTTP is spike
+    // behavior; the native end-state splits them (sync on iroh, HTTP on
+    // NOSTOS_BIND) or proxies admin traffic through the endpoint too.
+    #[cfg(feature = "iroh")]
+    let iroh_listener: Option<tokio::net::TcpListener> = if cfg.transport == "iroh" {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind loopback listener for the iroh bridge")?;
+        let bridge_addr = listener
+            .local_addr()
+            .context("loopback listener has no local addr")?;
+        let endpoint = nostos_infra::iroh_sync::bind_sync_endpoint()
+            .await
+            .context("iroh sync endpoint bind failed")?;
+        let url = endpoint.url(&cfg.ws_path);
+        info!(
+            transport = "iroh",
+            http_loopback = %bridge_addr,
+            dial_url = %url,
+            "Nostos sync server listening — clients dial the iroh:// URL; \
+             HTTP surface is loopback-only (spike behavior)"
+        );
+        let ep = endpoint.clone();
+        tokio::spawn(async move {
+            ep.serve_bridge(bridge_addr).await;
+        });
+        Some(listener)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "iroh"))]
+    if cfg.transport == "iroh" {
+        anyhow::bail!(
+            "NOSTOS_TRANSPORT=iroh but this server was built without the iroh feature \
+             (cargo build -p nostos-server --features iroh)"
+        );
+    }
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("failed to bind {addr}"))?;
+    let (_addr, listener) = if cfg.transport == "iroh" {
+        #[cfg(feature = "iroh")]
+        {
+            let listener =
+                iroh_listener.expect("iroh transport selected but the endpoint block did not run");
+            (
+                listener.local_addr().expect("listener has a local addr"),
+                listener,
+            )
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            unreachable!("bailed above when the feature is off")
+        }
+    } else {
+        let addr: SocketAddr = cfg
+            .bind
+            .parse()
+            .with_context(|| format!("invalid bind address: {}", cfg.bind))?;
+        info!(%addr, ws_path = %cfg.ws_path, "Nostos sync server listening");
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("failed to bind {addr}"))?;
+        (addr, listener)
+    };
 
     // ---- sync-rules hot reload (ADR-0031 D3, Task 14) ----
     // No engine restart: the watcher polls the same file loaded at boot and,
