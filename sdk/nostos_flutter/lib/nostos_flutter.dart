@@ -43,6 +43,7 @@ export 'src/nostos_database.dart'
 export 'src/attachments.dart'
     show
         Attachments,
+        AttachmentDatabase,
         AttachmentStorageAdapter,
         SupabaseStorageAdapter,
         BlobStore,
