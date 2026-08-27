@@ -242,7 +242,10 @@ impl SnapshotSource for PgSnapshotter {
             Ok(r) => r,
             Err(e) => {
                 self.drop_client().await;
-                return Err(SnapshotError::Backend(format!("query: {e}")));
+                return Err(SnapshotError::Backend(format!(
+                    "query: {}",
+                    display_chain(&e)
+                )));
             }
         };
 
@@ -306,7 +309,10 @@ impl SnapshotSource for PgSnapshotter {
             Ok(r) => r,
             Err(e) => {
                 self.drop_client().await;
-                return Err(SnapshotError::Backend(format!("query: {e}")));
+                return Err(SnapshotError::Backend(format!(
+                    "query: {}",
+                    display_chain(&e)
+                )));
             }
         };
 
@@ -341,6 +347,29 @@ fn scope_if_column_present<'a>(
     tenant: Option<TenantScope<'a>>,
 ) -> Option<TenantScope<'a>> {
     tenant.filter(|s| cols.iter().any(|(n, _)| n == s.column))
+}
+
+/// Render an error WITH its full source chain. `tokio_postgres::Error`'s
+/// Display is just `db error` — the SQLSTATE, the driver message, and the
+/// server's own text (the part that names the missing column) all live in
+/// `source()` levels, which `format!("{e}")` silently drops. The 2026-08-27
+/// products starvation cost an hour precisely because the transport logged
+/// `snapshot backend: query: db error` and the 42703 detail never reached
+/// the operator. Every snapshot query error renders through this instead.
+fn display_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(src) = cur {
+        // Skip levels that add nothing (some wrappers re-Display their
+        // source verbatim) so the chain reads as new information only.
+        let text = src.to_string();
+        if !text.is_empty() && !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cur = src.source();
+    }
+    out
 }
 
 /// Build one Insert event per row. Each gets a UNIQUE LSN strictly above
@@ -597,6 +626,80 @@ mod tests {
     #[test]
     fn tenant_scope_none_passthrough() {
         assert!(scope_if_column_present(&[("user_id".to_string(), 25)], None).is_none());
+    }
+
+    /// The incident shape: a top-level error whose Display is generic
+    /// ("db error") with the actionable text one source level down.
+    #[test]
+    fn display_chain_reaches_every_source_level() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Leaf(&'static str);
+        impl fmt::Display for Leaf {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Middle {
+            top: &'static str,
+            src: Leaf,
+        }
+        impl fmt::Display for Middle {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.top)
+            }
+        }
+        impl Error for Middle {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.src)
+            }
+        }
+
+        let e = Middle {
+            top: "db error",
+            src: Leaf("ERROR: column \"user_id\" does not exist"),
+        };
+        assert_eq!(
+            display_chain(&e),
+            "db error: ERROR: column \"user_id\" does not exist"
+        );
+    }
+
+    #[test]
+    fn display_chain_skips_duplicate_levels() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Leaf(&'static str);
+        impl fmt::Display for Leaf {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Wrapper;
+        impl fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "same text")
+            }
+        }
+        impl Error for Wrapper {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&Leaf("same text"))
+            }
+        }
+
+        // A wrapper that re-Displays its source verbatim must not render
+        // the duplicate level twice.
+        assert_eq!(display_chain(&Wrapper), "same text");
     }
 
     #[test]
