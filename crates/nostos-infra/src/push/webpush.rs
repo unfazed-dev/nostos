@@ -20,6 +20,14 @@
 //!   guard on the one URL nostos does not construct itself (M3).
 //! - 404/410 → [`RailOutcome::Unregistered`] (prune trigger); 429/5xx →
 //!   retryable.
+//!
+//! KNOWN BROWSER LIMITS (documented in docs/push.md § "Known Web Push
+//! limitations", deliberate non-goals): a killed tab renders the visible
+//! notification but a service worker cannot hold the WS sync session, so
+//! data reconciles on next foreground (silent doorbells to killed tabs are
+//! effectively lost); and nostos never learns of `pushsubscriptionchange`
+//! rotations — the stale subscription 404/410-prunes and the APP must
+//! re-register the fresh subscription JSON (registerPushToken("webpush", …)).
 
 use serde_json::json;
 use tracing::warn;

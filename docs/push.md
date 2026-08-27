@@ -154,6 +154,35 @@ Precedence: both set → delegate to the daemon; unset → embedded router (Reci
 
 ---
 
+## Known Web Push limitations (deliberate, documented — not fixed)
+
+Nostos's web rail is a **doorbell, not a data channel** on every platform, but
+Web Push has two browser-specific gaps operators must design around. Both are
+known, deliberate non-goals for the current version (tracked as arxa
+integration plan B2: "document instead of fixing"):
+
+1. **Killed tab shows the notification but cannot wake data.** With the tab
+   closed (or the browser background-suspended), the service worker fires and
+   the OS renders the visible notification — but a service worker cannot hold
+   the WebSocket sync session open, so no row data arrives until the user
+   next foregrounds the app. The durable LSN checkpoint then reconciles
+   everything: push is the hint, sync is the transport (ADR-0037 §1). A
+   silent (invisible) doorbell to a killed tab is effectively lost — prefer
+   visible payloads for web targets that matter.
+
+2. **No automatic re-subscribe on `pushsubscriptionchange`.** Browsers
+   periodically rotate push subscriptions (endpoint + keys). Nostos never
+   learns of the rotation: the stale subscription eventually answers 404/410,
+   the rail maps that to `Unregistered`, and the registry row is pruned —
+   that device silently stops receiving doorbells until the app registers a
+   fresh token. The app layer owns the fix: subscribe to the browser's
+   `pushsubscriptionchange` event and re-POST the new subscription JSON to
+   `/push-tokens` (embedded) or `/v1/tokens` (daemon) with the same
+   platform `"webpush"`. The SDKs' `registerPushToken("webpush", …)` is
+   the single call for that re-registration.
+
+---
+
 ## References
 
 - ADR-0037 — sync-aware push notifications (embedded router, doorbell semantics, honest limits)
