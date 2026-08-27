@@ -599,6 +599,81 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// The result of a boot-time [`audit_tenant_column`] pass: how each requested
+/// table relates to the configured tenant column.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantColumnAudit {
+    /// Tables that EXIST but have NO column named like the tenant column —
+    /// the "deliberately global table" shape (a shared catalog beside
+    /// tenant-scoped tables). Snapshots skip the tenant clause for these
+    /// (see [`scope_if_column_present`]); the LIVE path's predicate still
+    /// references the column and matches nothing under tenant deploys —
+    /// an operator must KNOW a table lands here.
+    pub columnless: Vec<String>,
+    /// Tables that do not exist AT ALL in the `public` schema. These fail
+    /// loudly on first snapshot anyway; listed so the operator sees the
+    /// ruleset naming tables the database never had (usually a typo).
+    pub missing: Vec<String>,
+}
+
+/// Boot-time operator guard for tenant-column deploys: classify the given
+/// tables by whether they actually carry the configured tenant column.
+/// Motivated by the 2026-08-27 incident — a deploy with
+/// `NOSTOS_TENANT_COLUMN` set (especially via the clap default `org_id`)
+/// against tables without that column produced only swallowed snapshot
+/// errors and starving shops; one boot log line naming the table + column
+/// turns that incident into a one-read diagnosis.
+///
+/// Reads `information_schema` only (no table locks, no per-table queries —
+/// two catalog scans regardless of table count). Failures are the CALLER's
+/// to tolerate: a guard must not be able to block boot, so callers log the
+/// error and continue.
+///
+/// # Errors
+/// `tokio_postgres` connection/query errors verbatim.
+pub async fn audit_tenant_column(
+    pg_url: &str,
+    column: &str,
+    tables: &[String],
+) -> Result<TenantColumnAudit, tokio_postgres::Error> {
+    let (client, conn) = tokio_postgres::connect(pg_url, tokio_postgres::NoTls).await?;
+    let conn_task = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let existing: Vec<String> = client
+        .query(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect();
+    let with_column: Vec<String> = client
+        .query(
+            "SELECT table_name FROM information_schema.columns \
+             WHERE table_schema = 'public' AND column_name = $1",
+            &[&column],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect();
+    conn_task.abort();
+
+    let mut audit = TenantColumnAudit::default();
+    for table in tables {
+        if !existing.contains(table) {
+            audit.missing.push(table.clone());
+        } else if !with_column.contains(table) {
+            audit.columnless.push(table.clone());
+        }
+    }
+    Ok(audit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
