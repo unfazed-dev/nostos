@@ -199,7 +199,18 @@ impl SnapshotSource for PgSnapshotter {
         let select_list = select_list_text(&cols);
         // Tenant scoping (the trait's enforced contract): when the
         // connection's principal carries a TenantScope, restrict the
-        // snapshot to that tenant. The column name is operator config
+        // snapshot to that tenant — but ONLY when the table actually HAS
+        // the tenant column (`scope_if_column_present` below): a tenant-
+        // column deploy with a deliberately global table (no tenant
+        // column — e.g. a shared catalog beside tenant-scoped tables, the
+        // shape nostos_rules.toml hand-mode documents) must not get the
+        // clause. `WHERE "<col>"::text = $1` against a columnless table
+        // is a guaranteed SQL 42703, which silently downgraded every
+        // subscribe of that table to live-fan-out-only (observed
+        // 2026-08-27: the atlet `products` catalog starved the shop).
+        // Skipping leaks nothing: a table without the column has no
+        // tenant data to scope, and table-level access stays the rules
+        // engine's decision. The column name is operator config
         // (trusted) and is identifier-quoted; the value is BOUND as $1,
         // never interpolated — mirrors the read path's server-injected
         // tenant clause (ADR-0011). None = anonymous / single-tenant
@@ -207,6 +218,7 @@ impl SnapshotSource for PgSnapshotter {
         // Bind target declared at function scope so the parameter
         // reference outlives the query call (the match arms' copies of the
         // Copy scope would not).
+        let tenant = scope_if_column_present(&cols, tenant);
         let tenant_value: Option<&str> = tenant.map(|s| s.value);
         let sql = match tenant {
             // `::text` on the COLUMN side: the bound value is always a
@@ -267,9 +279,17 @@ impl SnapshotSource for PgSnapshotter {
         //    error here, never a widened snapshot).
         let (mut where_sql, mut binds) = compile_stream_where(predicate)?;
 
+        let client = self.client().await?;
+        let cols = self.prepare_columns(&client, &quoted_table).await?;
+        let select_list = select_list_text(&cols);
+
         // 3. Tenant clause LAST, bound, with the same `::text` column cast as
         //    `snapshot` (JWT claims are strings; tenant columns may be
         //    uuid/int). `AND`ed outside the template's own parentheses.
+        //    Same column-presence gate as `snapshot`: a deliberately global
+        //    table (no tenant column) must not get the clause — it is a
+        //    guaranteed SQL 42703 otherwise (see scope_if_column_present).
+        let tenant = scope_if_column_present(&cols, tenant);
         let tenant_value: Option<String> = tenant.map(|s| s.value.to_string());
         if let (Some(scope), Some(value)) = (tenant, tenant_value.as_ref()) {
             binds.push(ColumnValue::Text(value.clone()));
@@ -279,10 +299,6 @@ impl SnapshotSource for PgSnapshotter {
                 binds.len()
             );
         }
-
-        let client = self.client().await?;
-        let cols = self.prepare_columns(&client, &quoted_table).await?;
-        let select_list = select_list_text(&cols);
         let sql = format!("SELECT {select_list} FROM {quoted_table} WHERE {where_sql}");
         let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             binds.iter().map(column_value_as_sql).collect();
@@ -306,6 +322,25 @@ fn select_list_text(cols: &[(String, i32)]) -> String {
         .map(|(n, _)| format!("{}::text", quote_ident(n)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The tenant scope to ACTUALLY apply: `Some` only when the table's own
+/// column list contains the tenant column. A tenant-column deploy with a
+/// deliberately global table (no tenant column — a shared catalog beside
+/// tenant-scoped tables, the shape `nostos_rules.toml` hand-mode documents)
+/// must not get the clause: `WHERE "<col>"::text = $1` against a columnless
+/// table is a guaranteed SQL 42703, which the transport logs as a swallowed
+/// `snapshot backend: query: db error` and downgrades to live-fan-out-only
+/// (observed 2026-08-27: the atlet `products` catalog starved the shop, and
+/// with a default-`org_id` column EVERY table 42703'd — no snapshots, no
+/// live matches, no doorbells). Skipping leaks nothing: a table without the
+/// column has no tenant data to scope, and table-level access remains the
+/// rules engine's decision. `None` passes through unchanged.
+fn scope_if_column_present<'a>(
+    cols: &[(String, i32)],
+    tenant: Option<TenantScope<'a>>,
+) -> Option<TenantScope<'a>> {
+    tenant.filter(|s| cols.iter().any(|(n, _)| n == s.column))
 }
 
 /// Build one Insert event per row. Each gets a UNIQUE LSN strictly above
@@ -538,6 +573,31 @@ fn quote_ident(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scope_for(column: &'static str) -> TenantScope<'static> {
+        TenantScope::new(column, "t1")
+    }
+
+    #[test]
+    fn tenant_scope_applies_when_column_present() {
+        let cols = vec![("id".to_string(), 25), ("user_id".to_string(), 25)];
+        let gated = scope_if_column_present(&cols, Some(scope_for("user_id")));
+        assert!(gated.is_some());
+        assert_eq!(gated.map(|s| s.column), Some("user_id"));
+    }
+
+    #[test]
+    fn tenant_scope_skips_deliberately_global_table() {
+        // The products-catalog shape: table has NO tenant column — the
+        // clause must be dropped, not 42703 the whole snapshot.
+        let cols = vec![("id".to_string(), 25), ("name".to_string(), 25)];
+        assert!(scope_if_column_present(&cols, Some(scope_for("user_id"))).is_none());
+    }
+
+    #[test]
+    fn tenant_scope_none_passthrough() {
+        assert!(scope_if_column_present(&[("user_id".to_string(), 25)], None).is_none());
+    }
 
     #[test]
     fn validate_ident_accepts_bare_lowercase() {

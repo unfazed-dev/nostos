@@ -223,6 +223,18 @@ NOSTOS_PG_PUBLICATION="$PUB" \
 NOSTOS_PG_SLOT="$SLOT" \
 NOSTOS_SYNC_AUTH=supabase-jwt \
 NOSTOS_SUPABASE_JWT_SECRET="$NOSTOS_SUPABASE_JWT_SECRET" \
+# NOSTOS_TENANT_COLUMN=user_id is REQUIRED here (root-caused 2026-08-27):
+# the push doorbell's fully-offline fallback (fanout.rs — the killed-app
+# case, which pauseSync models) targets tenants by reading the ROW's tenant
+# column; with the column unset (empty opt-out) that path has no tenant to
+# read and enqueues NOTHING — leg 1 dies with cairn_push_sent_total 0. And
+# the column must never be merely UNSET: the clap default is "org_id", a
+# column no smoke table has — every snapshot AND live predicate 42703s /
+# never matches (no frames, no doorbells). The original leg-2 failure
+# (products starving) was this same clause 42703ing the global catalog's
+# snapshot — fixed SERVER-side 2026-08-27: PgSnapshotter now skips the
+# tenant clause for tables lacking the column (deliberately-global
+# tables), so =user_id and the products catalog coexist.
 NOSTOS_TENANT_COLUMN=user_id \
 NOSTOS_WRITE_TABLES="$TABLE,cart_items,orders" \
 NOSTOS_PUSH_TABLES="$TABLE;orders:action:order_status:Atlet order update:Your order {id} is {status}" \
