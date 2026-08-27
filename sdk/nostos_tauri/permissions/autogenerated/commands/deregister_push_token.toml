@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-deregister-push-token"
+description = "Enables the deregister_push_token command without any pre-configured scope."
+commands.allow = ["deregister_push_token"]
+
+[[permission]]
+identifier = "deny-deregister-push-token"
+description = "Denies the deregister_push_token command without any pre-configured scope."
+commands.deny = ["deregister_push_token"]

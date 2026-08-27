@@ -68,6 +68,68 @@ pub enum PushCommand {
     Init(InitPushArgs),
     /// Dry-run every configured rail: shape checks + optional reachability.
     Check(CheckPushArgs),
+    /// Manage hashed-at-rest daemon API keys in the nostos-pushd registry
+    /// (B2 of the arxa integration plan). The daemon merges these over its
+    /// env keys at boot — the store wins on a tenant collision.
+    Key(KeyArgs),
+}
+
+/// `nostos push key …` wrapper (the nested subcommand pattern).
+#[derive(Debug, Args)]
+pub struct KeyArgs {
+    #[command(subcommand)]
+    pub command: KeyCommand,
+}
+
+/// `nostos push key <add|list|revoke>`.
+#[derive(Debug, Subcommand)]
+pub enum KeyCommand {
+    /// Mint a new secret for a tenant, store its SHA-256, print the secret
+    /// ONCE. Per-tenant send limits are optional (--rate-per-sec/--burst).
+    Add(KeyAddArgs),
+    /// List stored keys: tenant, role, limits — never the digest alone,
+    /// never a secret (there is none on disk to show).
+    List(KeyListArgs),
+    /// Delete a tenant's key (the tenant immediately falls back to its env
+    /// key at next daemon boot, if any).
+    Revoke(KeyRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KeyAddArgs {
+    /// The registry database (the daemon's NOSTOS_PUSHD_DB).
+    #[arg(long, default_value = "./cairn-pushd.db")]
+    pub db: PathBuf,
+    /// Tenant this key authenticates (one key per tenant).
+    #[arg(long)]
+    pub tenant: String,
+    /// Grant the rail role (rail-mode dispatch for RemoteNotifier
+    /// delegation); default is the standard registry-path role.
+    #[arg(long)]
+    pub rail: bool,
+    /// Per-tenant send-rate override (per second). Omit for daemon default.
+    #[arg(long, requires = "burst")]
+    pub rate_per_sec: Option<u32>,
+    /// Per-tenant burst override. Omit for daemon default.
+    #[arg(long, requires = "rate_per_sec")]
+    pub burst: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+pub struct KeyListArgs {
+    /// The registry database.
+    #[arg(long, default_value = "./cairn-pushd.db")]
+    pub db: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct KeyRevokeArgs {
+    /// The registry database.
+    #[arg(long, default_value = "./cairn-pushd.db")]
+    pub db: PathBuf,
+    /// The tenant whose key is revoked.
+    #[arg(long)]
+    pub tenant: String,
 }
 
 /// Four bools is what the surface IS — one rail-selector flag per rail plus
@@ -128,6 +190,7 @@ pub async fn run(args: PushArgs, cwd: &Path) -> Result<()> {
     match args.command {
         PushCommand::Init(init_args) => run_init(&init_args, cwd),
         PushCommand::Check(check_args) => run_check(check_args, cwd).await,
+        PushCommand::Key(key) => run_key(key.command).await,
     }
 }
 
@@ -135,6 +198,88 @@ pub async fn run(args: PushArgs, cwd: &Path) -> Result<()> {
 // init
 // ---------------------------------------------------------------------------
 
+/// `nostos push key …` — CRUD over the daemon registry's hashed-at-rest key
+/// store (B2). The CLI opens the SAME SQLite file nostos-pushd serves from
+/// (NOSTOS_PUSHD_DB); SQLite's file locking makes a write while the daemon
+/// runs safe (WAL). Key rotation story: add a new secret for the tenant
+/// (the upsert replaces the digest), restart the daemon (keys load at
+/// boot), distribute the new secret, done.
+async fn run_key(cmd: KeyCommand) -> Result<()> {
+    use nostos_push::store::{SqliteStore, Store, StoredApiKey};
+    use rand::RngCore;
+    use sha2::{Digest, Sha256};
+
+    match cmd {
+        KeyCommand::Add(args) => {
+            // Mint 32 random bytes, base64 — printable, paste-able, 256-bit.
+            let mut secret_bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut secret_bytes);
+            let secret = b64url(&secret_bytes);
+            let digest: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+            let db = args.db.to_string_lossy().to_string();
+            let store = SqliteStore::open(&db).with_context(|| format!("opening registry {db}"))?;
+            let key = StoredApiKey {
+                tenant_id: args.tenant.clone(),
+                secret_digest: digest,
+                role: if args.rail { "rail" } else { "standard" }.to_string(),
+                rate_per_sec: args.rate_per_sec,
+                burst: args.burst,
+            };
+            store.upsert_api_key(&key).await?;
+            println!(
+                "tenant {} key stored (role {}, limits {}).",
+                args.tenant,
+                if args.rail { "rail" } else { "standard" },
+                match (args.rate_per_sec, args.burst) {
+                    (Some(r), Some(b)) => format!("{r}/s burst {b}"),
+                    _ => "daemon default".to_string(),
+                },
+            );
+            println!();
+            println!("  secret: {secret}");
+            println!();
+            println!("  This is the ONLY time the secret is shown — only its");
+            println!("  SHA-256 is stored. Use it as the Bearer token:");
+            println!("    Authorization: Bearer {secret}");
+            if args.rail {
+                println!("  This key may use rail-mode dispatch (POST /v1/send");
+                println!("  with an unregistered token + platform field).");
+            }
+            println!("  Restart nostos-pushd to load the new key (keys merge at boot).");
+            Ok(())
+        }
+        KeyCommand::List(args) => {
+            let db = args.db.to_string_lossy().to_string();
+            let store = SqliteStore::open(&db).with_context(|| format!("opening registry {db}"))?;
+            let keys = store.list_api_keys().await?;
+            if keys.is_empty() {
+                println!("no stored keys (daemon uses its env keys only)");
+                return Ok(());
+            }
+            for k in keys {
+                let limits = match (k.rate_per_sec, k.burst) {
+                    (Some(r), Some(b)) => format!("{r}/s burst {b}"),
+                    _ => "default".to_string(),
+                };
+                println!("{}  role={}  limits={}", k.tenant_id, k.role, limits);
+            }
+            Ok(())
+        }
+        KeyCommand::Revoke(args) => {
+            let db = args.db.to_string_lossy().to_string();
+            let store = SqliteStore::open(&db).with_context(|| format!("opening registry {db}"))?;
+            if store.delete_api_key(&args.tenant).await? {
+                println!(
+                    "revoked key for tenant {} (env key, if any, applies at next boot)",
+                    args.tenant
+                );
+            } else {
+                println!("no stored key for tenant {}", args.tenant);
+            }
+            Ok(())
+        }
+    }
+}
 /// Flag-driven and non-interactive by design (matching `deploy` and `rules
 /// init`, the CLI's other scripting surfaces): every value arrives as a
 /// flag, so CI and provisioning scripts can drive credential setup without

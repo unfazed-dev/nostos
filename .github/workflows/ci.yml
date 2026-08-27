@@ -95,12 +95,14 @@ jobs:
     # nostos_node.node is gitignored, not committed — and smoke_live.cjs imports
     # node builtins only, so there is no npm install to drift).
     #
-    # `tauri` is deliberately EXCLUDED despite also being "just cargo":
-    # sdk/nostos_tauri depends on `tauri = "2"`, which needs libwebkit2gtk-4.1-dev
-    # / libsoup / libgtk-3-dev system packages to compile on bare ubuntu-latest.
-    # Adding that apt step to gate a thin wrapper trades a reliable job for a
-    # fragile one; it stays covered by the local `make sdk-e2e`. Add it here if
-    # the webkit deps ever become worth maintaining.
+    # `tauri` JOINED this job 2026-08-27 (Track A4 of the arxa integration
+    # plan): the conformance suite (tests/conformance.rs — the 5-item
+    # adapter.md contract ported to the Tauri surface) must run in CI next to
+    # the other SDKs, not only locally. It needs the webkit/soup/gtk dev
+    # packages to compile `tauri = "2"` on ubuntu-latest — the apt step below
+    # installs them. If that apt step proves flaky, drop `tauri` from the
+    # slice list before deleting the comment: the local `make sdk-e2e tauri`
+    # remains the fallback gate.
     #
     # web/capacitor need Playwright browsers, and swift/kotlin/reactnative need
     # a booted device — all local-only. (dotnet joined this CI job 2026-08-05.)
@@ -115,6 +117,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0"
+      # tauri slice: `tauri = "2"` needs the webkit2gtk-4.1 / soup3 / gtk-3
+      # dev packages at compile time on ubuntu-latest (runtime webview is
+      # never launched — the slice is `cargo test`, not a GUI run).
+      - name: Install Tauri system deps (webkit/gtk headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev
       - name: Run host SDK e2e slices
         # SDK_E2E_STRICT=1 makes a SKIP fatal. Naming the slices is not enough
         # on its own: the guards inside the script would still let a slice skip
@@ -125,7 +134,7 @@ jobs:
         # UniFFI cdylib + C# smoke and runs a live PUSH+ECHO round-trip — the
         # gate that catches a stale committed nostos.cs (e.g. signOut/setToken
         # missing, the 2026-08-05 defect).
-        run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node dotnet
+        run: SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh rust node dotnet tauri
       - name: Upload slice logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -176,6 +185,20 @@ jobs:
       - name: flutter test
         working-directory: sdk/nostos_flutter
         run: flutter test
+      # The reference consumer (docs/plans/nostos-integration-tauri-flutter-push.md
+      # Track C): apps/atlet pins nostos_flutter by path and carries the frozen
+      # SyncAdapter contract v1.1 + the push pilot. Gating it here keeps the
+      # reference honest — an SDK change that breaks the documented adoption
+      # path (adapters, push_pilot, conformance tests) fails CI instead of
+      # drifting. Same runner/toolchain as the SDK steps above (atlet's path
+      # dep pulls the same native-assets cargo fallback); 107 tests, ~7s
+      # after deps.
+      - name: atlet reference app — pub get + analyze + test
+        working-directory: apps/atlet/flutter
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
       # The doc-signature guard: parses the fenced Dart in README.md / USAGE.md
       # / docs/api/flutter.md and fails when a snippet names a NostosDatabase
       # factory parameter that does not exist in lib/. `make ci` is Rust-only and

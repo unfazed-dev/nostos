@@ -189,6 +189,7 @@ web-push = { version = "0.11", default-features = false }
 nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
 nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
 nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
+nostos-push = { path = "crates/nostos-push", version = "0.1.0", default-features = false }
 nostos-cloud = { path = "crates/nostos-cloud", version = "0.1.0" }
 nostos-license = { path = "crates/nostos-license", version = "0.1.0" }
 nostos-core = { path = "crates/nostos-core", version = "0.1.0" }

@@ -85,6 +85,20 @@ pub struct Config {
     /// audit ponytail as the pending-key ceiling.
     #[arg(long, env = "NOSTOS_PUSHD_LOSERS_MAX", default_value_t = 64)]
     pub losers_max: usize,
+
+    /// Total attempts per send after a transient (429/5xx/network) rail
+    /// outcome: 1 initial + the rest deferred retries (B2 of the arxa
+    /// integration plan). Default 2 — one deferred retry, the embedded
+    /// router's doorbell semantics: a send that fails twice is receipted
+    /// transient and abandoned; the next event re-pushes, and the durable
+    /// LSN checkpoint reconciles data regardless.
+    #[arg(long, env = "NOSTOS_PUSHD_RETRY_MAX_ATTEMPTS", default_value_t = 2)]
+    pub retry_max_attempts: u8,
+
+    /// How long a transiently-failed send waits before its deferred
+    /// retry (the re-debounce delay).
+    #[arg(long, env = "NOSTOS_PUSHD_RETRY_DELAY_MS", default_value_t = 500)]
+    pub retry_delay_ms: u64,
 }
 
 #[cfg(test)]
@@ -107,6 +121,8 @@ mod tests {
         assert_eq!(cfg.send_burst, 50);
         assert_eq!(cfg.pending_keys_max, 10_000);
         assert_eq!(cfg.losers_max, 64);
+        assert_eq!(cfg.retry_max_attempts, 2);
+        assert_eq!(cfg.retry_delay_ms, 500);
     }
 
     #[test]

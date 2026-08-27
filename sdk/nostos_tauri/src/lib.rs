@@ -10,8 +10,9 @@
 //! NOT a polished SDK.
 //!
 //! # Runtime shape
-//! The five `#[tauri::command]` handlers (`connect` / `subscribe` / `write` /
-//! `query` / `checkpoint`) are thin wrappers over `impl NostosState` async methods, which
+//! The ten `#[tauri::command]` handlers (`connect` / `subscribe` / `write` /
+//! `query` / `checkpoint` / `watch` / `set_token` / `sign_out` /
+//! `register_push_token` / `deregister_push_token`) are thin wrappers over `impl NostosState` async methods, which
 //! `.await` on the host runtime Tauri runs the command on (or, in tests, the
 //! `#[tokio::test]` runtime). `NostosState` ALSO owns a
 //! `tokio::runtime::Runtime` — the home of the long-lived `subscribe()` run
@@ -41,8 +42,11 @@
 //! - **Permissions**: only the six default command permissions are listed in
 //!   `permissions/default.toml`. A shipped plugin would also publish scoped
 //!   permission sets per table.
-//! - **JS bindings / `.d.ts`**: a shipped plugin runs `tauri-plugin`'s JS
-//!   scaffolder to emit a `guest-js/` package; not in scope here.
+//! - **JS bindings / `.d.ts`**: SHIPPED — `guest-js/` carries a typed
+//!   ESM `@nostos-sync/tauri` package (no build step: plain `.js` + hand-written
+//!   `.d.ts`). Ceiling: ESM-only (no CJS/iife bundle — Tauri frontends are
+//!   ESM-native); run `tauri-plugin`'s scaffolder if a `withGlobalTauri`
+//!   bundle is ever needed.
 
 #![forbid(unsafe_code)]
 // The Tauri plugin shape uses a generic `R: Runtime` init + `State<'_, T>`
@@ -58,16 +62,70 @@ use std::time::Duration;
 use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig};
 use nostos_core::{PendingWrite, WriteOp};
 use nostos_domain::Lsn;
+use serde::Deserialize;
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime, State};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex as AsyncMutex;
+
+/// std Mutex for fields locked across `.await`-free critical sections only
+/// (the token cache / push-token registry / session URL) — mirroring
+/// `sdk/nostos_node`'s handle fields. The session itself stays an AsyncMutex
+/// because its methods hold the guard across awaits.
+use std::sync::Mutex as StdMutex;
 
 /// Session-level reconnect backstop — mirrors `sdk/nostos_node`'s
 /// `IDLE_RECONNECT_BACKSTOP` and the Flutter glue's constant of the same name.
 /// Long relative to per-batch flush bounds: this is a rare defense-in-depth
 /// reconnect, not a per-write latency mechanism.
 const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(120);
+
+/// The `plugins.cairn` block of `tauri.conf.json` (A2 config story). Every
+/// field is optional: an absent block deserializes to all-`None` (Tauri hands
+/// the plugin `{}` when `plugins.cairn` is missing — verified against tauri
+/// 2.11.5 `plugin.rs` `initialize`: `.get(name).cloned().unwrap_or_default()`),
+/// and `deny_unknown_fields` turns a typo'd key into a loud startup error
+/// ("Error deserializing 'plugins.cairn' within your Tauri configuration").
+///
+/// These are DEFAULTS for `connect()`, not a second way to open a session:
+/// `connect`'s explicit args win, then these, then the hard-coded floor
+/// (table `"tasks"`, db path `"cairn.db"`). One config, one precedence rule —
+/// the same "config is the floor, args are the override" shape the official
+/// plugins use.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NostosPluginConfig {
+    /// Default sync endpoint (`ws://…/sync` / `wss://…/sync`) used when
+    /// `connect` is called without an explicit `url`.
+    pub sync_url: Option<String>,
+    /// Default bearer JWT used when `connect` is called without an explicit
+    /// `token` — also the credential push-token registration sends.
+    pub token: Option<String>,
+    /// The single table this session syncs (v1 ceiling: one table per
+    /// `NostosState`, matching the sibling SDKs; multi-table is the
+    /// provider-dashboard plan). Defaults to `"tasks"`.
+    pub table: Option<String>,
+    /// Default on-device SQLite path. Relative paths open relative to the
+    /// process working directory — desktop apps should pass an absolute path
+    /// (e.g. from `app.path().app_data_dir()`) either here or per `connect`.
+    /// Defaults to `"cairn.db"`.
+    pub db_path: Option<String>,
+}
+
+impl NostosPluginConfig {
+    /// The resolved session table: config value or the `"tasks"` floor
+    /// (the same default `sdk/nostos_node` and the scaffold pin).
+    fn table(&self) -> String {
+        self.table.clone().unwrap_or_else(|| "tasks".to_owned())
+    }
+
+    /// The resolved default SQLite path (`"cairn.db"` floor).
+    fn db_path(&self) -> String {
+        self.db_path
+            .clone()
+            .unwrap_or_else(|| "cairn.db".to_owned())
+    }
+}
 
 /// Plugin state, managed by Tauri. Owns a `tokio::runtime::Runtime` (home of
 /// the `subscribe()` run loop) plus at most one active session (v1: one table
@@ -92,6 +150,31 @@ pub struct NostosState {
     // drops outside async and pays no such cost.
     rt: Option<tokio::runtime::Runtime>,
     session: AsyncMutex<Option<Session>>,
+    // A2 config defaults (plugins.cairn from tauri.conf.json). Immutable
+    // after init() — connect() merges per-call args over it.
+    config: NostosPluginConfig,
+    // A3 push-REST credentials — the same "one credential source, one URL
+    // source" cache sdk/nostos_node keeps on its handle. SyncClient offers
+    // set_token but NO token getter, so the SDK layer must remember what it
+    // connected with to send Authorization: Bearer on the push-token REST
+    // round-trips (the SAME JWT the WS handshake uses — ADR-0037 §3).
+    // Updated by connect()/set_token(); cleared by sign_out() (which captures
+    // the pre-clear value first — the deregistration hook needs it).
+    token_cache: StdMutex<Option<String>>,
+    // The WS URL of the (last) successful connect — the push REST base is
+    // derived from it per call (http_base), so registration follows the
+    // same server the session syncs with even after a config change.
+    session_url: StdMutex<Option<String>>,
+    // Push tokens registered THIS session (ADR-0037 §3), deregistered
+    // best-effort by sign_out — a leaked registration would push the
+    // previous principal's data to the next user.
+    //
+    // ponytail: in-memory only — tokens registered before a process restart
+    // are not auto-deregistered (the set dies with the process). The stale
+    // case is covered server-side: the rails prune on APNs 410 / FCM
+    // UNREGISTERED. Upgrade path: persist the set in the local store if
+    // rail-prune proves too slow for real tenants.
+    registered_push_tokens: StdMutex<Vec<String>>,
 }
 
 struct Session {
@@ -171,9 +254,8 @@ async fn snapshot_rows(
     client: &SyncClient<SqliteStorage>,
     table: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let sql = format!(
-        "SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC"
-    );
+    let sql =
+        format!("SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC");
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = client
         .with_storage(move |s| s.query(&sql))
         .await
@@ -193,44 +275,78 @@ impl NostosState {
     /// Panics if the tokio runtime can't be constructed (OS resource
     /// exhaustion) or if invoked from inside an async context.
     pub fn new() -> Self {
+        Self::with_config(NostosPluginConfig::default())
+    }
+
+    /// Construct with plugins.cairn config defaults (the production path:
+    /// init() calls this with the deserialized tauri.conf.json block).
+    /// See NostosPluginConfig for the per-field precedence.
+    ///
+    /// # Panics
+    /// Panics if the tokio runtime can't be constructed (OS resource
+    /// exhaustion) or if invoked from inside an async context.
+    pub fn with_config(config: NostosPluginConfig) -> Self {
         Self {
             rt: Some(tokio::runtime::Runtime::new().expect("construct nostos-tauri runtime")),
             session: AsyncMutex::new(None),
+            config,
+            token_cache: StdMutex::new(None),
+            session_url: StdMutex::new(None),
+            registered_push_tokens: StdMutex::new(Vec::new()),
         }
     }
 
-    /// Open the local SQLite store at `db_path` and build a `SyncClient`
-    /// against `url`. No network I/O — the subscribe/run loop is a separate
-    /// (not-yet-wired) command. Idempotent: a second call while a session is
-    /// live is a no-op. The default table is `tasks` (matches `nostos_node`).
+    /// Open the local SQLite store and build a `SyncClient` against `url`.
+    /// No network I/O — the subscribe/run loop is a separate command.
+    /// Idempotent: a second call while a session is live is a no-op.
+    ///
+    /// A2 precedence — per-call args override `plugins.cairn` config, config
+    /// overrides the floor: `url` falls back to `config.syncUrl`, `token` to
+    /// `config.token`, `db_path` to `config.dbPath` (floor `"cairn.db"`), and
+    /// the session table to `config.table` (floor `"tasks"`, matching
+    /// `nostos_node`). With a fully-populated config, `connect()` needs no
+    /// args at all.
     ///
     /// # Errors
-    /// `String` if the SQLite store can't be opened/migrated.
+    /// `String` if neither the arg nor config supplies a sync URL, or the
+    /// SQLite store can't be opened/migrated.
     pub async fn connect(
         &self,
-        url: String,
+        url: Option<String>,
         token: Option<String>,
-        db_path: String,
+        db_path: Option<String>,
     ) -> Result<(), String> {
         let mut guard = self.session.lock().await;
         if guard.is_some() {
             return Ok(());
         }
-        let storage =
-            SqliteStorage::open(&db_path).map_err(|e| e.to_string())?;
+        // A2 precedence: arg > config. A missing URL is the one hard error —
+        // every other field has a floor.
+        let Some(url) = url.or_else(|| self.config.sync_url.clone()) else {
+            return Err("connect() called with no url and no plugins.cairn.syncUrl config — one of the two is required".to_string());
+        };
+        let token = token.or_else(|| self.config.token.clone());
+        let db_path = db_path.unwrap_or_else(|| self.config.db_path());
+        let table = self.config.table();
+        let storage = SqliteStorage::open(&db_path).map_err(|e| e.to_string())?;
         let config = SyncClientConfig {
-            table: "tasks".to_owned(),
-            token,
+            table: table.clone(),
+            token: token.clone(),
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
             ..SyncClientConfig::default()
         };
-        let client = Arc::new(SyncClient::new(url, storage, config));
+        let client = Arc::new(SyncClient::new(url.clone(), storage, config));
         *guard = Some(Session {
             client,
-            table: "tasks".to_owned(),
+            table,
             run_handle: None,
             watch_tasks: Vec::new(),
         });
+        // A3: remember the credential + URL the push-token REST round-trips
+        // need (SyncClient exposes no token getter; http_base derives the
+        // REST origin from the WS URL).
+        *self.session_url.lock().expect("session_url lock poisoned") = Some(url);
+        *self.token_cache.lock().expect("token_cache lock poisoned") = token;
         Ok(())
     }
 
@@ -318,6 +434,19 @@ impl NostosState {
     /// `String` if the local-state wipe itself failed (disk error). A failed
     /// wipe is surfaced, not swallowed — half a clear is a leak.
     pub async fn sign_out(&self) -> Result<(), String> {
+        // ADR-0037 §3: the sign-out deregistration needs the JWT from BEFORE
+        // step (4) clears it — capture it (and the push registry) now.
+        let auth = self
+            .token_cache
+            .lock()
+            .expect("sign_out: token_cache lock poisoned")
+            .clone();
+        let registered = std::mem::take(
+            &mut *self
+                .registered_push_tokens
+                .lock()
+                .expect("sign_out: registered_push_tokens lock poisoned"),
+        );
         let mut guard = self.session.lock().await;
         let Some(session) = guard.take() else {
             return Ok(()); // idempotent — nothing to sign out
@@ -344,11 +473,25 @@ impl NostosState {
             .clear_local_state()
             .await
             .map_err(|e: ClientError| e.to_string())?;
-        // (4) Clear the token. Defensive — the client drops at (5) with the
+        // (4) Clear the token. Defensive — the client drops at (6) with the
         // session, but clearing here matches the signOut contract and guards a
-        // stray `Arc` clone from re-authing on a reconnect.
+        // stray `Arc` clone from re-authing on a reconnect. A3: the SDK cache
+        // clears too, so a post-sign-out push registration has no credential
+        // to send.
         session.client.set_token(None);
-        // (5) `session` drops here; its handles are already drained and the
+        *self
+            .token_cache
+            .lock()
+            .expect("sign_out: token_cache lock poisoned") = None;
+        // (5) ADR-0037 §3: deregister this session's push tokens — best-effort
+        // (a failed DELETE is swallowed; the server prunes stale rows on a rail
+        // 410/UNREGISTERED). AFTER the local wipe, mirroring the Flutter + Node
+        // SDKs' hook ordering. Uses the token captured before (4) cleared it.
+        for token in registered {
+            let _ =
+                Self::deregister_push_token_http(&self.session_url, auth.as_deref(), &token).await;
+        }
+        // (6) `session` drops here; its handles are already drained and the
         // session slot is already `None`.
         Ok(())
     }
@@ -370,8 +513,135 @@ impl NostosState {
             Arc::clone(&session.client)
         };
         // `set_token` is a sync RwLock swap — no `.await` on the call itself.
+        // A3: mirror the swap into the SDK's token cache so push-token REST
+        // round-trips send the SAME credential the next WS open will.
+        *self.token_cache.lock().expect("token_cache lock poisoned") = token.clone();
         client.set_token(token);
         Ok(())
+    }
+
+    /// Register this device's push token with the server (ADR-0037 §3):
+    /// `POST /push-tokens` with `{"platform": …, "token": …}`, authenticated
+    /// by the SAME token the sync connection uses (`Authorization: Bearer`,
+    /// read from this state's token cache — the credential `connect()` built
+    /// the `SyncClient` from). The server stamps tenant/account itself; the
+    /// SDK never attests identity fields.
+    ///
+    /// A3 parity: byte-identical wire shape to the Flutter SDK's
+    /// `NostosDatabase.registerPushToken` (`nostos_database.dart`) and
+    /// `sdk/nostos_node`'s `registerPushToken` — one REST contract across
+    /// SDKs. On iOS/Android the token comes from the Tauri mobile shell's
+    /// native push hooks (APNs device token / FCM registration token).
+    /// Desktop has no OS rail: an online session already receives everything
+    /// over the WS, and doorbells only target offline devices (ADR-0037 §1),
+    /// so desktop apps usually do not register at all; a Web Push
+    /// subscription the host app obtains may register under `"webpush"`.
+    ///
+    /// `platform` is `"fcm"`, `"apns"`, or `"webpush"`. Resolves on the
+    /// pinned `204`; any other status errors with the status + body.
+    /// Registered tokens are deregistered best-effort by `sign_out`.
+    ///
+    /// ponytail: a fresh reqwest client per call — registration is a rare
+    /// path, not a hot loop. Share one `Client` on the state if a
+    /// measurement ever says otherwise.
+    ///
+    /// # Errors
+    /// `String` for an unknown platform, no prior `connect()` (no URL to
+    /// derive the REST base from), a transport failure, or any non-204 reply.
+    pub async fn register_push_token(&self, platform: String, token: String) -> Result<(), String> {
+        match platform.as_str() {
+            "fcm" | "apns" | "webpush" => {}
+            other => {
+                return Err(format!(
+                    "unknown push platform {other:?}: expected \"fcm\", \"apns\", or \"webpush\""
+                ))
+            }
+        }
+        let auth = self
+            .token_cache
+            .lock()
+            .expect("token_cache lock poisoned")
+            .clone();
+        let url = self
+            .session_url
+            .lock()
+            .expect("session_url lock poisoned")
+            .clone()
+            .ok_or_else(|| "register_push_token() called before connect()".to_string())?;
+        let body = serde_json::json!({"platform": platform, "token": token}).to_string();
+        let mut request = reqwest::Client::new()
+            .post(format!("{}/push-tokens", http_base(&url)))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+        if let Some(jwt) = &auth {
+            request = request.bearer_auth(jwt);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("push-token register failed: {e}"))?;
+        expect_204(response, "register").await?;
+        self.registered_push_tokens
+            .lock()
+            .expect("registered_push_tokens lock poisoned")
+            .push(token);
+        Ok(())
+    }
+
+    /// Deregister a push token (ADR-0037 §3): `DELETE /push-tokens/{token}`
+    /// with the same auth as `register_push_token`. Resolves on the pinned
+    /// `204`. `sign_out` calls this for every session-registered token
+    /// automatically; call it directly when the app can no longer receive on
+    /// the token (e.g. the user disables notifications).
+    ///
+    /// The token rides the path percent-encoded as ONE segment
+    /// (`encode_path_segment`): a webpush token is the full
+    /// `pushSubscription` JSON and contains `/`, which would split the path
+    /// and 404 the DELETE.
+    ///
+    /// # Errors
+    /// `String` for no prior `connect()`, a transport failure, or any
+    /// non-204 reply.
+    pub async fn deregister_push_token(&self, token: String) -> Result<(), String> {
+        let auth = self
+            .token_cache
+            .lock()
+            .expect("token_cache lock poisoned")
+            .clone();
+        Self::deregister_push_token_http(&self.session_url, auth.as_deref(), &token).await?;
+        self.registered_push_tokens
+            .lock()
+            .expect("registered_push_tokens lock poisoned")
+            .retain(|t| t != &token);
+        Ok(())
+    }
+
+    /// Shared DELETE core — `deregister_push_token` (reads the live cached
+    /// token) and `sign_out` (reads the token captured BEFORE it was
+    /// cleared) both ride this, so there is one wire shape.
+    async fn deregister_push_token_http(
+        session_url: &StdMutex<Option<String>>,
+        auth: Option<&str>,
+        token: &str,
+    ) -> Result<(), String> {
+        let url = session_url
+            .lock()
+            .expect("session_url lock poisoned")
+            .clone()
+            .ok_or_else(|| "push-token deregister called before connect()".to_string())?;
+        let mut request = reqwest::Client::new().delete(format!(
+            "{}/push-tokens/{}",
+            http_base(&url),
+            encode_path_segment(token)
+        ));
+        if let Some(jwt) = auth {
+            request = request.bearer_auth(jwt);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("push-token deregister failed: {e}"))?;
+        expect_204(response, "deregister").await
     }
 
     /// Enqueue a durable write against the active session's table. Resolves
@@ -578,6 +848,72 @@ impl NostosState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Push-token REST helpers (ADR-0037 §3) — ported from sdk/nostos_node so both
+// JS-facing SDKs speak a byte-identical wire shape against the same pinned
+// server contract (crates/nostos-server/src/push_api.rs).
+// ---------------------------------------------------------------------------
+
+/// Derive the HTTP base for the push-token REST endpoints from the WS `/sync`
+/// URL: `wss`→`https`, `ws`→`http`, trailing path stripped — the same
+/// derivation the Flutter SDK uses for `GET /schema`
+/// (`NostosDatabase._deriveHttpBase`) and node's `http_base`. One credential
+/// source, one URL source.
+fn http_base(ws_url: &str) -> String {
+    match ws_url.split_once("://") {
+        Some((scheme, rest)) => {
+            let scheme = match scheme {
+                "wss" => "https",
+                "ws" => "http",
+                other => other,
+            };
+            // Authority runs to the first `/` (or end); the path is dropped.
+            let authority = rest.split('/').next().unwrap_or(rest);
+            format!("{scheme}://{authority}")
+        }
+        None => ws_url.to_owned(),
+    }
+}
+
+/// Percent-encode a push token as ONE path segment: every byte outside RFC
+/// 3986's unreserved set (`A-Za-z0-9-._~`) becomes `%XX`. A webpush token
+/// is the full `pushSubscription` JSON — it contains `/`, which un-encoded
+/// splits the path and 404s the DELETE. Hand-rolled: this standalone
+/// workspace has no `percent-encoding` dep and the path-safe subset is this
+/// small; the server's `Path` extractor decodes it back verbatim.
+fn encode_path_segment(token: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(token.len());
+    for &b in token.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0x0F)]));
+            }
+        }
+    }
+    out
+}
+
+/// Enforce the pinned push-token contract (ADR-0037 §3): success is exactly
+/// `204 No Content`. Anything else — including a 2xx variant — surfaces the
+/// status + body so contract drift fails loudly on the SDK side.
+async fn expect_204(response: reqwest::Response, operation: &str) -> Result<(), String> {
+    let status = response.status();
+    if status.as_u16() == 204 {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(format!(
+        "push-token {operation} failed: HTTP {}: {body}",
+        status.as_u16()
+    ))
+}
+
 impl Default for NostosState {
     fn default() -> Self {
         Self::new()
@@ -610,12 +946,14 @@ impl Drop for NostosState {
 // ---------------------------------------------------------------------------
 
 /// Open the local SQLite store + build the `SyncClient`. No network I/O.
+/// Every arg is optional and falls back to the `plugins.cairn` config block
+/// (A2): with a populated `tauri.conf.json`, `connect()` needs no args.
 #[tauri::command]
 async fn connect(
     state: State<'_, NostosState>,
-    url: String,
+    url: Option<String>,
     token: Option<String>,
-    db_path: String,
+    db_path: Option<String>,
 ) -> Result<(), String> {
     state.connect(url, token, db_path).await
 }
@@ -681,20 +1019,42 @@ async fn sign_out(state: State<'_, NostosState>) -> Result<(), String> {
 /// ADR-0029: swap the auth token on the live client (a refresh self-heals
 /// within one backoff window). Requires `connect()` to have run.
 #[tauri::command]
-async fn set_token(
-    state: State<'_, NostosState>,
-    token: Option<String>,
-) -> Result<(), String> {
+async fn set_token(state: State<'_, NostosState>, token: Option<String>) -> Result<(), String> {
     state.set_token(token).await
+}
+
+/// ADR-0037 §3: register this device's push token (`POST /push-tokens`)
+/// with the same auth the sync connection uses. On iOS/Android the token
+/// comes from the Tauri mobile shell's APNs/FCM native hooks; desktop apps
+/// usually do not register (no OS rail — an online session gets WS delivery).
+#[tauri::command]
+async fn register_push_token(
+    state: State<'_, NostosState>,
+    platform: String,
+    token: String,
+) -> Result<(), String> {
+    state.register_push_token(platform, token).await
+}
+
+/// ADR-0037 §3: deregister a push token (`DELETE /push-tokens/{token}`);
+/// `sign_out` does this automatically for session-registered tokens.
+#[tauri::command]
+async fn deregister_push_token(state: State<'_, NostosState>, token: String) -> Result<(), String> {
+    state.deregister_push_token(token).await
 }
 
 /// Build the `nostos` Tauri plugin. Generic over `R: Runtime` so a Tauri app
 /// using any runtime (the default `Wry`, or a custom one) can register it via
 /// `tauri::Builder::default().plugin(nostos_tauri::init())`.
-pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    Builder::<R, ()>::new("cairn")
-        .setup(|app, _api| {
-            app.manage(NostosState::new());
+pub fn init<R: Runtime>() -> TauriPlugin<R, NostosPluginConfig> {
+    // A2 config story: the second Builder type parameter is the
+    // plugins.cairn block of tauri.conf.json — Tauri deserializes it in
+    // TauriPlugin::initialize (erroring loudly on a malformed block) and
+    // hands it to setup via api.config(). Absent block == empty object ==
+    // all-None defaults, so the plugin also works with zero config.
+    Builder::<R, NostosPluginConfig>::new("cairn")
+        .setup(|app, api| {
+            app.manage(NostosState::with_config(api.config().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -706,6 +1066,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             watch,
             set_token,
             sign_out,
+            register_push_token,
+            deregister_push_token,
         ])
         .build()
 }
@@ -728,9 +1090,9 @@ mod tests {
         // SyncClient. No network I/O — the url is unused without a run loop.
         state
             .connect(
-                "ws://localhost:0".into(),
+                Some("ws://localhost:0".into()),
                 None,
-                ":memory:".into(),
+                Some(":memory:".into()),
             )
             .await
             .expect("connect");
@@ -739,10 +1101,7 @@ mod tests {
         // `SyncClient::with_storage` → `SqliteStorage::query` — the same path
         // `nostos_node`'s `query()` takes. (Aliased so the column key is stable;
         // `nostos_node`'s smoke uses the same `AS one` shape.)
-        let rows_json = state
-            .query("SELECT 1 AS one".into())
-            .await
-            .expect("query");
+        let rows_json = state.query("SELECT 1 AS one".into()).await.expect("query");
         assert!(
             rows_json.contains("\"one\":1") || rows_json.contains("\"one\": 1"),
             "expected an one=1 row in the JSON, got: {rows_json}"
@@ -761,12 +1120,7 @@ mod tests {
     async fn write_before_connect_is_an_error() {
         let state = NostosState::new();
         let err = state
-            .write(
-                "tasks".into(),
-                "upsert".into(),
-                "pk1".into(),
-                None,
-            )
+            .write("tasks".into(), "upsert".into(), "pk1".into(), None)
             .await
             .expect_err("write before connect should error");
         assert!(
@@ -783,14 +1137,14 @@ mod tests {
     /// sign_out with no session is `Ok`).
     #[tokio::test(flavor = "multi_thread")]
     async fn sign_out_wipes_rows_and_drops_session() {
-        let db = std::env::temp_dir()
-            .join(format!("nostos-tauri-signout-{}.sqlite", std::process::id()));
+        let db =
+            std::env::temp_dir().join(format!("nostos-tauri-signout-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let path = db.to_str().expect("utf8 db path").to_owned();
 
         let state = NostosState::new();
         state
-            .connect("ws://localhost:0".into(), None, path.clone())
+            .connect(Some("ws://localhost:0".into()), None, Some(path.clone()))
             .await
             .expect("connect");
         state
@@ -829,15 +1183,14 @@ mod tests {
         // (2) The wipe persisted to disk — reopen the SAME file and the row is
         // gone. This is the cross-user-leak guard from ADR-0029.
         state
-            .connect("ws://localhost:0".into(), None, path.clone())
+            .connect(Some("ws://localhost:0".into()), None, Some(path.clone()))
             .await
             .expect("reconnect");
         let rows_json = state
             .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
             .await
             .expect("query after reconnect");
-        let rows: serde_json::Value =
-            serde_json::from_str(&rows_json).expect("parse rows json");
+        let rows: serde_json::Value = serde_json::from_str(&rows_json).expect("parse rows json");
         assert!(
             rows.as_array().is_some_and(|a| a.is_empty()),
             "tasks table should be empty after sign_out, got: {rows_json}"
@@ -874,17 +1227,17 @@ mod tests {
         struct RecordingEmitter(StdMutex<mpsc::Sender<NostosSnapshot>>);
         impl SnapshotEmitter for RecordingEmitter {
             fn emit(&self, snapshot: NostosSnapshot) -> bool {
-                self.0
-                    .lock()
-                    .expect("recorder lock")
-                    .send(snapshot)
-                    .is_ok()
+                self.0.lock().expect("recorder lock").send(snapshot).is_ok()
             }
         }
 
         let state = NostosState::new();
         state
-            .connect("ws://localhost:0".into(), None, ":memory:".into())
+            .connect(
+                Some("ws://localhost:0".into()),
+                None,
+                Some(":memory:".into()),
+            )
             .await
             .expect("connect");
 
@@ -939,6 +1292,321 @@ mod tests {
         state.abort_subscribe().await;
     }
 
+    // ─────────── push-token REST (ADR-0037 §3 / Track A3) ───────────
+    // Mirrors sdk/nostos_node's pinned-contract tests byte-for-byte: the
+    // server routes (crates/nostos-server/src/push_api.rs) are built against
+    // the same pins, so drift fails here first.
+
+    /// Build a full HTTP/1.1 reply with an exact Content-Length (no
+    /// hand-counted lengths to drift).
+    fn reply(status_line: &str, body: &str) -> String {
+        format!(
+            "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Spawn a local HTTP server on 127.0.0.1:0 that accepts `count`
+    /// connections, replies `response` to each, and forwards each raw request
+    /// (start line + headers + body, verbatim) over the channel. Hand-rolled
+    /// on std::net so the pinned-contract tests add no dev-dependencies (an
+    /// axum/hyper dev-dep would outweigh the scaffold SDK itself).
+    /// `Connection: close` in the canned reply keeps reqwest from reusing a
+    /// connection, so one accept == one request. Returns the host:port
+    /// authority.
+    fn spawn_capture_server(
+        count: usize,
+        response: String,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for _ in 0..count {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut raw = Vec::<u8>::new();
+                let mut buf = [0u8; 4096];
+                // Read until the headers end AND any Content-Length body is
+                // fully received — one complete HTTP/1.1 request.
+                loop {
+                    let complete = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|pos| {
+                        let headers = String::from_utf8_lossy(&raw[..pos]).to_ascii_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        raw.len() >= pos + 4 + len
+                    });
+                    if complete == Some(true) {
+                        break;
+                    }
+                    let n = match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    raw.extend_from_slice(&buf[..n]);
+                }
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                if tx.send(String::from_utf8_lossy(&raw).into_owned()).is_err() {
+                    break;
+                }
+            }
+        });
+        (format!("127.0.0.1:{}", addr.port()), rx)
+    }
+
+    /// A NostosState pointed at the capture server (WS URL derived from the
+    /// HTTP authority the way a real app's ws://…/sync URL would be).
+    async fn push_state(authority: &str, token: Option<&str>) -> NostosState {
+        let state = NostosState::new();
+        state
+            .connect(
+                Some(format!("ws://{authority}/sync")),
+                token.map(|t| t.to_owned()),
+                Some(":memory:".into()),
+            )
+            .await
+            .expect("connect");
+        state
+    }
+
+    /// PINNED CONTRACT: register_push_token sends `POST /push-tokens` with the
+    /// exact JSON body and the sync token as a Bearer header. The server
+    /// routes are built against this same pin; drift fails here first.
+    /// tenant/account are never sent — the server stamps them (ADR-0018
+    /// discipline).
+    #[tokio::test]
+    async fn register_push_token_posts_exact_json_with_bearer() {
+        let (authority, rx) = spawn_capture_server(1, reply("HTTP/1.1 204 No Content", ""));
+        let state = push_state(&authority, Some("tauri-jwt")).await;
+        state
+            .register_push_token("fcm".into(), "tok-1".into())
+            .await
+            .expect("register should succeed on 204");
+
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("request");
+        assert!(
+            raw.starts_with("POST /push-tokens HTTP/1.1"),
+            "expected POST /push-tokens, got: {raw}"
+        );
+        let lower = raw.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: bearer tauri-jwt"),
+            "expected the sync token as Bearer, got: {raw}"
+        );
+        assert!(
+            lower.contains("content-type: application/json"),
+            "expected a JSON content-type, got: {raw}"
+        );
+        assert!(
+            raw.contains(r#"{"platform":"fcm","token":"tok-1"}"#),
+            "expected the exact pinned JSON body, got: {raw}"
+        );
+    }
+
+    /// PINNED CONTRACT: deregister_push_token sends
+    /// `DELETE /push-tokens/{token}` with the same auth (register first so
+    /// the happy path is also real).
+    #[tokio::test]
+    async fn deregister_push_token_deletes_the_token_path() {
+        let (authority, rx) = spawn_capture_server(2, reply("HTTP/1.1 204 No Content", ""));
+        let state = push_state(&authority, Some("tauri-jwt")).await;
+        state
+            .register_push_token("apns".into(), "tok-1".into())
+            .await
+            .expect("register");
+        state
+            .deregister_push_token("tok-1".into())
+            .await
+            .expect("deregister should succeed on 204");
+
+        let _post = rx.recv_timeout(Duration::from_secs(5)).expect("POST");
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("DELETE");
+        assert!(
+            raw.starts_with("DELETE /push-tokens/tok-1 HTTP/1.1"),
+            "expected DELETE /push-tokens/tok-1, got: {raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer tauri-jwt"),
+            "expected the sync token as Bearer, got: {raw}"
+        );
+    }
+
+    /// M1: a token containing reserved characters — a webpush token IS the
+    /// full `pushSubscription` JSON, so it contains `/` — must ride the path
+    /// percent-encoded as ONE segment; un-encoded it splits the path and the
+    /// DELETE 404s (mirrors the Flutter push_token_test.dart pin).
+    #[tokio::test]
+    async fn deregister_push_token_percent_encodes_url_unsafe_token() {
+        let (authority, rx) = spawn_capture_server(1, reply("HTTP/1.1 204 No Content", ""));
+        let state = push_state(&authority, Some("tauri-jwt")).await;
+        state
+            .deregister_push_token("tok with spaces/+".into())
+            .await
+            .expect("deregister should succeed on 204");
+
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("DELETE");
+        assert!(
+            raw.starts_with("DELETE /push-tokens/tok%20with%20spaces%2F%2B HTTP/1.1"),
+            "expected the token percent-encoded as one path segment, got: {raw}"
+        );
+    }
+
+    /// Anything other than the pinned 204 surfaces the status + body in the
+    /// error message (this SDK's error style is String, matching every other
+    /// method here).
+    #[tokio::test]
+    async fn register_push_token_errors_on_non_204() {
+        let (authority, _rx) = spawn_capture_server(
+            1,
+            reply("HTTP/1.1 401 Unauthorized", r#"{"error":"unauthorized"}"#),
+        );
+        let state = push_state(&authority, Some("stale-jwt")).await;
+        let err = state
+            .register_push_token("fcm".into(), "tok-1".into())
+            .await
+            .expect_err("non-204 must error");
+        assert!(
+            err.contains("401") && err.contains("unauthorized"),
+            "expected status + body in the error, got: {err}"
+        );
+    }
+
+    /// An unknown platform fails before the wire (no request reaches the
+    /// server — it is spawned with zero accepts, so any request would hang
+    /// the test).
+    #[tokio::test]
+    async fn register_push_token_unknown_platform_is_an_error() {
+        let (authority, _rx) = spawn_capture_server(0, String::new());
+        let state = push_state(&authority, Some("tauri-jwt")).await;
+        let err = state
+            .register_push_token("gcm".into(), "tok-1".into())
+            .await
+            .expect_err("unknown platform must error");
+        assert!(
+            err.contains("unknown push platform"),
+            "expected a platform error, got: {err}"
+        );
+    }
+
+    /// No connect() means no URL to derive the REST base from — a clear
+    /// error, not a panic (the same contract the sync commands enforce).
+    #[tokio::test]
+    async fn register_push_token_before_connect_is_an_error() {
+        let state = NostosState::new();
+        let err = state
+            .register_push_token("fcm".into(), "tok-1".into())
+            .await
+            .expect_err("register before connect should error");
+        assert!(
+            err.contains("before connect"),
+            "expected a before-connect error, got: {err}"
+        );
+    }
+
+    /// ADR-0029 + ADR-0037 §3: set_token swaps the credential on the LIVE
+    /// client — the push cache must follow, so a post-refresh registration
+    /// sends the SAME JWT the next WS open will (the refresh self-heal).
+    #[tokio::test]
+    async fn set_token_updates_the_push_credential_cache() {
+        let (authority, rx) = spawn_capture_server(1, reply("HTTP/1.1 204 No Content", ""));
+        let state = push_state(&authority, Some("stale-jwt")).await;
+        state
+            .set_token(Some("fresh-jwt".into()))
+            .await
+            .expect("set_token");
+        state
+            .register_push_token("fcm".into(), "tok-1".into())
+            .await
+            .expect("register");
+
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("request");
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer fresh-jwt"),
+            "expected the refreshed token as Bearer, got: {raw}"
+        );
+    }
+
+    /// ADR-0037 §3: sign_out deregisters session-registered tokens. The DELETE
+    /// must carry the JWT captured BEFORE sign_out clears the token cache
+    /// (step 4) — this test pins that ordering.
+    #[tokio::test]
+    async fn sign_out_deregisters_session_registered_tokens() {
+        let (authority, rx) = spawn_capture_server(2, reply("HTTP/1.1 204 No Content", ""));
+        let state = push_state(&authority, Some("tauri-jwt")).await;
+        state
+            .register_push_token("webpush".into(), "tok-1".into())
+            .await
+            .expect("register");
+        state.sign_out().await.expect("sign_out");
+
+        let _post = rx.recv_timeout(Duration::from_secs(5)).expect("POST");
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("DELETE");
+        assert!(
+            raw.starts_with("DELETE /push-tokens/tok-1 HTTP/1.1"),
+            "sign_out should deregister the session token, got: {raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer tauri-jwt"),
+            "the deregister must use the pre-clear JWT, got: {raw}"
+        );
+    }
+
+    // ─────────── plugin config (Track A2) ───────────
+
+    /// A2 precedence: with a populated plugins.cairn config, connect() takes
+    /// no args — url/table/dbPath all fall through from the config block, and
+    /// the session table is honored by write()'s table guard.
+    #[tokio::test]
+    async fn connect_falls_back_to_plugin_config() {
+        let config = NostosPluginConfig {
+            sync_url: Some("ws://localhost:0/sync".into()),
+            token: None,
+            table: Some("notes".into()),
+            db_path: Some(":memory:".into()),
+        };
+        let state = NostosState::with_config(config);
+        state.connect(None, None, None).await.expect("connect");
+
+        // The session table came from config — "notes" writes, "tasks"
+        // (the old hard-coded default) mismatches.
+        state
+            .write("notes".into(), "upsert".into(), "n1".into(), None)
+            .await
+            .expect("write to the config table");
+        let err = state
+            .write("tasks".into(), "upsert".into(), "t1".into(), None)
+            .await
+            .expect_err("tasks should no longer be the session table");
+        assert!(
+            err.contains("does not match active session table"),
+            "expected a table-mismatch error, got: {err}"
+        );
+    }
+
+    /// A2 floor: no args AND no config syncUrl is the one hard error — every
+    /// other field has a default, but the SDK refuses to guess an endpoint.
+    #[tokio::test]
+    async fn connect_without_url_or_config_is_an_error() {
+        let state = NostosState::new();
+        let err = state
+            .connect(None, None, None)
+            .await
+            .expect_err("connect with no url anywhere should error");
+        assert!(
+            err.contains("no url") && err.contains("syncUrl"),
+            "expected the missing-URL error naming the config key, got: {err}"
+        );
+    }
     // -------------------------------------------------------------------------
     // Live-replication E2E — copies the Rust reference template
     // (`crates/nostos-client/tests/e2e_live_replication.rs`) against the same
@@ -950,7 +1618,8 @@ mod tests {
 
     /// Body the spine injects on `POST /push` — matches the reference template
     /// shape (PK only differs so the assertion is unambiguous).
-    const PUSH_BODY: &str = r#"{"pk":"tauri-push","payload":{"title":"from-server","status":"open","priority":"5"}}"#;
+    const PUSH_BODY: &str =
+        r#"{"pk":"tauri-push","payload":{"title":"from-server","status":"open","priority":"5"}}"#;
 
     /// Live-replication E2E against the shared spine server. Drives the SAME
     /// two-direction round-trip the Rust reference template proves, entirely
@@ -963,14 +1632,18 @@ mod tests {
 
         // PID-unique DB path so a stale file from a prior run can't yield a
         // false positive (mirrors the reference template).
-        let db_path = std::env::temp_dir()
-            .join(format!("nostos-tauri-e2e-{}.sqlite", std::process::id()));
+        let db_path =
+            std::env::temp_dir().join(format!("nostos-tauri-e2e-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&db_path);
 
         let state = NostosState::new();
         let url = format!("ws://127.0.0.1:{port}/sync");
         state
-            .connect(url, None, db_path.to_str().expect("utf8 db path").to_owned())
+            .connect(
+                Some(url),
+                None,
+                Some(db_path.to_str().expect("utf8 db path").to_owned()),
+            )
             .await
             .expect("connect");
 
@@ -994,9 +1667,7 @@ mod tests {
                 "tasks".into(),
                 "upsert".into(),
                 "tauri-echo".into(),
-                Some(
-                    r#"{"title":"from-client","status":"open","priority":"5"}"#.into(),
-                ),
+                Some(r#"{"title":"from-client","status":"open","priority":"5"}"#.into()),
             )
             .await
             .expect("write");
@@ -1016,9 +1687,7 @@ mod tests {
     /// `cairn_data` (the apply engine's target table) or `deadline` elapses.
     /// Returns `Some(())` once the row is queryable.
     async fn poll_query_pk(state: &NostosState, pk: &str, deadline: Duration) -> Option<()> {
-        let sql = format!(
-            "SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = '{pk}'"
-        );
+        let sql = format!("SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = '{pk}'");
         let end = tokio::time::Instant::now() + deadline;
         loop {
             let rows_json = state.query(sql.clone()).await.expect("query");

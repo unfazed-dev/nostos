@@ -134,6 +134,21 @@ pub struct TokenRecord {
     pub account_tag: Option<String>,
 }
 
+/// One stored API key (the hashed-at-rest key store, B2 of the arxa
+/// integration plan). The secret_digest field is SHA-256 of the secret — the
+/// raw secret exists ONLY at mint time (CLI prints it once, never stores
+/// it). rate_per_sec/burst are per-tenant send-limit overrides; None = the
+/// daemon-wide defaults. role is "standard" or "rail" (auth.rs KeyRole as
+/// persisted text — the store does not import auth).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredApiKey {
+    pub tenant_id: String,
+    pub secret_digest: [u8; 32],
+    pub role: String,
+    pub rate_per_sec: Option<u32>,
+    pub burst: Option<u32>,
+}
+
 /// A receipt to append. seq is assigned by the store.
 #[derive(Debug, Clone)]
 pub struct NewReceipt {
@@ -210,6 +225,27 @@ pub trait Store: Send + Sync {
 
     /// Delete receipts older than the retention window; returns rows swept.
     async fn sweep_receipts(&self, retention_secs: u64) -> anyhow::Result<u64>;
+
+    /// Upsert one API key row (hashed-at-rest key store, B2). One key per
+    /// tenant — the PRIMARY KEY mirrors the env list's duplicate-tenant
+    /// rejection. The defaults below error: the key store is the SQLite
+    /// registry's feature; a Pg-backed daemon keeps env keys until it
+    /// implements this (documented, not silent).
+    async fn upsert_api_key(&self, key: &StoredApiKey) -> anyhow::Result<()> {
+        let _ = key;
+        anyhow::bail!("api-key store unsupported on this backend")
+    }
+
+    /// Every stored key, unordered.
+    async fn list_api_keys(&self) -> anyhow::Result<Vec<StoredApiKey>> {
+        Ok(Vec::new())
+    }
+
+    /// Delete one tenant's key; true when a row existed.
+    async fn delete_api_key(&self, tenant_id: &str) -> anyhow::Result<bool> {
+        let _ = tenant_id;
+        anyhow::bail!("api-key store unsupported on this backend")
+    }
 }
 
 /// Fixed-width RFC3339 (always 9 subsecond digits, always Z) so TEXT
@@ -285,7 +321,13 @@ impl SqliteStore {
                 metadata TEXT,
                 provider_ts TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_receipts_tenant_seq
-                ON receipts(tenant_id, seq);",
+                ON receipts(tenant_id, seq);
+            CREATE TABLE IF NOT EXISTS api_keys (
+                tenant_id TEXT PRIMARY KEY,
+                secret_digest BLOB NOT NULL CHECK(length(secret_digest) = 32),
+                role TEXT NOT NULL CHECK(role IN ('standard','rail')),
+                rate_per_sec INTEGER CHECK(rate_per_sec IS NULL OR rate_per_sec >= 0),
+                burst INTEGER CHECK(burst IS NULL OR burst >= 0));",
         )?;
         Ok(())
     }
@@ -453,6 +495,65 @@ impl Store for SqliteStore {
             rusqlite::params![cutoff],
         )?;
         Ok(u64::try_from(n).unwrap_or(0))
+    }
+    async fn upsert_api_key(&self, key: &StoredApiKey) -> anyhow::Result<()> {
+        let c = self.conn.lock().await;
+        let sql = "INSERT INTO api_keys (tenant_id, secret_digest, role, rate_per_sec, burst) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(tenant_id) DO UPDATE SET secret_digest = excluded.secret_digest, role = excluded.role, rate_per_sec = excluded.rate_per_sec, burst = excluded.burst";
+        c.execute(
+            sql,
+            rusqlite::params![
+                key.tenant_id,
+                key.secret_digest,
+                key.role,
+                key.rate_per_sec,
+                key.burst,
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn list_api_keys(&self) -> anyhow::Result<Vec<StoredApiKey>> {
+        let c = self.conn.lock().await;
+        let mut stmt =
+            c.prepare("SELECT tenant_id, secret_digest, role, rate_per_sec, burst FROM api_keys")?;
+        let rows = stmt.query_map([], |row| {
+            let digest: Vec<u8> = row.get(1)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                digest,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (tenant_id, digest, role, rate, burst) = row?;
+            let secret_digest: [u8; 32] = digest.try_into().map_err(|v: Vec<u8>| {
+                anyhow::anyhow!(
+                    "api_keys.secret_digest not 32 bytes for tenant {}: {}",
+                    tenant_id,
+                    v.len()
+                )
+            })?;
+            out.push(StoredApiKey {
+                tenant_id,
+                secret_digest,
+                role,
+                rate_per_sec: rate.map(|r| u32::try_from(r).unwrap_or(u32::MAX)),
+                burst: burst.map(|b| u32::try_from(b).unwrap_or(u32::MAX)),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn delete_api_key(&self, tenant_id: &str) -> anyhow::Result<bool> {
+        let c = self.conn.lock().await;
+        let n = c.execute(
+            "DELETE FROM api_keys WHERE tenant_id = ?1",
+            rusqlite::params![tenant_id],
+        )?;
+        Ok(n > 0)
     }
 }
 

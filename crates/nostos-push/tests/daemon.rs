@@ -16,7 +16,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nostos_infra::push::{PushPayload, RailOutcome};
 use nostos_push::auth::ApiKeys;
-use nostos_push::coalescer::{self, CoalescerLimits};
+use nostos_push::coalescer::{self, CoalescerLimits, RetryPolicy};
 use nostos_push::limit::SendRateLimiter;
 use nostos_push::rail::{RailDispatch, Rails};
 use nostos_push::store::{Platform, SqliteStore, Store};
@@ -130,17 +130,39 @@ impl Daemon {
 /// Bind a daemon: in-memory store, the given rails, the given debounce,
 /// production-default rate limits and coalescer ceilings.
 async fn spawn_daemon(debounce_ms: u64, rails: Rails) -> Daemon {
-    spawn_daemon_tuned(debounce_ms, rails, 10, 50, CoalescerLimits::default()).await
+    spawn_daemon_tuned(
+        debounce_ms,
+        rails,
+        10,
+        50,
+        CoalescerLimits::default(),
+        RetryPolicy::default(),
+    )
+    .await
 }
 
-/// Bind a daemon with explicit rate/ceiling knobs — the audit tests run
-/// with tiny values (plan task 4.1: ceilings must be injectable).
+/// Bind a daemon with an explicit retry policy (B2 transient-retry tests).
+async fn spawn_daemon_retry(debounce_ms: u64, rails: Rails, retry: RetryPolicy) -> Daemon {
+    spawn_daemon_tuned(
+        debounce_ms,
+        rails,
+        10,
+        50,
+        CoalescerLimits::default(),
+        retry,
+    )
+    .await
+}
+
+/// Bind a daemon with explicit rate/ceiling/retry knobs — the audit tests
+/// run with tiny values (plan task 4.1: ceilings must be injectable).
 async fn spawn_daemon_tuned(
     debounce_ms: u64,
     rails: Rails,
     rate_per_sec: u32,
     send_burst: u32,
     limits: CoalescerLimits,
+    retry: RetryPolicy,
 ) -> Daemon {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().expect("store"));
     let coalescer = coalescer::spawn_coalescer(
@@ -148,6 +170,7 @@ async fn spawn_daemon_tuned(
         rails.clone(),
         Duration::from_millis(debounce_ms),
         limits,
+        retry,
     );
     let state = AppState {
         store,
@@ -231,6 +254,128 @@ async fn wait_for_receipts(d: &Daemon, key: &str, n: usize) -> Vec<Value> {
     panic!("timed out waiting for {n} receipts");
 }
 
+// --------------------------------------------------------- transient retry (B2)
+
+/// A transient rail outcome (429/5xx/network) re-debounces and retries:
+/// scripted [TransientRetryable, Delivered] => exactly 2 rail sends and a
+/// DELIVERED receipt — the embedded router's one-deferred-retry shape,
+/// ported to the daemon (arxa integration plan B2).
+#[tokio::test]
+async fn transient_outcome_retries_then_delivers() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let mock = mock.scripted(vec![RailOutcome::TransientRetryable]);
+    let d = spawn_daemon_retry(
+        30,
+        rails_for(Platform::Apns, &mock),
+        RetryPolicy {
+            max_attempts: 2,
+            delay: Duration::from_millis(20),
+        },
+    )
+    .await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    let push_id = send_silent(&d, KEY_A, TOKEN_A, json!({"i": 0})).await;
+
+    let receipts = wait_for_receipts(&d, KEY_A, 1).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["push_id"].as_str() == Some(push_id.as_str()))
+        .unwrap_or_else(|| panic!("receipt for {push_id}: {receipts:?}"));
+    assert_eq!(r["outcome"], json!("delivered"), "retry recovered: {r}");
+    // Let any (wrong) third send fire before counting.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(*calls.lock().unwrap(), 2, "1 initial + 1 deferred retry");
+}
+
+/// An exhausted transient budget receipts outcome=transient with a
+/// retries-exhausted detail — exactly max_attempts sends, never more (the
+/// doorbell semantics: abandon; the next event re-pushes).
+#[tokio::test]
+async fn exhausted_transient_receipts_with_detail() {
+    let (calls, mock) = MockRail::new(RailOutcome::TransientRetryable);
+    let d = spawn_daemon_retry(
+        30,
+        rails_for(Platform::Apns, &mock),
+        RetryPolicy {
+            max_attempts: 2,
+            delay: Duration::from_millis(20),
+        },
+    )
+    .await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    let push_id = send_silent(&d, KEY_A, TOKEN_A, json!({"i": 0})).await;
+
+    let receipts = wait_for_receipts(&d, KEY_A, 1).await;
+    let r = receipts
+        .iter()
+        .find(|r| r["push_id"].as_str() == Some(push_id.as_str()))
+        .unwrap_or_else(|| panic!("receipt for {push_id}: {receipts:?}"));
+    assert_eq!(r["outcome"], json!("transient"), "never delivered: {r}");
+    let detail = r["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("retries exhausted"),
+        "detail names the exhaustion: {r}"
+    );
+    // Let any (wrong) third send fire before counting.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(*calls.lock().unwrap(), 2, "budget of 2 respected");
+}
+
+/// max_attempts=1 restores v1 behavior exactly: one send, terminal
+/// transient receipt, no re-debounce (the off-switch operators can set).
+#[tokio::test]
+async fn max_attempts_one_disables_retry() {
+    let (calls, mock) = MockRail::new(RailOutcome::TransientRetryable);
+    let d = spawn_daemon_retry(
+        30,
+        rails_for(Platform::Apns, &mock),
+        RetryPolicy {
+            max_attempts: 1,
+            delay: Duration::from_millis(20),
+        },
+    )
+    .await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    let _ = send_silent(&d, KEY_A, TOKEN_A, json!({"i": 0})).await;
+
+    let receipts = wait_for_receipts(&d, KEY_A, 1).await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(*calls.lock().unwrap(), 1, "no retry when disabled");
+    assert_eq!(receipts.len(), 1, "exactly one receipt");
+}
+
+/// The retry preserves the every-push_id-one-receipt invariant across a
+/// coalesced burst: 5 sends in one window, transient-then-delivered rail =>
+/// 5 receipts (1 delivered winner + 4 coalesced), 2 rail sends.
+#[tokio::test]
+async fn retry_preserves_one_receipt_per_push_id_across_coalescing() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let mock = mock.scripted(vec![RailOutcome::TransientRetryable]);
+    let d = spawn_daemon_retry(
+        60,
+        rails_for(Platform::Apns, &mock),
+        RetryPolicy {
+            max_attempts: 2,
+            delay: Duration::from_millis(20),
+        },
+    )
+    .await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    let mut push_ids = Vec::new();
+    for i in 0..5 {
+        push_ids.push(send_silent(&d, KEY_A, TOKEN_A, json!({"i": i})).await);
+    }
+
+    let receipts = wait_for_receipts(&d, KEY_A, 5).await;
+    for pid in &push_ids {
+        let n = receipts
+            .iter()
+            .filter(|r| r["push_id"].as_str() == Some(pid.as_str()))
+            .count();
+        assert_eq!(n, 1, "push_id {pid} receipted exactly once");
+    }
+    assert_eq!(*calls.lock().unwrap(), 2, "window retried as a whole");
+}
 // ------------------------------------------------------------------ auth
 
 #[tokio::test]
@@ -600,7 +745,19 @@ async fn receipt_outcomes_mapped_with_detail() {
         RailOutcome::Fatal("boom".to_string()),
         RailOutcome::TransientRetryable,
     ]);
-    let d = spawn_daemon(120, rails_for(Platform::Apns, &mock)).await;
+    // Retry DISABLED here (max_attempts=1) so this test pins the pure
+    // rail-outcome -> receipt mapping. With the default policy a transient
+    // re-debounces first; the retry-recovered and retries-exhausted shapes
+    // are pinned by the B2 transient-retry tests below.
+    let d = spawn_daemon_retry(
+        120,
+        rails_for(Platform::Apns, &mock),
+        RetryPolicy {
+            max_attempts: 1,
+            delay: Duration::from_millis(10),
+        },
+    )
+    .await;
     register_apns(&d, KEY_A, TOKEN_A).await;
 
     // Fatal: outcome fatal + the rail's diagnostic as detail.
@@ -609,14 +766,64 @@ async fn receipt_outcomes_mapped_with_detail() {
     assert_eq!(r1[0]["outcome"], json!("fatal"));
     assert_eq!(r1[0]["detail"], json!("boom"));
 
-    // Transient: terminal on the receipt in v1 (no retries — callers retry).
+    // Transient with retry off: terminal on the receipt, with the budget
+    // exhaustion detail (consistent across max_attempts values — a terminal
+    // transient always names why: budget was 1 here, 2 in the B2 test).
     tokio::time::sleep(Duration::from_millis(250)).await;
     send_silent(&d, KEY_A, TOKEN_A, json!({})).await;
     let r2 = wait_for_receipts(&d, KEY_A, 2).await;
     assert_eq!(r2[1]["outcome"], json!("transient"));
-    assert!(r2[1].get("detail").is_none());
+    assert_eq!(
+        r2[1]["detail"],
+        json!("retries exhausted after 1 attempts"),
+        "the exhaustion detail names the configured budget"
+    );
 }
 
+// ------------------------------------------- per-tenant limits + Retry-After (B2)
+
+/// The limiter's 429 carries a Retry-After header derived from the
+/// tenant's deficit — rate 0/burst 2: two sends pass, the third 429s with
+/// Retry-After: 1 (the off-switch floor; a zero rate never recovers).
+#[tokio::test]
+async fn rate_limited_429_carries_retry_after() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon_tuned(
+        30,
+        rails_for(Platform::Apns, &mock),
+        0,
+        2,
+        CoalescerLimits::default(),
+        RetryPolicy::default(),
+    )
+    .await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    assert!(*calls.lock().unwrap() < 999); // rails wired
+    let _ = send_silent(&d, KEY_A, TOKEN_A, json!({})).await;
+    let _ = send_silent(&d, KEY_A, TOKEN_A, json!({})).await;
+
+    let resp = d
+        .client
+        .post(d.url("/v1/send"))
+        .bearer_auth(KEY_A)
+        .json(&json!({
+            "token": TOKEN_A,
+            "payload": {"silent": {"table": "docs", "lsn": "1"}},
+        }))
+        .send()
+        .await
+        .expect("third send");
+    assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let ra = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ra.chars().all(|c| c.is_ascii_digit()) && !ra.is_empty(),
+        "Retry-After must be whole seconds, got {ra:?}"
+    );
+}
 // -------------------------------------------------------------- receipts
 
 #[tokio::test]
@@ -851,6 +1058,7 @@ async fn send_rate_limited_429_after_burst_other_tenant_unaffected() {
         0,
         2,
         CoalescerLimits::default(),
+        RetryPolicy::default(),
     )
     .await;
     let rail_body = |token: &str| {
@@ -1062,6 +1270,7 @@ async fn coalescer_pending_key_ceiling_429_until_windows_flush() {
             pending_keys_max: 2,
             losers_max: 64,
         },
+        RetryPolicy::default(),
     )
     .await;
     let rail_body = |token: &str, lsn: u64| {
@@ -1144,6 +1353,7 @@ async fn coalescer_losers_ceiling_every_push_id_still_receipted() {
             pending_keys_max: 10_000,
             losers_max: 4,
         },
+        RetryPolicy::default(),
     )
     .await;
     let mut push_ids = Vec::new();
@@ -1377,6 +1587,7 @@ async fn batch_send_rate_short_bucket_429_non_draining() {
         0,
         5,
         CoalescerLimits::default(),
+        RetryPolicy::default(),
     )
     .await;
     register_apns(&d, KEY_A, "tok-batch-rate").await;
@@ -1417,6 +1628,7 @@ async fn batch_send_phase1_failure_refunds_tokens() {
         0,
         5,
         CoalescerLimits::default(),
+        RetryPolicy::default(),
     )
     .await;
     register_apns(&d, KEY_A, "tok-refund").await;

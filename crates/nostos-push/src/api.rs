@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Json;
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -51,11 +51,31 @@ pub struct AppState {
     pub gate: SharedPendingGate,
 }
 
-/// The contract's error body everywhere: {"error": string}.
-type ApiError = (StatusCode, Json<serde_json::Value>);
+/// The contract's error body everywhere: {"error": string}, plus an
+/// (almost always empty) header map — the one header ever set today is
+/// `Retry-After` on limiter 429s (B2).
+type ApiError = (StatusCode, HeaderMap, Json<serde_json::Value>);
 
 fn err(status: StatusCode, message: impl Into<String>) -> ApiError {
-    (status, Json(serde_json::json!({ "error": message.into() })))
+    (
+        status,
+        HeaderMap::new(),
+        Json(serde_json::json!({ "error": message.into() })),
+    )
+}
+
+/// A 429 with the standard `Retry-After` header (seconds) — the limiter
+/// derives it from the tenant's bucket deficit (B2).
+fn err_retry_after(message: impl Into<String>, retry_after_secs: u64) -> ApiError {
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+        headers.insert(header::RETRY_AFTER, v);
+    }
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        headers,
+        Json(serde_json::json!({ "error": message.into() })),
+    )
 }
 
 fn internal(message: &str) -> ApiError {
@@ -397,10 +417,10 @@ async fn send(
     Extension(role): Extension<KeyRole>,
     raw: Bytes,
 ) -> Result<(StatusCode, Json<SendAcceptedBody>), ApiError> {
-    if !state.send_limiter.try_acquire(&tenant.0) {
-        return Err(err(
-            StatusCode::TOO_MANY_REQUESTS,
+    if let Err(rejected) = state.send_limiter.try_acquire(&tenant.0) {
+        return Err(err_retry_after(
             "send rate limit exceeded for this tenant — retry later",
+            rejected.retry_after_secs,
         ));
     }
     let body: SendRequest = serde_json::from_slice(&raw)
@@ -561,7 +581,7 @@ async fn send_batch(
     // can NEVER acquire n tokens, so reject it at 400 here instead of a
     // guaranteed 429 (batches of 51..=100 were unreachable at the default
     // burst of 50 — caught in review 2026-08-17).
-    let effective_cap = MAX_BATCH_ITEMS.min(state.send_limiter.burst() as usize);
+    let effective_cap = MAX_BATCH_ITEMS.min(state.send_limiter.burst_for(&tenant.0) as usize);
     if body.items.is_empty() || body.items.len() > effective_cap {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -574,10 +594,10 @@ async fn send_batch(
     // One token PER ITEM, atomically: an insufficient bucket 429s the whole
     // batch and keeps every token (try_acquire_n never partially drains).
     let n = u32::try_from(body.items.len()).unwrap_or(u32::MAX);
-    if !state.send_limiter.try_acquire_n(&tenant.0, n) {
-        return Err(err(
-            StatusCode::TOO_MANY_REQUESTS,
+    if let Err(rejected) = state.send_limiter.try_acquire_n(&tenant.0, n) {
+        return Err(err_retry_after(
             "send rate limit exceeded for this tenant — retry later (batches are all-or-nothing)",
+            rejected.retry_after_secs,
         ));
     }
     // Phase 1 (atomic): validate + resolve + rail-check every item BEFORE
@@ -609,7 +629,7 @@ async fn send_batch(
             })?;
             let platform = resolve_platform(&state, &tenant.0, &token, platform, &role)
                 .await
-                .map_err(|(status, Json(v)): (StatusCode, Json<serde_json::Value>)| {
+                .map_err(|(status, _headers, Json(v)): (StatusCode, HeaderMap, Json<serde_json::Value>)| {
                     let msg = v
                         .get("error")
                         .and_then(serde_json::Value::as_str)

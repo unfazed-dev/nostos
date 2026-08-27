@@ -18,6 +18,8 @@ fn main() {
         "watch",
         "set_token",
         "sign_out",
+        "register_push_token",
+        "deregister_push_token",
     ])
     .build();
 }

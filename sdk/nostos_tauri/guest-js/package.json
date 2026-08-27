@@ -1,0 +1,28 @@
+{
+  "name": "@nostos-sync/tauri",
+  "version": "0.1.0",
+  "description": "Typed JS/TS guest bindings for the nostos Tauri 2 plugin (SyncClient<SqliteStorage> for Tauri webviews)",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unfazed-dev/nostos.git",
+    "directory": "sdk/nostos_tauri/guest-js"
+  }
+}

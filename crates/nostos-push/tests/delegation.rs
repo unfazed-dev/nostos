@@ -131,6 +131,7 @@ async fn spawn_daemon() -> (SocketAddr, Arc<Mutex<usize>>, String) {
         rails.clone(),
         Duration::from_millis(1500),
         CoalescerLimits::default(),
+        coalescer::RetryPolicy::default(),
     );
     let state = AppState {
         store,
