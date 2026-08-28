@@ -324,19 +324,22 @@ abstract class NostosHandle implements RustOpaqueInterface {
 /// Coarse connection-state signal for `Stream<NostosConnectionState>` on the
 /// Dart side.
 ///
-/// ponytail: `Connected` is a heuristic, not a precise signal from
-/// `SyncClient`. `SyncClient::run_once` blocks for the entire session
-/// (connect → subscribe → apply loop) and only returns on error or a clean
-/// server-initiated close — there is no mid-call hook to observe "the WS
-/// handshake + subscribe succeeded" without a further `nostos-client` change,
-/// which this task deliberately avoided to keep the additive surface minimal
-/// (see `SyncClient::subscribe_changes` / `with_storage`, which WERE worth
-/// adding). Instead: if `run_once()` hasn't already failed within a short
-/// grace window (`CONNECT_GRACE`), assume the handshake succeeded — a real
-/// connection refusal / DNS failure surfaces near-instantly. A slow-but-doomed
-/// connect can show a brief false `Connected` before flipping to
-/// `Disconnected`; acceptable for a v1 UI-facing signal. Upgrade path: add a
-/// `connected`/`subscribed` broadcast to `SyncClient` alongside `changes`.
+/// `Connected` is now a PROVEN signal, not a heuristic: it fires only when
+/// `SyncClient::subscribed()` reports the session's subscribe accepted AND a
+/// post-acceptance frame has arrived (snapshot boundary, replication event,
+/// or write ack — see the `subscribed` field docs in nostos-client). The old
+/// grace-window heuristic ("`run_once` hasn't failed within 250ms ⇒ assume
+/// connected") lied exactly when it mattered: a rules-rejected subscribe
+/// loop flapped `Connected` while ZERO rows ever arrived, and Dart's
+/// `waitForFirstSync()` completed against a session that never synced
+/// (observed 2026-08-27).
+///
+/// ponytail: the REJECTION reason itself still doesn't cross to Dart — the
+/// loop below stops retrying on `ClientError::SubscribeRejected` (surfaces
+/// as a final `Disconnected`, not a reconnect storm) and logs the reason via
+/// tracing, but the enum carries no payload. Upgrade path: a
+/// `NostosConnectionState::Rejected(String)` variant or a sibling error
+/// stream; requires an FRB regen, deliberately deferred.
 enum NostosConnectionState { connecting, connected, reconnecting, disconnected }
 
 /// One write op inside a `write_batch` group (ADR-0032 T3). Same fields as
