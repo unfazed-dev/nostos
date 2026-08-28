@@ -316,21 +316,37 @@ mod pg {
         /// the whole RMW — single writer per row, audit 2026-08-17 M4: the old
         /// check-out-then-query pattern let a concurrent merge open a SECOND
         /// connection, and two same-row merges could both SELECT the same
-        /// state — one element silently lost). No-tenant only; the
-        /// tenant + OR-set case falls through to the clobber path in `upsert`
-        /// (tenant-scoped shared sets are fixture co-design; the pomodoro
-        /// community row is the shared, unscoped case).
+        /// state — one element silently lost).
+        ///
+        /// Tenant-scoped when `tenant` is `Some` (ADR-0018 extended to the
+        /// merge paths): the SELECT is scoped so a merge never READS another
+        /// tenant's state into ours, the INSERT stamps the tenant column with
+        /// the PRINCIPAL's value, and the ON CONFLICT carries the same guard
+        /// as the clobber path — a conflict against a row owned by a different
+        /// tenant affects 0 rows and surfaces as `Forbidden` instead of a
+        /// silent ownership change. The tenant binds go through
+        /// prepare + `coerce_params` (unlike the no-tenant path, kept
+        /// byte-identical) so a uuid-shaped tenant value binds correctly
+        /// against BOTH text and uuid tenant columns.
         async fn or_set_merge(
             &self,
             table: &str,
             pk: &str,
             col: &str,
             payload_json: &str,
+            tenant: Option<TenantScope<'_>>,
         ) -> Result<(), WriteBackError> {
             if let Err(bad) = validate_ident(col) {
                 return Err(WriteBackError::InvalidPayload(format!(
                     "bad OR-set column identifier: {bad}"
                 )));
+            }
+            if let Some(t) = tenant {
+                if let Err(bad) = validate_ident(t.column) {
+                    return Err(WriteBackError::InvalidPayload(format!(
+                        "bad tenant column identifier: {bad}"
+                    )));
+                }
             }
             let quoted_table = quote_ident(table);
             let quoted_pk = quote_ident(PK_COLUMN);
@@ -352,15 +368,45 @@ mod pg {
             // Read the existing element-set (NULL / absent row → empty → just the
             // incoming set). Cast jsonb → text so the bytes round-trip through
             // serde_json unchanged.
-            let select_sql =
-                format!("SELECT {quoted_col}::text FROM {quoted_table} WHERE {quoted_pk} = $1");
-            let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                vec![pk_value.as_tosql()];
-            let existing: Option<String> = match client.query_opt(&select_sql, &sel_params).await {
-                Ok(Some(row)) => row.get::<_, Option<String>>(0),
-                Ok(None) => None,
-                Err(e) => {
-                    return Err(WriteBackError::Backend(e.to_string()));
+            let existing: Option<String> = match tenant {
+                None => {
+                    let select_sql = format!(
+                        "SELECT {quoted_col}::text FROM {quoted_table} WHERE {quoted_pk} = $1"
+                    );
+                    let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        vec![pk_value.as_tosql()];
+                    match client.query_opt(&select_sql, &sel_params).await {
+                        Ok(Some(row)) => row.get::<_, Option<String>>(0),
+                        Ok(None) => None,
+                        Err(e) => {
+                            return Err(WriteBackError::Backend(e.to_string()));
+                        }
+                    }
+                }
+                Some(t) => {
+                    let quoted_tcol = quote_ident(t.column);
+                    let select_sql = format!(
+                        "SELECT {quoted_col}::text FROM {quoted_table} \
+                         WHERE {quoted_pk} = $1 AND {quoted_tcol} = $2"
+                    );
+                    let mut sel_values =
+                        vec![SqlValue::from_pk(pk), SqlValue::from_scalar(t.value)];
+                    let stmt = match client.prepare(&select_sql).await {
+                        Ok(s) => s,
+                        Err(e) => return Err(WriteBackError::Backend(e.to_string())),
+                    };
+                    if let Err(msg) = coerce_params(&stmt, &mut sel_values) {
+                        return Err(WriteBackError::InvalidPayload(msg));
+                    }
+                    let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        sel_values.iter().map(SqlValue::as_tosql).collect();
+                    match client.query_opt(&stmt, &sel_params).await {
+                        Ok(Some(row)) => row.get::<_, Option<String>>(0),
+                        Ok(None) => None,
+                        Err(e) => {
+                            return Err(WriteBackError::Backend(e.to_string()));
+                        }
+                    }
                 }
             };
             let existing_bytes = existing.as_deref().map_or(&b""[..], str::as_bytes);
@@ -371,19 +417,62 @@ mod pg {
                 serde_json::from_slice(&merged).unwrap_or(serde_json::Value::Null);
             let col_value = json_value_to_sql(&merged_value);
 
-            let sql = format!(
-                "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}) \
-                 VALUES ($1, $2) \
-                 ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col}"
-            );
-            let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                vec![pk_value.as_tosql(), col_value.as_tosql()];
-            match client.execute(&sql, &ins_params).await {
-                Ok(_) => {
-                    *guard = Some(client);
-                    Ok(())
+            match tenant {
+                None => {
+                    let sql = format!(
+                        "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}) \
+                         VALUES ($1, $2) \
+                         ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col}"
+                    );
+                    let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        vec![pk_value.as_tosql(), col_value.as_tosql()];
+                    match client.execute(&sql, &ins_params).await {
+                        Ok(_) => {
+                            *guard = Some(client);
+                            Ok(())
+                        }
+                        Err(e) => Err(WriteBackError::Backend(e.to_string())),
+                    }
                 }
-                Err(e) => Err(WriteBackError::Backend(e.to_string())),
+                Some(t) => {
+                    let quoted_tcol = quote_ident(t.column);
+                    let sql = format!(
+                        "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}, {quoted_tcol}) \
+                         VALUES ($1, $2, $3) \
+                         ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col} \
+                         WHERE {quoted_table}.{quoted_tcol} = EXCLUDED.{quoted_tcol}"
+                    );
+                    let mut ins_values = vec![
+                        SqlValue::from_pk(pk),
+                        col_value,
+                        SqlValue::from_scalar(t.value),
+                    ];
+                    let stmt = match client.prepare(&sql).await {
+                        Ok(s) => s,
+                        Err(e) => return Err(WriteBackError::Backend(e.to_string())),
+                    };
+                    if let Err(msg) = coerce_params(&stmt, &mut ins_values) {
+                        return Err(WriteBackError::InvalidPayload(msg));
+                    }
+                    let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        ins_values.iter().map(SqlValue::as_tosql).collect();
+                    match client.execute(&stmt, &ins_params).await {
+                        Ok(rows) => {
+                            *guard = Some(client);
+                            // A fresh insert always affects one row; 0 rows here
+                            // can ONLY be the guard firing on a pk owned by a
+                            // different tenant — reject explicitly (same rule as
+                            // the clobber path's rows == 0 check).
+                            if rows == 0 {
+                                return Err(WriteBackError::Forbidden(format!(
+                                    "row {pk} in {table} belongs to a different tenant"
+                                )));
+                            }
+                            Ok(())
+                        }
+                        Err(e) => Err(WriteBackError::Backend(e.to_string())),
+                    }
+                }
             }
         }
 
@@ -391,18 +480,28 @@ mod pg {
         /// max into the configured JSONB column (read-modify-write with the
         /// pool guard HELD across the whole RMW — single writer per row,
         /// audit M4).
-        /// Mirrors `or_set_merge` but uses the counter merge primitive.
+        /// Mirrors `or_set_merge` but uses the counter merge primitive —
+        /// including the tenant scoping (scoped SELECT, principal-stamped
+        /// INSERT, guarded ON CONFLICT → `Forbidden` on cross-tenant pk).
         async fn counter_merge(
             &self,
             table: &str,
             pk: &str,
             col: &str,
             payload_json: &str,
+            tenant: Option<TenantScope<'_>>,
         ) -> Result<(), WriteBackError> {
             if let Err(bad) = validate_ident(col) {
                 return Err(WriteBackError::InvalidPayload(format!(
                     "bad counter column identifier: {bad}"
                 )));
+            }
+            if let Some(t) = tenant {
+                if let Err(bad) = validate_ident(t.column) {
+                    return Err(WriteBackError::InvalidPayload(format!(
+                        "bad tenant column identifier: {bad}"
+                    )));
+                }
             }
             let quoted_table = quote_ident(table);
             let quoted_pk = quote_ident(PK_COLUMN);
@@ -421,15 +520,45 @@ mod pg {
                     .await
                     .map_err(WriteBackError::Backend)?,
             };
-            let select_sql =
-                format!("SELECT {quoted_col}::text FROM {quoted_table} WHERE {quoted_pk} = $1");
-            let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                vec![pk_value.as_tosql()];
-            let existing: Option<String> = match client.query_opt(&select_sql, &sel_params).await {
-                Ok(Some(row)) => row.get::<_, Option<String>>(0),
-                Ok(None) => None,
-                Err(e) => {
-                    return Err(WriteBackError::Backend(e.to_string()));
+            let existing: Option<String> = match tenant {
+                None => {
+                    let select_sql = format!(
+                        "SELECT {quoted_col}::text FROM {quoted_table} WHERE {quoted_pk} = $1"
+                    );
+                    let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        vec![pk_value.as_tosql()];
+                    match client.query_opt(&select_sql, &sel_params).await {
+                        Ok(Some(row)) => row.get::<_, Option<String>>(0),
+                        Ok(None) => None,
+                        Err(e) => {
+                            return Err(WriteBackError::Backend(e.to_string()));
+                        }
+                    }
+                }
+                Some(t) => {
+                    let quoted_tcol = quote_ident(t.column);
+                    let select_sql = format!(
+                        "SELECT {quoted_col}::text FROM {quoted_table} \
+                         WHERE {quoted_pk} = $1 AND {quoted_tcol} = $2"
+                    );
+                    let mut sel_values =
+                        vec![SqlValue::from_pk(pk), SqlValue::from_scalar(t.value)];
+                    let stmt = match client.prepare(&select_sql).await {
+                        Ok(s) => s,
+                        Err(e) => return Err(WriteBackError::Backend(e.to_string())),
+                    };
+                    if let Err(msg) = coerce_params(&stmt, &mut sel_values) {
+                        return Err(WriteBackError::InvalidPayload(msg));
+                    }
+                    let sel_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        sel_values.iter().map(SqlValue::as_tosql).collect();
+                    match client.query_opt(&stmt, &sel_params).await {
+                        Ok(Some(row)) => row.get::<_, Option<String>>(0),
+                        Ok(None) => None,
+                        Err(e) => {
+                            return Err(WriteBackError::Backend(e.to_string()));
+                        }
+                    }
                 }
             };
             let existing_bytes = existing.as_deref().map_or(&b""[..], str::as_bytes);
@@ -439,19 +568,60 @@ mod pg {
                 serde_json::from_slice(&merged).unwrap_or(serde_json::Value::Null);
             let col_value = json_value_to_sql(&merged_value);
 
-            let sql = format!(
-                "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}) \
-                 VALUES ($1, $2) \
-                 ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col}"
-            );
-            let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                vec![pk_value.as_tosql(), col_value.as_tosql()];
-            match client.execute(&sql, &ins_params).await {
-                Ok(_) => {
-                    *guard = Some(client);
-                    Ok(())
+            match tenant {
+                None => {
+                    let sql = format!(
+                        "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}) \
+                         VALUES ($1, $2) \
+                         ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col}"
+                    );
+                    let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        vec![pk_value.as_tosql(), col_value.as_tosql()];
+                    match client.execute(&sql, &ins_params).await {
+                        Ok(_) => {
+                            *guard = Some(client);
+                            Ok(())
+                        }
+                        Err(e) => Err(WriteBackError::Backend(e.to_string())),
+                    }
                 }
-                Err(e) => Err(WriteBackError::Backend(e.to_string())),
+                Some(t) => {
+                    let quoted_tcol = quote_ident(t.column);
+                    let sql = format!(
+                        "INSERT INTO {quoted_table} ({quoted_pk}, {quoted_col}, {quoted_tcol}) \
+                         VALUES ($1, $2, $3) \
+                         ON CONFLICT ({quoted_pk}) DO UPDATE SET {quoted_col} = EXCLUDED.{quoted_col} \
+                         WHERE {quoted_table}.{quoted_tcol} = EXCLUDED.{quoted_tcol}"
+                    );
+                    let mut ins_values = vec![
+                        SqlValue::from_pk(pk),
+                        col_value,
+                        SqlValue::from_scalar(t.value),
+                    ];
+                    let stmt = match client.prepare(&sql).await {
+                        Ok(s) => s,
+                        Err(e) => return Err(WriteBackError::Backend(e.to_string())),
+                    };
+                    if let Err(msg) = coerce_params(&stmt, &mut ins_values) {
+                        return Err(WriteBackError::InvalidPayload(msg));
+                    }
+                    let ins_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                        ins_values.iter().map(SqlValue::as_tosql).collect();
+                    match client.execute(&stmt, &ins_params).await {
+                        Ok(rows) => {
+                            *guard = Some(client);
+                            // 0 rows ⟺ the guard fired on a pk owned by a
+                            // different tenant — reject explicitly.
+                            if rows == 0 {
+                                return Err(WriteBackError::Forbidden(format!(
+                                    "row {pk} in {table} belongs to a different tenant"
+                                )));
+                            }
+                            Ok(())
+                        }
+                        Err(e) => Err(WriteBackError::Backend(e.to_string())),
+                    }
+                }
             }
         }
     }
@@ -483,29 +653,23 @@ mod pg {
 
             // ADR-0030 slice 3: OR-set tables merge element-wise into a configured
             // JSONB column instead of clobbering, so concurrent client adds
-            // converge server-side. No-tenant only — tenant + OR-set falls through
-            // to the clobber path below (tenant-scoped shared sets are fixture
-            // co-design; the pomodoro community row is the shared, unscoped case).
+            // converge server-side. Tenant-scoped when a scope is active: the
+            // merge reads/stamps/guards the tenant column exactly like the
+            // clobber path below (ADR-0018 extended to the merge paths).
             if let Some(col) = self.or_set_columns.get(table) {
-                if tenant.is_none() {
-                    return self
-                        .or_set_merge(table, pk, col.as_str(), payload_json)
-                        .await;
-                }
-                // ponytail: tenant + OR-set → clobber (no regression vs today; the
-                // tenant-scoped merge is deferred to the fixture that needs it).
+                return self
+                    .or_set_merge(table, pk, col.as_str(), payload_json, tenant)
+                    .await;
             }
 
             // ADR-0030 addendum: PN-Counter tables merge per-replica elementwise
             // max into a configured JSONB column, so concurrent client increments
             // converge server-side (state-based CRDT — no server-side counter
-            // race). No-tenant only, mirroring the OR-set path.
+            // race). Tenant-scoped the same way, mirroring the OR-set path.
             if let Some(col) = self.counter_columns.get(table) {
-                if tenant.is_none() {
-                    return self
-                        .counter_merge(table, pk, col.as_str(), payload_json)
-                        .await;
-                }
+                return self
+                    .counter_merge(table, pk, col.as_str(), payload_json, tenant)
+                    .await;
             }
 
             // 3. Parse + validate the payload. Must be a JSON object; every key
