@@ -1,8 +1,20 @@
 # ADR-0041: Transport abstraction — `ws` | `iroh` as a first-class server/client option
 
-- **Status:** Proposed — D4 spike branch `spike/iroh-transport` exists and is green (see Spike Results below); upstream accept/reject still pending.
-- **Date:** 2026-08-27
-- **References:** `crates/nostos-infra/src/transport/` (the sync handler seam), `crates/nostos-server/src/main.rs` router assembly (`/sync` mount), `crates/nostos-client/src/client.rs` generic session loop, ADR-0025 (LSN/epoch resume — unchanged by this proposal), ADR-0032 (unified API — unchanged), iroh 0.91.2 docs (docs.rs, fetched 2026-08-27).
+- **Status:** **Accepted** (2026-08-29) — D4 spike merged to main at `2e6cb9c`; conditions and gated items in **Acceptance** below. (Proposed 2026-08-27; spike branch `spike/iroh-transport`, green — see Spike Results.)
+- **Date:** 2026-08-27 (accepted 2026-08-29)
+- **References:** `crates/nostos-infra/src/transport/` (the sync handler seam), `crates/nostos-server/src/main.rs` router assembly (`/sync` mount), `crates/nostos-client/src/client.rs` generic session loop, ADR-0025 (LSN/epoch resume — unchanged by this proposal), ADR-0032 (unified API — unchanged), iroh **1.1.0** docs (docs.rs — the spike shipped the 1.x stable line: `NodeAddr`→`EndpointAddr`, tickets → `iroh-tickets`; the 0.91.2 citations in Context are the proposal's original evidence pass), decision memo `docs/plans/adr-0041-decision-memo.md`.
+
+## Acceptance (2026-08-29)
+
+Accepted on the spike evidence (ws/iroh conformance parity re-run green at `680852f`; merge rehearsed — one mechanical conflict; iroh off-default everywhere; iOS/Android build viability verified) with these **conditions**:
+
+1. No consumer defaults to `iroh://` until the **field leg** passes (phone on cellular, relay path — the unrun half of "the test that matters").
+2. The loopback-bridge ponytail is resolved — the native `run_session` frame-io refactor — or explicitly re-accepted with its ceiling restated.
+3. Self-hosted relay guidance + the n0-fleet privacy note land with or before the SDK wiring.
+4. The exact iroh pin stays; upgrades are budgeted spikes (one breaking rename already observed: 0.91 → 1.1 inside a single spike).
+5. iroh remains off-default in every shipped artifact until conditions 1–3 clear.
+
+The reversal trigger (Consequences) is unchanged: drop the `iroh` transport, keep the seam, ws-only, no protocol change.
 
 ## Context
 
