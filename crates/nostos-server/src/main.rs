@@ -1039,7 +1039,17 @@ async fn main() -> anyhow::Result<()> {
     // direct-dialing ws client) binds NOSTOS_BIND in BOTH modes.
     #[cfg(feature = "iroh")]
     if cfg.transport == "iroh" {
-        let endpoint = nostos_infra::iroh_sync::bind_sync_endpoint()
+        // ADR-0041 D8: env-only operator knob (same argv-leak reasoning as
+        // NOSTOS_LICENSE_SECRET — main.rs reads it, infra stays env-free).
+        // Some(url) = self-hosted relay replaces the n0 default fleet.
+        let relay_url = nostos_infra::iroh_sync::parse_relay_url(
+            std::env::var("NOSTOS_IROH_RELAY_URL").ok().as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        if let Some(url) = &relay_url {
+            info!(relay = %url, "iroh sync: NOSTOS_IROH_RELAY_URL set — self-hosted relay replaces the n0 default fleet");
+        }
+        let endpoint = nostos_infra::iroh_sync::bind_sync_endpoint(relay_url)
             .await
             .context("iroh sync endpoint bind failed")?;
         let url = endpoint.url(&cfg.ws_path);

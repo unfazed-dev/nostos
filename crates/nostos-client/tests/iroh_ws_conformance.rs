@@ -141,7 +141,7 @@ async fn conformance_over_ws() {
 async fn conformance_over_iroh() {
     // The native server shape (ADR-0041 D6): no HTTP listener in the session
     // path — the accept loop drives the session core directly.
-    let endpoint = bind_sync_endpoint()
+    let endpoint = bind_sync_endpoint(None)
         .await
         .expect("bind the iroh sync endpoint");
     let url = endpoint.url("/sync");
@@ -179,7 +179,7 @@ async fn iroh_auth_rejects_bad_token() {
             .with_metrics(metrics)
             .with_snapshotter(Arc::new(SeedSnapshotter))
     };
-    let endpoint = bind_sync_endpoint()
+    let endpoint = bind_sync_endpoint(None)
         .await
         .expect("bind the iroh sync endpoint");
     let url = endpoint.url("/sync");

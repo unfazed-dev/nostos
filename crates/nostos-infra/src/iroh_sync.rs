@@ -31,6 +31,7 @@ use std::task::{Context, Poll};
 use axum::extract::ws::{CloseFrame as WsClose, Message as WsMessage};
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
 use iroh::endpoint::{presets, Endpoint, RecvStream, SendStream};
+use iroh::{RelayMode, RelayUrl};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::tungstenite;
@@ -42,13 +43,42 @@ use crate::transport::{bearer_token, run_session, AuthQuery, SyncRouterState};
 /// The ALPN every nostos sync participant registers/dials (ADR-0041 §2).
 pub const NOSTOS_SYNC_ALPN: &[u8] = b"cairn/sync/1";
 
+/// Parse the optional `NOSTOS_IROH_RELAY_URL` value (ADR-0041 D8): the URL of
+/// a self-hosted iroh relay that REPLACES the n0 default relay fleet for the
+/// sync endpoint (`RelayMode::Custom`). Unset/empty/whitespace → `None` (keep
+/// the n0 defaults). An unparseable value is a startup-fatal config error
+/// (`Err`), never silently ignored — the operator runbook pattern
+/// (docs/OPERATING.md §1).
+pub fn parse_relay_url(value: Option<&str>) -> Result<Option<RelayUrl>, String> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    raw.parse::<RelayUrl>()
+        .map(Some)
+        .map_err(|e| format!("invalid NOSTOS_IROH_RELAY_URL {raw:?}: {e}"))
+}
+
 /// Bind a sync endpoint with the default n0 preset (relay + discovery) and
 /// register the nostos sync ALPN. The returned handle exposes the dial URL.
-pub async fn bind_sync_endpoint() -> Result<SyncEndpoint, iroh::endpoint::BindError> {
-    let endpoint = Endpoint::builder(presets::N0)
-        .alpns(vec![NOSTOS_SYNC_ALPN.to_vec()])
-        .bind()
-        .await?;
+///
+/// `relay_url`: `Some(url)` swaps the n0 default relay fleet for that
+/// self-hosted relay (`RelayMode::Custom`); the printed dial URL's ticket
+/// then carries it, and stock clients dial straight through (iroh's relay
+/// transport treats any peer-address relay URL as dialable).
+// ponytail: `presets::N0` keeps n0's iroh.link DNS/pkarr discovery
+// (publish + resolve) even when a custom relay replaces the fleet — the QR
+// ticket carries the relay/addr hints, so pairing never depends on
+// discovery. A discovery cut-off knob (`clear_address_lookup`) lands only if
+// an operator asks for zero third-party contact; docs/OPERATING.md §9.
+pub async fn bind_sync_endpoint(
+    relay_url: Option<RelayUrl>,
+) -> Result<SyncEndpoint, iroh::endpoint::BindError> {
+    let builder = Endpoint::builder(presets::N0).alpns(vec![NOSTOS_SYNC_ALPN.to_vec()]);
+    let builder = match relay_url {
+        Some(url) => builder.relay_mode(RelayMode::custom([url])),
+        None => builder,
+    };
+    let endpoint = builder.bind().await?;
     Ok(SyncEndpoint { endpoint })
 }
 
@@ -313,6 +343,41 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_relay_url_none_or_empty_keeps_n0_defaults() {
+        assert_eq!(parse_relay_url(None).unwrap(), None);
+        assert_eq!(parse_relay_url(Some("")).unwrap(), None);
+        assert_eq!(parse_relay_url(Some("   ")).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_relay_url_valid_url_round_trips() {
+        let parsed = parse_relay_url(Some("https://relay.example.com"))
+            .unwrap()
+            .expect("a valid URL must parse");
+        assert_eq!(parsed.to_string(), "https://relay.example.com/");
+        // Whitespace-padded values trim to the same relay.
+        let padded = parse_relay_url(Some("  https://relay.example.com "))
+            .unwrap()
+            .expect("padded valid URL must parse");
+        assert_eq!(padded, parsed);
+    }
+
+    #[test]
+    fn parse_relay_url_garbage_is_a_named_startup_error() {
+        let err = parse_relay_url(Some("not a url")).expect_err("garbage must not parse");
+        assert!(
+            err.contains("NOSTOS_IROH_RELAY_URL"),
+            "error must name the var: {err}"
+        );
+        assert!(
+            err.contains("not a url"),
+            "error must echo the value: {err}"
+        );
+        // A bare host without scheme is a relative URL — also rejected.
+        assert!(parse_relay_url(Some("relay.example.com")).is_err());
+    }
 
     #[test]
     fn urlencode_escapes_reserved() {
