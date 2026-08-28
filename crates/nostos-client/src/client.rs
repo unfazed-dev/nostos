@@ -1328,7 +1328,6 @@ where
         });
     }
 
-
     /// Mark the current session PROVEN. Private: only the receive loop may
     /// say the server accepted us (a post-acceptance frame arrived).
     fn mark_subscribed(&self) {

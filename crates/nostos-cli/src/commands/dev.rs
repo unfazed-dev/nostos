@@ -204,10 +204,7 @@ mod tests {
             "NOSTOS_COUNTER_COLUMNS".to_string(),
             "counters:value".to_string(),
         );
-        dotenv_vars.insert(
-            "NOSTOS_OR_SET_COLUMNS".to_string(),
-            "sets:tags".to_string(),
-        );
+        dotenv_vars.insert("NOSTOS_OR_SET_COLUMNS".to_string(), "sets:tags".to_string());
         let mut env_pairs = Vec::new();
         push_crdt_columns_env(&mut env_pairs, &dotenv_vars);
         assert_eq!(

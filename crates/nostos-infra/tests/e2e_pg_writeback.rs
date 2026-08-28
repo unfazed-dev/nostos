@@ -1238,12 +1238,22 @@ async fn or_set_writeback_tenant_scoped_merge_converges_and_isolates() {
     };
 
     // Two replicas of tenant acme each add a distinct element to one row.
-    wb.upsert("nostosorsettenant", "shared-1", &element("alice", 1), Some(acme))
-        .await
-        .expect("alice add");
-    wb.upsert("nostosorsettenant", "shared-1", &element("bob", 2), Some(acme))
-        .await
-        .expect("bob add");
+    wb.upsert(
+        "nostosorsettenant",
+        "shared-1",
+        &element("alice", 1),
+        Some(acme),
+    )
+    .await
+    .expect("alice add");
+    wb.upsert(
+        "nostosorsettenant",
+        "shared-1",
+        &element("bob", 2),
+        Some(acme),
+    )
+    .await
+    .expect("bob add");
 
     // Converged AND stamped: the row belongs to acme and holds both elements.
     let id = "shared-1".to_string();
@@ -1255,24 +1265,41 @@ async fn or_set_writeback_tenant_scoped_merge_converges_and_isolates() {
         .await
         .expect("shared row exists after both adds");
     let tenant_id: String = row.get(0);
-    assert_eq!(tenant_id, "acme", "merge insert must stamp the principal's tenant");
+    assert_eq!(
+        tenant_id, "acme",
+        "merge insert must stamp the principal's tenant"
+    );
     let members_text: String = row.get::<_, Option<String>>(1).expect("members populated");
     let present =
         nostos_domain::present_elements(members_text.as_bytes()).expect("parse merged set");
-    assert!(present.contains(&"alice".to_string()), "alice clobbered: {present:?}");
-    assert!(present.contains(&"bob".to_string()), "bob missing: {present:?}");
+    assert!(
+        present.contains(&"alice".to_string()),
+        "alice clobbered: {present:?}"
+    );
+    assert!(
+        present.contains(&"bob".to_string()),
+        "bob missing: {present:?}"
+    );
 
     // A DIFFERENT tenant merging the same pk: Forbidden, and acme's state is
     // byte-identical afterwards (no read-fold, no clobber, no ownership move).
     let err = wb
-        .upsert("nostosorsettenant", "shared-1", &element("carol", 3), Some(other))
+        .upsert(
+            "nostosorsettenant",
+            "shared-1",
+            &element("carol", 3),
+            Some(other),
+        )
         .await;
     assert!(
         matches!(err, Err(WriteBackError::Forbidden(_))),
         "cross-tenant merge must be Forbidden, got {err:?}"
     );
     let after: String = sql
-        .query_one("SELECT members::text FROM nostosorsettenant WHERE id = $1", &[&id])
+        .query_one(
+            "SELECT members::text FROM nostosorsettenant WHERE id = $1",
+            &[&id],
+        )
         .await
         .expect("row still there")
         .get::<_, Option<String>>(0)
@@ -1283,9 +1310,14 @@ async fn or_set_writeback_tenant_scoped_merge_converges_and_isolates() {
     );
 
     // Isolation cuts both ways: other's merge on a FRESH pk stamps other.
-    wb.upsert("nostosorsettenant", "other-1", &element("carol", 4), Some(other))
-        .await
-        .expect("carol add on her own row");
+    wb.upsert(
+        "nostosorsettenant",
+        "other-1",
+        &element("carol", 4),
+        Some(other),
+    )
+    .await
+    .expect("carol add on her own row");
     let other_tenant: String = sql
         .query_one(
             "SELECT tenant_id FROM nostosorsettenant WHERE id = 'other-1'",
@@ -1325,14 +1357,8 @@ async fn counter_writeback_tenant_scoped_merge_sums_and_isolates() {
     counter_columns.insert("nostoscountertenant".to_string(), "value".to_string());
     let wb = PgWriteBack::new(&pg_url(), allowlist).with_counter_columns(counter_columns);
 
-    let acme = nostos_domain::TenantScope::new(
-        "tenant_id",
-        "11111111-1111-1111-1111-111111111111",
-    );
-    let other = nostos_domain::TenantScope::new(
-        "tenant_id",
-        "22222222-2222-2222-2222-222222222222",
-    );
+    let acme = nostos_domain::TenantScope::new("tenant_id", "11111111-1111-1111-1111-111111111111");
+    let other = nostos_domain::TenantScope::new("tenant_id", "22222222-2222-2222-2222-222222222222");
     let counts = |r: &str, p: u64, n: u64| {
         serde_json::to_string(&nostos_domain::PnCounterPayload {
             entries: vec![nostos_domain::PnEntry {
@@ -1345,12 +1371,22 @@ async fn counter_writeback_tenant_scoped_merge_sums_and_isolates() {
     };
 
     // Two replicas of the same tenant: +5 and −2 (p=3,n=2 nets +1) → total 6.
-    wb.upsert("nostoscountertenant", "counter-1", &counts("r1", 5, 0), Some(acme))
-        .await
-        .expect("r1 flush");
-    wb.upsert("nostoscountertenant", "counter-1", &counts("r2", 3, 2), Some(acme))
-        .await
-        .expect("r2 flush");
+    wb.upsert(
+        "nostoscountertenant",
+        "counter-1",
+        &counts("r1", 5, 0),
+        Some(acme),
+    )
+    .await
+    .expect("r1 flush");
+    wb.upsert(
+        "nostoscountertenant",
+        "counter-1",
+        &counts("r2", 3, 2),
+        Some(acme),
+    )
+    .await
+    .expect("r2 flush");
 
     let id = "counter-1".to_string();
     let row = sql
@@ -1368,19 +1404,30 @@ async fn counter_writeback_tenant_scoped_merge_sums_and_isolates() {
 
     // Cross-tenant merge on the same pk: Forbidden, state untouched.
     let err = wb
-        .upsert("nostoscountertenant", "counter-1", &counts("r9", 100, 0), Some(other))
+        .upsert(
+            "nostoscountertenant",
+            "counter-1",
+            &counts("r9", 100, 0),
+            Some(other),
+        )
         .await;
     assert!(
         matches!(err, Err(WriteBackError::Forbidden(_))),
         "cross-tenant counter merge must be Forbidden, got {err:?}"
     );
     let after: String = sql
-        .query_one("SELECT value::text FROM nostoscountertenant WHERE id = $1", &[&id])
+        .query_one(
+            "SELECT value::text FROM nostoscountertenant WHERE id = $1",
+            &[&id],
+        )
         .await
         .expect("row still there")
         .get::<_, Option<String>>(0)
         .expect("value still populated");
-    assert_eq!(after, value_text, "cross-tenant merge must not touch the row");
+    assert_eq!(
+        after, value_text,
+        "cross-tenant merge must not touch the row"
+    );
 
     let _ = sql.batch_execute("DROP TABLE nostoscountertenant;").await;
 }
