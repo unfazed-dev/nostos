@@ -10,7 +10,7 @@ Accepted on the spike evidence (ws/iroh conformance parity re-run green at `6808
 
 1. No consumer defaults to `iroh://` until the **field leg** passes (phone on cellular, relay path — the unrun half of "the test that matters").
 2. ~~The loopback-bridge ponytail is resolved~~ — **RESOLVED 2026-08-29** (`da772aa`): `run_session` is generic over the frame `Stream`/`Sink`; the iroh accept loop runs the WS handshake natively on each QUIC stream and drives the session core directly. Bridge deleted; auth parity pinned by `iroh_auth_rejects_bad_token`; HTTP surface binds NOSTOS_BIND in both modes.
-3. Self-hosted relay guidance + the n0-fleet privacy note land with or before the SDK wiring.
+3. ~~Self-hosted relay guidance + the n0-fleet privacy note land with or before the SDK wiring~~ — **RESOLVED 2026-08-29** (`c060bee`): `NOSTOS_IROH_RELAY_URL` (env-only, startup-fatal on a bad value) swaps the n0 default relay fleet for a self-hosted relay via `RelayMode::Custom`; the dial URL's ticket carries it, so stock clients dial straight through (iroh's relay transport accepts any peer-address relay URL — verified against vendored iroh 1.1.0 `socket/transports/relay.rs`). Guidance + privacy note + the discovery limitation (`iroh.link` stays n0's; `ponytail:` at `bind_sync_endpoint`) in `docs/OPERATING.md` §9.
 4. The exact iroh pin stays; upgrades are budgeted spikes (one breaking rename already observed: 0.91 → 1.1 inside a single spike).
 5. iroh remains off-default in every shipped artifact until conditions 1–3 clear.
 

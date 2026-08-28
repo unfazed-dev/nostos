@@ -19,6 +19,8 @@ flag is absent; flag wins when present.
 |---|---|---|
 | `NOSTOS_BIND` | `0.0.0.0:8800` | axum bind address. |
 | `NOSTOS_WS_PATH` | `/sync` | WebSocket path clients connect to. |
+| `NOSTOS_TRANSPORT` | `ws` | Sync transport (ADR-0041): `ws` = `/sync` over HTTP/WS on `NOSTOS_BIND`; `iroh` = sync sessions served natively over an iroh/QUIC endpoint, printing the QR-native `iroh://` dial URL. Requires a `--features iroh` build; off-default in every shipped artifact until ADR-0041's conditions clear. The HTTP ops surface binds `NOSTOS_BIND` in both modes. See §9. |
+| `NOSTOS_IROH_RELAY_URL` | _empty_ | **Env-only (NOT a clap flag)** — read only in `--features iroh` builds under `NOSTOS_TRANSPORT=iroh`; kept out of clap so binaries without the feature don't advertise a knob they can't use. URL of a self-hosted iroh relay replacing n0's default relay fleet. Unparseable = startup-fatal. See §9. |
 | `NOSTOS_SESSION_BUFFER` | `1024` | Per-session bounded channel depth; slow clients that fall further behind are dropped (explicit, observable — never silent OOM). |
 | `NOSTOS_REPLICATOR` | `fake` | **Critical.** `fake` = synthetic generator (zero-setup). `pg` = real Postgres logical replication. Anything else bails: `unknown NOSTOS_REPLICATOR value: {other}` (`main.rs:466`). |
 | `NOSTOS_PG_URL` | _empty_ | Postgres URL for `NOSTOS_REPLICATOR=pg`. Empty under `pg` bails fast (`main.rs:406`, `main.rs:497`). |
@@ -476,7 +478,66 @@ reconnects to an ADR-0031 server, it doesn't yet send `rules_checksum` in its
 full re-snapshot per client, one time. This is expected, not a regression;
 say so in release notes so it isn't reported as a bug.
 
-## 9. References
+## 9. iroh transport: relays, discovery, and who sees what (ADR-0041)
+
+`NOSTOS_TRANSPORT=iroh` (build with `cargo build -p nostos-server --features
+iroh`) serves sync sessions natively over an iroh/QUIC endpoint instead of
+HTTP/WS; the boot log prints a QR-native `iroh://…?ticket=…` dial URL. iroh
+is **off by default** in every shipped artifact until ADR-0041's acceptance
+conditions clear — treat it as preview.
+
+**Third-party contact by default.** `presets::N0` — the endpoint preset
+nostos uses (`crates/nostos-infra/src/iroh_sync.rs`) — talks to two n0
+(number zero) services:
+
+- **Relay fleet** (`RelayMode::Default`) — relays establish connectivity
+  and carry traffic when NAT hole-punching fails (restrictive NATs and
+  cellular commonly land here). Payloads are end-to-end encrypted QUIC with
+  device-keyed TLS: the relay operator **cannot read sync data**, but sees
+  connection metadata — endpoint IDs, source IPs, timing, byte volume.
+- **Address discovery** (`iroh.link` DNS + pkarr publish/resolve) — the
+  endpoint publishes its endpoint-id → relay/address mapping, signed by the
+  endpoint key, and resolves peers through the same service.
+
+The pairing ticket inside the dial URL carries the relay + direct-address
+hints, so **pairing never depends on discovery** — discovery is a
+re-resolution convenience, not a hard dependency.
+
+**Self-hosting the relay.** Run iroh's relay server (the `iroh-relay` crate
+ships the binary; nostos vendors iroh 1.1.0 — match versions):
+
+- Dev: `iroh-relay --dev` — localhost, plain HTTP on :3340.
+- Prod: config file with TLS certs or ACME; default ports 80/443 (HTTP/S),
+  7842 (QUIC), 9090 (metrics) — the crate's `main.rs` / `defaults.rs`.
+
+Then point the server at it:
+
+```
+NOSTOS_TRANSPORT=iroh NOSTOS_IROH_RELAY_URL=https://relay.example.com nostos-server
+```
+
+(`http://127.0.0.1:3340` against `--dev`.) An unparseable value is
+startup-fatal (`invalid NOSTOS_IROH_RELAY_URL …`). Boot logs
+`self-hosted relay replaces the n0 default fleet` naming the relay, and the
+printed dial URL's ticket now carries YOUR relay — **unmodified clients
+dial straight through it, no client-side config** (iroh's relay transport
+treats any relay URL in the peer's address as dialable). iroh's built-in
+`IROH_FORCE_STAGING_RELAYS` env (n0 staging fleet) is overridden when
+`NOSTOS_IROH_RELAY_URL` is set.
+
+**What self-hosting does NOT cut off today.**
+
+- Discovery stays on n0's `iroh.link` even with a custom relay
+  (`presets::N0` publishes regardless — `ponytail:` at
+  `bind_sync_endpoint`). Pairing doesn't depend on it; a cutoff knob
+  (`clear_address_lookup`) lands if an operator actually asks.
+- A `nostos-client` default endpoint still homes onto the n0 fleet and
+  publishes to `iroh.link` for its own addressing. A zero-third-party
+  deployment needs client-side knobs that don't exist yet — tracked under
+  ADR-0041's SDK-wiring item (D7), which keeps iroh off-default in shipped
+  artifacts regardless.
+
+## 10. References
 
 - Setup / install: [QUICKSTART.md](QUICKSTART.md).
 - Architecture / dependency rule: [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -486,8 +547,10 @@ say so in release notes so it isn't reported as a bug.
   resume), 0010 (sync auth), 0011 (server-enforced tenant predicates), 0013
   (write-back allowlist), 0016 (client WAL-bloat protection),
   0025 (persisted oplog backfill), 0031 (sync rules modes + checksum
-  resync). See [adr/](adr/).
+  resync), 0041 (ws | iroh transport, relay/discovery third-party contact).
+  See [adr/](adr/).
 - Source code cited above: `crates/nostos-server/src/main.rs`,
   `crates/nostos-infra/src/transport.rs`,
+  `crates/nostos-infra/src/iroh_sync.rs`,
   `crates/nostos-infra/src/replicator/pg.rs`,
   `crates/nostos-cli/src/{main.rs,commands/{init,doctor,dev,rules}.rs}`.
