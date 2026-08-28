@@ -1,29 +1,22 @@
-//! ADR-0041 SPIKE: the iroh transport — accept loop + ticket URL.
+//! ADR-0041: the iroh transport — endpoint, QR-native ticket URL, and the
+//! native accept loop.
 //!
-//! Scope of the spike (per ADR-0041 D4): prove the transport seam end to end
-//! — a sync client dials an iroh:// URL and completes a full session against
-//! a nostos server — while the session core stays byte-identical.
+//! One client session = one QUIC connection = one bidirectional stream
+//! (ADR-0041 §2). Each accepted stream runs the standard WebSocket server
+//! handshake IN PLACE (tungstenite works over any `AsyncRead + AsyncWrite`),
+//! then drives the SAME session core the axum `/sync` handler drives —
+//! `crate::transport::run_session` is generic over the frame `Stream`/`Sink`
+//! (D6). No loopback hop, no HTTP in the session path; the HTTP listener
+//! keeps only the ops surface (healthz/metrics/schema/push REST).
 //!
-//! ## How the spike bridges (and what the native end-state replaces)
+//! Auth parity with `sync_handler`: the handshake request is captured via
+//! `accept_hdr_async` and the token check is the same policy (Authorization
+//! header, else `?token=`, else `""` → the anonymous principal). The verifier
+//! is async, so a rejected token is answered with a `4401` close frame right
+//! after the handshake — where the axum path answers a pre-upgrade 401 —
+//! and no session state is ever created.
 //!
-//! The sync session core (run_session in transport.rs) is typed on axum's
-//! WebSocket, which can only be produced by an HTTP upgrade. Rather than
-//! refactor the core onto a transport trait inside the spike, each accepted
-//! iroh bidirectional stream is BRIDGED to the server's own loopback HTTP
-//! listener as raw bytes: the client runs the full WebSocket handshake over
-//! the iroh stream (tokio-tungstenite over any AsyncRead+AsyncWrite), those
-//! bytes surface on the loopback TCP connection, and axum upgrades it exactly
-//! as if the client had dialed TCP directly. This is the same bridging shape
-//! arxa studio's desktop pairing uses in production today (one iroh stream
-//! per HTTP exchange), so the pattern has field mileage.
-//!
-//! ponytail: the bridge costs one loopback TCP hop per connection — fine for
-//! the spike's proof, but the native end-state (if the ADR is accepted) is a
-//! run_session refactor onto a small frame-io trait so iroh streams drive the
-//! session core directly, deleting the hop. The conformance legs in
-//! nostos-client pin the BEHAVIOR so that refactor is a pure internal change.
-//!
-//! ## Addressing (ADR-0041 D4 §4)
+//! ## Addressing (ADR-0041 §4)
 //!
 //! The server prints an iroh:// URL carrying the node id plus a
 //! urlencoded EndpointTicket (relay + direct-address hints). This is
@@ -31,9 +24,20 @@
 
 #![cfg(feature = "iroh")]
 
-use iroh::endpoint::{presets, Endpoint};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use axum::extract::ws::{CloseFrame as WsClose, Message as WsMessage};
+use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
+use iroh::endpoint::{presets, Endpoint, RecvStream, SendStream};
 use iroh_tickets::endpoint::EndpointTicket;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, warn};
+
+use crate::transport::{bearer_token, run_session, AuthQuery, SyncRouterState};
 
 /// The ALPN every nostos sync participant registers/dials (ADR-0041 §2).
 pub const NOSTOS_SYNC_ALPN: &[u8] = b"cairn/sync/1";
@@ -66,10 +70,9 @@ impl SyncEndpoint {
         format!("iroh://{node}{ws_path}?ticket={}", urlencode(&ticket))
     }
 
-    /// Serve until the endpoint errors: accept connections, one bridge task
-    /// per bidirectional stream, piping raw bytes to the loopback HTTP
-    /// listener at http_addr (where the sync route is mounted).
-    pub async fn serve_bridge(&self, http_addr: std::net::SocketAddr) {
+    /// Serve until the endpoint errors: accept connections, accept every
+    /// bidirectional stream on each, and drive one sync session per stream.
+    pub async fn serve_sessions(&self, state: SyncRouterState) {
         loop {
             let Some(incoming) = self.endpoint.accept().await else {
                 debug!("iroh accept loop ended");
@@ -82,13 +85,12 @@ impl SyncEndpoint {
                     continue;
                 }
             };
-            let http = http_addr;
+            let state = state.clone();
             tokio::spawn(async move {
                 while let Ok((send, recv)) = conn.accept_bi().await {
+                    let state = state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = bridge_stream(send, recv, http).await {
-                            debug!(error = %e, "iroh sync stream bridge ended");
-                        }
+                        handle_stream(state, send, recv).await;
                     });
                 }
             });
@@ -96,31 +98,196 @@ impl SyncEndpoint {
     }
 }
 
-/// Pipe one iroh bidirectional stream against one fresh loopback TCP
-/// connection. Byte-opaque in both directions; the WebSocket (and its
-/// upgrade) rides inside, terminated by axum on the TCP side.
-async fn bridge_stream(
-    send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
-    http_addr: std::net::SocketAddr,
-) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let mut send = send;
-    let mut tcp = tokio::net::TcpStream::connect(http_addr).await?;
-    let (mut tcp_read, mut tcp_write) = tcp.split();
-
-    let uplink = async {
-        tokio::io::copy(&mut tcp_read, &mut send).await?;
-        let _ = send.finish();
-        Ok::<(), std::io::Error>(())
+/// One accepted bi-stream: WebSocket server handshake in place (capturing
+/// the request so the token check sees the same inputs the axum handler
+/// sees), authenticate, then hand the socket to the shared session core.
+// result_large_err: tungstenite's accept-callback signature is fixed
+// (Result<Response, ErrorResponse>) — not ours to slim.
+#[allow(clippy::result_large_err)]
+async fn handle_stream(state: SyncRouterState, send: SendStream, recv: RecvStream) {
+    let captured: Arc<Mutex<Option<tungstenite::handshake::server::Request>>> =
+        Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&captured);
+    let ws = match tokio_tungstenite::accept_hdr_async(
+        BiStream { send, recv },
+        move |req: &tungstenite::handshake::server::Request,
+              resp: tungstenite::handshake::server::Response| {
+            *slot.lock().expect("handshake capture mutex poisoned") = Some(req.clone());
+            Ok(resp)
+        },
+    )
+    .await
+    {
+        Ok(ws) => ws,
+        Err(e) => {
+            debug!(error = %e, "iroh sync websocket handshake failed");
+            return;
+        }
     };
-    let downlink = async {
-        tokio::io::copy(&mut recv, &mut tcp_write).await?;
-        tcp_write.shutdown().await?;
-        Ok::<(), std::io::Error>(())
+
+    // Token policy identical to transport::sync_handler. The captured request
+    // is always Some after a successful accept_hdr_async; the `Option` chain
+    // keeps a hypothetical miss on the anonymous path rather than panicking.
+    let req = captured
+        .lock()
+        .expect("handshake capture mutex poisoned")
+        .take();
+    let token = req
+        .as_ref()
+        .and_then(|r| bearer_token(r.headers()))
+        .or_else(|| {
+            req.as_ref().and_then(|r| {
+                axum::extract::Query::<AuthQuery>::try_from_uri(r.uri())
+                    .ok()
+                    .and_then(|axum::extract::Query(q)| q.token)
+            })
+        })
+        .unwrap_or_default();
+    let Some(principal) = state.auth.authenticate(&token).await else {
+        debug!("iroh sync session rejected: authentication failed");
+        let mut sock = IrohSessionSocket { inner: ws };
+        let frame = WsClose {
+            code: 4401,
+            reason: "nostos: authentication required for /sync".into(),
+        };
+        let _ = sock.send(WsMessage::Close(Some(frame))).await;
+        return;
     };
-    tokio::try_join!(uplink, downlink).map(|_| ())
+    let exp = crate::auth::token_exp(&token);
+    run_session(IrohSessionSocket { inner: ws }, state, principal, exp).await;
+}
+
+/// A server-side WebSocket over one iroh bi-stream, adapted to the axum
+/// frame type `run_session` is typed on. The ONLY translation in the iroh
+/// path — framing, ping/pong, and close semantics are tungstenite's either
+/// way (axum's `WebSocket` is itself tungstenite underneath).
+pub struct IrohSessionSocket {
+    inner: WebSocketStream<BiStream>,
+}
+
+impl Stream for IrohSessionSocket {
+    type Item = Result<WsMessage, tungstenite::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.poll_next_unpin(cx) {
+            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(to_axum(msg))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Sink<WsMessage> for IrohSessionSocket {
+    type Error = tungstenite::Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_ready(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: WsMessage) -> Result<(), Self::Error> {
+        Pin::new(&mut self.inner).start_send(to_tungstenite(item))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
+/// tungstenite → axum frame translation (the adapter's read half).
+///
+/// Both enums hold String/Vec<u8>/Cow payloads at these versions (axum's ws
+/// module is itself derived from tungstenite), so only the close CODE needs
+/// converting (tungstenite's `CloseCode` enum ↔ axum's u16).
+// result_large_err: the error type is tungstenite's own — dictated by its
+// API, not ours to box.
+#[allow(clippy::result_large_err)]
+fn to_axum(msg: tungstenite::Message) -> Result<WsMessage, tungstenite::Error> {
+    Ok(match msg {
+        tungstenite::Message::Text(t) => WsMessage::Text(t),
+        tungstenite::Message::Binary(b) => WsMessage::Binary(b),
+        tungstenite::Message::Ping(p) => WsMessage::Ping(p),
+        tungstenite::Message::Pong(p) => WsMessage::Pong(p),
+        tungstenite::Message::Close(cf) => WsMessage::Close(cf.map(|f| WsClose {
+            code: u16::from(f.code),
+            reason: f.reason,
+        })),
+        // Read-side never yields raw frames per tungstenite docs; be loud if
+        // that ever changes rather than silently dropping session data.
+        tungstenite::Message::Frame(_) => {
+            return Err(tungstenite::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected raw frame on the server read side",
+            )));
+        }
+    })
+}
+
+/// axum → tungstenite frame translation (the adapter's write half).
+fn to_tungstenite(msg: WsMessage) -> tungstenite::Message {
+    match msg {
+        WsMessage::Text(t) => tungstenite::Message::Text(t),
+        WsMessage::Binary(b) => tungstenite::Message::Binary(b),
+        WsMessage::Ping(p) => tungstenite::Message::Ping(p),
+        WsMessage::Pong(p) => tungstenite::Message::Pong(p),
+        WsMessage::Close(cf) => {
+            tungstenite::Message::Close(cf.map(|f| tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::from(f.code),
+                reason: f.reason,
+            }))
+        }
+    }
+}
+
+/// One iroh bidirectional stream as a single `AsyncRead + AsyncWrite` object
+/// (tungstenite wants one stream; iroh hands out halves). Shared by the
+/// client dial (`nostos-client::iroh_dial`) and the server accept loop here.
+#[derive(Debug)]
+pub struct BiStream {
+    /// The write half.
+    pub send: SendStream,
+    /// The read half.
+    pub recv: RecvStream,
+}
+
+impl AsyncRead for BiStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.recv).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for BiStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        // iroh's SendStream exposes inherent poll methods typed with its
+        // own WriteError; tokio's AsyncWrite wants io::Error — map across.
+        Pin::new(&mut self.send)
+            .poll_write(cx, buf)
+            .map_err(std::io::Error::other)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.send)
+            .poll_flush(cx)
+            .map_err(std::io::Error::other)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.send)
+            .poll_shutdown(cx)
+            .map_err(std::io::Error::other)
+    }
 }
 
 /// Minimal percent-encoding for the ticket inside a URL query param: escape
@@ -151,5 +318,20 @@ mod tests {
     fn urlencode_escapes_reserved() {
         assert_eq!(urlencode("a b/c?d"), "a%20b%2Fc%3Fd");
         assert_eq!(urlencode("plain-AZ_09.~"), "plain-AZ_09.~");
+    }
+
+    #[test]
+    fn message_translation_round_trips_close_codes() {
+        // The writer's contract-critical closes (4401 expiry, 1007 rejects)
+        // must survive the axum → tungstenite hop exactly.
+        let msg = to_tungstenite(WsMessage::Close(Some(WsClose {
+            code: 4401,
+            reason: "nostos: token expired".into(),
+        })));
+        let tungstenite::Message::Close(Some(frame)) = msg else {
+            panic!("close frame lost in translation");
+        };
+        assert_eq!(u16::from(frame.code), 4401);
+        assert_eq!(&*frame.reason, "nostos: token expired");
     }
 }

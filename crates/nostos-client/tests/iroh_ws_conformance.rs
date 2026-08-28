@@ -1,6 +1,6 @@
-//! ADR-0041 spike conformance: the SAME fixture, the SAME assertions, the
-//! URL swapped ws:// <-> iroh://. This is "the test that matters" from the
-//! ADR — the transport is plumbing, so behavior must be identical.
+//! ADR-0041 transport conformance: the SAME fixture, the SAME assertions,
+//! the URL swapped ws:// <-> iroh://. This is "the test that matters" from
+//! the ADR — the transport is plumbing, so behavior must be identical.
 //!
 //! Fixture: an all-mode server whose SeedSnapshotter hands "tasks" two
 //! pre-existing rows — a fresh client connecting over EITHER transport must
@@ -139,27 +139,75 @@ async fn conformance_over_ws() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn conformance_over_iroh() {
-    let app = axum::Router::new()
-        .route("/sync", axum::routing::get(sync_handler))
-        .with_state(build_app_state());
-    // The spike's server shape: HTTP on loopback, iroh bridge beside it.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bridge_addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.ok();
-    });
-    std::mem::forget(server);
-
+    // The native server shape (ADR-0041 D6): no HTTP listener in the session
+    // path — the accept loop drives the session core directly.
     let endpoint = bind_sync_endpoint()
         .await
         .expect("bind the iroh sync endpoint");
     let url = endpoint.url("/sync");
     eprintln!("iroh dial url: {url}");
-    let ep = endpoint.clone();
-    let bridge = tokio::spawn(async move {
-        ep.serve_bridge(bridge_addr).await;
+    let server = tokio::spawn(async move {
+        endpoint.serve_sessions(build_app_state()).await;
     });
-    std::mem::forget(bridge);
+    std::mem::forget(server);
 
     conformance_leg(&url).await;
+}
+
+/// Rejects every token but `good-token` — pins that the iroh accept loop
+/// enforces auth before any session state exists, and that `?token=` reaches
+/// the verifier through the handshake the client runs over the QUIC stream.
+struct FixedTokenAuth;
+
+#[async_trait::async_trait]
+impl SyncAuth for FixedTokenAuth {
+    async fn authenticate(&self, token: &str) -> Option<nostos_domain::Principal> {
+        (token == "good-token").then(nostos_domain::Principal::anonymous)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn iroh_auth_rejects_bad_token() {
+    let state = {
+        let metrics = Arc::new(Metrics::new());
+        let store: Arc<dyn nostos_application::ports::SessionStore> =
+            Arc::new(InMemorySessionStore::new());
+        let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
+        let auth: Arc<dyn SyncAuth> = Arc::new(FixedTokenAuth);
+        SyncRouterState::new(manager, auth)
+            .with_buffer(64)
+            .with_metrics(metrics)
+            .with_snapshotter(Arc::new(SeedSnapshotter))
+    };
+    let endpoint = bind_sync_endpoint()
+        .await
+        .expect("bind the iroh sync endpoint");
+    let url = endpoint.url("/sync");
+    let server = tokio::spawn(async move {
+        endpoint.serve_sessions(state).await;
+    });
+    std::mem::forget(server);
+
+    // Bad token: the close lands right after the handshake; whether the
+    // client loop reports it as an early-close error or a zero-frame
+    // session, no row may flow either way.
+    let storage = SqliteStorage::open_in_memory().expect("open in-memory sqlite");
+    let bad = SyncClient::new(
+        format!("{url}&token=bad-token"),
+        storage,
+        SyncClientConfig::default(),
+    );
+    let rejected = tokio::time::timeout(Duration::from_secs(20), bad.run_once())
+        .await
+        .expect("rejected session must not hang");
+    if let Ok(outcome) = rejected {
+        assert_eq!(
+            outcome.frames_received, 0,
+            "a rejected token must not receive session data"
+        );
+    }
+    // Err: an early close surfacing as an error is also a rejection.
+
+    // Good token through the same handshake plumbing: a full session.
+    conformance_leg(&format!("{url}&token=good-token")).await;
 }

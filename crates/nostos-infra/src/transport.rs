@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -348,7 +348,10 @@ pub async fn sync_handler(
 }
 
 /// Pull a bearer token off the Authorization header (`Bearer <token>`).
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
+///
+/// `pub(crate)`: the iroh accept loop (`crate::iroh_sync`) applies the same
+/// header policy to the handshake request it captures.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let h = headers.get(axum::http::header::AUTHORIZATION)?;
     let s = h.to_str().ok()?;
     let t = s
@@ -366,12 +369,25 @@ fn unauthorized() -> Response {
 }
 
 /// Drive one WebSocket connection for its lifetime.
-async fn run_session(
-    mut socket: WebSocket,
+///
+/// Generic over the frame transport (ADR-0041 D6): the axum path passes its
+/// upgraded `WebSocket` directly; the iroh accept loop passes a tungstenite
+/// `WebSocketStream` over a QUIC bi-stream behind the message adapter in
+/// `crate::iroh_sync`. Both are one `Stream + Sink` of axum `Message`s, so
+/// everything below the split is byte-identical per transport.
+pub(crate) async fn run_session<S, E>(
+    mut socket: S,
     state: SyncRouterState,
     principal: Principal,
     exp: Option<i64>,
-) {
+) where
+    S: futures_util::Stream<Item = Result<Message, E>>
+        + futures_util::Sink<Message, Error = E>
+        + Unpin
+        + Send
+        + 'static,
+    E: Send + 'static,
+{
     // 1. Read the subscribe frame.
     let Some(subscribe) = read_subscribe(&mut socket).await else {
         return; // client disconnected without subscribing
@@ -1751,8 +1767,11 @@ struct SubscribeRequest {
 /// subscribe first so its predicate is registered before any event (or write
 /// result) flows. Same discipline as an early ACK: the socket is closed
 /// (caller drops it). A `ping`/`pong` is skipped, keeping the handshake alive.
-async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
-    while let Some(Ok(msg)) = socket.recv().await {
+async fn read_subscribe<S, E>(socket: &mut S) -> Option<SubscribeRequest>
+where
+    S: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+{
+    while let Some(Ok(msg)) = socket.next().await {
         // Collect into owned bytes so the borrow outlives the match arms.
         let data: Vec<u8> = match msg {
             Message::Text(t) => t.into_bytes(),
@@ -1791,8 +1810,11 @@ async fn read_subscribe(socket: &mut WebSocket) -> Option<SubscribeRequest> {
     None
 }
 
-// (Transport-swap seam removed — axum 0.7's `WebSocket` works directly. If we
-// later swap to WebTransport, this module is the single place that changes.)
+// The frame-transport seam (ADR-0041 D6): `run_session` + `read_subscribe`
+// are generic over a `Stream + Sink` of axum `Message`s. The axum handler
+// passes its upgraded `WebSocket`; the iroh accept loop (`crate::iroh_sync`)
+// passes its tungstenite-over-QUIC adapter. A future third transport (e.g.
+// WebTransport) adds an adapter, not a session-core change.
 
 #[cfg(test)]
 mod tests {

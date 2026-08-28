@@ -1,13 +1,13 @@
-//! ADR-0041 SPIKE: client-side iroh dial-by-scheme.
+//! ADR-0041: client-side iroh dial-by-scheme.
 //!
 //! run_once's session loop is generic over the tungstenite message halves;
 //! this module produces EXACTLY those halves over an iroh bidirectional
 //! stream: dial iroh://<node><path>?ticket=..., connect, open_bi, wrap the
-//! halves as one AsyncRead+AsyncWrite, then run the standard WebSocket
-//! client handshake over it (tokio-tungstenite works over any stream). The
-//! bytes surface on the server's iroh accept loop, which bridges them to its
-//! loopback HTTP listener where axum upgrades them — end to end the session
-//! core sees an ordinary WebSocket.
+//! halves as one AsyncRead+AsyncWrite (`BiStream`, shared with the server's
+//! accept loop via nostos-infra), then run the standard WebSocket client
+//! handshake over it (tokio-tungstenite works over any stream). The server's
+//! iroh accept loop runs the matching server handshake in place and drives
+//! the same session core the TCP/WS path drives (D6) — no loopback hop.
 //!
 //! The wire contract is untouched: the token query param rides the HTTP
 //! request exactly as the TCP path does (JWT on connect frame, ADR-0018).
@@ -18,11 +18,10 @@ use std::pin::Pin;
 
 use iroh::endpoint::{presets, Endpoint};
 use iroh_tickets::endpoint::EndpointTicket;
-use tokio::io::AsyncRead;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::WebSocketStream;
 
-use nostos_infra::iroh_sync::NOSTOS_SYNC_ALPN;
+use nostos_infra::iroh_sync::{BiStream, NOSTOS_SYNC_ALPN};
 
 /// One process-wide client endpoint (rebinding per reconnect churns the node
 /// id and re-runs relay discovery; a stable endpoint is also what a future
@@ -229,55 +228,6 @@ impl futures_util::Sink<tokio_tungstenite::tungstenite::Message> for SyncWs {
             SyncWs::Tcp(ws) => Pin::new(ws).poll_close(cx),
             SyncWs::Iroh(ws) => Pin::new(ws).poll_close(cx),
         }
-    }
-}
-
-/// One iroh bidirectional stream as a single AsyncRead+AsyncWrite object
-/// (tungstenite wants one stream; iroh hands out halves).
-pub struct BiStream {
-    send: iroh::endpoint::SendStream,
-    recv: iroh::endpoint::RecvStream,
-}
-
-impl AsyncRead for BiStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.recv).poll_read(cx, buf)
-    }
-}
-
-impl tokio::io::AsyncWrite for BiStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::result::Result<usize, std::io::Error>> {
-        // iroh's SendStream exposes inherent poll methods typed with its
-        // own WriteError; tokio's AsyncWrite wants io::Error — map across.
-        Pin::new(&mut self.send)
-            .poll_write(cx, buf)
-            .map_err(std::io::Error::other)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
-        Pin::new(&mut self.send)
-            .poll_flush(cx)
-            .map_err(std::io::Error::other)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
-        Pin::new(&mut self.send)
-            .poll_shutdown(cx)
-            .map_err(std::io::Error::other)
     }
 }
 

@@ -272,10 +272,10 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_TENANT_COLUMN", default_value = "org_id")]
     tenant_column: String,
 
-    /// Sync transport (ADR-0041 spike): "ws" (default — bind NOSTOS_BIND and
-    /// serve /sync over HTTP/WS exactly as today) or "iroh" (bind the HTTP
-    /// surface on loopback only and serve sync sessions over an iroh
-    /// endpoint, printing the QR-native iroh:// dial URL). Requires a build
+    /// Sync transport (ADR-0041): "ws" (default — serve /sync over HTTP/WS on
+    /// NOSTOS_BIND) or "iroh" (serve sync sessions natively over an iroh
+    /// endpoint, printing the QR-native iroh:// dial URL; the HTTP ops
+    /// surface still binds NOSTOS_BIND). Requires a build
     /// with `--features iroh`.
     #[arg(long, env = "NOSTOS_TRANSPORT", default_value = "ws")]
     transport: String,
@@ -969,6 +969,10 @@ async fn main() -> anyhow::Result<()> {
         info!(publication = %cfg.pg_publication, "schema endpoint: PgSchemaSource");
     }
     let state = state_builder;
+    // ADR-0041: cloned for the iroh accept loop (transport block below); the
+    // router consumes the original via `.with_state`. Clone is Arcs — cheap.
+    #[cfg(feature = "iroh")]
+    let state_for_transport = state.clone();
 
     // CORS: explicit origins in production, permissive for local dev (the
     // empty-default case). Web clients need this to reach /sync from a browser.
@@ -1025,40 +1029,30 @@ async fn main() -> anyhow::Result<()> {
                 .layer(TraceLayer::new_for_http()),
         );
 
-    // ---- transport selection (ADR-0041 spike) ----
-    // iroh: the HTTP surface (healthz/metrics/schema/push REST + the /sync
-    // upgrade route) binds LOOPBACK-ONLY and an iroh accept loop bridges
-    // every accepted bidirectional stream to it — the sync URL clients dial
-    // is the printed iroh:// one. ponytail: loopback-only HTTP is spike
-    // behavior; the native end-state splits them (sync on iroh, HTTP on
-    // NOSTOS_BIND) or proxies admin traffic through the endpoint too.
+    // ---- transport selection (ADR-0041) ----
+    // "ws" (default): sync sessions ride HTTP/WS on NOSTOS_BIND. "iroh": an
+    // iroh endpoint serves the sync session core NATIVELY (D6 — the accept
+    // loop runs the WebSocket handshake on each QUIC stream and hands it to
+    // transport::run_session; no loopback hop). The printed QR-native
+    // iroh:// URL is what clients dial. The HTTP surface (healthz/metrics/
+    // schema/rules/push REST, plus the /sync upgrade route for any
+    // direct-dialing ws client) binds NOSTOS_BIND in BOTH modes.
     #[cfg(feature = "iroh")]
-    let iroh_listener: Option<tokio::net::TcpListener> = if cfg.transport == "iroh" {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("failed to bind loopback listener for the iroh bridge")?;
-        let bridge_addr = listener
-            .local_addr()
-            .context("loopback listener has no local addr")?;
+    if cfg.transport == "iroh" {
         let endpoint = nostos_infra::iroh_sync::bind_sync_endpoint()
             .await
             .context("iroh sync endpoint bind failed")?;
         let url = endpoint.url(&cfg.ws_path);
         info!(
             transport = "iroh",
-            http_loopback = %bridge_addr,
+            http_bind = %cfg.bind,
             dial_url = %url,
-            "Nostos sync server listening — clients dial the iroh:// URL; \
-             HTTP surface is loopback-only (spike behavior)"
+            "Nostos sync server listening — clients dial the iroh:// URL"
         );
-        let ep = endpoint.clone();
         tokio::spawn(async move {
-            ep.serve_bridge(bridge_addr).await;
+            endpoint.serve_sessions(state_for_transport).await;
         });
-        Some(listener)
-    } else {
-        None
-    };
+    }
     #[cfg(not(feature = "iroh"))]
     if cfg.transport == "iroh" {
         anyhow::bail!(
@@ -1067,31 +1061,14 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let (_addr, listener) = if cfg.transport == "iroh" {
-        #[cfg(feature = "iroh")]
-        {
-            let listener =
-                iroh_listener.expect("iroh transport selected but the endpoint block did not run");
-            (
-                listener.local_addr().expect("listener has a local addr"),
-                listener,
-            )
-        }
-        #[cfg(not(feature = "iroh"))]
-        {
-            unreachable!("bailed above when the feature is off")
-        }
-    } else {
-        let addr: SocketAddr = cfg
-            .bind
-            .parse()
-            .with_context(|| format!("invalid bind address: {}", cfg.bind))?;
-        info!(%addr, ws_path = %cfg.ws_path, "Nostos sync server listening");
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("failed to bind {addr}"))?;
-        (addr, listener)
-    };
+    let addr: SocketAddr = cfg
+        .bind
+        .parse()
+        .with_context(|| format!("invalid bind address: {}", cfg.bind))?;
+    info!(%addr, ws_path = %cfg.ws_path, transport = %cfg.transport, "Nostos HTTP surface listening");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind {addr}"))?;
 
     // ---- sync-rules hot reload (ADR-0031 D3, Task 14) ----
     // No engine restart: the watcher polls the same file loaded at boot and,
