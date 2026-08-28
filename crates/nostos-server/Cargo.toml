@@ -20,6 +20,8 @@ path = "src/main.rs"
 # runs — it just can't be switched to the real replicator).
 default = ["pg"]
 pg = ["nostos-infra/pg"]
+# ADR-0041 spike: --transport iroh (accept-loop bridge beside the HTTP mount).
+iroh = ["nostos-infra/iroh"]
 
 [dependencies]
 nostos-domain = { workspace = true }

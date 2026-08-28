@@ -16,6 +16,9 @@ homepage.workspace = true
 # OpenSSL backend (ece 2.3.1), and openssl-sys cannot cross-compile to iOS —
 # it broke the RN iOS staticlib build (sdk/nostos_react_native) until this gate.
 default = ["webpush"]
+# ADR-0041 spike: the iroh transport (accept-loop bridge + ticket URL). OFF by
+# default so plain builds gain no iroh/quinn dependency weight.
+iroh = ["dep:iroh", "dep:iroh-tickets"]
 webpush = ["dep:web-push"]
 # The real Postgres logical-replication adapter. OFF by default — the benchmark
 # uses FakeReplicator and pulls none of the pg crates. Turn on with
@@ -29,6 +32,8 @@ nostos-application = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
+iroh = { workspace = true, optional = true }
+iroh-tickets = { workspace = true, optional = true }
 axum = { workspace = true }
 dashmap = { workspace = true }
 

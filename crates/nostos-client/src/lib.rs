@@ -25,6 +25,11 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+/// `#[cfg(feature = "iroh")]` — ADR-0041 spike: dial-by-scheme for
+/// `iroh://` sync URLs (WebSocket handshake over an iroh bidirectional
+/// stream; the session loop is unchanged).
+#[cfg(feature = "iroh")]
+pub mod iroh_dial;
 pub mod sqlite;
 
 pub use client::{

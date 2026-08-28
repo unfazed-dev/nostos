@@ -19,6 +19,11 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+/// `#[cfg(feature = "iroh")]` — the ADR-0041 spike transport: iroh accept
+/// loop bridging each bidirectional stream to the loopback HTTP listener,
+/// plus the QR-native iroh:// dial URL.
+#[cfg(feature = "iroh")]
+pub mod iroh_sync;
 mod jwks;
 /// Persisted operation-log writers (ADR-0025 slice 2). `RecordingOpLogWriter`
 /// (always available, in-memory — bench/test) + `PgOpLogWriter` (feature "pg").

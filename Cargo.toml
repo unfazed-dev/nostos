@@ -92,6 +92,8 @@ regex = "1.10"
 tokio = { version = "1.39", features = ["full"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.23"
+iroh = "1.1"
+iroh-tickets = "1"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
