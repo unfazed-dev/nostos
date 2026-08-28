@@ -26,6 +26,7 @@ pub async fn run(cwd: &Path) -> Result<()> {
         .map(String::as_str);
     let mut env_pairs = cfg.server_env(&pg_url, jwt_secret);
     push_rules_file_env(&mut env_pairs, cwd);
+    push_crdt_columns_env(&mut env_pairs, &dotenv_vars);
 
     let binary = locate_server_binary();
     println!("Starting nostos-server ({})...", binary.describe());
@@ -74,6 +75,25 @@ fn push_rules_file_env(env_pairs: &mut Vec<(String, String)>, cwd: &Path) {
         "NOSTOS_RULES_FILE".to_string(),
         cwd.join("nostos_rules.toml").display().to_string(),
     ));
+}
+
+/// Forward the CRDT column declarations from `.env` to the server child.
+/// `nostos.toml` has no CRDT section — `NOSTOS_COUNTER_COLUMNS` /
+/// `NOSTOS_OR_SET_COLUMNS` are operator env the SERVER parses directly
+/// (nostos-infra write_back.rs), so `NostosConfig::server_env` rightly knows
+/// nothing about them; but without this bridge a `nostos dev` launch silently
+/// DROPPED them (the whitelist builds the child env from scratch), and CRDT
+/// writes fell through to the clobber path. Empty values are not forwarded —
+/// same rule as the JWT secret above.
+fn push_crdt_columns_env(
+    env_pairs: &mut Vec<(String, String)>,
+    dotenv_vars: &std::collections::BTreeMap<String, String>,
+) {
+    for key in ["NOSTOS_COUNTER_COLUMNS", "NOSTOS_OR_SET_COLUMNS"] {
+        if let Some(value) = dotenv_vars.get(key).filter(|v| !v.is_empty()) {
+            env_pairs.push((key.to_string(), value.clone()));
+        }
+    }
 }
 
 async fn ctrl_c_or_pending() {
@@ -175,5 +195,42 @@ mod tests {
             .expect("NOSTOS_RULES_FILE present");
         assert_eq!(v, &cwd.join("nostos_rules.toml").display().to_string());
         assert!(Path::new(v).is_absolute());
+    }
+
+    #[test]
+    fn dev_env_forwards_crdt_columns_from_dotenv() {
+        let mut dotenv_vars = std::collections::BTreeMap::new();
+        dotenv_vars.insert(
+            "NOSTOS_COUNTER_COLUMNS".to_string(),
+            "counters:value".to_string(),
+        );
+        dotenv_vars.insert(
+            "NOSTOS_OR_SET_COLUMNS".to_string(),
+            "sets:tags".to_string(),
+        );
+        let mut env_pairs = Vec::new();
+        push_crdt_columns_env(&mut env_pairs, &dotenv_vars);
+        assert_eq!(
+            env_pairs,
+            vec![
+                (
+                    "NOSTOS_COUNTER_COLUMNS".to_string(),
+                    "counters:value".to_string()
+                ),
+                ("NOSTOS_OR_SET_COLUMNS".to_string(), "sets:tags".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dev_env_omits_absent_or_empty_crdt_columns() {
+        let mut env_pairs = Vec::new();
+        push_crdt_columns_env(&mut env_pairs, &std::collections::BTreeMap::new());
+        assert!(env_pairs.is_empty());
+
+        let mut dotenv_vars = std::collections::BTreeMap::new();
+        dotenv_vars.insert("NOSTOS_COUNTER_COLUMNS".to_string(), String::new());
+        push_crdt_columns_env(&mut env_pairs, &dotenv_vars);
+        assert!(env_pairs.is_empty());
     }
 }
