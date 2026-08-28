@@ -1118,7 +1118,7 @@ async fn first_register_cap_reject_closes_with_code_1000() {
                 close_code = Some(u16::from(frame.code));
                 break;
             }
-            (Ok(Some(Ok(Message::Close(None)) | Err(_))) | Ok(None) | Err(_)) => break,
+            Ok(Some(Ok(Message::Close(None)) | Err(_)) | None) | Err(_) => break,
             Ok(Some(Ok(_))) => {} // any pre-close frames are fine
         }
     }

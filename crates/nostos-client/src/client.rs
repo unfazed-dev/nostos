@@ -1318,7 +1318,7 @@ where
     /// `true` while the next `run_once` is still between creation and its
     /// first poll (the internal reset only runs once the future is polled).
     pub fn reset_subscribed(&self) {
-        self.subscribed.send_if_modified(|v| std::mem::take(v));
+        self.subscribed.send_if_modified(std::mem::take);
     }
 
     /// Mark the current session PROVEN. Private: only the receive loop may
