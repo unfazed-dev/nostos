@@ -9,7 +9,7 @@
 Accepted on the spike evidence (ws/iroh conformance parity re-run green at `680852f`; merge rehearsed — one mechanical conflict; iroh off-default everywhere; iOS/Android build viability verified) with these **conditions**:
 
 1. No consumer defaults to `iroh://` until the **field leg** passes (phone on cellular, relay path — the unrun half of "the test that matters").
-2. The loopback-bridge ponytail is resolved — the native `run_session` frame-io refactor — or explicitly re-accepted with its ceiling restated.
+2. ~~The loopback-bridge ponytail is resolved~~ — **RESOLVED 2026-08-29** (`da772aa`): `run_session` is generic over the frame `Stream`/`Sink`; the iroh accept loop runs the WS handshake natively on each QUIC stream and drives the session core directly. Bridge deleted; auth parity pinned by `iroh_auth_rejects_bad_token`; HTTP surface binds NOSTOS_BIND in both modes.
 3. Self-hosted relay guidance + the n0-fleet privacy note land with or before the SDK wiring.
 4. The exact iroh pin stays; upgrades are budgeted spikes (one breaking rename already observed: 0.91 → 1.1 inside a single spike).
 5. iroh remains off-default in every shipped artifact until conditions 1–3 clear.
@@ -72,7 +72,7 @@ The D4 spike is implemented and green. What shipped:
 - **Server:** under `NOSTOS_TRANSPORT=iroh` the HTTP surface binds loopback-only and an iroh accept loop bridges every accepted bidirectional stream to it as raw bytes. The boot log prints the QR-native `dial_url=iroh://…/sync?ticket=…`. ponytail (recorded in code): the BRIDGE is spike behavior — one loopback TCP hop per connection, the arxa-proven pattern — the native end-state if accepted is a `run_session` refactor onto a small frame-io trait so iroh streams drive the session core directly.
 - **Conformance (the test that matters):** `crates/nostos-client/tests/iroh_ws_conformance.rs` runs the SAME fixture and assertions twice — `ws://` and `iroh://` — both green: seeded snapshot rows arrive, checkpoint advances, second session reconnects idempotently. Run: `cargo test -p nostos-client --features iroh --test iroh_ws_conformance`.
 - **Operator check:** `cargo run -p nostos-client --features iroh --example iroh_dial_check -- '<printed iroh:// url>'` dials any deployed server's URL from any machine and reports frames/checkpoint.
-- **Not yet done (accept-gated):** the field leg (phone on cellular, relay path); Flutter/tauri SDK wiring (the FRB bridge would need the feature enabled); the native session-core refactor; self-hosted relay guidance. Default relay usage routes through n0's fleet — a privacy consideration to document before any accepted default, not silence.
+- **Not yet done (accept-gated):** the field leg (phone on cellular, relay path); Flutter/tauri SDK wiring (the FRB bridge would need the feature enabled); self-hosted relay guidance. Default relay usage routes through n0's fleet — a privacy consideration to document before any accepted default, not silence. (The native session-core refactor listed here at spike time landed 2026-08-29 as D6 — `da772aa`.)
 
 ### Verification notes (2026-08-27, this proposal's evidence pass)
 
