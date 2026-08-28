@@ -78,7 +78,12 @@ const MAX_TABLES_PER_SOCKET: usize = 32;
 /// widen the verification can't prove safe in place; either way the client's
 /// reconnect (Task 11's checksum/epoch path) re-scopes it into the current
 /// ruleset.
-pub(crate) const RULES_CHANGED_CLOSE_REASON: &str = "rules changed; reconnect to re-scope";
+/// The wire-contract close reason for "ruleset changed under you; reconnect
+/// to re-scope" — PUBLIC because clients (nostos-client) must distinguish this
+/// one legitimate INVALID(1008) close from a subscribe REJECTION (same code,
+/// different reason). Do not change the string: it is a cross-process
+/// contract asserted by ws_contract tests and matched client-side.
+pub const RULES_CHANGED_CLOSE_REASON: &str = "rules changed; reconnect to re-scope";
 
 /// Shared state injected into the axum router.
 #[derive(Clone)]
@@ -1654,6 +1659,20 @@ fn build_predicate(
     // authenticated principal when a tenant column is configured — in every
     // rules mode, including `all` (ADR-0031 Global Constraint 11). This stays
     // LAST so it wraps everything above (rules scope + filters + where_sql).
+    //
+    // ponytail: on a table WITHOUT the tenant column (the deliberately-
+    // global shape — e.g. a shared catalog) this predicate references a
+    // column the row payloads don't carry, so `PredicateExpr::matches` is
+    // false for EVERY event: live changes to such tables never reach
+    // tenant-scoped subscribers. The snapshot path handles the shape
+    // correctly (`scope_if_column_present` skips the clause); the live path
+    // has no column metadata at event-filter time to make the same call.
+    // Ceiling: post-seed changes to deliberately-global tables don't stream
+    // under tenant deploys — snapshot-first delivery covers seeded catalogs.
+    // Upgrade path: tag table schemas (column lists) into the ruleset at
+    // compile time so this injection can skip columnless tables exactly
+    // like the snapshot path does. The boot-time `audit_tenant_column`
+    // guard (nostos-server main) names every table that lands here.
     if let Some(s) = scope {
         p = p.and_eq(s.column, ColumnValue::text(s.value));
     }

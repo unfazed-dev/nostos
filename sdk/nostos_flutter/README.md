@@ -300,6 +300,11 @@ before building a consumer app.
   minutes on an external SSD, observed 2026-08-27), then boots it and
   requires `/healthz` within 2 minutes. That boot window now measures boot
   only: failing it means a genuine server failure, not a missed compile.
+  The spawned server also gets `NOSTOS_RULES_FILE` pointed at an explicit
+  all-mode temp file — the server resolves `nostos_rules.toml` from its
+  cwd, and a hand-mode rules file at the repo root otherwise rejects the
+  test's tables and starves `watch()` (observed 2026-08-27). Verified
+  green end-to-end 2026-08-27.
   Requires disabling the macOS App Sandbox for **debug builds only**
   (`example/macos/Runner/DebugProfile.entitlements`) — a sandboxed app
   cannot spawn arbitrary subprocesses; `Release.entitlements` (what you'd
@@ -330,7 +335,10 @@ before building a consumer app.
 Two pins define a working consumer setup (verified 2026-08-27 on Flutter
 3.44.9 / Dart 3.12: `pub get` resolves both exactly, `flutter analyze` clean,
 72 unit tests green with the real native-assets dylib loaded through the
-build hook — the FFI pairing itself is exercised, not just resolved):
+build hook, the live-`nostos-server` macOS integration test green, and the
+atlet device round-trip (offline → server-side insert → online → delta
+apply) green on a physical iPhone AND an Android emulator — the FFI pairing
+is exercised on every tier, not just resolved):
 
 | pin | value | why exact |
 |---|---|---|

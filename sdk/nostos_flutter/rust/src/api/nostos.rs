@@ -27,7 +27,9 @@ use std::time::Duration;
 use std::collections::{HashMap, HashSet};
 
 use nostos_client::sqlite::ClientTable;
-use nostos_client::{ClientError, SqliteStorage, StreamHandle, SyncClient, SyncClientConfig, TableSub};
+use nostos_client::{
+    ClientError, SqliteStorage, StreamHandle, SyncClient, SyncClientConfig, TableSub,
+};
 use nostos_core::{PendingWrite, WriteOp};
 use flutter_rust_bridge::frb;
 use tokio::sync::broadcast::error::RecvError;
@@ -43,19 +45,22 @@ pub fn init_app() {
 /// Coarse connection-state signal for `Stream<NostosConnectionState>` on the
 /// Dart side.
 ///
-/// ponytail: `Connected` is a heuristic, not a precise signal from
-/// `SyncClient`. `SyncClient::run_once` blocks for the entire session
-/// (connect → subscribe → apply loop) and only returns on error or a clean
-/// server-initiated close — there is no mid-call hook to observe "the WS
-/// handshake + subscribe succeeded" without a further `nostos-client` change,
-/// which this task deliberately avoided to keep the additive surface minimal
-/// (see `SyncClient::subscribe_changes` / `with_storage`, which WERE worth
-/// adding). Instead: if `run_once()` hasn't already failed within a short
-/// grace window (`CONNECT_GRACE`), assume the handshake succeeded — a real
-/// connection refusal / DNS failure surfaces near-instantly. A slow-but-doomed
-/// connect can show a brief false `Connected` before flipping to
-/// `Disconnected`; acceptable for a v1 UI-facing signal. Upgrade path: add a
-/// `connected`/`subscribed` broadcast to `SyncClient` alongside `changes`.
+/// `Connected` is now a PROVEN signal, not a heuristic: it fires only when
+/// `SyncClient::subscribed()` reports the session's subscribe accepted AND a
+/// post-acceptance frame has arrived (snapshot boundary, replication event,
+/// or write ack — see the `subscribed` field docs in nostos-client). The old
+/// grace-window heuristic ("`run_once` hasn't failed within 250ms ⇒ assume
+/// connected") lied exactly when it mattered: a rules-rejected subscribe
+/// loop flapped `Connected` while ZERO rows ever arrived, and Dart's
+/// `waitForFirstSync()` completed against a session that never synced
+/// (observed 2026-08-27).
+///
+/// ponytail: the REJECTION reason itself still doesn't cross to Dart — the
+/// loop below stops retrying on `ClientError::SubscribeRejected` (surfaces
+/// as a final `Disconnected`, not a reconnect storm) and logs the reason via
+/// tracing, but the enum carries no payload. Upgrade path: a
+/// `NostosConnectionState::Rejected(String)` variant or a sibling error
+/// stream; requires an FRB regen, deliberately deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NostosConnectionState {
     Connecting,
@@ -127,8 +132,6 @@ impl From<ClientTableFfi> for ClientTable {
     }
 }
 
-const CONNECT_GRACE: Duration = Duration::from_millis(250);
-
 /// Session-level reconnect backstop for a long-lived `Nostos` subscription —
 /// see the doc on the `idle_timeout` field set from this constant in
 /// [`NostosHandle::subscribe`]. Deliberately much longer than
@@ -147,6 +150,7 @@ const CONNECT_GRACE: Duration = Duration::from_millis(250);
 ///   whole-table snapshots several times a minute for nothing;
 /// - it must comfortably exceed `max_backoff` (5s) plus
 ///   handshake+snapshot time or the loop can chase its own tail.
+///
 /// Fast reaction to *real* network transitions is the app layer's job
 /// (connectivity_plus → `setConnected`), not this timer's.
 const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(30);
@@ -403,17 +407,20 @@ impl NostosHandle {
     /// `subscribe()` hasn't been called. Server-side rejects (unknown stream,
     /// bad params) arrive asynchronously as `stream_error` frames and are
     /// logged; they do NOT fail this call.
-    pub async fn subscribe_stream(&self, name: String, params_json: String) -> Result<String, String> {
+    pub async fn subscribe_stream(
+        &self,
+        name: String,
+        params_json: String,
+    ) -> Result<String, String> {
         let params_value: serde_json::Value = serde_json::from_str(&params_json)
             .map_err(|e| format!("params_json is not valid JSON: {e}"))?;
-        let params = params_value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| {
-                "params_json must be a JSON object (e.g. {\"owner\":\"u1\"})".to_string()
-            })?;
+        let params = params_value.as_object().cloned().ok_or_else(|| {
+            "params_json must be a JSON object (e.g. {\"owner\":\"u1\"})".to_string()
+        })?;
         let mut guard = self.lock_session("subscribe_stream()").await?;
-        let session = guard.as_mut().expect("lock_session only yields a live session");
+        let session = guard
+            .as_mut()
+            .expect("lock_session only yields a live session");
         let handle = session.client.sync_stream(&name, params).subscribe();
         let id = handle.id().to_string();
         session.stream_handles.insert(id.clone(), handle);
@@ -428,7 +435,9 @@ impl NostosHandle {
     /// Returns an error string if `subscribe()` hasn't been called.
     pub async fn unsubscribe_stream(&self, id: String) -> Result<(), String> {
         let mut guard = self.lock_session("unsubscribe_stream()").await?;
-        let session = guard.as_mut().expect("lock_session only yields a live session");
+        let session = guard
+            .as_mut()
+            .expect("lock_session only yields a live session");
         // Dropping the handle queues the unsubscribe (StreamHandle::drop).
         session.stream_handles.remove(&id);
         Ok(())
@@ -616,10 +625,7 @@ impl NostosHandle {
     /// # Errors
     /// Same preconditions as [`Self::write`] (subscribe first, valid op, table
     /// in the subscribed set). A failure on ANY op rolls back the ENTIRE batch.
-    pub async fn write_batch(
-        &self,
-        ops: Vec<NostosWriteInput>,
-    ) -> Result<Vec<u64>, String> {
+    pub async fn write_batch(&self, ops: Vec<NostosWriteInput>) -> Result<Vec<u64>, String> {
         let guard = self.lock_session("write_batch()").await?;
         let session = guard
             .as_ref()
@@ -1004,15 +1010,38 @@ async fn run_connection_loop(
     loop {
         let _ = state_sink.add(NostosConnectionState::Connecting);
 
+        // Clear the PROVEN flag BEFORE creating the session future: the
+        // internal reset only runs once `run_once` is first polled, and
+        // `tokio::select!` polls branches in random order — without this,
+        // a select could read the PREVIOUS session's stale `true` and emit
+        // a false `Connected` before the new session has even connected
+        // (the exact lie this loop no longer tells).
+        client.reset_subscribed();
+        let mut subscribed = client.subscribed();
         let run_fut = client.run_once();
         tokio::pin!(run_fut);
-        let immediate = tokio::select! {
-            res = &mut run_fut => Some(res),
-            () = tokio::time::sleep(CONNECT_GRACE) => None,
+        // `wait_for` holds a read guard across its await (its future is
+        // !Send), so this is the manual borrow-check-then-`changed()` loop —
+        // the guard is dropped before every await point.
+        let proven = async {
+            loop {
+                if *subscribed.borrow_and_update() {
+                    return;
+                }
+                if subscribed.changed().await.is_err() {
+                    // Sender dropped (client closed) — treat as proven-never;
+                    // run_fut owns the real outcome.
+                    return;
+                }
+            }
         };
-        let result = match immediate {
-            Some(res) => res,
-            None => {
+        let result = tokio::select! {
+            res = &mut run_fut => res,
+            // `Connected` only when PROVEN: the server accepted this
+            // session's subscribe and a post-acceptance frame arrived
+            // (`SyncClient::subscribed`). Replaces the old CONNECT_GRACE
+            // heuristic, which lied under rejected-subscribe loops.
+            () = proven => {
                 let _ = state_sink.add(NostosConnectionState::Connected);
                 run_fut.await
             }
@@ -1028,6 +1057,19 @@ async fn run_connection_loop(
         // `max_backoff` on every routine backstop reconnect, since `attempt`
         // never comes back down otherwise.
         let is_err = result.is_err();
+        // A subscribe rejection is FATAL for this loop: the server's rules
+        // denied the table and re-sending the same subscribe forever is the
+        // silent reconnect storm the 2026-08-27 incident surfaced. Stop with
+        // a final `Disconnected`; the reason is logged (the enum carries no
+        // payload — see the ponytail on `NostosConnectionState`). The app
+        // layer can resubscribe/reconnect once the rules are fixed.
+        if let Err(ClientError::SubscribeRejected(_)) = &result {
+            // Reason already logged by nostos-client at the close-frame parse
+            // (this crate carries no logging facade). See the enum docs for
+            // the payload-crossing upgrade path.
+            let _ = state_sink.add(NostosConnectionState::Disconnected);
+            break;
+        }
         let _ = state_sink.add(NostosConnectionState::Disconnected);
 
         if is_err {

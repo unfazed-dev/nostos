@@ -199,7 +199,18 @@ impl SnapshotSource for PgSnapshotter {
         let select_list = select_list_text(&cols);
         // Tenant scoping (the trait's enforced contract): when the
         // connection's principal carries a TenantScope, restrict the
-        // snapshot to that tenant. The column name is operator config
+        // snapshot to that tenant — but ONLY when the table actually HAS
+        // the tenant column (`scope_if_column_present` below): a tenant-
+        // column deploy with a deliberately global table (no tenant
+        // column — e.g. a shared catalog beside tenant-scoped tables, the
+        // shape nostos_rules.toml hand-mode documents) must not get the
+        // clause. `WHERE "<col>"::text = $1` against a columnless table
+        // is a guaranteed SQL 42703, which silently downgraded every
+        // subscribe of that table to live-fan-out-only (observed
+        // 2026-08-27: the atlet `products` catalog starved the shop).
+        // Skipping leaks nothing: a table without the column has no
+        // tenant data to scope, and table-level access stays the rules
+        // engine's decision. The column name is operator config
         // (trusted) and is identifier-quoted; the value is BOUND as $1,
         // never interpolated — mirrors the read path's server-injected
         // tenant clause (ADR-0011). None = anonymous / single-tenant
@@ -207,6 +218,7 @@ impl SnapshotSource for PgSnapshotter {
         // Bind target declared at function scope so the parameter
         // reference outlives the query call (the match arms' copies of the
         // Copy scope would not).
+        let tenant = scope_if_column_present(&cols, tenant);
         let tenant_value: Option<&str> = tenant.map(|s| s.value);
         let sql = match tenant {
             // `::text` on the COLUMN side: the bound value is always a
@@ -230,7 +242,10 @@ impl SnapshotSource for PgSnapshotter {
             Ok(r) => r,
             Err(e) => {
                 self.drop_client().await;
-                return Err(SnapshotError::Backend(format!("query: {e}")));
+                return Err(SnapshotError::Backend(format!(
+                    "query: {}",
+                    display_chain(&e)
+                )));
             }
         };
 
@@ -267,9 +282,17 @@ impl SnapshotSource for PgSnapshotter {
         //    error here, never a widened snapshot).
         let (mut where_sql, mut binds) = compile_stream_where(predicate)?;
 
+        let client = self.client().await?;
+        let cols = self.prepare_columns(&client, &quoted_table).await?;
+        let select_list = select_list_text(&cols);
+
         // 3. Tenant clause LAST, bound, with the same `::text` column cast as
         //    `snapshot` (JWT claims are strings; tenant columns may be
         //    uuid/int). `AND`ed outside the template's own parentheses.
+        //    Same column-presence gate as `snapshot`: a deliberately global
+        //    table (no tenant column) must not get the clause — it is a
+        //    guaranteed SQL 42703 otherwise (see scope_if_column_present).
+        let tenant = scope_if_column_present(&cols, tenant);
         let tenant_value: Option<String> = tenant.map(|s| s.value.to_string());
         if let (Some(scope), Some(value)) = (tenant, tenant_value.as_ref()) {
             binds.push(ColumnValue::Text(value.clone()));
@@ -279,10 +302,6 @@ impl SnapshotSource for PgSnapshotter {
                 binds.len()
             );
         }
-
-        let client = self.client().await?;
-        let cols = self.prepare_columns(&client, &quoted_table).await?;
-        let select_list = select_list_text(&cols);
         let sql = format!("SELECT {select_list} FROM {quoted_table} WHERE {where_sql}");
         let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             binds.iter().map(column_value_as_sql).collect();
@@ -290,7 +309,10 @@ impl SnapshotSource for PgSnapshotter {
             Ok(r) => r,
             Err(e) => {
                 self.drop_client().await;
-                return Err(SnapshotError::Backend(format!("query: {e}")));
+                return Err(SnapshotError::Backend(format!(
+                    "query: {}",
+                    display_chain(&e)
+                )));
             }
         };
 
@@ -306,6 +328,48 @@ fn select_list_text(cols: &[(String, i32)]) -> String {
         .map(|(n, _)| format!("{}::text", quote_ident(n)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The tenant scope to ACTUALLY apply: `Some` only when the table's own
+/// column list contains the tenant column. A tenant-column deploy with a
+/// deliberately global table (no tenant column — a shared catalog beside
+/// tenant-scoped tables, the shape `nostos_rules.toml` hand-mode documents)
+/// must not get the clause: `WHERE "<col>"::text = $1` against a columnless
+/// table is a guaranteed SQL 42703, which the transport logs as a swallowed
+/// `snapshot backend: query: db error` and downgrades to live-fan-out-only
+/// (observed 2026-08-27: the atlet `products` catalog starved the shop, and
+/// with a default-`org_id` column EVERY table 42703'd — no snapshots, no
+/// live matches, no doorbells). Skipping leaks nothing: a table without the
+/// column has no tenant data to scope, and table-level access remains the
+/// rules engine's decision. `None` passes through unchanged.
+fn scope_if_column_present<'a>(
+    cols: &[(String, i32)],
+    tenant: Option<TenantScope<'a>>,
+) -> Option<TenantScope<'a>> {
+    tenant.filter(|s| cols.iter().any(|(n, _)| n == s.column))
+}
+
+/// Render an error WITH its full source chain. `tokio_postgres::Error`'s
+/// Display is just `db error` — the SQLSTATE, the driver message, and the
+/// server's own text (the part that names the missing column) all live in
+/// `source()` levels, which `format!("{e}")` silently drops. The 2026-08-27
+/// products starvation cost an hour precisely because the transport logged
+/// `snapshot backend: query: db error` and the 42703 detail never reached
+/// the operator. Every snapshot query error renders through this instead.
+fn display_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(src) = cur {
+        // Skip levels that add nothing (some wrappers re-Display their
+        // source verbatim) so the chain reads as new information only.
+        let text = src.to_string();
+        if !text.is_empty() && !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cur = src.source();
+    }
+    out
 }
 
 /// Build one Insert event per row. Each gets a UNIQUE LSN strictly above
@@ -535,9 +599,183 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// The result of a boot-time [`audit_tenant_column`] pass: how each requested
+/// table relates to the configured tenant column.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantColumnAudit {
+    /// Tables that EXIST but have NO column named like the tenant column —
+    /// the "deliberately global table" shape (a shared catalog beside
+    /// tenant-scoped tables). Snapshots skip the tenant clause for these
+    /// (see [`scope_if_column_present`]); the LIVE path's predicate still
+    /// references the column and matches nothing under tenant deploys —
+    /// an operator must KNOW a table lands here.
+    pub columnless: Vec<String>,
+    /// Tables that do not exist AT ALL in the `public` schema. These fail
+    /// loudly on first snapshot anyway; listed so the operator sees the
+    /// ruleset naming tables the database never had (usually a typo).
+    pub missing: Vec<String>,
+}
+
+/// Boot-time operator guard for tenant-column deploys: classify the given
+/// tables by whether they actually carry the configured tenant column.
+/// Motivated by the 2026-08-27 incident — a deploy with
+/// `NOSTOS_TENANT_COLUMN` set (especially via the clap default `org_id`)
+/// against tables without that column produced only swallowed snapshot
+/// errors and starving shops; one boot log line naming the table + column
+/// turns that incident into a one-read diagnosis.
+///
+/// Reads `information_schema` only (no table locks, no per-table queries —
+/// two catalog scans regardless of table count). Failures are the CALLER's
+/// to tolerate: a guard must not be able to block boot, so callers log the
+/// error and continue.
+///
+/// # Errors
+/// `tokio_postgres` connection/query errors verbatim.
+pub async fn audit_tenant_column(
+    pg_url: &str,
+    column: &str,
+    tables: &[String],
+) -> Result<TenantColumnAudit, tokio_postgres::Error> {
+    let (client, conn) = tokio_postgres::connect(pg_url, tokio_postgres::NoTls).await?;
+    let conn_task = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let existing: Vec<String> = client
+        .query(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect();
+    let with_column: Vec<String> = client
+        .query(
+            "SELECT table_name FROM information_schema.columns \
+             WHERE table_schema = 'public' AND column_name = $1",
+            &[&column],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect();
+    conn_task.abort();
+
+    let mut audit = TenantColumnAudit::default();
+    for table in tables {
+        if !existing.contains(table) {
+            audit.missing.push(table.clone());
+        } else if !with_column.contains(table) {
+            audit.columnless.push(table.clone());
+        }
+    }
+    Ok(audit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scope_for(column: &'static str) -> TenantScope<'static> {
+        TenantScope::new(column, "t1")
+    }
+
+    #[test]
+    fn tenant_scope_applies_when_column_present() {
+        let cols = vec![("id".to_string(), 25), ("user_id".to_string(), 25)];
+        let gated = scope_if_column_present(&cols, Some(scope_for("user_id")));
+        assert!(gated.is_some());
+        assert_eq!(gated.map(|s| s.column), Some("user_id"));
+    }
+
+    #[test]
+    fn tenant_scope_skips_deliberately_global_table() {
+        // The products-catalog shape: table has NO tenant column — the
+        // clause must be dropped, not 42703 the whole snapshot.
+        let cols = vec![("id".to_string(), 25), ("name".to_string(), 25)];
+        assert!(scope_if_column_present(&cols, Some(scope_for("user_id"))).is_none());
+    }
+
+    #[test]
+    fn tenant_scope_none_passthrough() {
+        assert!(scope_if_column_present(&[("user_id".to_string(), 25)], None).is_none());
+    }
+
+    /// The incident shape: a top-level error whose Display is generic
+    /// ("db error") with the actionable text one source level down.
+    #[test]
+    fn display_chain_reaches_every_source_level() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Leaf(&'static str);
+        impl fmt::Display for Leaf {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Middle {
+            top: &'static str,
+            src: Leaf,
+        }
+        impl fmt::Display for Middle {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.top)
+            }
+        }
+        impl Error for Middle {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.src)
+            }
+        }
+
+        let e = Middle {
+            top: "db error",
+            src: Leaf("ERROR: column \"user_id\" does not exist"),
+        };
+        assert_eq!(
+            display_chain(&e),
+            "db error: ERROR: column \"user_id\" does not exist"
+        );
+    }
+
+    #[test]
+    fn display_chain_skips_duplicate_levels() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Leaf(&'static str);
+        impl fmt::Display for Leaf {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Wrapper;
+        impl fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "same text")
+            }
+        }
+        impl Error for Wrapper {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&Leaf("same text"))
+            }
+        }
+
+        // A wrapper that re-Displays its source verbatim must not render
+        // the duplicate level twice.
+        assert_eq!(display_chain(&Wrapper), "same text");
+    }
 
     #[test]
     fn validate_ident_accepts_bare_lowercase() {

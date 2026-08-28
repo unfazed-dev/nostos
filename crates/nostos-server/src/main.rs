@@ -752,6 +752,13 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e).context("failed to load nostos_rules.toml"),
     };
     let ruleset_mode = ruleset.mode();
+    // Captured before the ruleset moves into `rules_shared`: the boot-time
+    // tenant-column audit (below) needs the synced-table list once.
+    let rules_tables: Vec<String> = ruleset
+        .synced_tables()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let (rules_tx, rules_changed) = tokio::sync::watch::channel(ruleset.checksum());
     let rules_shared = Arc::new(tokio::sync::RwLock::new(ruleset));
     state_builder = state_builder
@@ -847,6 +854,60 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(nostos_infra::PgSnapshotter::new(&cfg.pg_url));
         state_builder = state_builder.with_snapshotter(snapshotter);
         info!("snapshot-on-subscribe: PgSnapshotter (real source)");
+    }
+
+    // ---- boot-time tenant-column audit (2026-08-27 incident guard) ----
+    // A tenant-column deploy whose tables lack the column produced only
+    // swallowed snapshot errors and starving shops — and the clap default
+    // (`org_id`) made that the config you get by UNSETTING the env var.
+    // One catalog scan at boot names every affected table so the operator
+    // reads the diagnosis instead of probing raw WS frames for an hour.
+    // All-mode has no table list to audit (`synced_tables()` is empty), so
+    // the guard only fires under toggles/hand rules — where the table set
+    // is known. Non-fatal by design: a deliberately-global table is a
+    // LEGITIMATE shape (see `scope_if_column_present`); the audit informs,
+    // it does not block boot. An audit failure itself (PG unreachable for
+    // the catalog read) also only warns — the real snapshotter will surface
+    // connectivity loudly on its own.
+    #[cfg(feature = "pg")]
+    if let Some(col) = tenant_col {
+        if cfg.replicator == "pg" && !rules_tables.is_empty() {
+            match nostos_infra::snapshot_source::audit_tenant_column(&cfg.pg_url, col, &rules_tables)
+                .await
+            {
+                Ok(audit) => {
+                    for table in &audit.columnless {
+                        warn!(
+                            table = %table, tenant_column = %col,
+                            "synced table has NO tenant column: snapshots skip the \
+                             tenant clause (safe), but the LIVE predicate references \
+                             the column and will match NOTHING for tenant-scoped \
+                             subscribers — post-seed changes to this table will not \
+                             stream under a tenant deploy. If this table is meant to \
+                             be global, this is fine (snapshot-first delivery); if \
+                             not, add the column or fix NOSTOS_TENANT_COLUMN"
+                        );
+                    }
+                    for table in &audit.missing {
+                        warn!(
+                            table = %table,
+                            "ruleset syncs a table that does not exist in PG \
+                             (public schema) — usually a typo in nostos_rules.toml"
+                        );
+                    }
+                    if audit.columnless.is_empty() && audit.missing.is_empty() {
+                        info!(
+                            tenant_column = %col,
+                            tables = rules_tables.len(),
+                            "tenant-column audit: every synced table carries the column"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "tenant-column audit failed to read the catalog; continuing boot");
+                }
+            }
+        }
     }
 
     // ---- op-log replay-on-reconnect adapter (ADR-0025 slice 4b) ----

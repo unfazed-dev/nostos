@@ -309,18 +309,27 @@ class NostosDatabase {
   ///
   /// The caller MUST run `Supabase.initialize(...)` once at app start
   /// (before `runApp`) — `Supabase.initialize` is process-global and
-  /// once-only, so this factory does NOT call it. The caller MUST also
-  /// ensure a session exists (sign-in completed) before invoking this
-  /// factory; the live session's `accessToken` is read via
-  /// `Supabase.instance.client.auth.currentSession?.accessToken` and
-  /// passed as the bearer token to the underlying [Nostos] connection.
+  /// once-only, so this factory does NOT call it.
+  ///
+  /// A live session is NOT required at open (since 2026-08-28): signed-out
+  /// boot is a legitimate state — the app shows its login screen while local
+  /// reads/writes/watches already work. With no session the database opens
+  /// with a null bearer token; the server's 401 at the `/sync` handshake is a
+  /// *transient connect failure* to the client (HTTP, pre-upgrade — see
+  /// nostos-infra transport.rs `sync_handler`), so the reconnect loop simply
+  /// retries with backoff until [_wireSupabaseTokenRefresh] forwards the
+  /// post-sign-in token via [Nostos.setToken] and the next retry connects.
+  /// [waitForFirstSync] correctly pends until then. When a session DOES
+  /// exist its `accessToken` is read via
+  /// `Supabase.instance.client.auth.currentSession?.accessToken` and used
+  /// from the first dial. Note: sessionless opens cannot fetch a schema over
+  /// HTTP (that endpoint wants a token too) — pass [schema] explicitly, as
+  /// every kit/emitter consumer already does.
   ///
   /// [nostosUrl] is the `nostos-server` `/sync` WebSocket URL. [sqlitePath]
   /// is the on-disk SQLite file location. [schema], if `null`, is fetched
-  /// via `GET {httpBase}/schema` (see [connect] for the derivation rules).
-  ///
-  /// Throws [StateError] if there is no live Supabase session (the user
-  /// must sign in before calling this factory).
+  /// via `GET {httpBase}/schema` (see [connect] for the derivation rules —
+  /// and the sessionless note above).
   ///
   /// **Token refresh is handled for you** (since 2026-07-30). This factory
   /// subscribes to `Supabase.instance.client.auth.onAuthStateChange` and
@@ -346,14 +355,9 @@ class NostosDatabase {
     Set<String>? counterTables,
   }) async {
     final session = Supabase.instance.client.auth.currentSession;
-    if (session == null) {
-      throw StateError(
-        'no Supabase session — sign in before calling NostosDatabase.supabase()',
-      );
-    }
     final db = await _open(
       url: nostosUrl,
-      token: session.accessToken,
+      token: session?.accessToken,
       schema: schema,
       sqlitePath: sqlitePath,
       orSetTables: orSetTables,
@@ -376,7 +380,9 @@ class NostosDatabase {
   ///
   /// `signedIn` is handled as well as `tokenRefreshed` because
   /// `supabase_flutter` replays `signedIn` on session recovery at startup, and a
-  /// recovered session can carry a token newer than the one we opened with.
+  /// recovered session can carry a token newer than the one we opened with —
+  /// and because a sessionless open (signed-out boot, supported since
+  /// 2026-08-28) receives its FIRST token exactly this way.
   /// `signedOut` clears the token instead of leaving a stale credential in place.
   ///
   /// [Nostos.setToken] tears nothing down, so this never disturbs an open stream.
@@ -1031,10 +1037,18 @@ class NostosDatabase {
   /// immediately if sync has already happened (so it is safe to call on every
   /// reconnect / app start). Use this instead of polling [SyncStatus.hasSynced].
   ///
-  /// ponytail: `lastSyncedAt` is a proxy stamped on each `connected`
-  /// transition, not a precise "download completed / reconcile done" signal
-  /// (which the engine does not yet expose — ADR-0024). It is the same proxy
-  /// [SyncStatus.hasSynced] uses; upgrading one upgrades the other.
+  /// HONESTY NOTE (2026-08-27 hardening): on the NATIVE engine `connected` is
+  /// now a PROVEN signal — the server accepted this session's subscribe AND a
+  /// post-acceptance frame (snapshot boundary / event / write ack) arrived —
+  /// so completing here means rows actually flowed or were reconciled. A
+  /// rules-rejected subscribe no longer flaps `connected`; it surfaces as
+  /// `disconnected` with the reconnect loop stopped (the reason is in the
+  /// engine logs). The WEB engine still uses its own connection heuristic.
+  ///
+  /// ponytail: `lastSyncedAt` is stamped on each PROVEN `connected`
+  /// transition, still not a precise "download completed / reconcile done"
+  /// signal (which the engine does not yet expose — ADR-0024). It is the same
+  /// proxy [SyncStatus.hasSynced] uses; upgrading one upgrades the other.
   ///
   /// On a [NostosDatabase.local] database this resolves immediately — there is
   /// no server, so there is no first sync to wait for; the local row set is

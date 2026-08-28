@@ -20,7 +20,7 @@ use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
-use nostos_application::ports::SyncAuth;
+use nostos_application::ports::{SnapshotSource, SyncAuth};
 use nostos_application::{ActiveRuleset, SessionManager};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
@@ -89,6 +89,75 @@ pub async fn spawn_fake_server_with_tables(
         let set: std::collections::HashSet<String> = write_tables.into_iter().collect();
         state = state.with_write_tables(set);
     }
+    let app = axum::Router::new()
+        .route("/sync", get(sync_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    (addr, handle, manager, store)
+}
+
+/// Like [`spawn_fake_server_with`] but configures the `SessionManager` with an
+/// explicit finite concurrent-device cap (`SessionManager::with_device_cap`)
+/// instead of Enterprise's `u64::MAX` — lets a test drive the transport's
+/// first-register cap-reject close path without 2×Hobby connects.
+pub async fn spawn_fake_server_with_device_cap(
+    buffer: usize,
+    auth: Arc<dyn SyncAuth>,
+    device_cap: u64,
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<SessionManager>,
+    Arc<dyn nostos_application::ports::SessionStore>,
+) {
+    let store: Arc<dyn nostos_application::ports::SessionStore> =
+        Arc::new(InMemorySessionStore::new());
+    let manager = Arc::new(SessionManager::with_device_cap(
+        store.clone(),
+        nostos_domain::Tier::Enterprise,
+        device_cap,
+    ));
+
+    let state = SyncRouterState::new(Arc::clone(&manager), auth).with_buffer(buffer);
+    let app = axum::Router::new()
+        .route("/sync", get(sync_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    (addr, handle, manager, store)
+}
+
+/// Like [`spawn_fake_server_with`] but injects a [`SnapshotSource`] so a
+/// first-register subscribe takes the snapshot-on-subscribe path (ADR-0014
+/// reconcile boundaries + backpressure-aware row delivery). Used by the
+/// writer-hoist regression test in `ws_contract.rs`.
+pub async fn spawn_fake_server_with_snapshotter(
+    buffer: usize,
+    auth: Arc<dyn SyncAuth>,
+    snapshotter: Arc<dyn SnapshotSource>,
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<SessionManager>,
+    Arc<dyn nostos_application::ports::SessionStore>,
+) {
+    let store: Arc<dyn nostos_application::ports::SessionStore> =
+        Arc::new(InMemorySessionStore::new());
+    let manager = Arc::new(SessionManager::new(
+        store.clone(),
+        nostos_domain::Tier::Enterprise,
+    ));
+
+    let state = SyncRouterState::new(Arc::clone(&manager), auth)
+        .with_buffer(buffer)
+        .with_snapshotter(snapshotter);
     let app = axum::Router::new()
         .route("/sync", get(sync_handler))
         .with_state(state);

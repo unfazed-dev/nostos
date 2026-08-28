@@ -29,8 +29,9 @@ use nostos_domain::{
 
 use nostos_application::ports::SyncAuth;
 use common::{
-    decode_payload_hex, spawn_fake_server, spawn_fake_server_with, spawn_fake_server_with_rules,
-    spawn_fake_server_with_tables,
+    decode_payload_hex, spawn_fake_server, spawn_fake_server_with,
+    spawn_fake_server_with_device_cap, spawn_fake_server_with_rules,
+    spawn_fake_server_with_snapshotter, spawn_fake_server_with_tables,
 };
 
 use async_trait::async_trait;
@@ -978,5 +979,155 @@ async fn multi_table_one_socket_receives_both_tables() {
         tables.contains(&"providers"),
         "the providers event must arrive — a second Subscribe must register an additional session, \
          not be ignored (D1/ADR-0022); got tables {tables:?}"
+    );
+}
+
+// ===========================================================================
+// ADR-0040 reorder regression tests (no PG).
+//
+// Two contract points the writer-hoist commit must keep holding:
+//
+//   1. A first-connect snapshot LARGER than the session buffer drains fully.
+//      Pre-reorder, `deliver_awaiting` parked forever once the snapshot
+//      exceeded the sink's buffer depth: the channel's only consumer (the
+//      writer task) did not exist yet, and small fixture tables (≤ buffer
+//      rows) masked the hang.
+//
+//   2. The fatal first-register CAP reject closes POLITELY through the
+//      writer: a Close frame with code 1000 (NORMAL), never an abrupt drop.
+//      The where_sql reject arm (code 1002 + reason) is covered above;
+//      nothing exercised the cap arm.
+// ===========================================================================
+
+use nostos_application::ports::{DeliveryDecision, EventSink, SnapshotError, SnapshotSource};
+
+/// A snapshotter that answers every table with `rows` synthetic inserts,
+/// LSN-stamped above `base_lsn` per the `SnapshotSource` contract.
+struct BigSnapshot {
+    rows: usize,
+}
+
+#[async_trait]
+impl SnapshotSource for BigSnapshot {
+    async fn snapshot(
+        &self,
+        _table: &str,
+        base_lsn: nostos_domain::Lsn,
+        _tenant: Option<nostos_domain::TenantScope<'_>>,
+    ) -> Result<Vec<ReplicationEvent>, SnapshotError> {
+        Ok((0..self.rows)
+            .map(|i| {
+                ReplicationEvent::new(
+                    nostos_domain::Lsn::new(base_lsn.0 + 1 + i as u64),
+                    RowOp::Insert {
+                        table: "tasks".into(),
+                        pk: i.to_string(),
+                        payload: Bytes::from_static(b"{}"),
+                    },
+                )
+            })
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn first_connect_snapshot_larger_than_buffer_drains() {
+    // Buffer deliberately tiny so the 64-row snapshot cannot fit in the sink
+    // channel — every row past slot 8 forces `deliver_awaiting` to block until
+    // the writer drains, which is exactly the pre-reorder deadlock shape.
+    const ROWS: usize = 64;
+    let snap: Arc<dyn SnapshotSource> = Arc::new(BigSnapshot { rows: ROWS });
+    let (addr, _server, _mgr, _store) =
+        spawn_fake_server_with_snapshotter(8, Arc::new(nostos_infra::AllowAnonymous::new()), snap)
+            .await;
+
+    let got = tokio::spawn(async move {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+            .await
+            .expect("ws connect");
+        ws.send(Message::Text(common::subscribe_frame("tasks", &[])))
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(Message::Binary(b)))) =
+                tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            {
+                // The writer batches under backlog (C3): a message may be a
+                // single frame OR a coalesced JSON array — decode both forms.
+                rows.extend(nostos_infra::wire::decode_frames(&b));
+            }
+        }
+        rows
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        got.len(),
+        ROWS,
+        "a first-connect snapshot larger than the session buffer must drain FULLY — \
+         a short count means deliver_awaiting deadlocked against a missing writer \
+         (pre-ADR-0040-reorder behavior); got {} of {ROWS} rows",
+        got.len()
+    );
+}
+
+/// Accept-everything sink used to fill the device cap out-of-band through the
+/// `SessionManager` (same shape as tier_cap_regression's NoopSink).
+struct FillSink;
+
+#[async_trait]
+impl EventSink for FillSink {
+    async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+        DeliveryDecision::Delivered
+    }
+}
+
+#[tokio::test]
+async fn first_register_cap_reject_closes_with_code_1000() {
+    use nostos_domain::{Predicate, SyncSession};
+    let (addr, _server, mgr, _store) =
+        spawn_fake_server_with_device_cap(8, Arc::new(nostos_infra::AllowAnonymous::new()), 2).await;
+
+    // Fill the cap directly so the WS client's FIRST register hits
+    // DeviceCapReached before any session exists for it.
+    for _ in 0..2 {
+        let sink = Arc::new(FillSink) as Arc<dyn EventSink>;
+        mgr.connect(SyncSession::new(Predicate::all("tasks")), sink)
+            .await
+            .expect("cap not yet full");
+    }
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/sync"))
+        .await
+        .expect("ws connect");
+    ws.send(Message::Text(common::subscribe_frame("tasks", &[])))
+        .await
+        .unwrap();
+
+    // Read until the socket ends, capturing the close frame. A polite close
+    // arrives as Close(Some(frame)); an abrupt drop surfaces as None/Err with
+    // NO frame — which is exactly what this test must never observe.
+    let mut close_code: Option<u16> = None;
+    let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                close_code = Some(u16::from(frame.code));
+                break;
+            }
+            Ok(Some(Ok(Message::Close(None)) | Err(_)) | None) | Err(_) => break,
+            Ok(Some(Ok(_))) => {} // any pre-close frames are fine
+        }
+    }
+
+    assert_eq!(
+        close_code,
+        Some(1000),
+        "cap reject on first register must close politely with code 1000 (NORMAL) — \
+         None means the socket dropped without a close frame (abort), and 1005-style \
+         no-status would regress the explicit-code contract"
     );
 }
