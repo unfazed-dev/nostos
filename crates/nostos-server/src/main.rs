@@ -1039,9 +1039,11 @@ async fn main() -> anyhow::Result<()> {
     // direct-dialing ws client) binds NOSTOS_BIND in BOTH modes.
     #[cfg(feature = "iroh")]
     if cfg.transport == "iroh" {
-        // ADR-0041 D8: env-only operator knob (same argv-leak reasoning as
-        // NOSTOS_LICENSE_SECRET — main.rs reads it, infra stays env-free).
-        // Some(url) = self-hosted relay replaces the n0 default fleet.
+        // ADR-0041 D8: env-only operator knob — read only in iroh builds
+        // under NOSTOS_TRANSPORT=iroh; kept out of clap so non-iroh binaries
+        // don't advertise a knob they can't use (docs/OPERATING.md §1/§9).
+        // main.rs reads the env, infra stays env-free. Some(url) =
+        // self-hosted relay replaces the n0 default fleet.
         let relay_url = nostos_infra::iroh_sync::parse_relay_url(
             std::env::var("NOSTOS_IROH_RELAY_URL").ok().as_deref(),
         )
