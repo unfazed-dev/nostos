@@ -219,7 +219,11 @@ impl Drop for Session {
 
 impl NostosHandle {
     /// Open a connection. Does not touch the network yet — `subscribe()`
-    /// starts the actual WebSocket session. `db_path` is the SQLite file the
+    /// starts the actual session. `url` is `ws(s)://…/sync`, or an
+    /// `iroh://…?ticket=…` dial URL when this library is built with the
+    /// `iroh` cargo feature (ADR-0041 preview — shipped artifacts keep it OFF
+    /// until the field-leg condition clears; without the feature an iroh://
+    /// URL fails loudly with a named error). `db_path` is the SQLite file the
     /// durable client state lives in (Dart picks the directory, e.g. via
     /// `path_provider`'s `getApplicationSupportDirectory()` — see the
     /// `nostos_flutter` Dart wrapper).

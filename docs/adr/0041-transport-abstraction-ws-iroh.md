@@ -1,8 +1,20 @@
 # ADR-0041: Transport abstraction — `ws` | `iroh` as a first-class server/client option
 
-- **Status:** Proposed (upstream decision pending — the gate per the integration plan is explicit acceptance or rejection with recorded rationale).
-- **Date:** 2026-08-27
-- **References:** `crates/nostos-infra/src/transport/` (the sync handler seam), `crates/nostos-server/src/main.rs` router assembly (`/sync` mount), `crates/nostos-client/src/client.rs` generic session loop, ADR-0025 (LSN/epoch resume — unchanged by this proposal), ADR-0032 (unified API — unchanged), iroh 0.91.2 docs (docs.rs, fetched 2026-08-27).
+- **Status:** **Accepted** (2026-08-29) — D4 spike merged to main at `2e6cb9c`; conditions and gated items in **Acceptance** below. (Proposed 2026-08-27; spike branch `spike/iroh-transport`, green — see Spike Results.)
+- **Date:** 2026-08-27 (accepted 2026-08-29)
+- **References:** `crates/nostos-infra/src/transport/` (the sync handler seam), `crates/nostos-server/src/main.rs` router assembly (`/sync` mount), `crates/nostos-client/src/client.rs` generic session loop, ADR-0025 (LSN/epoch resume — unchanged by this proposal), ADR-0032 (unified API — unchanged), iroh **1.1.0** docs (docs.rs — the spike shipped the 1.x stable line: `NodeAddr`→`EndpointAddr`, tickets → `iroh-tickets`; the 0.91.2 citations in Context are the proposal's original evidence pass), decision memo `docs/plans/adr-0041-decision-memo.md`.
+
+## Acceptance (2026-08-29)
+
+Accepted on the spike evidence (ws/iroh conformance parity re-run green at `680852f`; merge rehearsed — one mechanical conflict; iroh off-default everywhere; iOS/Android build viability verified) with these **conditions**:
+
+1. No consumer defaults to `iroh://` until the **field leg** passes (phone on cellular, relay path — the unrun half of "the test that matters").
+2. ~~The loopback-bridge ponytail is resolved~~ — **RESOLVED 2026-08-29** (`da772aa`): `run_session` is generic over the frame `Stream`/`Sink`; the iroh accept loop runs the WS handshake natively on each QUIC stream and drives the session core directly. Bridge deleted; auth parity pinned by `iroh_auth_rejects_bad_token`; HTTP surface binds NOSTOS_BIND in both modes.
+3. ~~Self-hosted relay guidance + the n0-fleet privacy note land with or before the SDK wiring~~ — **RESOLVED 2026-08-29** (`c060bee`): `NOSTOS_IROH_RELAY_URL` (env-only, startup-fatal on a bad value) swaps the n0 default relay fleet for a self-hosted relay via `RelayMode::Custom`; the dial URL's ticket carries it, so stock clients dial straight through (iroh's relay transport accepts any peer-address relay URL — verified against vendored iroh 1.1.0 `socket/transports/relay.rs`). Guidance + privacy note + the discovery limitation (`iroh.link` stays n0's; `ponytail:` at `bind_sync_endpoint`) in `docs/OPERATING.md` §9.
+4. The exact iroh pin stays; upgrades are budgeted spikes (one breaking rename already observed: 0.91 → 1.1 inside a single spike).
+5. iroh remains off-default in every shipped artifact until conditions 1–3 clear.
+
+The reversal trigger (Consequences) is unchanged: drop the `iroh` transport, keep the seam, ws-only, no protocol change.
 
 ## Context
 
@@ -50,6 +62,17 @@ Serverless mesh or P2P sync between clients, gossip, client-relay-client topolog
 The adapter conformance suite (the A4 shape: connect → subscribe → offline write → online → serverAcked, plus signOut wipe and no-engine-type-leak) passes **identically over both transports** — same fixture, same marks, URL swapped `ws://` ↔ `iroh://`. And the field leg: a phone on cellular (no shared LAN) pairs via QR and completes an offline→online resume through the relay path.
 
 ---
+
+### Spike Results (2026-08-27, branch `spike/iroh-transport`)
+
+The D4 spike is implemented and green. What shipped:
+
+- **Version pin:** iroh **1.1.0** + iroh-tickets 1.0.0 (the proposal's 0.91.2 citations predate the 1.x stable line; `EndpointAddr` replaced `NodeAddr`, and tickets moved to `iroh-tickets`). MSRV 1.91 — under the workspace's 1.95. Everything lives behind OFF-by-default cargo features: `nostos-infra/iroh` (accept-loop bridge + ticket URL), `nostos-client/iroh` (dial-by-scheme), `nostos-server/iroh` (`--transport`/`NOSTOS_TRANSPORT=ws|iroh`). Default builds gain zero dependency weight.
+- **Client:** `run_once` now selects transport by URL scheme. `iroh://<node><path>?ticket=<urlencoded EndpointTicket>` dials the endpoint, opens a bidirectional stream, and runs the STANDARD WebSocket client handshake over it — the session loop is untouched (its halves always satisfied the same `Sink`/`Stream` bounds; a small `SyncWs` enum unifies the two stream types).
+- **Server:** under `NOSTOS_TRANSPORT=iroh` the HTTP surface binds loopback-only and an iroh accept loop bridges every accepted bidirectional stream to it as raw bytes. The boot log prints the QR-native `dial_url=iroh://…/sync?ticket=…`. ponytail (recorded in code): the BRIDGE is spike behavior — one loopback TCP hop per connection, the arxa-proven pattern — the native end-state if accepted is a `run_session` refactor onto a small frame-io trait so iroh streams drive the session core directly.
+- **Conformance (the test that matters):** `crates/nostos-client/tests/iroh_ws_conformance.rs` runs the SAME fixture and assertions twice — `ws://` and `iroh://` — both green: seeded snapshot rows arrive, checkpoint advances, second session reconnects idempotently. Run: `cargo test -p nostos-client --features iroh --test iroh_ws_conformance`.
+- **Operator check:** `cargo run -p nostos-client --features iroh --example iroh_dial_check -- '<printed iroh:// url>'` dials any deployed server's URL from any machine and reports frames/checkpoint.
+- **Not yet done (accept-gated):** the field leg (phone on cellular, relay path); Flutter/tauri SDK wiring (the FRB bridge would need the feature enabled); self-hosted relay guidance. Default relay usage routes through n0's fleet — a privacy consideration to document before any accepted default, not silence. (The native session-core refactor listed here at spike time landed 2026-08-29 as D6 — `da772aa`.)
 
 ### Verification notes (2026-08-27, this proposal's evidence pass)
 

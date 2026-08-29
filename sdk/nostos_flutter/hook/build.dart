@@ -238,14 +238,28 @@ Future<void> _cargoBuildFallback({
   }
   final String command;
   final List<String> args;
+  // ADR-0041 D7: opt-in cargo features for the source-build path (e.g.
+  // NOSTOS_FLUTTER_CARGO_FEATURES=iroh). Default empty — and the prebuilt
+  // binaries never carry iroh — so shipped artifacts stay off-default until
+  // ADR-0041's field-leg condition clears.
+  final extraFeatures =
+      (Platform.environment['NOSTOS_FLUTTER_CARGO_FEATURES'] ?? '')
+          .split(',')
+          .map((f) => f.trim())
+          .where((f) => f.isNotEmpty)
+          .toList();
+  final featureArgs = [
+    if (extraFeatures.isNotEmpty) ...['--features', extraFeatures.join(',')],
+  ];
   if (isAndroid) {
     command = 'cargo';
-    args = ['ndk', '-t', triple!, 'build', '--release'];
+    args = ['ndk', '-t', triple!, 'build', '--release', ...featureArgs];
   } else {
     command = 'cargo';
     args = [
       'build',
       '--release',
+      ...featureArgs,
       if (triple != null) ...['--target', triple],
     ];
   }

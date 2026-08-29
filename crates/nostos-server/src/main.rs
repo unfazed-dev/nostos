@@ -272,6 +272,14 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_TENANT_COLUMN", default_value = "org_id")]
     tenant_column: String,
 
+    /// Sync transport (ADR-0041): "ws" (default — serve /sync over HTTP/WS on
+    /// NOSTOS_BIND) or "iroh" (serve sync sessions natively over an iroh
+    /// endpoint, printing the QR-native iroh:// dial URL; the HTTP ops
+    /// surface still binds NOSTOS_BIND). Requires a build
+    /// with `--features iroh`.
+    #[arg(long, env = "NOSTOS_TRANSPORT", default_value = "ws")]
+    transport: String,
+
     /// Allowed CORS origins for browser clients, comma-separated (e.g.
     /// "https://app.example.com,http://localhost:3000"). Empty (default) =
     /// permissive (any origin) for local dev; set explicitly for production.
@@ -961,6 +969,10 @@ async fn main() -> anyhow::Result<()> {
         info!(publication = %cfg.pg_publication, "schema endpoint: PgSchemaSource");
     }
     let state = state_builder;
+    // ADR-0041: cloned for the iroh accept loop (transport block below); the
+    // router consumes the original via `.with_state`. Clone is Arcs — cheap.
+    #[cfg(feature = "iroh")]
+    let state_for_transport = state.clone();
 
     // CORS: explicit origins in production, permissive for local dev (the
     // empty-default case). Web clients need this to reach /sync from a browser.
@@ -1017,12 +1029,55 @@ async fn main() -> anyhow::Result<()> {
                 .layer(TraceLayer::new_for_http()),
         );
 
+    // ---- transport selection (ADR-0041) ----
+    // "ws" (default): sync sessions ride HTTP/WS on NOSTOS_BIND. "iroh": an
+    // iroh endpoint serves the sync session core NATIVELY (D6 — the accept
+    // loop runs the WebSocket handshake on each QUIC stream and hands it to
+    // transport::run_session; no loopback hop). The printed QR-native
+    // iroh:// URL is what clients dial. The HTTP surface (healthz/metrics/
+    // schema/rules/push REST, plus the /sync upgrade route for any
+    // direct-dialing ws client) binds NOSTOS_BIND in BOTH modes.
+    #[cfg(feature = "iroh")]
+    if cfg.transport == "iroh" {
+        // ADR-0041 D8: env-only operator knob — read only in iroh builds
+        // under NOSTOS_TRANSPORT=iroh; kept out of clap so non-iroh binaries
+        // don't advertise a knob they can't use (docs/OPERATING.md §1/§9).
+        // main.rs reads the env, infra stays env-free. Some(url) =
+        // self-hosted relay replaces the n0 default fleet.
+        let relay_url = nostos_infra::iroh_sync::parse_relay_url(
+            std::env::var("NOSTOS_IROH_RELAY_URL").ok().as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        if let Some(url) = &relay_url {
+            info!(relay = %url, "iroh sync: NOSTOS_IROH_RELAY_URL set — self-hosted relay replaces the n0 default fleet");
+        }
+        let endpoint = nostos_infra::iroh_sync::bind_sync_endpoint(relay_url)
+            .await
+            .context("iroh sync endpoint bind failed")?;
+        let url = endpoint.url(&cfg.ws_path);
+        info!(
+            transport = "iroh",
+            http_bind = %cfg.bind,
+            dial_url = %url,
+            "Nostos sync server listening — clients dial the iroh:// URL"
+        );
+        tokio::spawn(async move {
+            endpoint.serve_sessions(state_for_transport).await;
+        });
+    }
+    #[cfg(not(feature = "iroh"))]
+    if cfg.transport == "iroh" {
+        anyhow::bail!(
+            "NOSTOS_TRANSPORT=iroh but this server was built without the iroh feature \
+             (cargo build -p nostos-server --features iroh)"
+        );
+    }
+
     let addr: SocketAddr = cfg
         .bind
         .parse()
         .with_context(|| format!("invalid bind address: {}", cfg.bind))?;
-    info!(%addr, ws_path = %cfg.ws_path, "Nostos sync server listening");
-
+    info!(%addr, ws_path = %cfg.ws_path, transport = %cfg.transport, "Nostos HTTP surface listening");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;

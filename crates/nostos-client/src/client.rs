@@ -1325,12 +1325,11 @@ where
     /// say the server accepted us (a post-acceptance frame arrived).
     fn mark_subscribed(&self) {
         self.subscribed.send_if_modified(|v| {
-            if *v {
-                false
-            } else {
+            let changed = !*v;
+            if changed {
                 *v = true;
-                true
             }
+            changed
         });
     }
 
@@ -1360,9 +1359,33 @@ where
             });
         }
         let url = self.connect_url();
-        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
-            .await
-            .map_err(|e| ClientError::Connect(e.to_string()))?;
+        // ADR-0041 spike: dial-by-scheme. iroh:// URLs run the same
+        // WebSocket handshake over an iroh bidirectional stream (see
+        // iroh_dial); everything below this point is transport-agnostic —
+        // the halves satisfy the same Sink/Stream bounds either way.
+        #[cfg(feature = "iroh")]
+        let ws = if url.starts_with("iroh://") {
+            crate::iroh_dial::SyncWs::Iroh(
+                crate::iroh_dial::dial_sync_ws(&url)
+                    .await
+                    .map_err(ClientError::Connect)?,
+            )
+        } else {
+            crate::iroh_dial::SyncWs::Tcp(
+                tokio_tungstenite::connect_async(&url)
+                    .await
+                    .map_err(|e| ClientError::Connect(e.to_string()))?
+                    .0,
+            )
+        };
+        #[cfg(not(feature = "iroh"))]
+        let (ws, _resp) = {
+            // ADR-0041 D7: fail iroh:// URLs with a named, actionable error.
+            reject_iroh_scheme(&url)?;
+            tokio_tungstenite::connect_async(&url)
+                .await
+                .map_err(|e| ClientError::Connect(e.to_string()))?
+        };
         let (mut write, mut read) = ws.split();
 
         // ---- Subscribe with the durable resume_lsn + epoch ----
@@ -2043,10 +2066,33 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+/// ADR-0041 D7: without the `iroh` feature an `iroh://` URL must fail with a
+/// named, actionable error — not tungstenite's opaque scheme rejection.
+#[cfg(not(feature = "iroh"))]
+fn reject_iroh_scheme(url: &str) -> Result<(), ClientError> {
+    if url.starts_with("iroh://") {
+        return Err(ClientError::Connect(format!(
+            "iroh:// URL but nostos-client was built without the iroh feature \
+             (ADR-0041; rebuild with --features iroh): {url}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostos_domain::Operation;
+
+    #[cfg(not(feature = "iroh"))]
+    #[test]
+    fn iroh_url_fails_loudly_without_the_feature() {
+        let err = reject_iroh_scheme("iroh://node/sync?ticket=x")
+            .expect_err("iroh:// must be rejected on a default build");
+        let msg = err.to_string();
+        assert!(msg.contains("without the iroh feature"), "{msg}");
+        assert!(reject_iroh_scheme("ws://localhost:8800/sync").is_ok());
+    }
 
     #[test]
     fn decode_hex_roundtrips() {
