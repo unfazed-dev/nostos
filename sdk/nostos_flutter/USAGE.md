@@ -161,13 +161,25 @@ Bundled with the app and loaded by `NostosConfig.load()`. Keys (verified in
 }
 ```
 
-- `url` **(required)** — the `nostos-server` `/sync` WebSocket URL.
+- `url` **(required)** — the `nostos-server` `/sync` URL: `ws://`/`wss://` by
+  default, or an `iroh://…?ticket=…` dial URL (the server prints it at boot)
+  to sync over the iroh/QUIC transport — see the transports note below.
 - `supabase` *(optional)* — object with `url` + `anon_key` (or its successor
   name `publishable_key`). Present this block and `NostosDatabase.open` will
   initialize Supabase and use the signed-in session's access token as the sync
   bearer token.
 - `sqlite_filename` *(optional, default `cairn.sqlite`)* — joined onto the
   `sqliteDir` you pass at connect time.
+
+**Transports (ADR-0041).** `ws`/`wss` is the default everywhere. `iroh://`
+is a preview: the native library must be built from source with the `iroh`
+cargo feature — prebuilt binaries never carry it, and shipped artifacts stay
+off-default until ADR-0041's field-leg condition clears. To opt in on a
+source build, set `NOSTOS_FLUTTER_CARGO_FEATURES=iroh` in the build
+environment (the build hook forwards it to `cargo build --features`);
+without the feature an `iroh://` URL fails loudly with a named error. The
+server side is `NOSTOS_TRANSPORT=iroh` (plus `NOSTOS_IROH_RELAY_URL` if you
+self-host the relay) — see `docs/OPERATING.md` §9.
 
 Register it under `flutter/assets` in your `pubspec.yaml`:
 ```yaml

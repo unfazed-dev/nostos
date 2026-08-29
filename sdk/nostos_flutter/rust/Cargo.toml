@@ -32,3 +32,13 @@ serde_json = "1.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+# ADR-0041 D7: `iroh` lets `NostosHandle.connect` dial `iroh://…?ticket=…` URLs
+# through the native iroh/QUIC transport (nostos-client's dial-by-scheme). OFF
+# by default — shipped artifacts stay off-default until ADR-0041's field-leg
+# condition clears. ws/wss dialing is identical with or without the feature;
+# without it an iroh:// URL fails loudly with a named error (nostos-client
+# `reject_iroh_scheme`).
+[features]
+default = []
+iroh = ["nostos-client/iroh"]

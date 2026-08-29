@@ -37,11 +37,7 @@ class Nostos {
     NostosEngine engine, {
     Set<String>? orSetTables,
     Set<String>? counterTables,
-  }) : this._(
-          engine,
-          orSetTables: orSetTables,
-          counterTables: counterTables,
-        );
+  }) : this._(engine, orSetTables: orSetTables, counterTables: counterTables);
 
   final NostosEngine _engine;
 
@@ -54,8 +50,11 @@ class Nostos {
   /// Open a connection to a `nostos-server` `/sync` endpoint. Does not touch
   /// the network yet — [subscribe] starts the actual session.
   ///
-  /// [url] is the WebSocket URL, e.g. `ws://localhost:8800/sync` (see
-  /// `nostos dev`'s printed URL). [token] is a bearer token sent as `?token=`
+  /// [url] is the sync URL, e.g. `ws://localhost:8800/sync` (see
+  /// `nostos dev`'s printed URL), or an `iroh://…?ticket=…` dial URL when the
+  /// native library is built with the `iroh` feature (ADR-0041 preview — off
+  /// by default in shipped artifacts until the field-leg condition clears).
+  /// [token] is a bearer token sent as `?token=`
   /// on the WS handshake (matches whatever `NOSTOS_SYNC_AUTH` mode the server
   /// runs — `none` ignores it, `supabase-jwt` verifies it).
   ///
@@ -158,8 +157,10 @@ class Nostos {
   /// frame rides the live socket or the next reconnect. Rows surface through
   /// the existing [watch]/[watchQuery] layer — streams control which rows
   /// land in SQLite.
-  NostosSyncStream syncStream(String name, [Map<String, dynamic> params = const {}]) =>
-      NostosSyncStream._(_engine, name, params);
+  NostosSyncStream syncStream(
+    String name, [
+    Map<String, dynamic> params = const {},
+  ]) => NostosSyncStream._(_engine, name, params);
 
   /// The reactive row stream for [table]: the full current row set, re-emitted
   /// immediately with the durable on-disk snapshot (visible offline, before
@@ -294,14 +295,12 @@ class Nostos {
         ? merged
         : _debounceTicks(merged, throttle);
 
-    return ticks.asyncMap(
-      (_) async {
-        final rows = (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
-            .cast<Map<String, dynamic>>()
-            .toList();
-        return rows;
-      },
-    );
+    return ticks.asyncMap((_) async {
+      final rows = (jsonDecode(await _engine.query(sql: sql)) as List<dynamic>)
+          .cast<Map<String, dynamic>>()
+          .toList();
+      return rows;
+    });
   }
 
   /// Reactive typed-record watch (WS6, opt-in). Like [watchQuery] but decodes
