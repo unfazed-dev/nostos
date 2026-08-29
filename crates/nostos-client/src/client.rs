@@ -1379,9 +1379,13 @@ where
             )
         };
         #[cfg(not(feature = "iroh"))]
-        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
-            .await
-            .map_err(|e| ClientError::Connect(e.to_string()))?;
+        let (ws, _resp) = {
+            // ADR-0041 D7: fail iroh:// URLs with a named, actionable error.
+            reject_iroh_scheme(&url)?;
+            tokio_tungstenite::connect_async(&url)
+                .await
+                .map_err(|e| ClientError::Connect(e.to_string()))?
+        };
         let (mut write, mut read) = ws.split();
 
         // ---- Subscribe with the durable resume_lsn + epoch ----
@@ -2062,10 +2066,33 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+/// ADR-0041 D7: without the `iroh` feature an `iroh://` URL must fail with a
+/// named, actionable error — not tungstenite's opaque scheme rejection.
+#[cfg(not(feature = "iroh"))]
+fn reject_iroh_scheme(url: &str) -> Result<(), ClientError> {
+    if url.starts_with("iroh://") {
+        return Err(ClientError::Connect(format!(
+            "iroh:// URL but nostos-client was built without the iroh feature \
+             (ADR-0041; rebuild with --features iroh): {url}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostos_domain::Operation;
+
+    #[cfg(not(feature = "iroh"))]
+    #[test]
+    fn iroh_url_fails_loudly_without_the_feature() {
+        let err = reject_iroh_scheme("iroh://node/sync?ticket=x")
+            .expect_err("iroh:// must be rejected on a default build");
+        let msg = err.to_string();
+        assert!(msg.contains("without the iroh feature"), "{msg}");
+        assert!(reject_iroh_scheme("ws://localhost:8800/sync").is_ok());
+    }
 
     #[test]
     fn decode_hex_roundtrips() {
