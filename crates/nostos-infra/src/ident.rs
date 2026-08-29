@@ -22,7 +22,7 @@ fn ident_regex() -> &'static regex::Regex {
 /// matches, or `Err` with the offending identifier so the caller can wrap it
 /// in its port's error type (`SnapshotError::InvalidTable`,
 /// `WriteBackError::InvalidPayload`, …).
-pub(crate) fn validate_ident(name: &str) -> Result<(), String> {
+pub fn validate_ident(name: &str) -> Result<(), String> {
     if ident_regex().is_match(name) {
         Ok(())
     } else {

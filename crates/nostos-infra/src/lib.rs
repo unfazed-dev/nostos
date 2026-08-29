@@ -20,8 +20,9 @@
 
 pub mod auth;
 /// Shared strict identifier validation (ADR-0013 discipline) — lifted here
-/// when the mirror ingest adapter became the third caller.
-pub(crate) mod ident;
+/// when the mirror ingest adapter became the third caller; `pub` because the
+/// server's `/ingest` route validates the same client-controlled table names.
+pub mod ident;
 /// `#[cfg(feature = "iroh")]` — the ADR-0041 spike transport: iroh accept
 /// loop bridging each bidirectional stream to the loopback HTTP listener,
 /// plus the QR-native iroh:// dial URL.
