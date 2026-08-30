@@ -426,12 +426,12 @@ class NostosDatabase {
       orSetTables: orSetTables,
       counterTables: counterTables,
     );
-    final resolved = schema ?? await _fetchSchema(_deriveHttpBase(url));
+    final resolved = schema ?? await _fetchSchema(deriveHttpBase(url));
     nostos.applySchema(resolved.toClientTables());
     final db = NostosDatabase._(
       nostos,
       resolved,
-      _deriveHttpBase(url),
+      deriveHttpBase(url),
       token,
       supabaseAuth,
     );
@@ -1075,9 +1075,16 @@ class NostosDatabase {
     return completer.future;
   }
 
-  /// Derive the HTTP base for `GET /schema` from the WS `/sync` URL:
-  /// `wss`→`https`, `ws`→`http`, host+port preserved, trailing path stripped.
-  static String _deriveHttpBase(String wsUrl) {
+  /// Derive the HTTP base for the REST surface (`GET /schema`,
+  /// `POST /push-tokens`) from the WS `/sync` URL: `wss`→`https`, `ws`→`http`,
+  /// host+port preserved, and the WS path stripped down to its DIRECTORY —
+  /// the REST routes live on the same server beside `/sync`, so a sync URL
+  /// that reaches the server through a path-prefixed reverse proxy (an app
+  /// tunnel route like `/__nostos/sync`) must hit `/<prefix>/schema` and
+  /// `/<prefix>/push-tokens` on the SAME prefix. A root-level `/sync` (the
+  /// default server bind) keeps the historical host+port-only base.
+  @visibleForTesting
+  static String deriveHttpBase(String wsUrl) {
     final uri = Uri.parse(wsUrl);
     final scheme = switch (uri.scheme) {
       'wss' => 'https',
@@ -1085,7 +1092,10 @@ class NostosDatabase {
       _ => uri.scheme,
     };
     final port = uri.port == 0 ? '' : ':${uri.port}';
-    return '$scheme://${uri.host}$port';
+    final segments = uri.pathSegments.where((s) => s.isNotEmpty).toList();
+    if (segments.isNotEmpty) segments.removeLast();
+    final prefix = segments.isEmpty ? '' : '/${segments.join('/')}';
+    return '$scheme://${uri.host}$port$prefix';
   }
 
   static Future<NostosSchema> _fetchSchema(String httpBase) async {
