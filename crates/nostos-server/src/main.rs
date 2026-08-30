@@ -234,12 +234,23 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_LICENSE", default_value = "", hide = true)]
     license: String,
 
-    /// /sync authentication mode: "none" (anonymous — OSS dev default) or
-    /// "supabase-jwt" (HS256-verify a Supabase JWT). A managed multi-tenant
-    /// deploy MUST set "supabase-jwt"; "none" refuses to inject tenant filters
-    /// so it is single-tenant only (ADR-0010).
+    /// /sync authentication mode: "none" (anonymous — OSS dev default),
+    /// "bearer" (one shared secret → one fixed principal; ADR-0010 addendum),
+    /// or "supabase-jwt" (HS256/JWKS-verify a Supabase JWT). A managed
+    /// multi-tenant deploy MUST set "supabase-jwt"; "none" refuses to inject
+    /// tenant filters and mints the anonymous principal, which the push-token
+    /// registry refuses — single-tenant deploys wanting push receipts use
+    /// "bearer" (ADR-0010).
     #[arg(long, env = "NOSTOS_SYNC_AUTH", default_value = "none")]
     sync_auth: String,
+
+    /// The shared bearer secret for `NOSTOS_SYNC_AUTH=bearer`: every /sync
+    /// connection presenting it becomes one fixed principal (`local`/`local`
+    /// — see StaticBearerAuth), which is what makes push-token registration
+    /// (ADR-0037 §3) work on a single-tenant self-host without Supabase.
+    /// Required (non-empty) when `NOSTOS_SYNC_AUTH=bearer`; ignored otherwise.
+    #[arg(long, env = "NOSTOS_SYNC_BEARER_TOKEN", default_value = "")]
+    sync_bearer_token: String,
 
     /// The legacy HS256 shared secret used to verify Supabase JWTs at /sync.
     /// Ignored unless `NOSTOS_SYNC_AUTH=supabase-jwt`. Matches Supabase's
@@ -408,6 +419,19 @@ async fn main() -> anyhow::Result<()> {
             );
             Arc::new(nostos_infra::SupabaseJwtAuth::from_config(secret, jwks_url))
         }
+        "bearer" => {
+            if cfg.sync_bearer_token.is_empty() {
+                anyhow::bail!(
+                    "NOSTOS_SYNC_AUTH=bearer requires NOSTOS_SYNC_BEARER_TOKEN \
+                     (the shared secret every /sync connection must present)"
+                );
+            }
+            info!(
+                "sync auth: static bearer — one fixed principal (single-tenant \
+                 self-host; push registration enabled)"
+            );
+            Arc::new(nostos_infra::StaticBearerAuth::new(&cfg.sync_bearer_token))
+        }
         "none" => {
             warn!(
                 "sync auth: NONE — /sync is unauthenticated. Single-tenant/dev only; \
@@ -416,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(nostos_infra::AllowAnonymous::new())
         }
         other => anyhow::bail!(
-            "unknown NOSTOS_SYNC_AUTH value: {other} (expected 'none' or 'supabase-jwt')"
+            "unknown NOSTOS_SYNC_AUTH value: {other} (expected 'none', 'bearer', or 'supabase-jwt')"
         ),
     };
 

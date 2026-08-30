@@ -6,6 +6,10 @@
 //! - [`AllowAnonymous`] — OSS self-host dev default (`NOSTOS_SYNC_AUTH=none`).
 //!   Every connection becomes [`Principal::anonymous`]; no tenant filter is
 //!   injected. Never use in a multi-tenant managed deploy.
+//! - [`StaticBearerAuth`] — one shared bearer secret resolves to one fixed
+//!   principal (`NOSTOS_SYNC_AUTH=bearer`). The single-tenant self-host middle
+//!   rung: a real (non-anonymous) identity — so push-token registration
+//!   works — without standing up an IdP (ADR-0010 addendum).
 //! - [`SupabaseJwtAuth`] — verifies a Supabase JWT and lifts `sub` as the
 //!   account id and tenant id. Routes on the token's header `alg`:
 //!   - `HS256` verifies against a configured shared secret. Mirrors
@@ -30,7 +34,7 @@ use nostos_application::ports::SyncAuth;
 use nostos_domain::Principal;
 use hmac::{Hmac, Mac};
 use jsonwebtoken::Algorithm;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing::warn;
@@ -79,6 +83,64 @@ impl AllowAnonymous {
 impl SyncAuth for AllowAnonymous {
     async fn authenticate(&self, _token: &str) -> Option<Principal> {
         Some(Principal::anonymous())
+    }
+}
+
+/// Authenticate one shared bearer secret into one fixed, non-anonymous
+/// principal — `NOSTOS_SYNC_AUTH=bearer` (ADR-0010 addendum).
+///
+/// The middle rung between [`AllowAnonymous`] and [`SupabaseJwtAuth`]: a
+/// single-tenant self-host deploy (a personal device pair, a lab rig) that
+/// needs an AUTHENTICATED principal — the push-token registry refuses the
+/// anonymous one (ADR-0037 §3), so `none` can never deliver a push receipt —
+/// without operating an identity provider. Every connection presenting
+/// exactly the configured secret becomes the same `Principal` (account
+/// `local`, tenant `local` unless overridden).
+///
+/// Honest limits: this is ONE shared credential for the whole deployment —
+/// no per-device identity, no per-device revocation, and rotating it means
+/// re-provisioning every client. A managed multi-tenant deploy belongs to
+/// `supabase-jwt`.
+///
+/// Timing: the presented token and the configured secret are both run
+/// through SHA-256 and only the fixed-length 32-byte digests are compared,
+/// so comparison timing carries no information about either secret's bytes
+/// (the digest-vs-digest compare is the same shape for every input).
+pub struct StaticBearerAuth {
+    digest: [u8; 32],
+    account_id: String,
+    tenant_id: String,
+}
+
+impl StaticBearerAuth {
+    /// The default identity: account `local`, tenant `local`.
+    #[must_use]
+    pub fn new(token: impl AsRef<[u8]>) -> Self {
+        Self::with_identity(token, "local", "local")
+    }
+
+    /// An explicit fixed identity (account/tenant the registry rows and
+    /// tenant-scoped predicates will carry).
+    #[must_use]
+    pub fn with_identity(token: impl AsRef<[u8]>, account_id: &str, tenant_id: &str) -> Self {
+        Self {
+            digest: Sha256::digest(token.as_ref()).into(),
+            account_id: account_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl SyncAuth for StaticBearerAuth {
+    async fn authenticate(&self, token: &str) -> Option<Principal> {
+        if Sha256::digest(token.as_bytes()).as_slice() != self.digest.as_slice() {
+            return None;
+        }
+        Some(Principal::new(
+            self.account_id.clone(),
+            self.tenant_id.clone(),
+        ))
     }
 }
 
@@ -327,6 +389,34 @@ mod tests {
         let auth = AllowAnonymous::new();
         let p = auth.authenticate("anything").await.expect("always Some");
         assert!(p.is_anonymous());
+    }
+
+    #[tokio::test]
+    async fn static_bearer_matches_configured_secret() {
+        let auth = StaticBearerAuth::new("s3cret");
+        let p = auth.authenticate("s3cret").await.expect("exact match");
+        assert!(!p.is_anonymous());
+        assert_eq!(p.account_id, "local");
+        assert_eq!(p.tenant_id, "local");
+    }
+
+    #[tokio::test]
+    async fn static_bearer_rejects_wrong_partial_and_empty() {
+        let auth = StaticBearerAuth::new("s3cret");
+        assert!(auth.authenticate("wrong").await.is_none());
+        // Prefixes/suffixes must not match either — the digest compare is
+        // over the whole presented token, not a substring search.
+        assert!(auth.authenticate("s3cre").await.is_none());
+        assert!(auth.authenticate("s3cret2").await.is_none());
+        assert!(auth.authenticate("").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn static_bearer_identity_is_configurable() {
+        let auth = StaticBearerAuth::with_identity("s3cret", "owner", "arxa");
+        let p = auth.authenticate("s3cret").await.expect("match");
+        assert_eq!(p.account_id, "owner");
+        assert_eq!(p.tenant_id, "arxa");
     }
 
     #[tokio::test]
