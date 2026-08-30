@@ -517,11 +517,7 @@ async fn main() -> anyhow::Result<()> {
              column (e.g. org_id) or set NOSTOS_TENANT_COLUMN empty to opt out"
         );
     }
-    let tenant_col = if cfg.sync_auth == "supabase-jwt" && !cfg.tenant_column.is_empty() {
-        Some(cfg.tenant_column.as_str())
-    } else {
-        None
-    };
+    let tenant_col = resolve_tenant_col(&cfg.sync_auth, &cfg.tenant_column);
     if cfg.sync_auth == "supabase-jwt" && cfg.tenant_column.is_empty() {
         tracing::info!(
             "NOSTOS_TENANT_COLUMN is empty — tenant scoping disabled; \
@@ -1338,6 +1334,27 @@ struct PushTablesConfig {
 /// interpolation placeholders (they become the ActivityKit `content-state`).
 /// Invalid input is a startup error — a typo'd table silently not pushing is
 /// the failure mode this refuses to allow.
+/// The tenant column the deployment enforces, `None` when none applies.
+///
+/// Tenant scoping (ADR-0011) needs a REAL authenticated identity to scope
+/// WITH: `supabase-jwt` scopes per user claim; `bearer` (ADR-0010 addendum)
+/// scopes to the deployment's one fixed principal. `none` stays `None` —
+/// there is no identity to scope with, and injecting a column no principal
+/// backs would silently filter every subscription to zero rows.
+///
+/// Why bearer wants this set: without a tenant column the fan-out's
+/// fully-offline tenant-wide doorbell hint has no tenant source (the
+/// documented ponytail in fanout.rs), so a killed-app device can never be
+/// doorbelled. With it, mirror rows carry the column and the hint resolves
+/// against the registry's single tenant.
+fn resolve_tenant_col<'a>(sync_auth: &str, tenant_column: &'a str) -> Option<&'a str> {
+    if !tenant_column.is_empty() && (sync_auth == "supabase-jwt" || sync_auth == "bearer") {
+        Some(tenant_column)
+    } else {
+        None
+    }
+}
+
 fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<PushTablesConfig> {
     use nostos_application::ports::{PushTables, PushTemplate};
 
@@ -2747,6 +2764,34 @@ mod push_wiring_tests {
     fn unset_falls_back_to_embedded_or_noop() {
         assert_eq!(push_wiring("", "", true), Ok(PushWiring::Embedded));
         assert_eq!(push_wiring("", "", false), Ok(PushWiring::Noop));
+    }
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod resolve_tenant_col_tests {
+    use super::resolve_tenant_col;
+
+    #[test]
+    fn supabase_jwt_with_column_scopes() {
+        assert_eq!(resolve_tenant_col("supabase-jwt", "org_id"), Some("org_id"));
+    }
+
+    #[test]
+    fn bearer_with_column_scopes_to_the_fixed_principal_tenant() {
+        assert_eq!(resolve_tenant_col("bearer", "org_id"), Some("org_id"));
+    }
+
+    #[test]
+    fn none_auth_never_scopes() {
+        assert_eq!(resolve_tenant_col("none", "org_id"), None);
+    }
+
+    #[test]
+    fn empty_column_is_the_explicit_opt_out_in_every_mode() {
+        assert_eq!(resolve_tenant_col("supabase-jwt", ""), None);
+        assert_eq!(resolve_tenant_col("bearer", ""), None);
+        assert_eq!(resolve_tenant_col("none", ""), None);
     }
 }
 
