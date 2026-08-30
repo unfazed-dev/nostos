@@ -65,3 +65,18 @@
 - The route exists only when the mirror replicator is selected (the
   composition root constructs the handle there); in every other mode the
   path is a genuine 404.
+- **Verified end-to-end (2026-08-30, real binary, rig-only WS harness
+  `/tmp/arxa-d68/task6_ws.sh`):** ingest 200s carry server-stamped LSNs;
+  a subscriber connecting AFTER two pre-ingests receives both inside
+  `snapshot_begin`/`snapshot_end`; a third post-subscribe ingest arrives
+  live with its ingest LSN. Three wire facts phase-1b client work must
+  know: (1) snapshot rows arrive as ONE JSON-array frame between the
+  boundary control frames — the live path stays single-frame; (2)
+  snapshot rows are LSN RE-STAMPED at materialization (ingest acked
+  `[1,2]`, the wire carried `[3,4]` for the same rows, while the
+  post-subscribe live event kept its acked LSN) — ingest-ack LSNs are
+  NOT stable row identifiers; resume/dedup must key off wire LSNs plus
+  the epoch, never ingest acks; (3) the ruleset gates sync tables — a
+  subscribe for a table outside `nostos_rules.toml` is a silent 1008
+  close, so the sidecar must ship a rules file containing `approvals`
+  (or run rules-less, which is all-mode).
