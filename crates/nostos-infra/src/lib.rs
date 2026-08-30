@@ -67,7 +67,7 @@ pub mod transport;
 pub mod wire;
 pub mod write_back;
 
-pub use auth::{AllowAnonymous, SupabaseJwtAuth};
+pub use auth::{AllowAnonymous, StaticBearerAuth, SupabaseJwtAuth};
 pub use oplog::RecordingOpLogWriter;
 pub use push::router::{
     InMemoryTokenRegistry, PushRouter, PushSink, PushTokenRegistry, RailSet, RegisteredToken,

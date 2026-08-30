@@ -121,3 +121,36 @@ those claims would currently gate.
 
 **References:** `crates/nostos-infra/src/jwks.rs`,
 `crates/nostos-infra/src/auth.rs`, `docs/plans/flutter-supabase-plug-and-play-launch.md` (W2).
+
+## Addendum: static-bearer single-principal mode (2026-08-30)
+
+**Context.** The two existing modes bracket the deployment space awkwardly for
+a single-tenant self-host that wants working push notifications:
+`NOSTOS_SYNC_AUTH=none` mints the anonymous principal, and the push-token
+registry REFUSES the anonymous one (ADR-0037 §3 — there is no identity to
+stamp a token row with, and an open register route lets anyone poison the
+registry). The only authenticated mode, `supabase-jwt`, requires operating a
+Supabase project — wrong for a personal device pair or a lab rig that just
+needs its push receipt to land.
+
+**Decision.**
+
+1. New `NOSTOS_SYNC_AUTH=bearer` mode + `StaticBearerAuth` adapter
+   (`crates/nostos-infra/src/auth.rs`): one configured shared secret
+   (`NOSTOS_SYNC_BEARER_TOKEN`, required non-empty — the server fails fast
+   without it) resolves every connection presenting it to the same fixed,
+   NON-anonymous principal (account `local`, tenant `local`).
+2. The push-token registry works unchanged on top of it: registration stamps
+   `local`/`local`, and a bearer that doesn't match gets the same 401 as
+   before. No new route, no registry change.
+3. **Timing posture:** presented token and configured secret are both
+   SHA-256-hashed and only the fixed-length digests are compared — the
+   comparison's shape is identical for every input, so handshake timing does
+   not leak secret bytes.
+4. **Honest limits (documented on the adapter):** one shared credential per
+   deployment — no per-device identity, no per-device revocation, rotation
+   re-provisions every client. Anything multi-tenant stays `supabase-jwt`.
+
+**References:** `crates/nostos-infra/src/auth.rs` (`StaticBearerAuth`),
+`crates/nostos-server/src/main.rs` (config arm),
+`docs/plans/b2-sync-first-phase1.md` (phase-1b consumer).

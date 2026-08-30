@@ -234,12 +234,23 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_LICENSE", default_value = "", hide = true)]
     license: String,
 
-    /// /sync authentication mode: "none" (anonymous — OSS dev default) or
-    /// "supabase-jwt" (HS256-verify a Supabase JWT). A managed multi-tenant
-    /// deploy MUST set "supabase-jwt"; "none" refuses to inject tenant filters
-    /// so it is single-tenant only (ADR-0010).
+    /// /sync authentication mode: "none" (anonymous — OSS dev default),
+    /// "bearer" (one shared secret → one fixed principal; ADR-0010 addendum),
+    /// or "supabase-jwt" (HS256/JWKS-verify a Supabase JWT). A managed
+    /// multi-tenant deploy MUST set "supabase-jwt"; "none" refuses to inject
+    /// tenant filters and mints the anonymous principal, which the push-token
+    /// registry refuses — single-tenant deploys wanting push receipts use
+    /// "bearer" (ADR-0010).
     #[arg(long, env = "NOSTOS_SYNC_AUTH", default_value = "none")]
     sync_auth: String,
+
+    /// The shared bearer secret for `NOSTOS_SYNC_AUTH=bearer`: every /sync
+    /// connection presenting it becomes one fixed principal (`local`/`local`
+    /// — see StaticBearerAuth), which is what makes push-token registration
+    /// (ADR-0037 §3) work on a single-tenant self-host without Supabase.
+    /// Required (non-empty) when `NOSTOS_SYNC_AUTH=bearer`; ignored otherwise.
+    #[arg(long, env = "NOSTOS_SYNC_BEARER_TOKEN", default_value = "")]
+    sync_bearer_token: String,
 
     /// The legacy HS256 shared secret used to verify Supabase JWTs at /sync.
     /// Ignored unless `NOSTOS_SYNC_AUTH=supabase-jwt`. Matches Supabase's
@@ -408,6 +419,19 @@ async fn main() -> anyhow::Result<()> {
             );
             Arc::new(nostos_infra::SupabaseJwtAuth::from_config(secret, jwks_url))
         }
+        "bearer" => {
+            if cfg.sync_bearer_token.is_empty() {
+                anyhow::bail!(
+                    "NOSTOS_SYNC_AUTH=bearer requires NOSTOS_SYNC_BEARER_TOKEN \
+                     (the shared secret every /sync connection must present)"
+                );
+            }
+            info!(
+                "sync auth: static bearer — one fixed principal (single-tenant \
+                 self-host; push registration enabled)"
+            );
+            Arc::new(nostos_infra::StaticBearerAuth::new(&cfg.sync_bearer_token))
+        }
         "none" => {
             warn!(
                 "sync auth: NONE — /sync is unauthenticated. Single-tenant/dev only; \
@@ -416,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(nostos_infra::AllowAnonymous::new())
         }
         other => anyhow::bail!(
-            "unknown NOSTOS_SYNC_AUTH value: {other} (expected 'none' or 'supabase-jwt')"
+            "unknown NOSTOS_SYNC_AUTH value: {other} (expected 'none', 'bearer', or 'supabase-jwt')"
         ),
     };
 
@@ -493,11 +517,7 @@ async fn main() -> anyhow::Result<()> {
              column (e.g. org_id) or set NOSTOS_TENANT_COLUMN empty to opt out"
         );
     }
-    let tenant_col = if cfg.sync_auth == "supabase-jwt" && !cfg.tenant_column.is_empty() {
-        Some(cfg.tenant_column.as_str())
-    } else {
-        None
-    };
+    let tenant_col = resolve_tenant_col(&cfg.sync_auth, &cfg.tenant_column);
     if cfg.sync_auth == "supabase-jwt" && cfg.tenant_column.is_empty() {
         tracing::info!(
             "NOSTOS_TENANT_COLUMN is empty — tenant scoping disabled; \
@@ -1314,6 +1334,27 @@ struct PushTablesConfig {
 /// interpolation placeholders (they become the ActivityKit `content-state`).
 /// Invalid input is a startup error — a typo'd table silently not pushing is
 /// the failure mode this refuses to allow.
+/// The tenant column the deployment enforces, `None` when none applies.
+///
+/// Tenant scoping (ADR-0011) needs a REAL authenticated identity to scope
+/// WITH: `supabase-jwt` scopes per user claim; `bearer` (ADR-0010 addendum)
+/// scopes to the deployment's one fixed principal. `none` stays `None` —
+/// there is no identity to scope with, and injecting a column no principal
+/// backs would silently filter every subscription to zero rows.
+///
+/// Why bearer wants this set: without a tenant column the fan-out's
+/// fully-offline tenant-wide doorbell hint has no tenant source (the
+/// documented ponytail in fanout.rs), so a killed-app device can never be
+/// doorbelled. With it, mirror rows carry the column and the hint resolves
+/// against the registry's single tenant.
+fn resolve_tenant_col<'a>(sync_auth: &str, tenant_column: &'a str) -> Option<&'a str> {
+    if !tenant_column.is_empty() && (sync_auth == "supabase-jwt" || sync_auth == "bearer") {
+        Some(tenant_column)
+    } else {
+        None
+    }
+}
+
 fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<PushTablesConfig> {
     use nostos_application::ports::{PushTables, PushTemplate};
 
@@ -2723,6 +2764,34 @@ mod push_wiring_tests {
     fn unset_falls_back_to_embedded_or_noop() {
         assert_eq!(push_wiring("", "", true), Ok(PushWiring::Embedded));
         assert_eq!(push_wiring("", "", false), Ok(PushWiring::Noop));
+    }
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod resolve_tenant_col_tests {
+    use super::resolve_tenant_col;
+
+    #[test]
+    fn supabase_jwt_with_column_scopes() {
+        assert_eq!(resolve_tenant_col("supabase-jwt", "org_id"), Some("org_id"));
+    }
+
+    #[test]
+    fn bearer_with_column_scopes_to_the_fixed_principal_tenant() {
+        assert_eq!(resolve_tenant_col("bearer", "org_id"), Some("org_id"));
+    }
+
+    #[test]
+    fn none_auth_never_scopes() {
+        assert_eq!(resolve_tenant_col("none", "org_id"), None);
+    }
+
+    #[test]
+    fn empty_column_is_the_explicit_opt_out_in_every_mode() {
+        assert_eq!(resolve_tenant_col("supabase-jwt", ""), None);
+        assert_eq!(resolve_tenant_col("bearer", ""), None);
+        assert_eq!(resolve_tenant_col("none", ""), None);
     }
 }
 
