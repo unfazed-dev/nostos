@@ -12,6 +12,11 @@
 
 pub mod fake;
 
+/// Channel-fed mirror-ingest adapter (B2 desktop sidecar; ADR-00NN). The
+/// engine-side writer POSTs to `/ingest`, the handle records + forwards, the
+/// replicator drains — the same `ReplicatorStream` seam as fake/pg.
+pub mod mirror;
+
 #[cfg(feature = "pg")]
 pub mod pg;
 
@@ -35,6 +40,7 @@ pub mod extract;
 
 pub use extract::extract_json_column;
 pub use fake::{FakeReplicator, FakeReplicatorConfig};
+pub use mirror::{MirrorHandle, MirrorReplicator};
 
 #[cfg(feature = "pg")]
 pub use pg::{PgReplicator, PgReplicatorConfig, PgReplicatorError};

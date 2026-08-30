@@ -48,7 +48,6 @@
 #![cfg(feature = "pg")]
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -557,37 +556,12 @@ fn build_payload(cols: &[(String, i32)], row: &tokio_postgres::Row) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Identifier defense — identical to `write_back.rs::pg`'s helpers. Duplicated
-// rather than shared because the helpers are private to write_back's `pg`
-// submodule and the snapshot path is a distinct port (snapshot_source.rs).
-// Keeping a second copy is deliberate: the two ports must not gain a hidden
-// coupling through a shared private helper module, and the copies are tiny
-// (one regex + a one-line quote). If a THIRD caller appears, lift these into a
-// shared `crate::ident` module at that point.
+// Identifier defense — LIFTED into the shared `crate::ident` module when the
+// mirror ingest adapter became the third caller (this file's old note asked
+// for exactly that lift). `quote_ident` stays local: it is the only SQL user.
 // ---------------------------------------------------------------------------
 
-/// The strict identifier regex: a bare lowercase SQL identifier
-/// (`^[a-z_][a-z0-9_]*$`). Applied to the table name before any SQL is built.
-/// This is the SAME pattern `PgWriteBack` uses — the structural injection
-/// defense for a client-controlled identifier.
-fn ident_regex() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r"^[a-z_][a-z0-9_]*$")
-            .expect("identifier regex is a valid static pattern")
-    })
-}
-
-/// Validate one identifier against the strict regex. Returns `Ok(())` if it
-/// matches, or `Err` with the offending identifier so the caller can wrap it
-/// in a [`SnapshotError::InvalidTable`].
-fn validate_ident(name: &str) -> Result<(), String> {
-    if ident_regex().is_match(name) {
-        Ok(())
-    } else {
-        Err(name.to_string())
-    }
-}
+use crate::ident::validate_ident;
 
 /// Wrap a validated identifier in Postgres double-quotes (the identifier
 /// quote). The caller MUST have run [`validate_ident`] first — this function

@@ -11,6 +11,7 @@
 //! the hexagonal payoff (ADR-0001).
 
 mod admin_auth;
+mod ingest;
 mod push_api;
 
 use std::net::SocketAddr;
@@ -622,6 +623,11 @@ async fn main() -> anyhow::Result<()> {
     // Driver-liveness flag (M6): flipped when the replicator→fan-out driver
     // task exits on its own; folded into /healthz. Wired into state below.
     let driver_dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // B2 mirror (ADR-0042): the ingest half of the channel replicator, built
+    // in the `mirror` arm below and handed to the /ingest route mount. The
+    // handle implements SnapshotSource, so the snapshotter injection reuses
+    // the same object — one buffer, two views.
+    let mut mirror_ingest: Option<ingest::IngestState> = None;
     match cfg.replicator.as_str() {
         "fake" => {
             let mut repl = FakeReplicator::new(
@@ -649,6 +655,38 @@ async fn main() -> anyhow::Result<()> {
                 distinct_keys = cfg.fake_distinct_keys,
                 "replicator: FakeReplicator (synthetic; 0 = unbounded)"
             );
+        }
+        "mirror" => {
+            // B2 (ADR-0042): the desktop-sidecar mirror — the engine is the
+            // single writer and POSTs row events to /ingest; this arm drains
+            // the channel into the SAME fan-out pipeline (the adapter-swap
+            // payoff main.rs:8-11 advertises). No PG anywhere: the snapshot
+            // comes from the handle's in-memory buffer.
+            if !cfg.pg_url.trim().is_empty() {
+                anyhow::bail!(
+                    "NOSTOS_REPLICATOR=mirror but NOSTOS_PG_URL is set — the mirror \
+                     keeps its own in-memory read model and must not point at \
+                     Postgres. Unset NOSTOS_PG_URL."
+                );
+            }
+            let (handle, mut repl) = nostos_infra::MirrorHandle::open();
+            mirror_ingest = Some(ingest::IngestState { handle });
+            let fanout_drv = Arc::clone(&fanout);
+            let dead = Arc::clone(&driver_dead);
+            let drv = tokio::spawn(async move {
+                // Mirror payloads are the engine's tuple-image JSON — same
+                // typed extraction as the pg path (ADR-0037 plan 1.4).
+                let extract =
+                    |e: &ReplicationEvent, col: &str| extract_typed_column(e.payload_bytes(), col);
+                let outcome = fanout_drv.run(&mut repl, extract).await;
+                tracing::error!(
+                    ?outcome,
+                    "replicator→fan-out driver EXITED — live fan-out stopped; /healthz now degraded (M6)"
+                );
+                dead.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            std::mem::forget(drv);
+            info!("replicator: MirrorHandle (engine mirror-out via POST /ingest)");
         }
         "pg" => {
             #[cfg(feature = "pg")]
@@ -718,7 +756,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         other => {
-            anyhow::bail!("unknown NOSTOS_REPLICATOR value: {other} (expected 'fake' or 'pg')");
+            anyhow::bail!(
+                "unknown NOSTOS_REPLICATOR value: {other} (expected 'fake', 'pg', or 'mirror')"
+            );
         }
     }
 
@@ -862,6 +902,16 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(nostos_infra::PgSnapshotter::new(&cfg.pg_url));
         state_builder = state_builder.with_snapshotter(snapshotter);
         info!("snapshot-on-subscribe: PgSnapshotter (real source)");
+    }
+
+    // B2 mirror (ADR-0042): the handle's in-memory buffer IS the snapshot
+    // source — a freshly-subscribing client sees pre-ingest rows (and the
+    // shared LSN allocator keeps snapshot bands unique against live events).
+    if let Some(ing) = &mirror_ingest {
+        let snapshotter: Arc<dyn nostos_application::ports::SnapshotSource> =
+            Arc::new(ing.handle.clone());
+        state_builder = state_builder.with_snapshotter(snapshotter);
+        info!("snapshot-on-subscribe: MirrorHandle (in-memory mirror buffer)");
     }
 
     // ---- boot-time tenant-column audit (2026-08-27 incident guard) ----
@@ -1028,6 +1078,21 @@ async fn main() -> anyhow::Result<()> {
                 .layer(cors)
                 .layer(TraceLayer::new_for_http()),
         );
+
+    // B2 mirror (ADR-0042): the engine's write door. Mounted ONLY under
+    // NOSTOS_REPLICATOR=mirror — no handle, no route (the mount-time shape of
+    // PUT /rules's fail-closed unset-token 404).
+    let app = if let Some(ing) = mirror_ingest {
+        app.merge(
+            axum::Router::new()
+                .route("/ingest", axum::routing::post(ingest::post_ingest))
+                .with_state(ing)
+                .layer(build_cors_layer(&cfg.cors_origins)?)
+                .layer(TraceLayer::new_for_http()),
+        )
+    } else {
+        app
+    };
 
     // ---- transport selection (ADR-0041) ----
     // "ws" (default): sync sessions ride HTTP/WS on NOSTOS_BIND. "iroh": an
@@ -1202,14 +1267,14 @@ async fn watch_rules(
     }
 }
 
-/// Typed column extraction for the pg streaming path (ADR-0037 plan 1.4):
-/// the payload's JSON scalars keep their type — `{"priority":5}` yields
-/// [`ColumnValue::Number`] — instead of the old string-only read, which made
-/// numeric/bool columns look absent and let `Ne`/`Not(Eq)` predicates over
-/// them match wider than intended. Delegates to the canonical
-/// `extract_json_column` mapping (ADR-0019) so streaming predicates and the
-/// snapshot path can never drift.
-#[cfg(feature = "pg")]
+/// Typed column extraction for the pg streaming path AND the B2 mirror path
+/// (ADR-0037 plan 1.4): the payload's JSON scalars keep their type —
+/// `{"priority":5}` yields [`ColumnValue::Number`] — instead of the old
+/// string-only read, which made numeric/bool columns look absent and let
+/// `Ne`/`Not(Eq)` predicates over them match wider than intended. Delegates
+/// to the canonical `extract_json_column` mapping (ADR-0019) so streaming
+/// predicates and the snapshot path can never drift. Pure JSON — never
+/// pg-gated (the mirror arm runs featureless).
 fn extract_typed_column(payload: &[u8], col: &str) -> Option<ColumnValue> {
     nostos_infra::replicator::extract_json_column(payload)?(col)
 }

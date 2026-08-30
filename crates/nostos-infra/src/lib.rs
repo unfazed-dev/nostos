@@ -19,6 +19,10 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+/// Shared strict identifier validation (ADR-0013 discipline) — lifted here
+/// when the mirror ingest adapter became the third caller; `pub` because the
+/// server's `/ingest` route validates the same client-controlled table names.
+pub mod ident;
 /// `#[cfg(feature = "iroh")]` — the ADR-0041 spike transport: iroh accept
 /// loop bridging each bidirectional stream to the loopback HTTP listener,
 /// plus the QR-native iroh:// dial URL.
@@ -76,7 +80,7 @@ pub use push::{
 // OpenSSL-backed rail — feature-gated (see push/mod.rs); default-on for servers.
 #[cfg(feature = "webpush")]
 pub use push::webpush::WebPushRail;
-pub use replicator::{FakeReplicator, FakeReplicatorConfig};
+pub use replicator::{FakeReplicator, FakeReplicatorConfig, MirrorHandle, MirrorReplicator};
 pub use router::TokioEventSink;
 pub use store::InMemorySessionStore;
 pub use transport::SyncRouterState;
