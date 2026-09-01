@@ -24,13 +24,37 @@
    manifest must be committed after artifact hashes are known).
 3. **Publish to pub.dev** (explicit, human step):
 
+       git pull                     # MUST come first — see the warning below
        cd sdk/nostos_flutter && flutter pub publish --dry-run && flutter pub publish
+
+   > **`git pull` is load-bearing here.** Step 2 lands the real urls+sha256s
+   > on `main`; publish reads your *local* tree. Publish without pulling and
+   > 0.2.0 goes to pub.dev carrying the placeholder manifest — every consumer
+   > silently falls back to `cargo build`, and pub.dev versions cannot be
+   > unpublished, so the only remedy is 0.2.1. Gate on:
+   >
+   >     test "$(grep -c '"url": "https' sdk/nostos_flutter/hook/prebuilt.json)" = 7
+   >
+   > Note the publish is interactive on first upload of a package name (OAuth
+   > + it sets the uploader), so it wants a real terminal.
 
 4. **Flip the arxa kit pin** (arxa repo, `kit/nostos/pubspec.yaml`): the
    `nostos_flutter` git `ref:` moves from the `fa1c5840…` full SHA to
    `v0.2.0` — the one-line bump kit plan D1 reserved for exactly this
    moment. Do this ONLY after step 1 (the tag must resolve on GitHub) or
    arxa CI clones fail.
+
+   > **CORRECTION (2026-09-01).** A git `ref:` defeats the point of this
+   > release. The manifest PR (step 2) fills `hook/prebuilt.json` on `main`
+   > *after* the tag, so the tag's own tree keeps the placeholder manifest —
+   > verified: 0 of 7 urls filled at the tagged commit. An arxa pinned by git
+   > ref therefore takes the `cargo build` fallback and stays
+   > Rust-toolchain-bound, which is exactly what D3 0c was meant to end.
+   > Pin arxa to the **pub.dev** version (`nostos_flutter: ^0.2.0`, published
+   > in step 3 from a tree that has the merged manifest) — or, if the git ref
+   > is required for another reason, move the tag onto the post-merge commit
+   > first. Verify either way with
+   > `grep -c '"url": "https' <resolved>/hook/prebuilt.json` == 7.
 5. **Zero-toolchain consumers** arrive when arxa's kit rebuilds against the
    published prebuilts: no Rust, no cargo-ndk, no NDK for app builds
    (D3 0c closed). The interim Rust-prerequisite note in kit/nostos's README
