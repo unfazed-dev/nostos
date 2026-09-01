@@ -35,7 +35,9 @@ const COLLECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Mint an HS256 JWT carrying `{"sub": sub}` — the minimal valid Supabase token.
 fn mint_jwt(sub: &str) -> String {
     let header = b"{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
-    let payload = format!("{{\"sub\":\"{sub}\"}}");
+    // `exp` is required since the v0.2.0 audit (finding 5); far future so
+    // the token never expires mid-test.
+    let payload = format!("{{\"sub\":\"{sub}\",\"exp\":{}}}", 4_102_444_800i64);
     let h = base64url(header);
     let p = base64url(payload.as_bytes());
     let signing_input = format!("{h}.{p}");

@@ -141,7 +141,9 @@ fn jwt_b64url(bytes: &[u8]) -> String {
 /// Supabase token for `SupabaseJwtAuth::new(SECRET)`; `principal.tenant_id = sub`.
 fn mint_jwt(sub: &str) -> String {
     let header = b"{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
-    let payload = format!("{{\"sub\":\"{sub}\"}}");
+    // `exp` is required since the v0.2.0 audit (finding 5); far future so
+    // the token never expires mid-test.
+    let payload = format!("{{\"sub\":\"{sub}\",\"exp\":{}}}", 4_102_444_800i64);
     let h = jwt_b64url(header);
     let p = jwt_b64url(payload.as_bytes());
     let signing_input = format!("{h}.{p}");

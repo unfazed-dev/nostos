@@ -128,6 +128,36 @@ pub struct Config {
     /// short first sync is indistinguishable from a complete one at the
     /// client, which is the failure shape the stream-snapshot scope bypass
     /// had (audit finding 7). Raise this if a legitimate table is bigger.
+    /// Comma-separated allowlist of accepted JWT `iss` values.
+    ///
+    /// Empty (the default) leaves `iss` unchecked, so a token from ANY issuer
+    /// whose `kid` resolves against the configured JWKS is accepted (audit
+    /// finding 4). Set this to your project's issuer URL to close that.
+    /// Applies to the JWKS path only — the legacy HS256 path lifts no `iss`.
+    #[arg(long, env = "NOSTOS_JWT_ISSUERS", default_value = "")]
+    jwt_issuers: String,
+
+    /// Seconds a JWKS cache may keep serving after its last SUCCESSFUL fetch.
+    ///
+    /// Past this the cache fails closed rather than serving keys it can no
+    /// longer vouch for — a key the IdP revoked would otherwise keep verifying
+    /// for the whole outage (audit finding 6).
+    #[arg(long, env = "NOSTOS_JWKS_MAX_STALE_SECS", default_value_t = 1800)]
+    jwks_max_stale_secs: u64,
+
+    /// Accept legacy HS256 tokens that carry no `exp` claim.
+    ///
+    /// Such a token never expires and survives revocation, so it is refused by
+    /// default (audit finding 5). Set this only while migrating a token issuer
+    /// that cannot yet stamp `exp`.
+    #[arg(
+        long,
+        env = "NOSTOS_ALLOW_JWT_WITHOUT_EXP",
+        default_value_t = false,
+        value_parser = parse_env_bool
+    )]
+    allow_jwt_without_exp: bool,
+
     /// Ceiling on live sync sessions held by a SINGLE account.
     ///
     /// The licensed `device_cap` is global, so without this one account can
@@ -366,7 +396,16 @@ pub struct Config {
     /// `0` (default) = eviction OFF (no client is ever dropped for lag). A
     /// production deploy MUST set this AND `--pg-slot-wal-keep-size` to protect
     /// the primary's disk (ADR-0016).
-    #[arg(long, env = "NOSTOS_SLOT_MAX_LAG", default_value_t = 0)]
+    ///
+    /// Default changed from `0` (OFF) by the v0.2.0 audit (finding 1): with
+    /// eviction off, one client that connects, acks nothing and stays
+    /// connected pins the replication slot and grows WAL without bound — a
+    /// disk-exhaustion attack on the source primary that needs no
+    /// credentials beyond a valid sync session. 1 GiB is deliberately
+    /// generous: eviction costs a reconnect and resync, not data loss, and a
+    /// real client on a bad connection has to fall a gigabyte of WAL behind
+    /// before it trips. Set `0` to restore the old unbounded behaviour.
+    #[arg(long, env = "NOSTOS_SLOT_MAX_LAG", default_value_t = 1_073_741_824)]
     slot_max_lag: u64,
 
     /// Postgres `max_slot_wal_keep_size` for the replication slot (MB). Caps how
@@ -481,7 +520,19 @@ async fn main() -> anyhow::Result<()> {
                 jwks = jwks_url.is_some(),
                 "sync auth: supabase-jwt (tenant-enforced)"
             );
-            Arc::new(nostos_infra::SupabaseJwtAuth::from_config(secret, jwks_url))
+            Arc::new(
+                nostos_infra::SupabaseJwtAuth::from_config(secret, jwks_url)
+                    .with_allow_missing_exp(cfg.allow_jwt_without_exp)
+                    .with_issuers(
+                        cfg.jwt_issuers
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(ToString::to_string)
+                            .collect(),
+                    )
+                    .with_jwks_max_stale(std::time::Duration::from_secs(cfg.jwks_max_stale_secs)),
+            )
         }
         "bearer" => {
             if cfg.sync_bearer_token.is_empty() {
@@ -530,8 +581,10 @@ async fn main() -> anyhow::Result<()> {
     // /metrics endpoint (reader). The session gauge is updated on connect/
     // disconnect by the manager — for now we snapshot the store count on read.
     let metrics = Arc::new(nostos_application::ports::Metrics::new());
-    // WAL-bloat protection: OFF by default (slot_max_lag=0); a deploy that sets
-    // NOSTOS_SLOT_MAX_LAG opts into evicting clients that lag past it (ADR-0016).
+    // WAL-bloat protection: ON by default at 1 GiB since the v0.2.0 audit
+    // (finding 1). `NOSTOS_SLOT_MAX_LAG=0` opts back OUT, which restores the
+    // old behaviour where a client that acks nothing pins the slot forever
+    // (ADR-0016).
     let eviction = if cfg.slot_max_lag > 0 {
         nostos_application::EvictionPolicy::new(cfg.slot_max_lag)
     } else {
