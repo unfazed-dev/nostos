@@ -226,6 +226,15 @@ silently read as `true`).
 
 ## Open — confirmed gaps, not yet fixed
 
+> **Verification 2026-09-02 (code cross-check):** findings 2, 3, 6, 8, 9, 10,
+> 11 are CLOSED-VERIFIED at HEAD with named tests. **Finding 4 is only
+> half-closed** — `nbf`/`iss` are enforced on the JWKS path but not on the
+> HS256 path (`auth.rs:262`), and neither path has a test. Per-finding table:
+> "Verification 2026-09-02" under §3 of "Left deliberately". **Closed the
+> same day in `338e3f6`** (HS256 `nbf`/`iss` enforced; JWKS now also requires
+> `iss` when the allowlist is set; tests on both paths) — the heading above
+> is accurate again.
+
 > **Update 2026-09-02 — "fix all" pass COMPLETE. All ten findings in this
 > section are fixed** (1–11 less the numbers already closed above), across
 > commits `10ebc93`, `2095d16`, `1f960a7`, `2bf9be9` and the Batch A commits.
@@ -678,6 +687,41 @@ Unchanged this pass. Per-principal connection caps, the unbounded snapshot,
 each needs a policy call (what limit, what window, whose deploy breaks) rather
 than a patch. None is a silent-authorization-bypass of the class fixed above:
 findings 6 and 7 were, which is why they were done first.
+
+#### Verification 2026-09-02 — doc claims cross-checked against HEAD `afe485a`
+
+Read-only pass pinned to commit `afe485a`: each finding's claimed fix commit
+was located with `git log -S<symbol>`, every cited line was re-read from
+`git show afe485a:<path>` (the working tree of `main.rs` had drifted under
+concurrent edits; all `main.rs` lines below are the `afe485a` numbers), and the
+covering test named. Rule applied: CLOSED-VERIFIED only where a test that would
+fail on regression is named; code-only would be CLOSED-BUT-UNTESTED. Nothing
+was run (host CPU-contended). Verdicts:
+
+| # | Finding (one line) | Fix commit | Code at HEAD | Test | Verdict |
+|---|---|---|---|---|---|
+| 2 | No per-principal connection cap | `d893f86` | `store.rs:116` `PrincipalCapExceeded`; `session.rs:100` `with_per_principal_cap`; `main.rs:193` `NOSTOS_PER_PRINCIPAL_SESSION_CAP` | `store.rs::per_principal_cap_tests` (3: `one_account_cannot_consume_every_global_slot`, `a_refused_connect_does_not_burn_a_global_slot`, `presence_index_is_not_double_counted_by_the_capped_path`) | CLOSED-VERIFIED |
+| 3 | Unbounded snapshot | `d893f86` | `snapshot_source.rs:123` `limit_clause` (`LIMIT cap+1`), `:128` `reject_if_over_cap`, called on both `snapshot` (`:287`) and `snapshot_stream` (`:360`); `transport.rs:1284,1448` map `TooLarge` to a refusal | `limit_fetches_one_row_past_the_cap_so_a_breach_is_detectable`, `at_or_under_the_cap_is_accepted_and_over_it_is_refused`, `the_default_cap_clears_the_apply_throughput_bench` (`snapshot_source.rs:973-1010`). Transport-level `TooLarge` frame path is untested. | CLOSED-VERIFIED |
+| 4 | `nbf`, `aud`, `iss` not validated **on either verifier path** | `10ebc93` | JWKS path only: `jwks.rs:153` `validate_nbf = true`, `:154-155` opt-in `set_issuer`; `main.rs:143` `NOSTOS_JWT_ISSUERS`. **HS256 path `auth.rs:262` `verify_supabase_hs256` still checks only `exp` — no `nbf`, no `iss`; `NOSTOS_JWT_ISSUERS` is never applied to it.** | None. No test anywhere exercises a future-`nbf` token or a wrong-`iss` token (grep `nbf`/`with_issuers` in tests: zero hits). | **NOT-ACTUALLY-CLOSED** (half: JWKS done, HS256 untouched; both halves untested) |
+| 6 | Rotated keys stay valid through an outage | `10ebc93` | `jwks.rs:82` `DEFAULT_JWKS_MAX_STALE` 30 min, `:96` `with_max_stale`, `:236-247` refuses to serve past ceiling; `main.rs:151` `NOSTOS_JWKS_MAX_STALE_SECS` → `:570` `with_jwks_max_stale` | `a_cache_past_its_staleness_ceiling_stops_serving_during_an_outage` (`jwks.rs:832`) | CLOSED-VERIFIED |
+| 8 | No admin-token rate limiting | `1f960a7` | `admin_auth.rs:84` `failure_delay` (linear, capped), `:115` `check` sleeps on failure only, resets counter on success; `main.rs:469` refuses to start on token < `MIN_ADMIN_TOKEN_LEN` | `failure_delay_escalates_then_stops_at_the_cap`, `check_rejects_missing_and_malformed_headers`, `check_accepts_correct_bearer_token` (`admin_auth.rs:191-227`). Startup short-token bail at `main.rs:469` has no test. | CLOSED-VERIFIED |
+| 9 | Cross-tenant existence oracle | `a504bae` | `write_back.rs:249` `CROSS_TENANT_REJECTION`; all six `Forbidden(` sites (`:483,632,855,987,1155,1294`) return that one string | `e2e_pg_writeback.rs`: `cross_tenant_upsert_conflict_is_rejected`, `cross_tenant_delete_is_rejected_row_survives`, `cross_tenant_patch_is_rejected_row_unchanged`, `cross_tenant_insert_is_stamped_to_callers_tenant` (pg-gated, `NOSTOS_E2E_PG=1`) | CLOSED-VERIFIED |
+| 10 | No `Origin` check on WS upgrade | `1f960a7` | `transport.rs:450` `origin_allowed` (empty list = off, absent header = native client, exact match, non-UTF-8 refused); `main.rs:425` `NOSTOS_WS_ORIGINS` → `:984` `with_allowed_origins` | `empty_allowlist_is_off_and_admits_everything`, `configured_allowlist_admits_listed_and_refuses_unlisted`, `a_native_client_sending_no_origin_still_connects`, `match_is_exact_not_a_prefix_or_suffix` (`transport.rs:2053-2091`); `main.rs:2549-2569` origin-list parsing | CLOSED-VERIFIED |
+| 11 | `Not` over an absent column over-delivers | `2095d16` | `predicate.rs:256-312` three-valued eval; Unknown survives `Not`, Kleene `And`/`Or`, collapses to no-deliver at the top | `not_of_missing_eq_is_unknown_and_does_not_deliver` (`:766`), `unknown_survives_negation_at_every_depth` (`:794`) | CLOSED-VERIFIED |
+
+**Gap to dispatch — finding 4, HS256 half.** `crates/nostos-infra/src/auth.rs:262`
+`verify_supabase_hs256` decodes claims and checks `exp` only. It needs `nbf`
+rejection (with the same `JWT_LEEWAY_SECS`) and the `NOSTOS_JWT_ISSUERS`
+allowlist applied when non-empty, plus tests on both paths: a future-`nbf`
+token rejected, a wrong-`iss` token rejected when the allowlist is set, any
+`iss` accepted when it is unset. The close-all plan's own table (row 4) says
+"both verifier paths", so this is a doc/code mismatch, not a scoping choice.
+
+> Re-verified 2026-09-02: `10ebc93` covered the JWKS path only — HS256 ignored
+> `nbf`/`iss`, and JWKS accepted a *missing* `iss` even with an allowlist
+> (`jsonwebtoken` 10.4 `set_issuer` compares only when the claim is present);
+> both closed in `338e3f6` with tests on both paths (`auth::tests::hs256_*`,
+> `jwks::tests::jwks_*`). Finding 4 → CLOSED-VERIFIED.
 
 ---
 
