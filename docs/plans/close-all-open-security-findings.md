@@ -354,7 +354,10 @@ Docker was available for it.
   That is a feature, not a security fix, and inventing it under "fix all" is the
   scope creep the instructions warn against. Instead `nostos pull` now fails with
   an error naming `NOSTOS_PROTECT_METADATA` and the workaround, rather than a
-  bare 401. **Follow-up, recorded not done.**
+  bare 401. **Follow-up, done in `9e2313c`:** `nostos pull --token <TOKEN>`
+  with env fallback `NOSTOS_TOKEN` sends `Authorization: Bearer <token>` on
+  `GET /schema`. The token is a flag/env value only — still no field in
+  `.nostos/config.json`, which is committed — and is never printed.
 - **CORS is unchanged.** `build_cors_layer` still returns
   `CorsLayer::permissive()` on empty `NOSTOS_CORS_ORIGINS`. That is the
   documented local-dev default and `NOSTOS_CORS_ORIGINS` is the existing

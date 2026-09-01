@@ -244,7 +244,10 @@ silently read as `true`).
 > - **`nostos pull` cannot send a token.** `ProjectConfig` has no field for one,
 >   and adding a credential store is a feature, not a security fix. Against a
 >   server with `NOSTOS_PROTECT_METADATA=1` the CLI now fails with an error
->   naming the knob instead of a bare 401. **Follow-up.**
+>   naming the knob instead of a bare 401. **Follow-up — done in `9e2313c`:**
+>   `nostos pull --token <TOKEN>` (env fallback `NOSTOS_TOKEN`) sends
+>   `Authorization: Bearer <token>` on `GET /schema`; the 401 message names the
+>   flag and the env var. Still no token field in `.nostos/config.json`.
 > - **CORS is unchanged.** `build_cors_layer` still returns
 >   `CorsLayer::permissive()` on empty `NOSTOS_CORS_ORIGINS` — the documented
 >   local-dev default, with `NOSTOS_CORS_ORIGINS` as the existing production
