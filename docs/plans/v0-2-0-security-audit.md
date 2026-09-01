@@ -157,7 +157,7 @@ the doc comment above it promised timing carried no information. Now
 
 ## Open — needs a decision, not a patch
 
-### The fail-open default pair (USER DECISION PENDING)
+### The fail-open default pair — DECIDED AND FIXED (`fef1c53`)
 
 `NOSTOS_BIND` defaults to `0.0.0.0:8800` (`main.rs:44`). `NOSTOS_SYNC_AUTH`
 defaults to `none` → `AllowAnonymous`, which injects **no tenant filter**. Out of
@@ -178,16 +178,89 @@ missed, keeps an escape hatch. Rejected alternatives: defaulting the bind to
 loopback silently breaks existing Docker deployments; defaulting to
 `supabase-jwt` makes the quickstart require a Supabase project.
 
+**Implemented as recommended.** `exposes_anonymous_sync(bind)` gates the `"none"`
+arm of the auth match: `sync_auth=none` + a non-loopback bind → `anyhow::bail!`
+with a message naming all three ways out. An unparseable bind returns `false`
+(not this guard's error to report; boot bails on it later with the canonical
+message — and a bind the server can't parse is one it never listens on).
+
+**Boot-verified, four cases, not just unit-tested:**
+
+| bind | auth | hatch | result |
+|---|---|---|---|
+| `0.0.0.0:8877` | none | — | **refuses**, exit 1 |
+| `0.0.0.0:8878` | none | `=1` | listens |
+| `0.0.0.0:8879` | none | `=true` | listens |
+| `127.0.0.1:8880` | none | — | listens (local dev untouched) |
+
+**Two shipped configs paired anonymous with `0.0.0.0` and would have stopped
+booting.** Both were found by grepping every launch site, not by assuming:
+
+- `docker/docker-compose.stack.yml` sets `NOSTOS_BIND: 0.0.0.0:8800` and no
+  `NOSTOS_SYNC_AUTH`. Now carries `NOSTOS_INSECURE_ANONYMOUS: "1"` with a comment
+  saying why it is legitimate there and that a real deploy drops the line.
+- **`nostos dev`** — the flagship onboarding command — defaults `bind` to
+  `0.0.0.0` (so a physical phone on the LAN can reach the laptop) and
+  deliberately emits *no* `NOSTOS_SYNC_AUTH` without a Supabase secret
+  (`config.rs`, pinned by a test). It now emits the hatch explicitly in that
+  branch only: `nostos dev` **is** the "I am developing" signal. A production
+  deploy runs the `nostos-server` binary directly, never this path, and still
+  hits the refusal. Both branches are pinned by tests — hatch present without a
+  secret, absent with one.
+
+`scripts/sdk-e2e.sh` binds `127.0.0.1:8801` (unaffected); `release.yml` only
+builds binaries.
+
+#### The escape hatch did not work when first written
+
+`NOSTOS_INSECURE_ANONYMOUS=1` **failed to parse.** clap's stock `bool` accepts
+only `true`/`false`, so `=1` — the universal shell/compose convention, and what
+this server's *own refusal message* tells the operator to set — died with
+`invalid value '1' for '--insecure-anonymous'`. The compose file, the CLI hatch,
+and the error text all said `=1`; every one of them would have failed.
+
+The unit test on the guard passed the whole time. Only booting the actual binary
+caught it. A `parse_env_bool` value-parser now accepts `1/0`, `true/false`,
+`yes/no`, `on/off`, and hard-errors on anything else (a typo'd hatch must never
+silently read as `true`).
+
 ## Open — confirmed gaps, not yet fixed
 
 Ordered by exploitability.
 
-1. **`ack` is unvalidated** (`wire.rs`, `transport.rs`). A client can ack an LSN
-   it never received. Slot advance uses `min_acked_lsn` across sessions, so
-   acking *high* cannot skip other sessions' data — but acking *low forever*
-   holds the replication slot back, and unbounded WAL growth is a disk-exhaustion
-   attack on the Postgres primary. No monotonicity or in-flight check found.
-   Needs a test either way.
+1. ~~**`ack` is unvalidated**~~ — **PARTLY WRONG AS ORIGINALLY WRITTEN, now
+   fixed (`a20671d`).** Correcting the record, because an audit that overstates
+   a finding costs the next reader real time:
+   - *"No monotonicity check found"* was **false**. `TokioEventSink::record_ack`
+     (`router.rs:157`) has always been monotonic via a `compare_exchange_weak`
+     loop — a lower ack is ignored. So *"acking low forever holds the slot
+     back"* is not reachable by acking low: the sink simply won't go backwards.
+     A client that never acks **at all** does hold the slot, but that is the
+     already-documented ADR-0016 problem (a legitimately slow client looks
+     identical), not an ack-validation bug.
+   - *"A client can ack an LSN it never received"* was **true**, and is what
+     got fixed: `record_ack` now clamps to the sink's `delivered_lsn`.
+   - **It was never a leak.** Slot advance folds the *minimum* acked LSN across
+     live sessions (`store.rs:233`), so an inflated ack cannot flush the slot
+     past another session's data. Acking high only jams this session's own
+     `admit` acked-range guard shut — the client silently stops receiving. That
+     is self-harm, so the clamp is **defense-in-depth, not a security fix**,
+     and is labelled that way in the code.
+   - Fixing it required making `delivered_lsn` a true high-water mark
+     (`fetch_max`, not `store`). Its doc always said *"highest LSN delivered"*
+     but a snapshot row carries a lower base LSN than live traffic already
+     delivered, so the ceiling could regress and clamp a legitimate ack down.
+   - One test was found to be **fiction**:
+     `stream_snapshot_after_acked_live_traffic_still_delivers` claimed to
+     simulate "live traffic already delivered + acked at LSN 500" while only
+     calling `record_ack(500)` — a state no real client can reach. It now uses
+     `seed_acked_lsn`, which sets both cursors.
+
+   **Still genuinely open here:** `NOSTOS_SLOT_MAX_LAG` defaults to `0` (WAL-bloat
+   eviction OFF). *That* is the real disk-exhaustion exposure on the primary, and
+   it is a default-value decision with operational blast radius — eviction fires
+   on a legitimately slow mobile client on a bad connection. Not silently picked;
+   see "Left deliberately" below.
 2. **No per-principal connection cap.** `DeviceCapReached`
    (`application/src/session.rs:26`) is a *global* licensed-session count, so one
    tenant opening `cap` sockets locks out every other tenant. Per-socket caps
@@ -313,7 +386,7 @@ distinguishes a real fix from a table-name-only fix: under a ruleset scoped to
 `status = 'open'`, a `status='closed'` row must not arrive while the `open` row
 still does.
 
-### 7. Stream snapshot skips the rules scope — OPEN, not yet fixed
+### 7. Stream snapshot skips the rules scope — HIGH (fixed, `4b5dcb5`)
 
 Same class, second path. `register_stream` builds the session predicate with
 `build_stream_predicate` (rules scope AND bound template AND tenant), but then
@@ -329,11 +402,41 @@ by the ruleset's own scope, while live fan-out for the same stream is. Under a
 ruleset with a row-level scope, the stream snapshot over-delivers exactly that
 scope's worth of rows.
 
-Not yet patched: the naive fix (pass `predicate.expr`) would bake the tenant
-clause into the SQL expression as well as the dedicated `tenant` argument,
-which breaks deliberately-global tables that lack the tenant column
+The naive fix (pass `predicate.expr`) would bake the tenant clause into the SQL
+expression as well as the dedicated `tenant` argument, which breaks
+deliberately-global tables that lack the tenant column
 (`scope_if_column_present` skips the clause today). The correct fix passes
 `rules_expr.and(bound)` and leaves the tenant travelling in its own argument.
+
+**Fixed 2026-09-01.** `build_stream_predicate` now returns BOTH the session
+predicate and the snapshot expr (`rules ∧ bound`, tenant deliberately absent),
+so the two paths cannot be derived separately again — deriving the same
+authorization twice is how this bug happened. `bound` is now *moved* into the
+function rather than cloned, so the call site has no unscoped copy left to
+reach for.
+
+**Proven, not assumed.** `stream_snapshot_applies_the_rules_scope_not_just_the_template`
+seeds three rows under scope `status = 'open'` + template `owner_id = :owner`.
+Row `l2` is the load-bearing one: the template admits it, only the rules scope
+hides it. Pre-fix the test yields `["l1", "l2"]`; post-fix `["l1"]`. Verified by
+temporarily restoring the old behaviour, watching it fail, then reverting.
+
+#### The trap this fix had to clear first
+
+The obvious patch would have **broken every default deployment.** `PredicateExpr::and`
+built `And([self, other])` unconditionally, and the SQL compiler
+(`snapshot_source::compile_expr`) deliberately *refuses* `PredicateExpr::Any` —
+a match-all marker reaching SQL means a widened snapshot. The zero-config `all`
+sync mode decides `Allow(PredicateExpr::any())`, so `rules_expr.and(bound)`
+would have produced `And([Any, template])` → compile error → swallowed by the
+transport → downgraded to live-fan-out-only → **the client's first sync silently
+returns nothing.** Exactly the `products`-catalog starvation already documented
+in `snapshot_source.rs`.
+
+So `and` now collapses `Any` (and `or` absorbs it), matching what `Predicate::and_eq`
+/ `or_eq` already did one screen below. Semantics for `matches()` are unchanged
+(`Any AND x ≡ x`); the change is that the tree stays compilable. Blast radius
+measured: 132 domain + 214 infra tests, zero failures.
 
 ## Verification status — actually run, 2026-09-01
 
