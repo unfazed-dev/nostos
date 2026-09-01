@@ -134,7 +134,8 @@ impl StaticBearerAuth {
 #[async_trait]
 impl SyncAuth for StaticBearerAuth {
     async fn authenticate(&self, token: &str) -> Option<Principal> {
-        if Sha256::digest(token.as_bytes()).as_slice() != self.digest.as_slice() {
+        let got: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if got != self.digest {
             return None;
         }
         Some(Principal::new(
