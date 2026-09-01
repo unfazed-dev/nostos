@@ -3278,7 +3278,14 @@ mod tests {
         let principal = Principal::new("acct", "tenant-acme");
 
         // Simulate live traffic already delivered + acked at LSN 500.
-        sink.record_ack(Lsn::new(500));
+        //
+        // `seed_acked_lsn` sets BOTH cursors, which is what "delivered and
+        // acked" actually means on a live socket. A bare `record_ack(500)`
+        // used to work here only because acks were unvalidated — the sink now
+        // clamps an ack to what it delivered, so acking 500 having delivered
+        // nothing correctly registers as 0 and this fixture would be
+        // simulating a state no real client can reach.
+        sink.seed_acked_lsn(Lsn::new(500));
 
         register_stream(
             "s1",
