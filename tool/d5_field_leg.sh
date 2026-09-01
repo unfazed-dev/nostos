@@ -48,7 +48,7 @@ done
 echo '[d5] healthz ok'
 
 probe() {
-  cargo run -q -p nostos-client --features iroh --example iroh_dial_check -- "$URL" >"$DIR/probe$1.log" 2>&1 \
+  cargo run -q -p nostos-client --features iroh --example iroh_dial_check -- "$URL" 8 >"$DIR/probe$1.log" 2>&1 \
     && grep 'checkpoint LSN' "$DIR/probe$1.log" | sed -n "s/.*checkpoint LSN \([0-9]*\).*/\1/p" \
     || { echo "FAIL: probe $1 — see $DIR/probe$1.log"; exit 1; }
 }
