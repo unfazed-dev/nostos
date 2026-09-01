@@ -250,19 +250,22 @@ impl PredicateExpr {
     /// callback. It returns an **owned** `Option<ColumnValue>` rather than a
     /// borrow, sidestepping a higher-rank-lifetime trap.
     ///
-    /// # Missing-column semantics (two-valued logic)
+    /// # Missing-column semantics (three-valued logic)
     ///
-    /// A filter whose column is absent from the row does **not** match — for
-    /// both `Eq` and `Ne` — because we cannot verify the relation, and Nostos
-    /// never silently over-delivers. `And`/`Or`/`Not` then compose with
-    /// standard two-valued boolean logic.
+    /// A filter whose column is absent from the row evaluates to **unknown**,
+    /// not `false` — the same thing Postgres does with NULL. Unknown propagates
+    /// through `And`/`Or` by Kleene's rules and, crucially, **survives `Not`**:
+    /// negating "we could not tell" still yields "we could not tell", never a
+    /// match. The top level then treats unknown as no-match, exactly as SQL's
+    /// `WHERE` drops NULL rows.
     ///
-    /// **Documented edge:** because absence makes `Eq` return `false`, `Not(Eq
-    /// {absent})` returns `true`. This is the SQL-NULL three-valued-logic gap.
-    /// Slice 1 deliberately stays two-valued (no speculative NULL handling);
-    /// `Ne` is provided as the safe inequality that never matches on absence.
-    /// If real schemas demand it, three-valued logic is a documented future
-    /// refinement (ADR-0012).
+    /// This converges the in-memory evaluator with the snapshot's SQL path,
+    /// which compiles `Not` to `NOT (<inner>)` and has always been three-valued
+    /// because Postgres is. Before this, the two paths returned *different row
+    /// sets* for the same subscription: `Not(Eq{absent})` was `true` here and
+    /// excluded there. See the 2026-09-02 addendum to ADR-0012 — the original
+    /// decision deferred 3VL until that edge was shown to bite, and the v0.2.0
+    /// security audit is that demonstration.
     #[inline]
     pub fn matches<F>(&self, extract: F) -> bool
     where
@@ -271,21 +274,52 @@ impl PredicateExpr {
         // Delegate to a trait-object recursion so the tree monomorphizes to a
         // single copy. Calling `matches::<&F>` recursively would grow the type
         // one reference per depth (F, &F, &&F, …) and hit the recursion limit.
-        self.matches_dyn(&extract)
+        //
+        // Unknown is not a match: this is the one place 3VL collapses back to a
+        // yes/no delivery decision.
+        self.eval_dyn(&extract) == Some(true)
     }
 
-    fn matches_dyn(&self, extract: &dyn Fn(&str) -> Option<ColumnValue>) -> bool {
+    /// Three-valued evaluation. `Some(true)`/`Some(false)` are definite;
+    /// `None` is SQL's NULL — "unknown".
+    fn eval_dyn(&self, extract: &dyn Fn(&str) -> Option<ColumnValue>) -> Option<bool> {
         match self {
-            Self::Any => true,
-            Self::Eq(f) => matches_filter_eq(f, extract),
-            Self::Ne(f) => matches_filter_ne(f, extract),
-            Self::Lt(f) => matches_ordered(f, extract, Ordering::is_lt),
-            Self::Gt(f) => matches_ordered(f, extract, Ordering::is_gt),
-            Self::Le(f) => matches_ordered(f, extract, Ordering::is_le),
-            Self::Ge(f) => matches_ordered(f, extract, Ordering::is_ge),
-            Self::And(parts) => parts.iter().all(|p| p.matches_dyn(extract)),
-            Self::Or(parts) => parts.iter().any(|p| p.matches_dyn(extract)),
-            Self::Not(inner) => !inner.matches_dyn(extract),
+            Self::Any => Some(true),
+            Self::Eq(f) => eval_filter_eq(f, extract),
+            Self::Ne(f) => eval_filter_ne(f, extract),
+            Self::Lt(f) => eval_ordered(f, extract, Ordering::is_lt),
+            Self::Gt(f) => eval_ordered(f, extract, Ordering::is_gt),
+            Self::Le(f) => eval_ordered(f, extract, Ordering::is_le),
+            Self::Ge(f) => eval_ordered(f, extract, Ordering::is_ge),
+            // Kleene `AND`: a definite `false` still short-circuits (F ∧ U = F),
+            // so the fan-out hot path keeps its early exit. Otherwise any
+            // unknown poisons the conjunction.
+            Self::And(parts) => {
+                let mut unknown = false;
+                for p in parts {
+                    match p.eval_dyn(extract) {
+                        Some(false) => return Some(false),
+                        None => unknown = true,
+                        Some(true) => {}
+                    }
+                }
+                if unknown { None } else { Some(true) }
+            }
+            // Kleene `OR`, mirrored: a definite `true` short-circuits (T ∨ U = T).
+            Self::Or(parts) => {
+                let mut unknown = false;
+                for p in parts {
+                    match p.eval_dyn(extract) {
+                        Some(true) => return Some(true),
+                        None => unknown = true,
+                        Some(false) => {}
+                    }
+                }
+                if unknown { None } else { Some(false) }
+            }
+            // The whole fix: `None` maps to `None`. An unknown leaf can no
+            // longer be inverted into a delivery.
+            Self::Not(inner) => inner.eval_dyn(extract).map(|b| !b),
         }
     }
 }
@@ -440,32 +474,39 @@ impl std::ops::Not for Predicate {
 
 // --- leaf evaluators (split so the match arms stay readable) ---------------
 
-/// `column = value`: matches iff the column is present and the values agree.
-/// Absent column ⇒ `false` (never over-deliver).
+/// `column = value`: true iff the column is present and the values agree.
+/// Absent column ⇒ **unknown** (SQL NULL), never `false` — see the note on
+/// [`PredicateExpr::matches`].
 #[inline]
-fn matches_filter_eq(f: &PredicateFilter, extract: &dyn Fn(&str) -> Option<ColumnValue>) -> bool {
-    match extract(&f.column) {
-        Some(actual) => matches_value(&f.value, &actual),
-        None => false,
+fn eval_filter_eq(
+    f: &PredicateFilter,
+    extract: &dyn Fn(&str) -> Option<ColumnValue>,
+) -> Option<bool> {
+    if matches!(f.value, ColumnValue::Param(_)) {
+        return None;
     }
+    Some(matches_value(&f.value, &extract(&f.column)?))
 }
 
-/// `column != value`: matches iff the column is present and the values differ.
-/// Absent column ⇒ `false` — `Ne` is the safe inequality that never
-/// over-delivers when the column can't be read (see module docs).
+/// `column != value`: true iff the column is present and the values differ.
+/// Absent column ⇒ **unknown**, so `Ne` still never over-delivers.
 #[inline]
-fn matches_filter_ne(f: &PredicateFilter, extract: &dyn Fn(&str) -> Option<ColumnValue>) -> bool {
+fn eval_filter_ne(
+    f: &PredicateFilter,
+    extract: &dyn Fn(&str) -> Option<ColumnValue>,
+) -> Option<bool> {
     // An unbound `Param` placeholder must never match (P5 sync streams,
-    // docs/plans/p5-sync-streams-design.md Decision 2). Without this guard the
-    // `!matches_value(...)` below would invert the placeholder's non-match into
-    // a match-EVERYTHING — the exact over-delivery the marker exists to prevent.
+    // docs/plans/p5-sync-streams-design.md Decision 2). This guard predates 3VL,
+    // where it was the *only* thing stopping `!matches_value(...)` from
+    // inverting the placeholder's non-match into a match-EVERYTHING. Under 3VL
+    // that inversion is structurally impossible — `Not` maps unknown to unknown
+    // — so the guard is no longer a special case, just the leaf reporting that
+    // an unbound placeholder is unknowable. Kept because it must still return
+    // unknown rather than compare against the marker.
     if matches!(f.value, ColumnValue::Param(_)) {
-        return false;
+        return None;
     }
-    match extract(&f.column) {
-        Some(actual) => !matches_value(&f.value, &actual),
-        None => false,
-    }
+    Some(!matches_value(&f.value, &extract(&f.column)?))
 }
 
 /// Compare a filter value against a row value for equality/inequality leaves.
@@ -543,20 +584,19 @@ impl Ordering {
 }
 
 /// Evaluate an ordered leaf: extract the row value, coerce it to the filter's
-/// type, compare, and apply the predicate (Lt/Gt/Le/Ge). Absent column or
-/// non-coercible value ⇒ `false` (defensive — never over-deliver).
-fn matches_ordered(
+/// type, compare, and apply the predicate (Lt/Gt/Le/Ge).
+///
+/// Absent column ⇒ **unknown**. A non-coercible value (cross-type mismatch, a
+/// parse failure, or an unbound `Param`) is *also* unknown rather than `false`:
+/// "these are not comparable" is not the same claim as "this row fails the
+/// filter", and only the former is safe under `Not` — `false` would invert into
+/// a match and deliver rows nobody asked for.
+fn eval_ordered(
     f: &PredicateFilter,
     extract: &dyn Fn(&str) -> Option<ColumnValue>,
     keeps: impl Fn(Ordering) -> bool,
-) -> bool {
-    let Some(actual) = extract(&f.column) else {
-        return false;
-    };
-    match cmp_op(&f.value, &actual) {
-        Some(o) => keeps(o),
-        None => false,
-    }
+) -> Option<bool> {
+    Some(keeps(cmp_op(&f.value, &extract(&f.column)?)?))
 }
 
 /// Typed comparison of a filter value against a row value for ordered leaves.
@@ -715,12 +755,71 @@ mod tests {
     }
 
     #[test]
-    fn not_of_missing_eq_returns_true_pinned_edge() {
-        // Documented two-valued edge: Eq{absent} → false, so Not(Eq{absent}) →
-        // true. This is the SQL-NULL three-valued-logic gap (ADR-0012). Pinned
-        // so the behavior is never surprising; use `Ne` for safe inequality.
+    fn not_of_missing_eq_is_unknown_and_does_not_deliver() {
+        // Was `not_of_missing_eq_returns_true_pinned_edge`, which pinned the
+        // OPPOSITE assertion: two-valued logic made Eq{absent} → false, so
+        // Not(Eq{absent}) → true and the row was delivered.
+        //
+        // That pin recorded a choice only ONE path ever honored. The snapshot
+        // compiles this to `NOT ("status"::text = $1)`, and Postgres — being
+        // three-valued — sends a NULL column to NULL and EXCLUDES the row. So
+        // live fan-out delivered rows the snapshot did not, for the same
+        // subscription. ADR-0012 deferred 3VL "until a real schema demonstrates
+        // the Not(Eq{absent}) edge bites"; the v0.2.0 audit demonstrated it.
+        // See the 2026-09-02 addendum.
+        //
+        // The edge is still pinned — it just points the other way now, at the
+        // semantics Postgres always had.
         let p = !Predicate::eq("tasks", "status", ColumnValue::text("archived"));
-        assert!(p.matches(|_| None));
+        assert!(
+            !p.matches(|_| None),
+            "Not over an absent column must be unknown, not a match"
+        );
+
+        // The negation is genuinely unknown, not blanket-false: with the column
+        // present, Not still inverts normally.
+        assert!(p.matches(row_view(&[("status", ColumnValue::text("open"))])));
+        assert!(!p.matches(row_view(&[("status", ColumnValue::text("archived"))])));
+    }
+
+    #[test]
+    fn unknown_survives_negation_at_every_depth() {
+        // Double negation must not launder unknown back into a match — the
+        // shape a `!!` or De Morgan rewrite could otherwise sneak in.
+        let inner = PredicateExpr::eq("status", ColumnValue::text("archived"));
+        let double_not = PredicateExpr::Not(Box::new(PredicateExpr::Not(Box::new(inner))));
+        assert!(!double_not.matches(|_| None));
+
+        // Kleene AND: unknown ∧ true = unknown ⇒ no delivery. This is the
+        // tenant-scoped shape — a real subscription ANDs the tenant clause at
+        // the root, so this is the case that actually ships.
+        let tenant_scoped = PredicateExpr::And(vec![
+            PredicateExpr::eq("tenant_id", ColumnValue::text("acme")),
+            PredicateExpr::Not(Box::new(PredicateExpr::eq(
+                "status",
+                ColumnValue::text("archived"),
+            ))),
+        ]);
+        assert!(
+            !tenant_scoped.matches(row_view(&[("tenant_id", ColumnValue::text("acme"))])),
+            "absent `status` under Not must not widen delivery inside the tenant"
+        );
+
+        // Kleene AND still short-circuits on a definite false: unknown ∧ false
+        // = false, so a foreign tenant is rejected even with an unknown sibling.
+        assert!(!tenant_scoped.matches(row_view(&[("tenant_id", ColumnValue::text("other"))])));
+
+        // Kleene OR: unknown ∨ true = true. Unknown must not poison a
+        // disjunction that another branch already satisfied.
+        let or_tree = PredicateExpr::Or(vec![
+            PredicateExpr::Not(Box::new(PredicateExpr::eq(
+                "status",
+                ColumnValue::text("archived"),
+            ))),
+            PredicateExpr::eq("owner", ColumnValue::text("u1")),
+        ]);
+        assert!(or_tree.matches(row_view(&[("owner", ColumnValue::text("u1"))])));
+        assert!(!or_tree.matches(row_view(&[("owner", ColumnValue::text("u2"))])));
     }
 
     // ---- combinator algebra ----
