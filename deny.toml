@@ -10,6 +10,11 @@ allow = [
   # Apache-2.0 workspace is unencumbered; obligations attach only if we modify
   # ece's own files, which we don't. Sole MPL-2.0 crate in the graph.
   "MPL-2.0",
+  # Unlicense: public-domain dedication — strictly more permissive than MIT,
+  # which is already allowed. Needed because ws_stream_wasm / pharos /
+  # async_io_stream (the wasm websocket stack) are Unlicense-ONLY, not the
+  # usual `MIT OR Unlicense` dual that resolves to MIT on its own.
+  "Unlicense",
 ]
 
 [advisories]
@@ -33,6 +38,17 @@ ignore = [
   # this writing). Revisit if jsonwebtoken/rsa ship a constant-time fix, or
   # if any production code path ever performs an RSA private-key operation.
   "RUSTSEC-2023-0071",
+  # The two below are `unmaintained`, not vulnerabilities, and both arrive
+  # transitively under the OFF-DEFAULT `iroh` feature — nothing we ship by
+  # default links them, and neither is fixable from this workspace. Listed as
+  # explicit IDs rather than relaxing `unmaintained` wholesale, so a future
+  # unmaintained crate still fails the build.
+  # atomic-polyfill: superseded by portable-atomic (already in the graph);
+  # retires when the iroh chain finishes migrating.
+  "RUSTSEC-2023-0089",
+  # paste: feature-complete proc-macro, archived by its author. Retires when
+  # the iroh chain drops it.
+  "RUSTSEC-2024-0436",
 ]
 
 [bans]
