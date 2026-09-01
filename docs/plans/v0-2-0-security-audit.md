@@ -315,11 +315,16 @@ Ordered by exploitability.
      calling `record_ack(500)` — a state no real client can reach. It now uses
      `seed_acked_lsn`, which sets both cursors.
 
-   **Still genuinely open here:** `NOSTOS_SLOT_MAX_LAG` defaults to `0` (WAL-bloat
-   eviction OFF). *That* is the real disk-exhaustion exposure on the primary, and
-   it is a default-value decision with operational blast radius — eviction fires
-   on a legitimately slow mobile client on a bad connection. Not silently picked;
-   see "Left deliberately" below.
+   **Closed (ADR-0043, commits `10ebc93` + `60b0865`):** `NOSTOS_SLOT_MAX_LAG`
+   now defaults to `1073741824` (1 GiB); `0` still means unbounded but the server
+   logs a startup `warn!` naming the knob and the risk. Safe to default because
+   enforcement only removes the slowest *session* (`fanout.rs` →
+   `store.remove`) — the replication slot is never dropped, so the worst case
+   is one reconnect + resync for a client a gigabyte behind. Pinned by
+   `slot_max_lag_tests` in `nostos-server`; real-PG e2e green with the default.
+   Eviction does nothing for an *abandoned* slot (server gone) — that is bounded
+   only by Postgres `max_slot_wal_keep_size`, which `nostos doctor` now checks.
+   See "Left deliberately" §2 below.
 2. **No per-principal connection cap.** `DeviceCapReached`
    (`application/src/session.rs:26`) is a *global* licensed-session count, so one
    tenant opening `cap` sockets locks out every other tenant. Per-socket caps
@@ -662,23 +667,34 @@ If it should ship, the safe shape is a config flag defaulting to today's
 behaviour, flipped to required in a major version — say the word and it is a
 small change plus test-fixture updates.
 
-### 2. `NOSTOS_SLOT_MAX_LAG` defaults to `0` (WAL-bloat eviction OFF)
+### 2. `NOSTOS_SLOT_MAX_LAG` defaults to `0` (WAL-bloat eviction OFF) — RESOLVED
+
+**Decision (ADR-0043, 2026-09-02):** default is now **1 GiB**
+(`1073741824`), shipped in `10ebc93`; `0` = unbounded with a startup warning,
+`nostos doctor` `max_slot_wal_keep_size` check, docs and pinning tests in
+`60b0865`. Original reasoning kept below for the record.
 
 This — not the ack frame — is the genuine disk-exhaustion exposure on the
 Postgres primary. A client that simply never acks holds `restart_lsn` back and
 WAL accumulates without bound (ADR-0016).
 
-Not silently picked, because any non-zero default **disconnects real users**:
-the eviction cannot distinguish a malicious idle socket from a phone on a bad
-train connection, and the failure mode of guessing too low is "your app drops
-sync on the commute". That is a product decision about who gets cut off, not a
-security default an audit should choose alone.
+Not silently picked at audit time, because any non-zero default **disconnects
+real users**: the eviction cannot distinguish a malicious idle socket from a
+phone on a bad train connection, and the failure mode of guessing too low is
+"your app drops sync on the commute". Why 1 GiB is acceptable anyway: eviction
+never drops the slot, only the session — the client reconnects and resumes
+(op-log replay inside the ADR-0025 window, snapshot-reconcile outside it). One
+resync for a client a gigabyte behind is a far smaller blast radius than a full
+primary disk for everyone.
 
 Observed on the dev database while investigating: four abandoned slots
 (`cairn_slot`, `cairn_slot_arxa_kit`, `atlet_rt_sim_slot`, `atlet_demo_slot`)
 each retaining **117–120 MB** of WAL, plus six leftover `e2e_snap_*` slots.
 That is the mechanism working exactly as described, on a laptop, with nobody
-attacking anything.
+attacking anything. **Note:** no `NOSTOS_SLOT_MAX_LAG` value fixes those —
+there is no server left to evict anyone. Abandoned slots are bounded only by
+Postgres `max_slot_wal_keep_size` (ADR-0043 §3), which is why `nostos doctor`
+now flags `-1`.
 
 ### 3. Findings 2, 3, 4, 6, and 8–11 in "Open — confirmed gaps"
 
