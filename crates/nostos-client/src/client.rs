@@ -28,7 +28,10 @@
 //! `ok:true`. On `ok:false` the write's retry counter is bumped; once it
 //! reaches `dead_letter_max_attempts` (ADR-0013 v2) the write is quarantined
 //! (removed from the pending queue but NOT deleted) so the queue head advances
-//! past a permanently-failing write. The error surfaces via the client's log
+//! past a permanently-failing write — and a rejection the server flags
+//! non-retryable (`"retryable":false`, the allowlist/payload-shape class)
+//! dead-letters on the FIRST rejection, because no retry can fix it. The
+//! error surfaces via the client's log
 //! channel on every rejection. The user-facing surface is
 //! [`WriteQueueStatus`] (ADR-0027): pending/dead-lettered counts and the
 //! server's message, published on a `watch` channel — dead-letters only, since
@@ -213,7 +216,11 @@ pub struct SyncClientConfig {
     /// retries, and only a genuinely permanent failure (server bug, schema
     /// drift, an unauthorized row) hits the cap. Set to a small value for
     /// faster failover in test environments; set to `u32::MAX` to effectively
-    /// disable dead-lettering (the pre-v2 retry-forever behavior).
+    /// disable dead-lettering (the pre-v2 retry-forever behavior). A
+    /// rejection the server flags NON-retryable (allowlist / payload shape)
+    /// bypasses this ceiling entirely — it dead-letters on the first
+    /// rejection, because no amount of retrying can fix a client-controlled
+    /// permanent error.
     pub dead_letter_max_attempts: u32,
     /// Tables this client treats as add-wins OR-sets (ADR-0030). An
     /// `or_set_add` / `or_set_remove` on a table NOT in this set returns
@@ -1090,7 +1097,21 @@ where
         id: u64,
         server_error: Option<&str>,
     ) -> Result<(u32, bool), ClientError> {
-        let max = self.config.dead_letter_max_attempts;
+        self.bump_and_maybe_dead_letter_at(id, server_error, self.config.dead_letter_max_attempts)
+            .await
+    }
+
+    /// [`Self::bump_and_maybe_dead_letter`] with an explicit ceiling. The
+    /// permanent-rejection path passes `1`: a server-flagged non-retryable
+    /// rejection dead-letters on the first bump instead of cycling the full
+    /// attempt budget (the mirror topology's read-only tables showed
+    /// retryable-capped writes burning 50 wire cycles each in live logs).
+    async fn bump_and_maybe_dead_letter_at(
+        &self,
+        id: u64,
+        server_error: Option<&str>,
+        max: u32,
+    ) -> Result<(u32, bool), ClientError> {
         let engine = Arc::clone(&self.engine);
         let error_owned = server_error.map(str::to_string);
         let (attempts, dld, remaining) =
@@ -1597,9 +1618,9 @@ where
                             } else {
                                 debug!(write_id = id, "write ack'd — removed from outbox");
                             }
-                        } else {
-                            // ok:false — the write is NOT removed. Bump its retry
-                            // counter; once the count reaches `dead_letter_max_attempts`,
+                        } else if result.retryable {
+                            // ok:false, retryable — the write is NOT removed. Bump its
+                            // retry counter; once the count reaches `dead_letter_max_attempts`,
                             // quarantine it via `mark_dead_letter` so the queue head can
                             // advance past a permanently-failing write (ADR-0013 v2).
                             // The write is NOT deleted — it stays in the backing store
@@ -1630,6 +1651,42 @@ where
                                     error = %e,
                                     "failed to bump/dead-letter the rejected write; \
                                      stays queued (head not advanced this cycle)"
+                                ),
+                            }
+                        } else {
+                            // ok:false and NON-retryable — the server knows no
+                            // retry can fix this (allowlist / payload shape).
+                            // Dead-letter NOW instead of cycling the write
+                            // through the full attempt budget: the mirror
+                            // topology's read-only tables showed capped retries
+                            // burning 50 wire cycles per write in live logs.
+                            match self
+                                .bump_and_maybe_dead_letter_at(
+                                    id,
+                                    result.error.as_deref(),
+                                    1,
+                                )
+                                .await
+                            {
+                                Ok((attempts, true)) => warn!(
+                                    write_id = id,
+                                    attempts,
+                                    server_error =
+                                        result.error.as_deref().unwrap_or("(no detail)"),
+                                    "write dead-lettered on FIRST rejection (server \
+                                     flagged it non-retryable); removed from pending \
+                                     queue (inspectable, NOT deleted)"
+                                ),
+                                Ok((attempts, false)) => warn!(
+                                    write_id = id,
+                                    attempts,
+                                    "non-retryable rejection did not dead-letter at cap 1"
+                                ),
+                                Err(e) => warn!(
+                                    write_id = id,
+                                    error = %e,
+                                    "failed to dead-letter the non-retryable write; \
+                                     stays queued"
                                 ),
                             }
                         }
@@ -2011,6 +2068,10 @@ struct WriteResult {
     client_write_id: String,
     ok: bool,
     error: Option<String>,
+    /// `false` when the server knows no retry can succeed (allowlist /
+    /// payload-shape rejections). Absent on the wire — and for pre-flag
+    /// servers — means retryable.
+    retryable: bool,
 }
 
 /// Decode a `WriteResult` frame from a WS message's bytes. Returns `None` for
@@ -2041,6 +2102,12 @@ fn decode_write_result(bytes: &[u8]) -> Option<WriteResult> {
             .get("error")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        // Absent (old server) or malformed ⇒ retryable: a pre-flag server's
+        // rejections keep the old bump-to-cap behavior unchanged.
+        retryable: v
+            .get("retryable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -2171,6 +2238,65 @@ mod tests {
         );
         assert_eq!(s.dead_lettered, 1);
         assert_eq!(s.pending, 0, "dead-lettered write left the pending queue");
+    }
+
+    /// ADR-0013 v2 transient-vs-permanent: a rejection the server flags
+    /// non-retryable (allowlist / payload shape) must dead-letter on the FIRST
+    /// bump — the mirror topology's read-only tables showed capped retries
+    /// cycling one rejection per wire round-trip in live logs.
+    #[tokio::test]
+    async fn permanent_rejection_dead_letters_on_first_attempt() {
+        let client = SyncClient::new(
+            "ws://localhost:9999/sync",
+            crate::SqliteStorage::open_in_memory().expect("open"),
+            SyncClientConfig::default(),
+        );
+        let id = client
+            .write(nostos_core::PendingWrite {
+                table: "code_sessions".into(),
+                op: nostos_core::WriteOp::Upsert,
+                pk: "s1".into(),
+                payload_json: Some(r#"{"id":"s1"}"#.into()),
+            })
+            .await
+            .expect("enqueue");
+        assert_eq!(client.write_status().pending, 1);
+
+        let (attempts, dead_lettered) = client
+            .bump_and_maybe_dead_letter_at(id, Some("table not writable: 'code_sessions'"), 1)
+            .await
+            .expect("bump");
+        assert_eq!(attempts, 1);
+        assert!(
+            dead_lettered,
+            "a non-retryable rejection must dead-letter immediately"
+        );
+
+        let s = client.write_status();
+        assert_eq!(s.dead_lettered, 1);
+        assert_eq!(s.pending, 0);
+        assert_eq!(
+            s.last_error.as_deref(),
+            Some("table not writable: 'code_sessions'")
+        );
+    }
+
+    #[test]
+    fn decode_write_result_reads_retryable_flag() {
+        // Absent (pre-flag server) means retryable — old servers unchanged.
+        let old = decode_write_result(
+            br#"{"type":"write_result","client_write_id":"7","ok":false,"error":"backend"}"#,
+        )
+        .expect("old-shape frame decodes");
+        assert!(old.retryable);
+        assert!(!old.ok);
+
+        let permanent = decode_write_result(
+            br#"{"type":"write_result","client_write_id":"8","ok":false,"error":"table not writable: 'x'","retryable":false}"#,
+        )
+        .expect("flagged frame decodes");
+        assert!(!permanent.retryable);
+        assert_eq!(permanent.error.as_deref(), Some("table not writable: 'x'"));
     }
 
     /// A redelivered ack must not double-decrement `pending`.

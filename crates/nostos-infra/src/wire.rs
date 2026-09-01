@@ -187,8 +187,20 @@ pub fn encode_event(event: &ReplicationEvent) -> Vec<u8> {
 /// `error` is `Some(msg)` when `ok` is `false`; `None` (omitted on the wire)
 /// when `ok` is `true`. The `client_write_id` echoes the request so the client
 /// can correlate the response.
+///
+/// `retryable` closes ADR-0013 v2's transient-vs-permanent gap: a rejection
+/// the server KNOWS no retry can fix (allowlist, payload shape) is flagged
+/// `"retryable":false` so the client dead-letters on the first rejection
+/// instead of burning `dead_letter_max_attempts` wire cycles per write. The
+/// flag is emitted ONLY when false — absent means retryable, so the ok path
+/// and pre-flag servers keep the exact old shape.
 #[must_use]
-pub fn encode_write_result(client_write_id: &str, ok: bool, error: Option<&str>) -> Vec<u8> {
+pub fn encode_write_result(
+    client_write_id: &str,
+    ok: bool,
+    error: Option<&str>,
+    retryable: bool,
+) -> Vec<u8> {
     // Hand-built JSON keeps this allocation-light and avoids inventing a struct
     // for one outbound shape. The fields are simple (string/bool), so escaping
     // the two free-form strings (id + error) is the only care needed.
@@ -197,6 +209,9 @@ pub fn encode_write_result(client_write_id: &str, ok: bool, error: Option<&str>)
     push_json_string(&mut out, client_write_id);
     out.push_str(",\"ok\":");
     out.push_str(if ok { "true" } else { "false" });
+    if !retryable {
+        out.push_str(",\"retryable\":false");
+    }
     if let Some(err) = error {
         out.push_str(",\"error\":");
         push_json_string(&mut out, err);
@@ -855,7 +870,7 @@ mod tests {
 
     #[test]
     fn encode_write_result_ok_omits_error() {
-        let bytes = encode_write_result("w1", true, None);
+        let bytes = encode_write_result("w1", true, None, true);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["type"], "write_result");
         assert_eq!(v["client_write_id"], "w1");
@@ -866,18 +881,28 @@ mod tests {
 
     #[test]
     fn encode_write_result_err_includes_message() {
-        let bytes = encode_write_result("w9", false, Some("table not writable: x"));
+        let bytes = encode_write_result("w9", false, Some("transient backend hiccup"), true);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["type"], "write_result");
         assert_eq!(v["ok"], false);
-        assert_eq!(v["error"], "table not writable: x");
+        assert_eq!(v["error"], "transient backend hiccup");
+        // retryable is omitted when true — the old wire shape is preserved.
+        assert!(v.get("retryable").is_none() || v["retryable"].is_null());
+    }
+
+    #[test]
+    fn encode_write_result_permanent_marks_non_retryable() {
+        let bytes = encode_write_result("w2", false, Some("table not writable: x"), false);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["retryable"], false);
     }
 
     #[test]
     fn encode_write_result_escapes_quotes_in_error() {
         // The error string is free-form adapter text; it must not break the
         // JSON. A double-quote + backslash round-trips cleanly.
-        let bytes = encode_write_result("w\"", false, Some("bad \"col\\name\""));
+        let bytes = encode_write_result("w\"", false, Some("bad \"col\\name\""), true);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"], "bad \"col\\name\"");
         assert_eq!(v["client_write_id"], "w\"");
@@ -957,7 +982,7 @@ mod tests {
         let batch = encode_events(&[&ev_n(1), &ev_n(2)]);
         assert!(decode_control_frame(&batch).is_none());
 
-        let write_ack = encode_write_result("w1", true, None);
+        let write_ack = encode_write_result("w1", true, None, true);
         assert!(decode_control_frame(&write_ack).is_none());
 
         assert!(decode_control_frame(b"not json").is_none());

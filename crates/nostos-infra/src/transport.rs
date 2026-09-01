@@ -1415,7 +1415,10 @@ async fn handle_decoded_message(
                      (env, comma-separated; e.g. NOSTOS_WRITE_TABLES={table}). \
                      Empty by default = no tables writable (ADR-0013)."
                 );
-                let frame = encode_write_result(&client_write_id, false, Some(&msg));
+                // Permanent: no retry can put the table on the allowlist mid-
+                // session — flag non-retryable so the client dead-letters on the
+                // first rejection (ADR-0013 v2 transient-vs-permanent).
+                let frame = encode_write_result(&client_write_id, false, Some(&msg), false);
                 let _ = server_frames_tx.try_send(frame);
                 debug!(table = %table, "write rejected: table not writable");
                 return;
@@ -1429,11 +1432,18 @@ async fn handle_decoded_message(
             // out through normal replication to every subscriber.
             let result =
                 dispatch_write(write_back, &table, &op, &pk, payload.as_ref(), tenant).await;
-            let (ok, error) = match result {
-                Ok(()) => (true, None),
-                Err(e) => (false, Some(e.to_string())),
+            // Classify before the frame: allowlist + payload-shape failures are
+            // client-controlled inputs no retry can fix — non-retryable, so the
+            // client quarantines immediately instead of cycling the write
+            // through the full attempt budget. Backend errors stay retryable.
+            let (ok, error, retryable) = match result {
+                Ok(()) => (true, None, true),
+                Err(
+                    e @ (WriteBackError::TableNotAllowed(_) | WriteBackError::InvalidPayload(_)),
+                ) => (false, Some(e.to_string()), false),
+                Err(e) => (false, Some(e.to_string()), true),
             };
-            let frame = encode_write_result(&client_write_id, ok, error.as_deref());
+            let frame = encode_write_result(&client_write_id, ok, error.as_deref(), retryable);
             // If the channel is full (client disconnected / backpressure), the
             // ack is dropped — the writer loop will end on the next failed
             // send anyway. Best-effort; not fatal.
