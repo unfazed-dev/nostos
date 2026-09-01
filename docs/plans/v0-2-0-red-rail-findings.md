@@ -132,23 +132,58 @@ comment at line 106 describes). `cargo check --workspace --all-targets` under
 `-D warnings` is clean; `cargo test -p nostos-infra --lib` = 207 passed,
 including the three `static_bearer_*` tests covering this path.
 
-## Flaky, pre-existing, NOT fixed here
+## The 6h burns: uncapped jobs — FIXED
 
 `fmt + clippy + test` and `throughput benchmark (smoke)` each burned
-`6h0m16s` (the Actions job cap) in runs 33285564940 and 33339998210, then both
-passed in 3m56s / 4m43s in 33341541196. Intermittent.
+`6h0m16s` in runs 33285564940 and 33339998210, then passed in 3m56s / 4m43s
+in 33341541196. `6h0m19s` is not a test duration — it is the GitHub Actions
+default job cap.
 
-Prime suspect: `nostos-application/tests/fanout_scale.rs::ten_thousand_predicate_fanout_baseline`
-— an `#[ignore]`d perf-floor assertion that `make ci` opts into via
-`cargo test --workspace -- --include-ignored`. It asserts a **wall-clock
-floor** (50 zero-match events/sec at 10k predicates) from a **debug** build,
-so it is load-sensitive by construction: it failed locally at 38 events/sec
-while another cargo job shared the CPU, and passed alone in 48.94s.
+Root cause of the *cost*: **not one workflow job had `timeout-minutes`.**
+Verified `grep -c timeout-minutes .github/workflows/*.yml` == 0 across both
+files. Any hang therefore ran until the 6h ceiling.
 
-A perf floor in a debug build on a shared CI runner will keep flapping. Worth
-either moving to `--release`, gating it behind an explicit bench job, or
-widening the floor. Out of scope for the release; recorded so it is not
-rediscovered as new.
+Fixed by capping all 15 jobs (ci.yml 7, release.yml 8), sized to the build
+shape: 20 min for deny/typecheck/manifest/release, 30 for pg-e2e and flutter
+analyze, 45 for lint-test / sdk-e2e / benchmark, 60 for the release
+cross-compiles. Generous on purpose — a cap tighter than the real build turns
+a working pipeline red.
+
+**release.yml's caps had to land BEFORE the tag.** A `push: tags:` workflow
+runs the file as it exists *at the pushed ref*, so an uncapped release.yml in
+the tagged tree is unprotected no matter what `main` says later — the same
+failure shape as the missing `permissions:` block above. Gate:
+
+    git show v0.2.0:.github/workflows/release.yml | grep -c timeout-minutes   # == 8
+
+Also added `concurrency: {group: ci-${{ github.ref }}, cancel-in-progress: true}`
+to ci.yml. Three runs were in flight on `main` simultaneously on 2026-09-01
+and starved each other. Deliberately NOT added to release.yml: cancelling a
+half-finished release build would publish a partial artifact set.
+
+## What the hang actually was — UNDIAGNOSED
+
+An earlier revision of this document named
+`fanout_scale.rs::ten_thousand_predicate_fanout_baseline` the "prime suspect"
+for the 6h hangs. **That was wrong, and it is corrected here** so the guess is
+not inherited as a finding.
+
+That test measures elapsed wall-clock and asserts a floor. A slow machine makes
+it *fail*, in about 30 seconds — it terminates by construction and cannot
+produce a 6h hang. What was actually observed is two separate things:
+
+- **A fast flake, real:** the floor is 50 zero-match events/sec at 10k
+  predicates, asserted from a **debug** build. It failed locally at 38
+  events/sec while another cargo job shared the CPU, and passed alone in
+  48.94s. A wall-clock floor in a debug build on a shared runner will keep
+  flapping. Worth moving to `--release`, gating behind the bench job, or
+  widening — deliberately NOT done before the tag, since it changes what CI
+  asserts and cannot help the release.
+- **The hang, cause unknown.** No log survives the cap to say what stalled.
+  Whether the JoinSet delivery path in this same test can also deadlock is
+  unproven in both directions. The timeouts above bound the blast radius
+  regardless of cause, and the next occurrence will now leave a readable log
+  inside 45 minutes instead of a 6h truncation.
 
 ## Why the tag was held
 

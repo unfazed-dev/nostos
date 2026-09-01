@@ -34,6 +34,7 @@ jobs:
   cli-server-macos:
     name: cli/server — macOS (${{ matrix.target }})
     runs-on: macos-14 # Apple Silicon runner — can cross-link x86_64 too via Xcode.
+    timeout-minutes: 60
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
@@ -68,6 +69,7 @@ jobs:
   cli-server-linux:
     name: cli/server — Linux x86_64 (glibc-pinned)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # cargo-zigbuild over houseabsolute/actions-rust-cross: no Docker image to
     # pull (actions-rust-cross/`cross` cross-compiles inside a per-target
     # Docker container), and zigbuild's versioned target suffix
@@ -113,6 +115,7 @@ jobs:
   cli-server-windows:
     name: cli/server — Windows x86_64
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -158,6 +161,7 @@ jobs:
   flutter-android:
     name: flutter glue — Android (arm64-v8a, armeabi-v7a, x86_64)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -209,6 +213,7 @@ jobs:
   flutter-ios:
     name: flutter glue — iOS (device + simulator XCFramework)
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -276,6 +281,7 @@ jobs:
   flutter-macos:
     name: flutter glue — macOS (universal)
     runs-on: macos-14
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -331,6 +337,7 @@ jobs:
   update-manifest:
     name: assemble prebuilt.json for this release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # create-pull-request pushes a branch (contents) and opens the PR
     # (pull-requests). NOTE: the YAML grant is necessary but NOT sufficient —
     # the repo setting "Allow GitHub Actions to create and approve pull
@@ -380,6 +387,7 @@ jobs:
   create-release:
     name: create GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # action-gh-release creates the Release and uploads every artifact.
     permissions:
       contents: write

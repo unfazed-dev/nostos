@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+# Supersede in-flight runs for the same ref: three concurrent runs on main
+# starved each other's runners on 2026-09-01 and failed the Postgres e2e on
+# contention alone. Deliberately NOT set on release.yml — cancelling a
+# half-finished release build would publish a partial artifact set.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -14,6 +22,7 @@ jobs:
   lint-test:
     name: fmt + clippy + test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +43,7 @@ jobs:
   e2e-pg:
     name: real-Postgres logical-replication e2e
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -76,6 +86,7 @@ jobs:
   deny:
     name: cargo-deny (licenses, advisories, bans)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -85,6 +96,7 @@ jobs:
   sdk-e2e:
     name: SDK live-replication e2e (host slices)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Until this job existed, `scripts/sdk-e2e.sh` was a manual ritual: nothing
     # in CI ran it, so a change that broke an SDK's live PUSH+ECHO round-trip
     # merged green. The workspace test job doesn't cover it — these slices drive
@@ -154,6 +166,7 @@ jobs:
     # yet), so running this on a platform we haven't validated the hook
     # against would be new, untested surface, not just CI plumbing.
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -218,6 +231,7 @@ jobs:
   benchmark:
     name: throughput benchmark (smoke)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Benchmarks are expensive; only run a small smoke version on CI to keep
     # PRs honest. Full benchmark runs happen on a dedicated runner + locally.
     steps:
@@ -238,6 +252,7 @@ jobs:
   sdk-typecheck:
     name: ${{ matrix.sdk }} — typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
