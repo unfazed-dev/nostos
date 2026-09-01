@@ -176,9 +176,21 @@ async fn setup_bench_table() {
 /// here. The cheap manual antidote is one line:
 /// `ALTER PUBLICATION cairn_pub DROP TABLE bench_apply;`
 async fn teardown_bench_table() {
-    let c = sql_client().await;
-    // Both statements are best-effort: teardown must never turn a green bench
-    // red, and a missing table/publication entry is the state we wanted.
+    // Connect defensively like `drop_slot`, NOT via `sql_client()` — that
+    // helper `.expect()`s on connect, and a teardown that panics turns a bench
+    // that already passed its assertions into a red run. Teardown must never
+    // be able to fail the test it is cleaning up after.
+    let Ok((c, conn)) = tokio_postgres::connect(&pg_url(), tokio_postgres::NoTls).await else {
+        return;
+    };
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    // Both statements are best-effort and separate: `ALTER PUBLICATION ... DROP
+    // TABLE` ERRORS if the table is not currently published (it is not a
+    // no-op), and the two run in one implicit transaction if batched together,
+    // so that error would take the TRUNCATE down with it. Discarding each
+    // independently means "already unpublished" is simply the state we wanted.
     let _ = c
         .batch_execute("ALTER PUBLICATION cairn_pub DROP TABLE bench_apply;")
         .await;
