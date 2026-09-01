@@ -286,6 +286,37 @@ tenant-ANDed shape that actually ships, and both Kleene short-circuits.
 | Web admin | `npm run check` (svelte-check) | **688 files, 0 errors, 0 warnings** |
 | Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
 
+### Stress / pressure
+
+| Probe | Command | Result |
+|---|---|---|
+| Fan-out, recorded config | `nostos-bench --clients 1000 --events 100000` | 100,000,000 delivered, **100,000,000 matched, 0.00% drops**, 252,797 ops/sec |
+| Fan-out smoke | `nostos-bench --clients 1000 --events 10000` | 10,000,000 delivered, **0.00% drops**, 254,440 ops/sec |
+| Reconnect storm | `nostos-reconnect-storm 2000 1000 4000 4000` | **DRAINS CLEANLY** — post-storm drop **0.00%**, reconnect 3,003 ms |
+
+**The reconnect storm is the real test of the per-principal cap.** It performs
+1,000 drop+reconnect cycles against a cap of 512, so a counter that failed to
+decrement on disconnect would start refusing halfway through. All 1,000
+reconnected. The decrement at `store.rs:238` funnels *every* removal path
+(transport disconnect and WAL-bloat eviction), uses `saturating_sub` against
+underflow, and is gated on `if let Some(stored) = removed` so a double-remove
+cannot double-decrement — read first, then confirmed empirically here.
+
+**Do NOT read 252,797 ops/sec as a regression against the recorded 833,307.**
+Same host (`unfazed-macbook-air.local`, 10 cores), same profile
+(`lto=fat, codegen-units=1`) — but the machine was carrying a **load average of
+12.55 on 10 cores** during the run: four runaway copies of the context-mode MCP
+plugin (`start.mjs` 1.0.18) were each pegged at ~100% CPU, stealing roughly half
+the box. The recorded baseline was taken on an idle machine. Comparing the two
+would break the same-conditions rule in `docs/BENCHMARK-METHODOLOGY.md` exactly
+the way a cross-stage PowerSync comparison would.
+
+What the run *does* establish, and what contention cannot fake: **100,000,000
+events delivered, 100,000,000 matched, 0.00% dropped.** The three-valued
+predicate change neither dropped nor mis-matched a single event at 100M scale,
+and back-pressure held. Throughput on this machine is **unmeasured**, not
+regressed — a clean number needs an idle host.
+
 **The pg e2e was checked for the false-positive, not just the exit code.** All 14
 `e2e_pg_*` files self-skip silently when `NOSTOS_E2E_PG` is unset and still report
 `ok`, so a green exit proves nothing on its own. `grep -c skipping` over the log
