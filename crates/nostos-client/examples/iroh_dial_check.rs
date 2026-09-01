@@ -32,22 +32,22 @@ async fn main() {
     };
     let client = SyncClient::new(url, storage, config);
     let run = client.run_once();
-    let outcome = match cap {
-        Some(secs) => match tokio::time::timeout(secs, run).await {
-            Ok(finished) => Some(finished.expect("run_once")),
-            Err(_) => {
-                // Capped mid-session: the durable checkpoint still tells the
-                // resume story; frames/commits are unknown from outside.
-                let lsn = client.checkpoint().await.expect("checkpoint");
-                println!(
-                    "OK: capped after {}s, checkpoint LSN {}",
-                    secs.as_secs(),
-                    lsn.raw()
-                );
-                None
-            }
-        },
-        None => Some(run.await.expect("run_once")),
+    let outcome = if let Some(secs) = cap {
+        if let Ok(finished) = tokio::time::timeout(secs, run).await {
+            Some(finished.expect("run_once"))
+        } else {
+            // Capped mid-session: the durable checkpoint still tells the
+            // resume story; frames/commits are unknown from outside.
+            let lsn = client.checkpoint().await.expect("checkpoint");
+            println!(
+                "OK: capped after {}s, checkpoint LSN {}",
+                secs.as_secs(),
+                lsn.raw()
+            );
+            None
+        }
+    } else {
+        Some(run.await.expect("run_once"))
     };
     if let Some(outcome) = outcome {
         println!(
