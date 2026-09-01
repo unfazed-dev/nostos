@@ -221,47 +221,75 @@ to ci.yml. Three runs were in flight on `main` simultaneously on 2026-09-01
 and starved each other. Deliberately NOT added to release.yml: cancelling a
 half-finished release build would publish a partial artifact set.
 
-## What the hang actually was — DIAGNOSED (run 33490859076)
+## The 6h hang: a real deadlock in InMemorySessionStore — ROOT-CAUSED AND FIXED
 
-An earlier revision of this document named
-`fanout_scale.rs::ten_thousand_predicate_fanout_baseline` the "prime suspect",
-then a later one downgraded that to "cause unknown". Both are superseded: the
-timeouts added above caught the hang in 45 minutes instead of 6 hours, and the
-log names it.
+Earlier revisions of this document guessed twice (the perf-floor test, then
+"cause unknown"). Both are superseded. The timeouts caught it at 45 minutes
+instead of 6 hours, and the log named it.
 
-`fmt + clippy + test`, 09:11:12 -> 09:56:28 = **45m16s**, exactly the new cap.
-`rustfmt` and `clippy (strict)` passed; the `test` step was killed. Its last
-output:
+**Symptom.** Run 33490859076, `fmt + clippy + test`, 09:11:12 -> 09:56:28 =
+45m16s, exactly the new cap. `rustfmt` and `clippy` passed; `test` was killed:
 
-    Running tests/chaos.rs (target/debug/deps/chaos-afe299c891a85d51)
-    running 3 tests
+    Running tests/chaos.rs
     test slow_client_drops_without_blocking_others ... ok
     test selective_delivery_under_multitable_load ... ok
     test conservation_under_churn has been running for over 60 seconds
-    ##[error]The operation was canceled.
 
-**`nostos-infra/tests/chaos.rs::conservation_under_churn` hangs.** It is not a
-perf assertion and not `--include-ignored`-only: it is a normal test that runs
-on every `cargo test --workspace`. It passes in ~0.10s when it passes, which is
-why this went unnoticed — and why the burn looked random.
+Run 33495190289, `throughput benchmark (smoke)`, 10:00:46 -> 10:46:01 = 45m15s,
+step `smoke benchmark (1k clients, 10k events)`. **The same two jobs burned
+6h0m16s in runs 33285564940 and 33339998210** — and both drive
+connect/disconnect against `InMemorySessionStore` while events fan out. One
+cause, both burns.
 
-What it exercises is exactly a production shape: a churn task calling
-`SessionManager::connect` + `disconnect` 200 times while a second task drives
-500 `fan_out` calls over a stable pool of 50 sinks. So the suspicion is a real
-deadlock between session add/remove and fan-out delivery, not a test artifact.
-Two details worth carrying into the hunt:
+**Cause.** `crates/nostos-infra/src/store.rs` held DashMap shard guards across
+`.await` in four places:
 
-- the churn sink is `TokioEventSink::channel(8).0` — the receiver is dropped
-  immediately, so that bounded channel is closed from birth;
-- `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`, so scheduling
-  is genuinely concurrent and interleaving-dependent.
+| site | guard |
+|---|---|
+| `insert_indexed` | `.entry(table)` — shard WRITE guard, then `entry.lock().await` |
+| `remove` | `for entry in &self.by_table` — shard READ guard, then `.lock().await` |
+| `min_acked_lsn` | same iterator shape |
+| `slowest_session` | same iterator shape |
 
-**Deliberately NOT fixed in this release.** A concurrency bug in the fan-out
-path is not release-window work, it is pre-existing (it predates every change
-in this session), and it is invisible to `release.yml`, which contains neither
-the chaos test nor Postgres. Its job path is the six build jobs plus
-`update-manifest` and `create-release`. Tagging is not technically blocked by
-it — only the "ship green on ci.yml" policy is.
+DashMap's guards are blocking `parking_lot` locks, **not** async-aware. Awaiting
+while holding one parks the *task* with an *OS-level* lock still taken. Any
+other task touching that shard then blocks its whole worker thread. With
+`worker_threads = 4` on a 2-core runner, four such tasks consume every worker,
+the task holding the inner `tokio::sync::Mutex` can never be scheduled to
+release it, and the store deadlocks permanently.
+
+This is not a test artifact. `connect` + `disconnect` racing `fan_out` is the
+ordinary production shape — a client joining while another leaves while events
+flow. A server under churn on a small runtime can hang the same way.
+
+**Fix.** Never hold a DashMap guard across an await: clone the
+`Arc<Mutex<Vec<StoredSession>>>` out, drop the guard, then lock. This is the
+shape `candidates_for` already used correctly — the bug was that the three fold
+paths and `remove` didn't. Added `table_lists()` for the shared snapshot, and
+scoped the `entry` guard in `insert_indexed`.
+
+**Reproduction.** It never reproduced serially (0 hangs in 120 runs on a
+many-core Mac) because the deadlock needs worker starvation. Running **24
+concurrent instances** — oversubscribing the CPU the way a 2-core runner does —
+reproduced it immediately: 8 of 24 hung in the first round.
+
+Clean old-vs-fixed differential, two preserved binaries, same harness
+(24 concurrent x 6 rounds each, 75s cap), run sequentially so neither skews the
+other:
+
+| binary | hangs |
+|---|---|
+| before the fix | **40 / 144 (28%)** |
+| after the fix  | **0 / 144** |
+
+Repro harness: build the test binary, copy it aside, `git stash` the store fix,
+rebuild, and run both under `subprocess` with a timeout — a serial loop will not
+show this, and neither will a many-core machine.
+
+**Regression guard.** `conservation_under_churn` now wraps its joins in a
+60s `tokio::time::timeout` with a message naming the suspect. A recurrence
+fails in a minute with a cause attached instead of burning the job cap and
+looking like an infra flake.
 
 ## Postgres e2e: the readiness gate was racing init — FIXED
 
