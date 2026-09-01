@@ -102,9 +102,31 @@ impl InMemorySessionStore {
             .collect()
     }
 
-    async fn insert_indexed(&self, stored: StoredSession, table: String) {
-        if let Some(account) = stored.account() {
-            *self.by_account.entry(account.to_owned()).or_insert(0) += 1;
+    /// Atomically reserve one per-account session slot, or refuse.
+    ///
+    /// Check and increment happen under DashMap's per-key WRITE guard, so two
+    /// concurrent connects for the same account cannot both observe `cap - 1`
+    /// and both succeed — the same TOCTOU `try_add_below_cap`'s `fetch_update`
+    /// closes for the global count. Sync (no `.await` inside) so the blocking
+    /// shard guard is released before the caller awaits — see `table_lists`.
+    fn try_reserve_account(&self, account: &str, cap: u64) -> Result<(), StoreRejection> {
+        let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX);
+        let mut slot = self.by_account.entry(account.to_owned()).or_insert(0);
+        if *slot >= cap_usize {
+            return Err(StoreRejection::PrincipalCapExceeded { cap });
+        }
+        *slot += 1;
+        Ok(())
+    }
+
+    /// `count_account = false` when the caller already reserved the account's
+    /// slot via [`Self::try_reserve_account`]. Double-counting here would leak
+    /// the presence index upward on every capped connect.
+    async fn insert_indexed(&self, stored: StoredSession, table: String, count_account: bool) {
+        if count_account {
+            if let Some(account) = stored.account() {
+                *self.by_account.entry(account.to_owned()).or_insert(0) += 1;
+            }
         }
         // Take the Arc out and DROP the DashMap entry guard before awaiting.
         // `entry()` holds a shard WRITE guard; DashMap guards are blocking
@@ -137,7 +159,7 @@ impl SessionStore for InMemorySessionStore {
             principal: session.principal,
             sink,
         };
-        self.insert_indexed(stored, table).await;
+        self.insert_indexed(stored, table, true).await;
         // Mirrors the cap-free insert; the count stays honest for `len()`.
         self.live_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -147,6 +169,7 @@ impl SessionStore for InMemorySessionStore {
         session: SyncSession,
         sink: Arc<dyn EventSink>,
         cap: u64,
+        per_principal_cap: u64,
     ) -> Result<SessionId, StoreRejection> {
         // Reserve a slot atomically FIRST. fetch_update retries until we observe
         // a count below the cap and bump it by one — a single atomic step, so
@@ -172,7 +195,24 @@ impl SessionStore for InMemorySessionStore {
             principal: session.principal,
             sink,
         };
-        self.insert_indexed(stored, table).await;
+
+        // Per-principal ceiling (audit finding 2). One account must not be
+        // able to consume the whole deployment's `cap` and lock other tenants
+        // out. Anonymous sessions have no `account_id` and are exempt — there
+        // is no principal to bound, and an anonymous deployment has already
+        // opted out of tenant separation.
+        if let Some(account) = stored.account() {
+            let account = account.to_owned();
+            if let Err(e) = self.try_reserve_account(&account, per_principal_cap) {
+                // Release the global slot we took above, or a refused connect
+                // would permanently shrink the deployment's capacity.
+                self.live_count.fetch_sub(1, Ordering::AcqRel);
+                return Err(e);
+            }
+        }
+
+        // `false`: the account slot was reserved above, not here.
+        self.insert_indexed(stored, table, false).await;
         Ok(id)
     }
 
@@ -489,5 +529,104 @@ mod tests {
 
         store.remove(id).await;
         assert!(!store.account_online("u1").await);
+    }
+}
+
+/// The per-principal session cap (audit finding 2).
+///
+/// The property under test is not "a cap exists" but "one account cannot
+/// consume the deployment": a global cap alone lets a single tenant open every
+/// slot and lock everyone else out.
+#[cfg(test)]
+mod per_principal_cap_tests {
+    use super::*;
+    use crate::TokioEventSink;
+    use nostos_domain::{Predicate, Principal, SyncSession};
+
+    fn sink() -> Arc<dyn EventSink> {
+        Arc::new(TokioEventSink::channel(4).0)
+    }
+
+    fn session_for(account: &str) -> SyncSession {
+        SyncSession::new_authenticated(Predicate::all("tasks"), Principal::new(account, "org-acme"))
+    }
+
+    #[tokio::test]
+    async fn one_account_cannot_consume_every_global_slot() {
+        let store = InMemorySessionStore::new();
+        // Global room for 10; each account may hold 2.
+        for i in 0..2 {
+            store
+                .try_add_below_cap(session_for("noisy"), sink(), 10, 2)
+                .await
+                .unwrap_or_else(|e| panic!("connect {i} should fit: {e}"));
+        }
+
+        let err = store
+            .try_add_below_cap(session_for("noisy"), sink(), 10, 2)
+            .await
+            .expect_err("third session for the same account must be refused");
+        assert!(matches!(
+            err,
+            StoreRejection::PrincipalCapExceeded { cap: 2 }
+        ));
+
+        // The whole point: a different tenant is still served.
+        store
+            .try_add_below_cap(session_for("quiet"), sink(), 10, 2)
+            .await
+            .expect("a second account must still connect after the first is capped");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connect_does_not_burn_a_global_slot() {
+        let store = InMemorySessionStore::new();
+        store
+            .try_add_below_cap(session_for("a"), sink(), 2, 1)
+            .await
+            .expect("first fits");
+        // Refused on the per-principal cap — the global reservation taken
+        // before that check must be released, or repeated refusals would
+        // silently shrink the deployment to zero capacity.
+        let _ = store
+            .try_add_below_cap(session_for("a"), sink(), 2, 1)
+            .await
+            .expect_err("same account, cap 1");
+        assert_eq!(store.len().await, 1, "refused connect must not leak a slot");
+
+        store
+            .try_add_below_cap(session_for("b"), sink(), 2, 1)
+            .await
+            .expect("the freed global slot is still usable by another account");
+    }
+
+    #[tokio::test]
+    async fn presence_index_is_not_double_counted_by_the_capped_path() {
+        let store = InMemorySessionStore::new();
+        let id = store
+            .try_add_below_cap(session_for("a"), sink(), 10, 10)
+            .await
+            .expect("fits");
+        assert!(store.account_online("a").await);
+        // If the capped path counted the account twice, one remove would leave
+        // a phantom at 1 and the account would look permanently online.
+        store.remove(id).await;
+        assert!(
+            !store.account_online("a").await,
+            "account must go offline after its only session is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn anonymous_sessions_are_exempt() {
+        let store = InMemorySessionStore::new();
+        // No account_id, so nothing to bound — a cap of 1 must not stop the
+        // second anonymous session.
+        for _ in 0..3 {
+            store
+                .try_add_below_cap(SyncSession::new(Predicate::all("tasks")), sink(), 10, 1)
+                .await
+                .expect("anonymous sessions carry no principal to cap");
+        }
     }
 }

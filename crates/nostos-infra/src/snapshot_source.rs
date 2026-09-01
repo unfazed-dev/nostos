@@ -53,7 +53,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 
-use nostos_application::ports::{SnapshotError, SnapshotSource};
+use nostos_application::ports::{SnapshotError, SnapshotSource, DEFAULT_SNAPSHOT_MAX_ROWS};
 use nostos_domain::{
     ColumnValue, Lsn, PredicateExpr, PredicateFilter, ReplicationEvent, RowOp, TenantScope,
 };
@@ -89,6 +89,9 @@ pub struct PgSnapshotter {
     /// replaced transparently on the next subscribe — same discipline as
     /// `PgWriteBack`.
     client: Arc<Mutex<Option<tokio_postgres::Client>>>,
+    /// Row ceiling for one snapshot. Exceeding it is an error, never a
+    /// silent truncation — see [`DEFAULT_SNAPSHOT_MAX_ROWS`].
+    max_rows: usize,
 }
 
 impl PgSnapshotter {
@@ -100,7 +103,36 @@ impl PgSnapshotter {
         Self {
             pg_url: pg_url.to_string(),
             client: Arc::new(Mutex::new(None)),
+            max_rows: DEFAULT_SNAPSHOT_MAX_ROWS,
         }
+    }
+
+    /// Override the per-snapshot row ceiling (`NOSTOS_SNAPSHOT_MAX_ROWS`).
+    #[must_use]
+    pub fn with_max_rows(mut self, max_rows: usize) -> Self {
+        self.max_rows = max_rows;
+        self
+    }
+
+    /// `LIMIT` clause that fetches one row *past* the cap.
+    ///
+    /// Fetching `cap + 1` is what makes "did this table exceed the cap?"
+    /// answerable without reading the whole table: if the extra row comes
+    /// back, the snapshot is refused. A bare `LIMIT cap` could not tell a
+    /// table of exactly `cap` rows from one of a million.
+    fn limit_clause(&self) -> String {
+        format!(" LIMIT {}", self.max_rows.saturating_add(1))
+    }
+
+    /// Refuse a result set that ran past the cap.
+    fn reject_if_over_cap(&self, table: &str, len: usize) -> Result<(), SnapshotError> {
+        if len > self.max_rows {
+            return Err(SnapshotError::TooLarge {
+                table: table.to_string(),
+                cap: self.max_rows,
+            });
+        }
+        Ok(())
     }
 
     /// Obtain a connected client, opening the connection lazily if none is
@@ -233,6 +265,7 @@ impl SnapshotSource for PgSnapshotter {
             ),
             None => format!("SELECT {select_list} FROM {quoted_table}"),
         };
+        let sql = sql + &self.limit_clause();
         let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
         if let Some(v) = &tenant_value {
             params.push(v);
@@ -250,6 +283,11 @@ impl SnapshotSource for PgSnapshotter {
 
         // 4. One Insert event per row, stamped above `base_lsn` (see
         //    `rows_to_events` for the gate-safety argument).
+        // Loud cap breach, never a quiet short snapshot (ADR-0019 / audit finding 3).
+        if let Err(e) = self.reject_if_over_cap(table, rows.len()) {
+            self.return_client(client).await;
+            return Err(e);
+        }
         let events = rows_to_events(table, &cols, &rows, base_lsn);
 
         self.return_client(client).await;
@@ -301,7 +339,10 @@ impl SnapshotSource for PgSnapshotter {
                 binds.len()
             );
         }
-        let sql = format!("SELECT {select_list} FROM {quoted_table} WHERE {where_sql}");
+        let sql = format!(
+            "SELECT {select_list} FROM {quoted_table} WHERE {where_sql}{}",
+            self.limit_clause()
+        );
         let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             binds.iter().map(column_value_as_sql).collect();
         let rows = match client.query(&sql, &params).await {
@@ -315,6 +356,11 @@ impl SnapshotSource for PgSnapshotter {
             }
         };
 
+        // Loud cap breach, never a quiet short snapshot (ADR-0019 / audit finding 3).
+        if let Err(e) = self.reject_if_over_cap(table, rows.len()) {
+            self.return_client(client).await;
+            return Err(e);
+        }
         let events = rows_to_events(table, &cols, &rows, base_lsn);
         self.return_client(client).await;
         Ok(events)
@@ -910,5 +956,57 @@ mod tests {
             binds,
             vec![ColumnValue::text("open"), ColumnValue::number(2)]
         );
+    }
+}
+
+/// The snapshot row cap: it must REJECT, never truncate.
+///
+/// A cap that silently shortened the result set would recreate the bug class
+/// the stream-snapshot scope fix just closed — a first sync that is quietly
+/// incomplete while live fan-out stays correct, with nothing at the client to
+/// distinguish it from a complete one.
+#[cfg(test)]
+mod snapshot_cap_tests {
+    use super::*;
+
+    #[test]
+    fn limit_fetches_one_row_past_the_cap_so_a_breach_is_detectable() {
+        let s = PgSnapshotter::new("postgres://x").with_max_rows(10);
+        // Exactly `cap` rows is indistinguishable from `cap + 1` unless the
+        // query reaches for the extra row.
+        assert_eq!(s.limit_clause(), " LIMIT 11");
+    }
+
+    #[test]
+    fn limit_does_not_overflow_at_the_usize_ceiling() {
+        let s = PgSnapshotter::new("postgres://x").with_max_rows(usize::MAX);
+        assert_eq!(s.limit_clause(), format!(" LIMIT {}", usize::MAX));
+    }
+
+    #[test]
+    fn at_or_under_the_cap_is_accepted_and_over_it_is_refused() {
+        let s = PgSnapshotter::new("postgres://x").with_max_rows(3);
+        assert!(s.reject_if_over_cap("tasks", 0).is_ok());
+        assert!(s.reject_if_over_cap("tasks", 3).is_ok(), "cap is inclusive");
+
+        let err = s
+            .reject_if_over_cap("tasks", 4)
+            .expect_err("4 rows past a cap of 3 must be refused, not truncated");
+        match err {
+            SnapshotError::TooLarge { table, cap } => {
+                assert_eq!(table, "tasks");
+                assert_eq!(cap, 3);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_default_cap_clears_the_apply_throughput_bench() {
+        // `bench_apply` is seeded with 40_000 rows; a default that refused it
+        // would break `make bench` and the pg e2e suite rather than an attack.
+        const { assert!(DEFAULT_SNAPSHOT_MAX_ROWS > 40_000) };
+        let s = PgSnapshotter::new("postgres://x");
+        assert!(s.reject_if_over_cap("bench_apply", 40_000).is_ok());
     }
 }

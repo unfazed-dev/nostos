@@ -714,6 +714,7 @@ mod tests {
             _session: SyncSession,
             _sink: Arc<dyn EventSink>,
             _cap: u64,
+            _per_principal_cap: u64,
         ) -> Result<SessionId, StoreRejection> {
             Ok(SessionId::new())
         }

@@ -24,6 +24,13 @@ pub enum ConnectError {
     /// The instance is at its concurrent-device cap for the licensed tier.
     #[error("concurrent device cap reached ({cap} for tier {tier:?})")]
     DeviceCapReached { tier: nostos_domain::Tier, cap: u64 },
+    /// This principal already holds `cap` live sessions. Separate from
+    /// [`Self::DeviceCapReached`]: that one means the deployment is full, this
+    /// one means ONE account is at its own ceiling. Without it a single
+    /// account could take every licensed slot and lock all other tenants out
+    /// (audit finding 2).
+    #[error("per-principal session cap reached ({cap})")]
+    PrincipalCapReached { cap: u64 },
 }
 
 /// Manages the lifecycle of sync sessions: register on connect, unregister on
@@ -36,7 +43,23 @@ pub struct SessionManager {
     /// `tier.device_cap()`; a managed server overrides it with the cap carried
     /// by a verified license (`nostos_license::ResolvedEntitlement::device_cap`).
     device_cap: u64,
+    /// Ceiling on live sessions held by a SINGLE account.
+    ///
+    /// One subscribe == one session, and a socket may subscribe to
+    /// `MAX_TABLES_PER_SOCKET` (32) tables, so this must stay well above 32 or
+    /// an ordinary multi-table client trips it. Default
+    /// [`DEFAULT_PER_PRINCIPAL_SESSION_CAP`].
+    per_principal_cap: u64,
 }
+
+/// Default per-account live-session ceiling.
+///
+/// Sized as "a generous number of devices, each fully subscribed": one socket
+/// can hold up to 32 sessions (`MAX_TABLES_PER_SOCKET`), so 512 leaves room
+/// for ~16 concurrent fully-subscribed devices on one account before the cap
+/// bites. High enough not to break real clients, low enough that one account
+/// cannot exhaust an Enterprise deployment.
+pub const DEFAULT_PER_PRINCIPAL_SESSION_CAP: u64 = 512;
 
 impl SessionManager {
     /// Construct at a fixed tier. The tier's `device_cap()` becomes the
@@ -48,6 +71,7 @@ impl SessionManager {
             store,
             tier,
             device_cap: tier.device_cap(),
+            per_principal_cap: DEFAULT_PER_PRINCIPAL_SESSION_CAP,
         }
     }
 
@@ -65,7 +89,17 @@ impl SessionManager {
             store,
             tier,
             device_cap,
+            per_principal_cap: DEFAULT_PER_PRINCIPAL_SESSION_CAP,
         }
+    }
+
+    /// Override the per-account session ceiling
+    /// (`NOSTOS_PER_PRINCIPAL_SESSION_CAP`).
+    #[inline]
+    #[must_use]
+    pub fn with_per_principal_cap(mut self, per_principal_cap: u64) -> Self {
+        self.per_principal_cap = per_principal_cap;
+        self
     }
 
     /// Register a new session. Called by the transport when a client subscribes.
@@ -85,7 +119,7 @@ impl SessionManager {
         let cap = self.device_cap;
         // Enterprise's cap is u64::MAX, so try_add_below_cap never rejects it.
         self.store
-            .try_add_below_cap(session, sink, cap)
+            .try_add_below_cap(session, sink, cap, self.per_principal_cap)
             .await
             .map_err(|rejection| match rejection {
                 crate::ports::StoreRejection::CapExceeded { cap } => {
@@ -93,6 +127,9 @@ impl SessionManager {
                         tier: self.tier,
                         cap,
                     }
+                }
+                crate::ports::StoreRejection::PrincipalCapExceeded { cap } => {
+                    ConnectError::PrincipalCapReached { cap }
                 }
             })
     }
@@ -146,6 +183,7 @@ mod tests {
             session: SyncSession,
             sink: Arc<dyn EventSink>,
             cap: u64,
+            _per_principal_cap: u64,
         ) -> Result<SessionId, StoreRejection> {
             let mut g = self.0.lock().unwrap();
             if (g.len() as u64) >= cap {

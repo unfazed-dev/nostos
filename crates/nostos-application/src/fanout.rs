@@ -578,6 +578,7 @@ mod tests {
             session: SyncSession,
             sink: Arc<dyn EventSink>,
             cap: u64,
+            _per_principal_cap: u64,
         ) -> Result<SessionId, crate::ports::StoreRejection> {
             let mut g = self.by_table.lock().unwrap();
             let live: usize = g.values().map(Vec::len).sum();

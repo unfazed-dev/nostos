@@ -873,6 +873,7 @@ mod tests {
             _session: SyncSession,
             _sink: Arc<dyn nostos_application::ports::EventSink>,
             _cap: u64,
+            _per_principal_cap: u64,
         ) -> Result<SessionId, nostos_application::ports::StoreRejection> {
             Ok(SessionId::new())
         }

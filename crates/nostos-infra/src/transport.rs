@@ -1049,7 +1049,17 @@ async fn register_subscribe(
     let id = manager
         .connect(session, sink_dyn)
         .await
-        .map_err(|_| SubscribeReject::DeviceCapReached)?;
+        .map_err(|e| match e {
+            // Distinct rejections: the deployment being full and ONE account
+            // being at its own ceiling are different operator problems, and
+            // collapsing them hides which one is happening (audit finding 2).
+            nostos_application::session::ConnectError::PrincipalCapReached { .. } => {
+                SubscribeReject::Rejected(e.to_string())
+            }
+            nostos_application::session::ConnectError::DeviceCapReached { .. } => {
+                SubscribeReject::DeviceCapReached
+            }
+        })?;
 
     // ── Op-log replay-on-reconnect (ADR-0025 slice 4b). When the client's
     //    epoch matches the server's current slot epoch AND its resume_lsn is
@@ -1192,6 +1202,17 @@ async fn register_subscribe(
                 debug!(table = %req.table, count, "snapshot-on-subscribe delivered");
                 count
             }
+            // A table over the snapshotter's row cap is REFUSED, not quietly
+            // shortened. Every other snapshot error keeps the historical
+            // warn-and-continue (the client still gets live fan-out), but a
+            // cap breach is a configuration mistake the operator must see:
+            // continuing here would hand the client a short first sync that
+            // is indistinguishable from a complete one — the same shape as
+            // the stream-snapshot scope bypass (audit finding 7).
+            Err(e @ nostos_application::ports::SnapshotError::TooLarge { .. }) => {
+                manager.disconnect(id).await;
+                return Err(SubscribeReject::Rejected(e.to_string()));
+            }
             Err(e) => {
                 warn!(
                     table = %req.table, error = %e,
@@ -1307,7 +1328,7 @@ async fn register_stream(
     let session_id = manager
         .connect(session, sink_dyn)
         .await
-        .map_err(|_| "device session cap reached".to_string())?;
+        .map_err(|e| e.to_string())?;
 
     if let Some((old_session, _)) = replaced {
         manager.disconnect(old_session).await;
@@ -1347,6 +1368,15 @@ async fn register_stream(
                     .deliver_control(encode_snapshot_boundary_for_stream(&table, id, false));
                 debug!(table = %table, stream = %id, count, "stream snapshot delivered");
                 count
+            }
+            // Cap breach is loud on the stream path too — but here the wire
+            // already has a per-stream error frame, so the stream is torn
+            // down and the client is told which stream died and why, rather
+            // than being left with a silently short one.
+            Err(e @ nostos_application::ports::SnapshotError::TooLarge { .. }) => {
+                let _ = sink_concrete.deliver_control(encode_stream_error(id, &e.to_string()));
+                manager.disconnect(session_id).await;
+                return Ok(());
             }
             Err(e) => {
                 // A failed stream snapshot is non-fatal (design §3).

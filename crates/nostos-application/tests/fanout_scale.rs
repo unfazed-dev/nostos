@@ -81,6 +81,7 @@ impl SessionStore for TableStore {
         session: SyncSession,
         sink: Arc<dyn EventSink>,
         _cap: u64,
+        _per_principal_cap: u64,
     ) -> Result<SessionId, nostos_application::StoreRejection> {
         let id = session.id;
         self.add(session, sink).await;

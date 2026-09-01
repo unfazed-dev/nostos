@@ -70,9 +70,14 @@ async fn register_slow_session(store: &Arc<dyn SessionStore>, acked: u64) -> Ses
         delivered: Lsn::new(acked),
     });
     let session = SyncSession::new(Predicate::all("tasks"));
-    match store.try_add_below_cap(session, sink, u64::MAX).await {
+    match store
+        .try_add_below_cap(session, sink, u64::MAX, u64::MAX)
+        .await
+    {
         Ok(id) => id,
-        Err(StoreRejection::CapExceeded { .. }) => unreachable!("u64::MAX cap never exceeded"),
+        Err(StoreRejection::CapExceeded { .. } | StoreRejection::PrincipalCapExceeded { .. }) => {
+            unreachable!("u64::MAX caps are never exceeded")
+        }
     }
 }
 

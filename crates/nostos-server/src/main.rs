@@ -122,6 +122,32 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_REPLICATOR", default_value = "fake")]
     replicator: String,
 
+    /// Row ceiling for a single subscribe-time snapshot.
+    ///
+    /// A table with more rows than this is REFUSED, not truncated: a silently
+    /// short first sync is indistinguishable from a complete one at the
+    /// client, which is the failure shape the stream-snapshot scope bypass
+    /// had (audit finding 7). Raise this if a legitimate table is bigger.
+    /// Ceiling on live sync sessions held by a SINGLE account.
+    ///
+    /// The licensed `device_cap` is global, so without this one account can
+    /// open every slot and lock all other tenants out of the deployment
+    /// (audit finding 2). One subscribe is one session and a socket may hold
+    /// 32 tables, so keep this well above 32.
+    #[arg(
+        long,
+        env = "NOSTOS_PER_PRINCIPAL_SESSION_CAP",
+        default_value_t = nostos_application::session::DEFAULT_PER_PRINCIPAL_SESSION_CAP
+    )]
+    per_principal_session_cap: u64,
+
+    #[arg(
+        long,
+        env = "NOSTOS_SNAPSHOT_MAX_ROWS",
+        default_value_t = nostos_application::ports::DEFAULT_SNAPSHOT_MAX_ROWS
+    )]
+    snapshot_max_rows: usize,
+
     /// Fake-replicator emission rate, events/second. `0` = unbounded.
     ///
     /// A10: the default is *paced*, not unbounded. An unbounded synthetic
@@ -409,11 +435,14 @@ async fn main() -> anyhow::Result<()> {
         licensed = !cfg.license.is_empty(),
         "entitlement resolved"
     );
-    let manager = Arc::new(SessionManager::with_device_cap(
-        Arc::clone(&store),
-        entitlement.tier,
-        entitlement.device_cap,
-    ));
+    let manager = Arc::new(
+        SessionManager::with_device_cap(
+            Arc::clone(&store),
+            entitlement.tier,
+            entitlement.device_cap,
+        )
+        .with_per_principal_cap(cfg.per_principal_session_cap),
+    );
 
     // ---- /sync authentication (ADR-0010) ----
     // The OSS self-host default is `none` (anonymous — single-tenant dev). A
@@ -971,10 +1000,14 @@ async fn main() -> anyhow::Result<()> {
     if cfg.replicator == "pg" {
         // pg_url is already known non-empty here — the write-back block above
         // bailed on an empty NOSTOS_PG_URL under the same `replicator == "pg"`.
-        let snapshotter: Arc<dyn nostos_application::ports::SnapshotSource> =
-            Arc::new(nostos_infra::PgSnapshotter::new(&cfg.pg_url));
+        let snapshotter: Arc<dyn nostos_application::ports::SnapshotSource> = Arc::new(
+            nostos_infra::PgSnapshotter::new(&cfg.pg_url).with_max_rows(cfg.snapshot_max_rows),
+        );
         state_builder = state_builder.with_snapshotter(snapshotter);
-        info!("snapshot-on-subscribe: PgSnapshotter (real source)");
+        info!(
+            max_rows = cfg.snapshot_max_rows,
+            "snapshot-on-subscribe: PgSnapshotter (real source)"
+        );
     }
 
     // B2 mirror (ADR-0042): the handle's in-memory buffer IS the snapshot
