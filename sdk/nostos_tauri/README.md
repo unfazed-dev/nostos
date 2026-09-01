@@ -20,7 +20,7 @@ tauri::Builder::default()
 
 ## Invoke from JS
 
-Ten commands, namespaced `plugin:cairn|<command>`:
+Sixteen commands, namespaced `plugin:cairn|<command>`:
 
 | command | args | returns |
 |---|---|---|
@@ -34,6 +34,12 @@ Ten commands, namespaced `plugin:cairn|<command>`:
 | `sign_out` | — | `void` — ADR-0029 wipe + push deregistration |
 | `register_push_token` | `{ platform, token }` | `void` — `POST /push-tokens` (ADR-0037 §3) |
 | `deregister_push_token` | `{ token }` | `void` — `DELETE /push-tokens/{token}` |
+| `or_set_add` | `{ table, pk, element }` | `number` — ADR-0030 OR-set add (add-wins); table must be in `orSetTables` |
+| `or_set_remove` | `{ table, pk, element }` | `number` — OR-set tombstone; a later re-add wins |
+| `counter_increment` | `{ table, pk, delta }` | `number` — ADR-0030 PN-Counter increment; table in `counterTables` |
+| `counter_decrement` | `{ table, pk, delta }` | `number` — PN-Counter decrement |
+| `dead_letters` | — | `{ pending, deadLettered, lastError }` — the ADR-0027 outbox status |
+| `connection_state` | — | `boolean` — true once the session has proven a subscription |
 
 **Typed JS/TS bindings live in [`guest-js/`](guest-js/)** — the
 `@nostos-sync/tauri` package (ESM + `.d.ts` + README) wrapping every command

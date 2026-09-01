@@ -20,6 +20,12 @@ fn main() {
         "sign_out",
         "register_push_token",
         "deregister_push_token",
+        "or_set_add",
+        "or_set_remove",
+        "counter_increment",
+        "counter_decrement",
+        "dead_letters",
+        "connection_state",
     ])
     .build();
 }

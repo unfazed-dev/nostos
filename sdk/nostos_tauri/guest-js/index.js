@@ -113,6 +113,54 @@ export const nostos = {
   deregisterPushToken(token) {
     return invoke(`${CMD}deregister_push_token`, { token });
   },
+
+  // ---- unified verbs: CRDT tier (ADR-0030) + observability ----
+
+  /**
+   * ADR-0030 add-wins OR-set: add `element` to the OR-set at (table, pk).
+   * The table must be declared in plugins.cairn.orSetTables AND match the
+   * server's NOSTOS_OR_SET_COLUMNS (three views of one truth). Resolves
+   * with the outbox id once the merge-upsert is durable locally.
+   */
+  orSetAdd(table, pk, element) {
+    return invoke(`${CMD}or_set_add`, { table, pk, element });
+  },
+
+  /**
+   * ADR-0030 OR-set remove — a tombstone at a fresh HLC; a concurrent or
+   * later re-add (higher HLC) re-activates the element (add-wins).
+   */
+  orSetRemove(table, pk, element) {
+    return invoke(`${CMD}or_set_remove`, { table, pk, element });
+  },
+
+  /** ADR-0030 PN-Counter increment by delta (this replica's positive side). */
+  counterIncrement(table, pk, delta) {
+    return invoke(`${CMD}counter_increment`, { table, pk, delta });
+  },
+
+  /** ADR-0030 PN-Counter decrement by delta (this replica's negative side). */
+  counterDecrement(table, pk, delta) {
+    return invoke(`${CMD}counter_decrement`, { table, pk, delta });
+  },
+
+  /**
+   * ADR-0027 outbox status: { pending, deadLettered, lastError }. pending
+   * > 0 offline is the offline-first promise WORKING; deadLettered > 0
+   * means writes permanently failed (inspect + surface lastError — it
+   * names the exact env var for allowlist rejections).
+   */
+  deadLetters() {
+    return invoke(`${CMD}dead_letters`);
+  },
+
+  /**
+   * True once the session has PROVEN a subscription (first frame or write
+   * ack landed). false = connected-not-yet-proven or fully offline.
+   */
+  connectionState() {
+    return invoke(`${CMD}connection_state`);
+  },
 };
 
 // ---------------------------------------------------------------------------

@@ -13,4 +13,10 @@ permissions = [
     "allow-sign-out",
     "allow-register-push-token",
     "allow-deregister-push-token",
+    "allow-or-set-add",
+    "allow-or-set-remove",
+    "allow-counter-increment",
+    "allow-counter-decrement",
+    "allow-dead-letters",
+    "allow-connection-state",
 ]

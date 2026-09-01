@@ -319,6 +319,54 @@
           "markdownDescription": "Denies the connect command without any pre-configured scope."
         },
         {
+          "description": "Enables the connection_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-connection-state",
+          "markdownDescription": "Enables the connection_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the connection_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-connection-state",
+          "markdownDescription": "Denies the connection_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the counter_decrement command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-counter-decrement",
+          "markdownDescription": "Enables the counter_decrement command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the counter_decrement command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-counter-decrement",
+          "markdownDescription": "Denies the counter_decrement command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the counter_increment command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-counter-increment",
+          "markdownDescription": "Enables the counter_increment command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the counter_increment command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-counter-increment",
+          "markdownDescription": "Denies the counter_increment command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the dead_letters command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-dead-letters",
+          "markdownDescription": "Enables the dead_letters command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the dead_letters command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-dead-letters",
+          "markdownDescription": "Denies the dead_letters command without any pre-configured scope."
+        },
+        {
           "description": "Enables the deregister_push_token command without any pre-configured scope.",
           "type": "string",
           "const": "allow-deregister-push-token",
@@ -329,6 +377,30 @@
           "type": "string",
           "const": "deny-deregister-push-token",
           "markdownDescription": "Denies the deregister_push_token command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the or_set_add command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-or-set-add",
+          "markdownDescription": "Enables the or_set_add command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the or_set_add command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-or-set-add",
+          "markdownDescription": "Denies the or_set_add command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the or_set_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-or-set-remove",
+          "markdownDescription": "Enables the or_set_remove command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the or_set_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-or-set-remove",
+          "markdownDescription": "Denies the or_set_remove command without any pre-configured scope."
         },
         {
           "description": "Enables the query command without any pre-configured scope.",
@@ -415,10 +487,10 @@
           "markdownDescription": "Denies the write command without any pre-configured scope."
         },
         {
-          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`\n- `allow-register-push-token`\n- `allow-deregister-push-token`",
+          "description": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`\n- `allow-register-push-token`\n- `allow-deregister-push-token`\n- `allow-or-set-add`\n- `allow-or-set-remove`\n- `allow-counter-increment`\n- `allow-counter-decrement`\n- `allow-dead-letters`\n- `allow-connection-state`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`\n- `allow-register-push-token`\n- `allow-deregister-push-token`"
+          "markdownDescription": "Nostos Tauri plugin — default permissions for the connect/subscribe/write/query/checkpoint/watch/set-token/sign-out + push-token register/deregister surface. A shipped plugin would add scoped per-table permission sets; this scaffold grants all ten commands unconditionally.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-subscribe`\n- `allow-write`\n- `allow-query`\n- `allow-checkpoint`\n- `allow-watch`\n- `allow-set-token`\n- `allow-sign-out`\n- `allow-register-push-token`\n- `allow-deregister-push-token`\n- `allow-or-set-add`\n- `allow-or-set-remove`\n- `allow-counter-increment`\n- `allow-counter-decrement`\n- `allow-dead-letters`\n- `allow-connection-state`"
         }
       ]
     }

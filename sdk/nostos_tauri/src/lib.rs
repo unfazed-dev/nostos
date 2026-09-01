@@ -110,6 +110,15 @@ pub struct NostosPluginConfig {
     /// (e.g. from `app.path().app_data_dir()`) either here or per `connect`.
     /// Defaults to `"cairn.db"`.
     pub db_path: Option<String>,
+    /// Tables this session treats as add-wins OR-sets (ADR-0030) — the
+    /// client-side gate for the `orSetAdd`/`orSetRemove` commands. MUST
+    /// triple-match the storage tags and the server's `NOSTOS_OR_SET_COLUMNS`
+    /// (the sibling SDKs' three-views-of-one-truth rule).
+    pub or_set_tables: Option<Vec<String>>,
+    /// Tables this session treats as PN-Counters (ADR-0030 addendum) — the
+    /// gate for `counterIncrement`/`counterDecrement`. Same triple-match
+    /// rule against the server's `NOSTOS_COUNTER_COLUMNS`.
+    pub counter_tables: Option<Vec<String>>,
 }
 
 impl NostosPluginConfig {
@@ -211,6 +220,22 @@ pub struct NostosSnapshot {
     pub table: String,
     /// One JSON object per row (`pk`, `payload`) read from `cairn_data`.
     pub rows: Vec<serde_json::Value>,
+}
+
+/// The outbox status surfaced as the unified-verb `deadLetters` command —
+/// the ADR-0027 `WriteQueueStatus` shape, camelCase for the JS guest.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NostosWriteStatus {
+    /// Writes durably queued but not yet server-ack'd (> 0 offline is the
+    /// offline-first promise working, not an error).
+    pub pending: u64,
+    /// Writes permanently failed this session (quarantined, inspectable —
+    /// NOT deleted). Zero is the healthy steady state.
+    pub dead_lettered: u64,
+    /// The server's error text from the most recent dead-letter, verbatim
+    /// (names the exact env var for allowlist rejections).
+    pub last_error: Option<String>,
 }
 
 /// Internal reactive-emitter seam (mirrors `sdk/nostos_node`'s `SnapshotEmitter`):
@@ -333,6 +358,20 @@ impl NostosState {
             table: table.clone(),
             token: token.clone(),
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
+            or_set_tables: self
+                .config
+                .or_set_tables
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            counter_tables: self
+                .config
+                .counter_tables
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
             ..SyncClientConfig::default()
         };
         let client = Arc::new(SyncClient::new(url.clone(), storage, config));
@@ -695,6 +734,117 @@ impl NostosState {
         Ok(seq)
     }
 
+    /// The active session's client for a single-table command — the exact
+    /// write() guard discipline (no session → "<op>() called before
+    /// connect()"; table mismatch names the v1 one-table ceiling), shared
+    /// by the CRDT verbs so their messages match write()'s.
+    async fn session_client(
+        &self,
+        table: &str,
+        op: &str,
+    ) -> Result<Arc<SyncClient<SqliteStorage>>, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| format!("{op}() called before connect()"))?;
+        if session.table != table {
+            return Err(format!(
+                "{op}() table {table:?} does not match active session table {:?} — v1 supports one table per NostosState",
+                session.table
+            ));
+        }
+        Ok(Arc::clone(&session.client))
+    }
+
+    /// ADR-0030 add-wins OR-set: add `element` to the OR-set at `pk`.
+    /// Optimistic-local like every write — resolves once the merge-upsert
+    /// is durable in the outbox. The table must be declared in
+    /// `plugins.cairn.orSetTables` (the client gate; the server's
+    /// `NOSTOS_OR_SET_COLUMNS` must agree).
+    pub async fn or_set_add(
+        &self,
+        table: String,
+        pk: String,
+        element: String,
+    ) -> Result<u64, String> {
+        let client = self.session_client(&table, "orSetAdd").await?;
+        client
+            .or_set_add(&table, &pk, &element)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// ADR-0030 add-wins OR-set remove — a tombstone at a fresh HLC; a
+    /// concurrent/later re-add re-activates the element.
+    pub async fn or_set_remove(
+        &self,
+        table: String,
+        pk: String,
+        element: String,
+    ) -> Result<u64, String> {
+        let client = self.session_client(&table, "orSetRemove").await?;
+        client
+            .or_set_remove(&table, &pk, &element)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// ADR-0030 PN-Counter increment by `delta` (bumps this replica's
+    /// positive counter). Table must be in `plugins.cairn.counterTables`.
+    pub async fn counter_increment(
+        &self,
+        table: String,
+        pk: String,
+        delta: i64,
+    ) -> Result<u64, String> {
+        let client = self.session_client(&table, "counterIncrement").await?;
+        client
+            .counter_increment(&table, &pk, delta)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// ADR-0030 PN-Counter decrement by `delta` (bumps the negative
+    /// counter for this replica).
+    pub async fn counter_decrement(
+        &self,
+        table: String,
+        pk: String,
+        delta: u64,
+    ) -> Result<u64, String> {
+        let client = self.session_client(&table, "counterDecrement").await?;
+        client
+            .counter_decrement(&table, &pk, delta)
+            .await
+            .map_err(|e: ClientError| e.to_string())
+    }
+
+    /// ADR-0027 outbox status — pending count, dead-letter count, and the
+    /// most recent dead-letter error verbatim (the unified-verb surface's
+    /// `deadLetters`).
+    pub async fn write_queue_status(&self) -> Result<NostosWriteStatus, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "deadLetters() called before connect()".to_string())?;
+        let status = session.client.write_status();
+        Ok(NostosWriteStatus {
+            pending: status.pending,
+            dead_lettered: status.dead_lettered,
+            last_error: status.last_error,
+        })
+    }
+
+    /// True once the live session has PROVEN a subscription (first frame
+    /// or write ack) — the unified-verb surface's `connectionState`.
+    pub async fn is_subscribed(&self) -> Result<bool, String> {
+        let guard = self.session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "connectionState() called before connect()".to_string())?;
+        Ok(*session.client.subscribed().borrow())
+    }
+
     /// Run an arbitrary `SELECT` against the on-device SQLite store and return
     /// a JSON-array-of-objects STRING (one object per row, keyed by column
     /// name) — the same shape `nostos_node`'s `query()` emits, so a JS caller
@@ -1043,6 +1193,64 @@ async fn deregister_push_token(state: State<'_, NostosState>, token: String) -> 
     state.deregister_push_token(token).await
 }
 
+/// ADR-0030 add-wins OR-set add (see [`NostosState::or_set_add`]).
+#[tauri::command]
+async fn or_set_add(
+    state: State<'_, NostosState>,
+    table: String,
+    pk: String,
+    element: String,
+) -> Result<u64, String> {
+    state.or_set_add(table, pk, element).await
+}
+
+/// ADR-0030 OR-set remove (tombstone at a fresh HLC; add-wins).
+#[tauri::command]
+async fn or_set_remove(
+    state: State<'_, NostosState>,
+    table: String,
+    pk: String,
+    element: String,
+) -> Result<u64, String> {
+    state.or_set_remove(table, pk, element).await
+}
+
+/// ADR-0030 PN-Counter increment by `delta`.
+#[tauri::command]
+async fn counter_increment(
+    state: State<'_, NostosState>,
+    table: String,
+    pk: String,
+    delta: i64,
+) -> Result<u64, String> {
+    state.counter_increment(table, pk, delta).await
+}
+
+/// ADR-0030 PN-Counter decrement by `delta`.
+#[tauri::command]
+async fn counter_decrement(
+    state: State<'_, NostosState>,
+    table: String,
+    pk: String,
+    delta: u64,
+) -> Result<u64, String> {
+    state.counter_decrement(table, pk, delta).await
+}
+
+/// ADR-0027 outbox status — pending/dead-letter counts + the last
+/// dead-letter error (the unified-verb `deadLetters` surface).
+#[tauri::command]
+async fn dead_letters(state: State<'_, NostosState>) -> Result<NostosWriteStatus, String> {
+    state.write_queue_status().await
+}
+
+/// True once the session has proven a subscription — the unified-verb
+/// `connectionState` surface.
+#[tauri::command]
+async fn connection_state(state: State<'_, NostosState>) -> Result<bool, String> {
+    state.is_subscribed().await
+}
+
 /// Build the `nostos` Tauri plugin. Generic over `R: Runtime` so a Tauri app
 /// using any runtime (the default `Wry`, or a custom one) can register it via
 /// `tauri::Builder::default().plugin(nostos_tauri::init())`.
@@ -1068,6 +1276,12 @@ pub fn init<R: Runtime>() -> TauriPlugin<R, NostosPluginConfig> {
             sign_out,
             register_push_token,
             deregister_push_token,
+            or_set_add,
+            or_set_remove,
+            counter_increment,
+            counter_decrement,
+            dead_letters,
+            connection_state,
         ])
         .build()
 }
@@ -1573,6 +1787,7 @@ mod tests {
             token: None,
             table: Some("notes".into()),
             db_path: Some(":memory:".into()),
+            ..NostosPluginConfig::default()
         };
         let state = NostosState::with_config(config);
         state.connect(None, None, None).await.expect("connect");
@@ -1821,5 +2036,107 @@ mod tests {
             }
         }
         manifest.join(&rel)
+    }
+
+    // ---------------------------------------- unified verbs (Track A1)
+
+    /// plugins.cairn parses the CRDT table declarations camelCase (the
+    /// guest's spelling) and feeds them into the client config at connect.
+    #[test]
+    fn plugin_config_parses_crdt_tables_camel_case() {
+        let raw = serde_json::json!({
+            "syncUrl": "ws://localhost:9/sync",
+            "orSetTables": ["tags"],
+            "counterTables": ["scores"],
+        });
+        let config: NostosPluginConfig = serde_json::from_value(raw).expect("parse");
+        assert_eq!(config.or_set_tables, Some(vec!["tags".to_owned()]));
+        assert_eq!(config.counter_tables, Some(vec!["scores".to_owned()]));
+        // Unknown keys still fail loudly (deny_unknown_fields discipline).
+        assert!(
+            serde_json::from_value::<NostosPluginConfig>(serde_json::json!({
+                "orsettables": [],
+            }))
+            .is_err()
+        );
+    }
+
+    /// The CRDT verbs + observability commands fail honestly before
+    /// connect() — the same message shape write() uses.
+    #[tokio::test]
+    async fn unified_verbs_before_connect_fail_honestly() {
+        let state = NostosState::new();
+        let err = state
+            .or_set_add("tasks".into(), "t1".into(), "x".into())
+            .await
+            .expect_err("no session");
+        assert!(err.contains("before connect()"), "names the fix: {err}");
+        let err = state.write_queue_status().await.expect_err("no session");
+        assert!(err.contains("before connect()"), "names the fix: {err}");
+        let err = state.is_subscribed().await.expect_err("no session");
+        assert!(err.contains("before connect()"), "names the fix: {err}");
+    }
+
+    /// Offline CRDT round-trip: a tagged table's orSetAdd enqueues a
+    /// durable merge-upsert (the outbox id returns; pending ticks up in
+    /// the ADR-0027 status), and an UNTAGGED table is refused by the
+    /// client gate with the three-views-of-one-truth error. Note the v1
+    /// ceiling the single-table guard enforces: the CRDT table must BE the
+    /// session table (multi-table is the provider-dashboard plan).
+    #[tokio::test]
+    async fn crdt_verbs_offline_round_trip_and_gate() {
+        let config = NostosPluginConfig {
+            or_set_tables: Some(vec!["tasks".to_owned()]),
+            counter_tables: Some(vec!["tasks".to_owned()]),
+            ..NostosPluginConfig::default()
+        };
+        let state = NostosState::with_config(config);
+        state
+            .connect(
+                Some("ws://localhost:0".into()),
+                None,
+                Some(":memory:".into()),
+            )
+            .await
+            .expect("connect");
+
+        let id = state
+            .or_set_add("tasks".into(), "t1".into(), "hello".into())
+            .await
+            .expect("tagged table enqueues");
+        assert!(id > 0, "outbox ids start at 1");
+        let cid = state
+            .counter_increment("tasks".into(), "c1".into(), 3)
+            .await
+            .expect("tagged counter enqueues");
+        assert!(cid > 0);
+
+        let status = state.write_queue_status().await.expect("status");
+        assert!(status.pending >= 2, "both CRDT writes sit in the outbox");
+        assert_eq!(status.dead_lettered, 0, "nothing has been rejected yet");
+        assert_eq!(status.last_error, None);
+        assert!(!state.is_subscribed().await.expect("subscribed"));
+
+        // The gate: a session WITHOUT the table tag refuses the verb
+        // client-side (the three-views rule) before any outbox entry exists.
+        // The single-table guard fires first for OTHER tables, so this needs
+        // its own state whose session table is simply untagged.
+        let untagged = NostosState::new();
+        untagged
+            .connect(
+                Some("ws://localhost:0".into()),
+                None,
+                Some(":memory:".into()),
+            )
+            .await
+            .expect("connect");
+        let err = untagged
+            .or_set_add("tasks".into(), "n1".into(), "x".into())
+            .await
+            .expect_err("untagged table");
+        assert!(
+            err.to_lowercase().contains("tagged"),
+            "names the three-views rule: {err}"
+        );
     }
 }

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-counter-increment"
+description = "Enables the counter_increment command without any pre-configured scope."
+commands.allow = ["counter_increment"]
+
+[[permission]]
+identifier = "deny-counter-increment"
+description = "Denies the counter_increment command without any pre-configured scope."
+commands.deny = ["counter_increment"]
