@@ -239,6 +239,111 @@ Ordered by exploitability.
     is a sibling `And` — so it widens delivery only inside the attacker's own
     tenant.
 
+## The path audit — where the real bug was
+
+The plan was a **shape** matrix: every subscription shape (`Any`, `Eq`, `Ne`,
+ordered leaves, `And`/`Or`/`Not`, `where_sql`) crossed with two tenants,
+asserting zero cross-tenant delivery.
+
+**That matrix would have passed every cell, and proved nothing.** The tenant
+clause is ANDed at the ROOT (`build_predicate` ends with `p.and_eq(tenant)`),
+and `PredicateExpr::and` builds `And([self, other])`. So foreign-tenant
+rejection is a property of `And`, not of the shape of the other conjunct. Twelve
+shapes re-prove what `rules_scope_is_anded_with_tenant_scope` already proves.
+
+The axis that can actually fail is **path**, not shape — which is also the real
+shape of CVE-2026-30870 (PowerSync): rules *not applied* on one path, rather
+than misapplied. Enumerating every path that can put a row in front of a client
+found a live bug on the first one.
+
+### 6. Op-log replay bypassed the ruleset — HIGH (fixed)
+
+**The leak.** Two paths deliver rows, and only one enforced authorization:
+
+| path | filter applied |
+|---|---|
+| live fan-out | `predicate.matches` — rules scope + tenant clause |
+| op-log replay (reconnect) | **tenant only** |
+
+`OpLogSource::replay_after(tenant_id, after_lsn)` runs
+`WHERE tenant_id = $1 AND lsn > $2` — no table, no predicate. The rows went
+straight to `sink_concrete.deliver_awaiting(ev)`, and the sink's `admit` gate
+(`router.rs`) checks only open / acked / dedup. Nothing on that path consulted
+the session predicate.
+
+So a client that reconnects with a `resume_lsn` received **every row its tenant
+wrote** since that LSN, including:
+
+- rows from tables its own ruleset refuses to sync (a direct `subscribe` to
+  them is rejected `NotSynced`);
+- rows its row-level scope hides — e.g. under `scope = "owner_id = claims.sub"`,
+  another user's rows in the same tenant.
+
+Cross-tenant isolation held (the SQL does filter tenant). This is
+**within-tenant privilege escalation**, and in a deploy whose rules exist to
+separate users inside an org, that is the authorization boundary.
+
+**Proven before fixed.** `replay_never_delivers_rows_from_an_unsynced_table`
+failed on the unpatched tree with the `notes` row delivered to a `tasks`
+subscriber. The test asserts `replay_calls == 1` first, so a broken epoch gate
+that skipped replay entirely would fail loudly instead of passing vacuously.
+
+**The fix** (`replay_admits` in `transport.rs`): re-apply the session predicate
+on the replay path — table check, then the predicate over the row's JSON
+payload, failing closed on a payload that won't decode.
+
+Three details worth keeping:
+
+1. **Deletes are table-check only.** A replayed delete carries no old image
+   (`oplog.rs` drops it), so there are no columns to match. Failing closed would
+   drop the delete permanently for an offline client, leaving a row that never
+   goes away — the stale-row bug ADR-0014's reconcile boundary exists to
+   prevent. That is a worse outcome than leaking a pk inside the client's own
+   tenant and own subscribed table. Ceiling and upgrade path (log the scope
+   columns into `cairn_oplog` at write time) are in the `ponytail:` comment.
+2. **The `!events.is_empty()` guard was now wrong.** A non-empty replay can
+   filter to zero. The old arm returned `Ok(())` and skipped the snapshot, so a
+   fully-filtered replay would leave the client with neither replay nor
+   snapshot — a silent gap. The count is now taken *after* filtering.
+3. **The gate lives at the delivery site**, not in `OpLogSource`. The port takes
+   `tenant_id` and knows nothing about predicates.
+
+`replay_applies_the_rules_scope_not_just_the_table` is the one that
+distinguishes a real fix from a table-name-only fix: under a ruleset scoped to
+`status = 'open'`, a `status='closed'` row must not arrive while the `open` row
+still does.
+
+### 7. Stream snapshot skips the rules scope — OPEN, not yet fixed
+
+Same class, second path. `register_stream` builds the session predicate with
+`build_stream_predicate` (rules scope AND bound template AND tenant), but then
+calls:
+
+```rust
+snap.snapshot_stream(&table, &bound, ..., principal.tenant_scope(tenant_column))
+```
+
+It passes `&bound` — the raw bound template — **not** the rules-scoped expr. So
+a stream's initial snapshot is filtered by the template and the tenant, but not
+by the ruleset's own scope, while live fan-out for the same stream is. Under a
+ruleset with a row-level scope, the stream snapshot over-delivers exactly that
+scope's worth of rows.
+
+Not yet patched: the naive fix (pass `predicate.expr`) would bake the tenant
+clause into the SQL expression as well as the dedicated `tenant` argument,
+which breaks deliberately-global tables that lack the tenant column
+(`scope_if_column_present` skips the clause today). The correct fix passes
+`rules_expr.and(bound)` and leaves the tenant travelling in its own argument.
+
+## Verification status
+
+- `make ci` and the full real-Postgres e2e suite must both be re-run and *seen*
+  green. Two earlier background runs reported exit 0 without executing anything
+  (the first wrote to a non-existent directory; the second died on a full disk).
+  An exit code from a redirect that failed is not a test result.
+- Items 1 (predicate bound) and the tenant guard stay **unverified** until real
+  `test result:` lines are read.
+
 ## Recommended next test, not yet written
 
 The highest-value remaining test is the **tenant-isolation matrix**, modelled on
