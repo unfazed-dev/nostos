@@ -53,8 +53,57 @@ to modifications of the MPL files themselves. Two options — the user's call:
 1. Add `"MPL-2.0"` to `deny.toml` `[licenses] allow`. One line.
 2. Drop/replace `ece`, losing or reimplementing Web Push encryption.
 
-(The `Unlicense` crates — aho-corasick, byteorder, memchr — do NOT fail: each
-is dual-licensed and cargo-deny resolves them to MIT.)
+## THE TRAP: local `cargo deny check` is NOT the CI gate
+
+A first fix looked green locally and stayed red in CI. Reason:
+`EmbarkStudios/cargo-deny-action@v2` runs with **`--all-features`**, so CI
+resolves the whole graph including the off-default `iroh` tree. A bare local
+`cargo deny check` resolves default features and cannot see it.
+
+**Reproduce the CI gate exactly:**
+
+    cargo deny --all-features check licenses advisories bans
+
+Under `--all-features` two more classes fail, neither visible by default:
+
+- **3 `Unlicense`-ONLY crates**: `ws_stream_wasm@0.7.5`, `pharos@0.5.3`,
+  `async_io_stream@0.3.3` (the wasm websocket stack). Distinct from
+  aho-corasick / byteorder / memchr, which are `MIT OR Unlicense` and resolve
+  to MIT on their own — those never failed. Fixed by allowing `Unlicense`:
+  a public-domain dedication, strictly more permissive than the already-allowed
+  MIT, so it loosens nothing in spirit.
+- **2 `unmaintained` advisories** (informational, not vulnerabilities):
+  `atomic-polyfill@1.0.3` (RUSTSEC-2023-0089, superseded by portable-atomic,
+  already in the graph) and `paste@1.0.15` (RUSTSEC-2024-0436, archived,
+  feature-complete). Both transitive under `iroh`, neither fixable from this
+  workspace. Ignored as **explicit IDs**, deliberately not by relaxing
+  `unmaintained` wholesale, so a future unmaintained crate still fails.
+
+Both shapes now report `advisories ok, bans ok, licenses ok`.
+
+## release.yml could not have published anything
+
+`release.yml` had **no `permissions:` block at all**, so it inherited the repo
+default — verified `read`:
+
+    gh api repos/unfazed-dev/nostos/actions/permissions/workflow
+    {"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}
+
+With a read-only token, `create-release` (softprops/action-gh-release@v2)
+cannot publish the Release, and `update-manifest`
+(peter-evans/create-pull-request@v7) cannot open the manifest PR. The tag push
+would have burned every build job and produced nothing.
+
+Fixed with least privilege: top-level `contents: read`, `contents: write` on
+`create-release`, `contents: write` + `pull-requests: write` on
+`update-manifest`. `actionlint` clean.
+
+**Still open — needs a repo setting, not YAML.** `can_approve_pull_request_reviews`
+is `false`, which is the "Allow GitHub Actions to create and approve pull
+requests" checkbox. While it is off, create-pull-request fails with *"GitHub
+Actions is not permitted to create or approve pull requests"* no matter what
+the YAML grants. Either enable it, or have the operator apply the manifest by
+hand from the `release-prebuilt-manifest.json` release asset.
 
 ## SDK e2e — ROOT-CAUSED and fixed
 
