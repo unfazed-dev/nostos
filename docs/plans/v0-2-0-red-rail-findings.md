@@ -132,6 +132,28 @@ comment at line 106 describes). `cargo check --workspace --all-targets` under
 `-D warnings` is clean; `cargo test -p nostos-infra --lib` = 207 passed,
 including the three `static_bearer_*` tests covering this path.
 
+## The dotnet slice had never run on Linux — FIXED
+
+The `auth.rs` deprecation fix above cleared the rust, node and tauri slices but
+NOT dotnet, which kept failing with the misleading `FAIL: spine exited early`.
+Three separate macOS-only assumptions, each masked by the one before it:
+
+1. **`mktemp -t <prefix>` is BSD-only.** GNU coreutils requires the template to
+   end in at least 3 X's and errors `too few X's in template`. `$SPINE_LOG` came
+   back empty, redirecting the spine to `""` — hence "exited early", which had
+   nothing to do with the spine. Fixed with an explicit template:
+   `mktemp "${TMPDIR:-/tmp}/nostos-dotnet-e2e-spine.XXXXXX"` (valid on both).
+2. **`Smoke.csproj` only listed `libnostos_dotnet.dylib`.** Cargo emits `.so` on
+   Linux and `nostos_dotnet.dll` on Windows, so the `Exists()` condition was
+   false, nothing was copied next to the assembly, and
+   `DllImport("nostos_dotnet")` could not resolve. Added the two sibling entries.
+3. **Only `DYLD_LIBRARY_PATH` was exported.** Linux's loader reads
+   `LD_LIBRARY_PATH` and ignores `DYLD_*` entirely. Added alongside.
+
+The handoff's "sdk-e2e 7/7 host slices PASS" was true — **on macOS**. Every one
+of these is invisible to a macOS run by construction, which is exactly why a
+local green rail and a red remote rail disagreed for four runs.
+
 ## The 6h burns: uncapped jobs — FIXED
 
 `fmt + clippy + test` and `throughput benchmark (smoke)` each burned
