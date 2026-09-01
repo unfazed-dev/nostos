@@ -323,6 +323,15 @@ cannot double-decrement — read first, then confirmed empirically here.
 described below it could not have produced a trustworthy number, which is the
 reason to say so rather than quietly omit it.
 
+**Still host-blocked as of 2026-09-02.** Both the 10k soak and the throughput
+re-measure remain unrun. The blocker is the same four orphan context-mode
+`node` processes (`start.mjs`, PIDs **47955 47973 73569 73604**) still pegged
+at ~100% CPU each; agents in this session cannot kill them (outside the
+sandbox), so the user must `kill 47955 47973 73569 73604` and confirm the load
+average is back near idle before either number is taken. Run order once clear:
+`make bench` for the throughput figure, then `nostos-bench-10k` for the soak,
+recording load average alongside each per `docs/BENCHMARK-METHODOLOGY.md`.
+
 **Binary names, for the next agent:** the bench binaries are `nostos-bench`,
 `nostos-bench-10k`, `nostos-reconnect-storm`, `nostos-bench-pg-ingest` — *not* the
 source-file names (`probe_10k`, `reconnect_storm`). An inventory sweep this pass
