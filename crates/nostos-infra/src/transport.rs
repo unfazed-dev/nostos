@@ -71,6 +71,25 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// enough that 32 × device_cap snapshots is a bounded worst case.
 const MAX_TABLES_PER_SOCKET: usize = 32;
 
+/// Largest inbound WS message the server will buffer, per connection.
+///
+/// axum 0.7 defaults to 64 MiB message / 16 MiB frame. Everything a client
+/// sends us is small JSON — subscribe, ack, write-back mutation — and blobs go
+/// out-of-band on the attachment plane (ADR-0034), so the default is three
+/// orders of magnitude more headroom than the protocol needs. It is also
+/// per-connection: at a 1k-client device cap the default admits a ~64 GB
+/// worst-case buffer ceiling, reachable by clients that authenticate and then
+/// simply send large frames.
+///
+/// ponytail: one flat cap for every inbound message type. If write-back ever
+/// needs to carry a genuinely large batch, give that message type its own
+/// higher cap rather than raising this one for the whole socket.
+const MAX_WS_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Largest single inbound WS frame. Messages may span frames, so this bounds
+/// per-read allocation while `MAX_WS_MESSAGE_BYTES` bounds the reassembled whole.
+const MAX_WS_FRAME_BYTES: usize = 1024 * 1024;
+
 /// Close reason a live session receives when a sync-rules reload (ADR-0031
 /// D3) changes the rule decision for one of its subscribed tables. Swap
 /// verification is per-table and coarse — see the `ponytail:` at the
@@ -344,7 +363,9 @@ pub async fn sync_handler(
     // the handshake token's `exp`. `None` ⇒ no deadline — the OSS `sync_auth:
     // none` default and Phase-0 no-`exp` tokens stay open, exactly as before.
     let exp = crate::auth::token_exp(&token);
-    ws.on_upgrade(move |socket| run_session(socket, state, principal, exp))
+    ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_FRAME_BYTES)
+        .on_upgrade(move |socket| run_session(socket, state, principal, exp))
 }
 
 /// Pull a bearer token off the Authorization header (`Bearer <token>`).
