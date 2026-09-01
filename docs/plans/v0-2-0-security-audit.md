@@ -226,6 +226,23 @@ silently read as `true`).
 
 ## Open — confirmed gaps, not yet fixed
 
+> **Update 2026-09-02 — "fix all" pass in progress.** Findings 2, 3 and 9 are
+> fixed; see `docs/plans/close-all-open-security-findings.md` for the batch
+> plan and the design decisions read off the source. Two of this section's own
+> pointers were wrong and are corrected there:
+>
+> - Finding 3's `snapshot_source.rs:143` is `prepare_columns`, a metadata-only
+>   prepared statement that fetches zero rows. The unbounded reads are the
+>   `client.query` calls in `snapshot` and `snapshot_stream`.
+> - Finding 3 also had a half this section never mentioned: EVERY snapshot
+>   failure is a server-side `warn!` after which the subscribe continues with
+>   live fan-out only. A row cap alone would therefore have been invisible to
+>   the client — the same "first sync is quietly wrong" shape as finding 7. The
+>   cap now rejects the subscribe outright (table path) or emits a
+>   `stream_error` frame (stream path). **The residual is a new finding: every
+>   OTHER snapshot error is still silent to the client.**
+
+
 Ordered by exploitability.
 
 1. ~~**`ack` is unvalidated**~~ — **PARTLY WRONG AS ORIGINALLY WRITTEN, now
