@@ -389,6 +389,18 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_CORS_ORIGINS", default_value = "")]
     cors_origins: String,
 
+    /// Browser origins allowed to open the `/sync` WebSocket, comma-separated.
+    /// Empty (default) = **no check**, which is what every existing deployment
+    /// gets on upgrade.
+    ///
+    /// Separate from `NOSTOS_CORS_ORIGINS` on purpose: CORS governs the REST
+    /// surface and is enforced by the browser, whereas a WebSocket upgrade is
+    /// not subject to CORS at all — the server has to check `Origin` itself or
+    /// not at all. Deployments usually want the same list in both, but they are
+    /// different mechanisms and collapsing them would hide that.
+    #[arg(long, env = "NOSTOS_WS_ORIGINS", default_value = "")]
+    ws_origins: String,
+
     /// WAL-bloat protection: the maximum LSN-gap (in WAL bytes) a live client
     /// may lag behind the head of the stream before it is evicted. A client
     /// exceeding this is disconnected; it reconnects + re-syncs from a fresh
@@ -918,9 +930,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ---- build the axum router + transport ----
+    let ws_origins = parse_origin_list(&cfg.ws_origins);
+    if ws_origins.is_empty() {
+        info!("ws origin check: NOSTOS_WS_ORIGINS unset — /sync accepts any origin");
+    } else {
+        info!(origins = ?ws_origins, "ws origin check: /sync restricted to these browser origins");
+    }
     let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
         .with_buffer(cfg.session_buffer)
         .with_resync_signal(cfg.resync_signal)
+        .with_allowed_origins(ws_origins)
         .with_metrics(Arc::clone(&metrics));
     if let Some(col) = tenant_col {
         state_builder = state_builder.with_tenant_column(col);
@@ -1729,6 +1748,16 @@ fn push_wiring(
 /// even though the route itself is reachable and correctly gated. `DELETE`
 /// for the same reason: the SDKs deregister push tokens on sign-out
 /// (ADR-0037 `DELETE /push-tokens/{token}`) from browser clients.
+/// Split a comma-separated origin list, dropping blanks and trimming space.
+/// Empty input ⇒ empty vec ⇒ the caller's check stays off.
+fn parse_origin_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::CorsLayer> {
     if cors_origins.is_empty() {
         return Ok(tower_http::cors::CorsLayer::permissive());
@@ -1960,7 +1989,7 @@ async fn put_rules_handler(
     };
 
     // 2. Bearer token mismatch -> 401. Constant-time compare, no logging.
-    if !admin_auth::AdminAuth::check(&headers, &admin_token) {
+    if !admin_auth::AdminAuth::check(&headers, &admin_token).await {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthorized" })),
