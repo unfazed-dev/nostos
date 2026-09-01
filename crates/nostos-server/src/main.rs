@@ -429,9 +429,10 @@ pub struct Config {
     /// may lag behind the head of the stream before it is evicted. A client
     /// exceeding this is disconnected; it reconnects + re-syncs from a fresh
     /// checkpoint — trading a controlled replay window for source-DB safety.
-    /// `0` (default) = eviction OFF (no client is ever dropped for lag). A
-    /// production deploy MUST set this AND `--pg-slot-wal-keep-size` to protect
-    /// the primary's disk (ADR-0016).
+    /// Default `1073741824` (1 GiB). `0` = eviction OFF (no client is ever
+    /// dropped for lag; the server logs a startup warning). Eviction only
+    /// covers a *running* server with a slow client — an abandoned slot (server
+    /// gone) is bounded only by `--pg-slot-wal-keep-size` (ADR-0043).
     ///
     /// Default changed from `0` (OFF) by the v0.2.0 audit (finding 1): with
     /// eviction off, one client that connects, acks nothing and stays
@@ -618,14 +619,18 @@ async fn main() -> anyhow::Result<()> {
     // disconnect by the manager — for now we snapshot the store count on read.
     let metrics = Arc::new(nostos_application::ports::Metrics::new());
     // WAL-bloat protection: ON by default at 1 GiB since the v0.2.0 audit
-    // (finding 1). `NOSTOS_SLOT_MAX_LAG=0` opts back OUT, which restores the
-    // old behaviour where a client that acks nothing pins the slot forever
-    // (ADR-0016).
-    let eviction = if cfg.slot_max_lag > 0 {
-        nostos_application::EvictionPolicy::new(cfg.slot_max_lag)
-    } else {
-        nostos_application::EvictionPolicy::disabled()
-    };
+    // (finding 1, ADR-0043). `NOSTOS_SLOT_MAX_LAG=0` opts back OUT, which
+    // restores the old behaviour where a client that acks nothing pins the
+    // slot forever (ADR-0016) — loud, never silent.
+    let eviction = eviction_policy(cfg.slot_max_lag);
+    if eviction.max_lag.is_none() {
+        warn!(
+            "NOSTOS_SLOT_MAX_LAG=0: WAL-bloat eviction is OFF — a client that never acks pins the \
+             replication slot and grows WAL on the primary without bound (disk exhaustion). \
+             Set NOSTOS_SLOT_MAX_LAG (default 1073741824 = 1 GiB) and Postgres \
+             max_slot_wal_keep_size / NOSTOS_PG_SLOT_WAL_KEEP_SIZE (ADR-0043)."
+        );
+    }
     // Op-log writer (ADR-0025 slice 2): persisted op-log for in-window
     // reconnect replay. Only under `NOSTOS_REPLICATOR=pg` — the fake replicator
     // has no source database to durably write to (the bench drives a
@@ -3043,6 +3048,49 @@ mod put_rules_handler_tests {
 }
 
 /// The ADR-0038 §3 wiring precedence (plan task 2.3) — see [`push_wiring`].
+/// Map the `--slot-max-lag` knob onto an [`nostos_application::EvictionPolicy`].
+/// `0` is the documented "unbounded" escape hatch; anything else is a byte
+/// threshold. Pure so the default/opt-out contract is unit-testable without
+/// booting the server (ADR-0043).
+fn eviction_policy(slot_max_lag: u64) -> nostos_application::EvictionPolicy {
+    if slot_max_lag > 0 {
+        nostos_application::EvictionPolicy::new(slot_max_lag)
+    } else {
+        nostos_application::EvictionPolicy::disabled()
+    }
+}
+
+/// ADR-0043: the `NOSTOS_SLOT_MAX_LAG` default is a security decision (v0.2.0
+/// audit finding 1) — pin it so a refactor can't silently flip it back to
+/// unbounded, and pin that `0` still means "eviction OFF".
+#[cfg(test)]
+mod slot_max_lag_tests {
+    use super::{eviction_policy, Config};
+    use clap::Parser;
+
+    const ONE_GIB: u64 = 1_073_741_824;
+
+    #[test]
+    fn default_is_one_gib() {
+        let cfg = Config::parse_from(["nostos-server"]);
+        assert_eq!(cfg.slot_max_lag, ONE_GIB);
+        assert_eq!(eviction_policy(cfg.slot_max_lag).max_lag, Some(ONE_GIB));
+    }
+
+    #[test]
+    fn zero_means_unbounded() {
+        let cfg = Config::parse_from(["nostos-server", "--slot-max-lag", "0"]);
+        assert_eq!(cfg.slot_max_lag, 0);
+        assert_eq!(eviction_policy(cfg.slot_max_lag).max_lag, None);
+    }
+
+    #[test]
+    fn explicit_threshold_is_honoured() {
+        let cfg = Config::parse_from(["nostos-server", "--slot-max-lag", "4096"]);
+        assert_eq!(eviction_policy(cfg.slot_max_lag).max_lag, Some(4096));
+    }
+}
+
 #[cfg(test)]
 mod push_wiring_tests {
     use super::{push_wiring, PushWiring};

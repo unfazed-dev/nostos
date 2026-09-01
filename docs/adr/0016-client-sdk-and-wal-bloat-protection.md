@@ -64,7 +64,8 @@ no tokio, no SQLite (WASM-clean — this is what the FFI bridges will bind):
 - **`EvictionPolicy`** — pure logic: evict the slowest session when
   `head - slowest_acked > max_lag`. **OFF by default** (zero behavior change);
   opt-in via `NOSTOS_SLOT_MAX_LAG`. Targets the single slowest session via
-  `SessionStore::slowest_session`.
+  `SessionStore::slowest_session`. *(Superseded by ADR-0043: the server
+  default is now 1 GiB, `0` opts out with a startup warning.)*
 - **`max_slot_wal_keep_size_mb`** — the database-level backstop, set via
   `ALTER_REPLICATION_SLOT` (Postgres 13+); config knob
   `NOSTOS_PG_SLOT_WAL_KEEP_SIZE`. The eviction policy is the first line of
@@ -92,6 +93,11 @@ ships — durable and resumable, but not SQL-queryable. The FFI bridges
 documented opt-in, and `max_slot_wal_keep_size` is configurable. A deploy MUST
 set one (or both) before production; an unbounded slot on a customer's primary
 is unacceptable, and both knobs now exist.
+
+**Addendum (ADR-0043, 2026-09-02):** "MUST set before production" was not
+enough — the v0.2.0 audit found it made an unconfigured deploy a
+credential-free disk-exhaustion target. Eviction is now ON by default at
+1 GiB; `max_slot_wal_keep_size` remains the only bound on an *abandoned* slot.
 
 ## Validation
 

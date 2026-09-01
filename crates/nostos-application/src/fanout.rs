@@ -89,8 +89,9 @@ pub struct FanOutService {
     /// that assert on `FanOutOutcome` directly (counters would duplicate it).
     metrics: Option<Arc<Metrics>>,
     /// WAL-bloat protection: evict the slowest session when it lags further
-    /// than the policy's threshold behind the head of the stream. Default
-    /// disabled ([`EvictionPolicy::disabled`]) — see ADR-0016.
+    /// than the policy's threshold behind the head of the stream. Library
+    /// default disabled ([`EvictionPolicy::disabled`]); nostos-server enables it
+    /// at 1 GiB — see ADR-0016 / ADR-0043.
     eviction: crate::EvictionPolicy,
     /// Persisted op-log writer (ADR-0025 slice 2). `None` by default — the
     /// benchmark and fake-mode deploys run without one (no behavior change).
@@ -495,7 +496,8 @@ impl FanOutService {
             // further than the policy's threshold behind this event (the head of
             // the stream), disconnect it. It reconnects + re-syncs from a fresh
             // checkpoint — trading a controlled replay window for source-DB
-            // safety. OFF by default; a production deploy opts in via config.
+            // safety. This removes the *session* only — it never drops the
+            // replication slot (ADR-0043).
             if self.eviction.should_evict(event.lsn, slowest_acked) {
                 if let Some((id, _)) = self.store.slowest_session().await {
                     tracing::warn!(
