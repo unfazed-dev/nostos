@@ -62,6 +62,23 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_BIND", default_value = "0.0.0.0:8800")]
     bind: String,
 
+    /// Escape hatch for the anonymous-on-a-public-interface boot guard.
+    ///
+    /// `NOSTOS_SYNC_AUTH=none` injects no tenant filter, and `NOSTOS_BIND`
+    /// defaults to `0.0.0.0` — so the two DEFAULTS together are an
+    /// unauthenticated sync server on every interface. Neither default is
+    /// wrong alone (anonymous is right for local dev; `0.0.0.0` is right for
+    /// a container), which is exactly why the *pair* has to be the thing that
+    /// refuses to boot rather than either one changing. Set this only when
+    /// something in front of the server is doing the authenticating.
+    #[arg(
+        long,
+        env = "NOSTOS_INSECURE_ANONYMOUS",
+        default_value_t = false,
+        value_parser = parse_env_bool
+    )]
+    insecure_anonymous: bool,
+
     /// WebSocket path clients connect to.
     #[arg(long, env = "NOSTOS_WS_PATH", default_value = "/sync")]
     ws_path: String,
@@ -451,6 +468,24 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(nostos_infra::StaticBearerAuth::new(&cfg.sync_bearer_token))
         }
         "none" => {
+            // Fail-open pair guard. A `warn!` is not enforcement — it scrolls
+            // past in container logs, and the deploy that needed to read it is
+            // exactly the one nobody is watching. Refuse the PAIR instead:
+            // anonymous auth reachable from somewhere that is not this
+            // machine. Parsed leniently on purpose — an unparseable bind is
+            // not this check's error to report, and the canonical
+            // "invalid bind address" bail follows a few hundred lines down.
+            if !cfg.insecure_anonymous && exposes_anonymous_sync(&cfg.bind) {
+                anyhow::bail!(
+                    "refusing to start: NOSTOS_SYNC_AUTH=none (no authentication, no \
+                     tenant filter) with NOSTOS_BIND={} (reachable off-host). Pick one: \
+                     set NOSTOS_SYNC_AUTH=supabase-jwt (or bearer) for a real deploy; \
+                     set NOSTOS_BIND=127.0.0.1:8800 to keep it local; or set \
+                     NOSTOS_INSECURE_ANONYMOUS=1 if something in front of this server \
+                     is doing the authenticating.",
+                    cfg.bind
+                );
+            }
             warn!(
                 "sync auth: NONE — /sync is unauthenticated. Single-tenant/dev only; \
                  set NOSTOS_SYNC_AUTH=supabase-jwt for any multi-tenant deploy."
@@ -1365,6 +1400,43 @@ struct PushTablesConfig {
 /// documented ponytail in fanout.rs), so a killed-app device can never be
 /// doorbelled. With it, mirror rows carry the column and the hint resolves
 /// against the registry's single tenant.
+/// Parse a boolean env var the way operators actually write one.
+///
+/// clap's stock `bool` parser accepts ONLY `true`/`false`, so
+/// `NOSTOS_INSECURE_ANONYMOUS=1` — the universal shell/compose convention, and
+/// what this server's own refusal message tells you to set — fails argument
+/// parsing with `invalid value '1'`. That is a security-relevant failure mode:
+/// an operator who follows the instructions verbatim gets a server that will
+/// not boot, and the obvious way out of a confusing parse error is to turn off
+/// whatever they just added. Caught by booting the binary; the unit test on
+/// the guard itself passed happily.
+fn parse_env_bool(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(format!(
+            "expected a boolean (1/0, true/false, yes/no, on/off), got '{other}'"
+        )),
+    }
+}
+
+/// Would `bind` make an anonymous `/sync` reachable from off this machine?
+///
+/// True = the pair is unsafe and boot must refuse (unless the operator set
+/// `NOSTOS_INSECURE_ANONYMOUS`). Only a **loopback** address is safe; note that
+/// `0.0.0.0` (and `[::]`) are UNSPECIFIED, not loopback — `is_loopback()`
+/// returns false for them, which is the answer we want, but it is worth
+/// pinning in a test rather than trusting from memory.
+///
+/// An address that does not parse returns `false`: reporting a malformed bind
+/// is not this guard's job, and the canonical `invalid bind address` bail
+/// happens later in boot. This cannot open a hole — a bind string the server
+/// can't parse is a bind the server never listens on.
+fn exposes_anonymous_sync(bind: &str) -> bool {
+    bind.parse::<SocketAddr>()
+        .is_ok_and(|addr| !addr.ip().is_loopback())
+}
+
 fn resolve_tenant_col<'a>(sync_auth: &str, tenant_column: &'a str) -> Option<&'a str> {
     if !tenant_column.is_empty() && (sync_auth == "supabase-jwt" || sync_auth == "bearer") {
         Some(tenant_column)
@@ -3231,5 +3303,48 @@ mod push_e2e_tests {
             1,
             "no push to the deregistered token"
         );
+    }
+}
+
+#[cfg(test)]
+mod anonymous_bind_guard_tests {
+    use super::{exposes_anonymous_sync, parse_env_bool};
+
+    /// `=1` is what the refusal message, the compose file, and `nostos dev`
+    /// all emit. clap's stock bool parser rejects it — which turned the
+    /// escape hatch into an unbootable server until this parser existed.
+    #[test]
+    fn the_escape_hatch_accepts_how_operators_actually_write_booleans() {
+        for yes in ["1", "true", "TRUE", "yes", "on", " 1 "] {
+            assert_eq!(parse_env_bool(yes), Ok(true), "{yes:?} should enable");
+        }
+        for no in ["0", "false", "no", "off", ""] {
+            assert_eq!(parse_env_bool(no), Ok(false), "{no:?} should not enable");
+        }
+        // Garbage must be a hard error, never a silent `true` — a typo'd
+        // hatch value must not open an anonymous server.
+        assert!(parse_env_bool("maybe").is_err());
+    }
+
+    /// The whole point of the guard is which addresses count as "off-host".
+    /// `0.0.0.0` is the DEFAULT bind and is UNSPECIFIED, not loopback — if
+    /// `is_loopback()` were true for it the guard would never fire and the
+    /// fail-open pair would ship silently. Pin it rather than trust it.
+    #[test]
+    fn only_loopback_binds_may_serve_anonymous_sync() {
+        // Refused: the shipped default, and any concrete off-host interface.
+        assert!(exposes_anonymous_sync("0.0.0.0:8800"));
+        assert!(exposes_anonymous_sync("[::]:8800"));
+        assert!(exposes_anonymous_sync("192.168.1.5:8800"));
+
+        // Allowed: local dev keeps working with zero configuration.
+        assert!(!exposes_anonymous_sync("127.0.0.1:8800"));
+        assert!(!exposes_anonymous_sync("[::1]:8800"));
+        assert!(!exposes_anonymous_sync("127.0.0.53:9999"));
+
+        // Unparseable is NOT this guard's error to raise; boot bails on it
+        // later with the canonical message.
+        assert!(!exposes_anonymous_sync("not-an-address"));
+        assert!(!exposes_anonymous_sync(""));
     }
 }
