@@ -465,11 +465,39 @@ They also fail 2/2 on re-run, so they are deterministic in the current DB
 state, not flaky. Neither test uses `resume_lsn`, so the replay branch this
 work touches is never entered.
 
-Root cause not established. What is ruled out: leftover rows (the test
-`TRUNCATE`s `tasks` itself, line 106), publication volume (27 rows across all
-six published tables, well inside the test's 32-event budget), and stale
-replication slots (dropped, still fails). Worth its own investigation —
-`fresh_slot` fails at line 176, "live INSERT not delivered".
+**ROOT CAUSE FOUND 2026-09-01 (`eb82648`). Not a product bug — a cross-suite
+test-isolation leak.**
+
+`crates/nostos-client/tests/e2e_pg_apply_throughput.rs:141` runs
+`ALTER PUBLICATION cairn_pub ADD TABLE public.bench_apply` and **never removes
+it**. The bench leaves ~40,000 rows behind. `cairn_pub` is shared, so every
+later test that opens a *fresh* replication slot snapshots those 40k rows too.
+Both failing tests collect into a fixed budget — `collect_events(&mut repl, 8,
+..)` and `.., 32, ..` — so the budget fills with bench rows before the test's
+own row arrives.
+
+The failure text says so plainly once you actually read it rather than the
+summary of it: `fresh_slot` reports **"got 8 events"** — *exactly* its budget of
+8. `concurrent_writes` reports **"LOST rows ... 135"**. Nothing was lost or
+undelivered; the collection window was full of another test's data.
+
+This explains every property that made it look mysterious: deterministic
+(40k rows are stably there), reproduces on the pre-session baseline (it is
+database state, not code), and unrelated to `resume_lsn` (neither test uses it).
+
+**Confirmed by experiment, not inference:** `ALTER PUBLICATION cairn_pub DROP
+TABLE bench_apply;` then re-run → `2 passed; 0 failed` immediately.
+
+The earlier "27 rows across all six published tables" measurement is what sent
+the first investigation down a blind alley — it counted six tables. `cairn_pub`
+had **eight**; `bench_apply` was the one that mattered and was never in the
+`pg-init` fixture to begin with. A count that excludes the pathological case
+is worse than no count, because it retires the hypothesis it should have raised.
+
+Fixed by giving the bench a `teardown_bench_table()` that unpublishes and
+truncates. It runs on the success path only — a panicking bench still
+re-poisons the suite; that ceiling and the one-line manual antidote are named
+in a `ponytail:` comment on the helper.
 
 ### Two ways a test run lied this session
 
@@ -526,3 +554,54 @@ while tenant A is subscribed, does A get a retraction? Supabase Realtime caches
 channel policies for the connection lifetime and documents exactly this gap; no
 vendor in this category publishes clear guidance on the row-mutates-out-of-scope
 case. Treat it as a designed-for property, not an assumed one.
+
+---
+
+## Left deliberately — not silently
+
+Three things were in scope for "fix all the gaps" and were **not** changed. Each
+is a decision with real blast radius, written out so it can be approved in a
+sentence rather than rediscovered later.
+
+### 1. HS256 tokens without `exp` stay permanent credentials
+
+The one-line change is `required_spec_claims = {"exp"}` on the HS256 verifier,
+aligning it with the JWKS path (which already requires `exp`).
+
+Not done, because it is a **breaking auth change, not a hardening tweak**:
+Supabase *service-role* tokens carry no `exp`, so this would 401 every one of
+them at the next deploy — silently, from the operator's point of view, since
+the token itself looks unchanged. ADR-0029 §Decision-4 records the current
+behaviour as deliberate. "Fix all the gaps" authorises fixing gaps; it is not
+by itself a decision to invalidate credentials that are working in production
+today.
+
+If it should ship, the safe shape is a config flag defaulting to today's
+behaviour, flipped to required in a major version — say the word and it is a
+small change plus test-fixture updates.
+
+### 2. `NOSTOS_SLOT_MAX_LAG` defaults to `0` (WAL-bloat eviction OFF)
+
+This — not the ack frame — is the genuine disk-exhaustion exposure on the
+Postgres primary. A client that simply never acks holds `restart_lsn` back and
+WAL accumulates without bound (ADR-0016).
+
+Not silently picked, because any non-zero default **disconnects real users**:
+the eviction cannot distinguish a malicious idle socket from a phone on a bad
+train connection, and the failure mode of guessing too low is "your app drops
+sync on the commute". That is a product decision about who gets cut off, not a
+security default an audit should choose alone.
+
+Observed on the dev database while investigating: four abandoned slots
+(`cairn_slot`, `cairn_slot_arxa_kit`, `atlet_rt_sim_slot`, `atlet_demo_slot`)
+each retaining **117–120 MB** of WAL, plus six leftover `e2e_snap_*` slots.
+That is the mechanism working exactly as described, on a laptop, with nobody
+attacking anything.
+
+### 3. Findings 2, 3, 4, 6, and 8–11 in "Open — confirmed gaps"
+
+Unchanged this pass. Per-principal connection caps, the unbounded snapshot,
+`iss` validation, the JWKS bounded-staleness window, and the rest are real but
+each needs a policy call (what limit, what window, whose deploy breaks) rather
+than a patch. None is a silent-authorization-bypass of the class fixed above:
+findings 6 and 7 were, which is why they were done first.
