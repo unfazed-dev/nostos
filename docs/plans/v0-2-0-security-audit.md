@@ -335,14 +335,45 @@ which breaks deliberately-global tables that lack the tenant column
 (`scope_if_column_present` skips the clause today). The correct fix passes
 `rules_expr.and(bound)` and leaves the tenant travelling in its own argument.
 
-## Verification status
+## Verification status — actually run, 2026-09-01
 
-- `make ci` and the full real-Postgres e2e suite must both be re-run and *seen*
-  green. Two earlier background runs reported exit 0 without executing anything
-  (the first wrote to a non-existent directory; the second died on a full disk).
-  An exit code from a redirect that failed is not a test result.
-- Items 1 (predicate bound) and the tenant guard stay **unverified** until real
-  `test result:` lines are read.
+| suite | result |
+|---|---|
+| `make ci` (fmt + clippy `-D warnings` + full tests) | **green**, 0 failed |
+| `nostos-infra --lib` | **211 passed, 0 failed** |
+| real-Postgres e2e (`NOSTOS_E2E_PG=1`, `--test-threads=1`) | **296 passed, 2 failed, 0 skipped** |
+
+Items 1 (predicate bound) and the boot-time tenant guard are now **verified**:
+`0 skipped` confirms the pg suite really ran rather than self-skipping.
+
+### The 2 pg failures are pre-existing, not from this work
+
+`e2e_pg_snapshot.rs`: `concurrent_writes_during_snapshot_appear_exactly_once`
+and `fresh_slot_yields_snapshot_rows_then_live_stream`.
+
+Attribution was measured, not assumed — `git checkout 75ba8f8 -- transport.rs`
+reproduces both failures identically on the pre-fix tree. They also fail 2/2 on
+re-run, so they are deterministic in the current DB state, not flaky. Neither
+test uses `resume_lsn`, so the replay branch this work touches is never entered.
+
+Root cause not established. What is ruled out: leftover rows (the test
+`TRUNCATE`s `tasks` itself, line 106), publication volume (27 rows across all
+six published tables, well inside the test's 32-event budget), and stale
+replication slots (dropped, still fails). Worth its own investigation —
+`fresh_slot` fails at line 176, "live INSERT not delivered".
+
+### Two ways a test run lied this session
+
+Both worth knowing, because each reported success while running nothing:
+
+1. A background `cargo test > $DIR/log` where `$DIR` did not exist: the redirect
+   failed, and the harness still reported exit 0.
+2. `timeout 600 cargo test ...` — `timeout` is GNU coreutils, absent on macOS.
+   Exit 127, reported as completed.
+
+An exit code is not a test result. Only a `test result:` line is, and only when
+the skip count is also checked — the pg suite self-skips silently without
+`NOSTOS_E2E_PG=1`.
 
 ## Recommended next test, not yet written
 
