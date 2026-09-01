@@ -149,6 +149,42 @@ async fn setup_bench_table() {
         .expect("truncate bench_apply");
 }
 
+/// Take the bench table back OUT of `cairn_pub` and empty it.
+///
+/// # Why this is not optional housekeeping
+///
+/// Leaving `bench_apply` published is a **cross-suite test-isolation leak that
+/// silently breaks unrelated e2e tests.** This bench leaves ~40k rows behind;
+/// `cairn_pub` is shared, so every later test that opens a FRESH replication
+/// slot snapshots those rows too. Tests with a fixed event budget
+/// (`collect_events(&mut repl, 8, ..)`) then fill that budget with bench rows
+/// before their own row ever arrives, and fail with a message that points at
+/// the snapshot/stream boundary — nowhere near the actual cause.
+///
+/// That is not hypothetical: it is exactly what made
+/// `e2e_pg_snapshot::{fresh_slot_yields_snapshot_rows_then_live_stream,
+/// concurrent_writes_during_snapshot_appear_exactly_once}` fail
+/// deterministically, survive a revert to a pre-session baseline (it is
+/// database state, not code), and get recorded in the v0.2.0 security audit as
+/// "root cause not established". Both pass the moment the table leaves the
+/// publication.
+///
+/// ponytail: teardown runs on the success path only — a panicking bench still
+/// leaves the table published. Ceiling: a crashed bench re-poisons the suite
+/// until the next clean run. Upgrade path: a `Drop` guard, which needs a
+/// blocking SQL handle in `Drop`; not worth it until a bench actually panics
+/// here. The cheap manual antidote is one line:
+/// `ALTER PUBLICATION cairn_pub DROP TABLE bench_apply;`
+async fn teardown_bench_table() {
+    let c = sql_client().await;
+    // Both statements are best-effort: teardown must never turn a green bench
+    // red, and a missing table/publication entry is the state we wanted.
+    let _ = c
+        .batch_execute("ALTER PUBLICATION cairn_pub DROP TABLE bench_apply;")
+        .await;
+    let _ = c.batch_execute("TRUNCATE bench_apply;").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_pg_to_client_apply_sustained_throughput() {
     if std::env::var(E2E_FLAG).is_err() {
@@ -389,6 +425,9 @@ async fn real_pg_to_client_apply_sustained_throughput() {
     run_task.abort();
     client.disconnect();
     drop_slot(&slot).await;
+    // Unpublish before leaving: a published 40k-row bench table breaks every
+    // later fresh-slot e2e test in the workspace. See `teardown_bench_table`.
+    teardown_bench_table().await;
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -548,5 +587,8 @@ async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
     run_task.abort();
     client.disconnect();
     drop_slot(&slot).await;
+    // Unpublish before leaving: a published 40k-row bench table breaks every
+    // later fresh-slot e2e test in the workspace. See `teardown_bench_table`.
+    teardown_bench_table().await;
     let _ = std::fs::remove_file(&db_path);
 }
