@@ -617,3 +617,35 @@ Unchanged this pass. Per-principal connection caps, the unbounded snapshot,
 each needs a policy call (what limit, what window, whose deploy breaks) rather
 than a patch. None is a silent-authorization-bypass of the class fixed above:
 findings 6 and 7 were, which is why they were done first.
+
+---
+
+## Operational hazard: a killed test run poisons the next one
+
+A `--test-threads=1` pg run that is interrupted leaves its replication slots
+behind. Observed this session: an externally-killed suite left **20 inactive
+slots**, including `e2e_stream1_27716`…`e2e_stream6_27716` (the PID is in the
+name). The next run then failed three `e2e_pg_sync_streams` tests —
+`lazy_stream_snapshot_then_live_delta`,
+`stream_on_rules_denied_table_errors_non_fatally`, and
+`unsubscribe_stops_flow_and_two_streams_dedup` — all with "rows never arrived".
+
+That looks *exactly* like a fan-out regression, and it landed in the same file
+as a fresh change to the stream path, which is the worst possible coincidence.
+What ruled the change out before touching anything: those tests run under
+`SyncMode::All` and `Toggles` with `scope: None`, so `rules_expr` is `Any` and
+`rules_expr.and(bound) == bound` — the new code is provably identical to the old
+for them. Dropping the orphaned slots made all five pass.
+
+Antidote, worth running before any pg suite:
+
+```sh
+docker exec nostos-postgres psql -U cairn -d cairn -t -c \
+  "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots \
+   WHERE NOT active AND slot_name LIKE 'e2e_%';"
+```
+
+Two independent shared-state hazards bit this suite in one session
+(`bench_apply` in the publication, orphaned slots). Both produce failures that
+point at the sync path and mention nothing about state. The general lesson: on
+this suite, **verify the database is clean before believing a failure is code.**
