@@ -154,6 +154,44 @@ The handoff's "sdk-e2e 7/7 host slices PASS" was true — **on macOS**. Every on
 of these is invisible to a macOS run by construction, which is exactly why a
 local green rail and a red remote rail disagreed for four runs.
 
+## The node slice had never passed in CI either — FIXED
+
+With dotnet fixed, `sdk-e2e` still failed — on `node`, with
+`Cannot find module '.../sdk/nostos_node/nostos_node.node'`. (An earlier error
+grep here matched only `error|FAIL|panicked`, which `MODULE_NOT_FOUND` does
+not contain — worth widening next time.)
+
+The slice ran `cargo build --release && node smoke_live.cjs`, but **cargo never
+produces `nostos_node.node`** — it emits `target/release/libnostos_node.{dylib,so}`.
+The `.node` addon is written by a manual napi build and is gitignored
+(`sdk/nostos_node/.gitignore:2`). So locally the slice loaded whatever `*.node`
+happened to be lying in the tree; the one on this machine was dated
+**2026-07-12**. The slice was passing against a two-month-old binary while
+claiming to cover current code, and failing on every fresh CI checkout.
+
+Fixed by installing the addon from the build cargo just did, host-portably:
+
+    cp "$(ls target/release/libnostos_node.dylib \
+           target/release/libnostos_node.so \
+           target/release/nostos_node.dll 2>/dev/null | head -1)" nostos_node.node
+
+Verified with the stale addon deleted first, so the pass could not be inherited:
+`./scripts/sdk-e2e.sh node` -> PASS in 22s, PUSH_OK + ECHO_OK.
+
+Audited the other CI slices for the same shape: `rust`, `tauri` and (now)
+`dotnet` all build from source each run. `sdk/nostos_kotlin/android/src/main/jniLibs/`
+is a gitignored build product of the same kind, but that slice is device-local
+and not in CI.
+
+## Aside: both SDK lockfiles drift from a fresh resolve
+
+Building either SDK crate rewrites its committed lockfile, pruning ~70 packages
+(`sdk/nostos_dotnet/Cargo.lock` 374 -> 303, `sdk/nostos_node/Cargo.lock` 338 -> 266).
+Neither crate is a workspace member, so neither is covered by the workspace
+lock. Reverted both rather than let an unexplained prune ride into a release
+tag; nothing builds with `--locked`, so it is cosmetic. Worth regenerating
+deliberately some time, not during a release.
+
 ## The 6h burns: uncapped jobs — FIXED
 
 `fmt + clippy + test` and `throughput benchmark (smoke)` each burned
