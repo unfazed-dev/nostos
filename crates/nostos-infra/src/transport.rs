@@ -71,6 +71,25 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// enough that 32 × device_cap snapshots is a bounded worst case.
 const MAX_TABLES_PER_SOCKET: usize = 32;
 
+/// Largest inbound WS message the server will buffer, per connection.
+///
+/// axum 0.7 defaults to 64 MiB message / 16 MiB frame. Everything a client
+/// sends us is small JSON — subscribe, ack, write-back mutation — and blobs go
+/// out-of-band on the attachment plane (ADR-0034), so the default is three
+/// orders of magnitude more headroom than the protocol needs. It is also
+/// per-connection: at a 1k-client device cap the default admits a ~64 GB
+/// worst-case buffer ceiling, reachable by clients that authenticate and then
+/// simply send large frames.
+///
+/// ponytail: one flat cap for every inbound message type. If write-back ever
+/// needs to carry a genuinely large batch, give that message type its own
+/// higher cap rather than raising this one for the whole socket.
+const MAX_WS_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Largest single inbound WS frame. Messages may span frames, so this bounds
+/// per-read allocation while `MAX_WS_MESSAGE_BYTES` bounds the reassembled whole.
+const MAX_WS_FRAME_BYTES: usize = 1024 * 1024;
+
 /// Close reason a live session receives when a sync-rules reload (ADR-0031
 /// D3) changes the rule decision for one of its subscribed tables. Swap
 /// verification is per-table and coarse — see the `ponytail:` at the
@@ -344,7 +363,9 @@ pub async fn sync_handler(
     // the handshake token's `exp`. `None` ⇒ no deadline — the OSS `sync_auth:
     // none` default and Phase-0 no-`exp` tokens stay open, exactly as before.
     let exp = crate::auth::token_exp(&token);
-    ws.on_upgrade(move |socket| run_session(socket, state, principal, exp))
+    ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_FRAME_BYTES)
+        .on_upgrade(move |socket| run_session(socket, state, principal, exp))
 }
 
 /// Pull a bearer token off the Authorization header (`Bearer <token>`).
@@ -1018,6 +1039,9 @@ async fn register_subscribe(
 
     let predicate = build_predicate(req, principal, tenant_column, ruleset)
         .map_err(|rejection| SubscribeReject::Rejected(rejection.to_string()))?;
+    // The op-log replay gate needs the same predicate the live path filters
+    // on; `predicate` is moved into the session on the next line.
+    let replay_pred = predicate.clone();
     let session = SyncSession::new_authenticated(predicate, principal.clone());
     // Derive the type-erased clone the store holds; `sink_concrete` stays the
     // concrete handle for snapshot delivery below.
@@ -1061,34 +1085,50 @@ async fn register_subscribe(
                     .replay_after(principal.tenant_id.as_str(), resume)
                     .await
                 {
-                    Ok(events) if !events.is_empty() => {
-                        let count = events.len();
+                    Ok(events) => {
+                        let total = events.len();
+                        let mut count = 0_usize;
                         for ev in events {
+                            // AUTHORIZATION, not an optimization: `cairn_oplog`
+                            // is keyed by tenant ALONE, so without this gate a
+                            // resume widens scope past the ruleset that the
+                            // live path enforces (see `replay_admits`).
+                            if !replay_admits(&replay_pred, &ev) {
+                                continue;
+                            }
                             // Backpressure-aware (slice-1): the bounded sink
                             // mustn't truncate the replay. Live `deliver` +
                             // replay `deliver_awaiting` share the FIFO channel;
                             // slice-4a's per-row lsn gate dedups the overlap.
                             let _ = sink_concrete.deliver_awaiting(ev).await;
+                            count += 1;
+                        }
+                        // Count AFTER filtering: a replay that was non-empty but
+                        // filtered to nothing must still fall through to the
+                        // snapshot, or the client gets neither and silently
+                        // keeps a gap.
+                        if count > 0 {
+                            debug!(
+                                table = %req.table, resume, count, total,
+                                "op-log replay delivered (epoch match, in-window); skipping snapshot"
+                            );
+                            // Record the session on the socket (same bookkeeping
+                            // as the snapshot path's tail, minus the synthetic-
+                            // cursor advance — replay events carry REAL lsns,
+                            // not synthetic ones, so they don't consume the
+                            // cursor's space).
+                            {
+                                let mut s = subs.lock().await;
+                                s.ids.push(id);
+                                s.tables.insert(req.table.clone());
+                            }
+                            return Ok(());
                         }
                         debug!(
-                            table = %req.table, resume, count,
-                            "op-log replay delivered (epoch match, in-window); skipping snapshot"
+                            table = %req.table, resume, total,
+                            "op-log replay held nothing this session may see; falling back to snapshot"
                         );
-                        // Record the session on the socket (same bookkeeping as
-                        // the snapshot path's tail, minus the synthetic-cursor
-                        // advance — replay events carry REAL lsns, not synthetic
-                        // ones, so they don't consume the cursor's space).
-                        {
-                            let mut s = subs.lock().await;
-                            s.ids.push(id);
-                            s.tables.insert(req.table.clone());
-                        }
-                        return Ok(());
                     }
-                    Ok(_) => debug!(
-                        table = %req.table, resume,
-                        "op-log replay empty; falling back to snapshot"
-                    ),
                     Err(e) => warn!(
                         table = %req.table, error = %e,
                         "op-log replay failed; falling back to snapshot"
@@ -1254,8 +1294,13 @@ async fn register_stream(
         replacing
     };
 
-    let predicate =
-        build_stream_predicate(&table, bound.clone(), principal, tenant_column, ruleset)
+    // `snapshot_expr` is `rules ∧ bound` — the SAME ruleset scope live fan-out
+    // enforces. Passing the raw `bound` to the snapshot instead was audit
+    // finding 7: the stream's first sync skipped the ruleset's row scope while
+    // every subsequent live row honoured it. `bound` is MOVED here (no clone):
+    // the snapshot must not have a second, unscoped copy to reach for.
+    let (predicate, snapshot_expr) =
+        build_stream_predicate(&table, bound, principal, tenant_column, ruleset)
             .map_err(|rejection| rejection.to_string())?;
     let session = SyncSession::new_authenticated(predicate, principal.clone());
     let sink_dyn: Arc<dyn EventSink> = Arc::clone(sink_concrete) as Arc<dyn EventSink>;
@@ -1281,7 +1326,7 @@ async fn register_stream(
         match snap
             .snapshot_stream(
                 &table,
-                &bound,
+                &snapshot_expr,
                 nostos_domain::Lsn::new(snapshot_base),
                 principal.tenant_scope(tenant_column),
             )
@@ -1415,7 +1460,10 @@ async fn handle_decoded_message(
                      (env, comma-separated; e.g. NOSTOS_WRITE_TABLES={table}). \
                      Empty by default = no tables writable (ADR-0013)."
                 );
-                let frame = encode_write_result(&client_write_id, false, Some(&msg));
+                // Permanent: no retry can put the table on the allowlist mid-
+                // session — flag non-retryable so the client dead-letters on the
+                // first rejection (ADR-0013 v2 transient-vs-permanent).
+                let frame = encode_write_result(&client_write_id, false, Some(&msg), false);
                 let _ = server_frames_tx.try_send(frame);
                 debug!(table = %table, "write rejected: table not writable");
                 return;
@@ -1429,11 +1477,18 @@ async fn handle_decoded_message(
             // out through normal replication to every subscriber.
             let result =
                 dispatch_write(write_back, &table, &op, &pk, payload.as_ref(), tenant).await;
-            let (ok, error) = match result {
-                Ok(()) => (true, None),
-                Err(e) => (false, Some(e.to_string())),
+            // Classify before the frame: allowlist + payload-shape failures are
+            // client-controlled inputs no retry can fix — non-retryable, so the
+            // client quarantines immediately instead of cycling the write
+            // through the full attempt budget. Backend errors stay retryable.
+            let (ok, error, retryable) = match result {
+                Ok(()) => (true, None, true),
+                Err(
+                    e @ (WriteBackError::TableNotAllowed(_) | WriteBackError::InvalidPayload(_)),
+                ) => (false, Some(e.to_string()), false),
+                Err(e) => (false, Some(e.to_string()), true),
             };
-            let frame = encode_write_result(&client_write_id, ok, error.as_deref());
+            let frame = encode_write_result(&client_write_id, ok, error.as_deref(), retryable);
             // If the channel is full (client disconnected / backpressure), the
             // ack is dropped — the writer loop will end on the next failed
             // send anyway. Best-effort; not fatal.
@@ -1708,13 +1763,33 @@ fn build_predicate(
 /// never the principal's rows under a borrowed template (e2e §6 item 3 pins
 /// this over real PG). No client filters exist on the stream path: the whole
 /// shape is server config.
+///
+/// # Returns BOTH the session predicate and the snapshot expression
+///
+/// AUTHORIZATION, not ergonomics. The initial snapshot and live fan-out must
+/// enforce the SAME ruleset scope; when they were computed separately the
+/// snapshot silently skipped it (audit finding 7). So this returns the pair:
+///
+/// - `.0` — the full session predicate (rules ∧ bound ∧ tenant) for live
+///   fan-out, which filters rows in-process.
+/// - `.1` — `rules ∧ bound` for `SnapshotSource::snapshot_stream`, which
+///   compiles to SQL. The tenant clause is DELIBERATELY absent: it travels in
+///   `snapshot_stream`'s own `tenant` argument, where `scope_if_column_present`
+///   can drop it for a deliberately-global table that has no tenant column.
+///   Folding tenant into the expr instead would emit `WHERE "org_id" = $1`
+///   against a table with no `org_id` — a guaranteed SQL 42703 that the
+///   transport swallows into live-fan-out-only (the `products` catalog
+///   starvation observed 2026-08-27).
+///
+/// Returning the pair from ONE function is the point: two call sites deriving
+/// the same authorization independently is exactly how finding 7 happened.
 fn build_stream_predicate(
     table: &str,
     bound: PredicateExpr,
     principal: &Principal,
     tenant_column: Option<&str>,
     ruleset: &ActiveRuleset,
-) -> Result<Predicate, SubscribeRejection> {
+) -> Result<(Predicate, PredicateExpr), SubscribeRejection> {
     let rules_expr = match ruleset.decide(table, principal) {
         RuleDecision::Allow(expr) => expr,
         RuleDecision::DeniedTable => {
@@ -1730,14 +1805,60 @@ fn build_stream_predicate(
             });
         }
     };
+    // `PredicateExpr::and` collapses `Any`, so the zero-config `all` mode
+    // (which decides `Allow(Any)`) yields the bare template here rather than
+    // `And([Any, template])` — the latter is REFUSED by the SQL compiler and
+    // would turn every default deploy's stream snapshot into a swallowed error.
+    let snapshot_expr = rules_expr.and(bound);
     let mut p = Predicate {
         table: table.to_string(),
-        expr: rules_expr.and(bound),
+        expr: snapshot_expr.clone(),
     };
     if let Some(s) = principal.tenant_scope(tenant_column) {
         p = p.and_eq(s.column, ColumnValue::text(s.value));
     }
-    Ok(p)
+    Ok((p, snapshot_expr))
+}
+
+/// Replay-path authorization gate — the op-log twin of the live path's
+/// `predicate.matches` filter.
+///
+/// The live path evaluates EVERY event against the session predicate
+/// (`FanOutService::fan_out`), which carries the rules scope and the tenant
+/// clause. The replay path reads `cairn_oplog` keyed by tenant ALONE
+/// (`OpLogSource::replay_after(tenant, lsn)`) and the socket sink's `admit`
+/// gate checks only open/acked/dedup — never a predicate, never a table. So
+/// without this function a reconnect delivers every row the TENANT wrote,
+/// including tables the ruleset refuses to sync and rows the scope hides:
+/// authorization that holds live but not on resume.
+///
+/// Table check first, then the predicate over the row's own payload. A payload
+/// that won't decode fails CLOSED (never over-deliver — same stance as
+/// `PredicateExpr::matches` on an unparseable value).
+fn replay_admits(pred: &nostos_domain::Predicate, ev: &ReplicationEvent) -> bool {
+    if ev.op.table() != pred.table {
+        return false;
+    }
+    match &ev.op {
+        nostos_domain::RowOp::Insert { payload, .. }
+        | nostos_domain::RowOp::Update { payload, .. } => {
+            crate::replicator::extract_json_column(payload)
+                .is_some_and(|extract| pred.matches(extract))
+        }
+        // ponytail: a replayed delete carries no old image — `oplog.rs` drops
+        // it at read time — so there are no columns to match and the table
+        // check is all we have. Ceiling: a client can learn that SOME pk in
+        // its own tenant AND its own subscribed table was deleted, even one
+        // its row scope would have hidden. Failing closed instead would drop
+        // the delete permanently for an offline client, leaving a row that
+        // never goes away — the stale-row bug ADR-0014's reconcile boundary
+        // exists to prevent, and a worse trade than leaking a pk inside the
+        // client's own tenant. Replay-only: live deletes still go through
+        // fan-out's predicate. Upgrade path: write the scope columns into
+        // `cairn_oplog` at log time so replay can evaluate the predicate
+        // exactly like the live path.
+        nostos_domain::RowOp::Delete { .. } => true,
+    }
 }
 
 /// The parsed first-frame subscribe request (internal shape; the wire type is
@@ -1850,13 +1971,43 @@ mod tests {
         }
     }
 
+    /// Payload must be decodable JSON: `cairn_oplog` stores the row image as
+    /// JSONB, and `replay_admits` fails an undecodable payload CLOSED, so a
+    /// non-JSON fixture would silently exercise the reject path.
     fn ev(lsn: u64) -> ReplicationEvent {
         ReplicationEvent::new(
             Lsn::new(lsn),
             RowOp::Insert {
                 table: "tasks".into(),
                 pk: lsn.to_string(),
-                payload: Bytes::from_static(b"x"),
+                payload: Bytes::from_static(br#"{"id":"x"}"#),
+            },
+        )
+    }
+
+    /// A replay event carrying a real JSON payload, so the predicate has
+    /// columns to evaluate (the op log stores the row image as JSON).
+    fn ev_json(table: &str, lsn: u64, json: &str) -> ReplicationEvent {
+        ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Insert {
+                table: table.into(),
+                pk: lsn.to_string(),
+                payload: Bytes::copy_from_slice(json.as_bytes()),
+            },
+        )
+    }
+
+    /// Same as [`ev`] but on a caller-chosen table — the op log is keyed by
+    /// tenant only, so a replay can surface rows from ANY table the tenant
+    /// wrote, including ones this session never subscribed to.
+    fn ev_on(table: &str, lsn: u64) -> ReplicationEvent {
+        ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Insert {
+                table: table.into(),
+                pk: lsn.to_string(),
+                payload: Bytes::from_static(br#"{"id":"x"}"#),
             },
         )
     }
@@ -1935,6 +2086,131 @@ mod tests {
         assert!(rx.try_recv().is_err(), "replay delivered exactly one event");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(subs.lock().await.tables.contains("tasks"));
+    }
+
+    /// Replay must honor the SAME authorization the live path does.
+    ///
+    /// The live path filters every event through the session predicate
+    /// (`FanOutService::fan_out` -> `predicate.matches`), which carries the
+    /// ruleset scope AND the tenant clause. The replay path reads
+    /// `cairn_oplog` keyed by tenant alone (`replay_after(tenant, lsn)`) and
+    /// hands rows straight to the socket sink, whose `admit` gate checks only
+    /// open/acked/dedup — never the predicate, never the table. So a reconnect
+    /// can hand a client rows from a table its own ruleset refuses to sync: a
+    /// direct `subscribe` to `notes` here is rejected `NotSynced`, but a
+    /// `tasks` resume delivers it anyway.
+    ///
+    /// `calls == 1` is load-bearing: without it a broken epoch gate would skip
+    /// replay entirely and the empty-sink assertion would pass vacuously.
+    #[tokio::test]
+    async fn replay_never_delivers_rows_from_an_unsynced_table() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        // The tenant's op log holds a `notes` row. `notes` is not in the
+        // ruleset, so `decide` answers `DeniedTable` for it.
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![ev_on("notes", 10)],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        let rules = ActiveRuleset::compile(&toggles_rules("tasks", true, None)).unwrap();
+        register_subscribe(
+            &SubscribeRequest {
+                table: "tasks".into(),
+                filters: Vec::new(),
+                where_sql: None,
+                resume_lsn: Some(5),
+                client_epoch: Some(1),
+                client_rules_checksum: Some(rules.checksum()),
+            },
+            &subs,
+            &manager,
+            None,
+            1,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+            &rules,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "replay must actually run, else this test proves nothing",
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "replay leaked a row from `notes` — a table this ruleset does not sync \
+             and a direct subscribe would reject",
+        );
+    }
+
+    /// Replay honors the ROW scope, not just the table name.
+    ///
+    /// Distinguishes a real fix from a table-only one: both stop the
+    /// `notes` leak, but only re-applying the predicate stops a client whose
+    /// ruleset says `status = 'open'` from receiving `status = 'closed'` rows
+    /// on reconnect. `tenant_column` is `None` here, so the ONLY thing that can
+    /// reject the closed row is the rules scope itself.
+    ///
+    /// The in-scope row must still arrive — a gate that dropped everything
+    /// would also pass a "leaked nothing" assertion.
+    #[tokio::test]
+    async fn replay_applies_the_rules_scope_not_just_the_table() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let reader: Arc<dyn nostos_application::ports::OpLogSource> = Arc::new(MockOpLog {
+            events: vec![
+                ev_json("tasks", 10, r#"{"status":"closed"}"#),
+                ev_json("tasks", 11, r#"{"status":"open"}"#),
+            ],
+            tail: 0,
+            replay_calls: Arc::clone(&calls),
+        });
+        let principal = Principal::new("acct", "tenant-acme");
+        let rules =
+            ActiveRuleset::compile(&toggles_rules("tasks", true, Some("status = 'open'"))).unwrap();
+        register_subscribe(
+            &SubscribeRequest {
+                table: "tasks".into(),
+                filters: Vec::new(),
+                where_sql: None,
+                resume_lsn: Some(5),
+                client_epoch: Some(1),
+                client_rules_checksum: Some(rules.checksum()),
+            },
+            &subs,
+            &manager,
+            None,
+            1,
+            Some(&reader),
+            &sink,
+            &principal,
+            None,
+            &rules,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "replay must actually run, else this test proves nothing",
+        );
+        match rx.try_recv() {
+            Ok(crate::router::SinkMsg::Event(e)) => assert_eq!(
+                e.op.pk(),
+                "11",
+                "the in-scope (status=open) row is the one delivered",
+            ),
+            other => panic!("expected the in-scope row to be delivered, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "replay leaked a status='closed' row past a ruleset scoped to status='open'",
+        );
     }
 
     // (b) epoch mismatch → snapshot (replay never reached).
@@ -2800,6 +3076,101 @@ mod tests {
         assert!(s.streams.contains_key("s1"));
     }
 
+    /// Audit finding 7: the stream's INITIAL SNAPSHOT must enforce the same
+    /// ruleset scope live fan-out does.
+    ///
+    /// `register_stream` used to hand the raw bound template to
+    /// `snapshot_stream` while the session predicate carried `rules ∧ bound ∧
+    /// tenant`. So under a table scope the first sync over-delivered exactly
+    /// that scope's worth of rows, and every row after it was filtered
+    /// correctly — a leak that only exists in the first frame, which is why
+    /// reading the live path proves nothing about it.
+    ///
+    /// `l2` is the load-bearing row: the stream template admits it
+    /// (`owner_id = u1`) and only the RULES scope (`status = 'open'`) hides
+    /// it. Before the fix it is delivered; after, it is not.
+    #[tokio::test]
+    async fn stream_snapshot_applies_the_rules_scope_not_just_the_template() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let snap: Arc<dyn SnapshotSource> = Arc::new(FakeStreamSnapshotter {
+            rows: vec![
+                (
+                    "l1",
+                    vec![
+                        ("owner_id", ColumnValue::text("u1")),
+                        ("status", ColumnValue::text("open")),
+                    ],
+                ),
+                (
+                    "l2",
+                    vec![
+                        ("owner_id", ColumnValue::text("u1")),
+                        ("status", ColumnValue::text("archived")),
+                    ],
+                ),
+                (
+                    "l3",
+                    vec![
+                        ("owner_id", ColumnValue::text("u2")),
+                        ("status", ColumnValue::text("open")),
+                    ],
+                ),
+            ],
+        });
+        // Toggles mode so the table carries a REAL scope (the `all`-mode
+        // helper decides `Allow(Any)`, which cannot catch this bug).
+        let ruleset = ActiveRuleset::compile(&nostos_domain::SyncRules {
+            version: nostos_domain::RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![nostos_domain::TableRule {
+                table: "lists".into(),
+                sync: true,
+                scope: Some("status = 'open'".into()),
+            }],
+            hand: Vec::new(),
+            streams: vec![nostos_domain::StreamRule {
+                name: "mine".into(),
+                table: "lists".into(),
+                template: "owner_id = :owner".into(),
+            }],
+        })
+        .unwrap();
+
+        register_stream(
+            "s1",
+            "mine",
+            &stream_params(&serde_json::json!({ "owner": "u1" })),
+            &subs,
+            &manager,
+            Some(&snap),
+            &sink,
+            &Principal::new("acct", "tenant-acme"),
+            None,
+            &ruleset,
+        )
+        .await
+        .expect("stream registers");
+
+        // begin boundary
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            crate::router::SinkMsg::Control(_)
+        ));
+
+        let mut delivered = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::router::SinkMsg::Event(ev) = msg {
+                delivered.push(ev.op.pk().to_string());
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec!["l1".to_string()],
+            "snapshot must apply the rules scope: l2 is owner-matched but \
+             status='archived' (rules-hidden), l3 is another owner"
+        );
+    }
+
     #[test]
     fn stream_predicate_tenant_wrap_is_fail_closed() {
         // build_stream_predicate directly: bound tenant-param + injected
@@ -2813,7 +3184,7 @@ mod tests {
         )
         .unwrap();
         let principal = Principal::new("acct", "tenant-acme");
-        let p =
+        let (p, _snapshot_expr) =
             build_stream_predicate("tasks", bound, &principal, Some("org_id"), &ruleset).unwrap();
         let row = |org: &'static str| {
             move |col: &str| -> Option<ColumnValue> {

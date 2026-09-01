@@ -75,3 +75,7 @@ supabase/.temp/
 apps/atlet/FCM/
 apps/atlet/flutter/android/app/google-services.json
 apps/atlet/flutter/ios/Runner/GoogleService-Info.plist
+
+# Python bytecode from packaging/release tooling
+__pycache__/
+*.pyc

@@ -35,6 +35,16 @@ export interface ConnectOptions {
   dbPath?: string;
 }
 
+/** The outbox status (ADR-0027) — the `deadLetters()` result. */
+export interface NostosWriteStatus {
+  /** Writes durably queued, not yet server-ack'd. > 0 offline is normal. */
+  pending: number;
+  /** Writes permanently failed this session (quarantined, inspectable). */
+  deadLettered: number;
+  /** The server's most recent dead-letter error, verbatim. */
+  lastError: string | null;
+}
+
 /** A write enqueued through the sugar tier's writeBatch. */
 export interface BatchWrite {
   table: string;
@@ -74,6 +84,18 @@ export interface NostosRaw {
   registerPushToken(platform: "fcm" | "apns" | "webpush", token: string): Promise<void>;
   /** DELETE /push-tokens/{token}. */
   deregisterPushToken(token: string): Promise<void>;
+  /** ADR-0030 OR-set add (add-wins). Table must be in orSetTables config. */
+  orSetAdd(table: string, pk: string, element: string): Promise<number>;
+  /** ADR-0030 OR-set remove (tombstone; add-wins on re-add). */
+  orSetRemove(table: string, pk: string, element: string): Promise<number>;
+  /** ADR-0030 PN-Counter increment. Table must be in counterTables config. */
+  counterIncrement(table: string, pk: string, delta: number): Promise<number>;
+  /** ADR-0030 PN-Counter decrement. */
+  counterDecrement(table: string, pk: string, delta: number): Promise<number>;
+  /** ADR-0027 outbox status (pending/deadLettered/lastError). */
+  deadLetters(): Promise<NostosWriteStatus>;
+  /** True once the session has proven a subscription. */
+  connectionState(): Promise<boolean>;
 }
 
 export declare const nostos: NostosRaw;

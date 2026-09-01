@@ -165,10 +165,22 @@ impl NostosConfig {
         if let Some(secret) = jwt_secret.filter(|s| !s.is_empty()) {
             env.push(("NOSTOS_SYNC_AUTH".to_string(), "supabase-jwt".to_string()));
             env.push(("NOSTOS_SUPABASE_JWT_SECRET".to_string(), secret.to_string()));
+            // (no NOSTOS_INSECURE_ANONYMOUS: real auth is configured, so the
+            // server's boot guard has nothing to refuse.)
             env.push((
                 "NOSTOS_TENANT_COLUMN".to_string(),
                 self.sync.tenant_column.clone(),
             ));
+        } else {
+            // No secret → the server runs anonymous. `nostos dev` defaults
+            // `bind` to `0.0.0.0` so a physical phone on the LAN can reach the
+            // laptop, which is precisely the pair the server's boot guard
+            // refuses. Carry the escape hatch explicitly: `nostos dev` IS the
+            // "I am developing" signal, so the guard has already done its job
+            // by the time we get here. A production deploy runs the
+            // `nostos-server` binary directly, never this path, and still hits
+            // the refusal.
+            env.push(("NOSTOS_INSECURE_ANONYMOUS".to_string(), "1".to_string()));
         }
         env
     }
@@ -351,6 +363,14 @@ mod tests {
             .any(|(k, v)| k == "NOSTOS_WRITE_TABLES" && v == "tasks"));
         assert!(!env.iter().any(|(k, _)| k == "NOSTOS_SYNC_AUTH"));
         assert!(!env.iter().any(|(k, _)| k == "NOSTOS_SUPABASE_JWT_SECRET"));
+        // `nostos dev` binds 0.0.0.0 (LAN phones) and runs anonymous here —
+        // the exact pair the server refuses at boot. Without this hatch the
+        // flagship dev command cannot start at all, so pin that it ships.
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "NOSTOS_INSECURE_ANONYMOUS" && v == "1"),
+            "nostos dev must carry the anonymous-bind hatch or the server refuses to boot"
+        );
     }
 
     #[test]
@@ -366,6 +386,9 @@ mod tests {
         assert!(env
             .iter()
             .any(|(k, v)| k == "NOSTOS_TENANT_COLUMN" && v == "org_id"));
+        // Real auth configured → no hatch. Shipping it here would silently
+        // re-open the guard for every properly-authenticated dev run.
+        assert!(!env.iter().any(|(k, _)| k == "NOSTOS_INSECURE_ANONYMOUS"));
     }
 }
 

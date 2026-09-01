@@ -40,7 +40,11 @@ if [ ! -x "$SPINE" ]; then
 fi
 
 # 3. Spawn the spine; discover its port via stdout lines (30s ready timeout).
-SPINE_LOG="$(mktemp -t nostos-dotnet-e2e-spine)"
+# `mktemp -t <prefix>` is BSD-only: GNU coreutils requires the template to end
+# in at least 3 X's and errors "too few X's in template". macOS therefore passed
+# while Linux CI failed with an empty $SPINE_LOG, which surfaced as the
+# misleading "spine exited early". Explicit template works on both.
+SPINE_LOG="$(mktemp "${TMPDIR:-/tmp}/nostos-dotnet-e2e-spine.XXXXXX")"
 "$SPINE" >"$SPINE_LOG" 2>&1 &
 SPINE_PID=$!
 cleanup() { kill -TERM "$SPINE_PID" >/dev/null 2>&1 || true; rm -f "$SPINE_LOG"; }
@@ -69,6 +73,8 @@ echo "[dotnet-e2e] spine ready on port $SPINE_PORT"
 #    honored). The csproj already copies the dylib next to the assembly.
 export NOSTOS_E2E_PORT="$SPINE_PORT"
 export DYLD_LIBRARY_PATH="$DOTNET_DIR/target/release${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+# Linux ignores DYLD_* entirely; the loader reads LD_LIBRARY_PATH.
+export LD_LIBRARY_PATH="$DOTNET_DIR/target/release${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 cd "$DOTNET_DIR/dotnet/smoke"
 if dotnet run --project Smoke.csproj -c Release; then

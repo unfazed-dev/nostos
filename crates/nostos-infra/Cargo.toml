@@ -62,6 +62,7 @@ uuid = { workspace = true }
 # nostos-cloud's Hs256Verifier; see ADR-0010 on why this isn't shared).
 hmac = { workspace = true }
 sha2 = { workspace = true }
+subtle = { workspace = true }
 # RS256/ES256 JWT verification against a Supabase JWKS (ADR-0010 addendum).
 jsonwebtoken = { workspace = true }
 # JWKS fetch over HTTPS (same crate nostos-cloud uses for the Stripe REST call).

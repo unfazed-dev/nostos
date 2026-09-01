@@ -10,7 +10,7 @@ description: "Plug-and-play local-first sync for Flutter — Rust-owned SQLite +
 # unambiguous for path-dep consumers and can't be accidentally published
 # as stable. First flutter-carrying tag (v0.2.0) is cut when the release
 # pipeline runs for real — an operator call.
-version: 0.2.0-dev.1
+version: 0.2.0
 # NOSTOS-IDENTITY-PENDING: no domain registered — see docs/IDENTITY.md
 homepage: https://github.com/unfazed-dev/nostos
 repository: https://github.com/unfazed-dev/nostos

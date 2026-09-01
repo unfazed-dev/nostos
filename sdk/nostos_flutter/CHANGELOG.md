@@ -1,15 +1,33 @@
-## Unreleased (0.2.0-dev.1)
+## 0.2.0 (2026-09-01)
 
-Moving-head pre-release. `0.1.0` below was never published to pub.dev (the
-repo has no GitHub remote; the release pipeline has never run), and the repo's
-`v0.1.0` git tag (2026-07-05) predates the entire `sdk/` tree — **no tag has
-ever carried this package**. This version number exists so path-dependency
-consumers (apps/atlet, upcoming arxa clients) can pin an unambiguous head.
-The first flutter-carrying tag (`v0.2.0`) is cut when the release pipeline
-runs for real — see the README's Versioning and Releases sections.
+The first flutter-carrying tag. `0.1.0` below was never published to pub.dev,
+and the repo's `v0.1.0` git tag (2026-07-05) predates the entire `sdk/` tree —
+**no earlier tag has ever carried this package**. `0.2.0-dev.1` was the
+moving-head pin for path-dependency consumers (apps/atlet, arxa clients);
+this tag is the cut the dev head pointed at. Pushing it runs the release
+pipeline for real (`.github/workflows/release.yml`): CLI/server per-platform
+builds, the seven flutter-glue native artifacts, and the
+`release-prebuilt-manifest.json` PR that fills `hook/prebuilt.json` — the
+zero-Rust-toolchain consumer path (kit plan D3 0c). Publishing to pub.dev
+stays an explicit operator step after that PR merges — see the README's
+Versioning and Releases sections.
 
 Since the 0.1.0 entry was written (40+ commits), the surface grew to a
 superset — highlights, newest first:
+
+- **ADR-0041 D7 — iroh transport, off-default.** `nostos_flutter_rust` gains
+  an `iroh` cargo feature (default OFF; prebuilt binaries never carry it).
+  `connect(url, …)` was already scheme-agnostic; Dart `NostosConfig` accepts
+  the `iroh://` scheme, and without the feature an `iroh://` URL fails loudly
+  (`reject_iroh_scheme`). Opt-in at build time via
+  `NOSTOS_FLUTTER_CARGO_FEATURES=iroh` (source-build path only).
+- **Proxied sync works.** The REST base keeps the sync URL's path prefix, so
+  `/schema` + `/push-tokens` stay reachable when sync rides a reverse-proxy
+  prefix (the arxa studio tunnel's `/__nostos` leg).
+- `NostosDatabase.supabase()` opens sessionless — sync starts at sign-in
+  instead of requiring a live session at construction.
+- Rejected subscribes surface as fatal errors; `connected` now means PROVEN
+  (first frame or write ack), not socket-up.
 
 - `NostosDatabase.local({sqliteDir, schema, …})` — the no-server entry point:
   declared schema + on-device SQLite + durable outbox with the sync loop

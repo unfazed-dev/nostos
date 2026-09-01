@@ -59,6 +59,11 @@ services:
         condition: service_healthy
     environment:
       NOSTOS_BIND: "0.0.0.0:8800"
+      # This stack sets no NOSTOS_SYNC_AUTH, so /sync is anonymous. The server
+      # refuses that pair on a non-loopback bind unless told the exposure is
+      # deliberate — it is here: a local demo stack on Docker's own network.
+      # A real deploy sets NOSTOS_SYNC_AUTH=supabase-jwt and drops this line.
+      NOSTOS_INSECURE_ANONYMOUS: "1"
       NOSTOS_REPLICATOR: pg
       NOSTOS_PG_URL: "postgresql://cairn:cairn@postgres:5432/cairn"
       NOSTOS_PG_SLOT: cairn_slot

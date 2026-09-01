@@ -83,15 +83,41 @@ impl InMemorySessionStore {
     /// Shared insert tail of `add`/`try_add_below_cap`: table-list push +
     /// presence-index bump, so both registration chutes keep `by_account`
     /// honest identically.
+    /// Snapshot every table's list handle, releasing all DashMap shard guards
+    /// before the caller awaits anything.
+    ///
+    /// DashMap's iterator/entry guards are blocking `parking_lot` locks, NOT
+    /// async-aware. Holding one across an `.await` parks the task while the
+    /// shard stays locked; any other task touching that shard then blocks its
+    /// whole OS worker thread. On a runtime with few workers (CI runs this
+    /// suite with `worker_threads = 4` on a 2-core runner) that starves every
+    /// worker and the store deadlocks permanently — observed as a 6-hour hang
+    /// of `chaos.rs::conservation_under_churn` in CI run 33490859076.
+    /// `candidates_for` already used this clone-then-drop shape; the fold
+    /// helpers and `remove` did not.
+    fn table_lists(&self) -> Vec<Arc<Mutex<Vec<StoredSession>>>> {
+        self.by_table
+            .iter()
+            .map(|e| Arc::clone(e.value()))
+            .collect()
+    }
+
     async fn insert_indexed(&self, stored: StoredSession, table: String) {
         if let Some(account) = stored.account() {
             *self.by_account.entry(account.to_owned()).or_insert(0) += 1;
         }
-        let entry = self
-            .by_table
-            .entry(table)
-            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
-        entry.lock().await.push(stored);
+        // Take the Arc out and DROP the DashMap entry guard before awaiting.
+        // `entry()` holds a shard WRITE guard; DashMap guards are blocking
+        // (parking_lot), not async-aware, so awaiting while holding one parks
+        // the task with an OS-level lock still taken — see `table_lists`.
+        let list_arc = {
+            let entry = self
+                .by_table
+                .entry(table)
+                .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
+            Arc::clone(entry.value())
+        };
+        list_arc.lock().await.push(stored);
     }
 }
 
@@ -155,8 +181,8 @@ impl SessionStore for InMemorySessionStore {
         // (cheap — sessions per table is small after pruning). Capture the
         // removed session so the presence index decrements the right account.
         let mut removed: Option<StoredSession> = None;
-        for entry in &self.by_table {
-            let mut list = entry.value().lock().await;
+        for list_arc in self.table_lists() {
+            let mut list = list_arc.lock().await;
             let Some(pos) = list.iter().position(|s| s.id == id) else {
                 continue;
             };
@@ -219,8 +245,8 @@ impl SessionStore for InMemorySessionStore {
         // closely. WAL-bloat from a permanently-silent client is the deferred
         // ADR-0016 problem (max_slot_wal_keep_size / age-based advance).
         let mut global_min: Option<u64> = None;
-        for entry in &self.by_table {
-            let list = entry.value().lock().await;
+        for list_arc in self.table_lists() {
+            let list = list_arc.lock().await;
             for s in list.iter() {
                 if let Some(lsn) = s.sink.last_acked_lsn() {
                     global_min = Some(global_min.map_or(lsn.raw(), |m| m.min(lsn.raw())));
@@ -236,8 +262,8 @@ impl SessionStore for InMemorySessionStore {
         // but tracks the SessionId alongside the minimum so the fanout loop can
         // disconnect exactly this one session.
         let mut slowest: Option<(nostos_domain::SessionId, u64)> = None;
-        for entry in &self.by_table {
-            let list = entry.value().lock().await;
+        for list_arc in self.table_lists() {
+            let list = list_arc.lock().await;
             for s in list.iter() {
                 if let Some(lsn) = s.sink.last_acked_lsn() {
                     match slowest {

@@ -7,7 +7,9 @@
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "token": null,
       "table": "tasks",
-      "dbPath": "cairn.db"
+      "dbPath": "cairn.db",
+      "orSetTables": ["tasks"],
+      "counterTables": ["tasks"]
     }
   }
 }

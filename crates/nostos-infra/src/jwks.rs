@@ -48,6 +48,10 @@ struct Cache {
     keys: HashMap<String, CachedKey>,
     fetched_at: Option<Instant>,
     last_fetch_attempt: Option<Instant>,
+    /// Whether the most recent fetch attempt errored. A failed fetch leaves
+    /// `fetched_at` untouched, so the cache reads "stale" for the whole
+    /// outage — without this flag every subsequent request retries the fetch.
+    last_fetch_failed: bool,
 }
 
 /// Fetches, caches, and verifies against a Supabase project's JWKS.
@@ -132,30 +136,53 @@ impl JwksVerifier {
         // path: fetch outside the write lock with single-flight.
         let mut cache = self.cache.write().await;
         let is_fresh = cache.fetched_at.is_some_and(|t| t.elapsed() < self.ttl);
+        let recent_attempt = cache
+            .last_fetch_attempt
+            .is_some_and(|t| t.elapsed() < MIN_REFETCH_INTERVAL);
         if is_fresh {
             // A concurrent writer already refreshed while we waited for the
             // lock — check again before deciding this `kid` is truly unknown.
             if let Some(k) = cache.keys.get(kid) {
                 return Some(k.clone());
             }
-            if cache
-                .last_fetch_attempt
-                .is_some_and(|t| t.elapsed() < MIN_REFETCH_INTERVAL)
-            {
+            if recent_attempt {
                 warn!(
                     kid,
                     "jwks: unknown kid, refetch rate-limited, failing closed"
                 );
                 return None;
             }
+        } else if cache.last_fetch_failed && recent_attempt {
+            // Stale cache AND the last attempt errored: back off instead of
+            // retrying per request. A failing JWKS endpoint never advances
+            // `fetched_at`, so without this the cache stays stale for the whole
+            // outage and EVERY request drives its own fetch — under the write
+            // lock, behind a 10s client timeout. That serializes all
+            // authentication into a self-inflicted outage and points an
+            // amplifier at the IdP; an attacker spraying random `kid`s gets it
+            // for free. Same shape as GHSA-qw3h-qqm9-jrw8 (RabbitMQ) and
+            // CVE-2026-48524 (PyJWT).
+            //
+            // Deliberately NOT gated on a healthy endpoint: there, one stale
+            // fetch succeeds and re-freshens the cache, so the unknown-`kid`
+            // path above bounds the attack to one fetch per `ttl`. Rate-limiting
+            // successful stale refreshes too would break TTL-driven key
+            // rotation, which is itself a security property.
+            warn!(
+                kid,
+                "jwks: refetch backing off after recent failure, failing closed"
+            );
+            return None;
         }
         cache.last_fetch_attempt = Some(Instant::now());
         match self.fetch().await {
             Ok(keys) => {
                 cache.keys = keys;
                 cache.fetched_at = Some(Instant::now());
+                cache.last_fetch_failed = false;
             }
             Err(err) => {
+                cache.last_fetch_failed = true;
                 warn!(%err, "jwks: fetch failed, failing closed");
             }
         }
@@ -396,6 +423,7 @@ pub(crate) mod test_support {
     struct FixtureState {
         hits: Arc<AtomicUsize>,
         set: Arc<tokio::sync::RwLock<JwkSet>>,
+        fail: Arc<std::sync::atomic::AtomicBool>,
     }
 
     /// A tiny axum server that serves a mutable `JwkSet` and counts hits —
@@ -404,23 +432,31 @@ pub(crate) mod test_support {
         addr: SocketAddr,
         hits: Arc<AtomicUsize>,
         set: Arc<tokio::sync::RwLock<JwkSet>>,
+        fail: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl FixtureJwks {
         pub(crate) async fn start(initial: JwkSet) -> Self {
             let hits = Arc::new(AtomicUsize::new(0));
             let set = Arc::new(tokio::sync::RwLock::new(initial));
+            let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let app = Router::new()
                 .route(
                     "/jwks.json",
                     get(|AxumState(s): AxumState<FixtureState>| async move {
+                        use axum::response::IntoResponse;
                         s.hits.fetch_add(1, Ordering::SeqCst);
-                        Json(s.set.read().await.clone())
+                        if s.fail.load(Ordering::SeqCst) {
+                            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "jwks down")
+                                .into_response();
+                        }
+                        Json(s.set.read().await.clone()).into_response()
                     }),
                 )
                 .with_state(FixtureState {
                     hits: hits.clone(),
                     set: set.clone(),
+                    fail: fail.clone(),
                 });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -429,7 +465,18 @@ pub(crate) mod test_support {
             tokio::spawn(async move {
                 axum::serve(listener, app).await.expect("serve");
             });
-            Self { addr, hits, set }
+            Self {
+                addr,
+                hits,
+                set,
+                fail,
+            }
+        }
+
+        /// Simulate a JWKS outage: the endpoint keeps counting hits but returns
+        /// a body that fails to decode, so `fetch()` errors.
+        pub(crate) fn set_failing(&self, failing: bool) {
+            self.fail.store(failing, Ordering::SeqCst);
         }
 
         pub(crate) fn url(&self) -> String {
@@ -568,6 +615,66 @@ mod tests {
         let missing2 = verifier.resolve_key("also-missing").await;
         assert!(missing2.is_none());
         assert_eq!(fixture.hit_count(), 1, "rate-limited: no second fetch");
+    }
+
+    /// A FAILING JWKS endpoint must not turn every request into its own fetch.
+    ///
+    /// The sibling test above runs with a 10-minute ttl, so it only exercised
+    /// the fresh-cache branch — which is how the gap survived. A failed fetch
+    /// leaves `fetched_at` untouched, so the cache reads "stale" for the whole
+    /// outage; without a back-off, every inbound token drives another fetch
+    /// under the write lock behind a 10s client timeout, serializing all
+    /// authentication into a self-inflicted outage and pointing an amplifier at
+    /// the IdP. An attacker spraying random `kid`s gets it for free.
+    /// GHSA-qw3h-qqm9-jrw8 (RabbitMQ), CVE-2026-48524 (PyJWT).
+    #[tokio::test]
+    async fn failing_jwks_backs_off_instead_of_refetching_per_request() {
+        let (_enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        // ttl well under the sleeps below, so the cache is definitively stale.
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_millis(10));
+        fixture.set_failing(true);
+
+        assert!(verifier.resolve_key("nope-1").await.is_none());
+        assert_eq!(fixture.hit_count(), 1, "first attempt reaches the endpoint");
+
+        // Stale cache + previous failure: further requests must back off, even
+        // with distinct kids and even after the ttl has elapsed again.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(verifier.resolve_key("nope-2").await.is_none());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(verifier.resolve_key("nope-3").await.is_none());
+        assert_eq!(
+            fixture.hit_count(),
+            1,
+            "a failing endpoint must be retried on an interval, not once per \
+             request — otherwise every auth attempt stalls behind its own fetch"
+        );
+    }
+
+    /// The back-off must not swallow recovery, nor block TTL-driven rotation:
+    /// once the endpoint is healthy again the next attempt past the interval
+    /// refetches and verification resumes.
+    #[tokio::test]
+    async fn jwks_recovers_after_outage_once_backoff_elapses() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_millis(10));
+
+        fixture.set_failing(true);
+        assert!(verifier.resolve_key("k1").await.is_none(), "outage: no key");
+        assert_eq!(fixture.hit_count(), 1);
+
+        fixture.set_failing(false);
+        tokio::time::sleep(MIN_REFETCH_INTERVAL + Duration::from_millis(50)).await;
+
+        let token = mint_token(&enc, Algorithm::RS256, "k1", "user-1");
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        let principal = verifier
+            .verify(&token, &header)
+            .await
+            .expect("verification must resume once the endpoint recovers");
+        assert_eq!(principal.account_id, "user-1");
     }
 
     #[tokio::test]
