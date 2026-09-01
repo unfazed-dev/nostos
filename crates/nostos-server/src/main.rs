@@ -158,6 +158,24 @@ pub struct Config {
     )]
     allow_jwt_without_exp: bool,
 
+    /// Require authentication on `GET /schema` and `GET /rules` (audit
+    /// finding 7).
+    ///
+    /// Off by default because turning it on is a breaking change for clients
+    /// that fetch `/schema` without a token — `nostos pull`, and any Flutter app
+    /// built against an SDK older than this change.
+    ///
+    /// Parsed by [`parse_env_bool`] rather than read ad hoc, so a typo
+    /// (`=yes please`, `=True `) refuses to boot instead of silently leaving
+    /// the routes open while the log claims the variable is unset.
+    #[arg(
+        long,
+        env = "NOSTOS_PROTECT_METADATA",
+        default_value_t = false,
+        value_parser = parse_env_bool
+    )]
+    protect_metadata: bool,
+
     /// Ceiling on live sync sessions held by a SINGLE account.
     ///
     /// The licensed `device_cap` is global, so without this one account can
@@ -930,6 +948,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ---- build the axum router + transport ----
+    PROTECT_METADATA.store(cfg.protect_metadata, std::sync::atomic::Ordering::Relaxed);
+    if cfg.protect_metadata {
+        if cfg.sync_auth == "none" {
+            // Say it plainly rather than let the operator believe the knob did
+            // something: `AllowAnonymous` accepts the empty token, so the
+            // /schema gate admits everyone. /rules is still genuinely gated —
+            // it checks the admin token, which has nothing to do with sync auth.
+            warn!(
+                "NOSTOS_PROTECT_METADATA is set but NOSTOS_SYNC_AUTH=none — \
+                 GET /schema stays effectively open (anonymous auth accepts any \
+                 caller); only GET /rules is actually protected"
+            );
+        } else {
+            info!("metadata protection: GET /schema requires sync auth, GET /rules requires NOSTOS_ADMIN_TOKEN");
+        }
+    } else {
+        info!("metadata protection: off (NOSTOS_PROTECT_METADATA unset) — GET /schema and GET /rules are unauthenticated");
+    }
     let ws_origins = parse_origin_list(&cfg.ws_origins);
     if ws_origins.is_empty() {
         info!("ws origin check: NOSTOS_WS_ORIGINS unset — /sync accepts any origin");
@@ -1888,7 +1924,15 @@ async fn healthz(State(state): State<SyncRouterState>) -> (StatusCode, Json<serd
 /// / no-`pg` path) and 503 on a transient backend error.
 async fn schema(
     State(state): State<SyncRouterState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<SchemaDescriptor>, StatusCode> {
+    // `/schema` is a CLIENT endpoint (auto-schema), so it gates on SYNC auth,
+    // not the admin token — a real client already holds a bearer token, an
+    // operator does not necessarily. Off unless NOSTOS_PROTECT_METADATA is set,
+    // because gating it breaks `nostos pull` and any Flutter app on an older SDK.
+    if metadata_protected() && !sync_authenticated(&state, &headers).await {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let src = state.schema_source.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     src.fetch().await.map(Json).map_err(|e| {
         warn!(error = %e, "schema fetch failed");
@@ -1908,9 +1952,56 @@ async fn schema(
 /// Never echoes claim *values* — `scope_text` only ever renders column
 /// names, operators, and `claims.<name>` references. No principal data, no
 /// row counts.
-async fn rules_handler(State(state): State<SyncRouterState>) -> Json<serde_json::Value> {
+async fn rules_handler(
+    State(state): State<SyncRouterState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // `/rules` is an OPERATOR endpoint — its only production reader is the web
+    // admin panel, which already holds the admin token for the PUT on the same
+    // path. So it gates on the admin token, not sync auth: the ruleset is the
+    // tenant model, and no application user should be able to read it back.
+    if metadata_protected() {
+        let Some(token) = admin_auth::admin_token_from_env() else {
+            // Same fail-closed shape as PUT: no admin token configured means
+            // there is no way to authorise a read, so the route is not there.
+            return Err(StatusCode::NOT_FOUND);
+        };
+        if !admin_auth::AdminAuth::check(&headers, &token).await {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
     let ruleset = state.rules.read().await;
-    Json(rules_body(&ruleset, &state.metrics))
+    Ok(Json(rules_body(&ruleset, &state.metrics)))
+}
+
+/// Boot-time resolution of `--protect-metadata` / `NOSTOS_PROTECT_METADATA`,
+/// published for the two handlers that gate on it.
+///
+/// A `static` rather than a `SyncRouterState` field because this is
+/// server-level policy, and rather than a per-request `env::var` because that
+/// re-read would silently treat a typo as "off". Clap validates the value once
+/// at startup; this only carries the answer.
+static PROTECT_METADATA: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn metadata_protected() -> bool {
+    PROTECT_METADATA.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Does this request carry a token the *sync* auth adapter accepts?
+///
+/// Honest limitation: on an `AllowAnonymous` deployment this returns `true` for
+/// everyone, because that adapter accepts the empty token by design. The gate
+/// is therefore only meaningful where sync auth is actually configured — which
+/// is the same population that has tenant separation to protect. Boot logs say
+/// so plainly rather than implying protection that isn't there.
+async fn sync_authenticated(state: &SyncRouterState, headers: &axum::http::HeaderMap) -> bool {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    state.auth.authenticate(token).await.is_some()
 }
 
 /// Shared response shape for `GET /rules` and a successful `PUT /rules`
@@ -2710,7 +2801,11 @@ mod rules_handler_tests {
         let checksum = ruleset.checksum();
         let state = state_with(ruleset);
 
-        let Json(body) = rules_handler(State(state)).await;
+        // Unauthenticated read: the gate is off by default, which is the
+        // shape every existing deployment gets.
+        let Json(body) = rules_handler(State(state), axum::http::HeaderMap::new())
+            .await
+            .expect("rules read is open while NOSTOS_PROTECT_METADATA is unset");
 
         assert_eq!(body["sync_mode"], "toggles");
         assert_eq!(body["checksum"], format!("0x{checksum:x}"));
@@ -2730,7 +2825,11 @@ mod rules_handler_tests {
     async fn rules_handler_under_all_mode_lists_no_tables() {
         let state = state_with(ActiveRuleset::all_mode());
 
-        let Json(body) = rules_handler(State(state)).await;
+        // Unauthenticated read: the gate is off by default, which is the
+        // shape every existing deployment gets.
+        let Json(body) = rules_handler(State(state), axum::http::HeaderMap::new())
+            .await
+            .expect("rules read is open while NOSTOS_PROTECT_METADATA is unset");
 
         assert_eq!(body["sync_mode"], "all");
         assert_eq!(body["tables"], serde_json::json!([]));

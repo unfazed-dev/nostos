@@ -38,7 +38,7 @@ verification does not get carried into the next.
 
 | # | Finding | Fix | Default |
 |---|---|---|---|
-| 11 | `Not` over an absent column over-delivers (3VL gap) | Absent column under `Not` must not match — **both** the SQL compiler and the in-memory evaluator, moved together | **on** |
+| 11 | `Not` over an absent column over-delivers (3VL gap) | Make the in-memory evaluator three-valued. **Evaluator only** — the SQL path is already correct | **on** |
 
 ### Batch E — the last policy default
 
@@ -107,12 +107,65 @@ Two of the audit's own pointers were wrong; these are read off the source.
   only when the deployment has sync auth configured: an anonymous deployment
   has already opted out of tenant separation, and a real client already holds
   a bearer token. `/metrics` stays open — gating it silently breaks Prometheus.
-- **Finding 11 — the two paths already disagree.** Postgres evaluates
-  `NOT (col = 'x')` over NULL to NULL and excludes the row; the in-memory
-  `matches_dyn` is two-valued and returns `true`. Converging them means making
-  the evaluator three-valued (`Option<bool>`, `None` = unknown, top level
-  treats unknown as no-match), which is what SQL already does — not inventing
-  a third semantics.
+- **Finding 11 — the two paths already disagree.** Read off both, not inferred:
+  - SQL, `snapshot_source.rs:523`: `NOT ({inner})` over `"col"::text = $1`.
+    Postgres 3VL sends a NULL column to NULL and **excludes** the row.
+  - Memory, `predicate.rs:288`: `Self::Not(inner) => !inner.matches_dyn(..)`,
+    and an absent leaf is `false`, so `!false` = **includes** the row.
+
+  So the snapshot and live fan-out already deliver different row sets for the
+  same subscription. **The fix is evaluator-only — the SQL side is correct and
+  must not be touched**; "move both together" would change a correct path and
+  manufacture a fresh divergence.
+
+  Converge on SQL's direction: three-valued `Option<bool>` (`None` = unknown),
+  Kleene `And`/`Or`, `Not(None) = None`, top level treats `None` as no-match.
+  Only outcome that changes is `Not` over an unknown leaf — every other
+  combination lands where it does today (verified against the truth table).
+
+  **Path enumeration redone.** A first grep returned "no matches" while
+  `snapshot_source.rs:523` plainly matched — a broken search whose null result
+  proved nothing. Re-run: 9 `PredicateExpr::Not` sites, exactly one emitting SQL
+  (`snapshot_source.rs:523`), the rest parser/param-binding/tests. `nostos-core`
+  does **not** evaluate predicates (its hits are the `matches!` macro), so there
+  is no third path.
+
+  **ADR-0012 authorizes this; it does not forbid it.** The pinned test cites the
+  ADR, but the ADR lists 3VL as *Deferred* (line 97) and rejects it only as
+  "speculative until a real schema demonstrates the `Not(Eq{absent})` edge
+  bites" (line 221). An audit finding over-delivery plus a snapshot/live split
+  is that demonstration. Line 120 names the upgrade path and its one condition:
+  "three-valued logic is a documented future refinement — **recorded here, not
+  silently changed**." So the change ships with an ADR-0012 addendum, and
+  `not_of_missing_eq_returns_true_pinned_edge` is **rewritten** to assert the new
+  semantics and name the disagreement it resolves — not deleted.
+
+  `Param` and cross-type mismatch also become `None`: conservative, never
+  over-delivers under `Not`, and the existing param tests assert non-delivery at
+  top level, which `None` preserves. `matches_filter_ne`'s hand-rolled
+  anti-inversion guard is this same bug patched at one leaf — check whether 3VL
+  subsumes it.
+- **Finding 8 — penalise failures only, and keep it global.** Constant-time
+  compare (`subtle::ct_eq`, `admin_auth.rs:61`) and `MIN_ADMIN_TOKEN_LEN=32`
+  already exist; the gap is only that guessing is unlimited. `AdminAuth::check`
+  (`admin_auth.rs:75`) is the single entry point, so one place to change.
+
+  **The trap: a lockout keyed on failures is a DoS on the operator.** Anyone who
+  can reach the route could spam wrong tokens and lock the real operator out of
+  their own admin path — trading a low-severity hardening gap for an
+  availability bug, the same bad trade Batch B's JWKS staleness fix had to avoid.
+  So the penalty attaches to the *failure*, never to the route: a correct token
+  is checked first and succeeds immediately even mid-attack.
+
+  Global, not per-IP: `ConnectInfo` is **not** plumbed (`grep` for
+  `into_make_service_with_connect_info` in `main.rs` → no hits), so there is no
+  peer address to key on without changing how the server is served — and behind
+  a proxy every request shares one IP anyway, which makes per-IP keying both
+  costlier and less honest. A dependency for one counter fails the ladder.
+
+  Honest severity: brute-forcing a 32-char token is infeasible with or without
+  this. The value is defence-in-depth against a *weak* long token and a
+  log/alert signal that someone is trying — not a fix for a live break.
 - **Finding 1 — `slot_max_lag` is WAL BYTES, not events.** Eviction costs a
   reconnect and resync, not data loss. 1 GiB is generous for a bad connection
   while still bounding the primary's disk.
@@ -121,4 +174,119 @@ Two of the audit's own pointers were wrong; these are read off the source.
 
 Filled in as batches land.
 
-- Batch A implemented; `make ci` running.
+### Batch A — DONE, `make ci` green
+
+`MAKE_CI_EXIT=0`, 78 binaries, **980 passed, 0 failed, 0 ignored** (was 972 —
+the 8 new tests). Commits: cross-tenant message, snapshot cap + per-principal
+cap, docs.
+
+Boot-verified as required: `NOSTOS_SNAPSHOT_MAX_ROWS=lots` exits 2 with
+`invalid digit found in string`; a numeric value boots.
+
+### Batch B — auth hardening, in progress
+
+- **Finding 5 — `exp` now required on HS256.** `verify_supabase_hs256` takes
+  `allow_missing_exp`; `NOSTOS_ALLOW_JWT_WITHOUT_EXP` is the opt-in escape
+  hatch for a legacy issuer. This converges HS256 with the JWKS path, which
+  already required `exp` via `required_spec_claims`.
+  - Broke 5 unit tests + 2 integration fixtures, exactly as predicted. Fixed
+    at the *helpers* (`valid_hs256_token`, `hs256_token_from_payload`,
+    `mint_jwt` ×2) rather than per-test, so each test keeps its own payload
+    shape; `hs256_token_from_payload` injects `exp` only when absent.
+- **Finding 4 — `nbf` and `iss`.** `validate_nbf = true` (default-on: a token
+  minted for a future window was already usable). `iss` is an allowlist that
+  defaults to EMPTY = unchecked — a non-empty default would reject every
+  existing deployment's tokens on upgrade. `validate_aud` stays false; it is
+  load-bearing for Supabase's `aud:"authenticated"`.
+- **Finding 6 — JWKS staleness ceiling.** `DEFAULT_JWKS_MAX_STALE = 30 min`.
+  Past it the cache refuses rather than serving, converting an indefinite
+  fail-open on revocation into a bounded one. A cache that never fetched
+  successfully is refused on the same rule.
+
+All three knobs wired and **boot-verified against the real binary**, which is
+the check that matters — `NOSTOS_INSECURE_ANONYMOUS=1` passed its unit test last
+session and still failed to parse:
+
+| env | garbage value | documented value |
+|---|---|---|
+| `NOSTOS_ALLOW_JWT_WITHOUT_EXP` | `maybe` → refused, lists `1/0, true/false, yes/no, on/off` | `=1` boots |
+| `NOSTOS_JWKS_MAX_STALE_SECS` | `soon` → `invalid digit found in string` | `=900` boots |
+| `NOSTOS_JWT_ISSUERS` | — (free-form list) | issuer URL boots |
+
+Note on finding 4: the `iss` allowlist had to be wired to a knob to count as
+fixed at all. Left as a compile-time field it is always empty, which means
+`iss` is never checked and the finding is merely *closeable*, not closed.
+
+### Batch E — finding 1, folded into B's gate
+
+`NOSTOS_SLOT_MAX_LAG` now defaults to **1 GiB** instead of `0` (eviction off).
+
+The reasoning that settles the decision the audit deferred: with eviction off,
+one client that connects, acks nothing, and stays connected pins the
+replication slot and grows WAL without bound — disk exhaustion on the source
+primary, requiring no credentials beyond a valid sync session. Eviction costs a
+reconnect and a resync, **not data loss**, so the failure mode of the new
+default is strictly milder than the failure mode of the old one. 1 GiB is
+deliberately generous: a real client on a bad connection has to fall a gigabyte
+of WAL behind before it trips. `0` restores the old behaviour.
+
+Clippy pedantic caught `Duration::from_secs(30 * 60)` on the way through and
+required `from_mins(30)`.
+
+### Batch D — finding 11, DONE
+
+3VL landed in `predicate.rs` + an ADR-0012 addendum. `cargo test -p
+nostos-domain`: **133 passed, 0 failed.** A subagent sweep of every predicate
+test in the workspace predicted exactly **one** flip
+(`not_of_missing_eq_returns_true_pinned_edge`) and 31 unaffected — which matched
+the truth table and matched the run. The pin was rewritten, not deleted, plus a
+new `unknown_survives_negation_at_every_depth` covering double negation, the
+tenant-ANDed shape that actually ships, and both Kleene short-circuits.
+
+### Batch C — findings 8, 10, 7
+
+- **8 — admin throttle.** Failure-only penalty in `admin_auth.rs`; a correct
+  token is compared first and never delayed, so an attacker cannot lock the
+  operator out. `failure_delay` is pure and tested at the cap;
+  `a_correct_token_is_never_throttled_and_clears_the_counter` pins the property
+  that makes it safe. The compiler found a **second call site** (`ingest.rs:162`)
+  that a `main.rs`-only grep had missed.
+- **10 — WS origin allowlist.** Opt-in `NOSTOS_WS_ORIGINS`, empty = off. A
+  subagent confirmed the shape: exactly one browser client
+  (`nostos-ffi-wasm/src/transport.rs:592`), while every native client and all
+  ~30 integration tests use `tokio-tungstenite`, which sends **no** `Origin`.
+  Hence absent-Origin passes — rejecting it would break every native client and
+  stop nobody, since only browsers can be forced to send a truthful one. Tests
+  cover the suffix/subdomain/scheme/port bypasses.
+- **7 — metadata routes, split by consumer.** `/schema` is a CLIENT endpoint →
+  gated on **sync auth**; `/rules` is an OPERATOR endpoint (its only production
+  reader is the web admin, which already holds the admin token for the PUT on
+  the same path) → gated on the **admin token**. `/metrics` stays open; gating
+  it silently breaks Prometheus.
+
+  **My own knob was the silent-failure bug this pass exists to kill.** The first
+  version read the env var per-request with `.unwrap_or(false)`, so
+  `NOSTOS_PROTECT_METADATA=perhaps` booted with protection OFF while the log line
+  claimed the variable was "unset". Caught by boot-verification, not by a test.
+  Now a clap arg with `parse_env_bool`, so garbage exits 2 like every other knob.
+
+  **Honest limit, logged at boot:** on `NOSTOS_SYNC_AUTH=none` the `/schema` gate
+  is theatre — `AllowAnonymous` accepts the empty token. The server warns rather
+  than implying protection it does not have. `/rules` is still genuinely gated
+  there, because the admin token is unrelated to sync auth.
+
+### Deliberately NOT bundled
+
+- **A token field for `nostos pull`.** `ProjectConfig` has none, and adding one
+  means new config surface, env-vs-file precedence, and a new secret on disk.
+  That is a feature, not a security fix, and inventing it under "fix all" is the
+  scope creep the instructions warn against. Instead `nostos pull` now fails with
+  an error naming `NOSTOS_PROTECT_METADATA` and the workaround, rather than a
+  bare 401. **Follow-up, recorded not done.**
+- **CORS is unchanged.** `build_cors_layer` still returns
+  `CorsLayer::permissive()` on empty `NOSTOS_CORS_ORIGINS`. That is the
+  documented local-dev default and `NOSTOS_CORS_ORIGINS` is the existing
+  production knob. With `/schema` and `/rules` now authenticable, permissive
+  CORS no longer exposes metadata to a browser without credentials — CORS is a
+  browser mechanism and never constrained a server-side caller anyway. Do not
+  describe finding 7 as "CORS tightened"; it is not.

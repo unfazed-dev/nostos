@@ -63,7 +63,12 @@
 		loadError = null;
 		saveError = null;
 		try {
-			const res = await fetch(`${normalizedUrl()}/rules`);
+			// Send the same admin token the PUT below uses. A server running
+			// with NOSTOS_PROTECT_METADATA=1 requires it on the read too; one
+			// without it ignores the header, so this works against both.
+			const res = await fetch(`${normalizedUrl()}/rules`, {
+				headers: token ? { authorization: `Bearer ${token}` } : {}
+			});
 			if (!res.ok) throw new Error(await errorFrom(res));
 			applyResponse((await res.json()) as RulesResponse);
 		} catch (e) {

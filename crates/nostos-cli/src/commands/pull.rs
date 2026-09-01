@@ -50,6 +50,19 @@ pub async fn run(args: PullArgs, cwd: &Path) -> Result<()> {
              wal_level=logical Postgres). The fake replicator serves no schema."
         );
     }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        // `nostos pull` sends no bearer token — `ProjectConfig` has no field to
+        // put one in. Adding a credential store to the CLI is a feature, not a
+        // security fix, so it is deliberately NOT bundled here; name the knob
+        // instead of failing with a bare 401 the operator has to guess at.
+        bail!(
+            "server returned 401 for GET /schema — it is running with \
+             NOSTOS_PROTECT_METADATA=1, which requires a bearer token that \
+             `nostos pull` cannot yet send. Unset NOSTOS_PROTECT_METADATA on the \
+             server to pull the schema, or commit .nostos/schema.json from a \
+             machine that pulled it while the knob was off."
+        );
+    }
     if !status.is_success() {
         bail!("GET /schema returned HTTP {status}");
     }
