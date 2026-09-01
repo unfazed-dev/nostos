@@ -26,9 +26,11 @@ env NOSTOS_BIND="$BIND" NOSTOS_REPLICATOR=fake \
 SRV=$!
 trap 'kill "$SRV" 2>/dev/null || true' EXIT
 
+# The dial URL rides the `dial_url=iroh://…` field (the banner prose also
+# contains a bare 'iroh://' — match the FIELD, not the sentence).
 URL=''
 for _ in $(seq 1 180); do
-  URL=$(grep -o 'iroh://[^ "]*' "$LOG" | head -1 || true)
+  URL=$(grep -o 'dial_url=[^ ]*' "$LOG" | head -1 | cut -d= -f2 || true)
   [ -n "$URL" ] && break
   sleep 1
 done
