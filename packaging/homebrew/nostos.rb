@@ -25,23 +25,23 @@
 class Nostos < Formula
   desc "Local-first sync engine CLI — init/dev/doctor/deploy for a Postgres + Supabase sync backend"
   homepage "https://github.com/unfazed-dev/nostos"
-  version "0.1.0" # bump alongside workspace.package.version in the root Cargo.toml
+  version "0.2.0" # bump alongside workspace.package.version in the root Cargo.toml
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/unfazed-dev/nostos/releases/download/v0.1.0/nostos-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/unfazed-dev/nostos/releases/download/v0.2.0/nostos-aarch64-apple-darwin.tar.gz"
       sha256 "REPLACE_WITH_aarch64-apple-darwin_TAR_GZ_SHA256"
     end
     on_intel do
-      url "https://github.com/unfazed-dev/nostos/releases/download/v0.1.0/nostos-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/unfazed-dev/nostos/releases/download/v0.2.0/nostos-x86_64-apple-darwin.tar.gz"
       sha256 "REPLACE_WITH_x86_64-apple-darwin_TAR_GZ_SHA256"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/unfazed-dev/nostos/releases/download/v0.1.0/nostos-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/unfazed-dev/nostos/releases/download/v0.2.0/nostos-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "REPLACE_WITH_x86_64-unknown-linux-gnu_TAR_GZ_SHA256"
     end
   end

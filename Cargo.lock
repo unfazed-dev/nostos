@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2964,7 +2964,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2993,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-cloud"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "nostos-domain",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "serde",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-ffi-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "js-sys",
  "nostos-core",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-infra"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-license"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "hmac 0.12.1",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-push"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3136,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

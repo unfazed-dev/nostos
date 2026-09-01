@@ -54,7 +54,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -188,15 +188,15 @@ ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
 web-push = { version = "0.11", default-features = false }
 
 # internal crates (so members can reference each other via the workspace)
-nostos-domain = { path = "crates/nostos-domain", version = "0.1.0" }
-nostos-application = { path = "crates/nostos-application", version = "0.1.0" }
-nostos-infra = { path = "crates/nostos-infra", version = "0.1.0" }
-nostos-push = { path = "crates/nostos-push", version = "0.1.0", default-features = false }
-nostos-cloud = { path = "crates/nostos-cloud", version = "0.1.0" }
-nostos-license = { path = "crates/nostos-license", version = "0.1.0" }
-nostos-core = { path = "crates/nostos-core", version = "0.1.0" }
-nostos-client = { path = "crates/nostos-client", version = "0.1.0" }
-nostos-server = { path = "crates/nostos-server", version = "0.1.0" }
+nostos-domain = { path = "crates/nostos-domain", version = "0.2.0" }
+nostos-application = { path = "crates/nostos-application", version = "0.2.0" }
+nostos-infra = { path = "crates/nostos-infra", version = "0.2.0" }
+nostos-push = { path = "crates/nostos-push", version = "0.2.0", default-features = false }
+nostos-cloud = { path = "crates/nostos-cloud", version = "0.2.0" }
+nostos-license = { path = "crates/nostos-license", version = "0.2.0" }
+nostos-core = { path = "crates/nostos-core", version = "0.2.0" }
+nostos-client = { path = "crates/nostos-client", version = "0.2.0" }
+nostos-server = { path = "crates/nostos-server", version = "0.2.0" }
 
 # -----------------------------------------------------------------------------
 # Workspace-wide lints. Fail CI on the things that matter; warn on the rest.
