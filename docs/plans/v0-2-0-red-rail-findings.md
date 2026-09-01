@@ -221,29 +221,79 @@ to ci.yml. Three runs were in flight on `main` simultaneously on 2026-09-01
 and starved each other. Deliberately NOT added to release.yml: cancelling a
 half-finished release build would publish a partial artifact set.
 
-## What the hang actually was — UNDIAGNOSED
+## What the hang actually was — DIAGNOSED (run 33490859076)
 
 An earlier revision of this document named
-`fanout_scale.rs::ten_thousand_predicate_fanout_baseline` the "prime suspect"
-for the 6h hangs. **That was wrong, and it is corrected here** so the guess is
-not inherited as a finding.
+`fanout_scale.rs::ten_thousand_predicate_fanout_baseline` the "prime suspect",
+then a later one downgraded that to "cause unknown". Both are superseded: the
+timeouts added above caught the hang in 45 minutes instead of 6 hours, and the
+log names it.
 
-That test measures elapsed wall-clock and asserts a floor. A slow machine makes
-it *fail*, in about 30 seconds — it terminates by construction and cannot
-produce a 6h hang. What was actually observed is two separate things:
+`fmt + clippy + test`, 09:11:12 -> 09:56:28 = **45m16s**, exactly the new cap.
+`rustfmt` and `clippy (strict)` passed; the `test` step was killed. Its last
+output:
 
-- **A fast flake, real:** the floor is 50 zero-match events/sec at 10k
-  predicates, asserted from a **debug** build. It failed locally at 38
-  events/sec while another cargo job shared the CPU, and passed alone in
-  48.94s. A wall-clock floor in a debug build on a shared runner will keep
-  flapping. Worth moving to `--release`, gating behind the bench job, or
-  widening — deliberately NOT done before the tag, since it changes what CI
-  asserts and cannot help the release.
-- **The hang, cause unknown.** No log survives the cap to say what stalled.
-  Whether the JoinSet delivery path in this same test can also deadlock is
-  unproven in both directions. The timeouts above bound the blast radius
-  regardless of cause, and the next occurrence will now leave a readable log
-  inside 45 minutes instead of a 6h truncation.
+    Running tests/chaos.rs (target/debug/deps/chaos-afe299c891a85d51)
+    running 3 tests
+    test slow_client_drops_without_blocking_others ... ok
+    test selective_delivery_under_multitable_load ... ok
+    test conservation_under_churn has been running for over 60 seconds
+    ##[error]The operation was canceled.
+
+**`nostos-infra/tests/chaos.rs::conservation_under_churn` hangs.** It is not a
+perf assertion and not `--include-ignored`-only: it is a normal test that runs
+on every `cargo test --workspace`. It passes in ~0.10s when it passes, which is
+why this went unnoticed — and why the burn looked random.
+
+What it exercises is exactly a production shape: a churn task calling
+`SessionManager::connect` + `disconnect` 200 times while a second task drives
+500 `fan_out` calls over a stable pool of 50 sinks. So the suspicion is a real
+deadlock between session add/remove and fan-out delivery, not a test artifact.
+Two details worth carrying into the hunt:
+
+- the churn sink is `TokioEventSink::channel(8).0` — the receiver is dropped
+  immediately, so that bounded channel is closed from birth;
+- `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`, so scheduling
+  is genuinely concurrent and interleaving-dependent.
+
+**Deliberately NOT fixed in this release.** A concurrency bug in the fan-out
+path is not release-window work, it is pre-existing (it predates every change
+in this session), and it is invisible to `release.yml`, which contains neither
+the chaos test nor Postgres. Its job path is the six build jobs plus
+`update-manifest` and `create-release`. Tagging is not technically blocked by
+it — only the "ship green on ci.yml" policy is.
+
+## Postgres e2e: the readiness gate was racing init — FIXED
+
+Same run, `real-Postgres logical-replication e2e` died in **34 seconds** where a
+healthy run takes ~6.5 minutes. Not a timeout: the 60-iteration `sleep 1` poll
+cannot even complete in 34s. The log:
+
+    Container nostos-postgres  Started
+    psql: error: connection to server on socket ... failed: No such file or directory
+    Postgres ready (publication cairn_pub present) after 2s
+    psql: error: connection to server on socket ... failed: No such file or directory
+    ##[error]Process completed with exit code 1.
+
+The gate declared ready at 2s, then the very next `psql` could not connect.
+
+**The step's own comment had the reasoning backwards.** It gated on `cairn_pub`
+existing *instead of* `pg_isready` precisely to avoid the init restart — but
+`pg-init/01-sources.sql` is what CREATES `cairn_pub`, and initdb scripts run on
+the entrypoint's TEMPORARY server. So the publication appears *during* init;
+seeing it proves the temporary server is up, which is the opposite of the
+intended signal. The poll broke early and the next command landed in the
+restart gap.
+
+Fixed by requiring **5 consecutive** successes, resetting the streak on any
+failure, over a 180s budget. The restart necessarily breaks a streak, so the
+gate can only pass once the real server has served continuously for 5s. No
+dependence on entrypoint log strings, and it behaves the same on a pre-existing
+volume where no init runs at all.
+
+Unrelated but noted: `docker/docker-compose.yml` pins `postgres:16-alpine`, a
+floating tag — the e2e's server version is whatever Docker Hub served that
+minute. Worth pinning to a digest; not changed here.
 
 ## Why the tag was held
 
