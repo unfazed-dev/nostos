@@ -1294,8 +1294,13 @@ async fn register_stream(
         replacing
     };
 
-    let predicate =
-        build_stream_predicate(&table, bound.clone(), principal, tenant_column, ruleset)
+    // `snapshot_expr` is `rules ∧ bound` — the SAME ruleset scope live fan-out
+    // enforces. Passing the raw `bound` to the snapshot instead was audit
+    // finding 7: the stream's first sync skipped the ruleset's row scope while
+    // every subsequent live row honoured it. `bound` is MOVED here (no clone):
+    // the snapshot must not have a second, unscoped copy to reach for.
+    let (predicate, snapshot_expr) =
+        build_stream_predicate(&table, bound, principal, tenant_column, ruleset)
             .map_err(|rejection| rejection.to_string())?;
     let session = SyncSession::new_authenticated(predicate, principal.clone());
     let sink_dyn: Arc<dyn EventSink> = Arc::clone(sink_concrete) as Arc<dyn EventSink>;
@@ -1321,7 +1326,7 @@ async fn register_stream(
         match snap
             .snapshot_stream(
                 &table,
-                &bound,
+                &snapshot_expr,
                 nostos_domain::Lsn::new(snapshot_base),
                 principal.tenant_scope(tenant_column),
             )
@@ -1758,13 +1763,33 @@ fn build_predicate(
 /// never the principal's rows under a borrowed template (e2e §6 item 3 pins
 /// this over real PG). No client filters exist on the stream path: the whole
 /// shape is server config.
+///
+/// # Returns BOTH the session predicate and the snapshot expression
+///
+/// AUTHORIZATION, not ergonomics. The initial snapshot and live fan-out must
+/// enforce the SAME ruleset scope; when they were computed separately the
+/// snapshot silently skipped it (audit finding 7). So this returns the pair:
+///
+/// - `.0` — the full session predicate (rules ∧ bound ∧ tenant) for live
+///   fan-out, which filters rows in-process.
+/// - `.1` — `rules ∧ bound` for `SnapshotSource::snapshot_stream`, which
+///   compiles to SQL. The tenant clause is DELIBERATELY absent: it travels in
+///   `snapshot_stream`'s own `tenant` argument, where `scope_if_column_present`
+///   can drop it for a deliberately-global table that has no tenant column.
+///   Folding tenant into the expr instead would emit `WHERE "org_id" = $1`
+///   against a table with no `org_id` — a guaranteed SQL 42703 that the
+///   transport swallows into live-fan-out-only (the `products` catalog
+///   starvation observed 2026-08-27).
+///
+/// Returning the pair from ONE function is the point: two call sites deriving
+/// the same authorization independently is exactly how finding 7 happened.
 fn build_stream_predicate(
     table: &str,
     bound: PredicateExpr,
     principal: &Principal,
     tenant_column: Option<&str>,
     ruleset: &ActiveRuleset,
-) -> Result<Predicate, SubscribeRejection> {
+) -> Result<(Predicate, PredicateExpr), SubscribeRejection> {
     let rules_expr = match ruleset.decide(table, principal) {
         RuleDecision::Allow(expr) => expr,
         RuleDecision::DeniedTable => {
@@ -1780,14 +1805,19 @@ fn build_stream_predicate(
             });
         }
     };
+    // `PredicateExpr::and` collapses `Any`, so the zero-config `all` mode
+    // (which decides `Allow(Any)`) yields the bare template here rather than
+    // `And([Any, template])` — the latter is REFUSED by the SQL compiler and
+    // would turn every default deploy's stream snapshot into a swallowed error.
+    let snapshot_expr = rules_expr.and(bound);
     let mut p = Predicate {
         table: table.to_string(),
-        expr: rules_expr.and(bound),
+        expr: snapshot_expr.clone(),
     };
     if let Some(s) = principal.tenant_scope(tenant_column) {
         p = p.and_eq(s.column, ColumnValue::text(s.value));
     }
-    Ok(p)
+    Ok((p, snapshot_expr))
 }
 
 /// Replay-path authorization gate — the op-log twin of the live path's
@@ -3046,6 +3076,101 @@ mod tests {
         assert!(s.streams.contains_key("s1"));
     }
 
+    /// Audit finding 7: the stream's INITIAL SNAPSHOT must enforce the same
+    /// ruleset scope live fan-out does.
+    ///
+    /// `register_stream` used to hand the raw bound template to
+    /// `snapshot_stream` while the session predicate carried `rules ∧ bound ∧
+    /// tenant`. So under a table scope the first sync over-delivered exactly
+    /// that scope's worth of rows, and every row after it was filtered
+    /// correctly — a leak that only exists in the first frame, which is why
+    /// reading the live path proves nothing about it.
+    ///
+    /// `l2` is the load-bearing row: the stream template admits it
+    /// (`owner_id = u1`) and only the RULES scope (`status = 'open'`) hides
+    /// it. Before the fix it is delivered; after, it is not.
+    #[tokio::test]
+    async fn stream_snapshot_applies_the_rules_scope_not_just_the_template() {
+        let (subs, manager, sink, mut rx) = harness().await;
+        let snap: Arc<dyn SnapshotSource> = Arc::new(FakeStreamSnapshotter {
+            rows: vec![
+                (
+                    "l1",
+                    vec![
+                        ("owner_id", ColumnValue::text("u1")),
+                        ("status", ColumnValue::text("open")),
+                    ],
+                ),
+                (
+                    "l2",
+                    vec![
+                        ("owner_id", ColumnValue::text("u1")),
+                        ("status", ColumnValue::text("archived")),
+                    ],
+                ),
+                (
+                    "l3",
+                    vec![
+                        ("owner_id", ColumnValue::text("u2")),
+                        ("status", ColumnValue::text("open")),
+                    ],
+                ),
+            ],
+        });
+        // Toggles mode so the table carries a REAL scope (the `all`-mode
+        // helper decides `Allow(Any)`, which cannot catch this bug).
+        let ruleset = ActiveRuleset::compile(&nostos_domain::SyncRules {
+            version: nostos_domain::RULES_VERSION,
+            mode: SyncMode::Toggles,
+            tables: vec![nostos_domain::TableRule {
+                table: "lists".into(),
+                sync: true,
+                scope: Some("status = 'open'".into()),
+            }],
+            hand: Vec::new(),
+            streams: vec![nostos_domain::StreamRule {
+                name: "mine".into(),
+                table: "lists".into(),
+                template: "owner_id = :owner".into(),
+            }],
+        })
+        .unwrap();
+
+        register_stream(
+            "s1",
+            "mine",
+            &stream_params(&serde_json::json!({ "owner": "u1" })),
+            &subs,
+            &manager,
+            Some(&snap),
+            &sink,
+            &Principal::new("acct", "tenant-acme"),
+            None,
+            &ruleset,
+        )
+        .await
+        .expect("stream registers");
+
+        // begin boundary
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            crate::router::SinkMsg::Control(_)
+        ));
+
+        let mut delivered = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::router::SinkMsg::Event(ev) = msg {
+                delivered.push(ev.op.pk().to_string());
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec!["l1".to_string()],
+            "snapshot must apply the rules scope: l2 is owner-matched but \
+             status='archived' (rules-hidden), l3 is another owner"
+        );
+    }
+
     #[test]
     fn stream_predicate_tenant_wrap_is_fail_closed() {
         // build_stream_predicate directly: bound tenant-param + injected
@@ -3059,7 +3184,7 @@ mod tests {
         )
         .unwrap();
         let principal = Principal::new("acct", "tenant-acme");
-        let p =
+        let (p, _snapshot_expr) =
             build_stream_predicate("tasks", bound, &principal, Some("org_id"), &ruleset).unwrap();
         let row = |org: &'static str| {
             move |col: &str| -> Option<ColumnValue> {

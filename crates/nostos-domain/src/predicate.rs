@@ -206,17 +206,41 @@ impl PredicateExpr {
     }
 
     /// Combine two expressions with AND.
+    ///
+    /// `Any` is the identity for AND, and is COLLAPSED rather than wrapped —
+    /// the same normalization [`Predicate::and_eq`] already does one screen
+    /// down. This is not cosmetic. `Any` is a match-all *marker*, not a
+    /// compilable comparison: the SQL compiler
+    /// (`snapshot_source::compile_expr`) deliberately REFUSES it, because a
+    /// hand-built `Any` reaching SQL is a widened snapshot. The zero-config
+    /// `all` sync mode hands back exactly `Allow(PredicateExpr::any())`
+    /// (`transport.rs`), so without this collapse, ANDing a rules scope onto a
+    /// snapshot template yields `And([Any, ..])` — which compiles to an error,
+    /// which the transport swallows into live-fan-out-only, which silently
+    /// starves the client's first sync. Semantics are unchanged for
+    /// `matches()`: `Any AND x ≡ x`.
     #[inline]
     #[must_use]
     pub fn and(self, other: PredicateExpr) -> Self {
-        Self::And(vec![self, other])
+        match (self, other) {
+            (Self::Any, keep) | (keep, Self::Any) => keep,
+            (a, b) => Self::And(vec![a, b]),
+        }
     }
 
     /// Combine two expressions with OR.
+    ///
+    /// `Any` ABSORBS under OR (`Any OR x ≡ Any`) — the dual of [`Self::and`]
+    /// above, and the same rule [`Predicate::or_eq`] already applies. Widening
+    /// a disjunction back to match-all is the honest result here; it is the
+    /// caller's job not to OR a scope against `Any` and expect narrowing.
     #[inline]
     #[must_use]
     pub fn or(self, other: PredicateExpr) -> Self {
-        Self::Or(vec![self, other])
+        match (self, other) {
+            (Self::Any, _) | (_, Self::Any) => Self::Any,
+            (a, b) => Self::Or(vec![a, b]),
+        }
     }
 
     /// Does this expression match the given (column→value) view of a row?
@@ -948,5 +972,50 @@ mod tests {
             ("owner", ColumnValue::text("u1")),
             ("status", ColumnValue::text("archived")),
         ])));
+    }
+}
+
+#[cfg(test)]
+mod any_collapse_tests {
+    use super::*;
+
+    /// `Any` is AND's identity and OR's absorbing element, and both are
+    /// COLLAPSED rather than wrapped. Not a tidiness rule: `Any` is a
+    /// match-all marker the SQL compiler deliberately refuses, so an
+    /// `And([Any, ..])` reaching a snapshot query is a hard error that the
+    /// transport swallows into live-fan-out-only — a silently starved first
+    /// sync. The zero-config `all` sync mode decides `Allow(Any)`, so this is
+    /// the DEFAULT path, not an edge case.
+    #[test]
+    fn any_collapses_under_and_and_absorbs_under_or() {
+        let leaf = || PredicateExpr::eq("status", ColumnValue::text("open"));
+
+        // AND: identity, from either side, and never a wrapper.
+        assert_eq!(PredicateExpr::Any.and(leaf()), leaf());
+        assert_eq!(leaf().and(PredicateExpr::Any), leaf());
+        assert_eq!(PredicateExpr::Any.and(PredicateExpr::Any), PredicateExpr::Any);
+
+        // OR: absorbing — widening to match-all is the honest result.
+        assert_eq!(PredicateExpr::Any.or(leaf()), PredicateExpr::Any);
+        assert_eq!(leaf().or(PredicateExpr::Any), PredicateExpr::Any);
+
+        // Two real leaves still compose normally — the collapse must not
+        // swallow an actual conjunction.
+        assert!(matches!(leaf().and(leaf()), PredicateExpr::And(v) if v.len() == 2));
+        assert!(matches!(leaf().or(leaf()), PredicateExpr::Or(v) if v.len() == 2));
+    }
+
+    /// The collapse is semantics-preserving for row matching: whatever the
+    /// tree shape, `Any AND x` must accept exactly what `x` accepts.
+    #[test]
+    fn collapse_does_not_change_which_rows_match() {
+        let scoped = PredicateExpr::Any.and(PredicateExpr::eq("status", ColumnValue::text("open")));
+        let row = |status: &'static str| {
+            move |col: &str| -> Option<ColumnValue> {
+                (col == "status").then(|| ColumnValue::text(status))
+            }
+        };
+        assert!(scoped.matches(row("open")));
+        assert!(!scoped.matches(row("archived")));
     }
 }
