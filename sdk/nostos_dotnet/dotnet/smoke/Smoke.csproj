@@ -41,10 +41,22 @@
     <Compile Include="Program.cs" />
     <!-- Ship the host cdylib to the output dir so DllImport resolves from
          app base. run-dotnet-e2e.sh guarantees a release build exists first. -->
+    <!-- One of these three exists per host: cargo names the cdylib
+         libnostos_dotnet.dylib on macOS, .so on Linux, nostos_dotnet.dll on
+         Windows. Only the .dylib was listed, so on Linux CI nothing was
+         copied and DllImport("nostos_dotnet") could not resolve. -->
     <None Include="../../target/release/libnostos_dotnet.dylib"
           Condition="Exists('../../target/release/libnostos_dotnet.dylib')"
           CopyToOutputDirectory="PreserveNewest"
           Link="libnostos_dotnet.dylib" />
+    <None Include="../../target/release/libnostos_dotnet.so"
+          Condition="Exists('../../target/release/libnostos_dotnet.so')"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="libnostos_dotnet.so" />
+    <None Include="../../target/release/nostos_dotnet.dll"
+          Condition="Exists('../../target/release/nostos_dotnet.dll')"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="nostos_dotnet.dll" />
   </ItemGroup>
 
 </Project>
