@@ -153,6 +153,12 @@ impl JwksVerifier {
         validation.validate_nbf = true;
         if !self.issuers.is_empty() {
             validation.set_issuer(&self.issuers);
+            // `set_issuer` alone only compares `iss` WHEN PRESENT (jsonwebtoken
+            // 10.x does not add it to `required_spec_claims`), so a token that
+            // simply omitted `iss` bypassed the allowlist. Caught by
+            // `jwks_wrong_iss_rejected_when_allowlist_set`. An allowlist means
+            // "must be one of these", which includes "must be there".
+            validation.required_spec_claims.insert("iss".to_string());
         }
         let data = decode::<SupabaseClaims>(token, &key.decoding_key, &validation).ok()?;
         let sub = data.claims.sub;
@@ -573,6 +579,119 @@ mod tests {
         assert_eq!(principal.account_id, "user-1");
         assert_eq!(principal.tenant_id, "user-1");
         assert_eq!(fixture.hit_count(), 1);
+    }
+
+    // ---- audit finding 4: nbf + iss allowlist on the JWKS path ----
+    //
+    // The fix landed in 10ebc93 with no tests; these pin the behaviour.
+    // `jsonwebtoken`'s default leeway is 60s, the same as
+    // `crate::auth::JWT_LEEWAY_SECS`, so the HS256 tests in `auth.rs` and
+    // these draw the boundary at the same place.
+
+    fn claims_with(extra: &serde_json::Value) -> serde_json::Value {
+        let now = jsonwebtoken::get_current_timestamp();
+        let mut claims = serde_json::json!({ "sub": "user-1", "exp": now + 3600, "iat": now });
+        if let (Some(base), Some(add)) = (claims.as_object_mut(), extra.as_object()) {
+            base.extend(add.clone());
+        }
+        claims
+    }
+
+    #[tokio::test]
+    async fn jwks_future_nbf_rejected() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let nbf = jsonwebtoken::get_current_timestamp() + 3600;
+        let token = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "nbf": nbf })),
+        );
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert!(
+            verifier.verify(&token, &header).await.is_none(),
+            "an RS256 token not yet valid (nbf an hour ahead) must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_nbf_within_leeway_accepted() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let nbf = jsonwebtoken::get_current_timestamp() + 30;
+        let token = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "nbf": nbf })),
+        );
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert!(
+            verifier.verify(&token, &header).await.is_some(),
+            "an nbf inside the 60s clock-skew leeway must not be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_wrong_iss_rejected_when_allowlist_set() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10))
+            .with_issuers(vec!["https://good.example/auth/v1".to_string()]);
+        let wrong = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "iss": "https://evil.example/auth/v1" })),
+        );
+        let header = jsonwebtoken::decode_header(&wrong).unwrap();
+        assert!(
+            verifier.verify(&wrong, &header).await.is_none(),
+            "an iss outside the allowlist must be rejected even with a valid signature"
+        );
+        let missing = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({})),
+        );
+        let header = jsonwebtoken::decode_header(&missing).unwrap();
+        assert!(
+            verifier.verify(&missing, &header).await.is_none(),
+            "with an allowlist set, a token with no iss is rejected too"
+        );
+        let right = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "iss": "https://good.example/auth/v1" })),
+        );
+        let header = jsonwebtoken::decode_header(&right).unwrap();
+        assert!(
+            verifier.verify(&right, &header).await.is_some(),
+            "an allowlisted iss still verifies"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_any_iss_accepted_when_allowlist_unset() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let token = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "iss": "https://anyone.example/auth/v1" })),
+        );
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert!(
+            verifier.verify(&token, &header).await.is_some(),
+            "no allowlist configured = iss unchecked (upgrade-safe default)"
+        );
     }
 
     // ---- D1: extra-claims lifting applies on the JWKS path too (ADR-0031) ----

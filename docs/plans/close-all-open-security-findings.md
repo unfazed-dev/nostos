@@ -198,6 +198,23 @@ Boot-verified as required: `NOSTOS_SNAPSHOT_MAX_ROWS=lots` exits 2 with
   defaults to EMPTY = unchecked — a non-empty default would reject every
   existing deployment's tokens on upgrade. `validate_aud` stays false; it is
   load-bearing for Supabase's `aud:"authenticated"`.
+  - **Gap found on re-verification:** `10ebc93` only fixed the JWKS path.
+    `verify_supabase_hs256` still checked `exp` alone, and
+    `SupabaseJwtAuth::with_issuers` forwarded the allowlist only into
+    `JwksVerifier` — so `NOSTOS_JWT_ISSUERS` never applied to HS256 tokens and
+    a future-`nbf` HS256 token was usable. The JWKS side also shipped with
+    zero tests for `nbf`/`with_issuers`. Closed by
+    `fix(auth): enforce nbf and issuer allowlist on HS256 path, add tests for
+    both verifiers`: `nbf_and_issuer_ok` in `auth.rs` mirrors
+    `jsonwebtoken`'s rules (same `JWT_LEEWAY_SECS`, same "absent iss = not
+    in list"), `with_issuers` now stores the list for HS256 as well as JWKS
+    (one knob, both paths, no `main.rs` change), and both paths gained
+    future-nbf / nbf-within-leeway / wrong-iss / no-allowlist tests.
+    Writing the JWKS test exposed a second hole: `jsonwebtoken` 10.x's
+    `set_issuer` only compares `iss` when present, so with an allowlist set a
+    token that simply omitted `iss` still verified. Fixed in the same commit
+    by adding `iss` to `required_spec_claims` whenever the allowlist is
+    non-empty.
 - **Finding 6 — JWKS staleness ceiling.** `DEFAULT_JWKS_MAX_STALE = 30 min`.
   Past it the cache refuses rather than serving, converting an indefinite
   fail-open on revocation into a bounded one. A cache that never fetched
