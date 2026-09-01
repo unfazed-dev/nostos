@@ -449,6 +449,18 @@ measured: 132 domain + 214 infra tests, zero failures.
 Items 1 (predicate bound) and the boot-time tenant guard are now **verified**:
 `0 skipped` confirms the pg suite really ran rather than self-skipping.
 
+### Re-verified after the fixes (2026-09-02)
+
+| suite | result |
+|---|---|
+| `make ci` | **`MAKE_CI_EXIT=0` — 972 passed, 0 failed, 0 ignored**; 78 test binaries, 0 `FAILED`; zero clippy warnings, zero fmt diffs |
+| boot guard, 4 cases against the real binary | refuses the insecure pair; starts on `=1`, on `=true`, and on loopback-without-hatch |
+| `e2e_pg_snapshot` (the 2 formerly-failing tests) | **2 passed, 0 failed** once `bench_apply` left the publication |
+
+The `make ci` numbers are read off the `test result:` lines and the recorded
+`MAKE_CI_EXIT`, not off a shell exit code — a wrapper reported "exit code 0"
+twice in this session for runs that had actually failed or not run at all.
+
 ### The 2 pg failures are pre-existing, not from this work
 
 `e2e_pg_snapshot.rs`: `concurrent_writes_during_snapshot_appear_exactly_once`
