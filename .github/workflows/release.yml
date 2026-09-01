@@ -17,6 +17,15 @@ env:
   RUSTFLAGS: "-D warnings"
   NOSTOS_FLUTTER_RUST_DIR: sdk/nostos_flutter/rust
 
+# The repo default is `read` (verified 2026-09-01:
+# `gh api repos/:owner/:repo/actions/permissions/workflow` ->
+# default_workflow_permissions="read"). Without the per-job grants below,
+# `create-release` cannot publish the Release and `update-manifest` cannot open
+# its PR — the whole point of the tag push. Least privilege: read here, write
+# only on the two jobs that need it.
+permissions:
+  contents: read
+
 jobs:
   # ===========================================================================
   # 1a. `nostos` + `nostos-server` CLI/server binaries.
@@ -322,6 +331,14 @@ jobs:
   update-manifest:
     name: assemble prebuilt.json for this release
     runs-on: ubuntu-latest
+    # create-pull-request pushes a branch (contents) and opens the PR
+    # (pull-requests). NOTE: the YAML grant is necessary but NOT sufficient —
+    # the repo setting "Allow GitHub Actions to create and approve pull
+    # requests" must also be on, or the step dies with "GitHub Actions is not
+    # permitted to create or approve pull requests".
+    permissions:
+      contents: write
+      pull-requests: write
     needs: [flutter-android, flutter-ios, flutter-macos]
     outputs:
       manifest-path: release-prebuilt-manifest.json
@@ -363,6 +380,9 @@ jobs:
   create-release:
     name: create GitHub Release
     runs-on: ubuntu-latest
+    # action-gh-release creates the Release and uploads every artifact.
+    permissions:
+      contents: write
     needs:
       [
         cli-server-macos,
