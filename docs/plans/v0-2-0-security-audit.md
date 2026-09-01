@@ -351,10 +351,16 @@ Items 1 (predicate bound) and the boot-time tenant guard are now **verified**:
 `e2e_pg_snapshot.rs`: `concurrent_writes_during_snapshot_appear_exactly_once`
 and `fresh_slot_yields_snapshot_rows_then_live_stream`.
 
-Attribution was measured, not assumed — `git checkout 75ba8f8 -- transport.rs`
-reproduces both failures identically on the pre-fix tree. They also fail 2/2 on
-re-run, so they are deterministic in the current DB state, not flaky. Neither
-test uses `resume_lsn`, so the replay branch this work touches is never entered.
+Attribution was measured against a TRUE baseline, not just the pre-fix file.
+`git checkout 75ba8f8 -- transport.rs` was the first check, but `75ba8f8` is
+itself this session's HEAD and already carries the earlier fixes (predicate
+bound `3b23b04`, WS caps `6239e1e`) — reproducing there does not prove
+"pre-existing". The decisive run reverts **all** of `crates/` to the
+pre-session commit `071fe96` (8 files, 510 deletions): both tests still fail.
+
+They also fail 2/2 on re-run, so they are deterministic in the current DB
+state, not flaky. Neither test uses `resume_lsn`, so the replay branch this
+work touches is never entered.
 
 Root cause not established. What is ruled out: leftover rows (the test
 `TRUNCATE`s `tasks` itself, line 106), publication volume (27 rows across all
@@ -374,6 +380,21 @@ Both worth knowing, because each reported success while running nothing:
 An exit code is not a test result. Only a `test result:` line is, and only when
 the skip count is also checked — the pg suite self-skips silently without
 `NOSTOS_E2E_PG=1`.
+
+A third trap: reverting a file to "the commit before my fix" proves nothing when
+that commit is also yours. A baseline has to predate the whole session.
+
+## Operational hazard: the disk
+
+The 238 GiB volume hit 100% mid-session. A Python `open(path, "w")` truncates
+before it writes, so the full disk left `crates/nostos-infra/src/transport.rs` at
+**0 bytes**; `git checkout` could not restore it either, because git could not
+write `.git/index.lock`. Recovered by deleting `target/debug/incremental`, then
+restoring from git — nothing was lost, but only because the file was committed.
+
+Every later file write in this session used write-temp-then-`os.replace`, which
+is atomic and cannot truncate the original on failure. The volume is still at
+96%; `target/` is the bulk and is regenerable.
 
 ## Recommended next test, not yet written
 
