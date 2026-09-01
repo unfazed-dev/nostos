@@ -22,7 +22,7 @@ LOG="$DIR/server.log"
 echo '[d5] starting nostos-server (transport=iroh, replicator=fake)...'
 env NOSTOS_BIND="$BIND" NOSTOS_REPLICATOR=fake \
     ${NOSTOS_IROH_RELAY_URL:+NOSTOS_IROH_RELAY_URL="$NOSTOS_IROH_RELAY_URL"} \
-    cargo run -q -p nostos-server -- --transport iroh >"$LOG" 2>&1 &
+    cargo run -q -p nostos-server --features iroh -- --transport iroh >"$LOG" 2>&1 &
 SRV=$!
 trap 'kill "$SRV" 2>/dev/null || true' EXIT
 
