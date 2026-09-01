@@ -68,7 +68,31 @@ pub enum ParseError {
     TrailingInput(String),
     #[error("invalid number literal: {0}")]
     InvalidNumber(String),
+    #[error("expression nested deeper than {max} levels")]
+    TooDeep { max: u32 },
+    #[error("expression has {found} tokens; the limit is {max}")]
+    TooLarge { found: usize, max: usize },
 }
+
+/// Maximum `NOT`/parenthesis nesting depth.
+///
+/// The parser is recursive descent, so nesting depth is stack depth. Without
+/// this bound, ~50k `NOT ` tokens (200 KB — well inside the 16 MiB WS frame
+/// ceiling) overflowed the stack and **aborted the process**: a fatal runtime
+/// error, not a catchable panic, taking down fan-out for every tenant. Sessions
+/// run on tokio workers whose 2 MiB stacks are a quarter of the 8 MiB main
+/// thread the original repro used, so the real cliff is lower still.
+/// 64 is far above any legitimate subscription filter and far below the cliff.
+const MAX_DEPTH: u32 = 64;
+
+/// Maximum token count in one predicate expression.
+///
+/// Depth alone does not bound cost: `a=1 OR a=1 OR …` builds a *flat* Vec, so a
+/// million-node predicate is only one level deep. `PredicateExpr::matches` walks
+/// every node on every replicated event inside the shared fan-out loop, so one
+/// client's oversized filter degrades delivery for all of them. Bounding tokens
+/// bounds nodes (nodes <= tokens) with a single check at the entrypoint.
+const MAX_TOKENS: usize = 4096;
 
 /// Parse a safe-SQL-subset predicate string into a [`PredicateExpr`] tree.
 ///
@@ -80,7 +104,17 @@ pub fn parse_predicate_expr(input: &str) -> Result<PredicateExpr, ParseError> {
     if tokens.is_empty() {
         return Err(ParseError::Empty);
     }
-    let mut p = Parser { tokens, pos: 0 };
+    if tokens.len() > MAX_TOKENS {
+        return Err(ParseError::TooLarge {
+            found: tokens.len(),
+            max: MAX_TOKENS,
+        });
+    }
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let expr = p.parse_or()?;
     // All input must be consumed (no trailing garbage).
     if p.pos < p.tokens.len() {
@@ -262,9 +296,27 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Current recursion depth, bounded by [`MAX_DEPTH`].
+    depth: u32,
 }
 
 impl Parser {
+    /// Enter one level of recursion, or fail if [`MAX_DEPTH`] is reached.
+    ///
+    /// Callers pair this with [`Parser::leave`] on the success path; the error
+    /// path abandons the whole parse, so an unbalanced `enter` cannot leak.
+    fn enter(&mut self) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(ParseError::TooDeep { max: MAX_DEPTH });
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
     }
@@ -310,7 +362,9 @@ impl Parser {
     fn parse_not(&mut self) -> Result<PredicateExpr, ParseError> {
         if matches!(self.peek(), Some(Token::Not)) {
             self.advance();
+            self.enter()?;
             let inner = self.parse_not()?;
+            self.leave();
             return Ok(PredicateExpr::Not(Box::new(inner)));
         }
         self.parse_atom()
@@ -321,7 +375,9 @@ impl Parser {
         match self.peek() {
             Some(Token::LParen) => {
                 self.advance();
+                self.enter()?;
                 let inner = self.parse_or()?;
+                self.leave();
                 match self.advance() {
                     Some(Token::RParen) => Ok(inner),
                     _ => Err(ParseError::UnbalancedParens),
