@@ -302,6 +302,16 @@ reconnected. The decrement at `store.rs:238` funnels *every* removal path
 underflow, and is gated on `if let Some(stored) = removed` so a double-remove
 cannot double-decrement — read first, then confirmed empirically here.
 
+**`nostos-bench-10k` (the 10k-client soak) was NOT run.** Under the contention
+described below it could not have produced a trustworthy number, which is the
+reason to say so rather than quietly omit it.
+
+**Binary names, for the next agent:** the bench binaries are `nostos-bench`,
+`nostos-bench-10k`, `nostos-reconnect-storm`, `nostos-bench-pg-ingest` — *not* the
+source-file names (`probe_10k`, `reconnect_storm`). An inventory sweep this pass
+reported the source names as binary names and `cargo run --bin reconnect_storm`
+fails.
+
 **Do NOT read 252,797 ops/sec as a regression against the recorded 833,307.**
 Same host (`unfazed-macbook-air.local`, 10 cores), same profile
 (`lto=fat, codegen-units=1`) — but the machine was carrying a **load average of
