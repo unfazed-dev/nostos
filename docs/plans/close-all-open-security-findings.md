@@ -275,6 +275,36 @@ tenant-ANDed shape that actually ships, and both Kleene short-circuits.
   than implying protection it does not have. `/rules` is still genuinely gated
   there, because the admin token is unrelated to sync auth.
 
+## Verification actually run (2026-09-02)
+
+| Suite | Command | Result |
+|---|---|---|
+| Real-Postgres e2e | `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg -- --test-threads=1` | **exit 0, 397 passed, 0 failed** |
+| Flutter SDK | `flutter analyze` + `flutter test` | analyze clean; **85 passed** |
+| Flutter doc signatures | `python3 sdk/nostos_flutter/scripts/check-doc-signatures.py` | OK |
+| Web admin | `npm run check` (svelte-check) | **688 files, 0 errors, 0 warnings** |
+| Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
+
+**The pg e2e was checked for the false-positive, not just the exit code.** All 14
+`e2e_pg_*` files self-skip silently when `NOSTOS_E2E_PG` is unset and still report
+`ok`, so a green exit proves nothing on its own. `grep -c skipping` over the log
+returned **0** — the suite genuinely ran. This is the first session in which
+Docker was available for it.
+
+### Two self-inflicted failures worth recording
+
+1. **A "killed run" masquerading as a lint failure.** `ws_contract` stalled at
+   `_dyld_start` with a **112 KB** resident footprint — it never reached `main`;
+   a loaded Rust+tokio binary is tens of MB. That is macOS Gatekeeper/dyld on an
+   external volume, not a deadlock in the new per-principal cap, which was the
+   obvious suspect. Running the same binary directly afterwards: exit 0. The
+   lesson from last session held — `MAKE_CI_EXIT=2` with `binaries=0` and no
+   error text means killed, so read the log before "fixing" anything.
+2. **Five integration failures caused by my own verification.** The boot-tests
+   spawn `./target/debug/nostos-server` while the suite was rebuilding and
+   spawning the same binary. Re-run clean, and `admin_auth` 3×3 stable. Do not
+   boot-verify and run the gate at the same time.
+
 ### Deliberately NOT bundled
 
 - **A token field for `nostos pull`.** `ProjectConfig` has none, and adding one
