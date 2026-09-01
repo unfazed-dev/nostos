@@ -357,7 +357,12 @@ Docker was available for it.
   bare 401. **Follow-up, done in `9e2313c`:** `nostos pull --token <TOKEN>`
   with env fallback `NOSTOS_TOKEN` sends `Authorization: Bearer <token>` on
   `GET /schema`. The token is a flag/env value only — still no field in
-  `.nostos/config.json`, which is committed — and is never printed.
+  `.nostos/config.json`, which is committed — and is never printed. Hardening
+  on top: `--token` beats `NOSTOS_TOKEN`; the value is a `Token` newtype whose
+  `Debug` and `Display` both print `<redacted>`; and a token is only sent over
+  `https://` or to loopback (`127.0.0.0/8`, `::1`, `localhost`) — plain
+  `http://` to any other host bails unless `--allow-insecure-token` is passed.
+  Each rule has a unit test in `crates/nostos-cli/src/commands/pull.rs`.
 - **CORS is unchanged.** `build_cors_layer` still returns
   `CorsLayer::permissive()` on empty `NOSTOS_CORS_ORIGINS`. That is the
   documented local-dev default and `NOSTOS_CORS_ORIGINS` is the existing

@@ -301,9 +301,12 @@ see the deploy guide (TBD).
 not used to operate the server. Documented for completeness; see
 ADR-0023. One operator-facing note: when the server runs with
 `NOSTOS_PROTECT_METADATA=1`, `nostos pull` needs `--token <TOKEN>` or the
-`NOSTOS_TOKEN` env var to read `GET /schema`; the token goes through the same
-`NOSTOS_SYNC_AUTH` adapter as sync clients and is never stored in
-`.nostos/config.json`.
+`NOSTOS_TOKEN` env var to read `GET /schema` (`--token` wins when both are
+set); the token goes through the same `NOSTOS_SYNC_AUTH` adapter as sync
+clients, is never stored in `.nostos/config.json`, and is never printed. A
+token is only sent over `https://` or to loopback (`127.0.0.1`, `localhost`,
+`::1` — the `nostos dev` case); plain `http://` to any other host is refused
+unless `--allow-insecure-token` is passed.
 
 ### 4.2 `nostos-server` (crates/nostos-server/src/main.rs:33-205)
 

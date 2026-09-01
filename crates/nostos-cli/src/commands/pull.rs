@@ -16,14 +16,24 @@ use crate::config::{ProjectConfig, DOT_NOSTOS_DIR, SCHEMA_JSON};
 /// clap attribute can never drift apart.
 pub const TOKEN_ENV: &str = "NOSTOS_TOKEN";
 
-/// A bearer token for `GET /schema`. Newtype so redaction is structural: any
-/// `{:?}` of any struct that carries one prints `[redacted]`, and there is no
-/// `Display` at all — `nostos pull` never prints the value, on purpose.
+/// A bearer token for `GET /schema`. Newtype so redaction is structural: both
+/// `{:?}` and `{}` of anything that carries one print `<redacted>`, so the
+/// value cannot reach a log line, a panic message, or verbose request output
+/// by accident. The only way out is `non_blank()`, which is private to this
+/// module and consumed solely by `build_schema_request`.
 ///
-/// Deliberately NOT a `.nostos/config.json` field: that file is committed, so a
-/// secret in it would ship with the repo (v0-2-0-security-audit follow-up).
+/// Deliberately NOT a `.nostos/config.json` field and deliberately not
+/// `Serialize`: that file is committed, so a secret in it would ship with the
+/// repo (v0-2-0-security-audit follow-up). `nostos pull` never calls
+/// `ProjectConfig::save`; the token lives on `PullArgs` only.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Token(String);
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
 
 impl Token {
     /// The token with surrounding whitespace trimmed, or `None` when it is
@@ -46,7 +56,7 @@ impl FromStr for Token {
 
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token([redacted])")
+        f.write_str("Token(<redacted>)")
     }
 }
 
@@ -62,10 +72,18 @@ pub struct PullArgs {
     /// Only needed when the server runs with `NOSTOS_PROTECT_METADATA=1`; it
     /// must then satisfy the server's `NOSTOS_SYNC_AUTH` adapter (the
     /// `NOSTOS_SYNC_BEARER_TOKEN` secret for `bearer`, a user JWT for
-    /// `supabase-jwt`). Falls back to the `NOSTOS_TOKEN` env var. Never
-    /// stored in `.nostos/config.json` and never printed.
+    /// `supabase-jwt`). Falls back to the `NOSTOS_TOKEN` env var; an explicit
+    /// `--token` wins over the env var. Never stored in `.nostos/config.json`
+    /// and never printed.
     #[arg(long, env = TOKEN_ENV, hide_env_values = true)]
     pub token: Option<Token>,
+
+    /// Send the bearer token over plain `http://` to a non-loopback host.
+    /// By default a token is only sent over `https://` or to loopback
+    /// (`127.0.0.1`, `localhost`, `::1` — the `nostos dev` case), because plain
+    /// HTTP puts the secret on the wire in cleartext.
+    #[arg(long, default_value_t = false)]
+    pub allow_insecure_token: bool,
 }
 
 /// Fetch `GET {http_base}/schema` from the running nostos-server and write the
@@ -88,6 +106,9 @@ pub async fn run(args: PullArgs, cwd: &Path) -> Result<()> {
     };
     let schema_url = schema_endpoint_url(&http_base);
     let token = args.token.as_ref().and_then(Token::non_blank);
+    if token.is_some() {
+        ensure_token_transport(&schema_url, args.allow_insecure_token)?;
+    }
 
     let client = reqwest::Client::new();
     let response = build_schema_request(&client, &schema_url, token)
@@ -181,6 +202,45 @@ fn build_schema_request(
     }
 }
 
+/// Refuse to put a bearer token on the wire in cleartext. `https://` (and
+/// `wss://`, in case a caller hands us the sync URL) is always fine; plain
+/// `http://`/`ws://` is fine only for loopback — `127.0.0.0/8`, `::1`, or the
+/// literal `localhost` — which is exactly the `nostos dev` case. Anything else
+/// needs `--allow-insecure-token`. Pure function of the URL text, so the
+/// loopback/non-loopback decision is unit-tested without a network.
+///
+/// # Errors
+/// [`anyhow::Error`] if the URL does not parse, or if it is plain HTTP to a
+/// non-loopback host and `allow_insecure` is false.
+fn ensure_token_transport(schema_url: &str, allow_insecure: bool) -> Result<()> {
+    use std::net::IpAddr;
+
+    let url =
+        reqwest::Url::parse(schema_url).with_context(|| format!("parsing URL {schema_url}"))?;
+    let cleartext = matches!(url.scheme(), "http" | "ws");
+    if !cleartext {
+        return Ok(());
+    }
+    let host = url.host_str().unwrap_or("<no host>");
+    // `host_str` keeps the brackets on IPv6 literals (`[::1]`); strip them so
+    // the address parses. Anything that is not an IP literal is a domain.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = bare.parse::<IpAddr>().map_or_else(
+        |_| bare.eq_ignore_ascii_case("localhost"),
+        |ip| ip.is_loopback(),
+    );
+    if loopback || allow_insecure {
+        return Ok(());
+    }
+    bail!(
+        "refusing to send a bearer token over plain {}:// to {host} — the \
+         token would cross the network in cleartext. Bearer tokens are only \
+         sent over https:// or to loopback (127.0.0.1 / localhost / ::1). Use \
+         an https:// URL, or pass --allow-insecure-token if you accept the risk.",
+        url.scheme()
+    )
+}
+
 /// The 401 explanation, keyed on whether we sent a token: the server returns
 /// the same status for "missing" and "rejected", and the operator needs to
 /// know which one they are looking at. Never includes the token value.
@@ -266,10 +326,114 @@ mod tests {
         let args = PullArgs {
             url: None,
             token: Some(Token("hunter2".to_owned())),
+            allow_insecure_token: false,
         };
         let dbg = format!("{args:?}");
-        assert!(dbg.contains("[redacted]"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
         assert!(!dbg.contains("hunter2"), "token leaked via Debug: {dbg}");
+    }
+
+    #[test]
+    fn token_display_is_redacted() {
+        let shown = format!("{}", Token("hunter2".to_owned()));
+        assert_eq!(shown, "<redacted>");
+        // Same through an anyhow context chain, the way a stray `{}` in an
+        // error message would print it.
+        let err = anyhow::anyhow!("token was {}", Token("hunter2".to_owned()));
+        assert!(!format!("{err}").contains("hunter2"), "{err}");
+    }
+
+    #[test]
+    fn flag_beats_env_and_env_is_fallback() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            pull: PullArgs,
+        }
+
+        // Edition 2021: `set_var`/`remove_var` are safe fns. This is the only
+        // test in the crate that parses `PullArgs`, so the process-global env
+        // write cannot race another test's expectations.
+        std::env::set_var(TOKEN_ENV, "from-env");
+        let flag = Cli::try_parse_from(["nostos", "--token", "from-flag"]).unwrap();
+        let env_only = Cli::try_parse_from(["nostos"]).unwrap();
+        std::env::remove_var(TOKEN_ENV);
+        let none = Cli::try_parse_from(["nostos"]).unwrap();
+
+        assert_eq!(flag.pull.token, Some(Token("from-flag".to_owned())));
+        assert_eq!(env_only.pull.token, Some(Token("from-env".to_owned())));
+        assert_eq!(none.pull.token, None);
+        assert!(!flag.pull.allow_insecure_token);
+    }
+
+    #[test]
+    fn project_config_has_no_token_field() {
+        // `Token` is deliberately not `Serialize` and `PullArgs` is never
+        // persisted; pin the committed config's key set so a token field
+        // cannot be added to `.nostos/config.json` without failing here.
+        let cfg = ProjectConfig {
+            project: "p".into(),
+            sync_url: "wss://nostos.example.com/sync".into(),
+            backend: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        let keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["project", "sync_url"]);
+    }
+
+    #[test]
+    fn token_transport_allows_https_anywhere() {
+        assert!(ensure_token_transport("https://nostos.example.com/schema", false).is_ok());
+        assert!(ensure_token_transport("wss://10.0.0.5:8800/schema", false).is_ok());
+    }
+
+    #[test]
+    fn token_transport_allows_plain_http_to_loopback() {
+        for url in [
+            "http://127.0.0.1:8800/schema",
+            "http://127.0.0.2:8800/schema",
+            "http://localhost:8800/schema",
+            "http://LOCALHOST/schema",
+            "http://[::1]:8800/schema",
+            "ws://127.0.0.1:8800/sync",
+        ] {
+            assert!(ensure_token_transport(url, false).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn token_transport_refuses_plain_http_to_non_loopback() {
+        for url in [
+            "http://10.0.0.5:8800/schema",
+            "http://nostos.example.com/schema",
+            "http://192.168.1.20/schema",
+            "http://[fe80::1]:8800/schema",
+            "http://localhost.evil.example/schema",
+        ] {
+            let err = ensure_token_transport(url, false).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("cleartext"), "{url}: {msg}");
+            assert!(msg.contains("https://"), "{url}: {msg}");
+            assert!(msg.contains("--allow-insecure-token"), "{url}: {msg}");
+            assert!(!msg.contains("hunter2"), "{url}: {msg}");
+        }
+    }
+
+    #[test]
+    fn token_transport_override_allows_non_loopback() {
+        assert!(ensure_token_transport("http://10.0.0.5:8800/schema", true).is_ok());
+    }
+
+    #[test]
+    fn token_transport_rejects_unparseable_url() {
+        assert!(ensure_token_transport("not a url", false).is_err());
     }
 
     #[test]
