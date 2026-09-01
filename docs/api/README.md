@@ -181,7 +181,8 @@ From `crates/nostos-cli/src/main.rs:22`:
 `NOSTOS_TOKEN` in the environment and the CLI sends `Authorization: Bearer <token>`. The token must
 satisfy the server's `NOSTOS_SYNC_AUTH` adapter (the `NOSTOS_SYNC_BEARER_TOKEN` secret for `bearer`, a
 user JWT for `supabase-jwt`). It is never written to `.nostos/config.json` (that file is committed)
-and never printed.
+and never printed. Prefer `NOSTOS_TOKEN` over `--token` on shared machines (`--token` is visible in
+`ps`), and note that a token sent to a plain `http://` server travels in cleartext.
 
 ## Wire protocol
 
