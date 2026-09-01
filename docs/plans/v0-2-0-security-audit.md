@@ -455,7 +455,18 @@ Items 1 (predicate bound) and the boot-time tenant guard are now **verified**:
 |---|---|
 | `make ci` | **`MAKE_CI_EXIT=0` — 972 passed, 0 failed, 0 ignored**; 78 test binaries, 0 `FAILED`; zero clippy warnings, zero fmt diffs |
 | boot guard, 4 cases against the real binary | refuses the insecure pair; starts on `=1`, on `=true`, and on loopback-without-hatch |
-| `e2e_pg_snapshot` (the 2 formerly-failing tests) | **2 passed, 0 failed** once `bench_apply` left the publication |
+| real-Postgres e2e — **all 15 `e2e_pg_*` binaries**, `NOSTOS_E2E_PG=1`, `--test-threads=1` | **44 passed, 0 failed, 0 ignored** |
+| `e2e_pg_snapshot` (the 2 formerly-failing tests) | **2 passed, 0 failed** — `bench_apply` unpublished |
+| `e2e_pg_sync_streams` (incl. `cross_tenant_param_abuse_never_leaks`) | **5 passed, 0 failed** |
+
+The pg suite had to be run in two foreground batches: a whole-suite background
+run was externally killed twice before finishing a single binary, and a partial
+run is not a result. Per-binary counts are non-zero and `0 ignored`, which is
+what proves the tests actually ran rather than self-skipping on a missing
+`NOSTOS_E2E_PG`.
+
+**This retires the "296 passed / 2 failed" line above.** Nothing in the pg suite
+fails as of 2026-09-02.
 
 The `make ci` numbers are read off the `test result:` lines and the recorded
 `MAKE_CI_EXIT`, not off a shell exit code — a wrapper reported "exit code 0"
