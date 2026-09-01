@@ -30,6 +30,24 @@ use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 use clap::Parser;
 use tower_http::trace::TraceLayer;
+
+/// Request span that records the URI **path only**, never the query string.
+///
+/// Browsers cannot set an `Authorization` header on a WebSocket handshake, so
+/// `/sync` also accepts the bearer token as `?token=<jwt>` (see `AuthQuery` in
+/// nostos-infra's transport). tower-http's `DefaultMakeSpan` records the whole
+/// URI, which writes that live credential into every request span — and from
+/// there into stdout, any log aggregator, and anything tailing the container.
+/// Reverse proxies keep their own access logs, so this does not fix the whole
+/// class; it stops Nostos from being the one that leaks it.
+fn redacted_request_span(req: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    tracing::info_span!(
+        "request",
+        method = %req.method(),
+        path = %req.uri().path(),
+        version = ?req.version(),
+    )
+}
 use tracing::{info, warn};
 
 /// Command-line / env configuration for the sync server.
@@ -1072,7 +1090,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .layer(cors.clone())
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
         .with_state(state)
         // ADR-0037 §3 (plan 3.1): push-token registration, same JWT auth as
         // /sync, own state (registry + auth + tenant column) — merged after
@@ -1096,7 +1114,7 @@ async fn main() -> anyhow::Result<()> {
                     tenant_column: tenant_col.map(str::to_string),
                 })
                 .layer(cors)
-                .layer(TraceLayer::new_for_http()),
+                .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span)),
         );
 
     // B2 mirror (ADR-0042): the engine's write door. Mounted ONLY under
@@ -1108,7 +1126,7 @@ async fn main() -> anyhow::Result<()> {
                 .route("/ingest", axum::routing::post(ingest::post_ingest))
                 .with_state(ing)
                 .layer(build_cors_layer(&cfg.cors_origins)?)
-                .layer(TraceLayer::new_for_http()),
+                .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span)),
         )
     } else {
         app

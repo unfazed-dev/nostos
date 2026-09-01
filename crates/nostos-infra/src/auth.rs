@@ -135,7 +135,15 @@ impl StaticBearerAuth {
 impl SyncAuth for StaticBearerAuth {
     async fn authenticate(&self, token: &str) -> Option<Principal> {
         let got: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        if got != self.digest {
+        // Constant-time: `!=` on `[u8; 32]` early-exits on the first differing
+        // byte, which leaks a digest prefix. Harmless in practice (SHA-256 is
+        // not invertible, so a prefix oracle yields no token bytes) but the
+        // doc comment above promises timing carries no information, and a
+        // security path should not need that footnote to be true.
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            got.as_slice(),
+            self.digest.as_slice(),
+        )) {
             return None;
         }
         Some(Principal::new(
