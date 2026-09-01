@@ -30,7 +30,7 @@ trap 'kill "$SRV" 2>/dev/null || true' EXIT
 # contains a bare 'iroh://' — match the FIELD, not the sentence).
 URL=''
 for _ in $(seq 1 180); do
-  URL=$(grep -o 'dial_url=[^ ]*' "$LOG" | head -1 | cut -d= -f2 || true)
+  URL=$(grep -o 'dial_url=[^ ]*' "$LOG" | head -1 | cut -d= -f2- || true)
   [ -n "$URL" ] && break
   sleep 1
 done
