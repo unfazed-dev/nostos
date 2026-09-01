@@ -1,3 +1,9 @@
+> **SUPERSEDED (2026-09-01).** This list froze on 2026-08-05; everything it named
+> has since been executed, closed, or re-owned elsewhere. Live state: `docs/ROADMAP.md`
+> (status footer), the plans index (`docs/plans/README.md`), and
+> `docs/plans/nostos-integration-tauri-flutter-push.md` (studio integration, with its
+> 2026-08-28/09 addenda). Kept as the historical record only.
+
 # Nostos — Remaining Work (fable-z 8-subagent audit)
 
 **Date:** 2026-08-05 · **HEAD:** `67eecc3` · **Method:** fable-z classify-then-gate; 8 parallel
