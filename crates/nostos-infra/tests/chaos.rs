@@ -126,8 +126,22 @@ async fn conservation_under_churn() {
         total
     });
 
-    churn.await.unwrap();
-    let outcome = deliver.await.unwrap();
+    // Deadlock guard. This test hung for 6 hours in CI (run 33490859076) when
+    // the store held DashMap shard guards across `.await` — see
+    // InMemorySessionStore::table_lists. A recurrence must fail in a minute
+    // with a name on it, not burn the job cap and look like an infra flake.
+    let (churn_res, deliver_res) = tokio::time::timeout(
+        std::time::Duration::from_mins(1),
+        async { (churn.await, deliver.await) },
+    )
+    .await
+    .expect(
+        "deadlock: churn + fan_out did not finish in 60s. Prime suspect is a \
+         blocking guard (DashMap shard / std Mutex) held across an .await in \
+         the session store — see InMemorySessionStore::table_lists.",
+    );
+    churn_res.unwrap();
+    let outcome = deliver_res.unwrap();
 
     // Conservation: every matched event was either delivered or dropped.
     assert_eq!(
