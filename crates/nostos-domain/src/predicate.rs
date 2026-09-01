@@ -993,7 +993,10 @@ mod any_collapse_tests {
         // AND: identity, from either side, and never a wrapper.
         assert_eq!(PredicateExpr::Any.and(leaf()), leaf());
         assert_eq!(leaf().and(PredicateExpr::Any), leaf());
-        assert_eq!(PredicateExpr::Any.and(PredicateExpr::Any), PredicateExpr::Any);
+        assert_eq!(
+            PredicateExpr::Any.and(PredicateExpr::Any),
+            PredicateExpr::Any
+        );
 
         // OR: absorbing — widening to match-all is the honest result.
         assert_eq!(PredicateExpr::Any.or(leaf()), PredicateExpr::Any);
