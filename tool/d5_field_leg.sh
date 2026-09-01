@@ -20,7 +20,10 @@ mkdir -p "$DIR"
 LOG="$DIR/server.log"
 
 echo '[d5] starting nostos-server (transport=iroh, replicator=fake)...'
-env NOSTOS_BIND="$BIND" NOSTOS_REPLICATOR=fake \
+# Zero-config rules for the probe: everything syncs (the machine's ambient
+# nostos_rules.toml may be hand-mode and would reject the probe's table).
+printf 'sync_mode = "all"\n' > "$DIR/nostos_rules.toml"
+env NOSTOS_BIND="$BIND" NOSTOS_REPLICATOR=fake NOSTOS_RULES_FILE="$DIR/nostos_rules.toml" \
     ${NOSTOS_IROH_RELAY_URL:+NOSTOS_IROH_RELAY_URL="$NOSTOS_IROH_RELAY_URL"} \
     cargo run -q -p nostos-server --features iroh -- --transport iroh >"$LOG" 2>&1 &
 SRV=$!
