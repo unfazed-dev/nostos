@@ -1,0 +1,122 @@
+# v0.2.0 release — red-rail findings (2026-09-01)
+
+Blocks the tag push. `main` was pushed (`c4f0071..071fe96`); the tag was NOT.
+
+## What the handoff assumed vs what CI shows
+
+The handoff recorded "rail green / sdk-e2e 7/7 host slices PASS" — that was
+local. Remote CI on `main` has been red for the last 4 runs, three of them
+timing out at `6h0m19s` (the GitHub Actions job cap, i.e. a hang).
+
+Most recent completed run (33341541196) — 5 green, 2 red:
+
+| job | result |
+|---|---|
+| real-Postgres logical-replication e2e | pass |
+| fmt + clippy + test | pass |
+| throughput benchmark (smoke) | pass |
+| nostos_flutter — analyze + test | pass |
+| nostos_react_native — typecheck | pass |
+| **SDK live-replication e2e (host slices)** | **FAIL** |
+| **cargo-deny (licenses, advisories, bans)** | **FAIL** |
+
+## cargo-deny: advisories — FIXED by a lockfile bump
+
+Three errors, all in the **default** (shipped) `nostos-server` tree — verified
+with `cargo tree -p nostos-server -e normal -i <crate>`, so NOT confined to the
+off-default `iroh` feature:
+
+- `RUSTSEC-2026-0258` — h2 unbounded empty DATA frames (vulnerability), `h2 v0.4.15`
+- yanked crate `chacha20 v0.10.1`
+- yanked crate `spin v0.9.8`
+
+`paste` / `atomic-polyfill` (unmaintained) are NOT in the default tree.
+
+Fix, verified locally:
+
+    cargo update -p h2 -p chacha20 -p spin@0.9.8
+    # chacha20 0.10.1 -> 0.10.2 ; h2 0.4.15 -> 0.4.19 ; spin 0.9.8 -> 0.9.9
+
+Result: `advisories ok, bans ok, sources ok`. Lockfile-only, 12 insertions /
+12 deletions. Note `spin` needs the `@0.9.8` disambiguator — two versions are
+in the lock, and a bare `-p spin` errors with "specification is ambiguous".
+
+## cargo-deny: licenses — needs a POLICY decision (not a code fix)
+
+Exactly one offender: **`ece@2.3.1`, MPL-2.0** — the RFC-8188 encrypted
+content-encoding crate used by the Web Push path.
+
+`deny.toml`'s allow-list has no `MPL-2.0`. MPL-2.0 is weak, file-level
+copyleft: linking from an Apache-2.0 project is fine, obligations attach only
+to modifications of the MPL files themselves. Two options — the user's call:
+
+1. Add `"MPL-2.0"` to `deny.toml` `[licenses] allow`. One line.
+2. Drop/replace `ece`, losing or reimplementing Web Push encryption.
+
+(The `Unlicense` crates — aho-corasick, byteorder, memchr — do NOT fail: each
+is dual-licensed and cargo-deny resolves them to MIT.)
+
+## SDK e2e — ROOT-CAUSED and fixed
+
+`SDK live-replication e2e (host slices)` exits 3 = three failed slices
+(dotnet, node, tauri; `rust` passed). All three died the same way, from the
+uploaded slice logs:
+
+    error: use of deprecated method
+      `hmac::digest::generic_array::GenericArray::<T, N>::as_slice`
+    error: could not compile `nostos-infra` (lib) due to 1 previous error
+
+Not a test failure — a **deprecation promoted to an error** by the job-level
+`RUSTFLAGS: -D warnings`. Two `digest` versions are in the lock (0.10.7 and
+0.11.3); the newer one deprecates `as_slice` on `GenericArray`.
+
+Sole call site, `crates/nostos-infra/src/auth.rs:137`. `self.digest` is
+`[u8; 32]` (its `as_slice` is std and fine); the deprecated call was on the
+`GenericArray` returned by `Sha256::digest`. Fixed by taking the same `.into()`
+idiom line 127 already uses, then comparing arrays:
+
+    let got: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    if got != self.digest {
+
+Semantics unchanged (same fixed-length digest-vs-digest compare the doc
+comment at line 106 describes). `cargo check --workspace --all-targets` under
+`-D warnings` is clean; `cargo test -p nostos-infra --lib` = 207 passed,
+including the three `static_bearer_*` tests covering this path.
+
+## Flaky, pre-existing, NOT fixed here
+
+`fmt + clippy + test` and `throughput benchmark (smoke)` each burned
+`6h0m16s` (the Actions job cap) in runs 33285564940 and 33339998210, then both
+passed in 3m56s / 4m43s in 33341541196. Intermittent.
+
+Prime suspect: `nostos-application/tests/fanout_scale.rs::ten_thousand_predicate_fanout_baseline`
+— an `#[ignore]`d perf-floor assertion that `make ci` opts into via
+`cargo test --workspace -- --include-ignored`. It asserts a **wall-clock
+floor** (50 zero-match events/sec at 10k predicates) from a **debug** build,
+so it is load-sensitive by construction: it failed locally at 38 events/sec
+while another cargo job shared the CPU, and passed alone in 48.94s.
+
+A perf floor in a debug build on a shared CI runner will keep flapping. Worth
+either moving to `--release`, gating it behind an explicit bench job, or
+widening the floor. Out of scope for the release; recorded so it is not
+rediscovered as new.
+
+## Why the tag was held
+
+`v0.2.0` is cut at `8e7b548` and has never been pushed, so re-cutting it costs
+nothing right now. Pushing it would publish a server binary carrying a known
+DoS advisory. The cheap ordering is: fix -> green -> move the tag -> push.
+
+Once pushed, the ordering trap from the release handoff still applies: the
+manifest PR fills `hook/prebuilt.json` on `main` AFTER the tag, so
+`git pull` before `flutter pub publish` or 0.2.0 ships with the placeholder
+manifest (verify with `grep -c '"url": "https' sdk/nostos_flutter/hook/prebuilt.json` == 7).
+
+## Separate finding — the arxa kit pin (blocks handoff step 4)
+
+Step 4 flips arxa's `kit/nostos/pubspec.yaml` to `ref: v0.2.0`, a **git** ref.
+That tag's tree carries the placeholder manifest (verified: 0 of 7 urls filled
+at `8e7b548`), so a git-ref consumer takes the cargo-build fallback and the
+zero-Rust-toolchain promise — the headline of this release — does not hold.
+Point arxa at the **pub.dev** version instead, or move the tag to include the
+merged manifest commit.
