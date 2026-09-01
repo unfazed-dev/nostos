@@ -226,10 +226,37 @@ silently read as `true`).
 
 ## Open — confirmed gaps, not yet fixed
 
-> **Update 2026-09-02 — "fix all" pass in progress.** Findings 2, 3 and 9 are
-> fixed; see `docs/plans/close-all-open-security-findings.md` for the batch
-> plan and the design decisions read off the source. Two of this section's own
-> pointers were wrong and are corrected there:
+> **Update 2026-09-02 — "fix all" pass COMPLETE. All ten findings in this
+> section are fixed** (1–11 less the numbers already closed above), across
+> commits `10ebc93`, `2095d16`, `1f960a7`, `2bf9be9` and the Batch A commits.
+> See `docs/plans/close-all-open-security-findings.md` for the batch plan and
+> the design decisions read off the source.
+>
+> Per-finding: **1** slot eviction on by default (1 GiB); **2** per-principal
+> session cap; **3** snapshot row cap that rejects rather than truncates;
+> **4** `nbf` validated + opt-in `iss` allowlist; **5** `exp` required on HS256;
+> **6** bounded JWKS staleness; **7** opt-in metadata protection; **8**
+> failure-only admin throttle; **9** indistinguishable cross-tenant rejection;
+> **10** opt-in WS origin allowlist; **11** three-valued predicate logic.
+>
+> **Two carried forward deliberately, not silently:**
+>
+> - **`nostos pull` cannot send a token.** `ProjectConfig` has no field for one,
+>   and adding a credential store is a feature, not a security fix. Against a
+>   server with `NOSTOS_PROTECT_METADATA=1` the CLI now fails with an error
+>   naming the knob instead of a bare 401. **Follow-up.**
+> - **CORS is unchanged.** `build_cors_layer` still returns
+>   `CorsLayer::permissive()` on empty `NOSTOS_CORS_ORIGINS` — the documented
+>   local-dev default, with `NOSTOS_CORS_ORIGINS` as the existing production
+>   knob. Finding 7 should **not** be described as "CORS tightened".
+>
+> **Also recorded:** on `NOSTOS_SYNC_AUTH=none` the `/schema` gate is theatre,
+> because `AllowAnonymous` accepts the empty token. The server warns at boot
+> rather than implying protection it does not have.
+>
+> Two of this section's own pointers were wrong and are corrected there
+> (a third, finding 7's `main.rs:1556-1558` for CORS, is now push-table
+> parsing; the real code is `build_cors_layer`):
 >
 > - Finding 3's `snapshot_source.rs:143` is `prepare_columns`, a metadata-only
 >   prepared statement that fetches zero rows. The unbounded reads are the

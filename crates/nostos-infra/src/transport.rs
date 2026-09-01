@@ -2034,7 +2034,7 @@ where
 
 #[cfg(test)]
 mod origin_allowlist_tests {
-    use super::{HeaderMap, origin_allowed};
+    use super::{origin_allowed, HeaderMap};
 
     fn with_origin(origin: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -2053,8 +2053,14 @@ mod origin_allowlist_tests {
     #[test]
     fn configured_allowlist_admits_listed_and_refuses_unlisted() {
         let allowed = vec!["https://app.example".to_string()];
-        assert!(origin_allowed(&with_origin("https://app.example"), &allowed));
-        assert!(!origin_allowed(&with_origin("https://evil.example"), &allowed));
+        assert!(origin_allowed(
+            &with_origin("https://app.example"),
+            &allowed
+        ));
+        assert!(!origin_allowed(
+            &with_origin("https://evil.example"),
+            &allowed
+        ));
     }
 
     #[test]
@@ -2073,12 +2079,24 @@ mod origin_allowlist_tests {
         let allowed = vec!["https://app.example".to_string()];
         // The classic allowlist bypasses: a registrable-suffix lookalike and a
         // subdomain-prefixed impostor must both fail.
-        assert!(!origin_allowed(&with_origin("https://app.example.evil.com"), &allowed));
-        assert!(!origin_allowed(&with_origin("https://notapp.example"), &allowed));
+        assert!(!origin_allowed(
+            &with_origin("https://app.example.evil.com"),
+            &allowed
+        ));
+        assert!(!origin_allowed(
+            &with_origin("https://notapp.example"),
+            &allowed
+        ));
         // Scheme and port are part of an origin, so they must be part of the
         // comparison too.
-        assert!(!origin_allowed(&with_origin("http://app.example"), &allowed));
-        assert!(!origin_allowed(&with_origin("https://app.example:8443"), &allowed));
+        assert!(!origin_allowed(
+            &with_origin("http://app.example"),
+            &allowed
+        ));
+        assert!(!origin_allowed(
+            &with_origin("https://app.example:8443"),
+            &allowed
+        ));
     }
 
     #[test]

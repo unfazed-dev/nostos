@@ -303,7 +303,11 @@ impl PredicateExpr {
                         Some(true) => {}
                     }
                 }
-                if unknown { None } else { Some(true) }
+                if unknown {
+                    None
+                } else {
+                    Some(true)
+                }
             }
             // Kleene `OR`, mirrored: a definite `true` short-circuits (T ∨ U = T).
             Self::Or(parts) => {
@@ -315,7 +319,11 @@ impl PredicateExpr {
                         Some(false) => {}
                     }
                 }
-                if unknown { None } else { Some(false) }
+                if unknown {
+                    None
+                } else {
+                    Some(false)
+                }
             }
             // The whole fix: `None` maps to `None`. An unknown leaf can no
             // longer be inverted into a delivery.

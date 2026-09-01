@@ -1981,8 +1981,7 @@ async fn rules_handler(
 /// server-level policy, and rather than a per-request `env::var` because that
 /// re-read would silently treat a typo as "off". Clap validates the value once
 /// at startup; this only carries the answer.
-static PROTECT_METADATA: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static PROTECT_METADATA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn metadata_protected() -> bool {
     PROTECT_METADATA.load(std::sync::atomic::Ordering::Relaxed)
