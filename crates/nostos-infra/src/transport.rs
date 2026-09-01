@@ -196,6 +196,13 @@ pub struct SyncRouterState {
     /// native client while stopping nobody. What it does buy — and the audit's
     /// actual concern — is that on an `AllowAnonymous` deployment a random page
     /// on the internet can no longer open a socket.
+    ///
+    /// **Scope: the axum `/sync` route only.** The iroh transport
+    /// (`crate::iroh_sync`) calls [`run_session`] directly and never passes
+    /// through [`sync_handler`], so this list does not apply there. That is
+    /// correct rather than a hole — iroh is P2P QUIC, there is no browser and
+    /// no `Origin` header to check — but do not read this field as "every
+    /// transport is restricted".
     pub allowed_origins: Arc<Vec<String>>,
 }
 
