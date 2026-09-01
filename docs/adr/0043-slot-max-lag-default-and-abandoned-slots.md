@@ -68,6 +68,10 @@ every operator who doesn't read the log.
    `EvictionPolicy::disabled()`, an explicit value is honoured. The library
    default (`EvictionPolicy::default()`) stays disabled so a bare
    `FanOutService` in benchmarks and unit tests never evicts.
+6. **Threshold is chosen, not measured.** 1 GiB is a conservative guess; no
+   lag data from a real tenant exists yet. Revisit trigger: p99 session lag
+   from `cairn_slot_lag_bytes` over ≥1 week of a real tenant (that metric is
+   not emitted yet — adding it is the prerequisite for the revisit).
 
 ## Consequences
 
