@@ -57,6 +57,12 @@ use tracing::{info, warn};
     version,
     about = "Nostos local-first sync server"
 )]
+// `clippy::struct_excessive_bools` fires at 4+. The lint's real target is a
+// domain struct whose bool soup should have been an enum or a state machine —
+// but this is a clap argument struct, where one `bool` per flag IS the shape,
+// and the alternative (`#[command(flatten)]` sub-structs) would split the
+// operator-facing `--help` output to satisfy a lint about internal modelling.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Bind address.
     #[arg(long, env = "NOSTOS_BIND", default_value = "0.0.0.0:8800")]
