@@ -279,6 +279,7 @@ tenant-ANDed shape that actually ships, and both Kleene short-circuits.
 
 | Suite | Command | Result |
 |---|---|---|
+| Full gate | `make ci` (fmt + clippy `-D warnings` + full suite) | **exit 0, 78 binaries, 990 passed, 0 failed** |
 | Real-Postgres e2e | `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=… cargo test -p nostos-infra --features pg -- --test-threads=1` | **exit 0, 397 passed, 0 failed** |
 | Flutter SDK | `flutter analyze` + `flutter test` | analyze clean; **85 passed** |
 | Flutter doc signatures | `python3 sdk/nostos_flutter/scripts/check-doc-signatures.py` | OK |
