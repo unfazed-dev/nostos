@@ -113,3 +113,51 @@ macOS host's (`sysctl vm.loadavg`), not the VM's `/proc/loadavg` (the
 Fix only what the run names. Perf changes ship with before/after numbers
 (RESULTS.md) or get reverted; a "VM too small" verdict is a methodology note
 (RESULTS.md + BENCHMARK-METHODOLOGY.md), not a code change.
+
+## Run 1 result — 100k × 500 events, VALID (host load1 5.88 → 3.00)
+
+Log: benches/results/raw/2026-09-02-fanout-100k-diag/linux-fanout-diag.log
+(tier 100000, 12:13:58–12:19:31 VM clock).
+
+- Quorum after 31.78 s with 77,403 subscribed; the rest (22.6k) subscribed
+  during fan-out (100,000 by t=130 s).
+- Fan-out rate from the progress line: t=30→90 s matched went 7.78M → 41.65M
+  = 565k matched/s ≈ **0.15–0.19 s/event at ~86k live sessions**. All 500
+  events were fanned by t≈95 s (matched 42,708,863 = 500 × ~85.4k average
+  subscribed); `matched` then froze because the FakeReplicator was exhausted,
+  not because the loop slowed. The probe's `events_fanned_out~=427` divides
+  by the final 100k subscribed — the true count is 500.
+- Per-delivery rate 42.7M / 95 s ≈ 450k ops/s — the **same as the 50k tier's
+  414k ops/s**. No cliff inside 500 events.
+- VM during fan-out (`[sys]`, per 5 s across 10 vCPU = 5000 jiffies): user
+  ≈2300–2450, sys ≈800–1100, softirq ≈530–870, idle ≈500–900 → ~80–90% busy,
+  half of it user. After t≈95 s: idle ≈5000/5000.
+- Kernel memory: sockstat `TCP: mem` peaked ~41k pages (160 MiB) during
+  connect, 16–30k during fan-out, 680 after; `PruneCalled=0`,
+  `RcvPruned=0`, `TCPRcvCollapsed=0`, `TCPMemoryPressures=0`,
+  `TCPAbortOnMemory=0` throughout. Probe `swap_mib=0` throughout, peak RSS
+  3,906 MiB.
+- Router: matched=delivered=42,708,863, dropped=0, faulted=0.
+
+Verdict for the hypothesis table: **(a1) kernel TCP memory pressure —
+falsified** (counters flat, TCP mem tiny). **(a2) swap — falsified** (VmSwap
+0, VM idle after the loop finished). **(e) CPU saturation** — the VM was
+~85% busy but the loop still ran at the 50k rate, so it is not the cliff
+either. The original 1.22 s/event therefore needs one of:
+
+1. an effect that accumulates past ~500 events / ~100 s (channel backlog
+   cannot be it — router dropped 0 — but anything indexed by delivered
+   events would), or
+2. host contention during the original 11:17–11:38 run — the ladder's
+   env.txt only records load1=3.41 at ladder START; the host was later seen
+   at load 50–80 from desktop apps, and the 100k tier ran last.
+
+Discriminating run 2: the original shape, 100k × 5000 events, 1200 s,
+ack=1, 2 listeners, with the progress line, under the headroom gate. A
+uniform ~0.19 s/event to completion (≈950 s + connect) ⇒ (2): the ladder
+figure is INVALID and must be re-measured; a rate that degrades with event
+count ⇒ (1), and the progress line's knee says where to look.
+
+Note: `HOST tier=100000 end … rc=143` is the inner script's own exit status
+(its last command is `wait` on the killed sampler), not a probe failure —
+`SOAK rc=0`.
