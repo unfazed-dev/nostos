@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -2902,6 +2902,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "futures-util",
  "nostos-domain",
  "serde",
  "thiserror 1.0.69",

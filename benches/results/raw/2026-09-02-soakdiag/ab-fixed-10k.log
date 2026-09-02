@@ -1,0 +1,17 @@
+  [diag] subscribe quorum after 30.05s: connected=9166 subscribed=9166 connect_failed=0
+  [diag] connect failed after 50 tries: IO error: No buffer space available (os error 55)
+  [diag] connect failed after 50 tries: IO error: No buffer space available (os error 55)
+  [diag] connect failed after 50 tries: IO error: No buffer space available (os error 55)
+  [diag] at window end: connected=9166 subscribed=9166 connect_failed=834
+  [diag] router: matched=27798651 delivered=27796381 dropped=2270 faulted=0 events_fanned_out~=3032 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=4170000 not_reached_in_window=18038688 router_dropped=2270 in_flight_or_unaccounted=2334067
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 5000 (attempted deliveries: 50000000)
+  window    : 60s
+  ---------------------------
+  delivered : 25462314
+  ops/sec   : 424363
+  drop%     : 49.08
+  elapsed   : 60.00s

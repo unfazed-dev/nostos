@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::routing::get;
+use nostos_application::ports::Metrics;
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::ColumnValue;
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
@@ -97,7 +98,15 @@ async fn run(clients: usize, events: u64, window_secs: u64, ack_interval: u32) -
         store.clone(),
         nostos_domain::Tier::Enterprise,
     ));
-    let fanout = Arc::new(FanOutService::new(store.clone()).with_ack_progress_every(ack_interval));
+    // Diagnostic: router-side counters so the report can separate "server shed
+    // it (buffer full)" from "server never got to it in the window" from
+    // "client never connected". Without these the drop% is one opaque number.
+    let metrics = Arc::new(Metrics::new());
+    let fanout = Arc::new(
+        FanOutService::new(store.clone())
+            .with_ack_progress_every(ack_interval)
+            .with_metrics(Arc::clone(&metrics)),
+    );
 
     let state = SyncRouterState::new(
         Arc::clone(&manager),
@@ -119,15 +128,35 @@ async fn run(clients: usize, events: u64, window_secs: u64, ack_interval: u32) -
     // single contended cache line at 10k concurrent incrementers).
     let per_client: Vec<Arc<AtomicU64>> =
         (0..clients).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let conn = Arc::new(ConnStats::default());
     let mut handles = Vec::with_capacity(clients);
     for cnt in &per_client {
         let c = Arc::clone(cnt);
         let u = url.clone();
-        handles.push(tokio::spawn(client_task(u, c)));
+        let cs = Arc::clone(&conn);
+        handles.push(tokio::spawn(client_task(u, c, cs)));
     }
 
-    // Let clients connect + subscribe.
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Wait for a subscribe quorum (every client subscribed or given up), capped
+    // at 30s. A fixed 800ms grace was measured leaving 1k–9k of 10k clients
+    // still connecting when the first event fired (2026-09-02 diag), which
+    // silently charged those events as "undelivered" to the fan-out.
+    let quorum_start = Instant::now();
+    loop {
+        let settled =
+            conn.subscribed.load(Ordering::Relaxed) + conn.connect_failed.load(Ordering::Relaxed);
+        if settled >= clients as u64 || quorum_start.elapsed() >= Duration::from_secs(30) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    eprintln!(
+        "  [diag] subscribe quorum after {:.2}s: connected={} subscribed={} connect_failed={}",
+        quorum_start.elapsed().as_secs_f64(),
+        conn.connected.load(Ordering::Relaxed),
+        conn.subscribed.load(Ordering::Relaxed),
+        conn.connect_failed.load(Ordering::Relaxed),
+    );
 
     let sum = || {
         per_client
@@ -162,6 +191,32 @@ async fn run(clients: usize, events: u64, window_secs: u64, ack_interval: u32) -
 
     let delivered = sum();
     let attempted = events.saturating_mul(clients as u64).max(1);
+    {
+        let subscribed = conn.subscribed.load(Ordering::Relaxed).max(1);
+        let matched = metrics.matched.load(Ordering::Relaxed);
+        eprintln!(
+            "  [diag] at window end: connected={} subscribed={} connect_failed={}\n  \
+             [diag] router: matched={} delivered={} dropped={} faulted={} \
+             events_fanned_out~={} (matched/subscribed)\n  \
+             [diag] undelivered breakdown: never_connected={} not_reached_in_window={} \
+             router_dropped={} in_flight_or_unaccounted={}",
+            conn.connected.load(Ordering::Relaxed),
+            conn.subscribed.load(Ordering::Relaxed),
+            conn.connect_failed.load(Ordering::Relaxed),
+            matched,
+            metrics.delivered.load(Ordering::Relaxed),
+            metrics.dropped.load(Ordering::Relaxed),
+            metrics.faulted.load(Ordering::Relaxed),
+            matched / subscribed,
+            (clients as u64).saturating_sub(subscribed) * events,
+            subscribed * events.saturating_sub(matched / subscribed),
+            metrics.dropped.load(Ordering::Relaxed),
+            metrics
+                .delivered
+                .load(Ordering::Relaxed)
+                .saturating_sub(delivered),
+        );
+    }
     let drop_rate = 1.0 - (delivered as f64 / attempted as f64);
     let ops_per_sec = (delivered as f64) / elapsed.max(1e-9);
 
@@ -180,26 +235,48 @@ async fn run(clients: usize, events: u64, window_secs: u64, ack_interval: u32) -
     }
 }
 
+/// Diagnostic connection counters (see the `[diag]` lines in `run`).
+#[derive(Default)]
+struct ConnStats {
+    connected: AtomicU64,
+    subscribed: AtomicU64,
+    connect_failed: AtomicU64,
+}
+
 /// One client: connect, subscribe, count received FRAMES (not messages — the
 /// server may batch N frames per WS message under backlog).
-async fn client_task(url: String, received: Arc<AtomicU64>) {
+async fn client_task(url: String, received: Arc<AtomicU64>, stats: Arc<ConnStats>) {
     let mut ws = None;
+    let mut last_err = String::new();
     for _ in 0..50 {
         match connect_async(&url).await {
             Ok((stream, _)) => {
                 ws = Some(stream);
                 break;
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            Err(e) => {
+                last_err = e.to_string();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
     }
-    let Some(ws) = ws else { return };
+    let Some(ws) = ws else {
+        // Print the first few failures verbatim — the error text is the
+        // evidence (EADDRNOTAVAIL = ephemeral-port exhaustion, ECONNREFUSED =
+        // accept backlog, etc.).
+        if stats.connect_failed.fetch_add(1, Ordering::Relaxed) < 3 {
+            eprintln!("  [diag] connect failed after 50 tries: {last_err}");
+        }
+        return;
+    };
+    stats.connected.fetch_add(1, Ordering::Relaxed);
     let (mut write, mut read) = ws.split();
 
     let sub = serde_json::json!({ "type": "subscribe", "table": "tasks" }).to_string();
     if write.send(Message::Text(sub)).await.is_err() {
         return;
     }
+    stats.subscribed.fetch_add(1, Ordering::Relaxed);
 
     while let Some(Ok(msg)) = read.next().await {
         let bytes: Vec<u8> = match msg {

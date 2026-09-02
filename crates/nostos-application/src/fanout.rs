@@ -244,20 +244,19 @@ impl FanOutService {
     /// by the caller (the wire codec in infra knows the payload encoding); the
     /// application layer stays decoupled from any specific tuple format.
     ///
-    /// Deliveries to matching sinks are dispatched **concurrently** via a
-    /// `JoinSet` — each `EventSink::deliver` is non-blocking (`try_send` on a
-    /// bounded channel), so fanning out to 10,000 sessions spreads across the
-    /// tokio runtime instead of serializing on one task. This is what lets the
-    /// router scale past the 1-to-N sequential wall.
+    /// Deliveries to matching sinks run as a **sequential loop on the fan-out
+    /// task**. Each `EventSink::deliver` is non-blocking (`try_send` on a
+    /// bounded channel, ~100ns), so there is nothing to parallelise; the
+    /// previous design spawned one tokio task per matched session per event
+    /// (10k spawns + 10k joins per event at 10k clients) and was measured
+    /// 2026-09-02 at 5–50 events/s with 0 sheds — the spawn storm starved the
+    /// 20k writer/reader tasks sharing the runtime. Panics inside a sink are
+    /// isolated with `catch_unwind` and counted as `faulted`, preserving the
+    /// old JoinSet contract.
     pub async fn fan_out<F>(&self, event: &ReplicationEvent, column_extractor: F) -> FanOutOutcome
     where
         F: Fn(&ReplicationEvent, &str) -> Option<ColumnValue>,
     {
-        // Pre-filter candidates by predicate, then dispatch deliveries
-        // concurrently. `deliver` is non-blocking (`try_send` on a bounded
-        // channel), so fanning out to 10,000 sessions spreads across the tokio
-        // runtime instead of serializing on one task — this is what lets the
-        // router scale past the 1-to-N sequential wall.
         let matched: Vec<_> = self
             .store
             .candidates_for(event)
@@ -285,30 +284,33 @@ impl FanOutService {
             }
         }
 
-        let mut set = tokio::task::JoinSet::new();
-        for c in matched {
-            let ev = event.clone();
-            set.spawn(async move { c.sink.deliver(ev).await });
-        }
         let mut delivered = 0u64;
         let mut dropped = 0u64;
         let mut faulted = 0u64;
-        while let Some(res) = set.join_next().await {
+        for c in matched {
+            use futures_util::FutureExt as _;
+            let res = std::panic::AssertUnwindSafe(c.sink.deliver(event.clone()))
+                .catch_unwind()
+                .await;
             match res {
                 Ok(DeliveryDecision::Delivered) => delivered += 1,
                 // Slow-client backpressure: the sink's bounded buffer was full.
                 Ok(DeliveryDecision::Dropped) => dropped += 1,
-                // A delivery task faulted (panicked or was cancelled). This is a
-                // server-side problem, NOT slow-client backpressure — count it
-                // separately from `dropped` so it is never mis-attributed as a
-                // client drop in the "0% drops" moat figure, and log it (a
-                // panic here should be visible, not silent).
-                Err(e) => {
+                // A delivery panicked. This is a server-side problem, NOT
+                // slow-client backpressure — count it separately from
+                // `dropped` so it is never mis-attributed as a client drop in
+                // the "0% drops" moat figure, and log it (a panic here should
+                // be visible, not silent).
+                Err(payload) => {
                     faulted += 1;
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "non-string panic payload".to_string());
                     warn!(
-                        error = %e,
-                        is_panic = e.is_panic(),
-                        "delivery task faulted (panic/cancel); counted as faulted, not dropped"
+                        error = %msg,
+                        "delivery panicked; counted as faulted, not dropped"
                     );
                 }
             }

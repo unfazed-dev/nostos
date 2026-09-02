@@ -1,0 +1,14 @@
+  [diag] subscribe quorum after 7.87s: connected=10000 subscribed=10000 connect_failed=0
+  [diag] at window end: connected=10000 subscribed=10000 connect_failed=0
+  [diag] router: matched=1740000 delivered=1740000 dropped=0 faulted=0 events_fanned_out~=174 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=0 not_reached_in_window=48260000 router_dropped=0 in_flight_or_unaccounted=192866
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 5000 (attempted deliveries: 50000000)
+  window    : 60s
+  ---------------------------
+  delivered : 1547134
+  ops/sec   : 25629
+  drop%     : 96.91
+  elapsed   : 60.37s
