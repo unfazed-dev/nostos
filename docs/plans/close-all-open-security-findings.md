@@ -332,9 +332,14 @@ pass 2 654,772 ops/sec @ **21.43%** drops, host load 16–24 on 10 cores. The
 load source was not the orphans but VS Code's `Code Helper (Plugin)` (93–168%
 CPU) plus two other agent sessions. The run was aborted before pass 3 and the
 10k soak; full record in `benches/results/remeasure-2026-09-02/CONTENDED.md`.
-The 833,307 / 0.00% baseline stands unchanged. **Still needed:** quiet the host
-(1-min load < 10 — quit VS Code or its extension host, pause other sessions),
-then rerun `/tmp/nostos-remeasure.sh`; accept a pass only at ≤1% drops.
+A second attempt the same morning, launched at load 5.16, was starved again
+within three minutes (pass 1: 700,366 ops/sec @ **15.95%** drops; VS Code
+`Code Helper` pid 5260 at 231% CPU) and was killed — see
+`benches/results/remeasure-2026-09-02-run2/CONTENDED.md`.
+The 833,307 / 0.00% baseline stands unchanged. **Still needed:** quit VS Code
+entirely (its helper respawns), pause other sessions, confirm 1-min load < 5
+and holding, then rerun `/tmp/nostos-remeasure2.sh` with a fresh `D=` suffix;
+accept a pass only at ≤1% drops.
 
 **Binary names, for the next agent:** the bench binaries are `nostos-bench`,
 `nostos-bench-10k`, `nostos-reconnect-storm`, `nostos-bench-pg-ingest` — *not* the
