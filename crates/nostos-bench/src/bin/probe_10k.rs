@@ -229,9 +229,17 @@ async fn run(
     let extract = |_: &nostos_domain::ReplicationEvent, _: &str| Some(ColumnValue::Any);
 
     let start = Instant::now();
+    // Diagnostic: set when `run` returns, i.e. the replicator handed out its
+    // whole event budget — distinguishes "loop finished" from "loop stalled".
+    let fanout_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let fanout_task = {
         let fanout = Arc::clone(&fanout);
-        tokio::spawn(async move { fanout.run(&mut replicator, extract).await })
+        let done = Arc::clone(&fanout_done);
+        tokio::spawn(async move {
+            let outcome = fanout.run(&mut replicator, extract).await;
+            done.store(true, Ordering::Release);
+            outcome
+        })
     };
     // Diagnostic: a periodic progress line so a slow tier shows WHEN it was
     // slow (uniform vs degrading rate) and what the process footprint was at
@@ -241,6 +249,7 @@ async fn run(
         let per_client = per_client.clone();
         let metrics = Arc::clone(&metrics);
         let conn = Arc::clone(&conn);
+        let done = Arc::clone(&fanout_done);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             tick.tick().await; // first tick fires immediately; skip it
@@ -252,9 +261,10 @@ async fn run(
                 let (rss, swap) = rss_now_mib().unwrap_or((0, 0));
                 eprintln!(
                     "  [diag] progress t={:.0}s delivered={delivered} matched={matched} \
-                     events~={} subscribed={subscribed} rss_mib={rss} swap_mib={swap}",
+                     events~={} subscribed={subscribed} rss_mib={rss} swap_mib={swap} fanout_done={}",
                     start.elapsed().as_secs_f64(),
                     matched / subscribed,
+                    done.load(Ordering::Acquire),
                 );
             }
         })
@@ -361,6 +371,14 @@ async fn run(
             metrics.faulted.load(Ordering::Relaxed),
         ),
         finish_secs.map_or_else(|| "n/a".to_string(), |s| format!("{s:.2}s")),
+    );
+
+    // Diagnostic: did the fan-out loop RETURN (replicator budget exhausted) or
+    // was it still running when the window closed? A frozen `delivered` with
+    // `true` here is a finite event budget, not a stall.
+    eprintln!(
+        "  [diag] fanout_task_finished={} (true = replicator budget exhausted before the window closed)",
+        fanout_task.is_finished(),
     );
 
     // Best-effort: signal the fan-out task to wind down (don't await — that can
