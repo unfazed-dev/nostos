@@ -131,10 +131,16 @@ disk lever).
   - `sdk/nostos_flutter/rust` for `aarch64-apple-darwin` honours the
     build-dir (intermediates in `cargo-build/12/b970ea0b2e12c7/`, final
     `libnostos_flutter_rust.dylib` in the crate's `target/`). The example
-    app's `flutter build macos --debug` fails in `ring`'s C build script
-    (`TargetConditionals.h` not found under the Xcode script-phase env) —
-    reproduced identically with `build-dir` disabled, so it is a
-    pre-existing, unrelated bug; tracked separately.
+    app's `flutter build macos --debug` initially failed in `ring`'s C
+    build script (`TargetConditionals.h` not found) — reproduced
+    identically with `build-dir` disabled, so unrelated to this ADR. Root
+    cause, measured with a logging `CC` shim: the hook's Xcode-phase env
+    has no `SDKROOT` and a PATH that resolves bare `cc` to the raw
+    xctoolchain clang, and cc-rs 1.4 skips `-isysroot` for macOS when the
+    compiler is plain `cc`. Fixed in `sdk/nostos_flutter/hook/build.dart`
+    (`_appleSdkRootEnv`: set `SDKROOT` from `xcrun --show-sdk-path` when
+    absent). After the fix: macOS example build exit 0, iOS-simulator
+    build exit 0.
   - Android Studio's own Gradle daemon (parent = `studio`) starts with
     `daemonRegistryDir=/Volumes/developer_ssd/dev/.gradle` through the
     `~/.gradle` symlink and writes its caches there with zero

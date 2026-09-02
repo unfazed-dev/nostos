@@ -235,6 +235,8 @@ Future<void> _cargoBuildFallback({
   Map<String, String>? env;
   if (isAndroid) {
     env = await _androidNdkEnv(triple!);
+  } else {
+    env = await _appleSdkRootEnv(input.config.code);
   }
   final String command;
   final List<String> args;
@@ -288,6 +290,49 @@ Future<void> _cargoBuildFallback({
     throw Exception('cargo build did not produce ${builtFile.path}');
   }
   await builtFile.copy(destination.path);
+}
+
+/// Supply `SDKROOT` for Apple targets when the hook's env lacks it.
+///
+/// Inside the Xcode script phase the hook process gets a sanitised env
+/// (measured 2026-09-02 with a logging `CC` shim on `flutter build macos` of
+/// example/): PATH leads with `XcodeDefault.xctoolchain/usr/bin`, so a bare
+/// `cc` resolves to the raw toolchain clang rather than the `/usr/bin/cc`
+/// xcrun shim, and `SDKROOT` is absent. cc-rs 1.4 deliberately skips
+/// `-isysroot` for macOS targets when the compiler is plain `cc` (it trusts
+/// the shim to find the SDK), so ring's C sources failed with
+/// "'TargetConditionals.h' file not found". Restoring `SDKROOT` is the one
+/// missing input every consumer honours — toolchain clang, cc-rs (which
+/// validates it against the target SDK) and rustc's link step. iOS already
+/// gets `-isysroot` from cc-rs; setting the matching SDK there is harmless.
+/// If `xcrun` is unavailable or fails, set nothing and let cargo report the
+/// real error. Returns null when nothing needs setting.
+Future<Map<String, String>?> _appleSdkRootEnv(CodeConfig code) async {
+  if (Platform.environment['SDKROOT'] != null) {
+    return null;
+  }
+  final sdk = switch (code.targetOS) {
+    OS.macOS => 'macosx',
+    OS.iOS =>
+      code.iOS.targetSdk == IOSSdk.iPhoneSimulator
+          ? 'iphonesimulator'
+          : 'iphoneos',
+    _ => null,
+  };
+  if (sdk == null) {
+    return null;
+  }
+  final ProcessResult result;
+  try {
+    result = await Process.run('xcrun', ['--show-sdk-path', '--sdk', sdk]);
+  } on ProcessException {
+    return null;
+  }
+  if (result.exitCode != 0) {
+    return null;
+  }
+  final path = (result.stdout as String).trim();
+  return path.isEmpty ? null : {'SDKROOT': path};
 }
 
 /// Export CC/AR for the requested Android triple from a located NDK.
