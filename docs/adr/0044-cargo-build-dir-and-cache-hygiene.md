@@ -71,14 +71,20 @@ Verified before adopting (all on the pinned 1.95.0 toolchain, this machine):
    trade. `incremental` is left at its default (on) — it is the thing that
    makes edit-compile loops fast and the sweep bounds its growth.
 
-3. **Weekly mtime prune** of `/Volumes/developer_ssd/dev/cargo-build` by
-   `~/Library/Scripts/cargo-build-sweep.sh` (`find -mindepth 3 -type f
-   -mtime +7 -delete`, then drop empty dirs), triggered from `~/.zshrc` at
+3. **Weekly prune of idle workspace dirs** under
+   `/Volumes/developer_ssd/dev/cargo-build` by
+   `~/Library/Scripts/cargo-build-sweep.sh`, triggered from `~/.zshrc` at
    most once per 7 days (stamp file in `~/Library/Logs`), logging to
-   `~/Library/Logs/cargo-build-sweep.log`. Anything not touched in 7 days is
-   rebuilt on demand: Cargo's fingerprint check verifies outputs exist, so
-   a missing rlib or incremental dir is a rebuild, not a corrupt build.
-   A launchd agent was tried first and rejected: launchd-spawned processes
+   `~/Library/Logs/cargo-build-sweep.log`. A `{workspace-path-hash}` dir is
+   `rm -rf`'d **whole** when no file in it was modified for 14 days;
+   individual files are never deleted. Per-file `-mtime` pruning was the
+   first version and was rejected: Cargo re-checks that rlibs exist, but
+   not build-script `out/` files, so a half-pruned tree can fail until
+   `cargo clean -p` — and a fresh build already carried files with old
+   preserved mtimes that such a prune would have hit. Whole-dir removal is
+   coarser (an idle workspace pays one ~2 min cold rebuild) but can never
+   leave a partial tree.
+   A launchd agent was tried and rejected: launchd-spawned processes
    are denied removable-volume access by TCC (`find: Operation not
    permitted`) and exit 0 having swept nothing. The only launchd fix is
    Full Disk Access for `/bin/sh`, which is not acceptable; a terminal
@@ -117,10 +123,15 @@ disk lever).
 - `--time 7` means a week away from a project costs one cold rebuild on
   return. Acceptable; the registry cache (external) makes it a compile, not
   a download.
-- The prune is by file mtime, not by fingerprint graph, so a partially
-  pruned dependency is possible; Cargo treats that as "outputs missing →
-  rebuild", verified in the plan. Hash dirs whose workspace no longer exists
-  drain to nothing after 7 days on their own.
+- Hash dirs whose workspace no longer exists disappear after 14 idle days
+  on their own. If `developer_ssd` is unmounted at shell start, the sweep
+  logs an error and the `~/.gradle` / `~/.pub-cache` symlinks dangle —
+  loud, not silent.
+- Not verified end-to-end in this session: (a) `native_toolchain_rust` /
+  `flutter build` for `sdk/nostos_flutter` (reasoned safe: it passes its own
+  `--target-dir`); (b) an IDE-launched Gradle daemon (Android Studio)
+  reaching the symlinked `~/.gradle` on the removable volume. Both are
+  checked the first time those builds run.
 
 ## References
 
