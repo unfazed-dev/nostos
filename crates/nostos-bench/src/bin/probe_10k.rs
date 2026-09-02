@@ -84,12 +84,20 @@ fn main() {
     eprintln!(
         "\n=== nostos-bench-10k probe ===\n  clients   : {clients}\n  events    : {events} \
          (attempted deliveries: {})\n  window    : {window_secs}s\n  ---------------------------\n  \
-         delivered : {}\n  ops/sec   : {:.0}\n  drop%     : {:.2}\n  elapsed   : {:.2}s",
+         delivered : {}\n  ops/sec   : {:.0}\n  drop%     : {:.2}\n  elapsed   : {:.2}s\n  \
+         elapsed_to_finish : {}\n  ops/sec (finish)  : {}",
         events * clients as u64,
         result.delivered,
         result.ops_per_sec,
         result.drop_rate * 100.0,
         result.elapsed_secs,
+        result
+            .finish_secs
+            .map_or_else(|| "n/a (window expired)".to_string(), |s| format!("{s:.2}s")),
+        result.finish_secs.map_or_else(
+            || "n/a".to_string(),
+            |s| format!("{:.0}", result.delivered as f64 / s.max(1e-9)),
+        ),
     );
     process::exit(0);
 }
@@ -99,6 +107,9 @@ struct ProbeResult {
     ops_per_sec: f64,
     drop_rate: f64,
     elapsed_secs: f64,
+    /// Seconds from fan-out start to the last reachable delivery; `None` when
+    /// the window expired first (then `elapsed_secs` is the window, a floor).
+    finish_secs: Option<f64>,
 }
 
 async fn run(
@@ -223,19 +234,39 @@ async fn run(
         tokio::spawn(async move { fanout.run(&mut replicator, extract).await })
     };
 
-    // Wait until all events delivered, or the window elapses.
+    // Wait until every *reachable* delivery has landed, or the window elapses.
+    // `target` (clients × events) is unreachable once any subscriber arrived
+    // after fan-out started (its pre-subscribe events are never matched), so
+    // the loop also stops when fan-out has drained the replicator and the
+    // clients hold everything the router actually handed to a sink. That
+    // instant is the fan-out finish time; `None` means the window expired
+    // first. Resolution is the 50 ms poll.
     let target = events.saturating_mul(clients as u64);
     let deadline = Duration::from_secs(window_secs);
-    let _ = tokio::time::timeout(deadline, async {
+    let finish_secs = tokio::time::timeout(deadline, async {
         loop {
-            if sum() >= target {
+            let delivered = sum();
+            if delivered >= target {
                 break;
+            }
+            if fanout_task.is_finished() {
+                let reachable = reachable_deliveries(
+                    metrics.matched.load(Ordering::Relaxed),
+                    metrics.dropped.load(Ordering::Relaxed),
+                    metrics.faulted.load(Ordering::Relaxed),
+                );
+                if delivered >= reachable {
+                    break;
+                }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        start.elapsed().as_secs_f64()
     })
-    .await;
+    .await
+    .ok();
     let elapsed = start.elapsed().as_secs_f64();
+    let fanout_done = fanout_task.is_finished();
 
     let delivered = sum();
     let attempted = events.saturating_mul(clients as u64).max(1);
@@ -279,6 +310,19 @@ async fn run(
         delivered >= target,
         peak_rss_mib().map_or_else(|| "n/a".to_string(), |m| m.to_string()),
     );
+    // Fan-out finish: the instant the last reachable delivery landed, where
+    // reachable = matched − dropped − faulted once the replicator is drained.
+    // This is the honest denominator for ops/sec when late subscribers make
+    // `target` unreachable; "n/a" means the window expired first.
+    eprintln!(
+        "  [diag] finish: fanout_done={fanout_done} reachable={} delivered={delivered} elapsed_to_finish={}",
+        reachable_deliveries(
+            metrics.matched.load(Ordering::Relaxed),
+            metrics.dropped.load(Ordering::Relaxed),
+            metrics.faulted.load(Ordering::Relaxed),
+        ),
+        finish_secs.map_or_else(|| "n/a".to_string(), |s| format!("{s:.2}s")),
+    );
 
     // Best-effort: signal the fan-out task to wind down (don't await — that can
     // hang too if the replicator is still spinning against full buffers).
@@ -292,6 +336,33 @@ async fn run(
         ops_per_sec,
         drop_rate: drop_rate.clamp(0.0, 1.0),
         elapsed_secs: elapsed,
+        finish_secs,
+    }
+}
+
+/// Deliveries that can still land once fan-out has drained the replicator:
+/// the router matched `matched` (event, subscriber) pairs and shed `dropped`
+/// plus `faulted` of them. Late subscribers' pre-subscribe events never enter
+/// `matched`, so this — not clients × events — is the count the wait loop can
+/// actually reach.
+fn reachable_deliveries(matched: u64, dropped: u64, faulted: u64) -> u64 {
+    matched.saturating_sub(dropped).saturating_sub(faulted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reachable_deliveries;
+
+    #[test]
+    fn reachable_excludes_router_shed_and_faulted() {
+        assert_eq!(reachable_deliveries(1_000, 0, 0), 1_000);
+        assert_eq!(reachable_deliveries(1_000, 30, 5), 965);
+    }
+
+    #[test]
+    fn reachable_saturates_instead_of_underflowing() {
+        assert_eq!(reachable_deliveries(10, 20, 0), 0);
+        assert_eq!(reachable_deliveries(10, 5, 20), 0);
     }
 }
 

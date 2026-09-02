@@ -29,7 +29,7 @@ echo "START $(date '+%F %T') load=$(load)"
 tier() { # clients window listeners label
   echo "B: TIER $1 start $(date '+%T') load=$(load) window=$2 listeners=$3"
   benches/scripts/linux-soak.sh "$PWD" ladder-rerun "$RAW/linux-$4.log" "$1" 5000 "$2" 1 "$3"
-  echo "B: TIER $1 done $(grep -oE 'LINUX_SOAK_EXIT=[0-9]+|drop% *: *[0-9.]+|ops/sec *: *[0-9]+|completed=[a-z]+|peak_rss_mib=[0-9a-z/]+|quorum after [0-9.]+s|complete=[a-z]+|late_subscribers=[0-9]+' "$RAW/linux-$4.log" | tr '\n' ' ')"
+  echo "B: TIER $1 done $(grep -oE 'LINUX_SOAK_EXIT=[0-9]+|drop% *: *[0-9.]+|ops/sec *: *[0-9]+|ops/sec \(finish\) *: *[0-9a-z/]+|elapsed_to_finish *: *[0-9.]+s|elapsed_to_finish *: *n/a|completed=[a-z]+|peak_rss_mib=[0-9a-z/]+|quorum after [0-9.]+s|complete=[a-z]+|late_subscribers=[0-9]+' "$RAW/linux-$4.log" | tr '\n' ' ')"
   sleep 30
 }
 tier 30000  400  1 30k
@@ -37,20 +37,24 @@ tier 40000  500  1 40k
 tier 50000  600  1 50k
 tier 100000 1200 2 100k
 
-# Second pass at the largest tier that completed with <1% drops.
+# Second pass at the largest tier with <1% drops. Keyed on drop% alone:
+# `completed=true` means delivered == clients × events, which is unreachable
+# once any subscriber arrived after fan-out started (its pre-subscribe events
+# are never matched), so at ≥30k it is always false. The probe's
+# `elapsed_to_finish` line carries the honest finish time instead.
 best=""
 for spec in "30000 400 1 30k" "40000 500 1 40k" "50000 600 1 50k" "100000 1200 2 100k"; do
   set -- $spec
   f="$RAW/linux-$4.log"
   drop=$(grep -oE 'drop% *: *[0-9.]+' "$f" | grep -oE '[0-9.]+$')
-  if grep -q 'completed=true' "$f" && [ -n "$drop" ] && awk -v d="$drop" 'BEGIN{exit !(d<1)}'; then
+  if [ -n "$drop" ] && awk -v d="$drop" 'BEGIN{exit !(d<1)}'; then
     best=$1; bestw=$2; bestl=$3; bestlabel=$4
   fi
 done
 if [ -n "$best" ]; then
   tier "$best" "$bestw" "$bestl" "$bestlabel-pass2"
 else
-  echo "B: no tier completed with <1% drops — no second pass"
+  echo "B: no tier reached <1% drops — no second pass"
 fi
 echo "END $(date '+%F %T') load=$(load)"
 echo LADDER_EXIT=0
