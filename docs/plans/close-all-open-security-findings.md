@@ -323,14 +323,18 @@ cannot double-decrement — read first, then confirmed empirically here.
 described below it could not have produced a trustworthy number, which is the
 reason to say so rather than quietly omit it.
 
-**Still host-blocked as of 2026-09-02.** Both the 10k soak and the throughput
-re-measure remain unrun. The blocker is the same four orphan context-mode
-`node` processes (`start.mjs`, PIDs **47955 47973 73569 73604**) still pegged
-at ~100% CPU each; agents in this session cannot kill them (outside the
-sandbox), so the user must `kill 47955 47973 73569 73604` and confirm the load
-average is back near idle before either number is taken. Run order once clear:
-`make bench` for the throughput figure, then `nostos-bench-10k` for the soak,
-recording load average alongside each per `docs/BENCHMARK-METHODOLOGY.md`.
+**Attempted 2026-09-02 after the orphans were killed — still contended, aborted.**
+The four orphan context-mode `node` processes (PIDs 47955 47973 73569 73604)
+were killed by the user, and the throughput re-measure was run at commit
+`5c7ca8b` with the baseline's exact config. Both completed passes breached the
+methodology's >1% drop ceiling: pass 1 706,412 ops/sec @ **15.23%** drops,
+pass 2 654,772 ops/sec @ **21.43%** drops, host load 16–24 on 10 cores. The
+load source was not the orphans but VS Code's `Code Helper (Plugin)` (93–168%
+CPU) plus two other agent sessions. The run was aborted before pass 3 and the
+10k soak; full record in `benches/results/remeasure-2026-09-02/CONTENDED.md`.
+The 833,307 / 0.00% baseline stands unchanged. **Still needed:** quiet the host
+(1-min load < 10 — quit VS Code or its extension host, pause other sessions),
+then rerun `/tmp/nostos-remeasure.sh`; accept a pass only at ≤1% drops.
 
 **Binary names, for the next agent:** the bench binaries are `nostos-bench`,
 `nostos-bench-10k`, `nostos-reconnect-storm`, `nostos-bench-pg-ingest` — *not* the
