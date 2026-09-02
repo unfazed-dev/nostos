@@ -306,9 +306,14 @@ Future<void> _cargoBuildFallback({
 /// validates it against the target SDK) and rustc's link step. iOS already
 /// gets `-isysroot` from cc-rs; setting the matching SDK there is harmless.
 /// If `xcrun` is unavailable or fails, set nothing and let cargo report the
-/// real error. Returns null when nothing needs setting.
+/// real error. Returns null when nothing needs setting. An `SDKROOT` that is
+/// empty or a bare SDK name (`macosx`) rather than an absolute existing path
+/// counts as absent — raw toolchain clang can't use those either.
 Future<Map<String, String>?> _appleSdkRootEnv(CodeConfig code) async {
-  if (Platform.environment['SDKROOT'] != null) {
+  final existing = Platform.environment['SDKROOT'];
+  if (existing != null &&
+      existing.startsWith('/') &&
+      Directory(existing).existsSync()) {
     return null;
   }
   final sdk = switch (code.targetOS) {
