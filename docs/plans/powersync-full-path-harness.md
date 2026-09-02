@@ -210,15 +210,17 @@ development* setup and must not carry a published number.
 
 | Step | Deliverable | Days |
 |---|---|---|
-| 0 | Rewrite `docker/powersync/config.yaml` to documented schema; pin image; second PG for bucket storage; JWKS auth; extend `powersync_smoke.rs` to assert a real `checkpoint_complete` | 2 |
+| 0 | Rewrite `docker/powersync/config.yaml` to the documented schema; pin image; **MongoDB bucket storage** (single-node replica set, per the deployment-architecture doc — decision D6, §9); JWKS auth; extend `powersync_smoke.rs` to assert a real `checkpoint_complete` | 2 |
+| 0.5 | **Per-container ceiling probe** (moved up from §8 Q1 — decision D5): one API container, ramp `@powersync/node` clients 25→50→100→150 until the first connect failure or checkpoint stall; the measured ceiling sets the containers-per-tier ratio for Steps 3 and 5 | 0.5 |
 | 1 | `crates/nostos-bench/src/bin/shared_writer.rs` + `race_rows` DDL in `docker/pg-init/` | 1.5 |
 | 2 | Nostos apply swarm: `crates/nostos-bench/src/bin/race_nostos.rs` (N × `SyncClient`, per-client histogram, JSON artifact) | 2 |
-| 3 | PowerSync apply swarm: `benches/powersync-node/` (Node harness, N processes, same JSON artifact schema) | 3 |
+| 3 | PowerSync apply swarm: `benches/powersync-node/` (Node harness, **N clients packed per process via `worker_threads`**, client-side CPU sampled per engine — decision D7, same JSON artifact schema) | 3 |
 | 4 | Wire-delivery lane: `test-client concurrent-connections` wrapper + Nostos counterpart | 1.5 |
-| 5 | Orchestrator `benches/scripts/race.sh` (interleaved A/B, noise guard, env capture) | 1 |
+| 5 | Orchestrator `benches/scripts/race.sh` (interleaved A/B, **headroom rule D4 enforced mechanically**, env capture) | 1 |
 | 6 | `benches/results/race-<date>/RESULTS.md`; rewrite `docs/COMPARISON.md` §2/§4; update `docs/BENCHMARK-METHODOLOGY.md` §8 | 1.5 |
 
-Total ≈ 12.5 days.
+Total ≈ 13 days. **Status: HOLD — planning only** (decision D2, §9). Nothing in this table executes
+until the unblock condition in D2 is met and the team lead says go.
 
 **Stop line.** Whatever the harness measures gets published, including a loss. Concretely: if PowerSync
 wins any apply tier, the amended artifacts are named in advance — the labeled-number table in
@@ -259,8 +261,9 @@ worth stating accurately rather than as "FSL forever."
 
 ## 8. Open questions
 
-1. **Does `@powersync/node` scale to 100 instances on one host?** Unmeasured. Step 3 must include a
-   ceiling probe; if it caps below 100, the apply ladder tops out where it actually works and says so.
+1. **Does `@powersync/node` scale to 100 instances on one host?** Unmeasured. ~~Step 3 must include a
+   ceiling probe~~ **Resolved 2026-09-02 (D5): the probe is now Step 0.5 and runs before any tier is
+   built**; if it caps below 100, the apply ladder tops out where it actually works and says so.
 2. **Does the shared source Postgres become the bottleneck with two replication slots plus the writer?**
    If PG saturates first, the harness measures Postgres, not either engine. Needs a headroom check
    before any tier is published.
@@ -270,8 +273,8 @@ worth stating accurately rather than as "FSL forever."
    [deployment-architecture](https://docs.powersync.com/maintenance-ops/self-hosting/deployment-architecture)
    name MongoDB** (single node in replica-set mode for dev, 3-node replica set for production) — Postgres
    storage is never the recommended path there. If MongoDB storage is materially faster, racing on
-   Postgres storage reintroduces exactly the crippled default §5 exists to prevent. **Resolve before
-   Step 0 commits**; default to MongoDB unless evidence says otherwise.
+   Postgres storage reintroduces exactly the crippled default §5 exists to prevent. **Resolved
+   2026-09-02 (D6): MongoDB bucket storage; Step 0 rewritten accordingly.**
 4. **Sync Streams or legacy Sync Rules?** Streams went GA May 2026 and Rules are now "legacy"
    ([sync overview](https://docs.powersync.com/sync/overview)). Racing the legacy path would be a
    crippled default. Default to Sync Streams; confirm the pinned image supports them.
@@ -280,3 +283,28 @@ worth stating accurately rather than as "FSL forever."
    structural.
 6. **What counts as a drop for PowerSync?** It has no drop-on-full contract. Confirm from the docs or
    observation whether a slow client is ever shed, or only delayed, before writing the accounting code.
+
+## 9. Decisions (grilled 2026-09-02)
+
+Team-lead answers from a `/grill-me` session on the three open calls (ladder shape, Step 0 stack
+fixes, go/hold) plus the dependent details they forced. A future agent executes from this section
+without re-asking. (Advisor consult for this section was skipped: sandboxed shell could not reach the
+CLI login; decisions rest on §3–§8 and the team lead's answers.)
+
+| # | Decision | Rationale / consequence |
+|---|---|---|
+| D1 | **The one public claim:** same-stage full-path rows/sec at the *apply finish line*, Nostos vs PowerSync, at a stated client count. | Only honest cross-engine claim (§2). Rejected: "Nostos holds 100k wire clients, PowerSync can't" — that is PowerSync's documented deployment shape (1 API container per ~100 connections, §5.1), not a benchmark result. Wire lane (Step 4) stays secondary and is never quoted as the headline. |
+| D2 | **HOLD — planning only.** Execution unblocks when Nostos's own 100k fan-out collapse is *root-caused and documented* in `docs/plans/fanout-100k-collapse-2026-09-02.md` (a fix is not required) **and** the team lead explicitly says go. | The 100k investigation may change which Nostos tiers are interesting. A fix is not a precondition because the apply ladder (D3) tops at 1k, where Nostos shows no collapse. Nothing in §6 runs before then — not Step 0, not the ceiling probe. |
+| D3 | **Host: this Mac** (10 cores, Docker Desktop VM 8 GiB). **Apply ladder: 100 / 500 / 1k**, stopping at the first tier that fails D4. | The requested 10k–100k ladder is not runnable on the apply lane on one host: 1k apply already needs ~10 API containers + 1k PowerSync clients + 1k Nostos clients + source PG + MongoDB (§3.4). 5k apply (~50 containers) is out. A rented Linux box was offered and declined for now; if it is used later, *both* engines run on it (same-conditions rule, `docs/BENCHMARK-METHODOLOGY.md`). |
+| D4 | **Headroom rule (publish/invalid gate):** for the whole run, host load average < 0.8 × cores **and** no non-harness process > 20 % CPU; otherwise the tier is recorded as *invalid* with its logs (`CONTENDED.md` pattern), never re-rolled silently. | Same threshold that invalidated three Nostos re-measures on 2026-09-02. Mechanically enforced by `race.sh` (Step 5), not judged per tier. Also answers §8 Q2: a tier where the shared source PG saturates fails this rule via the PG process. |
+| D5 | **Per-container ceiling probe moves to Step 0.5**, before any ladder tier is built. | Sets the containers-per-tier ratio. Running it last (old Step 5 / §8 Q1) risked rebuilding tiers. Skipping it and trusting "100 per container" risked making PowerSync look artificially slow — unfair to them. |
+| D6 | **Step 0 = MongoDB bucket storage** (single-node replica set, the documented dev/production path) **+ `docker/powersync/config.yaml` rewritten to the documented schema.** | Current file points bucket storage at the *same* Postgres that carries the race writer and Nostos's replication slot — contaminates both numbers. Postgres-on-a-second-instance rejected: supported but not PowerSync's reference path, so any oddity reads as "you misconfigured it". |
+| D7 | **Client-side fairness:** pack N PowerSync clients per Node process via `worker_threads`; sample and publish client-side CPU per engine next to every tier's number. | 1k Node processes cost far more host CPU than 1k Rust `SyncClient`s and would push PowerSync's tiers into D4 failure through no fault of the sync service. A Rust PowerSync client stays rejected (§3.3: protocol is "see the SDK"). |
+
+**Execution order once D2 unblocks:** Step 0 → Step 0.5 → Step 1 → Step 2 → Step 3 → Step 5 → tiers
+100 / 500 / 1k under D4 → Step 4 (wire lane, secondary) → Step 6. Stop line in §6 is unchanged: a
+loss at any tier is published.
+
+**Still open after grilling:** §8 Q4 (Sync Streams vs legacy Rules — default Streams, confirm on the
+pinned image in Step 0), Q5 (checkpoint cadence knob), Q6 (PowerSync drop semantics). All three are
+Step 0 / Step 3 findings, not decisions the team lead needs to make in advance.
