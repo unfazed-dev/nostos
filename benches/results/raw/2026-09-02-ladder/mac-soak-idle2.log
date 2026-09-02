@@ -1,0 +1,16 @@
+  [diag] listeners: ws://127.0.0.1:55960/sync
+  [diag] subscribe quorum after 9.02s: connected=10000 subscribed=10000 connect_failed=0
+  [diag] at window end: connected=10000 subscribed=10000 connect_failed=0
+  [diag] router: matched=13533391 delivered=12881717 dropped=651674 faulted=0 events_fanned_out~=1353 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=0 not_reached_in_window=36470000 router_dropped=651674 in_flight_or_unaccounted=3137363
+  [diag] completed=false (delivered 9744354 of 50000000 before the 60s window) peak_rss_mib=n/a
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 5000 (attempted deliveries: 50000000)
+  window    : 60s
+  ---------------------------
+  delivered : 9744354
+  ops/sec   : 162401
+  drop%     : 80.51
+  elapsed   : 60.00s

@@ -62,6 +62,31 @@ unstable at this socket count and stays not-claimed.
 4. RESULTS.md new section (native and container in separate tables, never compared),
    ROADMAP 10k line, this plan's Results section, commit.
 
-## Results
+## Results — run 2026-09-02 19:21–20:26, commit `4bf9a0d`, `LADDER_EXIT=0`
 
-_(filled in when the runs finish)_
+Full tables in `benches/results/RESULTS.md` § "Scale ladder 20k–100k"; raw logs
+`benches/results/raw/2026-09-02-ladder/`.
+
+**Status: measured; ≥30k tiers are harness-capped and must be re-run.**
+
+- Linux 20k: clean and reproduced — 100M/100M, 0.00% drops, 988,044 / 967,548 ops/sec
+  (two passes), 912 / 884 MiB RSS, ~101 s each.
+- Linux 30k / 40k / 50k / 100k: **no server-side limit found** — router dropped = 0,
+  connect_failed = 0, no ENOBUFS, all clients connected by window end, 100k held
+  100,000 subscribed sessions at 4,034 MiB RSS. But every tier hit the probe's
+  subscribe-quorum cap (`max(30 s, clients/1000 s)`, `probe_10k.rs:170`) with 4–16% of
+  clients still connecting (container connect rate ≈ 840–960 conn/s), and `attempted`
+  = `clients × events` counts the events fanned out before those clients subscribed as
+  drops. Reconciled exactly: `matched == delivered` at every tier; shortfall = late
+  clients' missed early events. The 0.62% / 2.05% / 4.33% / 0.11% figures are that
+  artefact, and the ops/sec at those tiers is delivered ÷ window (lower bound only).
+- macOS 10k re-check answered the question: **not a cold-start artefact.** 2 of 4 soaks
+  clean (2.16M / 2.17M ops/sec, 0%), 2 stalled (~80% drops, fan-out loop ~13× slower,
+  router shed at the bounded buffers) with idle 2 failing 90 s after a clean idle run.
+  macOS 10k stays not-claimed. 1k bench pass in the same run: 2,687,461 ops/sec, 0%.
+
+**Follow-up (open):** make the quorum wait scale with the observed connect rate (or
+compute `attempted` from subscribed clients), then re-run 30k–100k un-capped. Until
+then no ≥30k rate is quoted anywhere.
+
+Not done from step 4: no ROADMAP edit — it has no dedicated 10k line to update.

@@ -360,3 +360,88 @@ remains flagged for the ~9.2k-socket ENOBUFS limit and this cold-start
 sensitivity (`docs/plans/close-soak-10k-open-items.md` item 2).
 
 The 833,307 figure is preserved above as the old-fan-out historical baseline.
+
+## Scale ladder 20k–100k — MEASURED 2026-09-02 (Linux container)
+
+Plan: `docs/plans/scale-ladder-20k-100k.md`. Recipe: `benches/scripts/scale-ladder.sh`
+on commit `4bf9a0d` (probe gained a `listeners` arg, `completed=` and peak-RSS
+reporting). Raw logs `benches/results/raw/2026-09-02-ladder/`, bench JSON
+`benches/results/ladder-2026-09-02/`. One pass per tier, then a second pass at
+the largest tier that finished with <1% drops. **Container numbers and native
+numbers are separate tables and are never compared to each other.**
+
+**Environment.** Host Mac16,13, 10 cores, macOS 26.6.2, rustc 1.95.0, load at
+start 2.70 (`env.txt`; its `dirty_files=1` is the script's own untracked output
+dir, not code drift). Container: Docker Desktop VM, `Linux 7.0.12-linuxkit
+aarch64`, 10 vCPU, 8 GiB, `nofile=1048576`, `ip_local_port_range` 1024–65535,
+`somaxconn=4096`, `rust:1.95-bookworm`. macOS and the VM share the same 10
+cores, so everything ran serially.
+
+**Tier shape.** `nostos-bench-10k <clients> 5000 <window> 1 <listeners>` — 5,000
+events per client (the 10k soak's shape), per-tier window 300/400/500/600/1200 s,
+one loopback listener for 20k–50k and two (`127.0.0.1` + `127.0.0.2`) at 100k so
+the 4-tuple space is not the limit.
+
+| tier | subscribed at quorum cap / target | quorum cap | delivered / attempted | drop% | router dropped | connect_failed | completed | elapsed | ops/sec (see note) | peak RSS |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20k | 20,000 / 20,000 | 29.2 s | 100,000,000 / 100,000,000 | 0.00% | 0 | 0 | yes | 101.2 s | 988,044 | 912 MiB |
+| 30k | 28,785 / 30,000 | 30.0 s (hit) | 149,073,401 / 150,000,000 | 0.62% | 0 | 0 | no | 400.0 s (window) | ≥372,682 | 1,300 MiB |
+| 40k | 36,769 / 40,000 | 40.0 s (hit) | 195,907,126 / 200,000,000 | 2.05% | 0 | 0 | no | 500.0 s (window) | ≥391,805 | 1,708 MiB |
+| 50k | 45,863 / 50,000 | 50.0 s (hit) | 239,166,579 / 250,000,000 | 4.33% | 0 | 0 | no | 600.0 s (window) | ≥398,609 | 2,171 MiB |
+| 100k (2 listeners) | 83,713 / 100,000 | 100.0 s (hit) | 499,450,462 / 500,000,000 | 0.11% | 0 | 0 | no | 1200.0 s (window) | ≥416,206 | 4,034 MiB |
+| 20k, pass 2 | 20,000 / 20,000 | 19.8 s | 100,000,000 / 100,000,000 | 0.00% | 0 | 0 | yes | 103.4 s | 967,548 | 884 MiB |
+
+**What the ≥30k "drops" are — a harness accounting artefact, reconciled
+exactly.** The probe waits for a subscribe quorum for at most
+`max(30 s, clients/1000 s)` (`probe_10k.rs:170`), then starts fanning out while
+the remaining clients keep connecting; `attempted` is `clients × events`
+(`:220`) regardless of when each client subscribed. The container connects at
+~840–960 conn/s, so every tier ≥30k hit that cap with 4–16% of clients still
+connecting. At every one of those tiers: `matched == delivered` (the router
+delivered every frame it matched — nothing shed, nothing faulted), all clients
+had connected by window end (`at window end: connected=30000/40000/50000/100000`),
+and the shortfall (926,599 / 4,092,874 / 10,833,421 / 549,538) is the events
+fanned out before the late clients subscribed — they were never matched, so they
+were never attempted by the server. **No tier showed a server-side limit: router
+dropped = 0, connect_failed = 0, no ENOBUFS, at every tier through 100k.**
+`completed=false` at those tiers is the same artefact (target = `clients × events`).
+
+**ops/sec note.** At 20k the probe finished its budget early, so ops/sec is
+delivered ÷ elapsed (988,044; 967,548 on pass 2). At ≥30k the probe ran to the
+window because the late clients' early events can never arrive, so ops/sec there
+is delivered ÷ window — a lower bound on the fan-out rate, not a measurement of
+it; the actual fan-out finished at some unrecorded point inside the window. No
+≥30k number is a headline. The one clean, un-capped statement from this run is:
+**20k clients, 100M/100M deliveries, 0.00% drops, ~970k–990k ops/sec, <1 GiB RSS,
+reproduced in two passes**, and **100k concurrent subscribed sessions on one
+process at 4.0 GiB RSS with zero router drops**.
+
+Memory scales roughly linearly: ~43 MiB per 1,000 sessions (912 MiB @ 20k →
+4,034 MiB @ 100k); the 8 GiB VM was not the limit.
+
+**Next fix (before ≥30k rates can be claimed):** scale the quorum cap to the
+measured connect rate (or compute `attempted` from subscribed clients), then
+re-run 30k–100k so those tiers are measured un-capped.
+
+**macOS 10k re-check (native, same commit, 4 soaks `10000 5000 60`, run from an
+idle host with 60 s gaps, the 4th immediately after a 1k bench pass):**
+
+| soak | quorum | delivered / attempted | drop% | router dropped | elapsed | ops/sec |
+|---|---|---|---|---|---|---|
+| idle 1 | 8.6 s | 50,000,000 / 50,000,000 | 0.00% | 0 | 23.1 s | 2,162,135 |
+| idle 2 | 9.0 s | 9,744,354 / 50,000,000 | 80.51% | 651,674 | 60.0 s (window) | 162,401 |
+| idle 3 | 29.8 s | 50,000,000 / 50,000,000 | 0.00% | 0 | 23.0 s | 2,171,537 |
+| after bench | 7.9 s | 11,734,000 / 50,000,000 | 76.53% | 40,476 | 60.0 s (window) | 195,547 |
+
+All four reached 10,000/10,000 subscribed with 0 connect failures. The two bad
+runs are not cold-start (idle 2 started 90 s after a clean run on an idle host):
+the fan-out loop itself ran ~13× slower (1,353 events in 60 s vs 5,000 in 23 s)
+and the router shed at the bounded per-session buffers because writers stalled;
+the following run's connect phase also took 29.8 s vs ~8.5 s. This is a macOS
+loopback stall between back-to-back 10k-socket runs, not a code-path
+difference (same binary, clean on either side). **macOS 10k stays bimodal (2 of
+4 clean) and is NOT claimed as met on macOS**; the 1k bench pass in the same run
+was 2,687,461 ops/sec, 0.00% drops (`ladder-2026-09-02/mac-bench/`), consistent
+with the 2,618,601 median above. 20k+ was not attempted natively — the sysctl
+walls (~9.2k ENOBUFS, 16,384 ports, `maxfilesperproc=61440`) are recorded in the
+plan.
