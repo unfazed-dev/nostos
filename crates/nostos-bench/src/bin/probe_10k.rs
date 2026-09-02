@@ -162,27 +162,48 @@ async fn run(
         handles.push(tokio::spawn(client_task(u, c, cs)));
     }
 
-    // Wait for a subscribe quorum (every client subscribed or given up), capped
-    // at 30s or 1s per 1k clients, whichever is larger (a 100k connect storm
-    // needs well over 30s). A fixed 800ms grace was measured leaving 1k–9k of
-    // 10k clients still connecting when the first event fired (2026-09-02
-    // diag), which silently charged those events as "undelivered" to the fan-out.
-    let quorum_cap = Duration::from_secs(30.max(clients as u64 / 1_000));
+    // Wait for a subscribe quorum (every client subscribed or given up). The
+    // wait is progress-based: keep waiting while the settled count is still
+    // rising (any growth inside the last `STALL` window), under a hard ceiling
+    // scaled to the client count. Two fixed waits were measured wrong before
+    // this: an 800ms grace left 1k–9k of 10k clients connecting when the first
+    // event fired, and a max(30s, 1s/1k-clients) cap (2026-09-02 ladder) started
+    // fan-out with 4–16% of 30k–100k clients still connecting in a container
+    // that connects ~900/s. Both charged those clients' early events to the
+    // fan-out as "undelivered" although nothing was ever sent to them. The
+    // connect rate is a host property, so the wait must follow it, not a clock.
+    let stall = Duration::from_secs(5);
+    let quorum_ceiling = Duration::from_secs(60.max(clients as u64 / 200));
     let quorum_start = Instant::now();
+    let mut last_settled = 0u64;
+    let mut last_progress = Instant::now();
     loop {
         let settled =
             conn.subscribed.load(Ordering::Relaxed) + conn.connect_failed.load(Ordering::Relaxed);
-        if settled >= clients as u64 || quorum_start.elapsed() >= quorum_cap {
+        if settled >= clients as u64 {
+            break;
+        }
+        if settled > last_settled {
+            last_settled = settled;
+            last_progress = Instant::now();
+        }
+        if last_progress.elapsed() >= stall || quorum_start.elapsed() >= quorum_ceiling {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let subscribed_at_start = conn.subscribed.load(Ordering::Relaxed);
+    let quorum_complete =
+        subscribed_at_start + conn.connect_failed.load(Ordering::Relaxed) >= clients as u64;
     eprintln!(
-        "  [diag] subscribe quorum after {:.2}s: connected={} subscribed={} connect_failed={}",
+        "  [diag] subscribe quorum after {:.2}s: connected={} subscribed={} connect_failed={} \
+         complete={quorum_complete} (ceiling {}s, stall {}s)",
         quorum_start.elapsed().as_secs_f64(),
         conn.connected.load(Ordering::Relaxed),
-        conn.subscribed.load(Ordering::Relaxed),
+        subscribed_at_start,
         conn.connect_failed.load(Ordering::Relaxed),
+        quorum_ceiling.as_secs(),
+        stall.as_secs(),
     );
 
     let sum = || {
@@ -222,7 +243,9 @@ async fn run(
         let subscribed = conn.subscribed.load(Ordering::Relaxed).max(1);
         let matched = metrics.matched.load(Ordering::Relaxed);
         eprintln!(
-            "  [diag] at window end: connected={} subscribed={} connect_failed={}\n  \
+            "  [diag] at window end: connected={} subscribed={} connect_failed={} \
+             subscribed_at_start={subscribed_at_start} late_subscribers={} \
+             (late subscribers' pre-subscribe events stay in the drop count)\n  \
              [diag] router: matched={} delivered={} dropped={} faulted={} \
              events_fanned_out~={} (matched/subscribed)\n  \
              [diag] undelivered breakdown: never_connected={} not_reached_in_window={} \
@@ -230,6 +253,9 @@ async fn run(
             conn.connected.load(Ordering::Relaxed),
             conn.subscribed.load(Ordering::Relaxed),
             conn.connect_failed.load(Ordering::Relaxed),
+            conn.subscribed
+                .load(Ordering::Relaxed)
+                .saturating_sub(subscribed_at_start),
             matched,
             metrics.delivered.load(Ordering::Relaxed),
             metrics.dropped.load(Ordering::Relaxed),
