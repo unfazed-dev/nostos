@@ -95,6 +95,19 @@ Decision table:
 | all memory counters flat; sys jiffies ≫ user; PSI cpu high | (e) kernel CPU / scheduler, not memory — next run: perf/softirq |
 | all flat, rate uniform from t=0, user CPU dominates | app-level; next: phase timers in fan_out, 50k with 2 listeners for (b) |
 
+## Numbers (every measurement, valid or not)
+
+Headroom rule: a measurement is VALID only if host load1 < 8 (0.8 × 10
+cores) at start and no other bench container was up. `load1` here is the
+macOS host's (`sysctl vm.loadavg`), not the VM's `/proc/loadavg` (the
+`[sys]` lines carry the VM's).
+
+| run | tier | host load1 start → end | s/event | events fanned | peak RSS | verdict |
+|---|---|---|---|---|---|---|
+| ladder-rerun linux-100k.log (11:17, commit 1d9de36) | 100k×5000, 1200 s, 2L | not recorded (ladder env.txt: 3.41 at ladder start) | 1.22 | 982 | 3,887 MiB | the finding under test |
+| ladder-rerun linux-50k.log (11:06) | 50k×5000, 600 s, 1L | not recorded | 0.12 | 4,971 | 2,044 MiB | control |
+| fanout-100k-diag, first attempt (12:10) — `linux-fanout-diag.INVALID-host-load51.log` | 100k×500, 300 s, 2L | 51 → killed in connect phase | — | — | — | **INVALID** (host load 51; killed before any fan-out numbers) |
+
 ## Phase 3 — after the verdict
 
 Fix only what the run names. Perf changes ship with before/after numbers
