@@ -107,6 +107,8 @@ macOS host's (`sysctl vm.loadavg`), not the VM's `/proc/loadavg` (the
 | ladder-rerun linux-100k.log (11:17, commit 1d9de36) | 100k×5000, 1200 s, 2L | not recorded (ladder env.txt: 3.41 at ladder start) | 1.22 | 982 | 3,887 MiB | the finding under test |
 | ladder-rerun linux-50k.log (11:06) | 50k×5000, 600 s, 1L | not recorded | 0.12 | 4,971 | 2,044 MiB | control |
 | fanout-100k-diag, first attempt (12:10) — `linux-fanout-diag.INVALID-host-load51.log` | 100k×500, 300 s, 2L | 51 → killed in connect phase | — | — | — | **INVALID** (host load 51; killed before any fan-out numbers) |
+| fanout-100k-diag run 1 (22:13–22:19) — `linux-fanout-diag.log` tier 100000 | 100k×500, 300 s, 2L | 5.88 → 3.00 (gate waited 120 s) | ~0.19 | 500 (all, by t≈95 s) | 3,906 MiB | **VALID** — no cliff in 500 events; see Run 1 |
+| fanout-100k-diag run 1 (22:20–22:22) — `linux-fanout-diag.log` tier 50000 | 50k×500, 120 s, 1L | 3.92 → 3.37 | ~0.066 | 500 (all, by t≈33 s) | 2,858 MiB | **VALID** control; see 50k control |
 
 ## Phase 3 — after the verdict
 
@@ -160,4 +162,33 @@ count ⇒ (1), and the progress line's knee says where to look.
 
 Note: `HOST tier=100000 end … rc=143` is the inner script's own exit status
 (its last command is `wait` on the killed sampler), not a probe failure —
-`SOAK rc=0`.
+`SOAK rc=0`. Fixed in ac672c0 (inner tier now exits 0 after sampler
+teardown; outer script takes tier specs from argv).
+
+## 50k control result — 50k × 500 events, VALID (host load1 3.92 → 3.37)
+
+Same log, tier 50000, 22:20:01–22:22:37 host clock.
+
+- Quorum after 34.81 s with 47,099 subscribed; 50,000 by t=80 s.
+- Progress line: t=10→30 s matched 6.78M → 22.68M = 795k matched/s at
+  ~47.1k live sessions ≈ **0.06 s/event**. All 500 events fanned by t≈33 s
+  (matched 23,633,433 = 500 × ~47.3k average subscribed); `matched` then
+  froze for the remaining ~87 s of the window — the same shape as the 100k
+  tier, so the post-plateau idle is the FakeReplicator budget (500 events)
+  running out, not a stall. `completed=false` in both tiers is the probe's
+  denominator (clients × events) assuming every client subscribed before
+  event 1.
+- Per-delivery rate 23.6M / 33 s ≈ 716k ops/s vs 100k's ≈ 450k ops/s. Per
+  event the 100k tier is ~2.9× slower for 2× the subscribers, i.e. ~35%
+  slower per delivery — a slope, not the ladder's 10× cliff (1.22 vs 0.12
+  s/event).
+- Router: matched=delivered=23,633,433, dropped=0, faulted=0, swap 0, peak
+  RSS 2,858 MiB.
+
+Both tiers reached their plateau with dropped=0 and matched=delivered at
+every progress sample, so the 500-event shape holds at both sizes. Run 2
+(100k × 5000, 1200 s, per the paragraph above) is what separates "the
+effect accumulates past ~500 events" from "the 11:17 ladder tier was taken
+under host contention". Run 2 is launched with
+`benches/scripts/fanout-100k-diag.sh <src> benches/results/raw/2026-09-02-fanout-100k-diag-run2 100000,5000,1200,1,2`
+behind the same headroom gate.
