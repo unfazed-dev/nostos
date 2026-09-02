@@ -67,7 +67,7 @@ unstable at this socket count and stays not-claimed.
 Full tables in `benches/results/RESULTS.md` § "Scale ladder 20k–100k"; raw logs
 `benches/results/raw/2026-09-02-ladder/`.
 
-**Status: measured; ≥30k tiers are harness-capped and must be re-run.**
+**Status: measured; first run ≥30k harness-capped (kept below); re-run with progress-based quorum done — 40k/50k promoted, 30k quorum-capped, 100k fan-out collapse open (see Follow-up).**
 
 - Linux 20k: clean and reproduced — 100M/100M, 0.00% drops, 988,044 / 967,548 ops/sec
   (two passes), 912 / 884 MiB RSS, ~101 s each.
@@ -85,8 +85,26 @@ Full tables in `benches/results/RESULTS.md` § "Scale ladder 20k–100k"; raw lo
   router shed at the bounded buffers) with idle 2 failing 90 s after a clean idle run.
   macOS 10k stays not-claimed. 1k bench pass in the same run: 2,687,461 ops/sec, 0%.
 
-**Follow-up (open):** make the quorum wait scale with the observed connect rate (or
-compute `attempted` from subscribed clients), then re-run 30k–100k un-capped. Until
-then no ≥30k rate is quoted anywhere.
+**Follow-up (done, 2026-09-02, commit `1d9de36`):** quorum wait made progress-based
+(waits while subscribers keep arriving; 5 s stall or per-tier ceiling releases it;
+reports `late_subscribers`). Re-ran 30k–100k via `benches/scripts/scale-ladder-rerun.sh`;
+raw logs `benches/results/raw/2026-09-02-ladder-rerun/`, table in RESULTS.md
+§ "Re-run with progress-based quorum".
+
+- 40k: 199,986,080 / 200M, 0.01% drops (120 late subscribers), router dropped 0,
+  2,191 MiB — **promoted to measured** on delivery/drops.
+- 50k: 248,588,185 / 250M, 0.56% (3,692 late), router dropped 0, 2,044 MiB —
+  **promoted to measured** on delivery/drops.
+- 30k: 4.11% — the connect ramp stalled >5 s at 25,173 and the stall detector
+  released quorum early; 4,827 late. Still quorum-capped, container hiccup.
+- 100k: 80.34% drops with router dropped 0 and all 100k subscribed — the fan-out
+  loop itself collapsed to ~982 events / 1200 s (81,901 ops/sec vs 414,312 at 50k).
+  Real finding; cause not isolated. No 100k rate quoted.
+
+**Still open:** ops/sec at ≥30k remains delivered ÷ window (lower bound) because the
+probe never records when fan-out finished; pass-2 criterion keyed on `completed`
+so no second pass ran. Next: (1) record fan-out finish time in the probe,
+(2) key pass 2 on drop% <1%, (3) investigate the 100k fan-out collapse
+(memory pressure vs 2-listener split vs sequential loop over 100k writers).
 
 Not done from step 4: no ROADMAP edit — it has no dedicated 10k line to update.

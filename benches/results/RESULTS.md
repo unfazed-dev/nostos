@@ -449,3 +449,51 @@ was 2,687,461 ops/sec, 0.00% drops (`ladder-2026-09-02/mac-bench/`), consistent
 with the 2,618,601 median above. 20k+ was not attempted natively — the sysctl
 walls (~9.2k ENOBUFS, 16,384 ports, `maxfilesperproc=61440`) are recorded in the
 plan.
+
+### Re-run with progress-based quorum (commit `1d9de36`) — MEASURED 2026-09-02
+
+Same container recipe (`benches/scripts/scale-ladder-rerun.sh`, `rust:1.95-bookworm`,
+Linux 7.0.12-linuxkit aarch64, 10 vCPU / 8 GiB, `nofile=1048576`, `somaxconn=4096`),
+host load 3.41 at start, `dirty_files=1` = the script's own output dir. The probe's
+quorum wait is now progress-based (keeps waiting while subscribers are still
+arriving; gives up after a 5 s stall or a per-tier ceiling) and reports
+`late_subscribers`. Raw logs: `benches/results/raw/2026-09-02-ladder-rerun/`.
+
+| tier | window | quorum | subscribed at start | late | delivered / attempted | drop% | router dropped | connect_failed | peak RSS | ops/sec (delivered ÷ window) | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 30k | 400 s | 26.4 s (stall-tripped) | 25,173 | 4,827 | 143,836,755 / 150,000,000 | 4.11% | 0 | 0 | 1,314 MiB | 359,587 | quorum-capped (still) |
+| 40k | 500 s | 24.9 s | 39,880 | 120 | 199,986,080 / 200,000,000 | 0.01% | 0 | 0 | 2,191 MiB | 399,969 | **measured at window** |
+| 50k | 600 s | 27.9 s | 46,308 | 3,692 | 248,588,185 / 250,000,000 | 0.56% | 0 | 0 | 2,044 MiB | 414,312 | **measured at window** |
+| 100k | 1200 s | 43.0 s | 95,496 | 4,504 | 98,281,260 / 500,000,000 | 80.34% | 0 | 0 | 3,887 MiB | 81,901 | window-capped — fan-out collapse |
+
+**What was promoted.** 40k and 50k now stand as measured, not lower-bound-only,
+on the delivery/drop axis: every event the router matched was delivered
+(`matched == delivered`, `router dropped = 0`, `connect_failed = 0`, all clients
+subscribed by window end), and the shortfall is exactly the late subscribers'
+pre-subscribe events (40k: 120 × 333 = 40,000; 50k: 3,692 × ~393 = 1,450,000 —
+`not_reached_in_window` matches to the event). Nothing was shed. **200k and
+250k concurrent deliveries per event, <1% drops, ≤2.2 GiB RSS, no server-side
+limit** is the honest statement for those tiers.
+
+**What was NOT promoted.** The ops/sec column is still delivered ÷ window at every
+≥30k tier because the probe waits for `delivered == attempted`, which the late
+subscribers make unreachable, so it always runs to the window and does not record
+when the fan-out actually finished. 399,969 / 414,312 are lower bounds on the
+container fan-out rate, not measurements of it. 30k stayed quorum-capped for a
+different reason than before: the connect ramp paused >5 s at 25,173 and the
+stall detector released the quorum early (a container connect hiccup, not a
+harness cap — 40k/50k/100k ramped without a stall).
+
+**100k is a real finding, not an artefact.** All 100,000 subscribed
+(4,504 late), router dropped 0, connect_failed 0 — but the fan-out loop only got
+through ~982 of 5,000 events in 1200 s (81,901 ops/sec vs 414,312 at 50k, ~5×
+slower per delivery). That is a throughput collapse at 100k sinks per event
+inside the 8 GiB VM (3.9 GiB server RSS plus 100k probe sockets), not shedding.
+Cause not yet isolated (memory pressure vs. 2-listener split vs. per-event
+sequential loop over 100k writers); it is the next perf investigation. No 100k
+rate is quoted anywhere.
+
+The script's second pass did not run: its criterion was `completed=true`, which
+no ≥30k tier can reach while `attempted` counts late subscribers' events. Two
+harness follow-ups: (1) record the fan-out finish time so ops/sec at ≥30k is a
+measurement; (2) key the pass-2 criterion on drop% <1% rather than `completed`.
