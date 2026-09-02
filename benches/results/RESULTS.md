@@ -368,7 +368,11 @@ on commit `4bf9a0d` (probe gained a `listeners` arg, `completed=` and peak-RSS
 reporting). Raw logs `benches/results/raw/2026-09-02-ladder/`, bench JSON
 `benches/results/ladder-2026-09-02/`. One pass per tier, then a second pass at
 the largest tier that finished with <1% drops. **Container numbers and native
-numbers are separate tables and are never compared to each other.**
+numbers are separate tables and are never compared to each other.** This whole
+section is eval-only (FakeReplicator loopback → router → WS fan-out) and is
+**not comparable to any PowerSync figure**; the only honest head-to-head is a
+full-path real-PG → client-apply race on one shared harness, tracked in
+`docs/COMPARISON.md`.
 
 **Environment.** Host Mac16,13, 10 cores, macOS 26.6.2, rustc 1.95.0, load at
 start 2.70 (`env.txt`; its `dirty_files=1` is the script's own untracked output
