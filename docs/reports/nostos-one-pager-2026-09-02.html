@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nostos — what it is and how it did in testing (2 Sept 2026)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --ink:#1b1f24; --muted:#5b6470; --line:#dfe3e8; --good:#1f8a4c; --warn:#c77700; --bad:#c0392b; --brand:#2f5fd0; --soft:#f4f6fa; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; background:#e9ecf1; color:var(--ink); font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  .page { width:1000px; margin:24px auto; background:#fff; padding:36px 44px; box-shadow:0 2px 14px rgba(0,0,0,.12); }
+  header { display:flex; justify-content:space-between; align-items:flex-end; border-bottom:3px solid var(--brand); padding-bottom:12px; margin-bottom:22px; }
+  h1 { margin:0; font-size:34px; letter-spacing:-.5px; }
+  h1 small { display:block; font-size:16px; font-weight:400; color:var(--muted); margin-top:4px; }
+  .date { color:var(--muted); font-size:13px; text-align:right; }
+  h2 { font-size:15px; text-transform:uppercase; letter-spacing:.08em; color:var(--brand); margin:0 0 10px; }
+  section { margin-bottom:22px; }
+  .row { display:grid; gap:14px; }
+  .c3 { grid-template-columns:repeat(3,1fr); }
+  .c2 { grid-template-columns:1.15fr .85fr; }
+  .card { background:var(--soft); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card h3 { margin:0 0 6px; font-size:16px; }
+  .card p { margin:0; color:var(--muted); font-size:14px; }
+  .analogy { background:#fff8e6; border-color:#f1dc9a; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600; }
+  td.num { font-variant-numeric:tabular-nums; font-weight:600; white-space:nowrap; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; color:#fff; }
+  .good { background:var(--good); } .warn { background:var(--warn); } .bad { background:var(--bad); }
+  .big { display:flex; gap:14px; }
+  .stat { flex:1; text-align:center; padding:16px 10px; border-radius:10px; background:var(--brand); color:#fff; }
+  .stat b { display:block; font-size:30px; line-height:1.1; letter-spacing:-.5px; }
+  .stat span { font-size:13px; opacity:.9; }
+  ul { margin:6px 0 0 18px; padding:0; } li { margin:3px 0; }
+  footer { border-top:1px solid var(--line); padding-top:10px; margin-top:6px; font-size:12px; color:var(--muted); }
+  @media print { html,body{background:#fff} .page{width:auto;margin:0;box-shadow:none;padding:18px 24px} @page{size:A4 portrait;margin:10mm} }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header>
+  <h1>Nostos <small>Keeps an app's data up to date on every phone and laptop — even when the internet drops out.</small></h1>
+  <div class="date">Test report for non-technical readers<br>2 September 2026</div>
+</header>
+
+<section>
+  <h2>What Nostos is</h2>
+  <div class="row c3">
+    <div class="card"><h3>One source of truth, everywhere</h3><p>Every change made in the central database is pushed out to all connected devices, and every device's changes come back. Everyone sees the same data.</p></div>
+    <div class="card"><h3>Works offline</h3><p>Each device keeps its own copy. Lose signal on a train, keep working; it catches up when you're back online.</p></div>
+    <div class="card"><h3>Free and open</h3><p>Apache-2.0 licence — anyone can use it, including commercially, at no cost. The main competitor (PowerSync) has a restricted licence.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>What we tested, in plain terms</h2>
+  <div class="row c2">
+    <div class="card analogy">
+      <h3>Think of a post office</h3>
+      <p>Nostos's server is the post office. Each app on a phone is a mailbox. We opened <b>thousands of mailboxes at once</b>, dropped <b>tens of millions of letters</b> into the post office, then counted two things: <b>how fast</b> they were delivered and <b>how many went missing</b>.</p>
+    </div>
+    <div class="card">
+      <h3>The setup</h3>
+      <ul>
+        <li>One computer (a 10-core Mac) plays both post office and all the mailboxes.</li>
+        <li>Runs from 1,000 up to 100,000 mailboxes, on macOS and inside a Linux container.</li>
+        <li>Each run repeated; we keep the middle result and report anything lost.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Headline numbers</h2>
+  <div class="big">
+    <div class="stat"><b>2.6 million</b><span>updates delivered per second<br>with 1,000 devices connected</span></div>
+    <div class="stat"><b>0 lost</b><span>out of 100 million updates<br>at 1,000, 10,000 and 20,000 devices</span></div>
+    <div class="stat"><b>50,000</b><span>devices served at once<br>with 99.4% delivered</span></div>
+    <div class="stat"><b>3×</b><span>faster than Nostos was a week ago<br>after a bug found by this testing</span></div>
+  </div>
+</section>
+
+<section>
+  <h2>Results by size</h2>
+  <table>
+    <tr><th>Devices connected</th><th>Letters sent</th><th>Delivered</th><th>Speed (per second)</th><th>Verdict</th></tr>
+    <tr><td>1,000</td><td class="num">100,000,000</td><td class="num">100% — none lost</td><td class="num">2,618,601</td><td><span class="pill good">Excellent</span></td></tr>
+    <tr><td>10,000</td><td class="num">50,000,000</td><td class="num">100% — none lost</td><td class="num">2,162,135</td><td><span class="pill good">Excellent</span></td></tr>
+    <tr><td>20,000</td><td class="num">100,000,000</td><td class="num">100% — none lost</td><td class="num">988,044</td><td><span class="pill good">Excellent</span></td></tr>
+    <tr><td>30,000</td><td class="num">150,000,000</td><td class="num">99.4%</td><td class="num">≈ 370,000</td><td><span class="pill good">Good</span> — the test rig, not Nostos, struggled to open all 30k mailboxes in time</td></tr>
+    <tr><td>40,000</td><td class="num">200,000,000</td><td class="num">99.99%</td><td class="num">399,969</td><td><span class="pill good">Excellent</span></td></tr>
+    <tr><td>50,000</td><td class="num">250,000,000</td><td class="num">99.4%</td><td class="num">414,312</td><td><span class="pill good">Good</span></td></tr>
+    <tr><td>100,000</td><td class="num">500,000,000</td><td class="num">not yet reliable</td><td class="num">—</td><td><span class="pill warn">Unverified</span> — one run delivered 99.9%, another only 20%. Every bad run happened while the computer was busy with other things. Needs a re-run on a quiet machine.</td></tr>
+  </table>
+</section>
+
+<section>
+  <div class="row c2">
+    <div class="card">
+      <h3>A real bug this testing found — and fixed</h3>
+      <p>For every letter, the server used to start one separate chore per mailbox. At 10,000 mailboxes that's 10,000 chores per letter, and the post office ground to a halt (only 25,600 deliveries per second). We changed it to one pass over all mailboxes. The same test then did <b>424,000</b> per second — and the 1,000-device number rose from 833,000 to 2.6 million.</p>
+    </div>
+    <div class="card">
+      <h3>Honest caveats</h3>
+      <ul>
+        <li>The "letters" came from a simulator, not a live database. A separate real-database test delivers ~35,000 updates per second end-to-end — a different measurement.</li>
+        <li>Everything ran on one machine; a real deployment spreads the load.</li>
+        <li>PowerSync publishes no comparable figure for this stage, so there is no apples-to-apples comparison yet. A head-to-head test is designed but on hold.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer>
+  Full data and method: <code>benches/results/RESULTS.md</code>, <code>docs/BENCHMARK-METHODOLOGY.md</code>, <code>docs/plans/fanout-100k-cliff-diagnosis.md</code>. All figures measured 2 Sept 2026 on a 10-core Apple Silicon Mac; Linux runs in a Docker container on the same machine.
+</footer>
+
+</div>
+</body>
+</html>
