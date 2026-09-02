@@ -234,3 +234,32 @@ Rule note for the coordinator: the 10-vCPU harness VM alone contributes
 only attainable on an otherwise idle desktop. The operative mid-run check
 is the second clause — no non-harness process > 20% CPU — sampled every
 10 s alongside load1. Re-armed behind the same gate.
+
+## Run 2, attempt 2 — 100k × 5000, INVALID #2 (mid-run rule: 17/17 samples with non-harness CPU > 20%)
+
+Log: `benches/results/raw/2026-09-02-fanout-100k-diag-run2/linux-fanout-diag.INVALID-attempt2-windowserver40-vscode61.log`,
+`host-cpu.INVALID-attempt2.log`, `host-load1.log`. Started 22:34:26 at load1
+4.39 (start gate passed, waited 60 s). Every 10 s sample from start to the
+t≈120 s check had a non-harness process > 20% CPU: WindowServer 38–43% on
+all 17, plus VS Code 61%, Google 38–40%, ProtonVPN WireGuard 28–30%, node
+24%, secd/syspolicyd/ctkd 22–40%. Host load1 ≈ 11 by t=120 s. Killed at
+t≈130 s per the agreed rule; no third re-arm.
+
+Partial trace (suggestive only, contaminated): quorum 49.34 s at 82,270
+subscribed (run 1: 31.8 s); t=60→100 s ≈0.29 s/event; **t=100→120 s: 8
+events in 20 s = 2.5 s/event** — the ladder's 1.22 s/event regime and
+worse, arriving exactly as the desktop load did.
+
+**Status: blocked on quiet host.** The discriminating run (100k × 5000 +
+50k × 5000 under the gate) needs ~35 min with no non-harness process > 20%
+CPU; two attempts on 2026-09-02 were contaminated within the first 2–4
+minutes. Re-run command, unchanged:
+`benches/scripts/fanout-100k-diag.sh <src> benches/results/raw/2026-09-02-fanout-100k-diag-run2 100000,5000,1200,1,2 50000,5000,600,1,1`
+with the two 10 s host samplers alongside.
+
+What is established without it (VALID runs only): no kernel TCP memory
+pressure, no swap, no drops at 100k; 100k×500 runs at ~0.19 s/event, 50k×500
+at ~0.06 s/event — a slope, not a cliff. Every observed collapse to
+> 0.5 s/event so far coincided with host contention. The ladder's 100k
+figure (1.22 s/event, 11:17, no mid-run load record) must be treated as
+UNVERIFIED until the gated run lands.
