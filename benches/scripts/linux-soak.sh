@@ -15,7 +15,7 @@
 # never compare these numbers with macOS-native ones, only with each other).
 set -u
 SRC=$1; TAG=$2; OUT=$3; shift 3
-CLIENTS=${1:-10000}; EVENTS=${2:-5000}; WINDOW=${3:-60}; ACK=${4:-1}
+CLIENTS=${1:-10000}; EVENTS=${2:-5000}; WINDOW=${3:-60}; ACK=${4:-1}; LISTENERS=${5:-1}
 IMAGE=${NOSTOS_LINUX_IMAGE:-rust:1.95-bookworm}
 
 docker run --rm --name "nostos-linux-soak-$TAG" \
@@ -40,8 +40,8 @@ docker run --rm --name "nostos-linux-soak-$TAG" \
       echo "BUILD ok $(date +%T)"
     fi
     echo "env: $(uname -srm) nproc=$(nproc) nofile=$(ulimit -n) ports=$(cat /proc/sys/net/ipv4/ip_local_port_range | tr "\t" -) mem=$(awk "/MemTotal/{print \$2}" /proc/meminfo)kB rustc=$(rustc --version)"
-    echo "SOAK start $(date +%T) clients='"$CLIENTS"' events='"$EVENTS"' window='"$WINDOW"' ack='"$ACK"'"
-    "$BIN" '"$CLIENTS"' '"$EVENTS"' '"$WINDOW"' '"$ACK"'
+    echo "SOAK start $(date +%T) clients='"$CLIENTS"' events='"$EVENTS"' window='"$WINDOW"' ack='"$ACK"' listeners='"$LISTENERS"' somaxconn=$(cat /proc/sys/net/core/somaxconn)"
+    "$BIN" '"$CLIENTS"' '"$EVENTS"' '"$WINDOW"' '"$ACK"' '"$LISTENERS"'
     echo "SOAK rc=$? $(date +%T)"
   ' >"$OUT" 2>&1
 echo "LINUX_SOAK_EXIT=$?" >>"$OUT"
