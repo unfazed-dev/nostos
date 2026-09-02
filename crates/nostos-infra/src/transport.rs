@@ -683,7 +683,7 @@ pub(crate) async fn run_session<S, E>(
                             }
                         }
                         crate::router::SinkMsg::Event(first_ev) => {
-                            let mut batch: Vec<ReplicationEvent> =
+                            let mut batch: Vec<Arc<ReplicationEvent>> =
                                 Vec::with_capacity(MAX_BATCH_FRAMES);
                             batch.push(first_ev);
                             let mut pending_control: Option<Vec<u8>> = None;
@@ -700,7 +700,8 @@ pub(crate) async fn run_session<S, E>(
                             let msg = if batch.len() == 1 {
                                 Message::Binary(encode_event(&batch[0]))
                             } else {
-                                let refs: Vec<&ReplicationEvent> = batch.iter().collect();
+                                let refs: Vec<&ReplicationEvent> =
+                                    batch.iter().map(|e| &**e).collect();
                                 Message::Binary(encode_events(&refs))
                             };
                             if writer.send(msg).await.is_err() {

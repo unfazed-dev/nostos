@@ -26,7 +26,7 @@
 //! dead client.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -51,7 +51,9 @@ const DEDUP_RING_CAPACITY: usize = 256;
 #[derive(Debug, Clone)]
 pub enum SinkMsg {
     /// A server-originated replication row (deduped + range-guarded by `deliver`).
-    Event(ReplicationEvent),
+    /// Shared with every other session's queue — the writer encodes through
+    /// `&*event`; never clone the inner event here.
+    Event(Arc<ReplicationEvent>),
     /// A pre-encoded control frame (snapshot boundary). NOT deduped — control
     /// frames carry no LSN; they bracket a snapshot burst, ordering is all that
     /// matters.
@@ -259,7 +261,7 @@ impl TokioEventSink {
         let Some(lsn_raw) = self.admit(&event) else {
             return DeliveryDecision::Dropped;
         };
-        if let Ok(()) = self.tx.send(SinkMsg::Event(event)).await {
+        if let Ok(()) = self.tx.send(SinkMsg::Event(Arc::new(event))).await {
             self.delivered_lsn.fetch_max(lsn_raw, Ordering::Release);
             DeliveryDecision::Delivered
         } else {
@@ -273,7 +275,7 @@ impl TokioEventSink {
 
 #[async_trait]
 impl EventSink for TokioEventSink {
-    async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision {
         let Some(lsn_raw) = self.admit(&event) else {
             return DeliveryDecision::Dropped;
         };
@@ -337,21 +339,36 @@ mod tests {
     async fn delivers_until_buffer_full_then_drops() {
         // buffer depth 2 → 3rd send must drop.
         let (sink, mut rx) = TokioEventSink::channel(2);
-        assert_eq!(sink.deliver(ev(1)).await, DeliveryDecision::Delivered);
-        assert_eq!(sink.deliver(ev(2)).await, DeliveryDecision::Delivered);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(1))).await,
+            DeliveryDecision::Delivered
+        );
+        assert_eq!(
+            sink.deliver(Arc::new(ev(2))).await,
+            DeliveryDecision::Delivered
+        );
         // Buffer full now.
-        assert_eq!(sink.deliver(ev(3)).await, DeliveryDecision::Dropped);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(3))).await,
+            DeliveryDecision::Dropped
+        );
 
         // Drain one → next send succeeds again.
         rx.recv().await.unwrap();
-        assert_eq!(sink.deliver(ev(4)).await, DeliveryDecision::Delivered);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(4))).await,
+            DeliveryDecision::Delivered
+        );
     }
 
     #[tokio::test]
     async fn closed_sink_drops_everything() {
         let (sink, _rx) = TokioEventSink::channel(8);
         sink.close();
-        assert_eq!(sink.deliver(ev(1)).await, DeliveryDecision::Dropped);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(1))).await,
+            DeliveryDecision::Dropped
+        );
     }
 
     #[tokio::test]
@@ -368,8 +385,14 @@ mod tests {
             sink.deliver_control(b"begin".to_vec()),
             DeliveryDecision::Delivered
         );
-        assert_eq!(sink.deliver(ev(1)).await, DeliveryDecision::Delivered);
-        assert_eq!(sink.deliver(ev(2)).await, DeliveryDecision::Delivered);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(1))).await,
+            DeliveryDecision::Delivered
+        );
+        assert_eq!(
+            sink.deliver(Arc::new(ev(2))).await,
+            DeliveryDecision::Delivered
+        );
         assert_eq!(
             sink.deliver_control(b"end".to_vec()),
             DeliveryDecision::Delivered
@@ -430,7 +453,10 @@ mod tests {
         let (sink, rx) = TokioEventSink::channel(8);
         drop(rx);
         // After receiver is gone, try_send reports Closed → drop.
-        assert_eq!(sink.deliver(ev(1)).await, DeliveryDecision::Dropped);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(1))).await,
+            DeliveryDecision::Dropped
+        );
     }
 
     #[tokio::test]
@@ -439,8 +465,14 @@ mod tests {
         // though the buffer has room. The primary exactly-once guard is
         // LSN-resume; this ring is defense-in-depth (ADR-0009).
         let (sink, _rx) = TokioEventSink::channel(8);
-        assert_eq!(sink.deliver(ev(5)).await, DeliveryDecision::Delivered);
-        assert_eq!(sink.deliver(ev(5)).await, DeliveryDecision::Dropped);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(5))).await,
+            DeliveryDecision::Delivered
+        );
+        assert_eq!(
+            sink.deliver(Arc::new(ev(5))).await,
+            DeliveryDecision::Dropped
+        );
     }
 
     #[tokio::test]
@@ -450,7 +482,7 @@ mod tests {
         assert_eq!(EventSink::last_acked_lsn(&sink), None);
         // Acks are clamped to what was delivered, so deliver first — this
         // test is about MONOTONICITY, and the ceiling is covered below.
-        sink.deliver(ev(200)).await;
+        sink.deliver(Arc::new(ev(200))).await;
         sink.record_ack(Lsn::new(100));
         assert_eq!(EventSink::last_acked_lsn(&sink), Some(Lsn::new(100)));
         // Lower ack ignored (monotonic).
@@ -481,13 +513,16 @@ mod tests {
         );
 
         // Deliver 10; an ack of u64::MAX may only count as far as 10.
-        sink.deliver(ev(10)).await;
+        sink.deliver(Arc::new(ev(10))).await;
         sink.record_ack(Lsn::new(u64::MAX));
         assert_eq!(EventSink::last_acked_lsn(&sink), Some(Lsn::new(10)));
 
         // And the session is NOT wedged: event 11 still gets through. Before
         // the clamp, acked=u64::MAX made `admit` drop everything forever.
-        assert_eq!(sink.deliver(ev(11)).await, DeliveryDecision::Delivered);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(11))).await,
+            DeliveryDecision::Delivered
+        );
     }
 
     /// `delivered_lsn` is a high-water mark, not "most recent". A snapshot row
@@ -497,8 +532,8 @@ mod tests {
     #[tokio::test]
     async fn delivered_lsn_does_not_regress_when_a_lower_lsn_arrives_later() {
         let (sink, _rx) = TokioEventSink::channel(8);
-        sink.deliver(ev(100)).await;
-        sink.deliver(ev(7)).await; // late snapshot row at a lower base LSN
+        sink.deliver(Arc::new(ev(100))).await;
+        sink.deliver(Arc::new(ev(7))).await; // late snapshot row at a lower base LSN
         assert_eq!(
             EventSink::last_delivered_lsn(&sink),
             Some(Lsn::new(100)),
@@ -515,14 +550,17 @@ mod tests {
         assert_eq!(EventSink::last_acked_lsn(&sink), Some(Lsn::new(42)));
         assert_eq!(EventSink::last_delivered_lsn(&sink), Some(Lsn::new(42)));
         // A resume-seeded sink won't re-receive already-applied LSNs.
-        assert_eq!(sink.deliver(ev(42)).await, DeliveryDecision::Dropped);
+        assert_eq!(
+            sink.deliver(Arc::new(ev(42))).await,
+            DeliveryDecision::Dropped
+        );
     }
 
     #[tokio::test]
     async fn deliver_records_delivered_lsn() {
         let (sink, _rx) = TokioEventSink::channel(8);
         assert_eq!(EventSink::last_delivered_lsn(&sink), None);
-        sink.deliver(ev(7)).await;
+        sink.deliver(Arc::new(ev(7))).await;
         assert_eq!(EventSink::last_delivered_lsn(&sink), Some(Lsn::new(7)));
     }
 }

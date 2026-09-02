@@ -1,0 +1,23 @@
+BUILD start 08:42:27 tag=arcfixed
+   Compiling nostos-infra v0.2.0 (/src/crates/nostos-infra)
+   Compiling nostos-bench v0.2.0 (/src/crates/nostos-bench)
+    Finished `release` profile [optimized] target(s) in 18.23s
+BUILD ok 08:42:45
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 ports=1024-65535 mem=8124512kB rustc=rustc 1.95.0 (59807616e 2026-04-14)
+SOAK start 08:42:45 clients=10000 events=5000 window=60 ack=1
+  [diag] subscribe quorum after 9.88s: connected=10000 subscribed=10000 connect_failed=0
+  [diag] at window end: connected=10000 subscribed=10000 connect_failed=0
+  [diag] router: matched=50000000 delivered=50000000 dropped=0 faulted=0 events_fanned_out~=5000 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=0 not_reached_in_window=0 router_dropped=0 in_flight_or_unaccounted=0
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 5000 (attempted deliveries: 50000000)
+  window    : 60s
+  ---------------------------
+  delivered : 50000000
+  ops/sec   : 854631
+  drop%     : 0.00
+  elapsed   : 58.50s
+SOAK rc=0 08:43:54
+LINUX_SOAK_EXIT=0

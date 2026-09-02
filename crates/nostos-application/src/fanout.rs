@@ -287,9 +287,12 @@ impl FanOutService {
         let mut delivered = 0u64;
         let mut dropped = 0u64;
         let mut faulted = 0u64;
+        // One allocation per event; every session gets a refcount bump, not a
+        // clone of the two `String`s + `Bytes` in `RowOp`.
+        let shared = Arc::new(event.clone());
         for c in matched {
             use futures_util::FutureExt as _;
-            let res = std::panic::AssertUnwindSafe(c.sink.deliver(event.clone()))
+            let res = std::panic::AssertUnwindSafe(c.sink.deliver(Arc::clone(&shared)))
                 .catch_unwind()
                 .await;
             match res {
@@ -540,8 +543,8 @@ mod tests {
 
     #[async_trait]
     impl EventSink for RecordingSink {
-        async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
-            self.events.lock().unwrap().push(event);
+        async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision {
+            self.events.lock().unwrap().push((*event).clone());
             DeliveryDecision::Delivered
         }
     }
@@ -802,7 +805,7 @@ mod tests {
 
     #[async_trait]
     impl EventSink for PanickingSink {
-        async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+        async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
             panic!("simulated delivery fault");
         }
     }

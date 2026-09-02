@@ -259,3 +259,51 @@ plausible cause but was not verified. Treat the 10k numbers as a regime check
 only; before any 10k figure is updated anywhere, rerun with a ≥60 s cool-down
 between soaks and report both. Same-stage comparator for PowerSync: none
 published at 10k either.
+
+## 10k soak on Linux, fan-out fixes A/B — MEASURED 2026-09-02 (container; NOT comparable to the native headline)
+
+Root cause of the 10k shortfall above: `docs/plans/soak-10k-root-cause-2026-09-02.md`
+(the fan-out loop spawned one tokio task per session per event; nothing was
+being shed). Two fixes: sequential fan-out loop (`e33b4c3`) and one shared
+`Arc<ReplicationEvent>` per event instead of a per-session clone (this commit).
+macOS cannot host the 10k probe on the fixed build — it now connects fast enough
+to hit `ENOBUFS` at ~9.2k loopback sockets (mbuf-cluster exhaustion, not nostos
+code) — so the 10k A/B ran in Docker via `benches/scripts/linux-soak.sh`.
+
+Environment (first line of every raw log under `benches/results/raw/2026-09-02-linux/`):
+Docker Desktop 29.7.2 VM, `Linux 7.0.12-linuxkit aarch64`, 10 vCPU, 8 GiB,
+rustc 1.95.0, `nofile=1048576`, `ip_local_port_range=1024-65535`, image
+`rust:1.95-bookworm`. Mac host load 8–9 (1-min) during the runs. **Different
+environment from the 833,307 native figure — compare only within this table.**
+
+`nostos-bench-10k 10000 5000 60`, baseline = `e33b4c3` (sequential loop, per-session
+clone), fixed = `Arc` event sharing:
+
+| Build | events fanned out (of 5000) | delivered / attempted (50M) | router dropped | undelivered at 60 s | ops/sec | elapsed |
+|---|---|---|---|---|---|---|
+| baseline `e33b4c3` | 3,596 | 35,953,345 | 0 | 28.09% | 599,219 | 60.00 s (window) |
+| **fixed (Arc)** | **5,000** | **50,000,000** | **0** | **0.00%** | **854,631** | **58.50 s** |
+
+**The fixed build delivers the entire 10k × 5000 budget inside the 60 s window
+with zero drops — the first time the 10k soak has met the <1%-drop goal.** The
+probe reports a subscribe quorum of 10000/10000 for both runs (`connect_failed=0`),
+so the 28% baseline shortfall is throughput, not connectivity.
+
+1k regression check (same probe, 1000 clients, three baseline/fixed pairs
+back-to-back, raw logs `ab-{baseline,fixed}-1k{,-r2,-r3}.log`; pair 1 ran
+5000 events = 5M deliveries, pairs 2–3 ran 20000 events = 20M deliveries):
+
+| Pair | events | baseline ops/sec (elapsed) | fixed ops/sec (elapsed) | drops |
+|---|---|---|---|---|
+| 1 | 5,000 | 2,154,769 (2.32 s) | 1,981,081 (2.52 s) | 0 / 0 |
+| 2 | 20,000 | 932,874 (21.44 s) | 2,152,227 (9.29 s) | 0 / 0 |
+| 3 | 20,000 | 1,112,585 (17.98 s) | 1,760,724 (11.36 s) | 0 / 0 |
+
+Every run finished its full event budget with zero drops. In the 2.3 s pair-1
+runs the two builds are within 8% (a run that short is mostly connect/subscribe
+time); on the longer 20k-event pairs, where steady-state fan-out dominates, the
+fixed build is 1.6–2.3× faster. No 1k regression.
+
+Not re-measured here: the macOS-native 3-pass `nostos-bench` headline on the
+fixed build. The 833,307 figure above was measured on the old fan-out and is
+now a floor; the native re-run is a pending item (`docs/plans/close-soak-10k-open-items.md` item 3).

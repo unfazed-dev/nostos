@@ -77,6 +77,15 @@ longer charged to the fan-out. Same probe binary shape, old vs new `fan_out`:
 
 ## Still open (not fixed here)
 
+> **Status 2026-09-02 (later the same day) — all three items closed or moved; see
+> `docs/plans/close-soak-10k-open-items.md`.** (1a) shipped: one `Arc<ReplicationEvent>`
+> per event; on Linux 10k delivers 50M/50M in 58.5 s, 0.00% drops, 854,631 ops/sec
+> (baseline 28% undelivered). (1b)/(1c) not needed for the goal — not built.
+> (2) worked around, not fixed: 10k runs in Docker (`benches/scripts/linux-soak.sh`);
+> the macOS socket ceiling is a host limit. (3) Linux 10k A/B + 3 × 1k A/B recorded in
+> RESULTS.md; the macOS-native 3-pass headline re-run on the fixed build is the one
+> remaining item (`benches/scripts/remeasure.sh`).
+
 1. **10k is still ~49% short of the 60 s budget.** Next candidates, in order,
    each to be measured alone: (a) `event.clone()` per session — `RowOp` holds
    two `String`s, so 20k allocations per event; share via `Arc` or pre-encoded

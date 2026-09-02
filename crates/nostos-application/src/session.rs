@@ -157,7 +157,7 @@ mod tests {
     struct NoopSink;
     #[async_trait]
     impl EventSink for NoopSink {
-        async fn deliver(&self, _e: ReplicationEvent) -> DeliveryDecision {
+        async fn deliver(&self, _e: Arc<ReplicationEvent>) -> DeliveryDecision {
             DeliveryDecision::Delivered
         }
     }

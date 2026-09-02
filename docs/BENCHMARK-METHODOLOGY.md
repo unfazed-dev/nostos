@@ -99,6 +99,8 @@ Recorded in every results artifact:
 
 **Reproducibility:** `make bench` from a clean clone reproduces the numbers (modulo hardware). The benchmark binary writes a JSON artifact with every input + output + environment field.
 
+**Linux-container runs (added 2026-09-02).** macOS caps a single host at ~9.2k loopback sockets (`ENOBUFS`, mbuf-cluster exhaustion), so the 10k soak runs in Docker via `benches/scripts/linux-soak.sh` (`rust:1.95-bookworm`, `--ulimit nofile=1048576`, `ip_local_port_range=1024 65535`). A Docker Desktop VM is a *different environment*: its numbers are reported only against other runs in the same container (baseline vs candidate, back-to-back), never against a macOS-native figure, and every container log starts with an `env:` line (kernel, arch, nproc, nofile, port range, mem, rustc) that the results section must quote. Host load on the Mac running the VM is recorded alongside, because it leaks into the VM.
+
 ---
 
 ## 7. Pure-router micro-benchmark

@@ -1,0 +1,23 @@
+BUILD start 08:35:49 tag=base-e33b4c3
+   Compiling nostos-infra v0.2.0 (/src/crates/nostos-infra)
+   Compiling nostos-bench v0.2.0 (/src/crates/nostos-bench)
+    Finished `release` profile [optimized] target(s) in 49.69s
+BUILD ok 08:36:38
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 ports=1024-65535 mem=8124512kB rustc=rustc 1.95.0 (59807616e 2026-04-14)
+SOAK start 08:36:39 clients=10000 events=5000 window=60 ack=1
+  [diag] subscribe quorum after 7.83s: connected=10000 subscribed=10000 connect_failed=0
+  [diag] at window end: connected=10000 subscribed=10000 connect_failed=0
+  [diag] router: matched=35960000 delivered=35960000 dropped=0 faulted=0 events_fanned_out~=3596 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=0 not_reached_in_window=14040000 router_dropped=0 in_flight_or_unaccounted=6655
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 5000 (attempted deliveries: 50000000)
+  window    : 60s
+  ---------------------------
+  delivered : 35953345
+  ops/sec   : 599219
+  drop%     : 28.09
+  elapsed   : 60.00s
+SOAK rc=0 08:37:46
+LINUX_SOAK_EXIT=0

@@ -3352,7 +3352,7 @@ mod push_e2e_tests {
 
     #[async_trait]
     impl EventSink for DroppingSink {
-        async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+        async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
             DeliveryDecision::Dropped
         }
     }
@@ -3493,7 +3493,7 @@ mod push_e2e_tests {
         struct OkSink;
         #[async_trait]
         impl EventSink for OkSink {
-            async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+            async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
                 DeliveryDecision::Delivered
             }
         }

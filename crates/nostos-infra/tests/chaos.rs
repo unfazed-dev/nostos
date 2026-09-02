@@ -47,7 +47,7 @@ impl TallySink {
 
 #[async_trait]
 impl EventSink for TallySink {
-    async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision {
         // Never drops — used for the conservation + selective tests.
         self.delivered.fetch_add(1, Ordering::Relaxed);
         let _ = event;
@@ -254,7 +254,7 @@ async fn slow_client_drops_without_blocking_others() {
     }
 
     // 1 stalled sink: depth-1 channel, receiver held but never drained.
-    let (stalled_tx, _stalled_rx) = tokio::sync::mpsc::channel::<ReplicationEvent>(1);
+    let (stalled_tx, _stalled_rx) = tokio::sync::mpsc::channel::<Arc<ReplicationEvent>>(1);
     let stalled = Arc::new(StalledSink { tx: stalled_tx }) as Arc<dyn EventSink>;
     store
         .add(SyncSession::new(Predicate::all("tasks")), stalled)
@@ -290,12 +290,12 @@ async fn slow_client_drops_without_blocking_others() {
 /// A sink backed by a bounded channel whose receiver is held but never drained
 /// — models a slow / stalled WebSocket client.
 struct StalledSink {
-    tx: tokio::sync::mpsc::Sender<ReplicationEvent>,
+    tx: tokio::sync::mpsc::Sender<Arc<ReplicationEvent>>,
 }
 
 #[async_trait]
 impl EventSink for StalledSink {
-    async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision {
         match self.tx.try_send(event) {
             Ok(()) => DeliveryDecision::Delivered,
             Err(

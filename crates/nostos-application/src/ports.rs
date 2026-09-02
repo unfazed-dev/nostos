@@ -95,7 +95,13 @@ pub enum DeliveryDecision {
 pub trait EventSink: Send + Sync {
     /// Attempt to deliver one event. Non-blocking from the router's POV —
     /// returns promptly with a [`DeliveryDecision`].
-    async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision;
+    ///
+    /// The event is shared (`Arc`) rather than owned: the fan-out loop hands
+    /// the SAME allocation to every matched session, so delivery costs one
+    /// refcount bump instead of cloning `RowOp`'s two `String`s + `Bytes` per
+    /// session (20k allocations per event at 10k clients — measured 2026-09-02,
+    /// see docs/plans/close-soak-10k-open-items.md).
+    async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision;
 
     /// Close the sink: subsequent `deliver()` calls return `Dropped` immediately.
     /// Used by unsubscribe to stop fan-out to a stream's session.

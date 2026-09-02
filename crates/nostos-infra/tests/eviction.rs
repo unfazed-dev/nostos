@@ -27,7 +27,7 @@ struct PinnedAckSink {
 
 #[async_trait]
 impl EventSink for PinnedAckSink {
-    async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
         DeliveryDecision::Delivered
     }
     fn last_acked_lsn(&self) -> Option<Lsn> {

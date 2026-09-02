@@ -98,16 +98,16 @@ async fn resume_seeds_dedup_so_acked_rows_are_not_redelivered() {
     sink.seed_acked_lsn(Lsn::new(40));
     // Delivering an event at or below 40 must be a dedup-hit drop.
     assert_eq!(
-        sink.deliver(ev(40, "1")).await,
+        sink.deliver(Arc::new(ev(40, "1"))).await,
         nostos_application::ports::DeliveryDecision::Dropped
     );
     assert_eq!(
-        sink.deliver(ev(30, "2")).await,
+        sink.deliver(Arc::new(ev(30, "2"))).await,
         nostos_application::ports::DeliveryDecision::Dropped
     );
     // An event ABOVE the resume LSN delivers normally.
     assert_eq!(
-        sink.deliver(ev(41, "3")).await,
+        sink.deliver(Arc::new(ev(41, "3"))).await,
         nostos_application::ports::DeliveryDecision::Delivered
     );
 }

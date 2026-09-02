@@ -337,7 +337,7 @@ mod tests {
     struct NoopSink;
     #[async_trait]
     impl EventSink for NoopSink {
-        async fn deliver(&self, _e: ReplicationEvent) -> DeliveryDecision {
+        async fn deliver(&self, _e: Arc<ReplicationEvent>) -> DeliveryDecision {
             DeliveryDecision::Delivered
         }
     }
@@ -447,7 +447,7 @@ mod tests {
 
     #[async_trait]
     impl EventSink for AckedSink {
-        async fn deliver(&self, _e: ReplicationEvent) -> DeliveryDecision {
+        async fn deliver(&self, _e: Arc<ReplicationEvent>) -> DeliveryDecision {
             DeliveryDecision::Delivered
         }
         fn last_acked_lsn(&self) -> Option<Lsn> {
@@ -505,7 +505,7 @@ mod tests {
 
     #[async_trait]
     impl EventSink for FullSink {
-        async fn deliver(&self, _e: ReplicationEvent) -> DeliveryDecision {
+        async fn deliver(&self, _e: Arc<ReplicationEvent>) -> DeliveryDecision {
             DeliveryDecision::Dropped
         }
     }
