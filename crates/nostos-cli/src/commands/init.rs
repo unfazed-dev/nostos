@@ -119,9 +119,11 @@ pub async fn run(args: InitArgs, cwd: &Path) -> Result<()> {
         );
     }
     println!(
-        "  guidance: set Postgres's max_slot_wal_keep_size and/or nostos-server's \
-         NOSTOS_SLOT_MAX_LAG in production so a stalled client can't grow WAL unbounded on the \
-         primary (ADR-0016). `nostos init` reports this but does not change server settings."
+        "  guidance: nostos-server evicts a client that lags more than NOSTOS_SLOT_MAX_LAG \
+         (default 1 GiB) so a stalled client can't grow WAL unbounded; that only holds while \
+         the server is running. Set Postgres's max_slot_wal_keep_size in production so an \
+         abandoned slot can't fill the primary's disk (ADR-0043). `nostos init` reports this \
+         but does not change server settings; `nostos doctor` checks it."
     );
 
     let supabase = args.supabase_url.map(|url| {

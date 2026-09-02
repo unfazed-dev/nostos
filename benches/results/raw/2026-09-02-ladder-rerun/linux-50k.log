@@ -1,0 +1,20 @@
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 ports=1024-65535 mem=8124512kB rustc=rustc 1.95.0 (59807616e 2026-04-14)
+SOAK start 11:06:38 clients=50000 events=5000 window=600 ack=1 listeners=1 somaxconn=4096
+  [diag] listeners: ws://127.0.0.1:8299/sync
+  [diag] subscribe quorum after 27.91s: connected=46308 subscribed=46308 connect_failed=0 complete=false (ceiling 250s, stall 5s)
+  [diag] at window end: connected=50000 subscribed=50000 connect_failed=0 subscribed_at_start=46308 late_subscribers=3692 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=248588185 delivered=248588185 dropped=0 faulted=0 events_fanned_out~=4971 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=0 not_reached_in_window=1450000 router_dropped=0 in_flight_or_unaccounted=0
+  [diag] completed=false (delivered 248588185 of 250000000 before the 600s window) peak_rss_mib=2044
+
+=== nostos-bench-10k probe ===
+  clients   : 50000
+  events    : 5000 (attempted deliveries: 250000000)
+  window    : 600s
+  ---------------------------
+  delivered : 248588185
+  ops/sec   : 414312
+  drop%     : 0.56
+  elapsed   : 600.00s
+SOAK rc=0 11:17:07
+LINUX_SOAK_EXIT=0

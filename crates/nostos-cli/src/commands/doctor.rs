@@ -1,6 +1,7 @@
 //! `nostos doctor` — read-only health checks: connectivity, `wal_level`,
-//! publication, slot headroom, replication lag, JWKS reachability. Never
-//! creates or alters anything (that's `init`'s job).
+//! publication, slot headroom, replication lag, `max_slot_wal_keep_size`
+//! (ADR-0043), JWKS reachability. Never creates or alters anything (that's
+//! `init`'s job).
 
 use std::path::Path;
 
@@ -128,6 +129,28 @@ pub async fn run(cwd: &Path) -> Result<()> {
         ),
     }
 
+    // ADR-0043: nostos-server's NOSTOS_SLOT_MAX_LAG eviction only protects the
+    // primary while the server is running. A slot left behind by a server
+    // that is gone (crash, decommission, renamed slot) pins WAL forever unless
+    // Postgres itself caps it. Advisory, not blocking: the dev compose
+    // Postgres ships unbounded and that is fine on a laptop.
+    match pg.max_slot_wal_keep_size().await {
+        Ok(v) if v.trim() == "-1" => {
+            advise(
+                "max_slot_wal_keep_size = -1 (unbounded): an abandoned replication slot can fill \
+                 the primary's disk. Recommended for production: \
+                 `ALTER SYSTEM SET max_slot_wal_keep_size = '2GB'; SELECT pg_reload_conf();` \
+                 or set NOSTOS_PG_SLOT_WAL_KEEP_SIZE (MB) on nostos-server (ADR-0043).",
+            );
+        }
+        Ok(v) => report(
+            &mut all_ok,
+            true,
+            &format!("max_slot_wal_keep_size = {v} (abandoned-slot WAL is bounded)"),
+        ),
+        Err(e) => advise(&format!("could not read max_slot_wal_keep_size: {e:#}")),
+    }
+
     if let Some(supabase) = &cfg.supabase {
         match reqwest::get(&supabase.jwks_url).await {
             Ok(resp) if resp.status().is_success() => {
@@ -159,6 +182,12 @@ fn report(all_ok: &mut bool, ok: bool, label: &str) {
     if !ok {
         *all_ok = false;
     }
+}
+
+/// A recommendation that does not fail `doctor` — printed with ⚠ and never
+/// flips `all_ok`.
+fn advise(label: &str) {
+    println!("\u{26a0} {label}");
 }
 
 fn print_summary(all_ok: bool) {

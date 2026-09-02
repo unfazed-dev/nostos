@@ -157,7 +157,7 @@ the doc comment above it promised timing carried no information. Now
 
 ## Open — needs a decision, not a patch
 
-### The fail-open default pair (USER DECISION PENDING)
+### The fail-open default pair — DECIDED AND FIXED (`fef1c53`)
 
 `NOSTOS_BIND` defaults to `0.0.0.0:8800` (`main.rs:44`). `NOSTOS_SYNC_AUTH`
 defaults to `none` → `AllowAnonymous`, which injects **no tenant filter**. Out of
@@ -178,16 +178,153 @@ missed, keeps an escape hatch. Rejected alternatives: defaulting the bind to
 loopback silently breaks existing Docker deployments; defaulting to
 `supabase-jwt` makes the quickstart require a Supabase project.
 
+**Implemented as recommended.** `exposes_anonymous_sync(bind)` gates the `"none"`
+arm of the auth match: `sync_auth=none` + a non-loopback bind → `anyhow::bail!`
+with a message naming all three ways out. An unparseable bind returns `false`
+(not this guard's error to report; boot bails on it later with the canonical
+message — and a bind the server can't parse is one it never listens on).
+
+**Boot-verified, four cases, not just unit-tested:**
+
+| bind | auth | hatch | result |
+|---|---|---|---|
+| `0.0.0.0:8877` | none | — | **refuses**, exit 1 |
+| `0.0.0.0:8878` | none | `=1` | listens |
+| `0.0.0.0:8879` | none | `=true` | listens |
+| `127.0.0.1:8880` | none | — | listens (local dev untouched) |
+
+**Two shipped configs paired anonymous with `0.0.0.0` and would have stopped
+booting.** Both were found by grepping every launch site, not by assuming:
+
+- `docker/docker-compose.stack.yml` sets `NOSTOS_BIND: 0.0.0.0:8800` and no
+  `NOSTOS_SYNC_AUTH`. Now carries `NOSTOS_INSECURE_ANONYMOUS: "1"` with a comment
+  saying why it is legitimate there and that a real deploy drops the line.
+- **`nostos dev`** — the flagship onboarding command — defaults `bind` to
+  `0.0.0.0` (so a physical phone on the LAN can reach the laptop) and
+  deliberately emits *no* `NOSTOS_SYNC_AUTH` without a Supabase secret
+  (`config.rs`, pinned by a test). It now emits the hatch explicitly in that
+  branch only: `nostos dev` **is** the "I am developing" signal. A production
+  deploy runs the `nostos-server` binary directly, never this path, and still
+  hits the refusal. Both branches are pinned by tests — hatch present without a
+  secret, absent with one.
+
+`scripts/sdk-e2e.sh` binds `127.0.0.1:8801` (unaffected); `release.yml` only
+builds binaries.
+
+#### The escape hatch did not work when first written
+
+`NOSTOS_INSECURE_ANONYMOUS=1` **failed to parse.** clap's stock `bool` accepts
+only `true`/`false`, so `=1` — the universal shell/compose convention, and what
+this server's *own refusal message* tells the operator to set — died with
+`invalid value '1' for '--insecure-anonymous'`. The compose file, the CLI hatch,
+and the error text all said `=1`; every one of them would have failed.
+
+The unit test on the guard passed the whole time. Only booting the actual binary
+caught it. A `parse_env_bool` value-parser now accepts `1/0`, `true/false`,
+`yes/no`, `on/off`, and hard-errors on anything else (a typo'd hatch must never
+silently read as `true`).
+
 ## Open — confirmed gaps, not yet fixed
+
+> **Verification 2026-09-02 (code cross-check):** findings 2, 3, 6, 8, 9, 10,
+> 11 are CLOSED-VERIFIED at HEAD with named tests. **Finding 4 is only
+> half-closed** — `nbf`/`iss` are enforced on the JWKS path but not on the
+> HS256 path (`auth.rs:262`), and neither path has a test. Per-finding table:
+> "Verification 2026-09-02" under §3 of "Left deliberately". **Closed the
+> same day in `338e3f6`** (HS256 `nbf`/`iss` enforced; JWKS now also requires
+> `iss` when the allowlist is set; tests on both paths) — the heading above
+> is accurate again.
+
+> **Update 2026-09-02 — "fix all" pass COMPLETE. All ten findings in this
+> section are fixed** (1–11 less the numbers already closed above), across
+> commits `10ebc93`, `2095d16`, `1f960a7`, `2bf9be9` and the Batch A commits.
+> See `docs/plans/close-all-open-security-findings.md` for the batch plan and
+> the design decisions read off the source.
+>
+> Per-finding: **1** slot eviction on by default (1 GiB); **2** per-principal
+> session cap; **3** snapshot row cap that rejects rather than truncates;
+> **4** `nbf` validated + opt-in `iss` allowlist; **5** `exp` required on HS256;
+> **6** bounded JWKS staleness; **7** opt-in metadata protection; **8**
+> failure-only admin throttle; **9** indistinguishable cross-tenant rejection;
+> **10** opt-in WS origin allowlist; **11** three-valued predicate logic.
+>
+> **Two carried forward deliberately, not silently:**
+>
+> - **`nostos pull` cannot send a token.** `ProjectConfig` has no field for one,
+>   and adding a credential store is a feature, not a security fix. Against a
+>   server with `NOSTOS_PROTECT_METADATA=1` the CLI now fails with an error
+>   naming the knob instead of a bare 401. **Follow-up — done in `9e2313c`:**
+>   `nostos pull --token <TOKEN>` (env fallback `NOSTOS_TOKEN`) sends
+>   `Authorization: Bearer <token>` on `GET /schema`; the 401 message names the
+>   flag and the env var. Still no token field in `.nostos/config.json`.
+>   `--token` beats `NOSTOS_TOKEN`, the value is redacted in `Debug`/`Display`,
+>   and it is only sent over `https://` or to loopback — plain `http://` to a
+>   non-loopback host needs `--allow-insecure-token`.
+> - **CORS is unchanged.** `build_cors_layer` still returns
+>   `CorsLayer::permissive()` on empty `NOSTOS_CORS_ORIGINS` — the documented
+>   local-dev default, with `NOSTOS_CORS_ORIGINS` as the existing production
+>   knob. Finding 7 should **not** be described as "CORS tightened".
+>
+> **Also recorded:** on `NOSTOS_SYNC_AUTH=none` the `/schema` gate is theatre,
+> because `AllowAnonymous` accepts the empty token. The server warns at boot
+> rather than implying protection it does not have.
+>
+> Two of this section's own pointers were wrong and are corrected there
+> (a third, finding 7's `main.rs:1556-1558` for CORS, is now push-table
+> parsing; the real code is `build_cors_layer`):
+>
+> - Finding 3's `snapshot_source.rs:143` is `prepare_columns`, a metadata-only
+>   prepared statement that fetches zero rows. The unbounded reads are the
+>   `client.query` calls in `snapshot` and `snapshot_stream`.
+> - Finding 3 also had a half this section never mentioned: EVERY snapshot
+>   failure is a server-side `warn!` after which the subscribe continues with
+>   live fan-out only. A row cap alone would therefore have been invisible to
+>   the client — the same "first sync is quietly wrong" shape as finding 7. The
+>   cap now rejects the subscribe outright (table path) or emits a
+>   `stream_error` frame (stream path). **The residual is a new finding: every
+>   OTHER snapshot error is still silent to the client.**
+
 
 Ordered by exploitability.
 
-1. **`ack` is unvalidated** (`wire.rs`, `transport.rs`). A client can ack an LSN
-   it never received. Slot advance uses `min_acked_lsn` across sessions, so
-   acking *high* cannot skip other sessions' data — but acking *low forever*
-   holds the replication slot back, and unbounded WAL growth is a disk-exhaustion
-   attack on the Postgres primary. No monotonicity or in-flight check found.
-   Needs a test either way.
+1. ~~**`ack` is unvalidated**~~ — **PARTLY WRONG AS ORIGINALLY WRITTEN, now
+   fixed (`a20671d`).** Correcting the record, because an audit that overstates
+   a finding costs the next reader real time:
+   - *"No monotonicity check found"* was **false**. `TokioEventSink::record_ack`
+     (`router.rs:157`) has always been monotonic via a `compare_exchange_weak`
+     loop — a lower ack is ignored. So *"acking low forever holds the slot
+     back"* is not reachable by acking low: the sink simply won't go backwards.
+     A client that never acks **at all** does hold the slot, but that is the
+     already-documented ADR-0016 problem (a legitimately slow client looks
+     identical), not an ack-validation bug.
+   - *"A client can ack an LSN it never received"* was **true**, and is what
+     got fixed: `record_ack` now clamps to the sink's `delivered_lsn`.
+   - **It was never a leak.** Slot advance folds the *minimum* acked LSN across
+     live sessions (`store.rs:233`), so an inflated ack cannot flush the slot
+     past another session's data. Acking high only jams this session's own
+     `admit` acked-range guard shut — the client silently stops receiving. That
+     is self-harm, so the clamp is **defense-in-depth, not a security fix**,
+     and is labelled that way in the code.
+   - Fixing it required making `delivered_lsn` a true high-water mark
+     (`fetch_max`, not `store`). Its doc always said *"highest LSN delivered"*
+     but a snapshot row carries a lower base LSN than live traffic already
+     delivered, so the ceiling could regress and clamp a legitimate ack down.
+   - One test was found to be **fiction**:
+     `stream_snapshot_after_acked_live_traffic_still_delivers` claimed to
+     simulate "live traffic already delivered + acked at LSN 500" while only
+     calling `record_ack(500)` — a state no real client can reach. It now uses
+     `seed_acked_lsn`, which sets both cursors.
+
+   **Closed (ADR-0043, commits `10ebc93` + `60b0865`):** `NOSTOS_SLOT_MAX_LAG`
+   now defaults to `1073741824` (1 GiB); `0` still means unbounded but the server
+   logs a startup `warn!` naming the knob and the risk. Safe to default because
+   enforcement only removes the slowest *session* (`fanout.rs` →
+   `store.remove`) — the replication slot is never dropped, so the worst case
+   is one reconnect + resync for a client a gigabyte behind. Pinned by
+   `slot_max_lag_tests` in `nostos-server`; real-PG e2e green with the default.
+   Eviction does nothing for an *abandoned* slot (server gone) — that is bounded
+   only by Postgres `max_slot_wal_keep_size`, which `nostos doctor` now checks.
+   See "Left deliberately" §2 below.
 2. **No per-principal connection cap.** `DeviceCapReached`
    (`application/src/session.rs:26`) is a *global* licensed-session count, so one
    tenant opening `cap` sockets locks out every other tenant. Per-socket caps
@@ -313,7 +450,7 @@ distinguishes a real fix from a table-name-only fix: under a ruleset scoped to
 `status = 'open'`, a `status='closed'` row must not arrive while the `open` row
 still does.
 
-### 7. Stream snapshot skips the rules scope — OPEN, not yet fixed
+### 7. Stream snapshot skips the rules scope — HIGH (fixed, `4b5dcb5`)
 
 Same class, second path. `register_stream` builds the session predicate with
 `build_stream_predicate` (rules scope AND bound template AND tenant), but then
@@ -329,11 +466,41 @@ by the ruleset's own scope, while live fan-out for the same stream is. Under a
 ruleset with a row-level scope, the stream snapshot over-delivers exactly that
 scope's worth of rows.
 
-Not yet patched: the naive fix (pass `predicate.expr`) would bake the tenant
-clause into the SQL expression as well as the dedicated `tenant` argument,
-which breaks deliberately-global tables that lack the tenant column
+The naive fix (pass `predicate.expr`) would bake the tenant clause into the SQL
+expression as well as the dedicated `tenant` argument, which breaks
+deliberately-global tables that lack the tenant column
 (`scope_if_column_present` skips the clause today). The correct fix passes
 `rules_expr.and(bound)` and leaves the tenant travelling in its own argument.
+
+**Fixed 2026-09-01.** `build_stream_predicate` now returns BOTH the session
+predicate and the snapshot expr (`rules ∧ bound`, tenant deliberately absent),
+so the two paths cannot be derived separately again — deriving the same
+authorization twice is how this bug happened. `bound` is now *moved* into the
+function rather than cloned, so the call site has no unscoped copy left to
+reach for.
+
+**Proven, not assumed.** `stream_snapshot_applies_the_rules_scope_not_just_the_template`
+seeds three rows under scope `status = 'open'` + template `owner_id = :owner`.
+Row `l2` is the load-bearing one: the template admits it, only the rules scope
+hides it. Pre-fix the test yields `["l1", "l2"]`; post-fix `["l1"]`. Verified by
+temporarily restoring the old behaviour, watching it fail, then reverting.
+
+#### The trap this fix had to clear first
+
+The obvious patch would have **broken every default deployment.** `PredicateExpr::and`
+built `And([self, other])` unconditionally, and the SQL compiler
+(`snapshot_source::compile_expr`) deliberately *refuses* `PredicateExpr::Any` —
+a match-all marker reaching SQL means a widened snapshot. The zero-config `all`
+sync mode decides `Allow(PredicateExpr::any())`, so `rules_expr.and(bound)`
+would have produced `And([Any, template])` → compile error → swallowed by the
+transport → downgraded to live-fan-out-only → **the client's first sync silently
+returns nothing.** Exactly the `products`-catalog starvation already documented
+in `snapshot_source.rs`.
+
+So `and` now collapses `Any` (and `or` absorbs it), matching what `Predicate::and_eq`
+/ `or_eq` already did one screen below. Semantics for `matches()` are unchanged
+(`Any AND x ≡ x`); the change is that the tree stays compilable. Blast radius
+measured: 132 domain + 214 infra tests, zero failures.
 
 ## Verification status — actually run, 2026-09-01
 
@@ -345,6 +512,29 @@ which breaks deliberately-global tables that lack the tenant column
 
 Items 1 (predicate bound) and the boot-time tenant guard are now **verified**:
 `0 skipped` confirms the pg suite really ran rather than self-skipping.
+
+### Re-verified after the fixes (2026-09-02)
+
+| suite | result |
+|---|---|
+| `make ci` | **`MAKE_CI_EXIT=0` — 972 passed, 0 failed, 0 ignored**; 78 test binaries, 0 `FAILED`; zero clippy warnings, zero fmt diffs |
+| boot guard, 4 cases against the real binary | refuses the insecure pair; starts on `=1`, on `=true`, and on loopback-without-hatch |
+| real-Postgres e2e — **all 15 `e2e_pg_*` binaries**, `NOSTOS_E2E_PG=1`, `--test-threads=1` | **44 passed, 0 failed, 0 ignored** |
+| `e2e_pg_snapshot` (the 2 formerly-failing tests) | **2 passed, 0 failed** — `bench_apply` unpublished |
+| `e2e_pg_sync_streams` (incl. `cross_tenant_param_abuse_never_leaks`) | **5 passed, 0 failed** |
+
+The pg suite had to be run in two foreground batches: a whole-suite background
+run was externally killed twice before finishing a single binary, and a partial
+run is not a result. Per-binary counts are non-zero and `0 ignored`, which is
+what proves the tests actually ran rather than self-skipping on a missing
+`NOSTOS_E2E_PG`.
+
+**This retires the "296 passed / 2 failed" line above.** Nothing in the pg suite
+fails as of 2026-09-02.
+
+The `make ci` numbers are read off the `test result:` lines and the recorded
+`MAKE_CI_EXIT`, not off a shell exit code — a wrapper reported "exit code 0"
+twice in this session for runs that had actually failed or not run at all.
 
 ### The 2 pg failures are pre-existing, not from this work
 
@@ -362,11 +552,39 @@ They also fail 2/2 on re-run, so they are deterministic in the current DB
 state, not flaky. Neither test uses `resume_lsn`, so the replay branch this
 work touches is never entered.
 
-Root cause not established. What is ruled out: leftover rows (the test
-`TRUNCATE`s `tasks` itself, line 106), publication volume (27 rows across all
-six published tables, well inside the test's 32-event budget), and stale
-replication slots (dropped, still fails). Worth its own investigation —
-`fresh_slot` fails at line 176, "live INSERT not delivered".
+**ROOT CAUSE FOUND 2026-09-01 (`eb82648`). Not a product bug — a cross-suite
+test-isolation leak.**
+
+`crates/nostos-client/tests/e2e_pg_apply_throughput.rs:141` runs
+`ALTER PUBLICATION cairn_pub ADD TABLE public.bench_apply` and **never removes
+it**. The bench leaves ~40,000 rows behind. `cairn_pub` is shared, so every
+later test that opens a *fresh* replication slot snapshots those 40k rows too.
+Both failing tests collect into a fixed budget — `collect_events(&mut repl, 8,
+..)` and `.., 32, ..` — so the budget fills with bench rows before the test's
+own row arrives.
+
+The failure text says so plainly once you actually read it rather than the
+summary of it: `fresh_slot` reports **"got 8 events"** — *exactly* its budget of
+8. `concurrent_writes` reports **"LOST rows ... 135"**. Nothing was lost or
+undelivered; the collection window was full of another test's data.
+
+This explains every property that made it look mysterious: deterministic
+(40k rows are stably there), reproduces on the pre-session baseline (it is
+database state, not code), and unrelated to `resume_lsn` (neither test uses it).
+
+**Confirmed by experiment, not inference:** `ALTER PUBLICATION cairn_pub DROP
+TABLE bench_apply;` then re-run → `2 passed; 0 failed` immediately.
+
+The earlier "27 rows across all six published tables" measurement is what sent
+the first investigation down a blind alley — it counted six tables. `cairn_pub`
+had **eight**; `bench_apply` was the one that mattered and was never in the
+`pg-init` fixture to begin with. A count that excludes the pathological case
+is worse than no count, because it retires the hypothesis it should have raised.
+
+Fixed by giving the bench a `teardown_bench_table()` that unpublishes and
+truncates. It runs on the success path only — a panicking bench still
+re-poisons the suite; that ceiling and the one-line manual antidote are named
+in a `ponytail:` comment on the helper.
 
 ### Two ways a test run lied this session
 
@@ -423,3 +641,132 @@ while tenant A is subscribed, does A get a retraction? Supabase Realtime caches
 channel policies for the connection lifetime and documents exactly this gap; no
 vendor in this category publishes clear guidance on the row-mutates-out-of-scope
 case. Treat it as a designed-for property, not an assumed one.
+
+---
+
+## Left deliberately — not silently
+
+Three things were in scope for "fix all the gaps" and were **not** changed. Each
+is a decision with real blast radius, written out so it can be approved in a
+sentence rather than rediscovered later.
+
+### 1. HS256 tokens without `exp` stay permanent credentials
+
+The one-line change is `required_spec_claims = {"exp"}` on the HS256 verifier,
+aligning it with the JWKS path (which already requires `exp`).
+
+Not done, because it is a **breaking auth change, not a hardening tweak**:
+Supabase *service-role* tokens carry no `exp`, so this would 401 every one of
+them at the next deploy — silently, from the operator's point of view, since
+the token itself looks unchanged. ADR-0029 §Decision-4 records the current
+behaviour as deliberate. "Fix all the gaps" authorises fixing gaps; it is not
+by itself a decision to invalidate credentials that are working in production
+today.
+
+If it should ship, the safe shape is a config flag defaulting to today's
+behaviour, flipped to required in a major version — say the word and it is a
+small change plus test-fixture updates.
+
+### 2. `NOSTOS_SLOT_MAX_LAG` defaults to `0` (WAL-bloat eviction OFF) — RESOLVED
+
+**Decision (ADR-0043, 2026-09-02):** default is now **1 GiB**
+(`1073741824`), shipped in `10ebc93`; `0` = unbounded with a startup warning,
+`nostos doctor` `max_slot_wal_keep_size` check, docs and pinning tests in
+`60b0865`. Original reasoning kept below for the record.
+
+This — not the ack frame — is the genuine disk-exhaustion exposure on the
+Postgres primary. A client that simply never acks holds `restart_lsn` back and
+WAL accumulates without bound (ADR-0016).
+
+Not silently picked at audit time, because any non-zero default **disconnects
+real users**: the eviction cannot distinguish a malicious idle socket from a
+phone on a bad train connection, and the failure mode of guessing too low is
+"your app drops sync on the commute". Why 1 GiB is acceptable anyway: eviction
+never drops the slot, only the session — the client reconnects and resumes
+(op-log replay inside the ADR-0025 window, snapshot-reconcile outside it). One
+resync for a client a gigabyte behind is a far smaller blast radius than a full
+primary disk for everyone.
+
+Observed on the dev database while investigating: four abandoned slots
+(`cairn_slot`, `cairn_slot_arxa_kit`, `atlet_rt_sim_slot`, `atlet_demo_slot`)
+each retaining **117–120 MB** of WAL, plus six leftover `e2e_snap_*` slots.
+That is the mechanism working exactly as described, on a laptop, with nobody
+attacking anything. **Note:** no `NOSTOS_SLOT_MAX_LAG` value fixes those —
+there is no server left to evict anyone. Abandoned slots are bounded only by
+Postgres `max_slot_wal_keep_size` (ADR-0043 §3), which is why `nostos doctor`
+now flags `-1`.
+
+### 3. Findings 2, 3, 4, 6, and 8–11 in "Open — confirmed gaps"
+
+Unchanged this pass. Per-principal connection caps, the unbounded snapshot,
+`iss` validation, the JWKS bounded-staleness window, and the rest are real but
+each needs a policy call (what limit, what window, whose deploy breaks) rather
+than a patch. None is a silent-authorization-bypass of the class fixed above:
+findings 6 and 7 were, which is why they were done first.
+
+#### Verification 2026-09-02 — doc claims cross-checked against HEAD `afe485a`
+
+Read-only pass pinned to commit `afe485a`: each finding's claimed fix commit
+was located with `git log -S<symbol>`, every cited line was re-read from
+`git show afe485a:<path>` (the working tree of `main.rs` had drifted under
+concurrent edits; all `main.rs` lines below are the `afe485a` numbers), and the
+covering test named. Rule applied: CLOSED-VERIFIED only where a test that would
+fail on regression is named; code-only would be CLOSED-BUT-UNTESTED. Nothing
+was run (host CPU-contended). Verdicts:
+
+| # | Finding (one line) | Fix commit | Code at HEAD | Test | Verdict |
+|---|---|---|---|---|---|
+| 2 | No per-principal connection cap | `d893f86` | `store.rs:116` `PrincipalCapExceeded`; `session.rs:100` `with_per_principal_cap`; `main.rs:193` `NOSTOS_PER_PRINCIPAL_SESSION_CAP` | `store.rs::per_principal_cap_tests` (3: `one_account_cannot_consume_every_global_slot`, `a_refused_connect_does_not_burn_a_global_slot`, `presence_index_is_not_double_counted_by_the_capped_path`) | CLOSED-VERIFIED |
+| 3 | Unbounded snapshot | `d893f86` | `snapshot_source.rs:123` `limit_clause` (`LIMIT cap+1`), `:128` `reject_if_over_cap`, called on both `snapshot` (`:287`) and `snapshot_stream` (`:360`); `transport.rs:1284,1448` map `TooLarge` to a refusal | `limit_fetches_one_row_past_the_cap_so_a_breach_is_detectable`, `at_or_under_the_cap_is_accepted_and_over_it_is_refused`, `the_default_cap_clears_the_apply_throughput_bench` (`snapshot_source.rs:973-1010`). Transport-level `TooLarge` frame path is untested. | CLOSED-VERIFIED |
+| 4 | `nbf`, `aud`, `iss` not validated **on either verifier path** | `10ebc93` | JWKS path only: `jwks.rs:153` `validate_nbf = true`, `:154-155` opt-in `set_issuer`; `main.rs:143` `NOSTOS_JWT_ISSUERS`. **HS256 path `auth.rs:262` `verify_supabase_hs256` still checks only `exp` — no `nbf`, no `iss`; `NOSTOS_JWT_ISSUERS` is never applied to it.** | None. No test anywhere exercises a future-`nbf` token or a wrong-`iss` token (grep `nbf`/`with_issuers` in tests: zero hits). | **NOT-ACTUALLY-CLOSED** (half: JWKS done, HS256 untouched; both halves untested) |
+| 6 | Rotated keys stay valid through an outage | `10ebc93` | `jwks.rs:82` `DEFAULT_JWKS_MAX_STALE` 30 min, `:96` `with_max_stale`, `:236-247` refuses to serve past ceiling; `main.rs:151` `NOSTOS_JWKS_MAX_STALE_SECS` → `:570` `with_jwks_max_stale` | `a_cache_past_its_staleness_ceiling_stops_serving_during_an_outage` (`jwks.rs:832`) | CLOSED-VERIFIED |
+| 8 | No admin-token rate limiting | `1f960a7` | `admin_auth.rs:84` `failure_delay` (linear, capped), `:115` `check` sleeps on failure only, resets counter on success; `main.rs:469` refuses to start on token < `MIN_ADMIN_TOKEN_LEN` | `failure_delay_escalates_then_stops_at_the_cap`, `check_rejects_missing_and_malformed_headers`, `check_accepts_correct_bearer_token` (`admin_auth.rs:191-227`). Startup short-token bail at `main.rs:469` has no test. | CLOSED-VERIFIED |
+| 9 | Cross-tenant existence oracle | `a504bae` | `write_back.rs:249` `CROSS_TENANT_REJECTION`; all six `Forbidden(` sites (`:483,632,855,987,1155,1294`) return that one string | `e2e_pg_writeback.rs`: `cross_tenant_upsert_conflict_is_rejected`, `cross_tenant_delete_is_rejected_row_survives`, `cross_tenant_patch_is_rejected_row_unchanged`, `cross_tenant_insert_is_stamped_to_callers_tenant` (pg-gated, `NOSTOS_E2E_PG=1`) | CLOSED-VERIFIED |
+| 10 | No `Origin` check on WS upgrade | `1f960a7` | `transport.rs:450` `origin_allowed` (empty list = off, absent header = native client, exact match, non-UTF-8 refused); `main.rs:425` `NOSTOS_WS_ORIGINS` → `:984` `with_allowed_origins` | `empty_allowlist_is_off_and_admits_everything`, `configured_allowlist_admits_listed_and_refuses_unlisted`, `a_native_client_sending_no_origin_still_connects`, `match_is_exact_not_a_prefix_or_suffix` (`transport.rs:2053-2091`); `main.rs:2549-2569` origin-list parsing | CLOSED-VERIFIED |
+| 11 | `Not` over an absent column over-delivers | `2095d16` | `predicate.rs:256-312` three-valued eval; Unknown survives `Not`, Kleene `And`/`Or`, collapses to no-deliver at the top | `not_of_missing_eq_is_unknown_and_does_not_deliver` (`:766`), `unknown_survives_negation_at_every_depth` (`:794`) | CLOSED-VERIFIED |
+
+**Gap to dispatch — finding 4, HS256 half.** `crates/nostos-infra/src/auth.rs:262`
+`verify_supabase_hs256` decodes claims and checks `exp` only. It needs `nbf`
+rejection (with the same `JWT_LEEWAY_SECS`) and the `NOSTOS_JWT_ISSUERS`
+allowlist applied when non-empty, plus tests on both paths: a future-`nbf`
+token rejected, a wrong-`iss` token rejected when the allowlist is set, any
+`iss` accepted when it is unset. The close-all plan's own table (row 4) says
+"both verifier paths", so this is a doc/code mismatch, not a scoping choice.
+
+> Re-verified 2026-09-02: `10ebc93` covered the JWKS path only — HS256 ignored
+> `nbf`/`iss`, and JWKS accepted a *missing* `iss` even with an allowlist
+> (`jsonwebtoken` 10.4 `set_issuer` compares only when the claim is present);
+> both closed in `338e3f6` with tests on both paths (`auth::tests::hs256_*`,
+> `jwks::tests::jwks_*`). Finding 4 → CLOSED-VERIFIED.
+
+---
+
+## Operational hazard: a killed test run poisons the next one
+
+A `--test-threads=1` pg run that is interrupted leaves its replication slots
+behind. Observed this session: an externally-killed suite left **20 inactive
+slots**, including `e2e_stream1_27716`…`e2e_stream6_27716` (the PID is in the
+name). The next run then failed three `e2e_pg_sync_streams` tests —
+`lazy_stream_snapshot_then_live_delta`,
+`stream_on_rules_denied_table_errors_non_fatally`, and
+`unsubscribe_stops_flow_and_two_streams_dedup` — all with "rows never arrived".
+
+That looks *exactly* like a fan-out regression, and it landed in the same file
+as a fresh change to the stream path, which is the worst possible coincidence.
+What ruled the change out before touching anything: those tests run under
+`SyncMode::All` and `Toggles` with `scope: None`, so `rules_expr` is `Any` and
+`rules_expr.and(bound) == bound` — the new code is provably identical to the old
+for them. Dropping the orphaned slots made all five pass.
+
+Antidote, worth running before any pg suite:
+
+```sh
+docker exec nostos-postgres psql -U cairn -d cairn -t -c \
+  "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots \
+   WHERE NOT active AND slot_name LIKE 'e2e_%';"
+```
+
+Two independent shared-state hazards bit this suite in one session
+(`bench_apply` in the publication, orphaned slots). Both produce failures that
+point at the sync path and mention nothing about state. The general lesson: on
+this suite, **verify the database is clean before believing a failure is code.**

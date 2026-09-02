@@ -95,7 +95,13 @@ pub enum DeliveryDecision {
 pub trait EventSink: Send + Sync {
     /// Attempt to deliver one event. Non-blocking from the router's POV —
     /// returns promptly with a [`DeliveryDecision`].
-    async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision;
+    ///
+    /// The event is shared (`Arc`) rather than owned: the fan-out loop hands
+    /// the SAME allocation to every matched session, so delivery costs one
+    /// refcount bump instead of cloning `RowOp`'s two `String`s + `Bytes` per
+    /// session (20k allocations per event at 10k clients — measured 2026-09-02,
+    /// see docs/plans/close-soak-10k-open-items.md).
+    async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision;
 
     /// Close the sink: subsequent `deliver()` calls return `Dropped` immediately.
     /// Used by unsubscribe to stop fan-out to a stream's session.
@@ -253,6 +259,11 @@ pub enum StoreRejection {
     /// maps this to [`ConnectError::DeviceCapReached`].
     #[error("concurrent device cap reached ({cap})")]
     CapExceeded { cap: u64 },
+    /// This principal already holds `cap` live sessions. Distinct from
+    /// [`Self::CapExceeded`] so an operator can tell "the deployment is full"
+    /// from "one account is hogging it".
+    #[error("per-principal session cap reached ({cap})")]
+    PrincipalCapExceeded { cap: u64 },
 }
 
 /// A live set of sync sessions, indexed for fast predicate evaluation.
@@ -283,11 +294,18 @@ pub trait SessionStore: Send + Sync {
     /// Returns the inserted session's id, or `CapExceeded` if the store is full.
     ///
     /// `cap = u64::MAX` means "no cap" (the unlimited / Enterprise path).
+    ///
+    /// `per_principal_cap` bounds how many live sessions ONE account may hold.
+    /// Without it the global `cap` is a cross-tenant denial-of-service: a
+    /// single account can open `cap` sessions and lock every other tenant out
+    /// of the deployment (audit finding 2). Anonymous sessions carry no
+    /// account and are not subject to it — there is no principal to bound.
     async fn try_add_below_cap(
         &self,
         session: SyncSession,
         sink: Arc<dyn EventSink>,
         cap: u64,
+        per_principal_cap: u64,
     ) -> Result<SessionId, StoreRejection>;
 
     /// Remove a session by id (connection closed / dropped).
@@ -705,6 +723,14 @@ pub trait SnapshotSource: Send + Sync {
     }
 }
 
+/// Default row ceiling for a single subscribe-time snapshot.
+///
+/// Lives here (not in the `pg` adapter) because the server's CLI surface needs
+/// it whether or not the `pg` feature is on. Sized well above anything the test
+/// and bench suites snapshot — the apply-throughput bench's `bench_apply` is
+/// 40,000 rows — while still bounding the cost of one subscribe.
+pub const DEFAULT_SNAPSHOT_MAX_ROWS: usize = 500_000;
+
 /// Why a [`SnapshotSource::snapshot`] call failed. Surfaced to the transport,
 /// which logs the error and continues with live fan-out (a failed snapshot is
 /// NOT fatal — the client still receives subsequent mutations). Variants mirror
@@ -724,6 +750,21 @@ pub enum SnapshotError {
     /// [`WriteBackError::Backend`].
     #[error("snapshot backend: {0}")]
     Backend(String),
+    /// The table has more rows than the snapshotter's configured cap.
+    ///
+    /// This is deliberately a **rejection, not a truncation**. A capped-but-
+    /// silent snapshot would hand the client a short first sync that looks
+    /// complete while live fan-out stays correct — the same "first sync is
+    /// quietly wrong" shape as the stream-snapshot scope bypass
+    /// (`docs/plans/v0-2-0-security-audit.md`, finding 7). An operator who
+    /// hits this must see it and raise the cap.
+    #[error("snapshot for '{table}' exceeds the {cap}-row cap (raise NOSTOS_SNAPSHOT_MAX_ROWS)")]
+    TooLarge {
+        /// The table whose snapshot was refused.
+        table: String,
+        /// The cap that was exceeded.
+        cap: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------

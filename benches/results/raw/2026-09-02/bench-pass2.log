@@ -1,0 +1,18 @@
+cargo run --release --bin nostos-bench -- \
+		--clients 1000 \
+		--events 100000 \
+		--out-dir benches/results/remeasure-2026-09-02/pass2
+    Finished `release` profile [optimized] target(s) in 1.63s
+     Running `target/release/nostos-bench --clients 1000 --events 100000 --out-dir benches/results/remeasure-2026-09-02/pass2`
+[2m2026-09-02T00:12:20.703757Z[0m [32m INFO[0m [2mnostos_bench[0m[2m:[0m starting nostos-bench [3mcfg[0m[2m=[0mBenchConfig { clients: [1000], events: 100000, profile: "small", buffer: 1024, out_dir: "benches/results/remeasure-2026-09-02/pass2", timeout_secs: 120 }
+[2m2026-09-02T00:12:20.703904Z[0m [32m INFO[0m [2mnostos_bench[0m[2m:[0m run starting [3mclients[0m[2m=[0m1000 [3mevents[0m[2m=[0m100000
+[2m2026-09-02T00:17:21.210637Z[0m [32m INFO[0m [2mnostos_bench[0m[2m:[0m fan-out didn't finish within 3min grace; aborting (10k regime)
+[2m2026-09-02T00:17:23.610322Z[0m [32m INFO[0m [2mnostos_bench[0m[2m:[0m run complete [3mclients[0m[2m=[0m1000 [3mdelivered[0m[2m=[0m78572826 [3mmatched[0m[2m=[0m0 [3mops_per_sec[0m[2m=[0m654771.9689985166 [3mdrop_rate[0m[2m=[0m0.21427174000000004
+
+=== Nostos Week-1 Benchmark ===
+
+ clients        ops/sec      drop%   p50(ms)    p99(ms)  delivered
+    1000         654772     21.43%      0.00      0.00   78572826
+
+Results written to benches/results/remeasure-2026-09-02/pass2/
+[1;36m✓ results written to benches/results/remeasure-2026-09-02/pass2/[0m

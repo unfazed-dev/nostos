@@ -179,6 +179,31 @@ pub struct SyncRouterState {
     /// stops routing to a zombie server that accepts `/sync` but delivers
     /// no live events. `None` = not wired (tests) = treated live.
     pub driver_dead: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Browser origins permitted to open `/sync`. **Empty = no check**, which
+    /// is the default and preserves every existing deployment.
+    ///
+    /// Opt-in for a concrete reason: a non-empty default would reject the one
+    /// browser client in this repo (`nostos-ffi-wasm`, driven by the Svelte
+    /// demo) on upgrade, and every native client — `nostos-client`,
+    /// `nostos-bench`, the Flutter SDK via FFI, and all 30-odd integration
+    /// tests — reaches this on `tokio-tungstenite`, which sends **no** `Origin`
+    /// header at all.
+    ///
+    /// That asymmetry is also why an absent `Origin` passes rather than fails:
+    /// only browsers set it, and only browsers can be *forced* to set it
+    /// truthfully. A native attacker is not constrained by this header in
+    /// either direction, so rejecting on absence would break every legitimate
+    /// native client while stopping nobody. What it does buy — and the audit's
+    /// actual concern — is that on an `AllowAnonymous` deployment a random page
+    /// on the internet can no longer open a socket.
+    ///
+    /// **Scope: the axum `/sync` route only.** The iroh transport
+    /// (`crate::iroh_sync`) calls [`run_session`] directly and never passes
+    /// through [`sync_handler`], so this list does not apply there. That is
+    /// correct rather than a hole — iroh is P2P QUIC, there is no browser and
+    /// no `Origin` header to check — but do not read this field as "every
+    /// transport is restricted".
+    pub allowed_origins: Arc<Vec<String>>,
 }
 
 impl SyncRouterState {
@@ -206,6 +231,7 @@ impl SyncRouterState {
             rules_tx,
             rules_file_path: std::path::PathBuf::from("nostos_rules.toml"),
             driver_dead: None,
+            allowed_origins: Arc::new(Vec::new()),
         }
     }
 
@@ -220,6 +246,14 @@ impl SyncRouterState {
     #[must_use]
     pub fn with_driver_dead(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.driver_dead = Some(flag);
+        self
+    }
+
+    /// Restrict `/sync` to a set of browser origins. Empty (the default) keeps
+    /// the check off entirely — see [`SyncRouterState::allowed_origins`].
+    #[must_use]
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Arc::new(origins);
         self
     }
 
@@ -351,6 +385,12 @@ pub async fn sync_handler(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Response {
+    // Origin allowlist (opt-in) BEFORE auth: a rejected origin should never
+    // reach the verifier, and on an anonymous deployment auth would wave it
+    // through anyway — which is precisely the case this guards.
+    if !origin_allowed(&headers, &state.allowed_origins) {
+        return forbidden_origin();
+    }
     // Token from header OR `?token=` (browsers can't set WS handshake headers).
     // An empty/missing token is passed to the adapter as "" — `AllowAnonymous`
     // accepts it (returns the anonymous principal), real verifiers reject it.
@@ -387,6 +427,38 @@ fn unauthorized() -> Response {
         "nostos: authentication required for /sync",
     )
         .into_response()
+}
+
+fn forbidden_origin() -> Response {
+    // 403, not 401: the caller's credentials are not the problem and retrying
+    // with a different token will not help.
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        "nostos: origin not allowed for /sync",
+    )
+        .into_response()
+}
+
+/// Is this upgrade permitted by the origin allowlist?
+///
+/// Empty allowlist ⇒ always `true` (the check is off). Otherwise an `Origin`
+/// header, if present, must match one of the entries exactly. Absent `Origin`
+/// ⇒ `true`: that is a native client, and only browsers both send this header
+/// and are prevented from forging it. See [`SyncRouterState::allowed_origins`]
+/// for why rejecting on absence would break every native client while stopping
+/// nobody.
+fn origin_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    match headers.get(axum::http::header::ORIGIN) {
+        None => true,
+        // A non-UTF-8 Origin cannot match any configured entry, so it is
+        // refused rather than treated as absent.
+        Some(value) => value
+            .to_str()
+            .is_ok_and(|origin| allowed.iter().any(|a| a == origin)),
+    }
 }
 
 /// Drive one WebSocket connection for its lifetime.
@@ -611,7 +683,7 @@ pub(crate) async fn run_session<S, E>(
                             }
                         }
                         crate::router::SinkMsg::Event(first_ev) => {
-                            let mut batch: Vec<ReplicationEvent> =
+                            let mut batch: Vec<Arc<ReplicationEvent>> =
                                 Vec::with_capacity(MAX_BATCH_FRAMES);
                             batch.push(first_ev);
                             let mut pending_control: Option<Vec<u8>> = None;
@@ -628,7 +700,8 @@ pub(crate) async fn run_session<S, E>(
                             let msg = if batch.len() == 1 {
                                 Message::Binary(encode_event(&batch[0]))
                             } else {
-                                let refs: Vec<&ReplicationEvent> = batch.iter().collect();
+                                let refs: Vec<&ReplicationEvent> =
+                                    batch.iter().map(|e| &**e).collect();
                                 Message::Binary(encode_events(&refs))
                             };
                             if writer.send(msg).await.is_err() {
@@ -1049,7 +1122,17 @@ async fn register_subscribe(
     let id = manager
         .connect(session, sink_dyn)
         .await
-        .map_err(|_| SubscribeReject::DeviceCapReached)?;
+        .map_err(|e| match e {
+            // Distinct rejections: the deployment being full and ONE account
+            // being at its own ceiling are different operator problems, and
+            // collapsing them hides which one is happening (audit finding 2).
+            nostos_application::session::ConnectError::PrincipalCapReached { .. } => {
+                SubscribeReject::Rejected(e.to_string())
+            }
+            nostos_application::session::ConnectError::DeviceCapReached { .. } => {
+                SubscribeReject::DeviceCapReached
+            }
+        })?;
 
     // ── Op-log replay-on-reconnect (ADR-0025 slice 4b). When the client's
     //    epoch matches the server's current slot epoch AND its resume_lsn is
@@ -1192,6 +1275,17 @@ async fn register_subscribe(
                 debug!(table = %req.table, count, "snapshot-on-subscribe delivered");
                 count
             }
+            // A table over the snapshotter's row cap is REFUSED, not quietly
+            // shortened. Every other snapshot error keeps the historical
+            // warn-and-continue (the client still gets live fan-out), but a
+            // cap breach is a configuration mistake the operator must see:
+            // continuing here would hand the client a short first sync that
+            // is indistinguishable from a complete one — the same shape as
+            // the stream-snapshot scope bypass (audit finding 7).
+            Err(e @ nostos_application::ports::SnapshotError::TooLarge { .. }) => {
+                manager.disconnect(id).await;
+                return Err(SubscribeReject::Rejected(e.to_string()));
+            }
             Err(e) => {
                 warn!(
                     table = %req.table, error = %e,
@@ -1307,7 +1401,7 @@ async fn register_stream(
     let session_id = manager
         .connect(session, sink_dyn)
         .await
-        .map_err(|_| "device session cap reached".to_string())?;
+        .map_err(|e| e.to_string())?;
 
     if let Some((old_session, _)) = replaced {
         manager.disconnect(old_session).await;
@@ -1347,6 +1441,15 @@ async fn register_stream(
                     .deliver_control(encode_snapshot_boundary_for_stream(&table, id, false));
                 debug!(table = %table, stream = %id, count, "stream snapshot delivered");
                 count
+            }
+            // Cap breach is loud on the stream path too — but here the wire
+            // already has a per-stream error frame, so the stream is torn
+            // down and the client is told which stream died and why, rather
+            // than being left with a silently short one.
+            Err(e @ nostos_application::ports::SnapshotError::TooLarge { .. }) => {
+                let _ = sink_concrete.deliver_control(encode_stream_error(id, &e.to_string()));
+                manager.disconnect(session_id).await;
+                return Ok(());
             }
             Err(e) => {
                 // A failed stream snapshot is non-fatal (design §3).
@@ -1936,6 +2039,85 @@ where
 // passes its upgraded `WebSocket`; the iroh accept loop (`crate::iroh_sync`)
 // passes its tungstenite-over-QUIC adapter. A future third transport (e.g.
 // WebTransport) adds an adapter, not a session-core change.
+
+#[cfg(test)]
+mod origin_allowlist_tests {
+    use super::{origin_allowed, HeaderMap};
+
+    fn with_origin(origin: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::ORIGIN, origin.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn empty_allowlist_is_off_and_admits_everything() {
+        // The default. Every deployment that upgrades without setting
+        // NOSTOS_WS_ORIGINS must keep working exactly as before.
+        assert!(origin_allowed(&HeaderMap::new(), &[]));
+        assert!(origin_allowed(&with_origin("https://evil.example"), &[]));
+    }
+
+    #[test]
+    fn configured_allowlist_admits_listed_and_refuses_unlisted() {
+        let allowed = vec!["https://app.example".to_string()];
+        assert!(origin_allowed(
+            &with_origin("https://app.example"),
+            &allowed
+        ));
+        assert!(!origin_allowed(
+            &with_origin("https://evil.example"),
+            &allowed
+        ));
+    }
+
+    #[test]
+    fn a_native_client_sending_no_origin_still_connects() {
+        // This is the assertion that keeps the 30-odd integration tests and
+        // every `nostos-client`/`nostos-bench` binary alive: tokio-tungstenite
+        // sends no Origin at all. Rejecting on absence would break all of them
+        // while stopping no attacker, since only browsers are forced to send a
+        // truthful Origin in the first place.
+        let allowed = vec!["https://app.example".to_string()];
+        assert!(origin_allowed(&HeaderMap::new(), &allowed));
+    }
+
+    #[test]
+    fn match_is_exact_not_a_prefix_or_suffix() {
+        let allowed = vec!["https://app.example".to_string()];
+        // The classic allowlist bypasses: a registrable-suffix lookalike and a
+        // subdomain-prefixed impostor must both fail.
+        assert!(!origin_allowed(
+            &with_origin("https://app.example.evil.com"),
+            &allowed
+        ));
+        assert!(!origin_allowed(
+            &with_origin("https://notapp.example"),
+            &allowed
+        ));
+        // Scheme and port are part of an origin, so they must be part of the
+        // comparison too.
+        assert!(!origin_allowed(
+            &with_origin("http://app.example"),
+            &allowed
+        ));
+        assert!(!origin_allowed(
+            &with_origin("https://app.example:8443"),
+            &allowed
+        ));
+    }
+
+    #[test]
+    fn non_utf8_origin_is_refused_not_treated_as_absent() {
+        let allowed = vec!["https://app.example".to_string()];
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        assert!(!origin_allowed(&h, &allowed));
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3278,7 +3460,14 @@ mod tests {
         let principal = Principal::new("acct", "tenant-acme");
 
         // Simulate live traffic already delivered + acked at LSN 500.
-        sink.record_ack(Lsn::new(500));
+        //
+        // `seed_acked_lsn` sets BOTH cursors, which is what "delivered and
+        // acked" actually means on a live socket. A bare `record_ack(500)`
+        // used to work here only because acks were unvalidated — the sink now
+        // clamps an ack to what it delivered, so acking 500 having delivered
+        // nothing correctly registers as 0 and this fixture would be
+        // simulating a state no real client can reach.
+        sink.seed_acked_lsn(Lsn::new(500));
 
         register_stream(
             "s1",

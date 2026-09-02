@@ -50,8 +50,13 @@ async fn min_acked_is_the_minimum_across_sessions() {
     let (s2, _rx2) = TokioEventSink::channel(64);
     let sink1 = Arc::new(s1);
     let sink2 = Arc::new(s2);
-    sink1.record_ack(Lsn::new(100));
-    sink2.record_ack(Lsn::new(50));
+    // `seed_acked_lsn`, not `record_ack`: acks are clamped to what the sink
+    // actually delivered, so acking 100 on a sink that has delivered nothing
+    // now correctly registers as 0. Seeding sets delivered AND acked together,
+    // which is what "this session has progressed to LSN N" really means (it is
+    // the resume path's own call).
+    sink1.seed_acked_lsn(Lsn::new(100));
+    sink2.seed_acked_lsn(Lsn::new(50));
 
     store
         .add(SyncSession::new(Predicate::all("tasks")), sink1.clone())
@@ -93,16 +98,16 @@ async fn resume_seeds_dedup_so_acked_rows_are_not_redelivered() {
     sink.seed_acked_lsn(Lsn::new(40));
     // Delivering an event at or below 40 must be a dedup-hit drop.
     assert_eq!(
-        sink.deliver(ev(40, "1")).await,
+        sink.deliver(Arc::new(ev(40, "1"))).await,
         nostos_application::ports::DeliveryDecision::Dropped
     );
     assert_eq!(
-        sink.deliver(ev(30, "2")).await,
+        sink.deliver(Arc::new(ev(30, "2"))).await,
         nostos_application::ports::DeliveryDecision::Dropped
     );
     // An event ABOVE the resume LSN delivers normally.
     assert_eq!(
-        sink.deliver(ev(41, "3")).await,
+        sink.deliver(Arc::new(ev(41, "3"))).await,
         nostos_application::ports::DeliveryDecision::Delivered
     );
 }
@@ -138,40 +143,58 @@ impl nostos_application::ports::ReplicatorStream for RecordingRepl {
     }
 }
 
+/// An ACK frame naming data the server never sent must not move the cursor —
+/// proven over a real WebSocket, not just at the sink API.
+///
+/// This test used to assert the opposite. It subscribed, sent `ack 777` on a
+/// session that had received nothing, and asserted the cursor advanced to 777
+/// — encoding "acks are unvalidated" as intended behaviour. The ack frame is
+/// entirely client-controlled, so that let any client name any LSN.
+///
+/// The rewrite keeps a real socket in the loop and pins both halves:
+/// a legitimate cursor (seeded by `resume_lsn`, ADR-0009) is honoured, and an
+/// ack above what was delivered is ignored rather than believed.
+///
+/// The "an ack frame is parsed and reaches `record_ack`" plumbing stays
+/// covered by `run_loop_advances_progress_to_min_acked_only` below and by the
+/// `router.rs` sink unit tests; the fake server emits no events, so this test
+/// cannot manufacture a delivery to ack against.
 #[tokio::test]
-async fn client_ack_frame_advances_sink_acked_lsn_over_ws() {
+async fn client_ack_frame_cannot_claim_undelivered_data_over_ws() {
     let auth: Arc<dyn SyncAuth> = Arc::new(AnonAuth);
     let (addr, _server, _mgr, store) = common::spawn_fake_server_with(64, auth, None).await;
 
-    // Connect, subscribe, send an ACK frame, then verify the store's
-    // min_acked_lsn reflects it.
     let url = format!("ws://{addr}/sync");
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // Subscribe WITH a resume cursor: the transport calls `seed_acked_lsn`,
+    // which sets delivered AND acked to 700 — the legitimate way a session
+    // arrives already-progressed without the server re-sending those rows.
     ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        common::subscribe_frame("tasks", &[]),
+        common::subscribe_frame_with("tasks", &[], Some(700)),
     ))
     .await
     .unwrap();
-    // Give the subscribe time to register.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // No ack yet → store's min is None.
-    assert_eq!(store.min_acked_lsn().await, None);
+    assert_eq!(
+        store.min_acked_lsn().await,
+        Some(Lsn::new(700)),
+        "a resume_lsn subscribe must seed the session's cursor"
+    );
 
-    // Send an ACK for LSN 777.
+    // Now the attack: ack far beyond anything this session was ever sent.
     ws.send(tokio_tungstenite::tungstenite::Message::Text(ack_frame(
-        777,
+        999_999,
     )))
     .await
     .unwrap();
-    // Give the reader task time to stamp.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // The store's min acked LSN is now 777 — the ACK drove the cursor.
     assert_eq!(
         store.min_acked_lsn().await,
-        Some(Lsn::new(777)),
-        "a client ACK frame must advance the sink's acked LSN"
+        Some(Lsn::new(700)),
+        "an ACK for data the server never delivered must be clamped, not believed"
     );
 }
 
@@ -184,9 +207,11 @@ async fn run_loop_advances_progress_to_min_acked_only() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let (sink, _rx) = TokioEventSink::channel(64);
     let sink = Arc::new(sink);
-    // The client acks to LSN 50 — so min_acked is 50. The loop must call
-    // advance_progress(50), and ONLY 50 (never the event's 100).
-    sink.record_ack(Lsn::new(50));
+    // The client has progressed to LSN 50 — so min_acked is 50. The loop must
+    // call advance_progress(50), and ONLY 50 (never the event's 100).
+    // Seeded rather than `record_ack`ed: an ack is clamped to what the sink
+    // delivered, and this sink has delivered nothing yet.
+    sink.seed_acked_lsn(Lsn::new(50));
     store
         .add(SyncSession::new(Predicate::all("tasks")), sink.clone())
         .await;

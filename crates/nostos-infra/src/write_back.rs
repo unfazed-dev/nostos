@@ -232,6 +232,22 @@ mod pg {
     /// ponytail: single connection; pool when a real load shows contention.
     /// The connection is established lazily on the first write and reused;
     /// a broken connection is re-opened transparently on the next call.
+    /// The rejection text for a write that a tenant guard refused.
+    ///
+    /// Deliberately says nothing about *why*. The old text — "row {pk} in {table}
+    /// belongs to a different tenant" — confirmed to the caller that the pk exists
+    /// and is owned by someone else, turning the write path into a cross-tenant
+    /// ownership oracle over guessed primary keys (audit finding 9).
+    ///
+    /// Residual, stated honestly: this closes the *disclosure*, not the whole
+    /// oracle. A pk that does not exist still inserts successfully while a
+    /// cross-tenant pk is refused, so the outcome alone still separates the two
+    /// cases. Closing that would mean either letting the write through (wrong) or
+    /// reporting a success that did not happen — the write path must never tell a
+    /// client its write landed when it did not (ADR-0018). Rate limiting is the
+    /// mitigation for enumeration; a vaguer error is not.
+    const CROSS_TENANT_REJECTION: &str = "write refused by the tenant guard";
+
     pub struct PgWriteBack {
         pg_url: String,
         allowlist: HashSet<String>,
@@ -464,9 +480,9 @@ mod pg {
                             // different tenant — reject explicitly (same rule as
                             // the clobber path's rows == 0 check).
                             if rows == 0 {
-                                return Err(WriteBackError::Forbidden(format!(
-                                    "row {pk} in {table} belongs to a different tenant"
-                                )));
+                                return Err(WriteBackError::Forbidden(
+                                    CROSS_TENANT_REJECTION.to_string(),
+                                ));
                             }
                             Ok(())
                         }
@@ -613,9 +629,9 @@ mod pg {
                             // 0 rows ⟺ the guard fired on a pk owned by a
                             // different tenant — reject explicitly.
                             if rows == 0 {
-                                return Err(WriteBackError::Forbidden(format!(
-                                    "row {pk} in {table} belongs to a different tenant"
-                                )));
+                                return Err(WriteBackError::Forbidden(
+                                    CROSS_TENANT_REJECTION.to_string(),
+                                ));
                             }
                             Ok(())
                         }
@@ -836,9 +852,9 @@ mod pg {
                     // client's write did not take effect and must not be told
                     // otherwise.
                     if tenant.is_some() && rows == 0 {
-                        return Err(WriteBackError::Forbidden(format!(
-                            "row {pk} in {table} belongs to a different tenant"
-                        )));
+                        return Err(WriteBackError::Forbidden(
+                            CROSS_TENANT_REJECTION.to_string(),
+                        ));
                     }
                     Ok(())
                 }
@@ -968,9 +984,9 @@ mod pg {
                     }
                     let still_exists: bool = row.get(1);
                     if still_exists {
-                        return Err(WriteBackError::Forbidden(format!(
-                            "row {pk} in {table} belongs to a different tenant"
-                        )));
+                        return Err(WriteBackError::Forbidden(
+                            CROSS_TENANT_REJECTION.to_string(),
+                        ));
                     }
                     Ok(()) // idempotent: the row never existed
                 }
@@ -1136,9 +1152,9 @@ mod pg {
                     }
                     let still_exists: bool = row.get(1);
                     if still_exists {
-                        return Err(WriteBackError::Forbidden(format!(
-                            "row {pk} in {table} belongs to a different tenant"
-                        )));
+                        return Err(WriteBackError::Forbidden(
+                            CROSS_TENANT_REJECTION.to_string(),
+                        ));
                     }
                     Ok(()) // idempotent: the row never existed
                 }
@@ -1275,9 +1291,9 @@ mod pg {
                     }
                     let still_exists: bool = row.get(1);
                     if still_exists {
-                        return Err(WriteBackError::Forbidden(format!(
-                            "row {pk} in {table} belongs to a different tenant"
-                        )));
+                        return Err(WriteBackError::Forbidden(
+                            CROSS_TENANT_REJECTION.to_string(),
+                        ));
                     }
                     Ok(()) // idempotent: the row never existed
                 }

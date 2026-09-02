@@ -40,6 +40,19 @@ impl PgControl {
         Ok(row.get::<_, String>(0))
     }
 
+    /// Postgres `max_slot_wal_keep_size` as `SHOW` reports it (`-1` =
+    /// unbounded, else a size like `1GB`). The only thing that bounds WAL held
+    /// by an *abandoned* slot — nostos-server's client eviction can't help once
+    /// the server is gone (ADR-0043).
+    pub async fn max_slot_wal_keep_size(&self) -> Result<String> {
+        let row = self
+            .client
+            .query_one("SHOW max_slot_wal_keep_size", &[])
+            .await
+            .context("querying max_slot_wal_keep_size")?;
+        Ok(row.get::<_, String>(0))
+    }
+
     /// Create the publication (idempotent) or, if it exists but scopes a
     /// different table set, `ALTER PUBLICATION ... SET TABLE` to match.
     /// Never touches the replication slot — that's the server's job.

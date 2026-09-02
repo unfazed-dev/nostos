@@ -1,0 +1,14 @@
+  [diag] after 800ms grace: connected=1207 subscribed=1207 connect_failed=0
+  [diag] at window end: connected=4664 subscribed=4664 connect_failed=0
+  [diag] router: matched=14264330 delivered=14264330 dropped=0 faulted=0 events_fanned_out~=3058 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=26680000 not_reached_in_window=9057488 router_dropped=0 in_flight_or_unaccounted=0
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 5000 (attempted deliveries: 50000000)
+  window    : 60s
+  ---------------------------
+  delivered : 14264330
+  ops/sec   : 237725
+  drop%     : 71.47
+  elapsed   : 60.00s

@@ -10,10 +10,14 @@
 //! disconnects it. The client then reconnects and re-syncs from a fresh
 //! checkpoint — trading a controlled replay window for source-DB safety.
 //!
-//! **OFF by default** (per ADR-0016): an unconfigured deploy never evicts, so
-//! existing behavior is unchanged and no threshold-guess surprises a benchmark
-//! or early adopter. A production deploy MUST set `max_lag` (the threshold is
-//! workload-dependent; the default is a placeholder, not a recommendation).
+//! **Library default is OFF** ([`EvictionPolicy::disabled`]) so a bare
+//! `FanOutService` (benchmarks, unit tests) never evicts. **The server default
+//! is ON at 1 GiB** (`NOSTOS_SLOT_MAX_LAG`, ADR-0043; `0` opts out) — the
+//! v0.2.0 audit found that OFF-by-default was a credential-free disk-exhaustion
+//! exposure on the operator's primary. Eviction disconnects a *session*; it
+//! never drops the replication slot, so it can only ever cost a reconnect.
+//! An abandoned slot (server gone) is a different failure mode, bounded only
+//! by Postgres `max_slot_wal_keep_size`.
 
 use nostos_domain::Lsn;
 
@@ -36,9 +40,10 @@ impl Default for EvictionPolicy {
 }
 
 impl EvictionPolicy {
-    /// Eviction disabled — the safe default. No client is ever disconnected for
-    /// lag. Use this for benchmarks, dev, and any deploy that has NOT set
-    /// `max_slot_wal_keep_size` on its replication slot.
+    /// Eviction disabled — the *library* default. No client is ever
+    /// disconnected for lag. Right for benchmarks and unit tests; nostos-server
+    /// only lands here when an operator sets `NOSTOS_SLOT_MAX_LAG=0` and it
+    /// warns at startup when it does (ADR-0043).
     #[must_use]
     pub const fn disabled() -> Self {
         Self { max_lag: None }
@@ -88,7 +93,9 @@ mod tests {
 
     #[test]
     fn default_is_disabled() {
-        // The whole point: a fresh deploy with no config never surprises anyone.
+        // Library default: a bare FanOutService (bench, tests) never evicts.
+        // The *server* default is 1 GiB — pinned in nostos-server's
+        // `slot_max_lag_tests` (ADR-0043).
         assert_eq!(EvictionPolicy::default().max_lag, None);
     }
 

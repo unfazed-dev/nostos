@@ -16,7 +16,12 @@ PowerSync publishes no comparable aggregate fan-out figure. Its published rates 
 
 | Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | PS comparator |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1000 | 833,307 | 0.00% | 0.00 | 0.00 | 99997513 | **none published** |
+| 1000 | 2,618,601 | 0.00% | 0.006 | 0.034 | 100000000 | **none published** |
+
+Median of 3 passes on the fixed fan-out, 2026-09-02 (spread 2,515,049–2,682,508) — see
+[Native re-measure on the fixed fan-out](#native-re-measure-on-the-fixed-fan-out--measured-2026-09-02).
+The previous headline, 833,307 ops/sec (old fan-out, 99,997,513 delivered, window-bound at 120 s),
+is preserved in the sections below as the historical baseline.
 
 ## Interpretation
 
@@ -27,7 +32,7 @@ PowerSync publishes no comparable aggregate fan-out figure. Its published rates 
 > ~42 events/sec floor remains explicitly NOT that number (test-driver-bound,
 > see ADR-0025 caveat below).
 
-- **Peak sustained throughput: 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
+- **Peak sustained throughput: 2,618,601 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (median of 3, 2026-09-02, fixed fan-out; was 833,307 on the old fan-out) (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
 - **Max drop rate across runs: 0.00%** (lower is better; >1% is flagged as not fully honest throughput in the methodology).
 - The synthetic `FakeReplicator` generates events faster than the router pushes them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. Real `pgoutput` parsing cost is added in Week 2.
 
@@ -203,3 +208,314 @@ reconnect/reconcile. On a large pre-populated table the first-connect snapshot
 itself floods the sink the same way (observed matched=69009 storm on ~28k
 rows). Named follow-up (ponytail candidate): slow-client policy for connected
 sessions — op-log replay trigger or server-side resnapshot on gap detection.
+
+## Throughput re-measure + 10k soak — MEASURED 2026-09-02
+
+Re-measure of the eval-only headline after two same-day attempts were thrown
+out as host-contended (`benches/results/remeasure-2026-09-02/CONTENDED.md`,
+`…-run2/CONTENDED.md`: 15–21% drops with VS Code `Code Helper` at 93–231% CPU).
+Run 3 (`benches/results/remeasure-2026-09-02-run3/`, raw logs under
+`benches/results/raw/2026-09-02-run3/`) used the baseline's exact config —
+`nostos-bench --clients 1000 --events 100000`, profile `small`, buffer 1024 —
+three passes back-to-back, then two `nostos-bench-10k 10000 5000 60` soaks.
+
+Environment (`raw/2026-09-02-run3/env.txt`): commit `edc2380`, rustc 1.95.0,
+Mac16,13 / 10 cores / macOS 26.6.2, `ulimit -n` 1048576, load at launch
+10.38 (1-min) — the bench itself is most of that.
+
+| Pass | load at start (1/5/15 min) | delivered / attempted | drop % | ops/sec |
+|---|---|---|---|---|
+| 1 | 10.38 / 7.62 / 7.65 | 99,997,217 / 100,000,000 | 0.00278% | 833,307 |
+| 2 | 10.38 / 10.40 / 9.09 | 99,997,221 / 100,000,000 | 0.00278% | 833,305 |
+| 3 | 12.27 / 11.22 / 9.67 | 99,997,084 / 100,000,000 | 0.00292% | 833,302 |
+
+**Median 833,305 ops/sec, spread 5 ops/sec (833,302–833,307); drop rate
+0.0028–0.0029% (≈2.8k of 100M deliveries).** Same stage, same units, same
+config as the recorded **833,307 / 0.00%** baseline (RESULTS table above):
+within 2 ops/sec — the baseline stands, no regression, no improvement to claim.
+
+Why the figure is so stable: `nostos-bench` runs a fixed 120 s window
+(`elapsed_secs` = 120.000 on every pass) and the server drains essentially
+all 100M deliveries inside it, so ops/sec ≈ delivered ÷ 120 and the quantity
+that actually varies run-to-run is the delivered / dropped count — that is the
+number to watch, not the ops/sec.
+
+Host-noise caveat: two orphan context-mode `node` processes (PIDs 62737,
+62824, ~97% CPU each) were live at launch and gone by the pass-1 check; the
+remaining non-bench load during the passes was VS Code `Code Helper (Renderer)`
+at 12–69% CPU, CoreSimulator ~15%, one agent session ~14%. None of it pushed a
+pass past the methodology's 1% drop ceiling, unlike the two aborted runs.
+
+### 10k-client soak (`nostos-bench-10k 10000 5000 60`) — measured, NOT citable as throughput
+
+| Soak | load at start | delivered / attempted (50M) | undelivered in window | ops/sec |
+|---|---|---|---|---|
+| 1 | 11.19 / 11.06 / 9.86 | 23,731,761 | 52.54% | 395,520 |
+| 2 | 7.74 / 10.27 / 9.66 | 12,075,234 | 75.85% | 201,248 |
+
+The probe's "drop%" is `1 − delivered/attempted` at window close — events not
+delivered within 60 s, whether shed by the router or simply not yet sent. Both
+soaks confirm what ROADMAP §C3 already records: **the 10k <1%-drop goal is
+still NOT met** (prior probe ~483k ops/sec @ ~61.4%). Soak 1 lands in the same
+regime as that prior figure; soak 2 delivered half as much. The 2× pass-to-pass
+gap is unexplained — soak 2 launched 1 s after soak 1's `process::exit` (the
+probe does no teardown, so 10k sockets were still closing), which is a
+plausible cause but was not verified. Treat the 10k numbers as a regime check
+only; before any 10k figure is updated anywhere, rerun with a ≥60 s cool-down
+between soaks and report both. Same-stage comparator for PowerSync: none
+published at 10k either.
+
+## 10k soak on Linux, fan-out fixes A/B — MEASURED 2026-09-02 (container; NOT comparable to the native headline)
+
+Root cause of the 10k shortfall above: `docs/plans/soak-10k-root-cause-2026-09-02.md`
+(the fan-out loop spawned one tokio task per session per event; nothing was
+being shed). Two fixes: sequential fan-out loop (`e33b4c3`) and one shared
+`Arc<ReplicationEvent>` per event instead of a per-session clone (this commit).
+macOS cannot host the 10k probe on the fixed build — it now connects fast enough
+to hit `ENOBUFS` at ~9.2k loopback sockets (mbuf-cluster exhaustion, not nostos
+code) — so the 10k A/B ran in Docker via `benches/scripts/linux-soak.sh`.
+
+Environment (first line of every raw log under `benches/results/raw/2026-09-02-linux/`):
+Docker Desktop 29.7.2 VM, `Linux 7.0.12-linuxkit aarch64`, 10 vCPU, 8 GiB,
+rustc 1.95.0, `nofile=1048576`, `ip_local_port_range=1024-65535`, image
+`rust:1.95-bookworm`. Mac host load 8–9 (1-min) during the runs. **Different
+environment from the 833,307 native figure — compare only within this table.**
+
+`nostos-bench-10k 10000 5000 60`, baseline = `e33b4c3` (sequential loop, per-session
+clone), fixed = `Arc` event sharing:
+
+| Build | events fanned out (of 5000) | delivered / attempted (50M) | router dropped | undelivered at 60 s | ops/sec | elapsed |
+|---|---|---|---|---|---|---|
+| baseline `e33b4c3` | 3,596 | 35,953,345 | 0 | 28.09% | 599,219 | 60.00 s (window) |
+| **fixed (Arc)** | **5,000** | **50,000,000** | **0** | **0.00%** | **854,631** | **58.50 s** |
+
+**The fixed build delivers the entire 10k × 5000 budget inside the 60 s window
+with zero drops — the first time the 10k soak has met the <1%-drop goal.** The
+probe reports a subscribe quorum of 10000/10000 for both runs (`connect_failed=0`),
+so the 28% baseline shortfall is throughput, not connectivity.
+
+1k regression check (same probe, 1000 clients, three baseline/fixed pairs
+back-to-back, raw logs `ab-{baseline,fixed}-1k{,-r2,-r3}.log`; pair 1 ran
+5000 events = 5M deliveries, pairs 2–3 ran 20000 events = 20M deliveries):
+
+| Pair | events | baseline ops/sec (elapsed) | fixed ops/sec (elapsed) | drops |
+|---|---|---|---|---|
+| 1 | 5,000 | 2,154,769 (2.32 s) | 1,981,081 (2.52 s) | 0 / 0 |
+| 2 | 20,000 | 932,874 (21.44 s) | 2,152,227 (9.29 s) | 0 / 0 |
+| 3 | 20,000 | 1,112,585 (17.98 s) | 1,760,724 (11.36 s) | 0 / 0 |
+
+Every run finished its full event budget with zero drops. In the 2.3 s pair-1
+runs the two builds are within 8% (a run that short is mostly connect/subscribe
+time); on the longer 20k-event pairs, where steady-state fan-out dominates, the
+fixed build is 1.6–2.3× faster. No 1k regression.
+
+The macOS-native 3-pass headline on the fixed build is in the next section.
+
+## Native re-measure on the fixed fan-out — MEASURED 2026-09-02
+
+Same harness, same config as the 833,307 baseline (`make bench`: 1,000
+clients, 100,000 events, per-session buffer 1024, `--release`), same host,
+run on commit `d3a49f0` (Arc-shared event + sequential deliver, both landed
+above). Recipe: `benches/scripts/remeasure.sh`; raw logs
+`benches/results/raw/2026-09-02-fixed/`, per-pass JSON
+`benches/results/remeasure-2026-09-02-fixed/pass{1,2,3}/`.
+
+**Environment** (`env.txt`): Mac16,13, 10 cores, macOS 26.6.2, rustc 1.95.0,
+`ulimit -n` 1,048,576, load at start 2.48 (orphan `node` procs killed, VS Code
+closed; `dirty_files=1` = the untracked remeasure script). Load rose to 8–10
+during passes 2–3 — that is the bench itself saturating the 10 cores, not a
+foreign process.
+
+| pass | load (1/5/15 at start) | delivered / attempted | drop% | elapsed | ops/sec |
+|---|---|---|---|---|---|
+| 1 | 2.48 / 3.92 / 4.84 | 100,000,000 / 100,000,000 | 0.00000% | 37.28 s | 2,682,508 |
+| 2 | 8.21 / 5.22 / 5.24 | 100,000,000 / 100,000,000 | 0.00000% | 38.19 s | 2,618,601 |
+| 3 | 10.00 / 6.05 / 5.54 | 100,000,000 / 100,000,000 | 0.00000% | 39.76 s | 2,515,049 |
+
+**Median 2,618,601 ops/sec, spread 2,515,049–2,682,508 (6.4%), 0.00% drops,
+every event delivered in every pass.** Same-stage, same-units, same-host
+comparison to the old fan-out's 833,305 median (run 3, 2026-09-02, spread
+5 ops/sec): **3.14× faster.** The old build was window-bound — it did not
+finish the 100M deliveries inside the 120 s `BENCH_TIMEOUT` (99,997,513
+delivered at 120.0 s); the fixed build drains all 100M in 37–40 s, so the
+elapsed time — not the window — now sets the rate. The 6.4% spread is wider
+than the old ±5% band; passes 2–3 ran on a host already loaded by pass 1's
+teardown, so the median (not pass 1) is the headline.
+
+**macOS 10k soak (`nostos-bench-10k 10000 5000 60`, two back-to-back runs):**
+
+| soak | load at start | delivered / attempted | drop% | router dropped | not reached in window | elapsed | ops/sec |
+|---|---|---|---|---|---|---|---|
+| 1 | 10.74 | 17,634,618 / 50,000,000 | 64.73% | 908,331 | 28,160,000 | 60.00 s | 293,900 |
+| 2 | 4.47 | 50,000,000 / 50,000,000 | 0.00% | 0 | 0 | 23.44 s | 2,133,208 |
+
+Both soaks reached quorum (10,000 connected / 10,000 subscribed, 0 connect
+failures). Soak 1, started at load 10.74 immediately after bench pass 3, shed
+908k events at the router and left 28M unreached in the window; soak 2, 90 s
+later at load 4.47, delivered everything in 23 s. **The macOS 10k soak is
+therefore inconsistent (1 of 2 clean) and is NOT claimed as met on macOS.**
+The authoritative <1%-drop 10k result stays the Linux-container run above
+(50M/50M, 0.00%, 854,631 ops/sec, commit `d3a49f0`); the macOS 10k regime
+remains flagged for the ~9.2k-socket ENOBUFS limit and this cold-start
+sensitivity (`docs/plans/close-soak-10k-open-items.md` item 2).
+
+The 833,307 figure is preserved above as the old-fan-out historical baseline.
+
+## Scale ladder 20k–100k — MEASURED 2026-09-02 (Linux container)
+
+Plan: `docs/plans/scale-ladder-20k-100k.md`. Recipe: `benches/scripts/scale-ladder.sh`
+on commit `4bf9a0d` (probe gained a `listeners` arg, `completed=` and peak-RSS
+reporting). Raw logs `benches/results/raw/2026-09-02-ladder/`, bench JSON
+`benches/results/ladder-2026-09-02/`. One pass per tier, then a second pass at
+the largest tier that finished with <1% drops. **Container numbers and native
+numbers are separate tables and are never compared to each other.** This whole
+section is eval-only (FakeReplicator loopback → router → WS fan-out) and is
+**not comparable to any PowerSync figure**; the only honest head-to-head is a
+full-path real-PG → client-apply race on one shared harness, tracked in
+`docs/COMPARISON.md`.
+
+**Environment.** Host Mac16,13, 10 cores, macOS 26.6.2, rustc 1.95.0, load at
+start 2.70 (`env.txt`; its `dirty_files=1` is the script's own untracked output
+dir, not code drift). Container: Docker Desktop VM, `Linux 7.0.12-linuxkit
+aarch64`, 10 vCPU, 8 GiB, `nofile=1048576`, `ip_local_port_range` 1024–65535,
+`somaxconn=4096`, `rust:1.95-bookworm`. macOS and the VM share the same 10
+cores, so everything ran serially.
+
+**Tier shape.** `nostos-bench-10k <clients> 5000 <window> 1 <listeners>` — 5,000
+events per client (the 10k soak's shape), per-tier window 300/400/500/600/1200 s,
+one loopback listener for 20k–50k and two (`127.0.0.1` + `127.0.0.2`) at 100k so
+the 4-tuple space is not the limit.
+
+| tier | subscribed at quorum cap / target | quorum cap | delivered / attempted | drop% | router dropped | connect_failed | completed | elapsed | ops/sec (see note) | peak RSS |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20k | 20,000 / 20,000 | 29.2 s | 100,000,000 / 100,000,000 | 0.00% | 0 | 0 | yes | 101.2 s | 988,044 | 912 MiB |
+| 30k | 28,785 / 30,000 | 30.0 s (hit) | 149,073,401 / 150,000,000 | 0.62% | 0 | 0 | no | 400.0 s (window) | ≥372,682 | 1,300 MiB |
+| 40k | 36,769 / 40,000 | 40.0 s (hit) | 195,907,126 / 200,000,000 | 2.05% | 0 | 0 | no | 500.0 s (window) | ≥391,805 | 1,708 MiB |
+| 50k | 45,863 / 50,000 | 50.0 s (hit) | 239,166,579 / 250,000,000 | 4.33% | 0 | 0 | no | 600.0 s (window) | ≥398,609 | 2,171 MiB |
+| 100k (2 listeners) | 83,713 / 100,000 | 100.0 s (hit) | 499,450,462 / 500,000,000 | 0.11% | 0 | 0 | no | 1200.0 s (window) | ≥416,206 | 4,034 MiB |
+| 20k, pass 2 | 20,000 / 20,000 | 19.8 s | 100,000,000 / 100,000,000 | 0.00% | 0 | 0 | yes | 103.4 s | 967,548 | 884 MiB |
+
+**What the ≥30k "drops" are — a harness accounting artefact, reconciled
+exactly.** The probe waits for a subscribe quorum for at most
+`max(30 s, clients/1000 s)` (`probe_10k.rs:170`), then starts fanning out while
+the remaining clients keep connecting; `attempted` is `clients × events`
+(`:220`) regardless of when each client subscribed. The container connects at
+~840–960 conn/s, so every tier ≥30k hit that cap with 4–16% of clients still
+connecting. At every one of those tiers: `matched == delivered` (the router
+delivered every frame it matched — nothing shed, nothing faulted), all clients
+had connected by window end (`at window end: connected=30000/40000/50000/100000`),
+and the shortfall (926,599 / 4,092,874 / 10,833,421 / 549,538) is the events
+fanned out before the late clients subscribed — they were never matched, so they
+were never attempted by the server. **No tier showed a server-side limit: router
+dropped = 0, connect_failed = 0, no ENOBUFS, at every tier through 100k.**
+`completed=false` at those tiers is the same artefact (target = `clients × events`).
+
+**ops/sec note.** At 20k the probe finished its budget early, so ops/sec is
+delivered ÷ elapsed (988,044; 967,548 on pass 2). At ≥30k the probe ran to the
+window because the late clients' early events can never arrive, so ops/sec there
+is delivered ÷ window — a lower bound on the fan-out rate, not a measurement of
+it; the actual fan-out finished at some unrecorded point inside the window. No
+≥30k number is a headline. The one clean, un-capped statement from this run is:
+**20k clients, 100M/100M deliveries, 0.00% drops, ~970k–990k ops/sec, <1 GiB RSS,
+reproduced in two passes**, and **100k concurrent subscribed sessions on one
+process at 4.0 GiB RSS with zero router drops**.
+
+Memory scales roughly linearly: ~43 MiB per 1,000 sessions (912 MiB @ 20k →
+4,034 MiB @ 100k); the 8 GiB VM was not the limit.
+
+**Next fix (before ≥30k rates can be claimed):** scale the quorum cap to the
+measured connect rate (or compute `attempted` from subscribed clients), then
+re-run 30k–100k so those tiers are measured un-capped.
+
+**macOS 10k re-check (native, same commit, 4 soaks `10000 5000 60`, run from an
+idle host with 60 s gaps, the 4th immediately after a 1k bench pass):**
+
+| soak | quorum | delivered / attempted | drop% | router dropped | elapsed | ops/sec |
+|---|---|---|---|---|---|---|
+| idle 1 | 8.6 s | 50,000,000 / 50,000,000 | 0.00% | 0 | 23.1 s | 2,162,135 |
+| idle 2 | 9.0 s | 9,744,354 / 50,000,000 | 80.51% | 651,674 | 60.0 s (window) | 162,401 |
+| idle 3 | 29.8 s | 50,000,000 / 50,000,000 | 0.00% | 0 | 23.0 s | 2,171,537 |
+| after bench | 7.9 s | 11,734,000 / 50,000,000 | 76.53% | 40,476 | 60.0 s (window) | 195,547 |
+
+All four reached 10,000/10,000 subscribed with 0 connect failures. The two bad
+runs are not cold-start (idle 2 started 90 s after a clean run on an idle host):
+the fan-out loop itself ran ~13× slower (1,353 events in 60 s vs 5,000 in 23 s)
+and the router shed at the bounded per-session buffers because writers stalled;
+the following run's connect phase also took 29.8 s vs ~8.5 s. This is a macOS
+loopback stall between back-to-back 10k-socket runs, not a code-path
+difference (same binary, clean on either side). **macOS 10k stays bimodal (2 of
+4 clean) and is NOT claimed as met on macOS**; the 1k bench pass in the same run
+was 2,687,461 ops/sec, 0.00% drops (`ladder-2026-09-02/mac-bench/`), consistent
+with the 2,618,601 median above. 20k+ was not attempted natively — the sysctl
+walls (~9.2k ENOBUFS, 16,384 ports, `maxfilesperproc=61440`) are recorded in the
+plan.
+
+### Re-run with progress-based quorum (commit `1d9de36`) — MEASURED 2026-09-02
+
+Same container recipe (`benches/scripts/scale-ladder-rerun.sh`, `rust:1.95-bookworm`,
+Linux 7.0.12-linuxkit aarch64, 10 vCPU / 8 GiB, `nofile=1048576`, `somaxconn=4096`),
+host load 3.41 at start, `dirty_files=1` = the script's own output dir. The probe's
+quorum wait is now progress-based (keeps waiting while subscribers are still
+arriving; gives up after a 5 s stall or a per-tier ceiling) and reports
+`late_subscribers`. Raw logs: `benches/results/raw/2026-09-02-ladder-rerun/`.
+
+| tier | window | quorum | subscribed at start | late | delivered / attempted | drop% | router dropped | connect_failed | peak RSS | ops/sec (delivered ÷ window) | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 30k | 400 s | 26.4 s (stall-tripped) | 25,173 | 4,827 | 143,836,755 / 150,000,000 | 4.11% | 0 | 0 | 1,314 MiB | 359,587 | quorum-capped (still) |
+| 40k | 500 s | 24.9 s | 39,880 | 120 | 199,986,080 / 200,000,000 | 0.01% | 0 | 0 | 2,191 MiB | 399,969 | **measured at window** |
+| 50k | 600 s | 27.9 s | 46,308 | 3,692 | 248,588,185 / 250,000,000 | 0.56% | 0 | 0 | 2,044 MiB | 414,312 | **measured at window** |
+| 100k | 1200 s | 43.0 s | 95,496 | 4,504 | 98,281,260 / 500,000,000 | 80.34% | 0 | 0 | 3,887 MiB | 81,901 | window-capped — fan-out collapse |
+
+**What was promoted.** 40k and 50k now stand as measured, not lower-bound-only,
+on the delivery/drop axis: every event the router matched was delivered
+(`matched == delivered`, `router dropped = 0`, `connect_failed = 0`, all clients
+subscribed by window end), and the shortfall is exactly the late subscribers'
+pre-subscribe events (40k: 13,920 = 120 late × ~116 each; 50k: 1,411,815 =
+3,692 late × ~382 each — i.e. `subscribed × events − matched`). *Correction
+(`198bafb`): the `not_reached_in_window` figures this paragraph first quoted
+(40,000 and 1,450,000) came from the probe's breakdown line, which divided
+`matched ÷ subscribed` as an integer before multiplying back and so printed one
+lost event per client; the delivered/attempted counts in the table were never
+affected.* Nothing was shed. **200k and
+250k concurrent deliveries per event, <1% drops, ≤2.2 GiB RSS, no server-side
+limit** is the honest statement for those tiers.
+
+**What was NOT promoted.** The ops/sec column is still delivered ÷ window at every
+≥30k tier because the probe waits for `delivered == attempted`, which the late
+subscribers make unreachable, so it always runs to the window and does not record
+when the fan-out actually finished. 399,969 / 414,312 are lower bounds on the
+container fan-out rate, not measurements of it. 30k stayed quorum-capped for a
+different reason than before: the connect ramp paused >5 s at 25,173 and the
+stall detector released the quorum early (a container connect hiccup, not a
+harness cap — 40k/50k/100k ramped without a stall).
+
+**100k is a real finding, not an artefact.** All 100,000 subscribed
+(4,504 late), router dropped 0, connect_failed 0 — but the fan-out loop only got
+through ~982 of 5,000 events in 1200 s (81,901 ops/sec vs 414,312 at 50k, ~5×
+slower per delivery). That is a throughput collapse at 100k sinks per event
+inside the 8 GiB VM (3.9 GiB server RSS plus 100k probe sockets), not shedding.
+Cause not yet isolated (memory pressure vs. 2-listener split vs. per-event
+sequential loop over 100k writers); it is the next perf investigation. No 100k
+rate is quoted anywhere.
+
+The script's second pass did not run: its criterion was `completed=true`, which
+no ≥30k tier can reach while `attempted` counts late subscribers' events. Two
+harness follow-ups: (1) record the fan-out finish time so ops/sec at ≥30k is a
+measurement; (2) key the pass-2 criterion on drop% <1% rather than `completed`.
+
+**Both follow-ups landed in `31a49ff`** (2026-09-02): the probe stops the window
+when `delivered == matched − dropped − faulted` with the replicator drained and
+prints `elapsed_to_finish` + `ops/sec (finish)`; the ladder script keys pass 2 on
+`drop% < 1`. Validation run, same container recipe via `benches/scripts/linux-soak.sh`,
+20k clients / 300 events / 120 s window, host load1 3.30 at start: quorum 23.05 s at
+19,912/20,000 (stall rule), 19,954 subscribed by the end (42 late, 46 never
+connected), `matched = delivered = 5,976,330`, router dropped 0, drop% 0.39,
+**`elapsed_to_finish` 6.84 s, 873,470 ops/sec (finish)** — the probe exited at
+6.84 s instead of running to 120 s. Same regime as the 20k/5000 ladder row above
+(988,044 ops/sec at 0.00%); the 0.39% here is the 46 never-connected clients
+(13,800 events) plus the 42 late subscribers' pre-subscribe events (9,870), which
+sum to the 23,670 undelivered exactly. Caveat: a first attempt at 20k/1000 on a
+host at load1 35–48 delivered 13.3M/20M at 111,196 ops/sec and ran to the window;
+that was host load (desktop apps, a VPN and an Xcode clone), not the harness — the
+container env line was identical. The ≥30k tiers above have **not** been re-run
+with the finish-time probe; their ops/sec column stays a lower bound until they are.

@@ -1,0 +1,24 @@
+BUILD start 10:49:32 tag=ladder-rerun
+   Compiling nostos-bench v0.2.0 (/src/crates/nostos-bench)
+    Finished `release` profile [optimized] target(s) in 12.92s
+BUILD ok 10:49:45
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 ports=1024-65535 mem=8124512kB rustc=rustc 1.95.0 (59807616e 2026-04-14)
+SOAK start 10:49:45 clients=30000 events=5000 window=400 ack=1 listeners=1 somaxconn=4096
+  [diag] listeners: ws://127.0.0.1:30027/sync
+  [diag] subscribe quorum after 26.40s: connected=25173 subscribed=25173 connect_failed=0 complete=false (ceiling 150s, stall 5s)
+  [diag] at window end: connected=30000 subscribed=30000 connect_failed=0 subscribed_at_start=25173 late_subscribers=4827 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=143836755 delivered=143836755 dropped=0 faulted=0 events_fanned_out~=4794 (matched/subscribed)
+  [diag] undelivered breakdown: never_connected=0 not_reached_in_window=6180000 router_dropped=0 in_flight_or_unaccounted=0
+  [diag] completed=false (delivered 143836755 of 150000000 before the 400s window) peak_rss_mib=1314
+
+=== nostos-bench-10k probe ===
+  clients   : 30000
+  events    : 5000 (attempted deliveries: 150000000)
+  window    : 400s
+  ---------------------------
+  delivered : 143836755
+  ops/sec   : 359587
+  drop%     : 4.11
+  elapsed   : 400.01s
+SOAK rc=0 10:56:52
+LINUX_SOAK_EXIT=0

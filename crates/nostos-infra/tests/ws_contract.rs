@@ -1080,7 +1080,7 @@ struct FillSink;
 
 #[async_trait]
 impl EventSink for FillSink {
-    async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
         DeliveryDecision::Delivered
     }
 }

@@ -24,8 +24,8 @@
 #             non-zero = see $HARNESS_LOG / $SPINE_LOG / $GRADLE_LOG.
 set -euo pipefail
 
-NOSTOS_RN="/Volumes/developer_ssd/Developer/nostos/sdk/nostos_react_native"
-REPO_ROOT="/Volumes/developer_ssd/Developer/nostos"
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+NOSTOS_RN="$REPO_ROOT/sdk/nostos_react_native"
 cd "$NOSTOS_RN"
 
 AVD="${NOSTOS_AVD:-nostos_api34}"

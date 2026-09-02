@@ -59,10 +59,45 @@ pub(crate) struct JwksVerifier {
     jwks_url: String,
     http: reqwest::Client,
     ttl: Duration,
+    /// How long a cache may keep serving after its last SUCCESSFUL fetch.
+    ///
+    /// Audit finding 6: a failed fetch only warns and leaves `cache.keys`
+    /// intact, so rotation is observed only via a *successful* fetch — a key
+    /// the IdP revoked kept verifying for the entire outage. Unknown `kid`s
+    /// failed closed; rotated ones failed OPEN. Past this window the cache is
+    /// refused outright, which turns an indefinite fail-open into a bounded
+    /// one: a long IdP outage now costs availability, not revocation.
+    max_stale: Duration,
     cache: RwLock<Cache>,
+    /// Accepted `iss` values. Empty = unchecked (the default — an allowlist
+    /// that defaults to non-empty would reject every existing deployment's
+    /// tokens on upgrade). When set, a token from any other issuer is
+    /// rejected even if its `kid` resolves.
+    issuers: Vec<String>,
 }
 
+/// Default ceiling on serving a JWKS cache that has not refreshed
+/// successfully. Long enough to ride a short IdP blip without an auth outage,
+/// short enough that a revoked key does not stay usable for a working day.
+pub(crate) const DEFAULT_JWKS_MAX_STALE: Duration = Duration::from_mins(30);
+
 impl JwksVerifier {
+    /// Restrict accepted `iss` values (audit finding 4). Empty leaves `iss`
+    /// unchecked, which is the default: a non-empty default would reject
+    /// every existing deployment's tokens on upgrade.
+    #[must_use]
+    pub(crate) fn with_issuers(mut self, issuers: Vec<String>) -> Self {
+        self.issuers = issuers;
+        self
+    }
+
+    /// Override the staleness ceiling (see [`Self::max_stale`]).
+    #[must_use]
+    pub(crate) fn with_max_stale(mut self, max_stale: Duration) -> Self {
+        self.max_stale = max_stale;
+        self
+    }
+
     pub(crate) fn new(jwks_url: String, ttl: Duration) -> Self {
         Self {
             jwks_url,
@@ -77,7 +112,9 @@ impl JwksVerifier {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             ttl,
+            max_stale: DEFAULT_JWKS_MAX_STALE,
             cache: RwLock::new(Cache::default()),
+            issuers: Vec::new(),
         }
     }
 
@@ -108,6 +145,21 @@ impl JwksVerifier {
         // (jsonwebtoken's default `required_spec_claims` includes "exp"),
         // which is new relative to the HS256 path — see ADR-0010 addendum.
         validation.validate_aud = false;
+        // Audit finding 4. `nbf` was unchecked, so a token minted for a future
+        // window was already usable. `iss` was unchecked too — any issuer whose
+        // key happened to resolve passed. `validate_aud` deliberately stays
+        // false: Supabase tokens carry `aud:"authenticated"` and the library
+        // default would reject all of them.
+        validation.validate_nbf = true;
+        if !self.issuers.is_empty() {
+            validation.set_issuer(&self.issuers);
+            // `set_issuer` alone only compares `iss` WHEN PRESENT (jsonwebtoken
+            // 10.x does not add it to `required_spec_claims`), so a token that
+            // simply omitted `iss` bypassed the allowlist. Caught by
+            // `jwks_wrong_iss_rejected_when_allowlist_set`. An allowlist means
+            // "must be one of these", which includes "must be there".
+            validation.required_spec_claims.insert("iss".to_string());
+        }
         let data = decode::<SupabaseClaims>(token, &key.decoding_key, &validation).ok()?;
         let sub = data.claims.sub;
         if sub.is_empty() {
@@ -185,6 +237,23 @@ impl JwksVerifier {
                 cache.last_fetch_failed = true;
                 warn!(%err, "jwks: fetch failed, failing closed");
             }
+        }
+        // Bounded staleness (audit finding 6). If the last SUCCESSFUL fetch is
+        // older than `max_stale`, refuse to serve from this cache at all: past
+        // that point we cannot claim the key is still current, and serving it
+        // is a fail-open on revocation. A cache that never fetched
+        // successfully (`fetched_at == None`) has nothing to vouch for its
+        // keys either, so it is refused on the same rule.
+        let fresh_enough = cache
+            .fetched_at
+            .is_some_and(|t| t.elapsed() <= self.max_stale);
+        if !fresh_enough {
+            warn!(
+                kid,
+                max_stale_secs = self.max_stale.as_secs(),
+                "jwks: cache past its staleness ceiling, failing closed"
+            );
+            return None;
         }
         cache.keys.get(kid).cloned()
     }
@@ -512,6 +581,119 @@ mod tests {
         assert_eq!(fixture.hit_count(), 1);
     }
 
+    // ---- audit finding 4: nbf + iss allowlist on the JWKS path ----
+    //
+    // The fix landed in 10ebc93 with no tests; these pin the behaviour.
+    // `jsonwebtoken`'s default leeway is 60s, the same as
+    // `crate::auth::JWT_LEEWAY_SECS`, so the HS256 tests in `auth.rs` and
+    // these draw the boundary at the same place.
+
+    fn claims_with(extra: &serde_json::Value) -> serde_json::Value {
+        let now = jsonwebtoken::get_current_timestamp();
+        let mut claims = serde_json::json!({ "sub": "user-1", "exp": now + 3600, "iat": now });
+        if let (Some(base), Some(add)) = (claims.as_object_mut(), extra.as_object()) {
+            base.extend(add.clone());
+        }
+        claims
+    }
+
+    #[tokio::test]
+    async fn jwks_future_nbf_rejected() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let nbf = jsonwebtoken::get_current_timestamp() + 3600;
+        let token = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "nbf": nbf })),
+        );
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert!(
+            verifier.verify(&token, &header).await.is_none(),
+            "an RS256 token not yet valid (nbf an hour ahead) must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_nbf_within_leeway_accepted() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let nbf = jsonwebtoken::get_current_timestamp() + 30;
+        let token = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "nbf": nbf })),
+        );
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert!(
+            verifier.verify(&token, &header).await.is_some(),
+            "an nbf inside the 60s clock-skew leeway must not be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_wrong_iss_rejected_when_allowlist_set() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10))
+            .with_issuers(vec!["https://good.example/auth/v1".to_string()]);
+        let wrong = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "iss": "https://evil.example/auth/v1" })),
+        );
+        let header = jsonwebtoken::decode_header(&wrong).unwrap();
+        assert!(
+            verifier.verify(&wrong, &header).await.is_none(),
+            "an iss outside the allowlist must be rejected even with a valid signature"
+        );
+        let missing = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({})),
+        );
+        let header = jsonwebtoken::decode_header(&missing).unwrap();
+        assert!(
+            verifier.verify(&missing, &header).await.is_none(),
+            "with an allowlist set, a token with no iss is rejected too"
+        );
+        let right = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "iss": "https://good.example/auth/v1" })),
+        );
+        let header = jsonwebtoken::decode_header(&right).unwrap();
+        assert!(
+            verifier.verify(&right, &header).await.is_some(),
+            "an allowlisted iss still verifies"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_any_iss_accepted_when_allowlist_unset() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let verifier = JwksVerifier::new(fixture.url(), Duration::from_mins(10));
+        let token = mint_token_with_claims(
+            &enc,
+            Algorithm::RS256,
+            "k1",
+            &claims_with(&serde_json::json!({ "iss": "https://anyone.example/auth/v1" })),
+        );
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert!(
+            verifier.verify(&token, &header).await.is_some(),
+            "no allowlist configured = iss unchecked (upgrade-safe default)"
+        );
+    }
+
     // ---- D1: extra-claims lifting applies on the JWKS path too (ADR-0031) ----
     //
     // `JwksVerifier::verify` reuses `crate::auth::lift_extra_claims` rather
@@ -751,5 +933,49 @@ mod tests {
         let mut header = jsonwebtoken::decode_header(&token).unwrap();
         header.alg = Algorithm::ES256; // attacker-style header tamper
         assert!(verifier.verify(&token, &header).await.is_none());
+    }
+}
+
+/// Audit finding 6: a JWKS cache must not serve indefinitely once its issuer
+/// stops answering.
+///
+/// The old behaviour failed CLOSED for an unknown `kid` but OPEN for a rotated
+/// one: a failed fetch only warned and left `cache.keys` intact, so a key the
+/// IdP had revoked kept verifying for the whole outage.
+#[cfg(test)]
+mod jwks_staleness_tests {
+    use super::test_support::{mint_token, rsa_key_and_jwk, FixtureJwks};
+    use super::{Duration, JwkSet, JwksVerifier};
+
+    #[tokio::test]
+    async fn a_cache_past_its_staleness_ceiling_stops_serving_during_an_outage() {
+        let (enc, jwk) = rsa_key_and_jwk("k1");
+        let fixture = FixtureJwks::start(JwkSet { keys: vec![jwk] }).await;
+        let token = mint_token(&enc, jsonwebtoken::Algorithm::RS256, "k1", "u1");
+        let header = jsonwebtoken::decode_header(&token).expect("header");
+
+        // Warm cache, generous ceiling: verifies while the IdP is healthy.
+        let healthy = JwksVerifier::new(fixture.url(), Duration::from_mins(5))
+            .with_max_stale(Duration::from_hours(1));
+        assert!(
+            healthy.verify(&token, &header).await.is_some(),
+            "a live JWKS verifies normally"
+        );
+        // Still served from cache while the IdP is down but inside the ceiling
+        // — an outage must not cause an instant auth outage.
+        fixture.set_failing(true);
+        assert!(
+            healthy.verify(&token, &header).await.is_some(),
+            "inside the staleness ceiling a cached key still serves"
+        );
+
+        // Same outage, but this cache is past its ceiling. Serving here is the
+        // revoked-key fail-open: we can no longer claim the key is current.
+        let stale =
+            JwksVerifier::new(fixture.url(), Duration::from_mins(5)).with_max_stale(Duration::ZERO);
+        assert!(
+            stale.verify(&token, &header).await.is_none(),
+            "past the staleness ceiling the cache must fail closed, not serve"
+        );
     }
 }

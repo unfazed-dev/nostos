@@ -57,6 +57,12 @@ use tracing::{info, warn};
     version,
     about = "Nostos local-first sync server"
 )]
+// `clippy::struct_excessive_bools` fires at 4+. The lint's real target is a
+// domain struct whose bool soup should have been an enum or a state machine —
+// but this is a clap argument struct, where one `bool` per flag IS the shape,
+// and the alternative (`#[command(flatten)]` sub-structs) would split the
+// operator-facing `--help` output to satisfy a lint about internal modelling.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Bind address.
     #[arg(long, env = "NOSTOS_BIND", default_value = "0.0.0.0:8800")]
@@ -121,6 +127,80 @@ pub struct Config {
     /// `cargo run` keeps working.
     #[arg(long, env = "NOSTOS_REPLICATOR", default_value = "fake")]
     replicator: String,
+
+    /// Row ceiling for a single subscribe-time snapshot.
+    ///
+    /// A table with more rows than this is REFUSED, not truncated: a silently
+    /// short first sync is indistinguishable from a complete one at the
+    /// client, which is the failure shape the stream-snapshot scope bypass
+    /// had (audit finding 7). Raise this if a legitimate table is bigger.
+    /// Comma-separated allowlist of accepted JWT `iss` values.
+    ///
+    /// Empty (the default) leaves `iss` unchecked, so a token from ANY issuer
+    /// whose `kid` resolves against the configured JWKS is accepted (audit
+    /// finding 4). Set this to your project's issuer URL to close that.
+    /// Applies to the JWKS path only — the legacy HS256 path lifts no `iss`.
+    #[arg(long, env = "NOSTOS_JWT_ISSUERS", default_value = "")]
+    jwt_issuers: String,
+
+    /// Seconds a JWKS cache may keep serving after its last SUCCESSFUL fetch.
+    ///
+    /// Past this the cache fails closed rather than serving keys it can no
+    /// longer vouch for — a key the IdP revoked would otherwise keep verifying
+    /// for the whole outage (audit finding 6).
+    #[arg(long, env = "NOSTOS_JWKS_MAX_STALE_SECS", default_value_t = 1800)]
+    jwks_max_stale_secs: u64,
+
+    /// Accept legacy HS256 tokens that carry no `exp` claim.
+    ///
+    /// Such a token never expires and survives revocation, so it is refused by
+    /// default (audit finding 5). Set this only while migrating a token issuer
+    /// that cannot yet stamp `exp`.
+    #[arg(
+        long,
+        env = "NOSTOS_ALLOW_JWT_WITHOUT_EXP",
+        default_value_t = false,
+        value_parser = parse_env_bool
+    )]
+    allow_jwt_without_exp: bool,
+
+    /// Require authentication on `GET /schema` and `GET /rules` (audit
+    /// finding 7).
+    ///
+    /// Off by default because turning it on is a breaking change for clients
+    /// that fetch `/schema` without a token — `nostos pull`, and any Flutter app
+    /// built against an SDK older than this change.
+    ///
+    /// Parsed by [`parse_env_bool`] rather than read ad hoc, so a typo
+    /// (`=yes please`, `=True `) refuses to boot instead of silently leaving
+    /// the routes open while the log claims the variable is unset.
+    #[arg(
+        long,
+        env = "NOSTOS_PROTECT_METADATA",
+        default_value_t = false,
+        value_parser = parse_env_bool
+    )]
+    protect_metadata: bool,
+
+    /// Ceiling on live sync sessions held by a SINGLE account.
+    ///
+    /// The licensed `device_cap` is global, so without this one account can
+    /// open every slot and lock all other tenants out of the deployment
+    /// (audit finding 2). One subscribe is one session and a socket may hold
+    /// 32 tables, so keep this well above 32.
+    #[arg(
+        long,
+        env = "NOSTOS_PER_PRINCIPAL_SESSION_CAP",
+        default_value_t = nostos_application::session::DEFAULT_PER_PRINCIPAL_SESSION_CAP
+    )]
+    per_principal_session_cap: u64,
+
+    #[arg(
+        long,
+        env = "NOSTOS_SNAPSHOT_MAX_ROWS",
+        default_value_t = nostos_application::ports::DEFAULT_SNAPSHOT_MAX_ROWS
+    )]
+    snapshot_max_rows: usize,
 
     /// Fake-replicator emission rate, events/second. `0` = unbounded.
     ///
@@ -333,14 +413,36 @@ pub struct Config {
     #[arg(long, env = "NOSTOS_CORS_ORIGINS", default_value = "")]
     cors_origins: String,
 
+    /// Browser origins allowed to open the `/sync` WebSocket, comma-separated.
+    /// Empty (default) = **no check**, which is what every existing deployment
+    /// gets on upgrade.
+    ///
+    /// Separate from `NOSTOS_CORS_ORIGINS` on purpose: CORS governs the REST
+    /// surface and is enforced by the browser, whereas a WebSocket upgrade is
+    /// not subject to CORS at all — the server has to check `Origin` itself or
+    /// not at all. Deployments usually want the same list in both, but they are
+    /// different mechanisms and collapsing them would hide that.
+    #[arg(long, env = "NOSTOS_WS_ORIGINS", default_value = "")]
+    ws_origins: String,
+
     /// WAL-bloat protection: the maximum LSN-gap (in WAL bytes) a live client
     /// may lag behind the head of the stream before it is evicted. A client
     /// exceeding this is disconnected; it reconnects + re-syncs from a fresh
     /// checkpoint — trading a controlled replay window for source-DB safety.
-    /// `0` (default) = eviction OFF (no client is ever dropped for lag). A
-    /// production deploy MUST set this AND `--pg-slot-wal-keep-size` to protect
-    /// the primary's disk (ADR-0016).
-    #[arg(long, env = "NOSTOS_SLOT_MAX_LAG", default_value_t = 0)]
+    /// Default `1073741824` (1 GiB). `0` = eviction OFF (no client is ever
+    /// dropped for lag; the server logs a startup warning). Eviction only
+    /// covers a *running* server with a slow client — an abandoned slot (server
+    /// gone) is bounded only by `--pg-slot-wal-keep-size` (ADR-0043).
+    ///
+    /// Default changed from `0` (OFF) by the v0.2.0 audit (finding 1): with
+    /// eviction off, one client that connects, acks nothing and stays
+    /// connected pins the replication slot and grows WAL without bound — a
+    /// disk-exhaustion attack on the source primary that needs no
+    /// credentials beyond a valid sync session. 1 GiB is deliberately
+    /// generous: eviction costs a reconnect and resync, not data loss, and a
+    /// real client on a bad connection has to fall a gigabyte of WAL behind
+    /// before it trips. Set `0` to restore the old unbounded behaviour.
+    #[arg(long, env = "NOSTOS_SLOT_MAX_LAG", default_value_t = 1_073_741_824)]
     slot_max_lag: u64,
 
     /// Postgres `max_slot_wal_keep_size` for the replication slot (MB). Caps how
@@ -409,11 +511,14 @@ async fn main() -> anyhow::Result<()> {
         licensed = !cfg.license.is_empty(),
         "entitlement resolved"
     );
-    let manager = Arc::new(SessionManager::with_device_cap(
-        Arc::clone(&store),
-        entitlement.tier,
-        entitlement.device_cap,
-    ));
+    let manager = Arc::new(
+        SessionManager::with_device_cap(
+            Arc::clone(&store),
+            entitlement.tier,
+            entitlement.device_cap,
+        )
+        .with_per_principal_cap(cfg.per_principal_session_cap),
+    );
 
     // ---- /sync authentication (ADR-0010) ----
     // The OSS self-host default is `none` (anonymous — single-tenant dev). A
@@ -452,7 +557,19 @@ async fn main() -> anyhow::Result<()> {
                 jwks = jwks_url.is_some(),
                 "sync auth: supabase-jwt (tenant-enforced)"
             );
-            Arc::new(nostos_infra::SupabaseJwtAuth::from_config(secret, jwks_url))
+            Arc::new(
+                nostos_infra::SupabaseJwtAuth::from_config(secret, jwks_url)
+                    .with_allow_missing_exp(cfg.allow_jwt_without_exp)
+                    .with_issuers(
+                        cfg.jwt_issuers
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(ToString::to_string)
+                            .collect(),
+                    )
+                    .with_jwks_max_stale(std::time::Duration::from_secs(cfg.jwks_max_stale_secs)),
+            )
         }
         "bearer" => {
             if cfg.sync_bearer_token.is_empty() {
@@ -501,13 +618,19 @@ async fn main() -> anyhow::Result<()> {
     // /metrics endpoint (reader). The session gauge is updated on connect/
     // disconnect by the manager — for now we snapshot the store count on read.
     let metrics = Arc::new(nostos_application::ports::Metrics::new());
-    // WAL-bloat protection: OFF by default (slot_max_lag=0); a deploy that sets
-    // NOSTOS_SLOT_MAX_LAG opts into evicting clients that lag past it (ADR-0016).
-    let eviction = if cfg.slot_max_lag > 0 {
-        nostos_application::EvictionPolicy::new(cfg.slot_max_lag)
-    } else {
-        nostos_application::EvictionPolicy::disabled()
-    };
+    // WAL-bloat protection: ON by default at 1 GiB since the v0.2.0 audit
+    // (finding 1, ADR-0043). `NOSTOS_SLOT_MAX_LAG=0` opts back OUT, which
+    // restores the old behaviour where a client that acks nothing pins the
+    // slot forever (ADR-0016) — loud, never silent.
+    let eviction = eviction_policy(cfg.slot_max_lag);
+    if eviction.max_lag.is_none() {
+        warn!(
+            "NOSTOS_SLOT_MAX_LAG=0: WAL-bloat eviction is OFF — a client that never acks pins the \
+             replication slot and grows WAL on the primary without bound (disk exhaustion). \
+             Set NOSTOS_SLOT_MAX_LAG (default 1073741824 = 1 GiB) and Postgres \
+             max_slot_wal_keep_size / NOSTOS_PG_SLOT_WAL_KEEP_SIZE (ADR-0043)."
+        );
+    }
     // Op-log writer (ADR-0025 slice 2): persisted op-log for in-window
     // reconnect replay. Only under `NOSTOS_REPLICATOR=pg` — the fake replicator
     // has no source database to durably write to (the bench drives a
@@ -836,9 +959,34 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ---- build the axum router + transport ----
+    PROTECT_METADATA.store(cfg.protect_metadata, std::sync::atomic::Ordering::Relaxed);
+    if cfg.protect_metadata {
+        if cfg.sync_auth == "none" {
+            // Say it plainly rather than let the operator believe the knob did
+            // something: `AllowAnonymous` accepts the empty token, so the
+            // /schema gate admits everyone. /rules is still genuinely gated —
+            // it checks the admin token, which has nothing to do with sync auth.
+            warn!(
+                "NOSTOS_PROTECT_METADATA is set but NOSTOS_SYNC_AUTH=none — \
+                 GET /schema stays effectively open (anonymous auth accepts any \
+                 caller); only GET /rules is actually protected"
+            );
+        } else {
+            info!("metadata protection: GET /schema requires sync auth, GET /rules requires NOSTOS_ADMIN_TOKEN");
+        }
+    } else {
+        info!("metadata protection: off (NOSTOS_PROTECT_METADATA unset) — GET /schema and GET /rules are unauthenticated");
+    }
+    let ws_origins = parse_origin_list(&cfg.ws_origins);
+    if ws_origins.is_empty() {
+        info!("ws origin check: NOSTOS_WS_ORIGINS unset — /sync accepts any origin");
+    } else {
+        info!(origins = ?ws_origins, "ws origin check: /sync restricted to these browser origins");
+    }
     let mut state_builder = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
         .with_buffer(cfg.session_buffer)
         .with_resync_signal(cfg.resync_signal)
+        .with_allowed_origins(ws_origins)
         .with_metrics(Arc::clone(&metrics));
     if let Some(col) = tenant_col {
         state_builder = state_builder.with_tenant_column(col);
@@ -971,10 +1119,14 @@ async fn main() -> anyhow::Result<()> {
     if cfg.replicator == "pg" {
         // pg_url is already known non-empty here — the write-back block above
         // bailed on an empty NOSTOS_PG_URL under the same `replicator == "pg"`.
-        let snapshotter: Arc<dyn nostos_application::ports::SnapshotSource> =
-            Arc::new(nostos_infra::PgSnapshotter::new(&cfg.pg_url));
+        let snapshotter: Arc<dyn nostos_application::ports::SnapshotSource> = Arc::new(
+            nostos_infra::PgSnapshotter::new(&cfg.pg_url).with_max_rows(cfg.snapshot_max_rows),
+        );
         state_builder = state_builder.with_snapshotter(snapshotter);
-        info!("snapshot-on-subscribe: PgSnapshotter (real source)");
+        info!(
+            max_rows = cfg.snapshot_max_rows,
+            "snapshot-on-subscribe: PgSnapshotter (real source)"
+        );
     }
 
     // B2 mirror (ADR-0042): the handle's in-memory buffer IS the snapshot
@@ -1643,6 +1795,16 @@ fn push_wiring(
 /// even though the route itself is reachable and correctly gated. `DELETE`
 /// for the same reason: the SDKs deregister push tokens on sign-out
 /// (ADR-0037 `DELETE /push-tokens/{token}`) from browser clients.
+/// Split a comma-separated origin list, dropping blanks and trimming space.
+/// Empty input ⇒ empty vec ⇒ the caller's check stays off.
+fn parse_origin_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::CorsLayer> {
     if cors_origins.is_empty() {
         return Ok(tower_http::cors::CorsLayer::permissive());
@@ -1773,7 +1935,15 @@ async fn healthz(State(state): State<SyncRouterState>) -> (StatusCode, Json<serd
 /// / no-`pg` path) and 503 on a transient backend error.
 async fn schema(
     State(state): State<SyncRouterState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<SchemaDescriptor>, StatusCode> {
+    // `/schema` is a CLIENT endpoint (auto-schema), so it gates on SYNC auth,
+    // not the admin token — a real client already holds a bearer token, an
+    // operator does not necessarily. Off unless NOSTOS_PROTECT_METADATA is set,
+    // because gating it breaks `nostos pull` and any Flutter app on an older SDK.
+    if metadata_protected() && !sync_authenticated(&state, &headers).await {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let src = state.schema_source.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     src.fetch().await.map(Json).map_err(|e| {
         warn!(error = %e, "schema fetch failed");
@@ -1793,9 +1963,55 @@ async fn schema(
 /// Never echoes claim *values* — `scope_text` only ever renders column
 /// names, operators, and `claims.<name>` references. No principal data, no
 /// row counts.
-async fn rules_handler(State(state): State<SyncRouterState>) -> Json<serde_json::Value> {
+async fn rules_handler(
+    State(state): State<SyncRouterState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // `/rules` is an OPERATOR endpoint — its only production reader is the web
+    // admin panel, which already holds the admin token for the PUT on the same
+    // path. So it gates on the admin token, not sync auth: the ruleset is the
+    // tenant model, and no application user should be able to read it back.
+    if metadata_protected() {
+        let Some(token) = admin_auth::admin_token_from_env() else {
+            // Same fail-closed shape as PUT: no admin token configured means
+            // there is no way to authorise a read, so the route is not there.
+            return Err(StatusCode::NOT_FOUND);
+        };
+        if !admin_auth::AdminAuth::check(&headers, &token).await {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
     let ruleset = state.rules.read().await;
-    Json(rules_body(&ruleset, &state.metrics))
+    Ok(Json(rules_body(&ruleset, &state.metrics)))
+}
+
+/// Boot-time resolution of `--protect-metadata` / `NOSTOS_PROTECT_METADATA`,
+/// published for the two handlers that gate on it.
+///
+/// A `static` rather than a `SyncRouterState` field because this is
+/// server-level policy, and rather than a per-request `env::var` because that
+/// re-read would silently treat a typo as "off". Clap validates the value once
+/// at startup; this only carries the answer.
+static PROTECT_METADATA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn metadata_protected() -> bool {
+    PROTECT_METADATA.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Does this request carry a token the *sync* auth adapter accepts?
+///
+/// Honest limitation: on an `AllowAnonymous` deployment this returns `true` for
+/// everyone, because that adapter accepts the empty token by design. The gate
+/// is therefore only meaningful where sync auth is actually configured — which
+/// is the same population that has tenant separation to protect. Boot logs say
+/// so plainly rather than implying protection that isn't there.
+async fn sync_authenticated(state: &SyncRouterState, headers: &axum::http::HeaderMap) -> bool {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    state.auth.authenticate(token).await.is_some()
 }
 
 /// Shared response shape for `GET /rules` and a successful `PUT /rules`
@@ -1874,7 +2090,7 @@ async fn put_rules_handler(
     };
 
     // 2. Bearer token mismatch -> 401. Constant-time compare, no logging.
-    if !admin_auth::AdminAuth::check(&headers, &admin_token) {
+    if !admin_auth::AdminAuth::check(&headers, &admin_token).await {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthorized" })),
@@ -2595,7 +2811,11 @@ mod rules_handler_tests {
         let checksum = ruleset.checksum();
         let state = state_with(ruleset);
 
-        let Json(body) = rules_handler(State(state)).await;
+        // Unauthenticated read: the gate is off by default, which is the
+        // shape every existing deployment gets.
+        let Json(body) = rules_handler(State(state), axum::http::HeaderMap::new())
+            .await
+            .expect("rules read is open while NOSTOS_PROTECT_METADATA is unset");
 
         assert_eq!(body["sync_mode"], "toggles");
         assert_eq!(body["checksum"], format!("0x{checksum:x}"));
@@ -2615,7 +2835,11 @@ mod rules_handler_tests {
     async fn rules_handler_under_all_mode_lists_no_tables() {
         let state = state_with(ActiveRuleset::all_mode());
 
-        let Json(body) = rules_handler(State(state)).await;
+        // Unauthenticated read: the gate is off by default, which is the
+        // shape every existing deployment gets.
+        let Json(body) = rules_handler(State(state), axum::http::HeaderMap::new())
+            .await
+            .expect("rules read is open while NOSTOS_PROTECT_METADATA is unset");
 
         assert_eq!(body["sync_mode"], "all");
         assert_eq!(body["tables"], serde_json::json!([]));
@@ -2824,6 +3048,49 @@ mod put_rules_handler_tests {
 }
 
 /// The ADR-0038 §3 wiring precedence (plan task 2.3) — see [`push_wiring`].
+/// Map the `--slot-max-lag` knob onto an [`nostos_application::EvictionPolicy`].
+/// `0` is the documented "unbounded" escape hatch; anything else is a byte
+/// threshold. Pure so the default/opt-out contract is unit-testable without
+/// booting the server (ADR-0043).
+fn eviction_policy(slot_max_lag: u64) -> nostos_application::EvictionPolicy {
+    if slot_max_lag > 0 {
+        nostos_application::EvictionPolicy::new(slot_max_lag)
+    } else {
+        nostos_application::EvictionPolicy::disabled()
+    }
+}
+
+/// ADR-0043: the `NOSTOS_SLOT_MAX_LAG` default is a security decision (v0.2.0
+/// audit finding 1) — pin it so a refactor can't silently flip it back to
+/// unbounded, and pin that `0` still means "eviction OFF".
+#[cfg(test)]
+mod slot_max_lag_tests {
+    use super::{eviction_policy, Config};
+    use clap::Parser;
+
+    const ONE_GIB: u64 = 1_073_741_824;
+
+    #[test]
+    fn default_is_one_gib() {
+        let cfg = Config::parse_from(["nostos-server"]);
+        assert_eq!(cfg.slot_max_lag, ONE_GIB);
+        assert_eq!(eviction_policy(cfg.slot_max_lag).max_lag, Some(ONE_GIB));
+    }
+
+    #[test]
+    fn zero_means_unbounded() {
+        let cfg = Config::parse_from(["nostos-server", "--slot-max-lag", "0"]);
+        assert_eq!(cfg.slot_max_lag, 0);
+        assert_eq!(eviction_policy(cfg.slot_max_lag).max_lag, None);
+    }
+
+    #[test]
+    fn explicit_threshold_is_honoured() {
+        let cfg = Config::parse_from(["nostos-server", "--slot-max-lag", "4096"]);
+        assert_eq!(eviction_policy(cfg.slot_max_lag).max_lag, Some(4096));
+    }
+}
+
 #[cfg(test)]
 mod push_wiring_tests {
     use super::{push_wiring, PushWiring};
@@ -3085,7 +3352,7 @@ mod push_e2e_tests {
 
     #[async_trait]
     impl EventSink for DroppingSink {
-        async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+        async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
             DeliveryDecision::Dropped
         }
     }
@@ -3226,7 +3493,7 @@ mod push_e2e_tests {
         struct OkSink;
         #[async_trait]
         impl EventSink for OkSink {
-            async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+            async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
                 DeliveryDecision::Delivered
             }
         }

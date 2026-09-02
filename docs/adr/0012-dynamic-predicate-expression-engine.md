@@ -241,3 +241,71 @@ eval loop binding (not before).
   - Slice 2: re-consulted after discovering the JSON payload already exists;
     ship typed comparison + the JSON extractor now to finish the moat (FFI
     breadth deferred — it gates on unstarted OPFS).
+
+## Addendum: three-valued logic adopted (2026-09-02)
+
+The original decision deferred three-valued logic and rejected it as
+"speculative until a real schema demonstrates the `Not(Eq{absent})` edge bites."
+The v0.2.0 security audit is that demonstration, and the trigger this ADR named
+has fired. 3VL is now **adopted**; this addendum is the "recorded here, not
+silently changed" that the deferral required.
+
+### What actually forced it
+
+Not the over-delivery on its own — the fact that the two evaluation paths had
+already diverged, which the original decision did not anticipate:
+
+- **SQL** (`snapshot_source.rs:523`) compiles `Not` to `NOT (<inner>)`. Postgres
+  is three-valued natively, so a NULL column sends the comparison to NULL and
+  `NOT NULL` is NULL — the row is **excluded** from the snapshot.
+- **In-memory** (`predicate.rs`) was two-valued: an absent column made the leaf
+  `false`, so `Not` inverted it to `true` and the row **was delivered** by live
+  fan-out.
+
+So one subscription returned two different row sets depending on which path
+served it. That is the same path-vs-path shape as the op-log replay bug (audit
+finding 6) and PowerSync's CVE-2026-30870: rules applied on one path and not
+another. A deferral is defensible; a silent disagreement between two paths is
+not.
+
+### Decision
+
+The in-memory evaluator becomes three-valued and converges on Postgres:
+
+- Leaves return **unknown** when the column is absent, and when the filter value
+  is an unbound `Param` that survived to match time.
+- `And`/`Or` follow Kleene: a dominating `false`/`true` still short-circuits, so
+  the fan-out hot path keeps its early exit; otherwise any unknown makes the
+  result unknown.
+- `Not(unknown) = unknown` — this is the whole fix. Unknown cannot be inverted
+  into a match.
+- The top level treats unknown as **no match**, which is what SQL's `WHERE`
+  does with NULL.
+
+Postgres is left alone. It was already correct, and "fix both paths together"
+would have changed a correct one and manufactured a fresh divergence.
+
+### Blast radius
+
+Only one outcome changes: `Not` over an unknown leaf flips from match to
+no-match. Every other combination lands where it did before — `And`/`Or` over an
+unknown already resolved to no-delivery at the top level, because two-valued
+`false` and three-valued unknown collapse the same way there.
+
+`matches_filter_ne`'s hand-rolled `Param` guard was this same bug patched at a
+single leaf: it existed because `!matches_value(param, actual)` inverts a
+non-match into a match. 3VL subsumes the reasoning — the guard stays, but it now
+returns unknown rather than `false`, and the anti-inversion special case is no
+longer special.
+
+`not_of_missing_eq_returns_true_pinned_edge` pinned the old behaviour
+deliberately. It is **rewritten**, not deleted, so the pin still documents the
+edge — it now asserts no-delivery and names the SQL path it converges with.
+
+### Cost
+
+Strictly narrower delivery. A subscription written as `NOT status = 'archived'`
+that relied on absent-column rows arriving must use `Ne` (`status != 'archived'`
+is unknown on absence too) or an explicit null test. The original ADR already
+steered users to `Ne` for "safe inequality"; this makes the engine agree with
+that advice instead of contradicting it.

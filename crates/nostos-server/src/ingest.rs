@@ -159,7 +159,7 @@ pub async fn post_ingest(
             Json(serde_json::json!({ "error": "not found" })),
         ));
     };
-    if !crate::admin_auth::AdminAuth::check(&headers, &admin_token) {
+    if !crate::admin_auth::AdminAuth::check(&headers, &admin_token).await {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthorized" })),

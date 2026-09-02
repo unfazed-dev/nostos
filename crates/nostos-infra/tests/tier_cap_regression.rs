@@ -29,7 +29,7 @@ use nostos_infra::store::InMemorySessionStore;
 struct NoopSink;
 #[async_trait]
 impl EventSink for NoopSink {
-    async fn deliver(&self, _event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
         DeliveryDecision::Delivered
     }
 }

@@ -43,7 +43,7 @@ impl CountingSink {
 
 #[async_trait]
 impl EventSink for CountingSink {
-    async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision {
         self.delivered
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.last_lsn
@@ -54,12 +54,12 @@ impl EventSink for CountingSink {
 
 /// A sink with a tiny bounded channel — fills fast so `deliver` returns Dropped.
 struct FullableSink {
-    tx: tokio::sync::mpsc::Sender<ReplicationEvent>,
+    tx: tokio::sync::mpsc::Sender<Arc<ReplicationEvent>>,
 }
 
 #[async_trait]
 impl EventSink for FullableSink {
-    async fn deliver(&self, event: ReplicationEvent) -> DeliveryDecision {
+    async fn deliver(&self, event: Arc<ReplicationEvent>) -> DeliveryDecision {
         match self.tx.try_send(event) {
             Ok(()) => DeliveryDecision::Delivered,
             Err(
@@ -201,7 +201,7 @@ fn event_with_org(lsn: u64, org: &str) -> ReplicationEvent {
 async fn full_sink_drops_and_outcome_is_honest() {
     let (svc, store) = real_pipeline();
     // Depth-1 channel; we never drain it, so the 2nd send onward must drop.
-    let (tx, _rx) = tokio::sync::mpsc::channel::<ReplicationEvent>(1);
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Arc<ReplicationEvent>>(1);
     let sink = Arc::new(FullableSink { tx }) as Arc<dyn EventSink>;
     register(&store, Predicate::all("tasks"), sink).await;
 

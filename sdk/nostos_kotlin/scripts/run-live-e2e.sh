@@ -28,8 +28,8 @@
 
 set -euo pipefail
 
-ROOT="/Volumes/developer_ssd/Developer/nostos/sdk/nostos_kotlin"
-REPO_ROOT="/Volumes/developer_ssd/Developer/nostos"
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+ROOT="$REPO_ROOT/sdk/nostos_kotlin"
 cd "$ROOT"
 
 AVD="${NOSTOS_AVD:-nostos_api34}"

@@ -1,0 +1,265 @@
+# 100k fan-out cliff — root-cause diagnosis plan
+
+Finding under test (benches/results/RESULTS.md § "Re-run with progress-based
+quorum", raw: benches/results/raw/2026-09-02-ladder-rerun/linux-{50k,100k}.log):
+
+| tier | events fanned in window | s/event | ops/s | dropped | peak RSS |
+|---|---|---|---|---|---|
+| 50k × 5000, 1 listener, 600 s | ~4,971 | 0.12 | 414,312 | 0 | 2,044 MiB |
+| 100k × 5000, 2 listeners, 1200 s | ~982 | 1.22 | 81,901 | 0 | 3,887 MiB |
+
+Doubling clients made each event **10× slower** (5× slower per delivery) with
+nothing shed. Container: rust:1.95-bookworm on Docker Desktop linuxkit
+7.0.12, 10 vCPU, 8,124,512 kB RAM, 1 GiB swap, tcp_rmem `4096 131072
+33554432`, tcp_wmem `4096 16384 4194304`.
+
+## Phase 1 — what the code says (no bench)
+
+Read: crates/nostos-application/src/fanout.rs, crates/nostos-infra/src/{router,
+transport,store}.rs, crates/nostos-bench/src/bin/probe_10k.rs.
+
+Per-event work in `FanOutService::fan_out` is strictly **O(N)**:
+
+1. `store.candidates_for(table)` — takes one tokio Mutex, clones N
+   `SessionCandidate { predicate: Predicate{String, PredicateExpr},
+   principal: Option<Principal>, sink: Arc }` → ~2 mallocs per candidate,
+   200k mallocs + frees per event at 100k.
+2. N × `sink.deliver()` → `try_send` on a bounded(1024) tokio mpsc per
+   session. Never `Full` in either run (router `dropped=0`), so the loop never
+   stalls on backpressure; it never awaits a writer.
+3. `ack_progress_every=1` (probe arg 4 = 1 in both runs) → `min_acked_lsn()`
+   and `slowest_session()` each scan N atomics under the same Mutex —
+   **once per event, not per ack** (fanout.rs:495, :507). The probe clients
+   never send acks at all (`client_task` only reads), so there is no per-ack
+   path. O(N²) is ruled out.
+4. `FakeReplicator::next_event` with `events_per_sec = 0` neither sleeps nor
+   yields.
+
+Linear model from the 50k figure predicts **0.24 s/event at 100k; observed
+1.22 s**. A 5× residual that the fan-out loop's own instructions cannot
+produce ⇒ the loop is being *starved or stalled* by something that scales
+worse than N. Candidates, ranked:
+
+- **(a) VM memory pressure** — RSS is linear (~40 KB per client pair) but the
+  VM is fixed: idle VM shows 6.0 of 8.1 GiB available (≈2.1 GiB used by
+  Docker Desktop + others). 100k: 3.9 GiB RSS + 2.1 = 6.0 GiB before any
+  kernel socket memory (200k in-VM sockets, rmem autotunes to 32 MiB/socket)
+  and slab ⇒ ≈2 GiB headroom, swap present. 50k: 2.0 + 2.1 = 4.1 GiB ⇒ ≈4 GiB
+  headroom. Two sub-mechanisms, same fix: (a1) kernel TCP memory pressure
+  (`tcp_mem` is host-global and not visible in the container; its pressure
+  line on an 8 GiB kernel is typically ~0.5 GiB of socket pages) — under
+  pressure every send is throttled and receive queues are pruned/collapsed;
+  (a2) page reclaim / swap of the 3.9 GiB process. Per-session channel
+  buffer: `with_buffer(1024)` × 100k is only *capacity*; frames are only
+  resident when queued, and the router never reported Full, so the mpsc
+  capacity does **not** explain the RSS — the RSS is sockets + tasks + WS
+  buffers on both sides.
+- **(e) scheduler / CPU saturation** — 200k+ tokio tasks on 10 vCPU; if the
+  kernel side (loopback softirq, epoll wakeups, memory pressure work) eats
+  the CPUs, the single fan-out task gets a shrinking share. Distinguishable
+  from (a) by user-vs-sys CPU split with pressure counters flat.
+- **(b) 2-listener split** — both listeners share one `SyncRouterState`; no
+  cross-listener serialisation found in code. Low prior; kept as the
+  fallback run (100k with 1 listener is impossible — 4-tuple cap ~64k — so
+  the discriminating run would be 50k with 2 listeners).
+- **(c) sequential loop + writer backpressure** — ruled out by `dropped=0`
+  and the loop never awaiting a writer.
+- **(d) frame encode / clone** — linear; cannot make a 5× residual.
+
+## Phase 2 — smallest discriminating run
+
+`benches/scripts/fanout-100k-diag.sh` (own container `nostos-linux-fanout-100k`,
+own volumes `nostos-linux-target-fanout` / `nostos-linux-cargo-registry-fanout`,
+honours `/tmp/nostos-bench.lock`). One container, two tiers, both with:
+
+- probe `[diag] progress` line every 10 s (additive to probe_10k.rs):
+  delivered, matched, events≈, live `VmRSS`, `VmSwap` — shows whether the
+  rate is uniform from t=0 (structural) or collapses (pressure), and whether
+  the process is being paged out.
+- in-container `[sys]` sampler every 5 s: `/proc/net/sockstat` `TCP: mem`
+  pages (VM-global), `TcpExt` PruneCalled / RcvPruned / TCPRcvCollapsed /
+  TCPMemoryPressures(Chrono) / TCPBacklogDrop / TCPAbortOnMemory,
+  MemAvailable / SwapFree / Slab, PSI memory+cpu, loadavg, cumulative
+  `/proc/stat` user/sys/idle/softirq (diffed offline).
+
+Runs: `100000 500 300 1 2` (original shape, short window — the progress
+line yields the rate without completion) then `50000 500 120 1 1` (control
+with identical instrumentation).
+
+Decision table:
+
+| signature | verdict |
+|---|---|
+| `TCP: mem` climbs into the 100k's; TCPMemoryPressures / PruneCalled / RcvCollapsed advance only at 100k | (a1) kernel TCP memory pressure |
+| MemAvailable → ~0, SwapFree falls, PSI mem full > 0, probe `swap_mib` > 0 | (a2) VM reclaim / swap |
+| all memory counters flat; sys jiffies ≫ user; PSI cpu high | (e) kernel CPU / scheduler, not memory — next run: perf/softirq |
+| all flat, rate uniform from t=0, user CPU dominates | app-level; next: phase timers in fan_out, 50k with 2 listeners for (b) |
+
+## Numbers (every measurement, valid or not)
+
+Headroom rule (agreed with the coordinator 2026-09-02):
+
+- START gate: host load1 < 8 (0.8 × 10 cores, the pre-VM baseline) and no
+  other bench container up.
+- MID-RUN validity: no non-harness process > 20% CPU on any 10 s sample
+  (`host-cpu.log`). load1 is recorded alongside (`host-load1.log`) but a run
+  is NOT invalidated on load1 alone — the 10-vCPU harness VM itself adds ~4–5
+  while fanning out, so "load1 < 8 for the whole run" is unreachable by
+  design. That is why a row with load1 = 12 mid-run can still be VALID.
+
+`load1` here is the macOS host's (`sysctl vm.loadavg`), not the VM's
+`/proc/loadavg` (the `[sys]` lines carry the VM's).
+
+| run | tier | host load1 start → end | s/event | events fanned | peak RSS | verdict |
+|---|---|---|---|---|---|---|
+| ladder-rerun linux-100k.log (11:17, commit 1d9de36) | 100k×5000, 1200 s, 2L | not recorded (ladder env.txt: 3.41 at ladder start) | 1.22 | 982 | 3,887 MiB | the finding under test |
+| ladder-rerun linux-50k.log (11:06) | 50k×5000, 600 s, 1L | not recorded | 0.12 | 4,971 | 2,044 MiB | control |
+| fanout-100k-diag, first attempt (12:10) — `linux-fanout-diag.INVALID-host-load51.log` | 100k×500, 300 s, 2L | 51 → killed in connect phase | — | — | — | **INVALID** (host load 51; killed before any fan-out numbers) |
+| fanout-100k-diag run 1 (22:13–22:19) — `linux-fanout-diag.log` tier 100000 | 100k×500, 300 s, 2L | 5.88 → 3.00 (gate waited 120 s) | ~0.19 | 500 (all, by t≈95 s) | 3,906 MiB | **VALID** — no cliff in 500 events; see Run 1 |
+| fanout-100k-diag run 1 (22:20–22:22) — `linux-fanout-diag.log` tier 50000 | 50k×500, 120 s, 1L | 3.92 → 3.37 | ~0.066 | 500 (all, by t≈33 s) | 2,858 MiB | **VALID** control; see 50k control |
+
+## Phase 3 — after the verdict
+
+Fix only what the run names. Perf changes ship with before/after numbers
+(RESULTS.md) or get reverted; a "VM too small" verdict is a methodology note
+(RESULTS.md + BENCHMARK-METHODOLOGY.md), not a code change.
+
+## Run 1 result — 100k × 500 events, VALID (host load1 5.88 → 3.00)
+
+Log: benches/results/raw/2026-09-02-fanout-100k-diag/linux-fanout-diag.log
+(tier 100000, 12:13:58–12:19:31 VM clock).
+
+- Quorum after 31.78 s with 77,403 subscribed; the rest (22.6k) subscribed
+  during fan-out (100,000 by t=130 s).
+- Fan-out rate from the progress line: t=30→90 s matched went 7.78M → 41.65M
+  = 565k matched/s ≈ **0.15–0.19 s/event at ~86k live sessions**. All 500
+  events were fanned by t≈95 s (matched 42,708,863 = 500 × ~85.4k average
+  subscribed); `matched` then froze because the FakeReplicator was exhausted,
+  not because the loop slowed. The probe's `events_fanned_out~=427` divides
+  by the final 100k subscribed — the true count is 500.
+- Per-delivery rate 42.7M / 95 s ≈ 450k ops/s — the **same as the 50k tier's
+  414k ops/s**. No cliff inside 500 events.
+- VM during fan-out (`[sys]`, per 5 s across 10 vCPU = 5000 jiffies): user
+  ≈2300–2450, sys ≈800–1100, softirq ≈530–870, idle ≈500–900 → ~80–90% busy,
+  half of it user. After t≈95 s: idle ≈5000/5000.
+- Kernel memory: sockstat `TCP: mem` peaked ~41k pages (160 MiB) during
+  connect, 16–30k during fan-out, 680 after; `PruneCalled=0`,
+  `RcvPruned=0`, `TCPRcvCollapsed=0`, `TCPMemoryPressures=0`,
+  `TCPAbortOnMemory=0` throughout. Probe `swap_mib=0` throughout, peak RSS
+  3,906 MiB.
+- Router: matched=delivered=42,708,863, dropped=0, faulted=0.
+
+Verdict for the hypothesis table: **(a1) kernel TCP memory pressure —
+falsified** (counters flat, TCP mem tiny). **(a2) swap — falsified** (VmSwap
+0, VM idle after the loop finished). **(e) CPU saturation** — the VM was
+~85% busy but the loop still ran at the 50k rate, so it is not the cliff
+either. The original 1.22 s/event therefore needs one of:
+
+1. an effect that accumulates past ~500 events / ~100 s (channel backlog
+   cannot be it — router dropped 0 — but anything indexed by delivered
+   events would), or
+2. host contention during the original 11:17–11:38 run — the ladder's
+   env.txt only records load1=3.41 at ladder START; the host was later seen
+   at load 50–80 from desktop apps, and the 100k tier ran last.
+
+Discriminating run 2: the original shape, 100k × 5000 events, 1200 s,
+ack=1, 2 listeners, with the progress line, under the headroom gate. A
+uniform ~0.19 s/event to completion (≈950 s + connect) ⇒ (2): the ladder
+figure is INVALID and must be re-measured; a rate that degrades with event
+count ⇒ (1), and the progress line's knee says where to look.
+
+Note: `HOST tier=100000 end … rc=143` is the inner script's own exit status
+(its last command is `wait` on the killed sampler), not a probe failure —
+`SOAK rc=0`. Fixed in ac672c0 (inner tier now exits 0 after sampler
+teardown; outer script takes tier specs from argv).
+
+## 50k control result — 50k × 500 events, VALID (host load1 3.92 → 3.37)
+
+Same log, tier 50000, 22:20:01–22:22:37 host clock.
+
+- Quorum after 34.81 s with 47,099 subscribed; 50,000 by t=80 s.
+- Progress line: t=10→30 s matched 6.78M → 22.68M = 795k matched/s at
+  ~47.1k live sessions ≈ **0.06 s/event**. All 500 events fanned by t≈33 s
+  (matched 23,633,433 = 500 × ~47.3k average subscribed); `matched` then
+  froze for the remaining ~87 s of the window — the same shape as the 100k
+  tier, so the post-plateau idle is the FakeReplicator budget (500 events)
+  running out, not a stall. `completed=false` in both tiers is the probe's
+  denominator (clients × events) assuming every client subscribed before
+  event 1.
+- Per-delivery rate 23.6M / 33 s ≈ 716k ops/s vs 100k's ≈ 450k ops/s. Per
+  event the 100k tier is ~2.9× slower for 2× the subscribers, i.e. ~35%
+  slower per delivery — a slope, not the ladder's 10× cliff (1.22 vs 0.12
+  s/event).
+- Router: matched=delivered=23,633,433, dropped=0, faulted=0, swap 0, peak
+  RSS 2,858 MiB.
+
+Both tiers reached their plateau with dropped=0 and matched=delivered at
+every progress sample, so the 500-event shape holds at both sizes. Run 2
+(100k × 5000, 1200 s, per the paragraph above) is what separates "the
+effect accumulates past ~500 events" from "the 11:17 ladder tier was taken
+under host contention". Run 2 is launched with
+`benches/scripts/fanout-100k-diag.sh <src> benches/results/raw/2026-09-02-fanout-100k-diag-run2 100000,5000,1200,1,2`
+behind the same headroom gate.
+
+## Run 2, attempt 1 — 100k × 5000, INVALID (host load1 5.41 → 12.6; WindowServer 41%, Brave 19.5%)
+
+Log: `benches/results/raw/2026-09-02-fanout-100k-diag-run2/linux-fanout-diag.INVALID-host-load12-windowserver41.log`
+plus `host-load1.INVALID-attempt1.log` (host load1 every 10 s). Started 22:25:54
+at load1 5.41 (gate passed); load1 crossed 8 at ≈22:29 and reached 15.0 at
+22:30:45; killed at t≈330 s. Non-harness processes at kill time: WindowServer
+41% CPU, Brave 19.5%, two claude agents 19%/17.5% (Docker VM itself 440%).
+
+Partial numbers, kept per the headroom rule. **Suggestive, not a verdict**:
+the bend coinciding with host load crossing 8, with guest idle RISING while
+throughput fell, is the single strongest pointer so far that the ladder's
+100k "cliff" was scheduler starvation of the VM rather than the fan-out
+loop — but this attempt was contaminated and cannot prove it.
+
+| span | matched Δ | events (≈100k subscribed) | s/event |
+|---|---|---|---|
+| t=0→100 s | 34.17M | ~382 (subscribed 79.6k→89.3k) | ~0.26 |
+| t=100→200 s | 18.35M | ~183 | ~0.55 |
+| t=200→300 s | 16.50M | ~165 | ~0.61 |
+
+The bend at t≈100 s coincides with host load1 rising past 8 (≈22:27:45), so
+this attempt cannot separate "accumulates with event count" from "host
+contention". VM `[sys]` during the slow spans shows idle rising to
+1500–1800 / 5000 jiffies per 5 s while throughput fell — the guest had
+spare CPU it was not being scheduled to use, which is what host
+oversubscription looks like from inside a VM that does not report steal.
+`PruneCalled`/`TCPMemoryPressures` stayed 0; swap 0; RSS 4,097 MiB.
+
+Rule note for the coordinator: the 10-vCPU harness VM alone contributes
+~4–5 to host load1 while fanning out, so "load1 < 8 for the whole run" is
+only attainable on an otherwise idle desktop. The operative mid-run check
+is the second clause — no non-harness process > 20% CPU — sampled every
+10 s alongside load1. Re-armed behind the same gate.
+
+## Run 2, attempt 2 — 100k × 5000, INVALID #2 (mid-run rule: 17/17 samples with non-harness CPU > 20%)
+
+Log: `benches/results/raw/2026-09-02-fanout-100k-diag-run2/linux-fanout-diag.INVALID-attempt2-windowserver40-vscode61.log`,
+`host-cpu.INVALID-attempt2.log`, `host-load1.log`. Started 22:34:26 at load1
+4.39 (start gate passed, waited 60 s). Every 10 s sample from start to the
+t≈120 s check had a non-harness process > 20% CPU: WindowServer 38–43% on
+all 17, plus VS Code 61%, Google 38–40%, ProtonVPN WireGuard 28–30%, node
+24%, secd/syspolicyd/ctkd 22–40%. Host load1 ≈ 11 by t=120 s. Killed at
+t≈130 s per the agreed rule; no third re-arm.
+
+Partial trace (suggestive only, contaminated): quorum 49.34 s at 82,270
+subscribed (run 1: 31.8 s); t=60→100 s ≈0.29 s/event; **t=100→120 s: 8
+events in 20 s = 2.5 s/event** — the ladder's 1.22 s/event regime and
+worse, arriving exactly as the desktop load did.
+
+**Status: blocked on quiet host.** The discriminating run (100k × 5000 +
+50k × 5000 under the gate) needs ~35 min with no non-harness process > 20%
+CPU; two attempts on 2026-09-02 were contaminated within the first 2–4
+minutes. Re-run command, unchanged:
+`benches/scripts/fanout-100k-diag.sh <src> benches/results/raw/2026-09-02-fanout-100k-diag-run2 100000,5000,1200,1,2 50000,5000,600,1,1`
+with the two 10 s host samplers alongside.
+
+What is established without it (VALID runs only): no kernel TCP memory
+pressure, no swap, no drops at 100k; 100k×500 runs at ~0.19 s/event, 50k×500
+at ~0.06 s/event — a slope, not a cliff. Every observed collapse to
+> 0.5 s/event so far coincided with host contention. The ladder's 100k
+figure (1.22 s/event, 11:17, no mid-run load record) must be treated as
+UNVERIFIED until the gated run lands.

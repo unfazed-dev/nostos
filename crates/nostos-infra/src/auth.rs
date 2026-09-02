@@ -172,6 +172,15 @@ impl SyncAuth for StaticBearerAuth {
 pub struct SupabaseJwtAuth {
     hs256_secret: Option<Vec<u8>>,
     jwks: Option<JwksVerifier>,
+    /// Accept HS256 tokens that carry no `exp` (audit finding 5). Off by
+    /// default: such a token is a permanent credential that survives
+    /// revocation. Only the legacy HS256 path consults this — the JWKS path
+    /// requires `exp` unconditionally.
+    allow_missing_exp: bool,
+    /// `iss` allowlist applied to BOTH verifier paths (audit finding 4).
+    /// Empty = unchecked. Held here as well as inside `JwksVerifier` because
+    /// the HS256 path has no `jsonwebtoken::Validation` to hand it to.
+    issuers: Vec<String>,
 }
 
 impl SupabaseJwtAuth {
@@ -182,7 +191,17 @@ impl SupabaseJwtAuth {
         Self {
             hs256_secret: Some(secret),
             jwks: None,
+            allow_missing_exp: false,
+            issuers: Vec::new(),
         }
+    }
+
+    /// Opt back into accepting HS256 tokens with no `exp`
+    /// (`NOSTOS_ALLOW_JWT_WITHOUT_EXP`). See [`Self::allow_missing_exp`].
+    #[must_use]
+    pub fn with_allow_missing_exp(mut self, allow: bool) -> Self {
+        self.allow_missing_exp = allow;
+        self
     }
 
     /// Construct from the resolved config surface: an optional legacy HS256
@@ -194,7 +213,28 @@ impl SupabaseJwtAuth {
         Self {
             hs256_secret,
             jwks: jwks_url.map(|url| JwksVerifier::new(url, DEFAULT_JWKS_TTL)),
+            allow_missing_exp: false,
+            issuers: Vec::new(),
         }
+    }
+
+    /// Restrict BOTH verifier paths to these `iss` values (audit finding 4,
+    /// one knob: `NOSTOS_JWT_ISSUERS`). Empty = unchecked, the default. The
+    /// first fix only forwarded this to the JWKS verifier, so an HS256 token
+    /// from any issuer still passed; now the HS256 path checks it too.
+    #[must_use]
+    pub fn with_issuers(mut self, issuers: Vec<String>) -> Self {
+        self.jwks = self.jwks.map(|j| j.with_issuers(issuers.clone()));
+        self.issuers = issuers;
+        self
+    }
+
+    /// Ceiling on serving a JWKS cache that has not refreshed successfully
+    /// (audit finding 6).
+    #[must_use]
+    pub fn with_jwks_max_stale(mut self, max_stale: std::time::Duration) -> Self {
+        self.jwks = self.jwks.map(|j| j.with_max_stale(max_stale));
+        self
     }
 }
 
@@ -208,7 +248,7 @@ impl SyncAuth for SupabaseJwtAuth {
         match header.alg {
             Algorithm::HS256 => {
                 let secret = self.hs256_secret.as_ref()?;
-                verify_supabase_hs256(token, secret)
+                verify_supabase_hs256(token, secret, self.allow_missing_exp, &self.issuers)
             }
             Algorithm::RS256 | Algorithm::ES256 | Algorithm::EdDSA => {
                 let jwks = self.jwks.as_ref()?;
@@ -227,7 +267,12 @@ impl SyncAuth for SupabaseJwtAuth {
 ///
 /// Kept as a free function so a test can exercise the crypto without
 /// constructing the async adapter.
-fn verify_supabase_hs256(token: &str, secret: &[u8]) -> Option<Principal> {
+fn verify_supabase_hs256(
+    token: &str,
+    secret: &[u8],
+    allow_missing_exp: bool,
+    issuers: &[String],
+) -> Option<Principal> {
     let mut parts = token.split('.');
     let header = parts.next()?;
     let payload = parts.next()?;
@@ -245,19 +290,40 @@ fn verify_supabase_hs256(token: &str, secret: &[u8]) -> Option<Principal> {
     }
     let payload_bytes = decode_base64url_to_bytes(payload)?;
     let claims: SupabaseClaims = serde_json::from_slice(&payload_bytes).ok()?;
-    // ADR-0029 §Decision-4: enforce `exp` when present (the JWKS/RS256 path
-    // already does via jsonwebtoken's `Validation`). A token with no `exp`
-    // never expires (JWT convention) — this preserves the Phase-0 behavior the
-    // existing tests rely on (their tokens carry no `exp`).
-    if let Some(exp) = claims.exp {
-        let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
-            Err(_) => i64::MAX,
-        };
-        if now > exp + JWT_LEEWAY_SECS {
-            warn!("jwt rejected: expired");
+    // ADR-0029 §Decision-4, amended by the v0.2.0 audit (finding 5): `exp` is
+    // REQUIRED now, not merely enforced-when-present.
+    //
+    // A token with no `exp` never expires by JWT convention, so an HS256 token
+    // minted without one was a permanent credential that survived revocation —
+    // and the handshake armed no close deadline for it either, so the socket
+    // lived forever too. The JWKS/RS256 path never had this hole
+    // (`jsonwebtoken`'s `required_spec_claims` defaults to `{"exp"}`), so this
+    // converges the two verifier paths rather than inventing a third rule.
+    //
+    // `allow_missing_exp` (`NOSTOS_ALLOW_JWT_WITHOUT_EXP=1`) is the escape hatch
+    // for a deployment still minting legacy `exp`-less tokens. Opt-in on
+    // purpose: defaulting it on would leave the finding open for everyone.
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(_) => i64::MAX,
+    };
+    match claims.exp {
+        Some(exp) => {
+            if now > exp + JWT_LEEWAY_SECS {
+                warn!("jwt rejected: expired");
+                return None;
+            }
+        }
+        None if allow_missing_exp => {
+            warn!("jwt accepted with no exp: NOSTOS_ALLOW_JWT_WITHOUT_EXP is set");
+        }
+        None => {
+            warn!("jwt rejected: no exp claim");
             return None;
         }
+    }
+    if !nbf_and_issuer_ok(&claims.rest, issuers, now) {
+        return None;
     }
     let sub = claims.sub;
     if sub.is_empty() {
@@ -272,6 +338,50 @@ fn verify_supabase_hs256(token: &str, secret: &[u8]) -> Option<Principal> {
     // `tenant_id` (RESERVED_CLAIMS), so a payload-carried tenant_id claim
     // cannot shadow this derived value.
     Some(Principal::with_claims(sub.clone(), sub, extra))
+}
+
+/// Audit finding 4 on the HS256 path: `nbf` and the `iss` allowlist. Mirrors
+/// exactly what `jsonwebtoken::Validation` does for the JWKS path
+/// (`validate_nbf = true` + `set_issuer`), so the two verifiers reject the
+/// same tokens for the same reasons:
+///
+/// - `nbf` absent → fine (it is optional by RFC 7519). Present and later than
+///   `now + JWT_LEEWAY_SECS` → not yet valid, reject. Present but not an
+///   integer → malformed, reject (the JWKS path fails deserialisation on the
+///   same input).
+/// - `issuers` empty → `iss` unchecked. Non-empty → `iss` must be a string in
+///   the list; absent or non-string counts as "not in the list".
+///
+/// Reads from the flattened `rest` map rather than named fields so the D1
+/// extra-claims lifting (`lift_extra_claims`) sees the same payload it did
+/// before this check existed.
+fn nbf_and_issuer_ok(
+    rest: &serde_json::Map<String, serde_json::Value>,
+    issuers: &[String],
+    now: i64,
+) -> bool {
+    match rest.get("nbf") {
+        None => {}
+        Some(v) => match v.as_i64() {
+            Some(nbf) if nbf <= now + JWT_LEEWAY_SECS => {}
+            Some(_) => {
+                warn!("jwt rejected: nbf is in the future");
+                return false;
+            }
+            None => {
+                warn!("jwt rejected: nbf is not an integer");
+                return false;
+            }
+        },
+    }
+    if !issuers.is_empty() {
+        let iss = rest.get("iss").and_then(serde_json::Value::as_str);
+        if !iss.is_some_and(|iss| issuers.iter().any(|allowed| allowed == iss)) {
+            warn!(?iss, "jwt rejected: iss not in NOSTOS_JWT_ISSUERS");
+            return false;
+        }
+    }
+    true
 }
 
 /// Clock-skew leeway for JWT `exp` enforcement (ADR-0029 §Decision-4). Mirrors
@@ -467,7 +577,8 @@ mod tests {
 
     fn valid_hs256_token(secret: &[u8], sub: &str) -> String {
         let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
-        let payload = b64url(format!(r#"{{"sub":"{sub}"}}"#).as_bytes());
+        // `exp` required since the v0.2.0 audit (finding 5); far future.
+        let payload = b64url(format!(r#"{{"sub":"{sub}","exp":4102444800}}"#).as_bytes());
         let signing_input = format!("{header}.{payload}");
         let mut mac = HmacSha256::new_from_slice(secret).expect("hmac key");
         mac.update(signing_input.as_bytes());
@@ -490,6 +601,19 @@ mod tests {
     /// extra-claims tests below, which need payload shapes
     /// `valid_hs256_token`/`hs256_token_with_exp` can't express).
     fn hs256_token_from_payload(secret: &[u8], payload_json: &str) -> String {
+        // `exp` is required since the v0.2.0 audit (finding 5). These tests
+        // exercise claim LIFTING, not expiry, so a far-future `exp` is
+        // injected when the payload does not already carry one — that keeps
+        // each test's own payload shape as its author wrote it. A payload with
+        // its own `exp` (or one that is not a JSON object, deliberately) is
+        // passed through untouched.
+        let payload_json = match serde_json::from_str::<serde_json::Value>(payload_json) {
+            Ok(serde_json::Value::Object(mut m)) if !m.contains_key("exp") => {
+                m.insert("exp".into(), serde_json::json!(4_102_444_800i64));
+                serde_json::Value::Object(m).to_string()
+            }
+            _ => payload_json.to_string(),
+        };
         let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
         let payload = b64url(payload_json.as_bytes());
         let signing_input = format!("{header}.{payload}");
@@ -624,6 +748,95 @@ mod tests {
         );
     }
 
+    // ---- audit finding 4 on the HS256 path: nbf + iss allowlist ----
+    //
+    // The first fix (10ebc93) only covered the JWKS verifier; these prove the
+    // HS256 path now rejects the same tokens. Payloads carry their own `exp`
+    // via `hs256_token_from_payload`'s far-future injection.
+
+    fn now_secs() -> i64 {
+        i64::try_from(jsonwebtoken::get_current_timestamp()).expect("epoch fits i64")
+    }
+
+    #[tokio::test]
+    async fn hs256_future_nbf_rejected() {
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec());
+        let nbf = now_secs() + 3600;
+        let token =
+            hs256_token_from_payload(b"secret", &format!(r#"{{"sub":"user-1","nbf":{nbf}}}"#));
+        assert!(
+            auth.authenticate(&token).await.is_none(),
+            "an HS256 token not yet valid (nbf an hour ahead) must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn hs256_nbf_within_leeway_accepted() {
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec());
+        let nbf = now_secs() + JWT_LEEWAY_SECS / 2;
+        let token =
+            hs256_token_from_payload(b"secret", &format!(r#"{{"sub":"user-1","nbf":{nbf}}}"#));
+        assert!(
+            auth.authenticate(&token).await.is_some(),
+            "an nbf inside the clock-skew leeway must not be rejected"
+        );
+        // And a plainly-past nbf is the ordinary case.
+        let past = now_secs() - 3600;
+        let token =
+            hs256_token_from_payload(b"secret", &format!(r#"{{"sub":"user-1","nbf":{past}}}"#));
+        assert!(auth.authenticate(&token).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn hs256_non_integer_nbf_rejected() {
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec());
+        let token = hs256_token_from_payload(b"secret", r#"{"sub":"user-1","nbf":"soon"}"#);
+        assert!(
+            auth.authenticate(&token).await.is_none(),
+            "a malformed nbf is rejected, never ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn hs256_wrong_iss_rejected_when_allowlist_set() {
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec())
+            .with_issuers(vec!["https://good.example/auth/v1".to_string()]);
+        let wrong = hs256_token_from_payload(
+            b"secret",
+            r#"{"sub":"user-1","iss":"https://evil.example/auth/v1"}"#,
+        );
+        assert!(
+            auth.authenticate(&wrong).await.is_none(),
+            "an iss outside NOSTOS_JWT_ISSUERS must be rejected on the HS256 path"
+        );
+        let missing = hs256_token_from_payload(b"secret", r#"{"sub":"user-1"}"#);
+        assert!(
+            auth.authenticate(&missing).await.is_none(),
+            "with an allowlist set, a token with no iss is rejected too"
+        );
+        let right = hs256_token_from_payload(
+            b"secret",
+            r#"{"sub":"user-1","iss":"https://good.example/auth/v1"}"#,
+        );
+        assert!(
+            auth.authenticate(&right).await.is_some(),
+            "an allowlisted iss still authenticates"
+        );
+    }
+
+    #[tokio::test]
+    async fn hs256_any_iss_accepted_when_allowlist_unset() {
+        let auth = SupabaseJwtAuth::new(b"secret".to_vec());
+        let token = hs256_token_from_payload(
+            b"secret",
+            r#"{"sub":"user-1","iss":"https://anyone.example/auth/v1"}"#,
+        );
+        assert!(
+            auth.authenticate(&token).await.is_some(),
+            "no allowlist configured = iss unchecked (upgrade-safe default)"
+        );
+    }
+
     #[tokio::test]
     async fn alg_none_rejected_outright() {
         // A token whose header claims `alg: none` — jsonwebtoken's `Algorithm`
@@ -660,6 +873,37 @@ mod tests {
         let auth = SupabaseJwtAuth::new(b"some-secret".to_vec());
         let token = mint_token(&enc, jsonwebtoken::Algorithm::RS256, "k1", "user-1");
         assert!(auth.authenticate(&token).await.is_none());
+    }
+
+    /// Audit finding 5: an HS256 token with no `exp` never expires and
+    /// survives revocation. It must be refused by default.
+    #[tokio::test]
+    async fn hs256_token_without_exp_is_rejected_by_default() {
+        let secret = b"legacy-secret".to_vec();
+        let auth = SupabaseJwtAuth::new(secret.clone());
+        // Signed correctly — the ONLY defect is the missing `exp`.
+        let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = b64url(br#"{"sub":"u1"}"#);
+        let signing_input = format!("{header}.{payload}");
+        let mut mac = HmacSha256::new_from_slice(&secret).expect("hmac key");
+        mac.update(signing_input.as_bytes());
+        let token = format!("{signing_input}.{}", b64url(&mac.finalize().into_bytes()));
+
+        assert!(
+            auth.authenticate(&token).await.is_none(),
+            "a validly-signed token with no exp is a permanent credential"
+        );
+
+        // The escape hatch is opt-in and really does opt in.
+        let lenient = SupabaseJwtAuth::new(secret).with_allow_missing_exp(true);
+        assert_eq!(
+            lenient
+                .authenticate(&token)
+                .await
+                .expect("escape hatch accepts it")
+                .account_id,
+            "u1"
+        );
     }
 
     #[tokio::test]

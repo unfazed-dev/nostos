@@ -176,6 +176,14 @@ From `crates/nostos-cli/src/main.rs:22`:
 
 `nostos pull && nostos gen` is the loop that keeps generated schema in step with Postgres.
 
+`nostos pull` reads `GET /schema` from the linked server. If that server runs with
+`NOSTOS_PROTECT_METADATA=1` the endpoint requires a bearer token: pass `--token <TOKEN>` or set
+`NOSTOS_TOKEN` in the environment and the CLI sends `Authorization: Bearer <token>`. The token must
+satisfy the server's `NOSTOS_SYNC_AUTH` adapter (the `NOSTOS_SYNC_BEARER_TOKEN` secret for `bearer`, a
+user JWT for `supabase-jwt`). It is never written to `.nostos/config.json` (that file is committed)
+and never printed. Prefer `NOSTOS_TOKEN` over `--token` on shared machines (`--token` is visible in
+`ps`), and note that a token sent to a plain `http://` server travels in cleartext.
+
 ## Wire protocol
 
 JSON, deliberately human-debuggable until a measurement says otherwise

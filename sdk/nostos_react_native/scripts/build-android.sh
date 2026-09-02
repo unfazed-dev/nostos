@@ -15,9 +15,9 @@
 # Exit codes: 0 = .so + Kotlin sources in place; non-zero = cargo/bindgen failed.
 set -euo pipefail
 
-NOSTOS_RN="/Volumes/developer_ssd/Developer/nostos/sdk/nostos_react_native"
-NOSTOS_KT="/Volumes/developer_ssd/Developer/nostos/sdk/nostos_kotlin"
-REPO_ROOT="/Volumes/developer_ssd/Developer/nostos"
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+NOSTOS_RN="$REPO_ROOT/sdk/nostos_react_native"
+NOSTOS_KT="$REPO_ROOT/sdk/nostos_kotlin"
 
 NDK_VERSION="${NOSTOS_NDK_VERSION:-28.2.13676358}"
 NDK="$HOME/Library/Android/sdk/ndk/$NDK_VERSION"

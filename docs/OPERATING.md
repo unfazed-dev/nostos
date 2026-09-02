@@ -33,8 +33,8 @@ flag is absent; flag wins when present.
 | `NOSTOS_OPLOG_BUFFER` | `4096` | Op-log writer's internal channel depth (ADR-0025 slice 2). Raise if `cairn_oplog_dropped_total > 0`. `pg` only. |
 | `NOSTOS_OPLOG_RETENTION_SECS` | `3600` | Op-log row retention window (ADR-0025 slice 5). Offline gaps beyond this fall back to snapshot-reconcile. |
 | `NOSTOS_OPLOG_COMPACT_INTERVAL_SECS` | `300` | Op-log compaction tick (ADR-0025 slice 5). |
-| `NOSTOS_SLOT_MAX_LAG` | `0` | WAL-bloat eviction threshold (bytes). `0` = eviction OFF. A production deploy MUST set this AND `NOSTOS_PG_SLOT_WAL_KEEP_SIZE` (ADR-0016). |
-| `NOSTOS_PG_SLOT_WAL_KEEP_SIZE` | `0` | Postgres `max_slot_wal_keep_size` (MB) — the DB-level WAL-bloat backstop. `0` = Postgres default (unbounded). |
+| `NOSTOS_SLOT_MAX_LAG` | `1073741824` (1 GiB) | WAL-bloat eviction threshold (bytes). A live client lagging further than this is disconnected and resyncs; the slot is never dropped. `0` = eviction OFF (server warns at startup). Only protects the primary while nostos-server is running (ADR-0043). |
+| `NOSTOS_PG_SLOT_WAL_KEEP_SIZE` | `0` | Postgres `max_slot_wal_keep_size` (MB) — the DB-level WAL-bloat backstop and the ONLY bound on an abandoned slot (server gone). `0` = Postgres default (unbounded). Set in production; `nostos doctor` flags `-1` (ADR-0043). |
 | `NOSTOS_SYNC_AUTH` | `none` | `/sync` auth mode (ADR-0010). `none` = anonymous (OSS dev, single-tenant only). `supabase-jwt` = verify a Supabase JWT (multi-tenant). |
 | `NOSTOS_SUPABASE_JWT_SECRET` | _empty_ | Legacy HS256 Supabase JWT secret. Required-or-JWKS under `supabase-jwt`. |
 | `NOSTOS_SUPABASE_URL` | _empty_ | Supabase project URL — derives the JWKS URL for RS256/ES256/EdDSA. |
@@ -226,8 +226,9 @@ Run this in order. Each line is **symptom → check → fix**.
    `SELECT slot_name, wal_status, restart_lsn, confirmed_flush_lsn FROM
    pg_replication_slots WHERE slot_name='cairn_slot';`.
    Fix: nothing — auto-recreate per §2.1 handles it. If it keeps recurring,
-   set `NOSTOS_SLOT_MAX_LAG` and `NOSTOS_PG_SLOT_WAL_KEEP_SIZE` (ADR-0016) so
-   lagging clients are evicted before Postgres evicts the WAL.
+   check `NOSTOS_SLOT_MAX_LAG` is not `0` (default 1 GiB, ADR-0043) so lagging
+   clients are evicted before Postgres evicts the WAL, and set
+   `NOSTOS_PG_SLOT_WAL_KEEP_SIZE` above the eviction threshold.
 
 5. **Did the client receive a snapshot?**
    Symptom: client acks subscribe, then nothing; no error server-side.
@@ -298,7 +299,14 @@ see the deploy guide (TBD).
 
 `nostos link` / `nostos pull` / `nostos gen` — app-side (Flutter / WASM) commands,
 not used to operate the server. Documented for completeness; see
-ADR-0023.
+ADR-0023. One operator-facing note: when the server runs with
+`NOSTOS_PROTECT_METADATA=1`, `nostos pull` needs `--token <TOKEN>` or the
+`NOSTOS_TOKEN` env var to read `GET /schema` (`--token` wins when both are
+set); the token goes through the same `NOSTOS_SYNC_AUTH` adapter as sync
+clients, is never stored in `.nostos/config.json`, and is never printed. A
+token is only sent over `https://` or to loopback (`127.0.0.1`, `localhost`,
+`::1` — the `nostos dev` case); plain `http://` to any other host is refused
+unless `--allow-insecure-token` is passed.
 
 ### 4.2 `nostos-server` (crates/nostos-server/src/main.rs:33-205)
 
@@ -319,7 +327,7 @@ OPTIONS (most-commonly-tuned; see §1 for the full table):
   --sync-auth <none|supabase-jwt>                                [env: NOSTOS_SYNC_AUTH, default: none]
   --log <FILTER>                                                 [env: NOSTOS_LOG, default: info,nostos=debug]
   --session-buffer <N>                                           [env: NOSTOS_SESSION_BUFFER, default: 1024]
-  --slot-max-lag <BYTES>                                         [env: NOSTOS_SLOT_MAX_LAG, default: 0]
+  --slot-max-lag <BYTES>                                         [env: NOSTOS_SLOT_MAX_LAG, default: 1073741824]
   --pg-slot-wal-keep-size <MB>                                   [env: NOSTOS_PG_SLOT_WAL_KEEP_SIZE, default: 0]
   -h, --help              Print help
   -V, --version           Print version
