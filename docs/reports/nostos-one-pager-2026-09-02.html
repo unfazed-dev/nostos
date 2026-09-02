@@ -2,177 +2,128 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Nostos — what it is and how it did in testing (2 Sept 2026)</title>
+<title>Nostos — test results, 2 Sept 2026</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root { --ink:#1b1f24; --muted:#5b6470; --line:#dfe3e8; --good:#1f8a4c; --warn:#c77700; --bad:#c0392b; --brand:#2f5fd0; --brand2:#9db4ee; --soft:#f4f6fa; }
+  :root { --ink:#1b1f24; --muted:#5b6470; --line:#dfe3e8; --good:#1f8a4c; --warn:#c77700; --brand:#2f5fd0; --brand2:#9db4ee; --soft:#f4f6fa; }
   * { box-sizing:border-box; }
-  html,body { margin:0; background:#e9ecf1; color:var(--ink); font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
-  .page { width:1000px; margin:24px auto; background:#fff; padding:34px 44px; box-shadow:0 2px 14px rgba(0,0,0,.12); }
-  header { display:flex; justify-content:space-between; align-items:flex-end; border-bottom:3px solid var(--brand); padding-bottom:12px; margin-bottom:20px; }
-  h1 { margin:0; font-size:34px; letter-spacing:-.5px; }
-  h1 small { display:block; font-size:16px; font-weight:400; color:var(--muted); margin-top:4px; }
-  .date { color:var(--muted); font-size:13px; text-align:right; }
-  h2 { font-size:14px; text-transform:uppercase; letter-spacing:.08em; color:var(--brand); margin:0 0 10px; }
-  section { margin-bottom:20px; }
-  .row { display:grid; gap:14px; }
+  html,body { margin:0; background:#e9ecf1; color:var(--ink); font:20px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  .page { width:1100px; margin:24px auto; background:#fff; padding:40px 48px; box-shadow:0 2px 14px rgba(0,0,0,.12); }
+  header { border-bottom:4px solid var(--brand); padding-bottom:14px; margin-bottom:26px; display:flex; justify-content:space-between; align-items:flex-end; }
+  h1 { margin:0; font-size:48px; letter-spacing:-1px; }
+  h1 small { display:block; font-size:24px; font-weight:400; color:var(--muted); margin-top:6px; }
+  .date { color:var(--muted); font-size:18px; }
+  .row { display:grid; gap:18px; margin-bottom:24px; }
   .c3 { grid-template-columns:repeat(3,1fr); }
   .c2 { grid-template-columns:1fr 1fr; }
-  .card { background:var(--soft); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
-  .card h3 { margin:0 0 6px; font-size:16px; }
-  .card p { margin:0; color:var(--muted); font-size:14px; }
-  .card.chart p.note { margin-top:6px; font-size:12.5px; }
-  .analogy { background:#fff8e6; border-color:#f1dc9a; }
-  .big { display:flex; gap:14px; }
-  .stat { flex:1; text-align:center; padding:14px 10px; border-radius:10px; background:var(--brand); color:#fff; }
-  .stat b { display:block; font-size:30px; line-height:1.1; letter-spacing:-.5px; }
-  .stat span { font-size:13px; opacity:.9; }
-  svg { width:100%; height:auto; display:block; font-family:inherit; }
-  svg text { fill:var(--ink); font-size:12px; }
-  svg .axis { fill:var(--muted); font-size:11px; }
-  svg .val { font-weight:600; font-size:11.5px; }
+  .card { background:var(--soft); border:1px solid var(--line); border-radius:12px; padding:18px 22px; }
+  .card h3 { margin:0 0 4px; font-size:24px; }
+  .card p { margin:0; color:var(--muted); font-size:19px; }
+  .stat { text-align:center; padding:22px 12px; border-radius:12px; background:var(--brand); color:#fff; }
+  .stat b { display:block; font-size:52px; line-height:1; letter-spacing:-1px; }
+  .stat span { font-size:20px; opacity:.92; display:block; margin-top:8px; }
+  svg { width:100%; height:auto; display:block; font-family:inherit; margin-top:8px; }
+  svg text { fill:var(--ink); font-size:17px; }
+  svg .axis { fill:var(--muted); font-size:16px; }
+  svg .val { font-weight:700; font-size:17px; }
   svg .grid { stroke:var(--line); stroke-width:1; }
   svg .bar { fill:var(--brand); }
-  svg .bar.faint { fill:var(--brand2); }
-  svg .bar.good { fill:var(--good); }
-  svg .bar.warn { fill:var(--warn); }
-  svg .bar.bad { fill:var(--bad); }
-  .legend { display:flex; gap:14px; font-size:12px; color:var(--muted); margin-top:4px; }
-  .legend i { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:5px; vertical-align:-1px; }
-  ul { margin:6px 0 0 18px; padding:0; } li { margin:3px 0; }
-  footer { border-top:1px solid var(--line); padding-top:10px; margin-top:4px; font-size:12px; color:var(--muted); }
-  @media print { html,body{background:#fff} .page{width:auto;margin:0;box-shadow:none;padding:16px 22px} @page{size:A4 portrait;margin:9mm} }
+  svg .faint { fill:var(--brand2); }
+  svg .good { fill:var(--good); }
+  svg .warn { fill:var(--warn); }
+  .warnline { color:var(--warn); font-weight:600; font-size:19px; margin-top:8px; }
+  ul { margin:8px 0 0 22px; padding:0; font-size:20px; } li { margin:6px 0; }
+  footer { border-top:1px solid var(--line); padding-top:10px; font-size:15px; color:var(--muted); }
+  @media print { html,body{background:#fff} .page{width:auto;margin:0;box-shadow:none;padding:14px 20px} @page{size:A4 landscape;margin:8mm} }
 </style>
 </head>
 <body>
 <div class="page">
 
 <header>
-  <h1>Nostos <small>Keeps an app's data up to date on every phone and laptop — even when the internet drops out.</small></h1>
-  <div class="date">Test report for non-technical readers<br>2 September 2026</div>
+  <h1>Nostos <small>Keeps app data in sync on every device. Works offline. Free and open.</small></h1>
+  <div class="date">Test results · 2 Sept 2026</div>
 </header>
 
-<section>
-  <h2>What Nostos is</h2>
-  <div class="row c3">
-    <div class="card"><h3>One source of truth, everywhere</h3><p>Every change in the central database is pushed to all connected devices, and every device's changes come back. Everyone sees the same data.</p></div>
-    <div class="card"><h3>Works offline</h3><p>Each device keeps its own copy. Lose signal on a train, keep working; it catches up when you're back online.</p></div>
-    <div class="card"><h3>Free and open</h3><p>Apache-2.0 licence — anyone can use it, including commercially, at no cost. The main competitor (PowerSync) has a restricted licence.</p></div>
+<div class="row c3">
+  <div class="stat"><b>2.6M</b><span>updates per second<br>1,000 devices</span></div>
+  <div class="stat"><b>0 lost</b><span>of 100 million updates<br>up to 20,000 devices</span></div>
+  <div class="stat"><b>50,000</b><span>devices at once<br>99.4% delivered</span></div>
+</div>
+
+<div class="row c2">
+
+  <div class="card">
+    <h3>Speed as more devices connect</h3>
+    <p>Updates delivered per second.</p>
+    <svg viewBox="0 0 460 235" role="img" aria-label="Delivery speed by device count">
+      <line class="grid" x1="28" y1="190" x2="450" y2="190"/>
+      <rect class="bar" x="30" y="44.5" width="50" height="145.5" rx="3"/><text class="val" x="55" y="36" text-anchor="middle">2.6M</text><text class="axis" x="55" y="212" text-anchor="middle">1k</text>
+      <rect class="bar" x="102" y="69.9" width="50" height="120.1" rx="3"/><text class="val" x="127" y="61" text-anchor="middle">2.2M</text><text class="axis" x="127" y="212" text-anchor="middle">10k</text>
+      <rect class="bar" x="174" y="135.1" width="50" height="54.9" rx="3"/><text class="val" x="199" y="127" text-anchor="middle">988k</text><text class="axis" x="199" y="212" text-anchor="middle">20k</text>
+      <rect class="bar" x="246" y="169.3" width="50" height="20.7" rx="3"/><text class="val" x="271" y="161" text-anchor="middle">372k</text><text class="axis" x="271" y="212" text-anchor="middle">30k</text>
+      <rect class="bar" x="318" y="167.8" width="50" height="22.2" rx="3"/><text class="val" x="343" y="160" text-anchor="middle">400k</text><text class="axis" x="343" y="212" text-anchor="middle">40k</text>
+      <rect class="bar" x="390" y="167" width="50" height="23" rx="3"/><text class="val" x="415" y="159" text-anchor="middle">414k</text><text class="axis" x="415" y="212" text-anchor="middle">50k</text>
+      <text class="axis" x="240" y="232" text-anchor="middle">devices connected</text>
+    </svg>
   </div>
-</section>
 
-<section>
-  <h2>What we tested, in plain terms</h2>
-  <div class="row c2">
-    <div class="card analogy">
-      <h3>Think of a post office</h3>
-      <p>Nostos's server is the post office. Each app on a phone is a mailbox. We opened <b>thousands of mailboxes at once</b>, dropped <b>hundreds of millions of letters</b> into the post office, then counted <b>how fast</b> they were delivered and <b>how many went missing</b>.</p>
-    </div>
-    <div class="card">
-      <h3>The setup</h3>
-      <ul>
-        <li>One computer (a 10-core Mac) plays both the post office and every mailbox.</li>
-        <li>From 1,000 up to 100,000 mailboxes; on macOS and inside a Linux container.</li>
-        <li>Runs repeated; we keep the middle result and always report what was lost.</li>
-      </ul>
-    </div>
+  <div class="card">
+    <h3>Updates lost, per 1,000 sent</h3>
+    <p>Zero = every update arrived.</p>
+    <svg viewBox="0 0 460 235" role="img" aria-label="Updates lost per thousand by device count">
+      <line class="grid" x1="90" y1="8" x2="90" y2="200"/>
+      <line class="grid" x1="240" y1="8" x2="240" y2="200"/><text class="axis" x="240" y="218" text-anchor="middle">5</text>
+      <line class="grid" x1="390" y1="8" x2="390" y2="200"/><text class="axis" x="390" y="218" text-anchor="middle">10</text>
+      <text class="axis" x="90" y="218" text-anchor="middle">0</text>
+      <text class="axis" x="80" y="27" text-anchor="end">1k</text>   <rect class="good" x="90" y="13" width="3" height="20"/><text class="val" x="100" y="28">0</text>
+      <text class="axis" x="80" y="55" text-anchor="end">10k</text>  <rect class="good" x="90" y="41" width="3" height="20"/><text class="val" x="100" y="56">0</text>
+      <text class="axis" x="80" y="83" text-anchor="end">20k</text>  <rect class="good" x="90" y="69" width="3" height="20"/><text class="val" x="100" y="84">0</text>
+      <text class="axis" x="80" y="111" text-anchor="end">30k</text> <rect class="good" x="90" y="97" width="186" height="20" rx="2"/><text class="val" x="284" y="112">6</text>
+      <text class="axis" x="80" y="139" text-anchor="end">40k</text> <rect class="good" x="90" y="125" width="4" height="20"/><text class="val" x="101" y="140">0.1</text>
+      <text class="axis" x="80" y="167" text-anchor="end">50k</text> <rect class="good" x="90" y="153" width="168" height="20" rx="2"/><text class="val" x="266" y="168">6</text>
+      <text class="axis" x="80" y="195" text-anchor="end">100k</text><rect class="warn" x="90" y="181" width="300" height="20" rx="2" opacity=".35"/><text class="val" x="100" y="196">unverified</text>
+    </svg>
+    <div class="warnline">100k: computer was too busy for a fair run. Re-test pending.</div>
   </div>
-</section>
 
-<section>
-  <div class="big">
-    <div class="stat"><b>2.6 million</b><span>letters delivered per second<br>with 1,000 mailboxes open</span></div>
-    <div class="stat"><b>0 lost</b><span>out of 100 million letters<br>at 1,000, 10,000 and 20,000 mailboxes</span></div>
-    <div class="stat"><b>50,000</b><span>mailboxes served at once<br>with 99.4% delivered</span></div>
-    <div class="stat"><b>3×</b><span>faster than a week ago<br>thanks to a bug this testing found</span></div>
+</div>
+
+<div class="row c2">
+
+  <div class="card">
+    <h3>Bug found and fixed</h3>
+    <p>Updates per second, before and after.</p>
+    <svg viewBox="0 0 460 200" role="img" aria-label="Before and after the fix">
+      <text x="115" y="18" text-anchor="middle" font-weight="700">1,000 devices</text>
+      <line class="grid" x1="40" y1="175" x2="190" y2="175"/>
+      <rect class="faint" x="55" y="128.7" width="50" height="46.3" rx="3"/><text class="val" x="80" y="121" text-anchor="middle">833k</text>
+      <rect class="bar" x="125" y="29.5" width="50" height="145.5" rx="3"/><text class="val" x="150" y="22" text-anchor="middle" style="display:none">2.6M</text>
+      <text class="val" x="115" y="105" text-anchor="middle" fill="#1f8a4c" font-size="22">3×</text>
+      <text class="axis" x="80" y="194" text-anchor="middle">before</text><text class="axis" x="150" y="194" text-anchor="middle">after · 2.6M</text>
+
+      <text x="345" y="18" text-anchor="middle" font-weight="700">10,000 devices</text>
+      <line class="grid" x1="270" y1="175" x2="420" y2="175"/>
+      <rect class="faint" x="285" y="166.5" width="50" height="8.5" rx="2"/><text class="val" x="310" y="159" text-anchor="middle">26k</text>
+      <rect class="bar" x="355" y="33.7" width="50" height="141.3" rx="3"/>
+      <text class="val" x="345" y="105" text-anchor="middle" fill="#1f8a4c" font-size="22">16×</text>
+      <text class="axis" x="310" y="194" text-anchor="middle">before</text><text class="axis" x="380" y="194" text-anchor="middle">after · 424k</text>
+    </svg>
   </div>
-</section>
 
-<section>
-  <div class="row c2">
-
-    <div class="card chart">
-      <h3>Delivery speed as more mailboxes open</h3>
-      <p>Letters delivered per second. More mailboxes = each letter has to be copied more times, so speed per second naturally falls.</p>
-      <svg viewBox="0 0 460 235" role="img" aria-label="Bar chart of delivery speed per second by number of mailboxes">
-        <line class="grid" x1="28" y1="40" x2="450" y2="40"/><text class="axis" x="452" y="43" text-anchor="end">2.7M</text>
-        <line class="grid" x1="28" y1="115" x2="450" y2="115"/><text class="axis" x="452" y="118" text-anchor="end">1.35M</text>
-        <line class="grid" x1="28" y1="190" x2="450" y2="190"/>
-        <!-- scale: 150px = 2.7M -->
-        <rect class="bar" x="30" y="44.5" width="50" height="145.5" rx="3"/><text class="val" x="55" y="38" text-anchor="middle">2,618,601</text><text class="axis" x="55" y="208" text-anchor="middle">1,000</text>
-        <rect class="bar" x="102" y="69.9" width="50" height="120.1" rx="3"/><text class="val" x="127" y="63" text-anchor="middle">2,162,135</text><text class="axis" x="127" y="208" text-anchor="middle">10,000</text>
-        <rect class="bar" x="174" y="135.1" width="50" height="54.9" rx="3"/><text class="val" x="199" y="129" text-anchor="middle">988,044</text><text class="axis" x="199" y="208" text-anchor="middle">20,000</text>
-        <rect class="bar" x="246" y="169.3" width="50" height="20.7" rx="3"/><text class="val" x="271" y="163" text-anchor="middle">≈372,000</text><text class="axis" x="271" y="208" text-anchor="middle">30,000</text>
-        <rect class="bar" x="318" y="167.8" width="50" height="22.2" rx="3"/><text class="val" x="343" y="161" text-anchor="middle">399,969</text><text class="axis" x="343" y="208" text-anchor="middle">40,000</text>
-        <rect class="bar" x="390" y="167" width="50" height="23" rx="3"/><text class="val" x="415" y="161" text-anchor="middle">414,312</text><text class="axis" x="415" y="208" text-anchor="middle">50,000</text>
-        <text class="axis" x="240" y="228" text-anchor="middle">mailboxes open at the same time</text>
-      </svg>
-    </div>
-
-    <div class="card chart">
-      <h3>Letters lost, per 1,000 sent</h3>
-      <p>Lower is better. Zero means every single letter arrived.</p>
-      <svg viewBox="0 0 460 235" role="img" aria-label="Horizontal bar chart of letters lost per thousand by number of mailboxes">
-        <!-- scale: 300px = 10 per 1,000; bars start x=90 -->
-        <line class="grid" x1="90" y1="8" x2="90" y2="200"/>
-        <line class="grid" x1="240" y1="8" x2="240" y2="200"/><text class="axis" x="240" y="214" text-anchor="middle">5</text>
-        <line class="grid" x1="390" y1="8" x2="390" y2="200"/><text class="axis" x="390" y="214" text-anchor="middle">10</text>
-        <text class="axis" x="90" y="214" text-anchor="middle">0</text>
-        <text class="axis" x="240" y="230" text-anchor="middle">letters lost per 1,000 sent</text>
-
-        <text x="82" y="26" text-anchor="end">1,000</text>   <rect class="bar good" x="90" y="14" width="2" height="18"/><text class="val" x="98" y="27">0 — none lost</text>
-        <text x="82" y="54" text-anchor="end">10,000</text>  <rect class="bar good" x="90" y="42" width="2" height="18"/><text class="val" x="98" y="55">0 — none lost</text>
-        <text x="82" y="82" text-anchor="end">20,000</text>  <rect class="bar good" x="90" y="70" width="2" height="18"/><text class="val" x="98" y="83">0 — none lost</text>
-        <text x="82" y="110" text-anchor="end">30,000</text> <rect class="bar good" x="90" y="98" width="186" height="18" rx="2"/><text class="val" x="282" y="111">6.2</text>
-        <text x="82" y="138" text-anchor="end">40,000</text> <rect class="bar good" x="90" y="126" width="3" height="18"/><text class="val" x="99" y="139">0.1</text>
-        <text x="82" y="166" text-anchor="end">50,000</text> <rect class="bar good" x="90" y="154" width="168" height="18" rx="2"/><text class="val" x="264" y="167">5.6</text>
-        <text x="82" y="194" text-anchor="end">100,000</text><rect class="bar warn" x="90" y="182" width="300" height="18" rx="2" opacity=".35"/><text class="val" x="98" y="195">not yet reliable — see note</text>
-      </svg>
-      <p class="note"><b>100,000 mailboxes:</b> one run delivered 99.9%, another only 20%. Every bad run happened while the computer was busy with other work, so we don't trust either number yet. It needs a re-run on a quiet machine.</p>
-    </div>
-
+  <div class="card">
+    <h3>Keep in mind</h3>
+    <ul>
+      <li>Simulated data source, one machine.</li>
+      <li>30k+ figures are lower bounds.</li>
+      <li>100k result not yet trustworthy.</li>
+      <li>No like-for-like PowerSync number exists yet.</li>
+    </ul>
   </div>
-</section>
 
-<section>
-  <div class="row c2">
+</div>
 
-    <div class="card chart">
-      <h3>A real bug this testing found — and fixed</h3>
-      <p>For every letter, the server used to start one separate chore <i>per mailbox</i> — 10,000 chores per letter at 10,000 mailboxes. We changed it to one pass over all mailboxes.</p>
-      <svg viewBox="0 0 460 200" role="img" aria-label="Before and after bar charts for the fan-out fix">
-        <!-- left panel: 1,000 mailboxes, scale 150px = 2.7M -->
-        <text x="115" y="16" text-anchor="middle" font-weight="600">1,000 mailboxes</text>
-        <line class="grid" x1="40" y1="175" x2="190" y2="175"/>
-        <rect class="bar faint" x="55" y="128.7" width="50" height="46.3" rx="3"/><text class="val" x="80" y="123" text-anchor="middle">833,307</text><text class="axis" x="80" y="190" text-anchor="middle">before</text>
-        <rect class="bar" x="125" y="29.5" width="50" height="145.5" rx="3"/><text class="val" x="150" y="24" text-anchor="middle">2,618,601</text><text class="axis" x="150" y="190" text-anchor="middle">after</text>
-        <text class="val" x="115" y="112" text-anchor="middle" fill="#1f8a4c" font-size="14">3.1× faster</text>
-        <!-- right panel: 10,000 mailboxes probe, scale 150px = 450k -->
-        <text x="345" y="16" text-anchor="middle" font-weight="600">10,000 mailboxes</text>
-        <line class="grid" x1="270" y1="175" x2="420" y2="175"/>
-        <rect class="bar faint" x="285" y="166.5" width="50" height="8.5" rx="2"/><text class="val" x="310" y="160" text-anchor="middle">25,600</text><text class="axis" x="310" y="190" text-anchor="middle">before</text>
-        <rect class="bar" x="355" y="33.7" width="50" height="141.3" rx="3"/><text class="val" x="380" y="28" text-anchor="middle">424,000</text><text class="axis" x="380" y="190" text-anchor="middle">after</text>
-        <text class="val" x="345" y="112" text-anchor="middle" fill="#1f8a4c" font-size="14">16× faster</text>
-      </svg>
-      <div class="legend"><span><i style="background:#9db4ee"></i>before the fix</span><span><i style="background:#2f5fd0"></i>after the fix</span><span>letters per second</span></div>
-    </div>
-
-    <div class="card">
-      <h3>Honest caveats</h3>
-      <ul>
-        <li>The letters came from a <b>simulator</b>, not a live database. A separate real-database test delivers about 35,000 updates per second end-to-end — a different measurement, not comparable to the charts.</li>
-        <li>Everything ran on <b>one machine</b>. A real deployment spreads the load across several.</li>
-        <li>Numbers at 30,000 mailboxes and above are <b>lower bounds</b>: the test rig couldn't open every mailbox in time, and the runs stopped at a fixed time limit.</li>
-        <li><b>PowerSync</b> publishes no comparable figure for this stage of the pipeline, so there is no apples-to-apples comparison yet. A head-to-head test is designed but on hold.</li>
-      </ul>
-    </div>
-
-  </div>
-</section>
-
-<footer>
-  Full data and method: <code>benches/results/RESULTS.md</code>, <code>docs/BENCHMARK-METHODOLOGY.md</code>, <code>docs/plans/fanout-100k-cliff-diagnosis.md</code>. All figures measured 2 Sept 2026 on a 10-core Apple Silicon Mac; Linux runs in a Docker container on the same machine. 30,000-mailbox speed is the first run (≈372k/s); a re-run gave 359,587/s.
-</footer>
+<footer>Full data: benches/results/RESULTS.md · 10-core Apple Silicon Mac, Linux runs in Docker on the same machine.</footer>
 
 </div>
 </body>
