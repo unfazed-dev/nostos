@@ -127,11 +127,18 @@ disk lever).
   on their own. If `developer_ssd` is unmounted at shell start, the sweep
   logs an error and the `~/.gradle` / `~/.pub-cache` symlinks dangle —
   loud, not silent.
-- Not verified end-to-end in this session: (a) `native_toolchain_rust` /
-  `flutter build` for `sdk/nostos_flutter` (reasoned safe: it passes its own
-  `--target-dir`); (b) an IDE-launched Gradle daemon (Android Studio)
-  reaching the symlinked `~/.gradle` on the removable volume. Both are
-  checked the first time those builds run.
+- Verified 2026-09-02, after the move:
+  - `sdk/nostos_flutter/rust` for `aarch64-apple-darwin` honours the
+    build-dir (intermediates in `cargo-build/12/b970ea0b2e12c7/`, final
+    `libnostos_flutter_rust.dylib` in the crate's `target/`). The example
+    app's `flutter build macos --debug` fails in `ring`'s C build script
+    (`TargetConditionals.h` not found under the Xcode script-phase env) —
+    reproduced identically with `build-dir` disabled, so it is a
+    pre-existing, unrelated bug; tracked separately.
+  - Android Studio's own Gradle daemon (parent = `studio`) starts with
+    `daemonRegistryDir=/Volumes/developer_ssd/dev/.gradle` through the
+    `~/.gradle` symlink and writes its caches there with zero
+    permission errors — the IDE has the removable-volume grant.
 
 ## References
 
