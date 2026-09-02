@@ -319,6 +319,15 @@ reconnected. The decrement at `store.rs:238` funnels *every* removal path
 underflow, and is gated on `if let Some(stored) = removed` so a double-remove
 cannot double-decrement — read first, then confirmed empirically here.
 
+**Superseded 2026-09-02 (fixed fan-out, commit `d3a49f0`).** After the
+sequential + Arc-shared fan-out landed, the same 3-pass native recipe measured
+**2,682,508 / 2,618,601 / 2,515,049 ops/sec, 0.00% drops, 100M/100M delivered
+in 37–40 s** — median 2,618,601, 3.14× the run-3 median below; headline updated
+in RESULTS.md / README / CLAUDE.md / STRATEGY.md. The macOS 10k soak was
+inconsistent (64.73% drops at load 10.74, then 0.00% / 2.13M ops/sec at load
+4.47), so macOS 10k is still not claimed; the Linux-container 10k (50M/50M,
+0.00%) is the authoritative <1% result. Raw: `benches/results/raw/2026-09-02-fixed/`.
+
 **Throughput re-measure + 10k soak — MEASURED 2026-09-02 (run 3).** The 252,797
 ops/sec in the table above was taken under host contention and is not the
 number; two same-day re-measure attempts were also thrown out as contended

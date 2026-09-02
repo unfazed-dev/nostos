@@ -16,7 +16,12 @@ PowerSync publishes no comparable aggregate fan-out figure. Its published rates 
 
 | Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | PS comparator |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1000 | 833,307 | 0.00% | 0.00 | 0.00 | 99997513 | **none published** |
+| 1000 | 2,618,601 | 0.00% | 0.006 | 0.034 | 100000000 | **none published** |
+
+Median of 3 passes on the fixed fan-out, 2026-09-02 (spread 2,515,049–2,682,508) — see
+[Native re-measure on the fixed fan-out](#native-re-measure-on-the-fixed-fan-out--measured-2026-09-02).
+The previous headline, 833,307 ops/sec (old fan-out, 99,997,513 delivered, window-bound at 120 s),
+is preserved in the sections below as the historical baseline.
 
 ## Interpretation
 
@@ -27,7 +32,7 @@ PowerSync publishes no comparable aggregate fan-out figure. Its published rates 
 > ~42 events/sec floor remains explicitly NOT that number (test-driver-bound,
 > see ADR-0025 caveat below).
 
-- **Peak sustained throughput: 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
+- **Peak sustained throughput: 2,618,601 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (median of 3, 2026-09-02, fixed fan-out; was 833,307 on the old fan-out) (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
 - **Max drop rate across runs: 0.00%** (lower is better; >1% is flagged as not fully honest throughput in the methodology).
 - The synthetic `FakeReplicator` generates events faster than the router pushes them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. Real `pgoutput` parsing cost is added in Week 2.
 
@@ -304,6 +309,54 @@ runs the two builds are within 8% (a run that short is mostly connect/subscribe
 time); on the longer 20k-event pairs, where steady-state fan-out dominates, the
 fixed build is 1.6–2.3× faster. No 1k regression.
 
-Not re-measured here: the macOS-native 3-pass `nostos-bench` headline on the
-fixed build. The 833,307 figure above was measured on the old fan-out and is
-now a floor; the native re-run is a pending item (`docs/plans/close-soak-10k-open-items.md` item 3).
+The macOS-native 3-pass headline on the fixed build is in the next section.
+
+## Native re-measure on the fixed fan-out — MEASURED 2026-09-02
+
+Same harness, same config as the 833,307 baseline (`make bench`: 1,000
+clients, 100,000 events, per-session buffer 1024, `--release`), same host,
+run on commit `d3a49f0` (Arc-shared event + sequential deliver, both landed
+above). Recipe: `benches/scripts/remeasure.sh`; raw logs
+`benches/results/raw/2026-09-02-fixed/`, per-pass JSON
+`benches/results/remeasure-2026-09-02-fixed/pass{1,2,3}/`.
+
+**Environment** (`env.txt`): Mac16,13, 10 cores, macOS 26.6.2, rustc 1.95.0,
+`ulimit -n` 1,048,576, load at start 2.48 (orphan `node` procs killed, VS Code
+closed; `dirty_files=1` = the untracked remeasure script). Load rose to 8–10
+during passes 2–3 — that is the bench itself saturating the 10 cores, not a
+foreign process.
+
+| pass | load (1/5/15 at start) | delivered / attempted | drop% | elapsed | ops/sec |
+|---|---|---|---|---|---|
+| 1 | 2.48 / 3.92 / 4.84 | 100,000,000 / 100,000,000 | 0.00000% | 37.28 s | 2,682,508 |
+| 2 | 8.21 / 5.22 / 5.24 | 100,000,000 / 100,000,000 | 0.00000% | 38.19 s | 2,618,601 |
+| 3 | 10.00 / 6.05 / 5.54 | 100,000,000 / 100,000,000 | 0.00000% | 39.76 s | 2,515,049 |
+
+**Median 2,618,601 ops/sec, spread 2,515,049–2,682,508 (6.4%), 0.00% drops,
+every event delivered in every pass.** Same-stage, same-units, same-host
+comparison to the old fan-out's 833,305 median (run 3, 2026-09-02, spread
+5 ops/sec): **3.14× faster.** The old build was window-bound — it did not
+finish the 100M deliveries inside the 120 s `BENCH_TIMEOUT` (99,997,513
+delivered at 120.0 s); the fixed build drains all 100M in 37–40 s, so the
+elapsed time — not the window — now sets the rate. The 6.4% spread is wider
+than the old ±5% band; passes 2–3 ran on a host already loaded by pass 1's
+teardown, so the median (not pass 1) is the headline.
+
+**macOS 10k soak (`nostos-bench-10k 10000 5000 60`, two back-to-back runs):**
+
+| soak | load at start | delivered / attempted | drop% | router dropped | not reached in window | elapsed | ops/sec |
+|---|---|---|---|---|---|---|---|
+| 1 | 10.74 | 17,634,618 / 50,000,000 | 64.73% | 908,331 | 28,160,000 | 60.00 s | 293,900 |
+| 2 | 4.47 | 50,000,000 / 50,000,000 | 0.00% | 0 | 0 | 23.44 s | 2,133,208 |
+
+Both soaks reached quorum (10,000 connected / 10,000 subscribed, 0 connect
+failures). Soak 1, started at load 10.74 immediately after bench pass 3, shed
+908k events at the router and left 28M unreached in the window; soak 2, 90 s
+later at load 4.47, delivered everything in 23 s. **The macOS 10k soak is
+therefore inconsistent (1 of 2 clean) and is NOT claimed as met on macOS.**
+The authoritative <1%-drop 10k result stays the Linux-container run above
+(50M/50M, 0.00%, 854,631 ops/sec, commit `d3a49f0`); the macOS 10k regime
+remains flagged for the ~9.2k-socket ENOBUFS limit and this cold-start
+sensitivity (`docs/plans/close-soak-10k-open-items.md` item 2).
+
+The 833,307 figure is preserved above as the old-fan-out historical baseline.

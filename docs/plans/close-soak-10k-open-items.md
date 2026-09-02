@@ -67,6 +67,22 @@ headline (docs/BENCHMARK-METHODOLOGY.md same-env rule).
 4. Headline (README / CLAUDE.md) changes only if the 1k native median moves outside the
    3-pass spread of the 2026-09-02 re-measure.
 
+**Result (macOS native, commit `d3a49f0`, `benches/results/raw/2026-09-02-fixed/`).**
+- 3 × `make bench`: **2,682,508 / 2,618,601 / 2,515,049 ops/sec, 0.00% drops,
+  100M/100M delivered, 37–40 s** (old build: 833,305 median, window-bound at 120 s).
+  Median 2,618,601, spread 6.4% — far outside the old 5 ops/sec spread, so the
+  headline moved (RESULTS.md table, README, CLAUDE.md, STRATEGY.md); 833,307 kept
+  as historical.
+- 2 × 10k soak: soak 1 (load 10.74, straight after bench pass 3) 64.73% drops,
+  router dropped 908,331; soak 2 (load 4.47, 90 s later) 50M/50M, 0.00%,
+  2,133,208 ops/sec. Inconsistent → macOS 10k NOT claimed; Linux-container
+  result (item 1) stays the authoritative <1% figure; item 2 stays open for
+  macOS.
+- Step 2 (Linux container 2 × 10k soak): the item-1 Linux run already covers one
+  pass; a second same-container pass is not yet recorded.
+- Step 3: RESULTS.md new section done; ROADMAP / BENCHMARK-METHODOLOGY updated in
+  the same commit if a matching line exists (see commit).
+
 ## Exit criteria
 
 - `make ci` green.
