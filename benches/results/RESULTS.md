@@ -470,8 +470,13 @@ arriving; gives up after a 5 s stall or a per-tier ceiling) and reports
 on the delivery/drop axis: every event the router matched was delivered
 (`matched == delivered`, `router dropped = 0`, `connect_failed = 0`, all clients
 subscribed by window end), and the shortfall is exactly the late subscribers'
-pre-subscribe events (40k: 120 × 333 = 40,000; 50k: 3,692 × ~393 = 1,450,000 —
-`not_reached_in_window` matches to the event). Nothing was shed. **200k and
+pre-subscribe events (40k: 13,920 = 120 late × ~116 each; 50k: 1,411,815 =
+3,692 late × ~382 each — i.e. `subscribed × events − matched`). *Correction
+(`198bafb`): the `not_reached_in_window` figures this paragraph first quoted
+(40,000 and 1,450,000) came from the probe's breakdown line, which divided
+`matched ÷ subscribed` as an integer before multiplying back and so printed one
+lost event per client; the delivered/attempted counts in the table were never
+affected.* Nothing was shed. **200k and
 250k concurrent deliveries per event, <1% drops, ≤2.2 GiB RSS, no server-side
 limit** is the honest statement for those tiers.
 
@@ -497,3 +502,20 @@ The script's second pass did not run: its criterion was `completed=true`, which
 no ≥30k tier can reach while `attempted` counts late subscribers' events. Two
 harness follow-ups: (1) record the fan-out finish time so ops/sec at ≥30k is a
 measurement; (2) key the pass-2 criterion on drop% <1% rather than `completed`.
+
+**Both follow-ups landed in `31a49ff`** (2026-09-02): the probe stops the window
+when `delivered == matched − dropped − faulted` with the replicator drained and
+prints `elapsed_to_finish` + `ops/sec (finish)`; the ladder script keys pass 2 on
+`drop% < 1`. Validation run, same container recipe via `benches/scripts/linux-soak.sh`,
+20k clients / 300 events / 120 s window, host load1 3.30 at start: quorum 23.05 s at
+19,912/20,000 (stall rule), 19,954 subscribed by the end (42 late, 46 never
+connected), `matched = delivered = 5,976,330`, router dropped 0, drop% 0.39,
+**`elapsed_to_finish` 6.84 s, 873,470 ops/sec (finish)** — the probe exited at
+6.84 s instead of running to 120 s. Same regime as the 20k/5000 ladder row above
+(988,044 ops/sec at 0.00%); the 0.39% here is the 46 never-connected clients
+(13,800 events) plus the 42 late subscribers' pre-subscribe events (9,870), which
+sum to the 23,670 undelivered exactly. Caveat: a first attempt at 20k/1000 on a
+host at load1 35–48 delivered 13.3M/20M at 111,196 ops/sec and ran to the window;
+that was host load (desktop apps, a VPN and an Xcode clone), not the harness — the
+container env line was identical. The ≥30k tiers above have **not** been re-run
+with the finish-time probe; their ops/sec column stays a lower bound until they are.

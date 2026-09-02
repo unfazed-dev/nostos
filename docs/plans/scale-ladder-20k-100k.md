@@ -107,4 +107,23 @@ so no second pass ran. Next: (1) record fan-out finish time in the probe,
 (2) key pass 2 on drop% <1%, (3) investigate the 100k fan-out collapse
 (memory pressure vs 2-listener split vs sequential loop over 100k writers).
 
+**(1) and (2) done — `31a49ff`** (2026-09-02). The probe now stops the window the
+instant `delivered == matched − dropped − faulted` with the replicator drained
+(the last *reachable* delivery; late subscribers' pre-subscribe events are
+excluded), prints `[diag] finish: ... elapsed_to_finish=` plus `ops/sec (finish)`,
+and the ladder script keys pass 2 on `drop% < 1` and prints `elapsed_to_finish`.
+Validated on the container recipe at 20k clients / 300 events / 120 s window, host
+load1 3.30 (`benches/scripts/linux-soak.sh`, run 2026-09-02 22:23): quorum 23.05 s
+at 19,912/20,000 (stall rule), 19,954 subscribed by the end (42 late, 46 never
+connected), `matched = delivered = 5,976,330`, router dropped 0, **drop% 0.39,
+`elapsed_to_finish` 6.84 s, 873,470 ops/sec (finish)** — the probe exited at 6.84 s
+of the 120 s window. A first attempt at 20k/1000 on a host at load1 35–48 ran to
+the window at 111k ops/sec; that was host load, not the change (same recipe, same
+binary line, idle host → ~873k). Follow-up `198bafb`: the
+`[diag] undelivered breakdown` line was computing `subscribed × (events −
+matched ÷ subscribed)` with integer division, so it printed one lost event per
+client (19,954) instead of the real 9,870; it now splits `attempted − delivered`
+exactly into never-connected × events, pre-subscribe loss, router dropped/faulted
+and in-flight, and the terms are asserted to sum in a unit test. (3) still open.
+
 Not done from step 4: no ROADMAP edit — it has no dedicated 10k line to update.
