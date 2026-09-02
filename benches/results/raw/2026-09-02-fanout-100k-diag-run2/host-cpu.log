@@ -1,0 +1,22 @@
+22:34:08 load={ 5.75 9.41 13.42 } | WindowServer=45.6% Brave=29.1% 
+22:34:18 load={ 5.10 9.15 13.28 } | WindowServer=43.1% Brave=29.0% 
+22:34:28 load={ 4.39 8.86 13.13 } | WindowServer=39.3% claude=39.2% 
+22:34:38 load={ 9.14 9.74 13.40 } | node=108.6% WindowServer=40.0% node=20.7% 
+22:34:48 load={ 9.23 9.74 13.36 } | Google=49.3% WindowServer=46.7% ctkd=35.8% ch.protonvpn.mac.WireGuard-Extension=35.0% Brave=23.7% 
+22:34:58 load={ 8.84 9.64 13.27 } | Google=57.6% Visual=49.4% WindowServer=43.0% syspolicyd=28.6% Brave=24.6% 
+22:35:08 load={ 9.29 9.71 13.26 } | node=94.0% WindowServer=46.5% ch.protonvpn.mac.WireGuard-Extension=46.2% Brave=22.1% 
+22:35:18 load={ 8.32 9.49 13.14 } | WindowServer=38.1% ch.protonvpn.mac.WireGuard-Extension=27.6% 
+22:35:28 load={ 9.36 9.67 13.16 } | WindowServer=40.0% claude=21.7% 
+22:35:38 load={ 10.02 9.80 13.16 } | WindowServer=39.8% ch.protonvpn.mac.WireGuard-Extension=32.8% 
+22:35:49 load={ 10.49 9.91 13.16 } | node=86.3% WindowServer=40.3% 
+22:35:59 load={ 11.76 10.20 13.23 } | WindowServer=38.5% syspolicyd=32.5% ch.protonvpn.mac.WireGuard-Extension=30.2% 
+22:36:09 load={ 11.29 10.16 13.18 } | WindowServer=36.6% 
+22:36:19 load={ 11.79 10.30 13.19 } | WindowServer=37.8% 
+22:36:29 load={ 11.90 10.38 13.19 } | Visual=58.5% WindowServer=38.5% 
+22:36:39 load={ 11.36 10.31 13.13 } | WindowServer=37.6% Visual=36.3% 
+22:36:49 load={ 11.39 10.35 13.11 } | Visual=61.1% secd=40.3% WindowServer=38.4% Google=38.3% 
+22:36:59 load={ 11.61 10.44 13.11 } | WindowServer=40.1% Google=39.8% ch.protonvpn.mac.WireGuard-Extension=29.6% syspolicyd=22.7% ctkd=21.7% 
+22:37:09 load={ 10.98 10.34 13.04 } | WindowServer=42.9% secd=33.4% ch.protonvpn.mac.WireGuard-Extension=28.0% node=23.7% 
+22:37:19 load={ 11.06 10.38 13.02 } | WindowServer=42.9% Google=30.8% ctkd=25.8% 
+22:37:29 load={ 11.63 10.53 13.05 } | WindowServer=42.8% ch.protonvpn.mac.WireGuard-Extension=34.8% Brave=20.4% 
+22:37:39 load={ 11.05 10.44 12.99 } | WindowServer=41.7% Brave=28.9% 

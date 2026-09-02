@@ -1,0 +1,13 @@
+BUILD start 12:07:07 tag=fanout-diag
+   Compiling nostos-infra v0.2.0 (/src/crates/nostos-infra)
+   Compiling nostos-bench v0.2.0 (/src/crates/nostos-bench)
+    Finished `release` profile [optimized] target(s) in 3m 02s
+BUILD ok 12:10:12
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 mem=8124512kB swap=1048572kB tcp_rmem=4096-131072-33554432 tcp_wmem=4096-16384-4194304
+SOAK start 12:10:12 clients=100000 events=500 window=300 ack=1 listeners=2
+  [diag] listeners: ws://127.0.0.1:2599/sync ws://127.0.0.2:17291/sync
+[sys] 12:10:12 tcp_alloc=12 tcp_mem_pages=170 PruneCalled=19 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:7162M SwapFree:1023M Dirty:315M Slab:101M psi_mem=avg60=0.00 psi_cpu=avg60=9.61 load=5.39,2.47,0.97 cpu_u=34138 n=0 s=5065 i=128895 io=4327 irq=0 sirq=557
+[sys] 12:10:17 tcp_alloc=101202 tcp_mem_pages=53674 PruneCalled=19 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5848M SwapFree:1023M Dirty:315M Slab:568M psi_mem=avg60=0.00 psi_cpu=avg60=9.09 load=5.75,2.59,1.02 cpu_u=34238 n=0 s=9043 i=129114 io=4330 irq=0 sirq=633
+[sys] 12:10:22 tcp_alloc=115023 tcp_mem_pages=58026 PruneCalled=19 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5717M SwapFree:1023M Dirty:74M Slab:623M psi_mem=avg60=0.00 psi_cpu=avg60=8.38 load=6.02,2.70,1.07 cpu_u=34267 n=0 s=13040 i=129292 io=4330 irq=0 sirq=668
+[sys] 12:10:27 tcp_alloc=125879 tcp_mem_pages=68010 PruneCalled=19 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5646M SwapFree:1023M Dirty:75M Slab:677M psi_mem=avg60=0.00 psi_cpu=avg60=7.87 load=6.33,2.82,1.12 cpu_u=34292 n=0 s=17411 i=129530 io=4330 irq=0 sirq=683
+[sys] 12:10:32 tcp_alloc=158566 tcp_mem_pages=42154 PruneCalled=19 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4251M SwapFree:1023M Dirty:75M Slab:811M psi_mem=avg60=0.00 psi_cpu=avg60=7.22 load=6.63,2.94,1.16 cpu_u=34653 n=0 s=20166 i=131017 io=4330 irq=0 sirq=815
