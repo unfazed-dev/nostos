@@ -97,10 +97,18 @@ Decision table:
 
 ## Numbers (every measurement, valid or not)
 
-Headroom rule: a measurement is VALID only if host load1 < 8 (0.8 × 10
-cores) at start and no other bench container was up. `load1` here is the
-macOS host's (`sysctl vm.loadavg`), not the VM's `/proc/loadavg` (the
-`[sys]` lines carry the VM's).
+Headroom rule (agreed with the coordinator 2026-09-02):
+
+- START gate: host load1 < 8 (0.8 × 10 cores, the pre-VM baseline) and no
+  other bench container up.
+- MID-RUN validity: no non-harness process > 20% CPU on any 10 s sample
+  (`host-cpu.log`). load1 is recorded alongside (`host-load1.log`) but a run
+  is NOT invalidated on load1 alone — the 10-vCPU harness VM itself adds ~4–5
+  while fanning out, so "load1 < 8 for the whole run" is unreachable by
+  design. That is why a row with load1 = 12 mid-run can still be VALID.
+
+`load1` here is the macOS host's (`sysctl vm.loadavg`), not the VM's
+`/proc/loadavg` (the `[sys]` lines carry the VM's).
 
 | run | tier | host load1 start → end | s/event | events fanned | peak RSS | verdict |
 |---|---|---|---|---|---|---|
@@ -201,7 +209,11 @@ at load1 5.41 (gate passed); load1 crossed 8 at ≈22:29 and reached 15.0 at
 22:30:45; killed at t≈330 s. Non-harness processes at kill time: WindowServer
 41% CPU, Brave 19.5%, two claude agents 19%/17.5% (Docker VM itself 440%).
 
-Partial numbers, kept per the headroom rule but NOT evidence either way:
+Partial numbers, kept per the headroom rule. **Suggestive, not a verdict**:
+the bend coinciding with host load crossing 8, with guest idle RISING while
+throughput fell, is the single strongest pointer so far that the ladder's
+100k "cliff" was scheduler starvation of the VM rather than the fan-out
+loop — but this attempt was contaminated and cannot prove it.
 
 | span | matched Δ | events (≈100k subscribed) | s/event |
 |---|---|---|---|
