@@ -271,34 +271,47 @@ async fn run(
     let delivered = sum();
     let attempted = events.saturating_mul(clients as u64).max(1);
     {
-        let subscribed = conn.subscribed.load(Ordering::Relaxed).max(1);
+        let subscribed = conn.subscribed.load(Ordering::Relaxed);
         let matched = metrics.matched.load(Ordering::Relaxed);
+        let dropped = metrics.dropped.load(Ordering::Relaxed);
+        let faulted = metrics.faulted.load(Ordering::Relaxed);
+        let undelivered = undelivered_breakdown(
+            clients as u64,
+            subscribed,
+            events,
+            matched,
+            dropped,
+            faulted,
+            delivered,
+        );
+        // Until the replicator is drained the pre-subscribe term also holds
+        // events that simply have not been fanned out yet; say so in the label.
+        let pre_subscribe_label = if fanout_done {
+            "pre_subscribe_loss"
+        } else {
+            "pre_subscribe_or_not_yet_fanned_out"
+        };
         eprintln!(
-            "  [diag] at window end: connected={} subscribed={} connect_failed={} \
+            "  [diag] at window end: connected={} subscribed={subscribed} connect_failed={} \
              subscribed_at_start={subscribed_at_start} late_subscribers={} \
              (late subscribers' pre-subscribe events stay in the drop count)\n  \
-             [diag] router: matched={} delivered={} dropped={} faulted={} \
+             [diag] router: matched={matched} delivered={} dropped={dropped} faulted={faulted} \
              events_fanned_out~={} (matched/subscribed)\n  \
-             [diag] undelivered breakdown: never_connected={} not_reached_in_window={} \
-             router_dropped={} in_flight_or_unaccounted={}",
+             [diag] undelivered breakdown (events): never_connected_x_events={} \
+             {pre_subscribe_label}={} router_dropped={} router_faulted={} \
+             in_flight_or_unaccounted={} sum={} (attempted-delivered={})",
             conn.connected.load(Ordering::Relaxed),
-            conn.subscribed.load(Ordering::Relaxed),
             conn.connect_failed.load(Ordering::Relaxed),
-            conn.subscribed
-                .load(Ordering::Relaxed)
-                .saturating_sub(subscribed_at_start),
-            matched,
+            subscribed.saturating_sub(subscribed_at_start),
             metrics.delivered.load(Ordering::Relaxed),
-            metrics.dropped.load(Ordering::Relaxed),
-            metrics.faulted.load(Ordering::Relaxed),
-            matched / subscribed,
-            (clients as u64).saturating_sub(subscribed) * events,
-            subscribed * events.saturating_sub(matched / subscribed),
-            metrics.dropped.load(Ordering::Relaxed),
-            metrics
-                .delivered
-                .load(Ordering::Relaxed)
-                .saturating_sub(delivered),
+            matched / subscribed.max(1),
+            undelivered.never_connected,
+            undelivered.pre_subscribe_loss,
+            undelivered.router_dropped,
+            undelivered.router_faulted,
+            undelivered.in_flight_or_unaccounted,
+            undelivered.total(),
+            attempted.saturating_sub(delivered),
         );
     }
     let drop_rate = 1.0 - (delivered as f64 / attempted as f64);
@@ -349,9 +362,87 @@ fn reachable_deliveries(matched: u64, dropped: u64, faulted: u64) -> u64 {
     matched.saturating_sub(dropped).saturating_sub(faulted)
 }
 
+/// Where `attempted − delivered` went, every term in *events* (never clients)
+/// so the five sum to `attempted − delivered` exactly, saturation aside.
+#[derive(Debug, PartialEq, Eq)]
+struct Undelivered {
+    /// Clients that never subscribed: all `events` of each are lost.
+    never_connected: u64,
+    /// `subscribed × events − matched`: events fanned out before a late
+    /// subscriber arrived. While the replicator is still draining this also
+    /// holds events not yet fanned out at all.
+    pre_subscribe_loss: u64,
+    router_dropped: u64,
+    router_faulted: u64,
+    /// Matched and not shed by the router, but not yet counted by a client:
+    /// sitting in a sink buffer or a socket.
+    in_flight_or_unaccounted: u64,
+}
+
+impl Undelivered {
+    fn total(&self) -> u64 {
+        self.never_connected
+            .saturating_add(self.pre_subscribe_loss)
+            .saturating_add(self.router_dropped)
+            .saturating_add(self.router_faulted)
+            .saturating_add(self.in_flight_or_unaccounted)
+    }
+}
+
+/// Splits `clients × events − delivered` into [`Undelivered`] terms. The
+/// pre-2026-09-02 version divided `matched / subscribed` first (integer
+/// events-per-client) and multiplied back, so 9,870 lost deliveries at 20k
+/// clients printed as 19,954 — one per client — and the terms never summed.
+fn undelivered_breakdown(
+    clients: u64,
+    subscribed: u64,
+    events: u64,
+    matched: u64,
+    dropped: u64,
+    faulted: u64,
+    delivered: u64,
+) -> Undelivered {
+    Undelivered {
+        never_connected: clients.saturating_sub(subscribed).saturating_mul(events),
+        pre_subscribe_loss: subscribed.saturating_mul(events).saturating_sub(matched),
+        router_dropped: dropped,
+        router_faulted: faulted,
+        in_flight_or_unaccounted: reachable_deliveries(matched, dropped, faulted)
+            .saturating_sub(delivered),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::reachable_deliveries;
+    use super::{reachable_deliveries, undelivered_breakdown, Undelivered};
+
+    /// Numbers from the validated 20k/300 container run (2026-09-02, host
+    /// load1 3.30): 46 clients never subscribed, 42 subscribed late.
+    #[test]
+    fn breakdown_matches_20k_validation_run() {
+        let b = undelivered_breakdown(20_000, 19_954, 300, 5_976_330, 0, 0, 5_976_330);
+        assert_eq!(
+            b,
+            Undelivered {
+                never_connected: 13_800,
+                pre_subscribe_loss: 9_870,
+                router_dropped: 0,
+                router_faulted: 0,
+                in_flight_or_unaccounted: 0,
+            }
+        );
+        assert_eq!(b.total(), 20_000 * 300 - 5_976_330);
+    }
+
+    #[test]
+    fn breakdown_terms_sum_to_attempted_minus_delivered() {
+        // 10 clients × 100 events; 1 never subscribed, router shed 7, 5 in flight.
+        let b = undelivered_breakdown(10, 9, 100, 880, 4, 3, 868);
+        assert_eq!(b.never_connected, 100);
+        assert_eq!(b.pre_subscribe_loss, 20);
+        assert_eq!(b.in_flight_or_unaccounted, 5);
+        assert_eq!(b.total(), 10 * 100 - 868);
+    }
 
     #[test]
     fn reachable_excludes_router_shed_and_faulted() {
