@@ -203,3 +203,59 @@ reconnect/reconcile. On a large pre-populated table the first-connect snapshot
 itself floods the sink the same way (observed matched=69009 storm on ~28k
 rows). Named follow-up (ponytail candidate): slow-client policy for connected
 sessions — op-log replay trigger or server-side resnapshot on gap detection.
+
+## Throughput re-measure + 10k soak — MEASURED 2026-09-02
+
+Re-measure of the eval-only headline after two same-day attempts were thrown
+out as host-contended (`benches/results/remeasure-2026-09-02/CONTENDED.md`,
+`…-run2/CONTENDED.md`: 15–21% drops with VS Code `Code Helper` at 93–231% CPU).
+Run 3 (`benches/results/remeasure-2026-09-02-run3/`, raw logs under
+`benches/results/raw/2026-09-02-run3/`) used the baseline's exact config —
+`nostos-bench --clients 1000 --events 100000`, profile `small`, buffer 1024 —
+three passes back-to-back, then two `nostos-bench-10k 10000 5000 60` soaks.
+
+Environment (`raw/2026-09-02-run3/env.txt`): commit `edc2380`, rustc 1.95.0,
+Mac16,13 / 10 cores / macOS 26.6.2, `ulimit -n` 1048576, load at launch
+10.38 (1-min) — the bench itself is most of that.
+
+| Pass | load at start (1/5/15 min) | delivered / attempted | drop % | ops/sec |
+|---|---|---|---|---|
+| 1 | 10.38 / 7.62 / 7.65 | 99,997,217 / 100,000,000 | 0.00278% | 833,307 |
+| 2 | 10.38 / 10.40 / 9.09 | 99,997,221 / 100,000,000 | 0.00278% | 833,305 |
+| 3 | 12.27 / 11.22 / 9.67 | 99,997,084 / 100,000,000 | 0.00292% | 833,302 |
+
+**Median 833,305 ops/sec, spread 5 ops/sec (833,302–833,307); drop rate
+0.0028–0.0029% (≈2.8k of 100M deliveries).** Same stage, same units, same
+config as the recorded **833,307 / 0.00%** baseline (RESULTS table above):
+within 2 ops/sec — the baseline stands, no regression, no improvement to claim.
+
+Why the figure is so stable: `nostos-bench` runs a fixed 120 s window
+(`elapsed_secs` = 120.000 on every pass) and the server drains essentially
+all 100M deliveries inside it, so ops/sec ≈ delivered ÷ 120 and the quantity
+that actually varies run-to-run is the delivered / dropped count — that is the
+number to watch, not the ops/sec.
+
+Host-noise caveat: two orphan context-mode `node` processes (PIDs 62737,
+62824, ~97% CPU each) were live at launch and gone by the pass-1 check; the
+remaining non-bench load during the passes was VS Code `Code Helper (Renderer)`
+at 12–69% CPU, CoreSimulator ~15%, one agent session ~14%. None of it pushed a
+pass past the methodology's 1% drop ceiling, unlike the two aborted runs.
+
+### 10k-client soak (`nostos-bench-10k 10000 5000 60`) — measured, NOT citable as throughput
+
+| Soak | load at start | delivered / attempted (50M) | undelivered in window | ops/sec |
+|---|---|---|---|---|
+| 1 | 11.19 / 11.06 / 9.86 | 23,731,761 | 52.54% | 395,520 |
+| 2 | 7.74 / 10.27 / 9.66 | 12,075,234 | 75.85% | 201,248 |
+
+The probe's "drop%" is `1 − delivered/attempted` at window close — events not
+delivered within 60 s, whether shed by the router or simply not yet sent. Both
+soaks confirm what ROADMAP §C3 already records: **the 10k <1%-drop goal is
+still NOT met** (prior probe ~483k ops/sec @ ~61.4%). Soak 1 lands in the same
+regime as that prior figure; soak 2 delivered half as much. The 2× pass-to-pass
+gap is unexplained — soak 2 launched 1 s after soak 1's `process::exit` (the
+probe does no teardown, so 10k sockets were still closing), which is a
+plausible cause but was not verified. Treat the 10k numbers as a regime check
+only; before any 10k figure is updated anywhere, rerun with a ≥60 s cool-down
+between soaks and report both. Same-stage comparator for PowerSync: none
+published at 10k either.

@@ -1,0 +1,10 @@
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 5000 (attempted deliveries: 50000000)
+  window    : 60s
+  ---------------------------
+  delivered : 23731761
+  ops/sec   : 395520
+  drop%     : 52.54
+  elapsed   : 60.00s
