@@ -233,6 +233,32 @@ async fn run(
         let fanout = Arc::clone(&fanout);
         tokio::spawn(async move { fanout.run(&mut replicator, extract).await })
     };
+    // Diagnostic: a periodic progress line so a slow tier shows WHEN it was
+    // slow (uniform vs degrading rate) and what the process footprint was at
+    // that moment — the end-of-window totals alone can't tell a steady 1 ev/s
+    // from a fast start that collapsed. Additive only; no bearing on results.
+    let progress_task = {
+        let per_client = per_client.clone();
+        let metrics = Arc::clone(&metrics);
+        let conn = Arc::clone(&conn);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            tick.tick().await; // first tick fires immediately; skip it
+            loop {
+                tick.tick().await;
+                let delivered: u64 = per_client.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+                let matched = metrics.matched.load(Ordering::Relaxed);
+                let subscribed = conn.subscribed.load(Ordering::Relaxed).max(1);
+                let (rss, swap) = rss_now_mib().unwrap_or((0, 0));
+                eprintln!(
+                    "  [diag] progress t={:.0}s delivered={delivered} matched={matched} \
+                     events~={} subscribed={subscribed} rss_mib={rss} swap_mib={swap}",
+                    start.elapsed().as_secs_f64(),
+                    matched / subscribed,
+                );
+            }
+        })
+    };
 
     // Wait until every *reachable* delivery has landed, or the window elapses.
     // `target` (clients × events) is unreachable once any subscriber arrived
@@ -340,6 +366,7 @@ async fn run(
     // Best-effort: signal the fan-out task to wind down (don't await — that can
     // hang too if the replicator is still spinning against full buffers).
     fanout_task.abort();
+    progress_task.abort();
     for h in &handles {
         h.abort();
     }
@@ -465,6 +492,22 @@ fn peak_rss_mib() -> Option<u64> {
     let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
     let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kib / 1024)
+}
+
+/// Current resident set and swapped-out size in MiB (`VmRSS`, `VmSwap` from
+/// `/proc/self/status`); `None` where procfs is absent. Sampled by the
+/// periodic progress line — a rising `VmSwap` is the direct signature of the
+/// VM paging the server out mid-run.
+fn rss_now_mib() -> Option<(u64, u64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let field = |key: &str| -> Option<u64> {
+        let line = status.lines().find(|l| l.starts_with(key))?;
+        line.split_whitespace().nth(1)?.parse::<u64>().ok()
+    };
+    Some((
+        field("VmRSS:")? / 1024,
+        field("VmSwap:").unwrap_or(0) / 1024,
+    ))
 }
 
 /// Diagnostic connection counters (see the `[diag]` lines in `run`).
