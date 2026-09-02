@@ -192,3 +192,33 @@ effect accumulates past ~500 events" from "the 11:17 ladder tier was taken
 under host contention". Run 2 is launched with
 `benches/scripts/fanout-100k-diag.sh <src> benches/results/raw/2026-09-02-fanout-100k-diag-run2 100000,5000,1200,1,2`
 behind the same headroom gate.
+
+## Run 2, attempt 1 — 100k × 5000, INVALID (host load1 5.41 → 12.6; WindowServer 41%, Brave 19.5%)
+
+Log: `benches/results/raw/2026-09-02-fanout-100k-diag-run2/linux-fanout-diag.INVALID-host-load12-windowserver41.log`
+plus `host-load1.INVALID-attempt1.log` (host load1 every 10 s). Started 22:25:54
+at load1 5.41 (gate passed); load1 crossed 8 at ≈22:29 and reached 15.0 at
+22:30:45; killed at t≈330 s. Non-harness processes at kill time: WindowServer
+41% CPU, Brave 19.5%, two claude agents 19%/17.5% (Docker VM itself 440%).
+
+Partial numbers, kept per the headroom rule but NOT evidence either way:
+
+| span | matched Δ | events (≈100k subscribed) | s/event |
+|---|---|---|---|
+| t=0→100 s | 34.17M | ~382 (subscribed 79.6k→89.3k) | ~0.26 |
+| t=100→200 s | 18.35M | ~183 | ~0.55 |
+| t=200→300 s | 16.50M | ~165 | ~0.61 |
+
+The bend at t≈100 s coincides with host load1 rising past 8 (≈22:27:45), so
+this attempt cannot separate "accumulates with event count" from "host
+contention". VM `[sys]` during the slow spans shows idle rising to
+1500–1800 / 5000 jiffies per 5 s while throughput fell — the guest had
+spare CPU it was not being scheduled to use, which is what host
+oversubscription looks like from inside a VM that does not report steal.
+`PruneCalled`/`TCPMemoryPressures` stayed 0; swap 0; RSS 4,097 MiB.
+
+Rule note for the coordinator: the 10-vCPU harness VM alone contributes
+~4–5 to host load1 while fanning out, so "load1 < 8 for the whole run" is
+only attainable on an otherwise idle desktop. The operative mid-run check
+is the second clause — no non-harness process > 20% CPU — sampled every
+10 s alongside load1. Re-armed behind the same gate.
