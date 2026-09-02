@@ -40,6 +40,7 @@ tier)
   "$BIN" "$1" "$2" "$3" "$4" "$5"
   echo "SOAK rc=$? $(date +%T)"
   kill "$SP" 2>/dev/null; wait "$SP" 2>/dev/null
+  exit 0
   ;;
 *)
   echo "usage: $0 build | tier <clients> <events> <window> <ack> <listeners>"; exit 2 ;;

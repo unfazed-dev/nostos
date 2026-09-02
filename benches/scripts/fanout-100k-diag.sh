@@ -18,9 +18,10 @@
 # no other nostos-linux-* container is up, and /tmp/nostos-bench.lock is free.
 # Each tier is its own docker run with host load1 logged before and after.
 #
-# Usage: benches/scripts/fanout-100k-diag.sh <src-dir> <out-dir>
+# Usage: benches/scripts/fanout-100k-diag.sh <src-dir> <out-dir> [tier-spec ...]
+#   tier-spec = clients,events,window,ack,listeners (default: the two runs below)
 set -u
-SRC=$1; OUT=$2
+SRC=$1; OUT=$2; shift 2
 IMAGE=${NOSTOS_LINUX_IMAGE:-rust:1.95-bookworm}
 LOCK=/tmp/nostos-bench.lock
 NAME=nostos-linux-fanout-100k
@@ -70,9 +71,13 @@ tier() { # clients events window ack listeners
 }
 trap 'rm -f "$LOCK"; docker rm -f "$NAME" >/dev/null 2>&1' EXIT
 
-# 100k first (the slow tier, exact original shape: ack=1, 2 listeners) with a
-# short window — the progress line gives the rate without needing completion.
-tier 100000 500 300 1 2
-# 50k control, original shape (1 listener), same instrumentation.
-tier 50000 500 120 1 1
+if [ $# -eq 0 ]; then
+  # 100k first (the slow tier, exact original shape: ack=1, 2 listeners) with a
+  # short window — the progress line gives the rate without needing completion.
+  set -- 100000,500,300,1,2 50000,500,120,1,1
+fi
+for spec in "$@"; do
+  IFS=, read -r c e w a l <<<"$spec"
+  tier "$c" "$e" "$w" "$a" "$l"
+done
 echo "LINUX_DIAG_EXIT=0" >>"$LOG"
