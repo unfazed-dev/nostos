@@ -59,7 +59,7 @@
     <svg viewBox="0 0 460 235" role="img" aria-label="Delivery speed by device count">
       <line class="grid" x1="28" y1="190" x2="450" y2="190"/>
       <rect class="bar" x="30" y="44.5" width="50" height="145.5" rx="3"/><text class="val" x="55" y="36" text-anchor="middle">2.6M</text><text class="axis" x="55" y="212" text-anchor="middle">1k</text>
-      <rect class="bar" x="102" y="69.9" width="50" height="120.1" rx="3"/><text class="val" x="127" y="61" text-anchor="middle">2.2M</text><text class="axis" x="127" y="212" text-anchor="middle">10k</text>
+      <rect class="bar" x="102" y="142.5" width="50" height="47.5" rx="3"/><text class="val" x="127" y="134" text-anchor="middle">855k</text><text class="axis" x="127" y="212" text-anchor="middle">10k</text>
       <rect class="bar" x="174" y="135.1" width="50" height="54.9" rx="3"/><text class="val" x="199" y="127" text-anchor="middle">988k</text><text class="axis" x="199" y="212" text-anchor="middle">20k</text>
       <rect class="bar" x="246" y="169.3" width="50" height="20.7" rx="3"/><text class="val" x="271" y="161" text-anchor="middle">372k</text><text class="axis" x="271" y="212" text-anchor="middle">30k</text>
       <rect class="bar" x="318" y="167.8" width="50" height="22.2" rx="3"/><text class="val" x="343" y="160" text-anchor="middle">400k</text><text class="axis" x="343" y="212" text-anchor="middle">40k</text>
@@ -69,8 +69,8 @@
   </div>
 
   <div class="card">
-    <h3>Updates lost, per 1,000 sent</h3>
-    <p>Zero = every update arrived.</p>
+    <h3>Updates missed, per 1,000 sent</h3>
+    <p>Zero = all arrived; 30k/50k: devices joined late.</p>
     <svg viewBox="0 0 460 235" role="img" aria-label="Updates lost per thousand by device count">
       <line class="grid" x1="90" y1="8" x2="90" y2="200"/>
       <line class="grid" x1="240" y1="8" x2="240" y2="200"/><text class="axis" x="240" y="218" text-anchor="middle">5</text>
@@ -115,7 +115,7 @@
     <h3>Keep in mind</h3>
     <ul>
       <li>Simulated data source, one machine.</li>
-      <li>30k+ figures are lower bounds.</li>
+      <li>10k–50k ran in Docker; 30k+ are lower bounds.</li>
       <li>100k result not yet trustworthy.</li>
       <li>No like-for-like PowerSync number exists yet.</li>
     </ul>
