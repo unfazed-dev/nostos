@@ -111,10 +111,7 @@ void main() {
         startedAt: DateTime.utc(2026, 8, 6),
       );
 
-      expect(
-        record.toJson()['metrics']['label'],
-        RunRecord.evaluationLabel,
-      );
+      expect(record.toJson()['metrics']['label'], RunRecord.evaluationLabel);
     });
   });
 

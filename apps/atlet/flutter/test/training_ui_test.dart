@@ -13,6 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/ui/detail.dart';
 import 'package:atlet/ui/home.dart';
+
 import 'support/fake_cart_orders.dart';
 
 /// Minimal fake: addSession/deleteSession mutate an in-memory map but only
@@ -73,17 +74,19 @@ class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
 }
 
 SessionRow _fixture({String id = 'w1', int streak = 4}) => SessionRow(
-      id: id,
-      title: 'Sunrise 5k',
-      type: 'distance',
-      metric: 5,
-      unit: 'km',
-      streak: streak,
-      occurredOn: DateTime(2026, 8, 1),
-    );
+  id: id,
+  title: 'Sunrise 5k',
+  type: 'distance',
+  metric: 5,
+  unit: 'km',
+  streak: streak,
+  occurredOn: DateTime(2026, 8, 1),
+);
 
 void main() {
-  testWidgets('session list renders only after watchSessions emits', (tester) async {
+  testWidgets('session list renders only after watchSessions emits', (
+    tester,
+  ) async {
     final adapter = _FakeAdapter();
     addTearDown(adapter.dispose);
 
@@ -103,33 +106,44 @@ void main() {
     expect(find.byKey(const Key('streak-chip')), findsOneWidget);
   });
 
-  testWidgets('add-session sheet writes through the adapter and renders on echo', (tester) async {
-    final adapter = _FakeAdapter();
-    addTearDown(adapter.dispose);
+  testWidgets(
+    'add-session sheet writes through the adapter and renders on echo',
+    (tester) async {
+      final adapter = _FakeAdapter();
+      addTearDown(adapter.dispose);
 
-    await tester.pumpWidget(MaterialApp(home: TrainingHome(adapter: adapter)));
-    adapter.flush();
-    await tester.pump();
+      await tester.pumpWidget(
+        MaterialApp(home: TrainingHome(adapter: adapter)),
+      );
+      adapter.flush();
+      await tester.pump();
 
-    await tester.tap(find.byKey(const Key('add-session-button')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('add-session-button')));
+      await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const Key('session-title-field')), 'Tabata Burnout');
-    await tester.enterText(find.byKey(const Key('session-metric-field')), '4');
-    // Rebuild so the Save button's onPressed picks up the now-valid form
-    // state (onChanged's setState doesn't rebuild until the next pump).
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('save-session-button')));
-    await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('session-title-field')),
+        'Tabata Burnout',
+      );
+      await tester.enterText(
+        find.byKey(const Key('session-metric-field')),
+        '4',
+      );
+      // Rebuild so the Save button's onPressed picks up the now-valid form
+      // state (onChanged's setState doesn't rebuild until the next pump).
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('save-session-button')));
+      await tester.pumpAndSettle();
 
-    // Sheet closed, write is in flight, but nothing renders until the
-    // stream echoes it back.
-    expect(find.text('Tabata Burnout'), findsNothing);
+      // Sheet closed, write is in flight, but nothing renders until the
+      // stream echoes it back.
+      expect(find.text('Tabata Burnout'), findsNothing);
 
-    adapter.flush();
-    await tester.pumpAndSettle();
-    expect(find.text('Tabata Burnout'), findsOneWidget);
-  });
+      adapter.flush();
+      await tester.pumpAndSettle();
+      expect(find.text('Tabata Burnout'), findsOneWidget);
+    },
+  );
 
   testWidgets('detail: complete removes the session and pops', (tester) async {
     final adapter = _FakeAdapter();
@@ -139,22 +153,25 @@ void main() {
     // SessionDetail must be pushed (not the route's `home:`) for this test to
     // actually exercise the pop path — canPop() is always false at the root,
     // so a `home:`-only setup would let the pop code silently never run.
-    await tester.pumpWidget(MaterialApp(
-      home: Builder(
-        builder: (context) => Scaffold(
-          body: Center(
-            child: TextButton(
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => SessionDetail(adapter: adapter, sessionId: 'w1'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        SessionDetail(adapter: adapter, sessionId: 'w1'),
+                  ),
                 ),
+                child: const Text('open detail'),
               ),
-              child: const Text('open detail'),
             ),
           ),
         ),
       ),
-    ));
+    );
 
     await tester.tap(find.text('open detail'));
     await tester.pumpAndSettle();
@@ -173,14 +190,18 @@ void main() {
     expect(find.text('Sunrise 5k'), findsNothing);
   });
 
-  testWidgets('detail: delete asks for confirmation before removing', (tester) async {
+  testWidgets('detail: delete asks for confirmation before removing', (
+    tester,
+  ) async {
     final adapter = _FakeAdapter();
     addTearDown(adapter.dispose);
     await adapter.addSession(_fixture());
 
-    await tester.pumpWidget(MaterialApp(
-      home: SessionDetail(adapter: adapter, sessionId: 'w1'),
-    ));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SessionDetail(adapter: adapter, sessionId: 'w1'),
+      ),
+    );
     adapter.flush();
     await tester.pumpAndSettle();
 

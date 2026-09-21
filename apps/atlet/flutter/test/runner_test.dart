@@ -9,6 +9,7 @@ import 'dart:io';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/bench/runner.dart';
 import 'package:flutter_test/flutter_test.dart';
+
 import 'support/fake_cart_orders.dart';
 
 /// Minimal, self-contained fake adapter for Runner tests only — not shared
@@ -187,71 +188,74 @@ void main() {
     }
   });
 
-  test('writeAck does not hang when acks are scheduled with zero delay', () async {
-    adapter.ackDelay = Duration.zero;
-    final record = await runner.writeAck(
-      adapter,
-      buildSession: buildSession,
-      n: 3,
-      timeout: const Duration(seconds: 2),
-    );
-    expect((record.metrics['samples_ms'] as List), hasLength(3));
-  });
-
-  test('queueDrain waits out an offline queue and measures from reconnect', () async {
-    adapter.ackDelay = const Duration(milliseconds: 2);
-    final record = await runner.queueDrain(
-      adapter,
-      buildSession: buildSession,
-      n: 5,
-      timeout: const Duration(seconds: 5),
-    );
-
-    expect(record.runType, 'queue_drain');
-    expect(record.metrics['n'], 5);
-    expect(record.metrics['queue_drain_ms'], greaterThanOrEqualTo(0));
-  });
-
   test(
-    'propagation adds clockOffset back (regression: was subtracting, '
-    'giving true_delay - 2x offset)',
+    'writeAck does not hang when acks are scheduled with zero delay',
     () async {
-      // Server clock reads 120ms ahead of the client, so a row committed
-      // ~300ms ago (in true/server time) has a server_committed_at that is
-      // only ~300ms - 120ms = 180ms behind DateTime.now() on the client's
-      // own clock. Runner.propagation must add the 120ms back to recover
-      // the true ~300ms delay, not subtract it (which would give ~60ms).
-      const clockOffset = Duration(milliseconds: 120);
-      const trueDelay = Duration(milliseconds: 300);
-      final serverCommittedAt = DateTime.now().toUtc().subtract(
-        trueDelay - clockOffset,
-      );
-
-      final record = await runner.propagation(
+      adapter.ackDelay = Duration.zero;
+      final record = await runner.writeAck(
         adapter,
-        insertRemoteRow: () async {
-          final id = 'remote-row';
-          // Emit asynchronously so propagation()'s buffered-mark path is
-          // exercised the same way a real PostgREST round trip would be.
-          scheduleMicrotask(
-            () => adapter.emitRemoteVisible(id, serverCommittedAt),
-          );
-          return id;
-        },
-        clockOffset: clockOffset,
-        n: 1,
+        buildSession: buildSession,
+        n: 3,
         timeout: const Duration(seconds: 2),
       );
-
-      final samples = record.metrics['samples_ms'] as List;
-      expect(samples, hasLength(1));
-      // Tolerance covers the real wall-clock time the test itself takes to
-      // run between constructing serverCommittedAt and propagation()
-      // reading DateTime.now() — typically sub-millisecond, never close to
-      // the 240ms (2x offset) the sign bug would have produced.
-      expect(samples.single, closeTo(300, 30));
+      expect((record.metrics['samples_ms'] as List), hasLength(3));
     },
   );
+
+  test(
+    'queueDrain waits out an offline queue and measures from reconnect',
+    () async {
+      adapter.ackDelay = const Duration(milliseconds: 2);
+      final record = await runner.queueDrain(
+        adapter,
+        buildSession: buildSession,
+        n: 5,
+        timeout: const Duration(seconds: 5),
+      );
+
+      expect(record.runType, 'queue_drain');
+      expect(record.metrics['n'], 5);
+      expect(record.metrics['queue_drain_ms'], greaterThanOrEqualTo(0));
+    },
+  );
+
+  test('propagation adds clockOffset back (regression: was subtracting, '
+      'giving true_delay - 2x offset)', () async {
+    // Server clock reads 120ms ahead of the client, so a row committed
+    // ~300ms ago (in true/server time) has a server_committed_at that is
+    // only ~300ms - 120ms = 180ms behind DateTime.now() on the client's
+    // own clock. Runner.propagation must add the 120ms back to recover
+    // the true ~300ms delay, not subtract it (which would give ~60ms).
+    const clockOffset = Duration(milliseconds: 120);
+    const trueDelay = Duration(milliseconds: 300);
+    final serverCommittedAt = DateTime.now().toUtc().subtract(
+      trueDelay - clockOffset,
+    );
+
+    final record = await runner.propagation(
+      adapter,
+      insertRemoteRow: () async {
+        final id = 'remote-row';
+        // Emit asynchronously so propagation()'s buffered-mark path is
+        // exercised the same way a real PostgREST round trip would be.
+        scheduleMicrotask(
+          () => adapter.emitRemoteVisible(id, serverCommittedAt),
+        );
+        return id;
+      },
+      clockOffset: clockOffset,
+      n: 1,
+      timeout: const Duration(seconds: 2),
+    );
+
+    final samples = record.metrics['samples_ms'] as List;
+    expect(samples, hasLength(1));
+    // Tolerance covers the real wall-clock time the test itself takes to
+    // run between constructing serverCommittedAt and propagation()
+    // reading DateTime.now() — typically sub-millisecond, never close to
+    // the 240ms (2x offset) the sign bug would have produced.
+    expect(samples.single, closeTo(300, 30));
+  });
 
   group('dbBytes', () {
     late Directory tempDir;
@@ -265,12 +269,10 @@ void main() {
     });
 
     test('sums all regular file sizes under dbDir', () async {
-      await File('${tempDir.path}/cairn.sqlite').writeAsBytes(
-        List.filled(100, 0),
-      );
-      await File('${tempDir.path}/cairn.sqlite-wal').writeAsBytes(
-        List.filled(25, 0),
-      );
+      await File('${tempDir.path}/cairn.sqlite')
+          .writeAsBytes(List.filled(100, 0));
+      await File('${tempDir.path}/cairn.sqlite-wal')
+          .writeAsBytes(List.filled(25, 0));
 
       final record = await runner.dbBytes(tempDir.path);
 
@@ -279,27 +281,27 @@ void main() {
     });
 
     test('records wal journal mode when a -wal sidecar is present', () async {
-      await File('${tempDir.path}/powersync.db').writeAsBytes(
-        List.filled(10, 0),
-      );
-      await File('${tempDir.path}/powersync.db-wal').writeAsBytes(
-        List.filled(5, 0),
-      );
+      await File('${tempDir.path}/powersync.db')
+          .writeAsBytes(List.filled(10, 0));
+      await File('${tempDir.path}/powersync.db-wal')
+          .writeAsBytes(List.filled(5, 0));
 
       final record = await runner.dbBytes(tempDir.path);
 
       expect(record.metrics['journal_mode'], 'wal');
     });
 
-    test('records a non-wal journal mode when no -wal sidecar exists', () async {
-      await File('${tempDir.path}/cairn.sqlite').writeAsBytes(
-        List.filled(10, 0),
-      );
+    test(
+      'records a non-wal journal mode when no -wal sidecar exists',
+      () async {
+        await File('${tempDir.path}/cairn.sqlite')
+            .writeAsBytes(List.filled(10, 0));
 
-      final record = await runner.dbBytes(tempDir.path);
+        final record = await runner.dbBytes(tempDir.path);
 
-      expect(record.metrics['journal_mode'], isNot('wal'));
-    });
+        expect(record.metrics['journal_mode'], isNot('wal'));
+      },
+    );
 
     test('returns zero bytes for a directory that does not exist', () async {
       final missing = '${tempDir.path}/does-not-exist';
@@ -309,18 +311,19 @@ void main() {
       expect(record.metrics['db_bytes'], 0);
     });
 
-    test('descends into subdirectories (multi-file engine footprints)', () async {
-      final subDir = Directory('${tempDir.path}/nested')..createSync();
-      await File('${subDir.path}/extra.sqlite').writeAsBytes(
-        List.filled(50, 0),
-      );
-      await File('${tempDir.path}/cairn.sqlite').writeAsBytes(
-        List.filled(50, 0),
-      );
+    test(
+      'descends into subdirectories (multi-file engine footprints)',
+      () async {
+        final subDir = Directory('${tempDir.path}/nested')..createSync();
+        await File('${subDir.path}/extra.sqlite')
+            .writeAsBytes(List.filled(50, 0));
+        await File('${tempDir.path}/cairn.sqlite')
+            .writeAsBytes(List.filled(50, 0));
 
-      final record = await runner.dbBytes(tempDir.path);
+        final record = await runner.dbBytes(tempDir.path);
 
-      expect(record.metrics['db_bytes'], 100);
-    });
+        expect(record.metrics['db_bytes'], 100);
+      },
+    );
   });
 }

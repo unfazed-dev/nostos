@@ -21,8 +21,7 @@ double percentile(List<num> values, num p) {
   final highIndex = rank.ceil();
   if (lowIndex == highIndex) return sorted[lowIndex].toDouble();
   final fraction = rank - lowIndex;
-  return (sorted[lowIndex] +
-          (sorted[highIndex] - sorted[lowIndex]) * fraction)
+  return (sorted[lowIndex] + (sorted[highIndex] - sorted[lowIndex]) * fraction)
       .toDouble();
 }
 
@@ -43,7 +42,8 @@ class RunRecord {
   final String sdk;
   final String engine; // 'cairn' | 'powersync'
   final String profile; // 'local' | 'cloud'
-  final String runType; // 'cold_sync' | 'propagation' | 'write_ack' | 'queue_drain'
+  final String
+  runType; // 'cold_sync' | 'propagation' | 'write_ack' | 'queue_drain'
   final String specVersion;
   final int seedSize;
   final String appVersion;

@@ -71,7 +71,6 @@ class _FakeEngine implements NostosEngine {
   writes = [];
 
   @override
-
   @override
   Future<String> subscribeStream({
     required String name,

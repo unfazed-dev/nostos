@@ -43,7 +43,6 @@ class _PushFakeEngine implements NostosEngine {
     Set<String> counterTables = const <String>{},
   }) => stateController.stream;
   @override
-
   @override
   Future<String> subscribeStream({
     required String name,
@@ -161,8 +160,9 @@ Future<(HttpServer, List<_Captured>)> _start401Then204Server() async {
       headers[name.toLowerCase()] = values.first;
     });
     requests.add(_Captured(req.method, req.uri.path, headers, reqBody));
-    req.response.statusCode =
-        requests.length == 1 ? 401 : 204; // first is the stale token
+    req.response.statusCode = requests.length == 1
+        ? 401
+        : 204; // first is the stale token
     await req.response.close();
   });
   return (server, requests);
@@ -189,8 +189,11 @@ void main() {
     expect(requests, hasLength(2));
     expect(refreshCalls, 1);
     expect(requests.first.headers['authorization'], 'Bearer stale-jwt');
-    expect(requests.last.headers['authorization'], 'Bearer fresh-jwt',
-        reason: 'the retry must re-read the credential, not replay it');
+    expect(
+      requests.last.headers['authorization'],
+      'Bearer fresh-jwt',
+      reason: 'the retry must re-read the credential, not replay it',
+    );
     await server.close();
   });
 

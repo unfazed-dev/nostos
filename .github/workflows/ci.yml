@@ -198,6 +198,11 @@ jobs:
       - name: flutter pub get
         working-directory: sdk/nostos_flutter
         run: flutter pub get
+      # Formatter tracks the latest stable Dart (standing rule 2026-09-21): the
+      # 3.13 formatter re-flowed 22 files that older Dart had accepted.
+      - name: dart format --set-exit-if-changed
+        working-directory: sdk/nostos_flutter
+        run: dart format --set-exit-if-changed -o none lib test example/lib
       - name: flutter analyze
         working-directory: sdk/nostos_flutter
         run: flutter analyze
@@ -228,6 +233,7 @@ jobs:
           # Pre-create the dirs; drop once flutter_tools creates them itself.
           mkdir -p build/ios/SourcePackages build/macos/SourcePackages
           flutter pub get
+          dart format --set-exit-if-changed -o none lib test integration_test
           flutter analyze
           flutter test
       # The doc-signature guard: parses the fenced Dart in README.md / USAGE.md

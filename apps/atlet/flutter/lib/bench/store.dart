@@ -19,8 +19,8 @@ class BenchStore {
   BenchStore({
     required Directory directory,
     String fileName = 'atlet_runs.jsonl',
-  })  : file = File('${directory.path}/$fileName'),
-        _memory = null;
+  }) : file = File('${directory.path}/$fileName'),
+       _memory = null;
 
   /// Web: path_provider has no browser implementation (the open future never
   /// resolves — the Analytics tab spun forever) and dart:io File throws there,
@@ -71,7 +71,8 @@ class BenchStore {
     return lines
         .where((line) => line.trim().isNotEmpty)
         .map(
-          (line) => RunRecord.fromJson(jsonDecode(line) as Map<String, dynamic>),
+          (line) =>
+              RunRecord.fromJson(jsonDecode(line) as Map<String, dynamic>),
         )
         .toList();
   }

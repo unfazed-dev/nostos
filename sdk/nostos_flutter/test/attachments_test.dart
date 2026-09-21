@@ -73,7 +73,6 @@ class _AttachFakeEngine implements NostosEngine {
   }
 
   @override
-
   @override
   Future<String> subscribeStream({
     required String name,

@@ -35,7 +35,10 @@ void main() {
     events.add(const [ConnectivityResult.none]);
     events.add(const [ConnectivityResult.none]); // dup — no callback
     events.add(const [ConnectivityResult.wifi]);
-    events.add(const [ConnectivityResult.wifi, ConnectivityResult.mobile]); // dup
+    events.add(const [
+      ConnectivityResult.wifi,
+      ConnectivityResult.mobile,
+    ]); // dup
     await Future<void>.delayed(Duration.zero);
 
     expect(seen, [false, true]);
@@ -43,24 +46,31 @@ void main() {
     await events.close();
   });
 
-  test('mixed results containing none but also a real transport = online',
-      () async {
-    // connectivity_plus can report e.g. [vpn, wifi]; only an exclusive
-    // "none" means offline. _lastOnline seeds true, so lead offline first
-    // to create a state change, then verify the mixed bag reads online.
-    final events = StreamController<List<ConnectivityResult>>();
-    final seen = <bool>[];
-    final guard = ConnectivityGuard(
-      events: events.stream,
-      onOnlineChanged: (online) async => seen.add(online),
-    )..start();
+  test(
+    'mixed results containing none but also a real transport = online',
+    () async {
+      // connectivity_plus can report e.g. [vpn, wifi]; only an exclusive
+      // "none" means offline. _lastOnline seeds true, so lead offline first
+      // to create a state change, then verify the mixed bag reads online.
+      final events = StreamController<List<ConnectivityResult>>();
+      final seen = <bool>[];
+      final guard = ConnectivityGuard(
+        events: events.stream,
+        onOnlineChanged: (online) async => seen.add(online),
+      )..start();
 
-    events.add(const [ConnectivityResult.none]); // → offline (change from seed)
-    events.add(const [ConnectivityResult.none, ConnectivityResult.wifi]); // → online
-    await Future<void>.delayed(Duration.zero);
+      events.add(const [
+        ConnectivityResult.none,
+      ]); // → offline (change from seed)
+      events.add(const [
+        ConnectivityResult.none,
+        ConnectivityResult.wifi,
+      ]); // → online
+      await Future<void>.delayed(Duration.zero);
 
-    expect(seen, [false, true]);
-    await guard.dispose();
-    await events.close();
-  });
+      expect(seen, [false, true]);
+      await guard.dispose();
+      await events.close();
+    },
+  );
 }

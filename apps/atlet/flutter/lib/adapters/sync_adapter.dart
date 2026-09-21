@@ -88,12 +88,7 @@ class SyncMark {
   final Duration tMono; // from bench clock
   final DateTime? serverCommittedAt;
 
-  const SyncMark(
-    this.kind,
-    this.rowId,
-    this.tMono, {
-    this.serverCommittedAt,
-  });
+  const SyncMark(this.kind, this.rowId, this.tMono, {this.serverCommittedAt});
 }
 
 /// Wraps a broadcast [tail] so each new listener first receives the most

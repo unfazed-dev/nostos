@@ -70,37 +70,34 @@ void main() {
     ]);
   });
 
-  test(
-    'NostosSchema.fromSchemaDescriptor parses column affinity + pg_oid (WS6-A)',
-    () {
-      // Mirrors the wire shape PgSchemaSource emits (ports.rs SchemaColumn) —
-      // affinity derived via oid_to_sqlite_affinity (ADR-0019): bool(16)→INTEGER,
-      // int4(23)→INTEGER, float4(700)→REAL, text(25)→TEXT.
-      final schema = NostosSchema.fromSchemaDescriptor({
-        'publication': 'cairn_pub',
-        'tables': [
-          {
-            'name': 'tasks',
-            'primary_key': ['id'],
-            'columns': [
-              {'name': 'id', 'pg_oid': 25, 'affinity': 'TEXT'},
-              {'name': 'title', 'pg_oid': 25, 'affinity': 'TEXT'},
-              {'name': 'completed', 'pg_oid': 16, 'affinity': 'INTEGER'},
-              {'name': 'position', 'pg_oid': 700, 'affinity': 'REAL'},
-            ],
-          },
-        ],
-      });
-      final cols = schema.tables.single.columns;
-      expect(cols.map((c) => c.name), ['id', 'title', 'completed', 'position']);
-      expect(cols[0].affinity, 'TEXT');
-      expect(cols[0].pgOid, 25);
-      expect(cols[2].affinity, 'INTEGER');
-      expect(cols[2].pgOid, 16);
-      expect(cols[3].affinity, 'REAL');
-      expect(cols[3].pgOid, 700);
-    },
-  );
+  test('NostosSchema.fromSchemaDescriptor parses column affinity + pg_oid (WS6-A)', () {
+    // Mirrors the wire shape PgSchemaSource emits (ports.rs SchemaColumn) —
+    // affinity derived via oid_to_sqlite_affinity (ADR-0019): bool(16)→INTEGER,
+    // int4(23)→INTEGER, float4(700)→REAL, text(25)→TEXT.
+    final schema = NostosSchema.fromSchemaDescriptor({
+      'publication': 'cairn_pub',
+      'tables': [
+        {
+          'name': 'tasks',
+          'primary_key': ['id'],
+          'columns': [
+            {'name': 'id', 'pg_oid': 25, 'affinity': 'TEXT'},
+            {'name': 'title', 'pg_oid': 25, 'affinity': 'TEXT'},
+            {'name': 'completed', 'pg_oid': 16, 'affinity': 'INTEGER'},
+            {'name': 'position', 'pg_oid': 700, 'affinity': 'REAL'},
+          ],
+        },
+      ],
+    });
+    final cols = schema.tables.single.columns;
+    expect(cols.map((c) => c.name), ['id', 'title', 'completed', 'position']);
+    expect(cols[0].affinity, 'TEXT');
+    expect(cols[0].pgOid, 25);
+    expect(cols[2].affinity, 'INTEGER');
+    expect(cols[2].pgOid, 16);
+    expect(cols[3].affinity, 'REAL');
+    expect(cols[3].pgOid, 700);
+  });
 }
 
 /// A minimal typed record decoded from a row, with a `fromRow` factory — the
@@ -161,7 +158,6 @@ class _FakeEngine implements NostosEngine {
   Future<String> query({required String sql}) async => queryResult;
 
   @override
-
   @override
   Future<String> subscribeStream({
     required String name,

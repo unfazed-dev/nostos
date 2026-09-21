@@ -12,6 +12,7 @@ import 'package:atlet/bench/runner.dart';
 import 'package:atlet/bench/store.dart';
 import 'package:atlet/engine_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
+
 import 'support/fake_cart_orders.dart';
 
 /// Self-contained fake, mirrors test/runner_test.dart's `_FakeAdapter` but
@@ -39,6 +40,7 @@ class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
     _lastSessions = rows;
     _sessionsController.add(rows);
   }
+
   Duration ackDelay = Duration.zero;
   bool signedOut = false;
   int initCount = 0;
@@ -192,7 +194,8 @@ SessionRow _buildSession(int i) => SessionRow(
 /// row synced back down. Counts calls so tests can assert propagation drove
 /// exactly `n` PostgREST inserts.
 ({Future<String> Function() insertRemoteRow, int Function() callCount})
-_fakeInsertRemoteRow(_FakeAdapter adapter) => _fakeInsertRemoteRowFanOut([adapter]);
+_fakeInsertRemoteRow(_FakeAdapter adapter) =>
+    _fakeInsertRemoteRowFanOut([adapter]);
 
 /// Same as [_fakeInsertRemoteRow] but fans the remoteVisible mark out to
 /// every adapter in [adapters] — needed when one `insertRemoteRow` closure
@@ -277,18 +280,24 @@ void main() {
 
         final records = await harness.runFullSuite();
 
-        expect(
-          records.map((r) => r.runType).toList(),
-          ['cold_sync', 'propagation', 'write_ack', 'queue_drain', 'db_bytes'],
-        );
+        expect(records.map((r) => r.runType).toList(), [
+          'cold_sync',
+          'propagation',
+          'write_ack',
+          'queue_drain',
+          'db_bytes',
+        ]);
         expect(fake.callCount(), 2); // n=2 PostgREST inserts, one per sample
 
         final persisted = await store.readAll();
         expect(persisted, hasLength(5));
-        expect(
-          persisted.map((r) => r.runType).toList(),
-          ['cold_sync', 'propagation', 'write_ack', 'queue_drain', 'db_bytes'],
-        );
+        expect(persisted.map((r) => r.runType).toList(), [
+          'cold_sync',
+          'propagation',
+          'write_ack',
+          'queue_drain',
+          'db_bytes',
+        ]);
         expect(persisted.every((r) => r.engine == 'cairn'), isTrue);
 
         final dbBytesRecord = persisted.last;
@@ -296,41 +305,44 @@ void main() {
       },
     );
 
-    test('propagation never drives writes through the adapter (PostgREST only)', () async {
-      final fake = _fakeInsertRemoteRow(adapter);
-      final dbDir = '${tempDir.path}/db2';
-      await Directory(dbDir).create(recursive: true);
+    test(
+      'propagation never drives writes through the adapter (PostgREST only)',
+      () async {
+        final fake = _fakeInsertRemoteRow(adapter);
+        final dbDir = '${tempDir.path}/db2';
+        await Directory(dbDir).create(recursive: true);
 
-      // watchSessions() replays the latest snapshot on listen (matching the
-      // real adapters' replayLatest contract) — subscribe now so the
-      // post-suite assertion sees the latest emission either way.
-      List<SessionRow> latestRows = const [];
-      final sub = adapter.watchSessions().listen((rows) => latestRows = rows);
+        // watchSessions() replays the latest snapshot on listen (matching the
+        // real adapters' replayLatest contract) — subscribe now so the
+        // post-suite assertion sees the latest emission either way.
+        List<SessionRow> latestRows = const [];
+        final sub = adapter.watchSessions().listen((rows) => latestRows = rows);
 
-      final harness = BenchHarness(
-        runner: runner,
-        adapter: adapter,
-        store: store,
-        supabaseUrl: 'http://localhost:3000',
-        accessToken: 'test-token',
-        userId: 'test-user',
-        dbDir: dbDir,
-        insertRemoteRow: fake.insertRemoteRow,
-        buildSession: _buildSession,
-        n: 3,
-        timeout: const Duration(seconds: 5),
-      );
+        final harness = BenchHarness(
+          runner: runner,
+          adapter: adapter,
+          store: store,
+          supabaseUrl: 'http://localhost:3000',
+          accessToken: 'test-token',
+          userId: 'test-user',
+          dbDir: dbDir,
+          insertRemoteRow: fake.insertRemoteRow,
+          buildSession: _buildSession,
+          n: 3,
+          timeout: const Duration(seconds: 5),
+        );
 
-      await harness.runFullSuite();
-      await sub.cancel();
+        await harness.runFullSuite();
+        await sub.cancel();
 
-      // Only writeAck (n) + queueDrain (n) go through adapter.addSession;
-      // propagation's n inserts must NOT add to that count.
-      // seedSize (2) + writeAck (3) + queueDrain (3) = 8; propagation's 3
-      // PostgREST inserts never touch this adapter's session list at all.
-      expect(latestRows, hasLength(8));
-      expect(fake.callCount(), 3);
-    });
+        // Only writeAck (n) + queueDrain (n) go through adapter.addSession;
+        // propagation's n inserts must NOT add to that count.
+        // seedSize (2) + writeAck (3) + queueDrain (3) = 8; propagation's 3
+        // PostgREST inserts never touch this adapter's session list at all.
+        expect(latestRows, hasLength(8));
+        expect(fake.callCount(), 3);
+      },
+    );
   });
 
   group('runFullSuiteForBothEngines', () {
@@ -340,7 +352,9 @@ void main() {
     late _FakeAdapter powerSyncAdapter;
 
     setUp(() async {
-      tempDir = await Directory.systemTemp.createTemp('atlet-both-engines-test');
+      tempDir = await Directory.systemTemp.createTemp(
+        'atlet-both-engines-test',
+      );
       store = BenchStore(directory: tempDir, fileName: 'runs.jsonl');
       nostosAdapter = _FakeAdapter(engine: 'cairn')
         ..ackDelay = const Duration(milliseconds: 1);
@@ -354,56 +368,53 @@ void main() {
       if (await tempDir.exists()) await tempDir.delete(recursive: true);
     });
 
-    test(
-      'runs one full suite per engine, wipes each via signOut, and uses '
-      'separate dbDir subdirectories',
-      () async {
-        // Fanned out to both adapters: insertRemoteRow is shared across
-        // both engines' suites (matches production — one PostgREST client,
-        // used regardless of which engine is currently under test), so the
-        // fake must satisfy whichever engine's propagation run is currently
-        // subscribed to `.marks`.
-        final fake = _fakeInsertRemoteRowFanOut([nostosAdapter, powerSyncAdapter]);
+    test('runs one full suite per engine, wipes each via signOut, and uses '
+        'separate dbDir subdirectories', () async {
+      // Fanned out to both adapters: insertRemoteRow is shared across
+      // both engines' suites (matches production — one PostgREST client,
+      // used regardless of which engine is currently under test), so the
+      // fake must satisfy whichever engine's propagation run is currently
+      // subscribed to `.marks`.
+      final fake = _fakeInsertRemoteRowFanOut([nostosAdapter, powerSyncAdapter]);
 
-        final results = await runFullSuiteForBothEngines(
-          sdk: 'flutter',
-          specVersion: 'v0',
-          seedSize: 0,
-          appVersion: '1.0.0+1',
-          device: {'model': 'test', 'os': 'test-os'},
-          rootDbDir: tempDir.path,
-          supabaseUrl: 'http://localhost:3000',
-          accessToken: 'test-token',
-          userId: 'test-user',
-          store: store,
-          insertRemoteRow: fake.insertRemoteRow,
-          buildSession: _buildSession,
-          adapterFactories: {
-            Engine.cairn: () => nostosAdapter,
-            Engine.powersync: () => powerSyncAdapter,
-          },
-          n: 1,
-          timeout: const Duration(seconds: 5),
-        );
+      final results = await runFullSuiteForBothEngines(
+        sdk: 'flutter',
+        specVersion: 'v0',
+        seedSize: 0,
+        appVersion: '1.0.0+1',
+        device: {'model': 'test', 'os': 'test-os'},
+        rootDbDir: tempDir.path,
+        supabaseUrl: 'http://localhost:3000',
+        accessToken: 'test-token',
+        userId: 'test-user',
+        store: store,
+        insertRemoteRow: fake.insertRemoteRow,
+        buildSession: _buildSession,
+        adapterFactories: {
+          Engine.cairn: () => nostosAdapter,
+          Engine.powersync: () => powerSyncAdapter,
+        },
+        n: 1,
+        timeout: const Duration(seconds: 5),
+      );
 
-        expect(results.keys.toSet(), {Engine.cairn, Engine.powersync});
-        expect(results[Engine.cairn], hasLength(5));
-        expect(results[Engine.powersync], hasLength(5));
+      expect(results.keys.toSet(), {Engine.cairn, Engine.powersync});
+      expect(results[Engine.cairn], hasLength(5));
+      expect(results[Engine.powersync], hasLength(5));
 
-        expect(nostosAdapter.signedOut, isTrue);
-        expect(powerSyncAdapter.signedOut, isTrue);
+      expect(nostosAdapter.signedOut, isTrue);
+      expect(powerSyncAdapter.signedOut, isTrue);
 
-        expect(nostosAdapter.lastDbDir, '${tempDir.path}/cairn');
-        expect(powerSyncAdapter.lastDbDir, '${tempDir.path}/powersync');
-        expect(await Directory('${tempDir.path}/cairn').exists(), isTrue);
-        expect(await Directory('${tempDir.path}/powersync').exists(), isTrue);
+      expect(nostosAdapter.lastDbDir, '${tempDir.path}/cairn');
+      expect(powerSyncAdapter.lastDbDir, '${tempDir.path}/powersync');
+      expect(await Directory('${tempDir.path}/cairn').exists(), isTrue);
+      expect(await Directory('${tempDir.path}/powersync').exists(), isTrue);
 
-        final persisted = await store.readAll();
-        expect(persisted, hasLength(10));
-        expect(persisted.where((r) => r.engine == 'cairn'), hasLength(5));
-        expect(persisted.where((r) => r.engine == 'powersync'), hasLength(5));
-      },
-    );
+      final persisted = await store.readAll();
+      expect(persisted, hasLength(10));
+      expect(persisted.where((r) => r.engine == 'cairn'), hasLength(5));
+      expect(persisted.where((r) => r.engine == 'powersync'), hasLength(5));
+    });
   });
 
   group('sessionInsertPayload', () {

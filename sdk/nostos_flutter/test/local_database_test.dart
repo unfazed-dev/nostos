@@ -130,15 +130,18 @@ void main() {
       await db.close();
     });
 
-    test('resumeSync fails loudly — a local database has no sync to resume', () async {
-      final db = await NostosDatabase.localForTest(
-        Nostos.withEngine(_RecordingEngine()),
-        _schema,
-      );
+    test(
+      'resumeSync fails loudly — a local database has no sync to resume',
+      () async {
+        final db = await NostosDatabase.localForTest(
+          Nostos.withEngine(_RecordingEngine()),
+          _schema,
+        );
 
-      expect(() => db.resumeSync(), throwsStateError);
-      await db.close();
-    });
+        expect(() => db.resumeSync(), throwsStateError);
+        await db.close();
+      },
+    );
 
     test('push-token registration fails loudly — a local database has no server to knock', () async {
       final db = await NostosDatabase.localForTest(
@@ -216,8 +219,7 @@ class _RecordingEngine implements NostosEngine {
   Future<String> subscribeStream({
     required String name,
     required String paramsJson,
-  }) async =>
-      'fake-stream';
+  }) async => 'fake-stream';
 
   @override
   Future<void> unsubscribeStream({required String id}) async {}
@@ -228,47 +230,41 @@ class _RecordingEngine implements NostosEngine {
     required String op,
     required String pk,
     String? payloadJson,
-  }) async =>
-      0;
+  }) async => 0;
 
   @override
   Future<List<int>> writeBatch({
     required List<({String table, String op, String pk, String? payloadJson})>
     ops,
-  }) async =>
-      List.filled(ops.length, 0);
+  }) async => List.filled(ops.length, 0);
 
   @override
   Future<int> orSetAdd({
     required String table,
     required String pk,
     required String element,
-  }) async =>
-      0;
+  }) async => 0;
 
   @override
   Future<int> orSetRemove({
     required String table,
     required String pk,
     required String element,
-  }) async =>
-      0;
+  }) async => 0;
 
   @override
   Future<int> counterIncrement({
     required String table,
     required String pk,
     required int delta,
-  }) async =>
-      0;
+  }) async => 0;
 
   @override
   Future<int> counterDecrement({
     required String table,
     required String pk,
     required int delta,
-  }) async =>
-      0;
+  }) async => 0;
 
   @override
   Future<void> setToken(String? token) async {}

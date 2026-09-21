@@ -88,39 +88,41 @@ class PowerSyncAdapter implements SyncAdapter {
     await db.connect(connector: _SupabaseConnector(accessToken));
 
     _sessionsSub = db
-        .watch('SELECT * FROM sessions '
-            'ORDER BY occurred_on DESC, '
-            '(server_committed_at IS NULL) DESC, server_committed_at DESC')
+        .watch(
+          'SELECT * FROM sessions '
+          'ORDER BY occurred_on DESC, '
+          '(server_committed_at IS NULL) DESC, server_committed_at DESC',
+        )
         .map((rows) => rows.map(sessionFromRow).toList(growable: false))
         .listen((sessions) {
-      _deriver.onEmission(sessions);
-      _lastSessions = sessions;
-      _sessionsController?.add(sessions);
-    });
+          _deriver.onEmission(sessions);
+          _lastSessions = sessions;
+          _sessionsController?.add(sessions);
+        });
 
     _productsSub = db
         .watch('SELECT * FROM products')
         .map((rows) => rows.map(productFromRow).toList(growable: false))
         .listen((products) {
-      _lastProducts = products;
-      _productsController?.add(products);
-    });
+          _lastProducts = products;
+          _productsController?.add(products);
+        });
 
     _cartSub = db
         .watch('SELECT * FROM cart_items ORDER BY added_at DESC')
         .map((rows) => rows.map(psCartItemFromRow).toList(growable: false))
         .listen((items) {
-      _lastCart = items;
-      _cartController?.add(items);
-    });
+          _lastCart = items;
+          _cartController?.add(items);
+        });
 
     _ordersSub = db
         .watch('SELECT * FROM orders ORDER BY created_at DESC')
         .map((rows) => rows.map(psOrderFromRow).toList(growable: false))
         .listen((orders) {
-      _lastOrders = orders;
-      _ordersController?.add(orders);
-    });
+          _lastOrders = orders;
+          _ordersController?.add(orders);
+        });
   }
 
   @override
@@ -140,8 +142,10 @@ class PowerSyncAdapter implements SyncAdapter {
   @override
   Future<void> updateSession(SessionRow s) async {
     final payload = sessionWritePayload(s);
-    final sets =
-        payload.keys.where((k) => k != 'id').map((k) => '$k = ?').join(', ');
+    final sets = payload.keys
+        .where((k) => k != 'id')
+        .map((k) => '$k = ?')
+        .join(', ');
     final args = [
       for (final k in payload.keys.where((k) => k != 'id')) payload[k],
       s.id,
@@ -154,18 +158,12 @@ class PowerSyncAdapter implements SyncAdapter {
       _requireDb().execute('DELETE FROM sessions WHERE id = ?', [id]);
 
   @override
-  Future<void> addToCart(CartItemRow item) =>
-      _requireDb().execute(
-        'INSERT INTO cart_items (id, product_id, qty, added_at) '
-        'VALUES (?, ?, ?, ?) '
-        'ON CONFLICT(id) DO UPDATE SET qty = excluded.qty',
-        [
-          item.id,
-          item.productId,
-          item.qty,
-          item.addedAt.toUtc().toIso8601String(),
-        ],
-      );
+  Future<void> addToCart(CartItemRow item) => _requireDb().execute(
+    'INSERT INTO cart_items (id, product_id, qty, added_at) '
+    'VALUES (?, ?, ?, ?) '
+    'ON CONFLICT(id) DO UPDATE SET qty = excluded.qty',
+    [item.id, item.productId, item.qty, item.addedAt.toUtc().toIso8601String()],
+  );
 
   @override
   Future<void> removeCartItem(String id) =>
@@ -203,28 +201,33 @@ class PowerSyncAdapter implements SyncAdapter {
 
   @override
   Stream<List<CartItemRow>> watchCart() => replayLatest(
-      _requireController(_cartController, 'watchCart() before init()'),
-      () => _lastCart);
+    _requireController(_cartController, 'watchCart() before init()'),
+    () => _lastCart,
+  );
 
   @override
   Stream<List<OrderRow>> watchOrders() => replayLatest(
-      _requireController(_ordersController, 'watchOrders() before init()'),
-      () => _lastOrders);
+    _requireController(_ordersController, 'watchOrders() before init()'),
+    () => _lastOrders,
+  );
 
   @override
   Stream<List<SessionRow>> watchSessions() => replayLatest(
-      _requireController(_sessionsController, 'watchSessions() before init()'),
-      () => _lastSessions);
+    _requireController(_sessionsController, 'watchSessions() before init()'),
+    () => _lastSessions,
+  );
 
   @override
   Stream<List<ProductRow>> watchProducts() => replayLatest(
-      _requireController(_productsController, 'watchProducts() before init()'),
-      () => _lastProducts);
+    _requireController(_productsController, 'watchProducts() before init()'),
+    () => _lastProducts,
+  );
 
   @override
   Stream<bool> get connected => replayLatest(
-      _requireController(_connectedController, 'connected before init()'),
-      () => _lastConnected);
+    _requireController(_connectedController, 'connected before init()'),
+    () => _lastConnected,
+  );
 
   @override
   Future<void> setConnected(bool up) async {
@@ -305,7 +308,8 @@ class PowerSyncAdapter implements SyncAdapter {
   PowerSyncDatabase _requireDb() =>
       _db ?? (throw StateError('PowerSyncAdapter.init() must be called first'));
 
-  String _requireAccessToken() => _accessToken ??
+  String _requireAccessToken() =>
+      _accessToken ??
       (throw StateError('PowerSyncAdapter.setConnected(true) before init()'));
 
   Stream<T> _requireController<T>(StreamController<T>? c, String what) =>
@@ -323,7 +327,8 @@ class _SupabaseConnector extends PowerSyncBackendConnector {
   final String _accessToken;
 
   @override
-  Future<PowerSyncCredentials?> fetchCredentials() async => PowerSyncCredentials(
+  Future<PowerSyncCredentials?> fetchCredentials() async =>
+      PowerSyncCredentials(
         endpoint: PowerSyncAdapter._powerSyncUrl,
         token: _accessToken,
       );
@@ -357,8 +362,7 @@ class _SupabaseConnector extends PowerSyncBackendConnector {
 StreamSubscription<bool> wireConnected(
   Stream<bool> connectedStream,
   void Function(bool isConnected) onConnected,
-) =>
-    connectedStream.listen(onConnected);
+) => connectedStream.listen(onConnected);
 
 final Schema _schema = Schema([
   Table('sessions', [
@@ -402,24 +406,24 @@ final Schema _schema = Schema([
 /// Maps a `cart_items` row to [CartItemRow] — pure, mirrors the nostos
 /// adapter's cartItemFromRow.
 CartItemRow psCartItemFromRow(Map<String, dynamic> row) => CartItemRow(
-      id: row['id'] as String,
-      productId: row['product_id'] as String,
-      qty: (row['qty'] as num).toInt(),
-      addedAt: DateTime.parse(row['added_at'] as String),
-    );
+  id: row['id'] as String,
+  productId: row['product_id'] as String,
+  qty: (row['qty'] as num).toInt(),
+  addedAt: DateTime.parse(row['added_at'] as String),
+);
 
 /// Maps an `orders` row to [OrderRow].
 OrderRow psOrderFromRow(Map<String, dynamic> row) => OrderRow(
-      id: row['id'] as String,
-      status: row['status'] as String,
-      subtotalCents: (row['subtotal_cents'] as num).toInt(),
-      taxCents: (row['tax_cents'] as num).toInt(),
-      shippingCents: (row['shipping_cents'] as num).toInt(),
-      totalCents: (row['total_cents'] as num).toInt(),
-      paymentRef: row['payment_ref'] as String?,
-      itemsJson: row['items_json'] as String?,
-      createdAt: DateTime.parse(row['created_at'] as String),
-    );
+  id: row['id'] as String,
+  status: row['status'] as String,
+  subtotalCents: (row['subtotal_cents'] as num).toInt(),
+  taxCents: (row['tax_cents'] as num).toInt(),
+  shippingCents: (row['shipping_cents'] as num).toInt(),
+  totalCents: (row['total_cents'] as num).toInt(),
+  paymentRef: row['payment_ref'] as String?,
+  itemsJson: row['items_json'] as String?,
+  createdAt: DateTime.parse(row['created_at'] as String),
+);
 
 /// Maps a row from `db.watch('SELECT * FROM sessions')` to [SessionRow].
 /// Top-level and pure so it's testable without a live sync connection — see
@@ -427,26 +431,26 @@ OrderRow psOrderFromRow(Map<String, dynamic> row) => OrderRow(
 /// PowerSync `Row` implements that interface) so plain map literals work in
 /// tests too.
 SessionRow sessionFromRow(Map<String, dynamic> row) => SessionRow(
-      id: row['id'] as String,
-      title: row['title'] as String,
-      type: row['type'] as String,
-      metric: _asInt(row['metric']),
-      unit: row['unit'] as String,
-      note: row['note'] as String?,
-      streak: row['streak'] == null ? 0 : _asInt(row['streak']),
-      occurredOn: DateTime.parse(row['occurred_on'] as String),
-      serverCommittedAt: _asDateTimeOrNull(row['server_committed_at']),
-    );
+  id: row['id'] as String,
+  title: row['title'] as String,
+  type: row['type'] as String,
+  metric: _asInt(row['metric']),
+  unit: row['unit'] as String,
+  note: row['note'] as String?,
+  streak: row['streak'] == null ? 0 : _asInt(row['streak']),
+  occurredOn: DateTime.parse(row['occurred_on'] as String),
+  serverCommittedAt: _asDateTimeOrNull(row['server_committed_at']),
+);
 
 ProductRow productFromRow(Map<String, dynamic> row) => ProductRow(
-      id: row['id'] as String,
-      name: row['name'] as String,
-      category: row['category'] as String,
-      priceCents: _asInt(row['price_cents']),
-      rating: _asDoubleOrNull(row['rating']),
-      plantBased: _asBool(row['plant_based']),
-      imageUrl: row['image_url'] as String?,
-    );
+  id: row['id'] as String,
+  name: row['name'] as String,
+  category: row['category'] as String,
+  priceCents: _asInt(row['price_cents']),
+  rating: _asDoubleOrNull(row['rating']),
+  plantBased: _asBool(row['plant_based']),
+  imageUrl: row['image_url'] as String?,
+);
 
 /// Local write image for `addSession`. Omits `server_committed_at` — the
 /// server's `default now()` is the clock authority for the serverAcked mark
@@ -455,44 +459,44 @@ ProductRow productFromRow(Map<String, dynamic> row) => ProductRow(
 /// server-side from the Supabase upsert's auth context, overwriting whatever
 /// the client sends (mirrors nostos_adapter.dart's sessionWritePayload).
 Map<String, dynamic> sessionWritePayload(SessionRow s) => {
-      'id': s.id,
-      'title': s.title,
-      'type': s.type,
-      'metric': s.metric,
-      'unit': s.unit,
-      if (s.note != null) 'note': s.note,
-      'streak': s.streak,
-      'occurred_on': _dateOnly(s.occurredOn),
-    };
+  'id': s.id,
+  'title': s.title,
+  'type': s.type,
+  'metric': s.metric,
+  'unit': s.unit,
+  if (s.note != null) 'note': s.note,
+  'streak': s.streak,
+  'occurred_on': _dateOnly(s.occurredOn),
+};
 
 String _dateOnly(DateTime d) =>
     '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
 int _asInt(Object? v) => switch (v) {
-      int i => i,
-      num n => n.toInt(),
-      String s => int.parse(s),
-      _ => throw ArgumentError('expected int, got $v (${v.runtimeType})'),
-    };
+  int i => i,
+  num n => n.toInt(),
+  String s => int.parse(s),
+  _ => throw ArgumentError('expected int, got $v (${v.runtimeType})'),
+};
 
 double? _asDoubleOrNull(Object? v) => switch (v) {
-      null => null,
-      double d => d,
-      num n => n.toDouble(),
-      String s => double.parse(s),
-      _ => throw ArgumentError('expected double?, got $v (${v.runtimeType})'),
-    };
+  null => null,
+  double d => d,
+  num n => n.toDouble(),
+  String s => double.parse(s),
+  _ => throw ArgumentError('expected double?, got $v (${v.runtimeType})'),
+};
 
 bool _asBool(Object? v) => switch (v) {
-      bool b => b,
-      int i => i != 0,
-      num n => n != 0,
-      String s => s == 'true' || s == '1',
-      _ => throw ArgumentError('expected bool, got $v (${v.runtimeType})'),
-    };
+  bool b => b,
+  int i => i != 0,
+  num n => n != 0,
+  String s => s == 'true' || s == '1',
+  _ => throw ArgumentError('expected bool, got $v (${v.runtimeType})'),
+};
 
 DateTime? _asDateTimeOrNull(Object? v) => switch (v) {
-      null => null,
-      String s => DateTime.parse(s),
-      _ => throw ArgumentError('expected DateTime?, got $v (${v.runtimeType})'),
-    };
+  null => null,
+  String s => DateTime.parse(s),
+  _ => throw ArgumentError('expected DateTime?, got $v (${v.runtimeType})'),
+};

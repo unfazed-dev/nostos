@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import '../adapters/sync_adapter.dart';
 
 class MarkDeriver {
@@ -19,15 +20,27 @@ class MarkDeriver {
         if (localIds.contains(r.id)) {
           _out.add(SyncMark(MarkKind.localVisible, r.id, t));
         } else if (r.serverCommittedAt != null) {
-          _out.add(SyncMark(MarkKind.remoteVisible, r.id, t,
-              serverCommittedAt: r.serverCommittedAt));
+          _out.add(
+            SyncMark(
+              MarkKind.remoteVisible,
+              r.id,
+              t,
+              serverCommittedAt: r.serverCommittedAt,
+            ),
+          );
         }
       }
       if (r.serverCommittedAt != null &&
           _acked.add(r.id) &&
           localIds.contains(r.id)) {
-        _out.add(SyncMark(MarkKind.serverAcked, r.id, t,
-            serverCommittedAt: r.serverCommittedAt));
+        _out.add(
+          SyncMark(
+            MarkKind.serverAcked,
+            r.id,
+            t,
+            serverCommittedAt: r.serverCommittedAt,
+          ),
+        );
       }
     }
   }

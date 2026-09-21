@@ -37,47 +37,56 @@ void main() {
     if (await tempDir.exists()) await tempDir.delete(recursive: true);
   });
 
-  test('uploadStoredRuns returns 0 and never calls uploadRuns on an empty store', () async {
-    final store = BenchStore(directory: tempDir);
-    var called = false;
-    final count = await uploadStoredRuns(store, (rows) async {
-      called = true;
-    });
-    expect(count, 0);
-    expect(called, isFalse);
-  });
+  test(
+    'uploadStoredRuns returns 0 and never calls uploadRuns on an empty store',
+    () async {
+      final store = BenchStore(directory: tempDir);
+      var called = false;
+      final count = await uploadStoredRuns(store, (rows) async {
+        called = true;
+      });
+      expect(count, 0);
+      expect(called, isFalse);
+    },
+  );
 
-  test('uploadStoredRuns posts every stored record shaped via toJson', () async {
-    final store = BenchStore(directory: tempDir);
-    await store.append(_fixture(runType: 'cold_sync'));
-    await store.append(_fixture(runType: 'propagation'));
+  test(
+    'uploadStoredRuns posts every stored record shaped via toJson',
+    () async {
+      final store = BenchStore(directory: tempDir);
+      await store.append(_fixture(runType: 'cold_sync'));
+      await store.append(_fixture(runType: 'propagation'));
 
-    List<Map<String, dynamic>>? captured;
-    final count = await uploadStoredRuns(store, (rows) async {
-      captured = rows;
-    });
+      List<Map<String, dynamic>>? captured;
+      final count = await uploadStoredRuns(store, (rows) async {
+        captured = rows;
+      });
 
-    expect(count, 2);
-    expect(captured, isNotNull);
-    expect(captured!.length, 2);
-    expect(captured![0]['run_type'], 'cold_sync');
-    expect(captured![1]['run_type'], 'propagation');
-    // Every uploaded row carries the internal-eval label (decision #10) —
-    // RunRecord.toJson stamps it into metrics, upload.dart must not strip it.
-    expect(captured![0]['metrics']['label'], RunRecord.evaluationLabel);
-  });
+      expect(count, 2);
+      expect(captured, isNotNull);
+      expect(captured!.length, 2);
+      expect(captured![0]['run_type'], 'cold_sync');
+      expect(captured![1]['run_type'], 'propagation');
+      // Every uploaded row carries the internal-eval label (decision #10) —
+      // RunRecord.toJson stamps it into metrics, upload.dart must not strip it.
+      expect(captured![0]['metrics']['label'], RunRecord.evaluationLabel);
+    },
+  );
 
-  test('uploadStoredRuns propagates a failing uploader instead of swallowing it', () async {
-    final store = BenchStore(directory: tempDir);
-    await store.append(_fixture());
+  test(
+    'uploadStoredRuns propagates a failing uploader instead of swallowing it',
+    () async {
+      final store = BenchStore(directory: tempDir);
+      await store.append(_fixture());
 
-    Future<void> failingUpload(List<Map<String, dynamic>> rows) async {
-      throw StateError('network down');
-    }
+      Future<void> failingUpload(List<Map<String, dynamic>> rows) async {
+        throw StateError('network down');
+      }
 
-    expect(
-      () => uploadStoredRuns(store, failingUpload),
-      throwsA(isA<StateError>()),
-    );
-  });
+      expect(
+        () => uploadStoredRuns(store, failingUpload),
+        throwsA(isA<StateError>()),
+      );
+    },
+  );
 }

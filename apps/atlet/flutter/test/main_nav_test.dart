@@ -19,7 +19,9 @@ import 'package:atlet/ui/shop.dart';
 /// real platform channel under test (MissingPluginException). No events
 /// are emitted; the guard stays in its seeded online state.
 void _mockConnectivityPlus() {
-  const eventChannel = MethodChannel('dev.fluttercommunity.plus/connectivity_status');
+  const eventChannel = MethodChannel(
+    'dev.fluttercommunity.plus/connectivity_status',
+  );
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(eventChannel, (MethodCall call) async => null);
 
@@ -55,9 +57,8 @@ void main() {
       if (await tempDir.exists()) await tempDir.delete(recursive: true);
     });
 
-    Widget harness() => MaterialApp(
-          home: HomeScreen(benchStoreOpener: () async => store),
-        );
+    Widget harness() =>
+        MaterialApp(home: HomeScreen(benchStoreOpener: () async => store));
 
     testWidgets('all three tabs are present', (tester) async {
       await tester.pumpWidget(harness());
@@ -93,18 +94,19 @@ void main() {
       expect(find.byType(ShopScreen), findsOneWidget);
     });
 
-    testWidgets('tapping Analytics shows AnalyticsScreen with the eval banner', (
-      tester,
-    ) async {
-      await tester.pumpWidget(harness());
-      await tester.pump();
+    testWidgets(
+      'tapping Analytics shows AnalyticsScreen with the eval banner',
+      (tester) async {
+        await tester.pumpWidget(harness());
+        await tester.pump();
 
-      await tester.tap(find.byKey(const Key('nav-tab-analytics')));
-      await _settle(tester);
+        await tester.tap(find.byKey(const Key('nav-tab-analytics')));
+        await _settle(tester);
 
-      expect(find.byKey(const Key('analytics-screen')), findsOneWidget);
-      expect(find.byKey(const Key('analytics-eval-banner')), findsOneWidget);
-    });
+        expect(find.byKey(const Key('analytics-screen')), findsOneWidget);
+        expect(find.byKey(const Key('analytics-eval-banner')), findsOneWidget);
+      },
+    );
 
     testWidgets('tapping back to Home returns to the training screen', (
       tester,

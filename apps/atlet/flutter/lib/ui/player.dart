@@ -35,7 +35,11 @@ class WorkoutPlayer extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _PlayerScaffold extends StatelessWidget {
-  const _PlayerScaffold({required this.title, required this.child, this.controls});
+  const _PlayerScaffold({
+    required this.title,
+    required this.child,
+    this.controls,
+  });
 
   final String title;
   final Widget child;
@@ -54,12 +58,7 @@ class _PlayerScaffold extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
-            children: [
-              const Spacer(),
-              child,
-              const Spacer(),
-              ?controls,
-            ],
+            children: [const Spacer(), child, const Spacer(), ?controls],
           ),
         ),
       ),
@@ -68,7 +67,11 @@ class _PlayerScaffold extends StatelessWidget {
 }
 
 class _Dial extends StatelessWidget {
-  const _Dial({required this.progress, this.urgent = false, required this.child});
+  const _Dial({
+    required this.progress,
+    this.urgent = false,
+    required this.child,
+  });
 
   final double progress; // 0..1
   final bool urgent;
@@ -178,8 +181,13 @@ class _TimePlayerState extends State<_TimePlayer> {
                 color: AtletTokens.ink,
               ),
             ),
-            Text('of ${_fmtSec(_total)}',
-                style: TextStyle(color: AtletTokens.ink3, fontSize: AtletTokens.body)),
+            Text(
+              'of ${_fmtSec(_total)}',
+              style: TextStyle(
+                color: AtletTokens.ink3,
+                fontSize: AtletTokens.body,
+              ),
+            ),
           ],
         ),
       ),
@@ -232,10 +240,18 @@ class _RepsPlayerState extends State<_RepsPlayer> {
               '$_done',
               key: const Key('player-reps-count'),
               style: TextStyle(
-                  fontSize: 64, fontWeight: FontWeight.w600, color: AtletTokens.ink),
+                fontSize: 64,
+                fontWeight: FontWeight.w600,
+                color: AtletTokens.ink,
+              ),
             ),
-            Text('of $_target reps',
-                style: TextStyle(color: AtletTokens.ink3, fontSize: AtletTokens.body)),
+            Text(
+              'of $_target reps',
+              style: TextStyle(
+                color: AtletTokens.ink3,
+                fontSize: AtletTokens.body,
+              ),
+            ),
           ],
         ),
       ),
@@ -299,15 +315,19 @@ class _DistancePlayerState extends State<_DistancePlayer> {
     } else {
       setState(() => _running = true);
       _timer = Timer.periodic(
-          const Duration(seconds: 1), (_) => setState(() => _elapsed++));
+        const Duration(seconds: 1),
+        (_) => setState(() => _elapsed++),
+      );
     }
   }
 
   void _finish() {
     _timer?.cancel();
     setState(() => _running = false);
-    showFeedbackSheet(context,
-        summary: '$_targetKm km in ${_fmtSec(_elapsed)}');
+    showFeedbackSheet(
+      context,
+      summary: '$_targetKm km in ${_fmtSec(_elapsed)}',
+    );
   }
 
   @override
@@ -318,8 +338,13 @@ class _DistancePlayerState extends State<_DistancePlayer> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('$_targetKm km target',
-              style: TextStyle(color: AtletTokens.ink3, fontSize: AtletTokens.body)),
+          Text(
+            '$_targetKm km target',
+            style: TextStyle(
+              color: AtletTokens.ink3,
+              fontSize: AtletTokens.body,
+            ),
+          ),
           const SizedBox(height: 8),
           Text(
             _fmtSec(_elapsed),
@@ -342,7 +367,9 @@ class _DistancePlayerState extends State<_DistancePlayer> {
               backgroundColor: AtletTokens.accent,
               minimumSize: const Size.fromHeight(48),
             ),
-            child: Text(_running ? 'Pause' : (_elapsed > 0 ? 'Resume' : 'Start')),
+            child: Text(
+              _running ? 'Pause' : (_elapsed > 0 ? 'Resume' : 'Start'),
+            ),
           ),
           const SizedBox(height: 12),
           TextButton(
@@ -411,14 +438,22 @@ const _feedbackOptions = [
 ];
 
 const _feedbackTags = [
-  'Felt strong', 'Short on time', 'Sore', 'Good form',
-  'Crushed it', 'Low energy', 'New PR',
+  'Felt strong',
+  'Short on time',
+  'Sore',
+  'Good form',
+  'Crushed it',
+  'Low energy',
+  'New PR',
 ];
 
 /// Shows the post-workout feedback sheet. Display-only: the adapter exposes
 /// no feedback persistence surface, so submit acknowledges and pops back to
 /// the session detail. Named honestly (design task-12 precedent).
-Future<void> showFeedbackSheet(BuildContext context, {required String summary}) {
+Future<void> showFeedbackSheet(
+  BuildContext context, {
+  required String summary,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -453,14 +488,22 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('How did it go?',
-                style: TextStyle(
-                    fontSize: AtletTokens.title2,
-                    fontWeight: FontWeight.w600,
-                    color: AtletTokens.ink)),
+            Text(
+              'How did it go?',
+              style: TextStyle(
+                fontSize: AtletTokens.title2,
+                fontWeight: FontWeight.w600,
+                color: AtletTokens.ink,
+              ),
+            ),
             const SizedBox(height: 4),
-            Text(widget.summary,
-                style: TextStyle(color: AtletTokens.ink3, fontSize: AtletTokens.body)),
+            Text(
+              widget.summary,
+              style: TextStyle(
+                color: AtletTokens.ink3,
+                fontSize: AtletTokens.body,
+              ),
+            ),
             const SizedBox(height: 16),
             Row(
               children: [
@@ -533,7 +576,9 @@ class _RatingChip extends StatelessWidget {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: selected ? AtletTokens.accent : AtletTokens.ink.withValues(alpha: 0.15),
+            color: selected
+                ? AtletTokens.accent
+                : AtletTokens.ink.withValues(alpha: 0.15),
             width: selected ? 2 : 1,
           ),
         ),
@@ -541,10 +586,12 @@ class _RatingChip extends StatelessWidget {
           children: [
             Text(emoji, style: const TextStyle(fontSize: 22)),
             const SizedBox(height: 2),
-            Text(label,
-                style: TextStyle(fontSize: 11, color: AtletTokens.ink3),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis),
+            Text(
+              label,
+              style: TextStyle(fontSize: 11, color: AtletTokens.ink3),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ],
         ),
       ),

@@ -171,9 +171,8 @@ class _ChatViewState extends State<ChatView> {
                     vertical: 1,
                   ),
                   decoration: BoxDecoration(
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.secondaryContainer.withValues(alpha: 0.6),
+                    color: Theme.of(context).colorScheme.secondaryContainer
+                        .withValues(alpha: 0.6),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Text(

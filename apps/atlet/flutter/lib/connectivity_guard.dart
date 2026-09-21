@@ -53,8 +53,9 @@ class ConnectivityGuard {
   bool? _lastOnline = true;
 
   void start() {
-    _sub ??=
-        (_events ?? Connectivity().onConnectivityChanged).listen((results) {
+    _sub ??= (_events ?? Connectivity().onConnectivityChanged).listen((
+      results,
+    ) {
       final online = results.any((r) => r != ConnectivityResult.none);
       _apply(online);
     });
@@ -64,8 +65,10 @@ class ConnectivityGuard {
     // "offline" forever and disconnect a healthy engine) — rely on
     // connectivity_plus's navigator.onLine events there instead.
     if (!kIsWeb && (_events == null || _probe != null)) {
-      _probeTimer ??=
-          Timer.periodic(_probeInterval, (_) => unawaited(_runProbe()));
+      _probeTimer ??= Timer.periodic(
+        _probeInterval,
+        (_) => unawaited(_runProbe()),
+      );
     }
   }
 

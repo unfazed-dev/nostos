@@ -12,11 +12,11 @@ import 'stats_deck.dart';
 const _kSessionTypes = ['distance', 'reps', 'time'];
 
 String _wireUnitFor(String type) => switch (type) {
-      'distance' => 'km',
-      'reps' => 'reps',
-      'time' => 'sec',
-      _ => '',
-    };
+  'distance' => 'km',
+  'reps' => 'reps',
+  'time' => 'sec',
+  _ => '',
+};
 
 /// Display-transform per apps/atlet/design/views/train.hints.json — presentation
 /// only, never mutates the stored row. Returns (typeLabel, valueText, unitLabel).
@@ -65,7 +65,9 @@ class TrainingHome extends StatelessWidget {
             child: const Icon(Icons.add, color: AtletTokens.textOnAccent),
           ),
           body: sessions.isEmpty
-              ? const _EmptyState(message: 'No sessions yet.\nTap + to log one.')
+              ? const _EmptyState(
+                  message: 'No sessions yet.\nTap + to log one.',
+                )
               : ListView.separated(
                   key: const Key('session-list'),
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
@@ -191,7 +193,11 @@ class _StreakChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.local_fire_department_outlined, size: 14, color: AtletTokens.warn),
+          Icon(
+            Icons.local_fire_department_outlined,
+            size: 14,
+            color: AtletTokens.warn,
+          ),
           const SizedBox(width: 4),
           Text(
             '$streak',
@@ -292,7 +298,10 @@ class _AddSessionSheetState extends State<_AddSessionSheet> {
               key: const Key('session-type-selector'),
               segments: [
                 for (final t in _kSessionTypes)
-                  ButtonSegment(value: t, label: Text(t[0].toUpperCase() + t.substring(1))),
+                  ButtonSegment(
+                    value: t,
+                    label: Text(t[0].toUpperCase() + t.substring(1)),
+                  ),
               ],
               selected: {_type},
               onSelectionChanged: (s) => setState(() => _type = s.first),
@@ -310,10 +319,14 @@ class _AddSessionSheetState extends State<_AddSessionSheet> {
               controller: _metric,
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
-                labelText: _type == 'time' ? 'Minutes' : (_type == 'distance' ? 'Km' : 'Reps'),
-                errorText: (_metric.text.isNotEmpty &&
+                labelText: _type == 'time'
+                    ? 'Minutes'
+                    : (_type == 'distance' ? 'Km' : 'Reps'),
+                errorText:
+                    (_metric.text.isNotEmpty &&
                         ((int.tryParse(_metric.text) ?? -1) <= 0 ||
-                            (int.tryParse(_metric.text) ?? 0) > _maxMetricInput))
+                            (int.tryParse(_metric.text) ?? 0) >
+                                _maxMetricInput))
                     ? 'Enter 1–$_maxMetricInput'
                     : null,
               ),

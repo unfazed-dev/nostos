@@ -38,11 +38,9 @@ class _RecordingEngine implements NostosEngine {
     required List<NostosTableSub> tables,
     Set<String> orSetTables = const <String>{},
     Set<String> counterTables = const <String>{},
-  }) =>
-      stateController.stream;
+  }) => stateController.stream;
 
   @override
-
   @override
   Future<String> subscribeStream({
     required String name,
@@ -56,8 +54,9 @@ class _RecordingEngine implements NostosEngine {
   Stream<String> watch({required String table}) => rowsController.stream;
 
   final _writeStatus =
-      StreamController<({int pending, int deadLettered, String? lastError})>
-          .broadcast();
+      StreamController<
+        ({int pending, int deadLettered, String? lastError})
+      >.broadcast();
   @override
   Stream<({int pending, int deadLettered, String? lastError})>
   watchWriteStatus() => _writeStatus.stream;
@@ -68,47 +67,41 @@ class _RecordingEngine implements NostosEngine {
     required String op,
     required String pk,
     String? payloadJson,
-  }) async =>
-      1;
+  }) async => 1;
 
   @override
   Future<List<int>> writeBatch({
     required List<({String table, String op, String pk, String? payloadJson})>
     ops,
-  }) async =>
-      List.filled(ops.length, 1);
+  }) async => List.filled(ops.length, 1);
 
   @override
   Future<int> orSetAdd({
     required String table,
     required String pk,
     required String element,
-  }) async =>
-      1;
+  }) async => 1;
 
   @override
   Future<int> orSetRemove({
     required String table,
     required String pk,
     required String element,
-  }) async =>
-      1;
+  }) async => 1;
 
   @override
   Future<int> counterIncrement({
     required String table,
     required String pk,
     required int delta,
-  }) async =>
-      0;
+  }) async => 0;
 
   @override
   Future<int> counterDecrement({
     required String table,
     required String pk,
     required int delta,
-  }) async =>
-      0;
+  }) async => 0;
 
   @override
   void applySchema(List<ClientTableFfi> tables) {}
@@ -149,10 +142,8 @@ void main() {
     return (engine, db);
   }
 
-  Collection<_Row> schemaQualified(NostosDatabase db) => db.collection<_Row>(
-    table: 'myschema.tasks',
-    fromRow: _Row.fromRow,
-  );
+  Collection<_Row> schemaQualified(NostosDatabase db) =>
+      db.collection<_Row>(table: 'myschema.tasks', fromRow: _Row.fromRow);
 
   test('getAll emits SQL against the collapsed view name', () async {
     final (engine, db) = newDb();
@@ -201,9 +192,7 @@ void main() {
   test('bare public names pass through unchanged', () async {
     final (engine, db) = newDb();
     await db.subscribe('todos');
-    await db
-        .collection<_Row>(table: 'todos', fromRow: _Row.fromRow)
-        .getAll();
+    await db.collection<_Row>(table: 'todos', fromRow: _Row.fromRow).getAll();
     expect(engine.queries.last, contains('FROM todos'));
   });
 }

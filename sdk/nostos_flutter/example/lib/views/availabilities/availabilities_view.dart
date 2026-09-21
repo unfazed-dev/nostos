@@ -93,9 +93,9 @@ class _AvailabilitiesViewState extends State<AvailabilitiesView> {
                                 avatar: Icon(
                                   Icons.access_time_filled,
                                   size: 16,
-                                  color: Theme.of(
-                                    context,
-                                  ).colorScheme.onSurfaceVariant,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant,
                                 ),
                                 label: Text(
                                   w.summary,

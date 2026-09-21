@@ -34,7 +34,9 @@ NostosWorkerPort spawnNostosWorker({String? workerUrl}) {
   // Chromium/Safari decide by heuristics — either way, fire and forget.
   try {
     unawaited(
-      window.navigator.storage.persist().toDart.catchError((Object _) => false.toJS),
+      window.navigator.storage.persist().toDart.catchError(
+        (Object _) => false.toJS,
+      ),
     );
   } catch (_) {
     /* no StorageManager (very old browser) — nothing to request */

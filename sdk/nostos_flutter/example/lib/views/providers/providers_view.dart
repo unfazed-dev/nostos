@@ -110,9 +110,9 @@ class _ProvidersViewState extends State<ProvidersView> {
                           p.specialty!,
                           style: TextStyle(
                             fontSize: 13,
-                            color: Theme.of(
-                              context,
-                            ).colorScheme.onSurfaceVariant,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant,
                           ),
                         ),
                       const SizedBox(height: 6),

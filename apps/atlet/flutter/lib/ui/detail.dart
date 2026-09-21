@@ -38,7 +38,11 @@ import 'player.dart';
 /// adapter update surface) is a parked, operator-gated future task — see
 /// task-12-report.md Concerns.
 class SessionDetail extends StatelessWidget {
-  const SessionDetail({super.key, required this.adapter, required this.sessionId});
+  const SessionDetail({
+    super.key,
+    required this.adapter,
+    required this.sessionId,
+  });
 
   final SyncAdapter adapter;
   final String sessionId;
@@ -51,7 +55,10 @@ class SessionDetail extends StatelessWidget {
         if (!snapshot.hasData) {
           // Stream hasn't emitted yet — unknown, not absent. Popping here
           // would bounce straight back out before the first snapshot arrives.
-          return Scaffold(backgroundColor: AtletTokens.bone, body: const SizedBox.shrink());
+          return Scaffold(
+            backgroundColor: AtletTokens.bone,
+            body: const SizedBox.shrink(),
+          );
         }
 
         SessionRow? session;
@@ -78,7 +85,10 @@ class SessionDetail extends StatelessWidget {
           appBar: AppBar(
             backgroundColor: AtletTokens.bone,
             elevation: 0,
-            title: Text(session.title, style: TextStyle(color: AtletTokens.ink)),
+            title: Text(
+              session.title,
+              style: TextStyle(color: AtletTokens.ink),
+            ),
           ),
           body: Padding(
             padding: const EdgeInsets.all(24),
@@ -106,16 +116,30 @@ class SessionDetail extends StatelessWidget {
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    Icon(Icons.local_fire_department_outlined, size: 16, color: AtletTokens.warn),
+                    Icon(
+                      Icons.local_fire_department_outlined,
+                      size: 16,
+                      color: AtletTokens.warn,
+                    ),
                     const SizedBox(width: 6),
-                    Text('${session.streak}-day streak',
-                        style: TextStyle(color: AtletTokens.ink3, fontSize: AtletTokens.body)),
+                    Text(
+                      '${session.streak}-day streak',
+                      style: TextStyle(
+                        color: AtletTokens.ink3,
+                        fontSize: AtletTokens.body,
+                      ),
+                    ),
                   ],
                 ),
                 if (session.note != null) ...[
                   const SizedBox(height: 16),
-                  Text(session.note!,
-                      style: TextStyle(color: AtletTokens.ink, fontSize: AtletTokens.body)),
+                  Text(
+                    session.note!,
+                    style: TextStyle(
+                      color: AtletTokens.ink,
+                      fontSize: AtletTokens.body,
+                    ),
+                  ),
                 ],
                 const Spacer(),
                 FilledButton(
@@ -145,7 +169,10 @@ class SessionDetail extends StatelessWidget {
                 TextButton(
                   key: const Key('delete-session-button'),
                   onPressed: () => _confirmDelete(context, session!),
-                  child: Text('Delete', style: TextStyle(color: AtletTokens.accent2)),
+                  child: Text(
+                    'Delete',
+                    style: TextStyle(color: AtletTokens.accent2),
+                  ),
                 ),
               ],
             ),

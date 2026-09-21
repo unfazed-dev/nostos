@@ -41,7 +41,6 @@ class _FakeEngine implements NostosEngine {
   }) => stateController.stream;
 
   @override
-
   @override
   Future<String> subscribeStream({
     required String name,

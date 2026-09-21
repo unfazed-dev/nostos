@@ -111,11 +111,17 @@ class NostosAdapter implements SyncAdapter {
     // maybe filter, maybe order" reads. Injection-safe by construction.
     // (No sessions handle — its sort needs watchSql, see below.)
     final products = db.collection<ProductRow>(
-        table: 'products', fromRow: productFromRow);
+      table: 'products',
+      fromRow: productFromRow,
+    );
     final cartItems = db.collection<CartItemRow>(
-        table: 'cart_items', fromRow: cartItemFromRow);
-    final orders =
-        db.collection<OrderRow>(table: 'orders', fromRow: orderFromRow);
+      table: 'cart_items',
+      fromRow: cartItemFromRow,
+    );
+    final orders = db.collection<OrderRow>(
+      table: 'orders',
+      fromRow: orderFromRow,
+    );
 
     // sessions: the sort needs `(server_committed_at IS NULL) DESC`, an
     // expression the structured `Order` (field+direction) can't express yet —
@@ -124,27 +130,33 @@ class NostosAdapter implements SyncAdapter {
     // Newest first: latest day on top; within a day, the just-added row
     // (server_committed_at still NULL until acked) sorts above older ones.
     _sessionsSub = db
-        .watchSql('SELECT * FROM sessions '
-            'ORDER BY occurred_on DESC, '
-            '(server_committed_at IS NULL) DESC, server_committed_at DESC')
+        .watchSql(
+          'SELECT * FROM sessions '
+          'ORDER BY occurred_on DESC, '
+          '(server_committed_at IS NULL) DESC, server_committed_at DESC',
+        )
         .listen((rows) {
-      final items = rows.map(sessionFromRow).toList(growable: false);
-      _deriver.onEmission(items);
-      _lastSessions = items;
-      _sessionsController?.add(items);
-    });
+          final items = rows.map(sessionFromRow).toList(growable: false);
+          _deriver.onEmission(items);
+          _lastSessions = items;
+          _sessionsController?.add(items);
+        });
 
     _productsSub = products.watch().listen((items) {
       _lastProducts = items;
       _productsController?.add(items);
     });
 
-    _cartSub = cartItems.watch(orderBy: [Order.desc('added_at')]).listen((items) {
+    _cartSub = cartItems.watch(orderBy: [Order.desc('added_at')]).listen((
+      items,
+    ) {
       _lastCart = items;
       _cartController?.add(items);
     });
 
-    _ordersSub = orders.watch(orderBy: [Order.desc('created_at')]).listen((items) {
+    _ordersSub = orders.watch(orderBy: [Order.desc('created_at')]).listen((
+      items,
+    ) {
       _lastOrders = items;
       _ordersController?.add(items);
     });
@@ -167,11 +179,11 @@ class NostosAdapter implements SyncAdapter {
 
   @override
   Future<void> updateSession(SessionRow s) => _requireDb().write(
-        table: 'sessions',
-        op: 'upsert',
-        pk: s.id,
-        payload: sessionWritePayload(s),
-      );
+    table: 'sessions',
+    op: 'upsert',
+    pk: s.id,
+    payload: sessionWritePayload(s),
+  );
 
   @override
   Future<void> deleteSession(String id) =>
@@ -179,11 +191,11 @@ class NostosAdapter implements SyncAdapter {
 
   @override
   Future<void> addToCart(CartItemRow item) => _requireDb().write(
-        table: 'cart_items',
-        op: 'upsert',
-        pk: item.id,
-        payload: cartItemWritePayload(item, userId: _userId),
-      );
+    table: 'cart_items',
+    op: 'upsert',
+    pk: item.id,
+    payload: cartItemWritePayload(item, userId: _userId),
+  );
 
   @override
   Future<void> removeCartItem(String id) =>
@@ -211,28 +223,33 @@ class NostosAdapter implements SyncAdapter {
 
   @override
   Stream<List<CartItemRow>> watchCart() => replayLatest(
-      _requireController(_cartController, 'watchCart() before init()'),
-      () => _lastCart);
+    _requireController(_cartController, 'watchCart() before init()'),
+    () => _lastCart,
+  );
 
   @override
   Stream<List<OrderRow>> watchOrders() => replayLatest(
-      _requireController(_ordersController, 'watchOrders() before init()'),
-      () => _lastOrders);
+    _requireController(_ordersController, 'watchOrders() before init()'),
+    () => _lastOrders,
+  );
 
   @override
   Stream<List<SessionRow>> watchSessions() => replayLatest(
-      _requireController(_sessionsController, 'watchSessions() before init()'),
-      () => _lastSessions);
+    _requireController(_sessionsController, 'watchSessions() before init()'),
+    () => _lastSessions,
+  );
 
   @override
   Stream<List<ProductRow>> watchProducts() => replayLatest(
-      _requireController(_productsController, 'watchProducts() before init()'),
-      () => _lastProducts);
+    _requireController(_productsController, 'watchProducts() before init()'),
+    () => _lastProducts,
+  );
 
   @override
   Stream<bool> get connected => replayLatest(
-      _requireController(_connectedController, 'connected before init()'),
-      () => _lastConnected);
+    _requireController(_connectedController, 'connected before init()'),
+    () => _lastConnected,
+  );
 
   @override
   Future<void> setConnected(bool up) async {
@@ -332,72 +349,89 @@ class NostosAdapter implements SyncAdapter {
 StreamSubscription<NostosConnectionState> wireConnectionState(
   Stream<NostosConnectionState> connectionState,
   void Function(bool isConnected) onConnected,
-) =>
-    connectionState.listen((state) {
-      onConnected(state == NostosConnectionState.connected);
-    });
+) => connectionState.listen((state) {
+  onConnected(state == NostosConnectionState.connected);
+});
 
-final NostosSchema _schema = NostosSchema(tables: [
-  NostosTable(name: 'sessions', primaryKey: const ['id'], columns: [
-    NostosColumn.text('id'),
-    NostosColumn.text('title'),
-    NostosColumn.text('type'),
-    NostosColumn.integer('metric'),
-    NostosColumn.text('unit'),
-    NostosColumn.text('note'),
-    NostosColumn.integer('streak'),
-    NostosColumn.text('occurred_on'),
-    NostosColumn.text('server_committed_at'),
-  ]),
-  NostosTable(name: 'products', primaryKey: const ['id'], columns: [
-    NostosColumn.text('id'),
-    NostosColumn.text('name'),
-    NostosColumn.text('category'),
-    NostosColumn.integer('price_cents'),
-    NostosColumn.real('rating'),
-    NostosColumn.integer('plant_based'),
-    NostosColumn.text('image_url'),
-  ]),
-  NostosTable(name: 'cart_items', primaryKey: const ['id'], columns: [
-    NostosColumn.text('id'),
-    NostosColumn.text('product_id'),
-    NostosColumn.integer('qty'),
-    NostosColumn.text('added_at'),
-  ]),
-  NostosTable(name: 'orders', primaryKey: const ['id'], columns: [
-    NostosColumn.text('id'),
-    NostosColumn.text('status'),
-    NostosColumn.integer('subtotal_cents'),
-    NostosColumn.integer('tax_cents'),
-    NostosColumn.integer('shipping_cents'),
-    NostosColumn.integer('total_cents'),
-    NostosColumn.text('payment_ref'),
-    NostosColumn.text('items_json'),
-    NostosColumn.text('created_at'),
-  ]),
-]);
+final NostosSchema _schema = NostosSchema(
+  tables: [
+    NostosTable(
+      name: 'sessions',
+      primaryKey: const ['id'],
+      columns: [
+        NostosColumn.text('id'),
+        NostosColumn.text('title'),
+        NostosColumn.text('type'),
+        NostosColumn.integer('metric'),
+        NostosColumn.text('unit'),
+        NostosColumn.text('note'),
+        NostosColumn.integer('streak'),
+        NostosColumn.text('occurred_on'),
+        NostosColumn.text('server_committed_at'),
+      ],
+    ),
+    NostosTable(
+      name: 'products',
+      primaryKey: const ['id'],
+      columns: [
+        NostosColumn.text('id'),
+        NostosColumn.text('name'),
+        NostosColumn.text('category'),
+        NostosColumn.integer('price_cents'),
+        NostosColumn.real('rating'),
+        NostosColumn.integer('plant_based'),
+        NostosColumn.text('image_url'),
+      ],
+    ),
+    NostosTable(
+      name: 'cart_items',
+      primaryKey: const ['id'],
+      columns: [
+        NostosColumn.text('id'),
+        NostosColumn.text('product_id'),
+        NostosColumn.integer('qty'),
+        NostosColumn.text('added_at'),
+      ],
+    ),
+    NostosTable(
+      name: 'orders',
+      primaryKey: const ['id'],
+      columns: [
+        NostosColumn.text('id'),
+        NostosColumn.text('status'),
+        NostosColumn.integer('subtotal_cents'),
+        NostosColumn.integer('tax_cents'),
+        NostosColumn.integer('shipping_cents'),
+        NostosColumn.integer('total_cents'),
+        NostosColumn.text('payment_ref'),
+        NostosColumn.text('items_json'),
+        NostosColumn.text('created_at'),
+      ],
+    ),
+  ],
+);
 
 /// Maps a decoded `cart_items` row to [CartItemRow]. Top-level and pure —
 /// same testability rationale as [sessionFromRow].
 CartItemRow cartItemFromRow(Map<String, dynamic> row) => CartItemRow(
-      id: row['id'] as String,
-      productId: row['product_id'] as String,
-      qty: _asInt(row['qty']),
-      addedAt: DateTime.parse(row['added_at'] as String),
-    );
+  id: row['id'] as String,
+  productId: row['product_id'] as String,
+  qty: _asInt(row['qty']),
+  addedAt: DateTime.parse(row['added_at'] as String),
+);
 
 /// Maps a decoded `orders` row to [OrderRow].
 OrderRow orderFromRow(Map<String, dynamic> row) => OrderRow(
-      id: row['id'] as String,
-      status: row['status'] as String,
-      subtotalCents: _asInt(row['subtotal_cents']),
-      taxCents: _asInt(row['tax_cents']),
-      shippingCents: _asInt(row['shipping_cents']),
-      totalCents: _asInt(row['total_cents']),
-      paymentRef: row['payment_ref'] as String?,
-      itemsJson: row['items_json'] as String?,
-      createdAt: DateTime.parse(row['created_at'] as String),
-    );
+  id: row['id'] as String,
+  status: row['status'] as String,
+  subtotalCents: _asInt(row['subtotal_cents']),
+  taxCents: _asInt(row['tax_cents']),
+  shippingCents: _asInt(row['shipping_cents']),
+  totalCents: _asInt(row['total_cents']),
+  paymentRef: row['payment_ref'] as String?,
+  itemsJson: row['items_json'] as String?,
+  createdAt: DateTime.parse(row['created_at'] as String),
+);
 
 /// Write payload for a cart upsert (snake_case wire keys, like
 /// [sessionWritePayload]).
@@ -407,53 +441,53 @@ OrderRow orderFromRow(Map<String, dynamic> row) => OrderRow(
 /// connection where `auth.uid()` is NULL — omitting it fails NOT NULL and
 /// the write is rejected (tenant stamping is off; products is global).
 Map<String, dynamic> cartItemWritePayload(CartItemRow c, {String? userId}) => {
-      'id': c.id,
-      'user_id': ?userId,
-      'product_id': c.productId,
-      'qty': c.qty,
-      'added_at': c.addedAt.toUtc().toIso8601String(),
-    };
+  'id': c.id,
+  'user_id': ?userId,
+  'product_id': c.productId,
+  'qty': c.qty,
+  'added_at': c.addedAt.toUtc().toIso8601String(),
+};
 
 /// Write payload for an order insert. Includes `user_id` for the same
 /// reason as [cartItemWritePayload].
 Map<String, dynamic> orderWritePayload(OrderRow o, {String? userId}) => {
-      'id': o.id,
-      'user_id': ?userId,
-      'status': o.status,
-      'subtotal_cents': o.subtotalCents,
-      'tax_cents': o.taxCents,
-      'shipping_cents': o.shippingCents,
-      'total_cents': o.totalCents,
-      'payment_ref': o.paymentRef,
-      'items_json': o.itemsJson,
-      'created_at': o.createdAt.toUtc().toIso8601String(),
-    };
+  'id': o.id,
+  'user_id': ?userId,
+  'status': o.status,
+  'subtotal_cents': o.subtotalCents,
+  'tax_cents': o.taxCents,
+  'shipping_cents': o.shippingCents,
+  'total_cents': o.totalCents,
+  'payment_ref': o.paymentRef,
+  'items_json': o.itemsJson,
+  'created_at': o.createdAt.toUtc().toIso8601String(),
+};
 
 /// Maps a decoded row from a sessions read (the escape-hatch `watchSql` path,
 /// since the structured `Order` can't express the `(server_committed_at IS
 /// NULL) DESC` sort) to [SessionRow]. Top-level and pure so it's testable
 /// without the FFI bridge — see nostos_adapter_test.dart.
 SessionRow sessionFromRow(Map<String, dynamic> row) => SessionRow(
-      id: row['id'] as String,
-      title: row['title'] as String,
-      type: row['type'] as String,
-      metric: _asInt(row['metric']),
-      unit: row['unit'] as String,
-      note: row['note'] as String?,
-      streak: row['streak'] == null ? 0 : _asInt(row['streak']),
-      occurredOn: DateTime.parse(row['occurred_on'] as String),
-      serverCommittedAt: _asDateTimeOrNull(row['server_committed_at']),
-    );
+  id: row['id'] as String,
+  title: row['title'] as String,
+  type: row['type'] as String,
+  metric: _asInt(row['metric']),
+  unit: row['unit'] as String,
+  note: row['note'] as String?,
+  streak: row['streak'] == null ? 0 : _asInt(row['streak']),
+  occurredOn: DateTime.parse(row['occurred_on'] as String),
+  serverCommittedAt: _asDateTimeOrNull(row['server_committed_at']),
+);
 
 ProductRow productFromRow(Map<String, dynamic> row) => ProductRow(
-      id: row['id'] as String,
-      name: row['name'] as String,
-      category: row['category'] as String,
-      priceCents: _asInt(row['price_cents']),
-      rating: _asDoubleOrNull(row['rating']),
-      plantBased: _asBool(row['plant_based']),
-      imageUrl: row['image_url'] as String?,
-    );
+  id: row['id'] as String,
+  name: row['name'] as String,
+  category: row['category'] as String,
+  priceCents: _asInt(row['price_cents']),
+  rating: _asDoubleOrNull(row['rating']),
+  plantBased: _asBool(row['plant_based']),
+  imageUrl: row['image_url'] as String?,
+);
 
 /// Write image for `addSession`. Omits `server_committed_at` — Postgres's
 /// `default now()` is the clock authority for the serverAcked mark; sending
@@ -462,44 +496,44 @@ ProductRow productFromRow(Map<String, dynamic> row) => ProductRow(
 /// JWT server-side (NOSTOS_TENANT_COLUMN=user_id, write_back.rs's
 /// stamp_tenant_column), overwriting whatever the client sends.
 Map<String, dynamic> sessionWritePayload(SessionRow s) => {
-      'id': s.id,
-      'title': s.title,
-      'type': s.type,
-      'metric': s.metric,
-      'unit': s.unit,
-      if (s.note != null) 'note': s.note,
-      'streak': s.streak,
-      'occurred_on': _dateOnly(s.occurredOn),
-    };
+  'id': s.id,
+  'title': s.title,
+  'type': s.type,
+  'metric': s.metric,
+  'unit': s.unit,
+  if (s.note != null) 'note': s.note,
+  'streak': s.streak,
+  'occurred_on': _dateOnly(s.occurredOn),
+};
 
 String _dateOnly(DateTime d) =>
     '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
 int _asInt(Object? v) => switch (v) {
-      int i => i,
-      num n => n.toInt(),
-      String s => int.parse(s),
-      _ => throw ArgumentError('expected int, got $v (${v.runtimeType})'),
-    };
+  int i => i,
+  num n => n.toInt(),
+  String s => int.parse(s),
+  _ => throw ArgumentError('expected int, got $v (${v.runtimeType})'),
+};
 
 double? _asDoubleOrNull(Object? v) => switch (v) {
-      null => null,
-      double d => d,
-      num n => n.toDouble(),
-      String s => double.parse(s),
-      _ => throw ArgumentError('expected double?, got $v (${v.runtimeType})'),
-    };
+  null => null,
+  double d => d,
+  num n => n.toDouble(),
+  String s => double.parse(s),
+  _ => throw ArgumentError('expected double?, got $v (${v.runtimeType})'),
+};
 
 bool _asBool(Object? v) => switch (v) {
-      bool b => b,
-      int i => i != 0,
-      num n => n != 0,
-      String s => s == 'true' || s == '1',
-      _ => throw ArgumentError('expected bool, got $v (${v.runtimeType})'),
-    };
+  bool b => b,
+  int i => i != 0,
+  num n => n != 0,
+  String s => s == 'true' || s == '1',
+  _ => throw ArgumentError('expected bool, got $v (${v.runtimeType})'),
+};
 
 DateTime? _asDateTimeOrNull(Object? v) => switch (v) {
-      null => null,
-      String s => DateTime.parse(s),
-      _ => throw ArgumentError('expected DateTime?, got $v (${v.runtimeType})'),
-    };
+  null => null,
+  String s => DateTime.parse(s),
+  _ => throw ArgumentError('expected DateTime?, got $v (${v.runtimeType})'),
+};
