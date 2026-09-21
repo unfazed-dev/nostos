@@ -224,6 +224,33 @@ by design:
 So: the browser client is offline-capable AND reload-durable; the Node facade is
 offline-capable within a session only.
 
+### Multi-tab, eviction, bundlers (2026-09-21 — see `docs/research/web-sdk-best-practices-2026-09-21.md`)
+
+- **One durable engine per origin, every tab uses it.** `opfs-sahpool` installs
+  once per origin (sqlite.org persistence doc). The Worker takes a Web Lock
+  (`cairn:opfs-sahpool`) before opening OPFS; a tab that loses the lock becomes
+  a **follower**: it proxies every command over a `BroadcastChannel` to the
+  leader tab's Worker (responses by id, pushes mirrored) and reports the
+  leader's mode with `reason:"follower"`. A later `connect` joins the live
+  session (first tab's url/table win); `close`/`signOut` from any tab end it
+  for all. When the leader tab closes, the Web Lock queue promotes a follower,
+  which opens OPFS and replays its own `connect` (in-flight requests at that
+  moment are lost). Not a `SharedWorker`: Chromium exposes no `Worker` in
+  `SharedWorkerGlobalScope` and opfs-sahpool needs a dedicated worker's sync
+  access handle. Opt a tab OUT with `allowSecondaryTab: true` on connect →
+  standalone memory engine, own socket, `reason:"secondary-tab"`. Pinned by
+  `e2e/secondary_tab.spec.cjs`.
+- **Ask for persistent storage.** Origin storage is best-effort and evictable
+  (MDN). Call `await navigator.storage.persist()` on the main thread before
+  spawning the Worker; the storage push carries `persisted` so the UI can warn.
+- **Guard pending writes on close** (PowerSync recipe): when `deadLetters().pending > 0`
+  add a `beforeunload` listener that calls `preventDefault()`. Do it always when
+  `storageMode === "memory"` — those writes die with the tab.
+- **Bundlers.** Construct the Worker so Vite/webpack can see it:
+  `new Worker(new URL("@nostos-sync/web/worker/nostos.worker.js", import.meta.url), { type: "module" })`.
+  `worker/`, `sw/` and `pkg-web/` ship in the npm `files` list; run
+  `npm run build:web` before packing.
+
 **A third gap is Node-only.** `NostosSocket.connect()` is wired to
 `web-sys::WebSocket` + `Window::localStorage` (default of the injectable
 `setKvStore` seam), which Node lacks, so the

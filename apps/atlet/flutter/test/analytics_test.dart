@@ -56,10 +56,7 @@ void main() {
         _fixture(
           engine: 'cairn',
           runType: 'propagation',
-          metrics: {
-            'propagation_ms_median': 12.5,
-            'propagation_ms_p95': 40.0,
-          },
+          metrics: {'propagation_ms_median': 12.5, 'propagation_ms_p95': 40.0},
         ),
       );
       expect(row.value, 12.5);
@@ -103,24 +100,27 @@ void main() {
   });
 
   group('latestMetricRows', () {
-    test('collapses repeated (engine, run_type) runs to the latest by startedAt', () {
-      final rows = latestMetricRows([
-        _fixture(
-          engine: 'cairn',
-          runType: 'cold_sync',
-          metrics: {'cold_sync_ms': 100},
-          startedAt: DateTime.utc(2026, 1, 1),
-        ),
-        _fixture(
-          engine: 'cairn',
-          runType: 'cold_sync',
-          metrics: {'cold_sync_ms': 50},
-          startedAt: DateTime.utc(2026, 1, 2),
-        ),
-      ]);
-      expect(rows, hasLength(1));
-      expect(rows.single.value, 50);
-    });
+    test(
+      'collapses repeated (engine, run_type) runs to the latest by startedAt',
+      () {
+        final rows = latestMetricRows([
+          _fixture(
+            engine: 'cairn',
+            runType: 'cold_sync',
+            metrics: {'cold_sync_ms': 100},
+            startedAt: DateTime.utc(2026, 1, 1),
+          ),
+          _fixture(
+            engine: 'cairn',
+            runType: 'cold_sync',
+            metrics: {'cold_sync_ms': 50},
+            startedAt: DateTime.utc(2026, 1, 2),
+          ),
+        ]);
+        expect(rows, hasLength(1));
+        expect(rows.single.value, 50);
+      },
+    );
 
     test('sorts by engine then canonical run-type order', () {
       final rows = latestMetricRows([
@@ -176,7 +176,9 @@ void main() {
       expect(find.text(RunRecord.evaluationLabel), findsOneWidget);
     });
 
-    testWidgets('empty store shows the empty state, not a table', (tester) async {
+    testWidgets('empty store shows the empty state, not a table', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         MaterialApp(
           home: AnalyticsScreen(
@@ -191,7 +193,9 @@ void main() {
       expect(find.byKey(const Key('results-table')), findsNothing);
     });
 
-    testWidgets('run-suite button invokes runSuite and reloads the table', (tester) async {
+    testWidgets('run-suite button invokes runSuite and reloads the table', (
+      tester,
+    ) async {
       var runCount = 0;
       Future<void> fakeRunSuite() async {
         runCount++;
@@ -220,10 +224,15 @@ void main() {
 
       expect(runCount, 1);
       expect(find.byKey(const Key('results-table')), findsOneWidget);
-      expect(find.byKey(const Key('result-row-cairn-cold_sync')), findsOneWidget);
+      expect(
+        find.byKey(const Key('result-row-cairn-cold_sync')),
+        findsOneWidget,
+      );
     });
 
-    testWidgets('upload button posts stored runs and reports the count', (tester) async {
+    testWidgets('upload button posts stored runs and reports the count', (
+      tester,
+    ) async {
       // Real dart:io File I/O — testWidgets wraps the *entire* callback (not
       // just post-pumpWidget) in a FakeAsync zone, so even a setup-time
       // `store.append` needs `runAsync` or it never completes (see _settle's
@@ -261,7 +270,9 @@ void main() {
       expect(find.text('Uploaded 1 run(s).'), findsOneWidget);
     });
 
-    testWidgets('a failing upload surfaces the error instead of crashing', (tester) async {
+    testWidgets('a failing upload surfaces the error instead of crashing', (
+      tester,
+    ) async {
       await tester.runAsync(
         () => store.append(
           _fixture(

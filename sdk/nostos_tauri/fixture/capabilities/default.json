@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "nostos fixture: the plugin's default permission set on the main window.",
+  "windows": ["main"],
+  "permissions": ["core:default", "cairn:default"]
+}

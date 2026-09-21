@@ -2712,7 +2712,7 @@ mod tests {
         assert_eq!(handle.id(), "s-0");
         let registry = client.streams.lock().expect("lock");
         assert_eq!(registry.active.len(), 1);
-        assert!(registry.active["s-0"].0 == "lists");
+        assert_eq!(registry.active["s-0"].0, "lists");
         assert!(
             matches!(registry.pending.first(), Some(StreamCommand::Subscribe { id, .. }) if id == "s-0")
         );

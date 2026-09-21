@@ -19,7 +19,8 @@ String? _assetPathFor(ProductRow p) {
   return url == null ? null : '../$url';
 }
 
-String _titleCase(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+String _titleCase(String s) =>
+    s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 
 String _money(int cents) => '\$${(cents / 100).toStringAsFixed(2)}';
 
@@ -98,16 +99,15 @@ class ShopScreen extends StatelessWidget {
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                       gridDelegate:
                           const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 2,
-                        mainAxisSpacing: 12,
-                        crossAxisSpacing: 12,
-                        childAspectRatio: 0.61,
-                      ),
+                            crossAxisCount: 2,
+                            mainAxisSpacing: 12,
+                            crossAxisSpacing: 12,
+                            childAspectRatio: 0.61,
+                          ),
                       itemCount: products.length,
                       itemBuilder: (context, i) => _ProductCard(
                         product: products[i],
-                        onTap: () =>
-                            _openDetail(context, adapter, products[i]),
+                        onTap: () => _openDetail(context, adapter, products[i]),
                       ),
                     ),
             );
@@ -249,8 +249,11 @@ class _ProductCard extends StatelessWidget {
                           ),
                         ),
                         if (product.plantBased)
-                          Icon(Icons.eco_outlined,
-                              size: 14, color: AtletTokens.good),
+                          Icon(
+                            Icons.eco_outlined,
+                            size: 14,
+                            color: AtletTokens.good,
+                          ),
                       ],
                     ),
                   ],
@@ -545,12 +548,14 @@ class _CartSheet extends StatelessWidget {
                             if (q <= 0) {
                               await adapter.removeCartItem(line.id);
                             } else {
-                              await adapter.addToCart(CartItemRow(
-                                id: line.id,
-                                productId: line.productId,
-                                qty: q,
-                                addedAt: line.addedAt,
-                              ));
+                              await adapter.addToCart(
+                                CartItemRow(
+                                  id: line.id,
+                                  productId: line.productId,
+                                  qty: q,
+                                  addedAt: line.addedAt,
+                                ),
+                              );
                             }
                           },
                         );
@@ -600,7 +605,8 @@ class _CartSheet extends StatelessWidget {
                               isScrollControlled: true,
                               shape: const RoundedRectangleBorder(
                                 borderRadius: BorderRadius.vertical(
-                                    top: Radius.circular(20)),
+                                  top: Radius.circular(20),
+                                ),
                               ),
                               builder: (_) => _CheckoutSheet(
                                 adapter: adapter,
@@ -731,10 +737,9 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
   String? _orderId;
 
   int get _subtotal => widget.cart.fold<int>(
-        0,
-        (n, c) =>
-            n + (widget.productsById[c.productId]?.priceCents ?? 0) * c.qty,
-      );
+    0,
+    (n, c) => n + (widget.productsById[c.productId]?.priceCents ?? 0) * c.qty,
+  );
 
   Future<void> _pay() async {
     setState(() => _paying = true);
@@ -750,21 +755,22 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
             'product_id': c.productId,
             'name': widget.productsById[c.productId]?.name,
             'qty': c.qty,
-            'price_cents':
-                widget.productsById[c.productId]?.priceCents ?? 0,
+            'price_cents': widget.productsById[c.productId]?.priceCents ?? 0,
           },
       ];
-      final orderId = await widget.adapter.placeOrder(OrderRow(
-        id: uuidV4(),
-        status: 'paid',
-        subtotalCents: subtotal,
-        taxCents: tax,
-        shippingCents: shipping,
-        totalCents: subtotal + tax + shipping,
-        paymentRef: 'demo-visa-4242',
-        itemsJson: jsonEncode(items),
-        createdAt: DateTime.now().toUtc(),
-      ));
+      final orderId = await widget.adapter.placeOrder(
+        OrderRow(
+          id: uuidV4(),
+          status: 'paid',
+          subtotalCents: subtotal,
+          taxCents: tax,
+          shippingCents: shipping,
+          totalCents: subtotal + tax + shipping,
+          paymentRef: 'demo-visa-4242',
+          itemsJson: jsonEncode(items),
+          createdAt: DateTime.now().toUtc(),
+        ),
+      );
       await widget.adapter.clearCart();
       if (!mounted) return;
       setState(() {
@@ -795,8 +801,11 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
                 key: const Key('order-confirmation'),
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.check_circle_outline,
-                      size: 48, color: AtletTokens.good),
+                  Icon(
+                    Icons.check_circle_outline,
+                    size: 48,
+                    color: AtletTokens.good,
+                  ),
                   const SizedBox(height: 12),
                   Text(
                     'Order placed',
@@ -887,7 +896,8 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
                       ),
                       onPressed: _paying ? null : _pay,
                       child: Text(
-                          _paying ? 'Processing…' : 'Pay ${_money(total)}'),
+                        _paying ? 'Processing…' : 'Pay ${_money(total)}',
+                      ),
                     ),
                   ),
                 ],

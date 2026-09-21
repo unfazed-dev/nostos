@@ -18,8 +18,10 @@ void main() {
   });
 
   test('wss maps to https, default port omitted', () {
-    expect(NostosDatabase.deriveHttpBase('wss://nostos.example.com/sync'),
-        'https://nostos.example.com');
+    expect(
+      NostosDatabase.deriveHttpBase('wss://nostos.example.com/sync'),
+      'https://nostos.example.com',
+    );
   });
 
   test('a path-prefixed sync URL keeps its prefix directory', () {
@@ -37,10 +39,16 @@ void main() {
   });
 
   test('a bare /sync/ trailing slash still lands at the root', () {
-    expect(NostosDatabase.deriveHttpBase('ws://h.example/sync/'), 'http://h.example');
+    expect(
+      NostosDatabase.deriveHttpBase('ws://h.example/sync/'),
+      'http://h.example',
+    );
   });
 
   test('port zero is omitted, not emitted', () {
-    expect(NostosDatabase.deriveHttpBase('ws://127.0.0.1:0/sync'), 'http://127.0.0.1');
+    expect(
+      NostosDatabase.deriveHttpBase('ws://127.0.0.1:0/sync'),
+      'http://127.0.0.1',
+    );
   });
 }

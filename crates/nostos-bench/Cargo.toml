@@ -29,6 +29,13 @@ path = "src/bin/probe_10k.rs"
 # peak per-session queue depth proxy, drop rate during/after the storm, and
 # time-to-drain. Decides whether admission control / token-bucket is needed
 # before Phase D — the probe is the MEASUREMENT, not an admission-control build.
+# Fan-out walk probe: the per-event loop with the network removed (N sessions,
+# E events, real store + real sinks, no clients). The instrument for
+# before/after numbers on `FanOutService::fan_out` — never a headline figure.
+[[bin]]
+name = "nostos-fanout-walk"
+path = "src/bin/fanout_walk.rs"
+
 [[bin]]
 name = "nostos-reconnect-storm"
 path = "src/bin/reconnect_storm.rs"
@@ -57,6 +64,7 @@ nostos-application = { workspace = true }
 nostos-infra = { workspace = true }
 
 async-trait = { workspace = true }
+bytes = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 axum = { workspace = true }

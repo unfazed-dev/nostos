@@ -23,9 +23,8 @@ import 'package:meta/meta.dart';
 /// only way an attacker-controlled string reaches `toSql()` is through a column
 /// name, so this is the injection boundary.
 void _checkIdent(String name, {String what = 'column'}) {
-  final ok = RegExp(
-    r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$',
-  ).hasMatch(name);
+  final ok = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$')
+      .hasMatch(name);
   if (!ok) {
     throw ArgumentError.value(
       name,

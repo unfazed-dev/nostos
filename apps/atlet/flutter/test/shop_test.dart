@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/ui/shop.dart';
+
 import 'support/fake_cart_orders.dart';
 
 class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
@@ -57,7 +58,8 @@ class _FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   void dispose() => _controller.close();
 }
 
-ProductRow _fixture({String id = 'p1', String name = 'Whey Isolate'}) => ProductRow(
+ProductRow _fixture({String id = 'p1', String name = 'Whey Isolate'}) =>
+    ProductRow(
       id: id,
       name: name,
       category: 'protein',
@@ -68,7 +70,9 @@ ProductRow _fixture({String id = 'p1', String name = 'Whey Isolate'}) => Product
     );
 
 void main() {
-  testWidgets('shop grid renders only after watchProducts emits', (tester) async {
+  testWidgets('shop grid renders only after watchProducts emits', (
+    tester,
+  ) async {
     final adapter = _FakeAdapter();
     addTearDown(adapter.dispose);
 
@@ -88,7 +92,9 @@ void main() {
     expect(find.text('\$34.99'), findsOneWidget);
   });
 
-  testWidgets('empty emission renders the empty state, not the loader', (tester) async {
+  testWidgets('empty emission renders the empty state, not the loader', (
+    tester,
+  ) async {
     final adapter = _FakeAdapter();
     addTearDown(adapter.dispose);
 
@@ -106,11 +112,15 @@ void main() {
     expect(find.textContaining('No sync engine selected'), findsOneWidget);
   });
 
-  testWidgets('grid handles the full 1k-row seed without throwing', (tester) async {
+  testWidgets('grid handles the full 1k-row seed without throwing', (
+    tester,
+  ) async {
     final adapter = _FakeAdapter();
     addTearDown(adapter.dispose);
 
-    final rows = [for (var i = 0; i < 1000; i++) _fixture(id: 'p$i', name: 'Product $i')];
+    final rows = [
+      for (var i = 0; i < 1000; i++) _fixture(id: 'p$i', name: 'Product $i'),
+    ];
 
     await tester.pumpWidget(MaterialApp(home: ShopScreen(adapter: adapter)));
     adapter.push(rows);

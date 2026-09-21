@@ -496,7 +496,9 @@ slower per delivery). That is a throughput collapse at 100k sinks per event
 inside the 8 GiB VM (3.9 GiB server RSS plus 100k probe sockets), not shedding.
 Cause not yet isolated (memory pressure vs. 2-listener split vs. per-event
 sequential loop over 100k writers); it is the next perf investigation. No 100k
-rate is quoted anywhere.
+rate is quoted anywhere. **Partly isolated 2026-09-21 — see below: the
+cliff is real and the kernel is not causing it, but the per-event loop is NOT
+the cause either (it measures linear to 100k). Still open.**
 
 The script's second pass did not run: its criterion was `completed=true`, which
 no ≥30k tier can reach while `attempted` counts late subscribers' events. Two
@@ -519,3 +521,117 @@ host at load1 35–48 delivered 13.3M/20M at 111,196 ops/sec and ran to the wind
 that was host load (desktop apps, a VPN and an Xcode clone), not the harness — the
 container env line was identical. The ≥30k tiers above have **not** been re-run
 with the finish-time probe; their ops/sec column stays a lower bound until they are.
+
+## 100k fan-out cliff — MEASURED 2026-09-21 (Linux container, gated quiet host)
+
+> **Attribution corrected later the same day.** This section originally
+> concluded the cliff *was* the single-threaded fan-out loop. A direct
+> measurement of that loop says otherwise — see "The fan-out walk is linear"
+> below. What this section measures (the cliff exists, and the kernel is not
+> causing it) stands; what it concluded about the cause does not.
+
+Plan: `docs/plans/fanout-100k-cliff-diagnosis.md`.
+Raw: `benches/results/raw/2026-09-21-fanout-100k-run2/`.
+Recipe: `benches/scripts/fanout-100k-diag.sh <src> <out> 100000,5000,1200,1,2 50000,5000,600,1,1`
+
+The discriminating run the diagnosis plan had been blocked on since 2026-09-02
+(two prior attempts invalidated by host contention). Both tiers cleared the
+headroom gate: 100k started at host load1 **7.02**, 50k at **7.12**, each after
+a 60 s wait. Container VM: Linux 7.0.12-linuxkit aarch64, 10 vCPU, 8,124,516 kB
+RAM, 1,048,572 kB swap, nofile 1,048,576.
+
+**Toolchain changed: rustc 1.98, not the 1.95 of every earlier row here.** The
+workspace MSRV moved in `b40bc65` and the bench image could no longer build it.
+Both tiers ran in the same session on the same compiler, so the 50k-vs-100k
+contrast is internally valid; cross-date absolute comparisons carry the change.
+
+Steady state, measured from t=100 s (all clients subscribed) to window end:
+
+| tier | ops/sec | s/event | per-delivery | router dropped | router faulted | peak RSS |
+|---|---|---|---|---|---|---|
+| 50k × 5000, 1 listener | 316,314 | 0.158 | 3.16 µs | 0 | 0 | 2,712 MiB |
+| 100k × 5000, 2 listeners | 27,859 | 3.597 | 35.89 µs | 0 | 0 | 3,978 MiB |
+
+**Doubling the clients costs 22.7× the time per event** (11.4× worse per
+delivery). Linear fan-out would cost 2.0×.
+
+**Attribution: the per-event sequential fan-out loop.** Three of the four
+candidate causes are falsified by the in-VM sampler (376 ticks at 5 s):
+
+- *Kernel TCP memory pressure* — `PruneCalled`, `RcvPruned`, `TCPRcvCollapsed`,
+  `TCPAbortOnMemory`, `TCPMemoryPressures`, `TCPMemoryPressuresChrono`,
+  `TCPBacklogDrop`, `TCPZeroWindowDrop`, `TCPRcvQDrop` all **flat at 0 in both
+  tiers**.
+- *VM reclaim / swap* — `SwapFree` never moved off 1023 M, `swap_mib=0` on every
+  probe line, `MemAvailable` bottomed at 2,667 M, `psi_mem` avg60 max 0.08.
+- *Kernel CPU / scheduler* — sys share **identical at 13.1%** in both tiers, and
+  the box is *more* idle at the slow tier (42.2% vs 34.5%). `psi_cpu` avg60 max
+  2.53.
+
+What is left is application-level, and the 42% idle names the mechanism: the
+sequential fan-out (one task walking every session per event, shipped
+2026-09-02) is single-threaded, so at 100k sessions one event costs ~3.6 s of
+wall clock while nine vCPUs idle. Neither tier degrades over its run (100k
+oscillates 18k–33k ops/sec with RSS flat at 3,845–3,849 MiB), so this is a
+steady-state serialization ceiling, not accumulation.
+
+**The earlier contention hypothesis is falsified.** The diagnosis plan held that
+every collapse past 0.5 s/event coincided with desktop load, leaving the
+ladder's 1.22 s/event UNVERIFIED. Gated and quiet, the same shape measures
+**3.60 s/event** — 3× *worse* than the contended ladder run. That supersedes the
+1.22 figure.
+
+**The probe's 93.39% "drop" at 100k is not loss.** `router: matched = delivered
+= 33,108,868, dropped = 0, faulted = 0`. The undelivered 466.9 M is
+`pre_subscribe_or_not_yet_fanned_out` — the window expired with the replicator
+~331 events into a 5,000-event budget. Same at 50k (dropped 0; the 23.58%
+figure is 58.8 M not yet fanned out). Only `router_dropped` and `router_faulted`
+mean loss; both are 0 at every tier measured to date.
+
+No 100k rate is quoted as a headline.
+
+## The fan-out walk is linear — MEASURED 2026-09-21 (macOS 10-core, `nostos-fanout-walk`)
+
+`crates/nostos-bench/src/bin/fanout_walk.rs` runs the real `InMemorySessionStore`,
+the real `FanOutService` and real `TokioEventSink`s with real drain tasks, with
+the network, the replicator and the client swarm removed. 200 events, release
+build. **Not comparable to any figure above** — no wire encode, no socket, no
+client apply. It is an instrument for changes to the loop, nothing else.
+
+| sessions | per event | per delivery | `min_acked_lsn` scan |
+|---|---|---|---|
+| 10,000 | 4.58 ms | 0.458 µs | 0.072 ms |
+| 50,000 | 24.24 ms | 0.485 µs | 0.324 ms |
+| 100,000 | 48.58 ms | 0.486 µs | 0.723 ms |
+
+Per-delivery cost moves **6% across a 10× range**, deciles flat. The loop does
+not have a cliff in it. At 100k the whole server-side per-event cost this probe
+can see is ~49 ms against the container's 3,597 ms/event — the fan-out loop is
+**~1.4%** of the observed time, so it cannot be the 22.7× collapse.
+
+What that leaves is everything the probe removed: the per-session wire
+encode + socket write in the transport writers, the kernel socket path at 100k
+connections, and the 100k **in-process client tasks** sharing the server's
+runtime (`nostos-bench-10k` runs the swarm in-process). The next experiment is
+per-stage timing inside the container run, not another guess.
+
+### Parallel walk — before/after (same probe, real sinks)
+
+The walk now splits across `available_parallelism()` tasks above 8,192 matched
+sessions; `with_fanout_workers(1)` is the old sequential walk. Chunk tasks are
+joined before `fan_out` returns, so per-sink LSN order is unchanged.
+
+| sessions | sequential | parallel | speedup |
+|---|---|---|---|
+| 10,000 | 4.58 ms/event | 2.03 ms/event | 2.26× |
+| 50,000 | 24.24 ms/event | 12.14 ms/event | 2.00× |
+| 100,000 | 48.58 ms/event | 25.47 ms/event | 1.91× |
+
+2× on 10 cores, not 10× — the drain tasks already occupied the runtime. Real
+and bounded. Counter-case: with a no-op sink (79 ns/delivery) the parallel walk
+is 2× *slower* (7.88 → 15.38 ms/event at 100k); chunk + spawn + join dominate
+when the sink does nothing. That is why the 8,192 floor and the workers knob
+exist.
+
+This changes no headline number: the moat figure is 1k clients, far below the
+parallel floor, and it has not been re-measured.

@@ -26,8 +26,23 @@ const defaultWorkerUrl = 'nostos/nostos_worker.js';
 /// by the real browser Worker. The Worker boots the wasm engine + sqlite-wasm
 /// (durable, or memory degrade) asynchronously; the engine learns the resolved
 /// storage mode from the Worker's `{type:"storage", mode}` push.
-NostosWorkerPort spawnNostosWorker({String? workerUrl}) =>
-    _JsWorkerPort(workerUrl ?? defaultWorkerUrl);
+NostosWorkerPort spawnNostosWorker({String? workerUrl}) {
+  // MDN Storage API: origin storage is best-effort (evictable under pressure)
+  // until `persist()` is granted. StorageManager.persist is Window-only, so it
+  // runs here, not in the Worker; the Worker reports `persisted` back on its
+  // storage push (WebNostosEngine.storagePersisted). Firefox prompts the user;
+  // Chromium/Safari decide by heuristics — either way, fire and forget.
+  try {
+    unawaited(
+      window.navigator.storage.persist().toDart.catchError(
+        (Object _) => false.toJS,
+      ),
+    );
+  } catch (_) {
+    /* no StorageManager (very old browser) — nothing to request */
+  }
+  return _JsWorkerPort(workerUrl ?? defaultWorkerUrl);
+}
 
 /// A [NostosWorkerPort] over a real browser [Worker].
 class _JsWorkerPort implements NostosWorkerPort {

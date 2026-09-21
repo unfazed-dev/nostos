@@ -18,10 +18,10 @@ void main() {
         initialRoute: '/signin',
         routes: {
           '/signin': (context) => SigninScreen(
-                passwordSignIn: (email, password) async {},
-                onSignedIn: () =>
-                    Navigator.of(context).pushReplacementNamed('/home'),
-              ),
+            passwordSignIn: (email, password) async {},
+            onSignedIn: () =>
+                Navigator.of(context).pushReplacementNamed('/home'),
+          ),
           '/home': (context) => const HomeScreen(),
         },
       ),
@@ -29,8 +29,14 @@ void main() {
 
     expect(find.text('Home'), findsNothing);
 
-    await tester.enterText(find.byKey(const Key('signin-email')), 'flutter@atlet.dev');
-    await tester.enterText(find.byKey(const Key('signin-password')), 'password');
+    await tester.enterText(
+      find.byKey(const Key('signin-email')),
+      'flutter@atlet.dev',
+    );
+    await tester.enterText(
+      find.byKey(const Key('signin-password')),
+      'password',
+    );
     await tester.pump();
 
     await tester.tap(find.widgetWithText(FilledButton, 'Sign in'));

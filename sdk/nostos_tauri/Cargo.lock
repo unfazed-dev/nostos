@@ -2226,9 +2226,10 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nostos-application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "nostos-domain",
  "serde",
  "thiserror 1.0.69",
@@ -2239,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "nostos-core",
@@ -2257,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nostos-domain",
  "serde",
@@ -2267,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "serde",
@@ -2278,7 +2279,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-infra"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2294,27 +2295,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.23.1",
  "toml 0.8.2",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "nostos-tauri"
-version = "0.1.0"
-dependencies = [
- "nostos-client",
- "nostos-core",
- "nostos-domain",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
- "tokio",
 ]
 
 [[package]]
@@ -4079,6 +4066,21 @@ dependencies = [
  "serde_json",
  "tauri-utils",
  "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-cairn"
+version = "0.1.0"
+dependencies = [
+ "nostos-client",
+ "nostos-core",
+ "nostos-domain",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
 ]
 
 [[package]]

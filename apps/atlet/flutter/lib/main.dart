@@ -206,10 +206,11 @@ class _HomeScreenState extends State<HomeScreen> {
           if (kIsWeb) {
             _notify('Order ${o.id.substring(0, 8)} is ${o.status}');
           } else {
-            unawaited(_orderBannerChannel.invokeMethod(
-              'order_update',
-              {'body': 'Order ${o.id.substring(0, 8)} is ${o.status}'},
-            ));
+            unawaited(
+              _orderBannerChannel.invokeMethod('order_update', {
+                'body': 'Order ${o.id.substring(0, 8)} is ${o.status}',
+              }),
+            );
           }
         }
         _lastOrderStatuses[o.id] = o.status;
@@ -248,7 +249,9 @@ class _HomeScreenState extends State<HomeScreen> {
       // path_provider has no web impl; the web engine's storage is
       // OPFS-backed and ignores sqlitePath (ADR-0036), so dbDir is an
       // unused placeholder there.
-      final dbDir = kIsWeb ? '' : (await getApplicationDocumentsDirectory()).path;
+      final dbDir = kIsWeb
+          ? ''
+          : (await getApplicationDocumentsDirectory()).path;
       final adapter = await engineRegistry.switchTo(
         target,
         SyncSession(
@@ -283,9 +286,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _notify(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _openSettings() {

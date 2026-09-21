@@ -33,7 +33,8 @@ class BenchClock {
     ClockProbe? probe,
     int samples = 5,
   }) async {
-    final effectiveProbe = probe ?? (() => _defaultProbe(_requireClient(client)));
+    final effectiveProbe =
+        probe ?? (() => _defaultProbe(_requireClient(client)));
     final offsetsMs = <num>[];
     for (var i = 0; i < samples; i++) {
       final sample = await effectiveProbe();

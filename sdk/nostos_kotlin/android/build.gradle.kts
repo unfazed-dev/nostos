@@ -10,7 +10,17 @@
 plugins {
     id("com.android.library") version "8.7.3"
     kotlin("android") version "1.9.24"
+    `maven-publish`
+    signing
 }
+
+// Coordinates. Both overridable from the command line / gradle.properties so
+// the namespace decision (docs/plans/phase3-launch-readiness-2026-09-21.md,
+// BLOCKER 4) is NOT baked into the build. The default is the namespace
+// Sonatype auto-verifies for a GitHub signup — `io.github.<username>` — which
+// is the zero-paperwork option if no domain is ever registered.
+group = providers.gradleProperty("nostosGroupId").getOrElse("io.github.unfazed-dev")
+version = providers.gradleProperty("nostosVersion").getOrElse("0.2.0")
 
 android {
     namespace = "run.nostos.sdk"
@@ -70,6 +80,101 @@ android {
     testOptions {
         targetSdk = 34
     }
+
+    // Central rejects a component without sources + javadoc jars
+    // (central.sonatype.org/publish/requirements). AGP builds both.
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+            withJavadocJar()
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Maven Central publishing (BLOCKER 3, docs/plans/phase3-launch-readiness-*.md)
+// -----------------------------------------------------------------------------
+// There is no OFFICIAL Gradle plugin for the Central Publishing Portal
+// (central.sonatype.org/publish/publish-portal-gradle — checked 2026-09-21);
+// every option there is a community plugin. So this stays on stock
+// `maven-publish` + `signing`: publish into a local repo laid out as Maven
+// expects, zip it, and the operator uploads that one bundle. No third-party
+// plugin in the build, and nothing here assumes which namespace wins.
+//
+//   ./gradlew centralBundle -PnostosGroupId=io.github.you \
+//       -PsigningInMemoryKey="$(gpg --armor --export-secret-keys KEYID)" \
+//       -PsigningInMemoryKeyPassword=…
+//   → android/build/distributions/nostos-kotlin-<version>-central-bundle.zip
+//
+// then POST it to https://central.sonatype.com/api/v1/publisher/upload with a
+// Portal bearer token. That upload is the operator's call: it needs the
+// account, the verified namespace and the GPG key, none of which live here.
+publishing {
+    publications {
+        register<MavenPublication>("release") {
+            artifactId = "nostos-kotlin"
+            // AGP's `release` component only exists after evaluation.
+            afterEvaluate { from(components["release"]) }
+            pom {
+                name.set("nostos-kotlin")
+                description.set(
+                    "Kotlin/Android SDK for Nostos — local-first sync over a Rust core (UniFFI).",
+                )
+                url.set("https://github.com/unfazed-dev/nostos")
+                licenses {
+                    license {
+                        name.set("Apache License, Version 2.0")
+                        url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                    }
+                }
+                developers {
+                    developer {
+                        id.set("unfazed-dev")
+                        name.set("Nostos maintainers")
+                        url.set("https://github.com/unfazed-dev")
+                    }
+                }
+                scm {
+                    url.set("https://github.com/unfazed-dev/nostos")
+                    connection.set("scm:git:https://github.com/unfazed-dev/nostos.git")
+                    developerConnection.set("scm:git:ssh://git@github.com/unfazed-dev/nostos.git")
+                }
+            }
+        }
+    }
+    repositories {
+        // Staging only — never a live remote. Gradle writes the .md5/.sha1
+        // Central requires alongside each artifact.
+        maven {
+            name = "centralBundle"
+            url = uri(layout.buildDirectory.dir("central-bundle"))
+        }
+    }
+}
+
+signing {
+    // Off unless a key is actually supplied, so `assembleRelease` and CI stay
+    // green on a machine with no GPG at all.
+    setRequired({ project.hasProperty("signingInMemoryKey") })
+    if (project.hasProperty("signingInMemoryKey")) {
+        useInMemoryPgpKeys(
+            providers.gradleProperty("signingInMemoryKey").get(),
+            providers.gradleProperty("signingInMemoryKeyPassword").getOrElse(""),
+        )
+    }
+    sign(publishing.publications)
+}
+
+// The uploadable artifact. `maven-metadata*` is excluded: the Portal derives
+// its own and rejects bundles that carry one.
+tasks.register<Zip>("centralBundle") {
+    group = "publishing"
+    description = "Build the Central Portal upload bundle (zip of the staged Maven layout)."
+    dependsOn("publishReleasePublicationToCentralBundleRepository")
+    from(layout.buildDirectory.dir("central-bundle"))
+    exclude("**/maven-metadata*")
+    archiveFileName.set("nostos-kotlin-$version-central-bundle.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
 }
 
 dependencies {

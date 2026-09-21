@@ -93,8 +93,7 @@ async fn slot_exists(slot: &str) -> bool {
                 &[&slot],
             )
             .await
-            .ok()
-            .is_some_and(|r| r.is_some())
+            .is_ok_and(|r| r.is_some())
         }
         Err(_) => false,
     }

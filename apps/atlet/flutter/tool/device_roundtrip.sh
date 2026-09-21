@@ -126,7 +126,7 @@ python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('htt
 # ---- 4. device leg --------------------------------------------------------
 ROW_ID="roundtrip-$(date +%s)"
 printf "  running atlet round-trip on %s [%s] (log: $APP_LOG)…\n" "$DEVICE_MODE" "$DEVICE_ID"
-( cd "$APP_DIR" && flutter pub get >/dev/null 2>&1 && \
+( cd "$APP_DIR" && mkdir -p build/ios/SourcePackages build/macos/SourcePackages && flutter pub get >/dev/null 2>&1 && \
   flutter test integration_test/device_roundtrip_test.dart -d "$DEVICE_ID" \
     --dart-define=NOSTOS_SYNC_URL="$SYNC_URL" \
     --dart-define=ROUNDTRIP_ROW_ID="$ROW_ID" \

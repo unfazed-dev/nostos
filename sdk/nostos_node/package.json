@@ -1,6 +1,6 @@
 {
   "name": "@nostos-sync/node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "napi-rs scaffold exposing nostos-client SyncClient<SqliteStorage> to Node.js (feasibility proof, not a polished SDK)",
   "main": "nostos_node.node",
   "scripts": {
@@ -25,5 +25,6 @@
   "homepage": "https://github.com/unfazed-dev/nostos",
   "bugs": {
     "url": "https://github.com/unfazed-dev/nostos/issues"
-  }
+  },
+  "private": true
 }

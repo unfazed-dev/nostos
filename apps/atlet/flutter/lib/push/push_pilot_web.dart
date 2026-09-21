@@ -28,9 +28,14 @@ import '../../adapters/nostos_adapter.dart';
 /// must be the better half of the server's NOSTOS_WEBPUSH_VAPID_PRIVATE_KEY.
 const String _vapidPublicKey = String.fromEnvironment('ATLET_VAPID_PUBLIC_KEY');
 
-Future<void> attachWebPush(NostosAdapter adapter, void Function(String) log) async {
+Future<void> attachWebPush(
+  NostosAdapter adapter,
+  void Function(String) log,
+) async {
   if (_vapidPublicKey.isEmpty) {
-    log('push pilot (web): ATLET_VAPID_PUBLIC_KEY not set — skipping subscribe');
+    log(
+      'push pilot (web): ATLET_VAPID_PUBLIC_KEY not set — skipping subscribe',
+    );
     return;
   }
   final permission = await web.Notification.requestPermission().toDart;
@@ -38,8 +43,7 @@ Future<void> attachWebPush(NostosAdapter adapter, void Function(String) log) asy
     log('push pilot (web): notification permission $permission — no push');
     return;
   }
-  final registration = await web
-      .window.navigator.serviceWorker
+  final registration = await web.window.navigator.serviceWorker
       .register('./atlet-push-sw.js'.toJS)
       .toDart;
   final pushManager = registration.pushManager;
@@ -79,7 +83,6 @@ Future<void> attachWebPush(NostosAdapter adapter, void Function(String) log) asy
 /// base64url → the raw bytes `applicationServerKey` wants (BufferSource).
 Uint8List _applicationServerKey(String b64url) {
   final normalized = b64url.replaceAll('-', '+').replaceAll('_', '/');
-  final padded =
-      normalized + '=' * ((4 - normalized.length % 4) % 4);
+  final padded = normalized + '=' * ((4 - normalized.length % 4) % 4);
   return base64.decode(padded);
 }

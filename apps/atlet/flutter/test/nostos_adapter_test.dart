@@ -25,19 +25,22 @@ void main() {
     // stream with nothing emitted until "subscribe" runs, and no replay to a
     // listener that attaches afterward (StreamController.broadcast drops
     // .add() calls made with zero current listeners).
-    test('a listener attached AFTER subscribe misses the transition (the bug)', () async {
-      final controller = StreamController<NostosConnectionState>.broadcast();
-      final seen = <bool>[];
+    test(
+      'a listener attached AFTER subscribe misses the transition (the bug)',
+      () async {
+        final controller = StreamController<NostosConnectionState>.broadcast();
+        final seen = <bool>[];
 
-      controller.add(NostosConnectionState.connected); // "subscribe" fires
+        controller.add(NostosConnectionState.connected); // "subscribe" fires
 
-      final sub = wireConnectionState(controller.stream, seen.add);
-      await Future<void>.delayed(Duration.zero);
+        final sub = wireConnectionState(controller.stream, seen.add);
+        await Future<void>.delayed(Duration.zero);
 
-      expect(seen, isEmpty);
-      await sub.cancel();
-      await controller.close();
-    });
+        expect(seen, isEmpty);
+        await sub.cancel();
+        await controller.close();
+      },
+    );
 
     test('a listener attached BEFORE subscribe surfaces initial connected=true (the fix)', () async {
       final controller = StreamController<NostosConnectionState>.broadcast();
@@ -131,12 +134,12 @@ void main() {
   group('productFromRow', () {
     test('plant_based coerces from int/string/bool', () {
       Map<String, dynamic> base(Object plantBased) => {
-            'id': 'p1',
-            'name': 'Oat milk',
-            'category': 'dairy',
-            'price_cents': 399,
-            'plant_based': plantBased,
-          };
+        'id': 'p1',
+        'name': 'Oat milk',
+        'category': 'dairy',
+        'price_cents': 399,
+        'plant_based': plantBased,
+      };
       expect(productFromRow(base(true)).plantBased, true);
       expect(productFromRow(base(1)).plantBased, true);
       expect(productFromRow(base('true')).plantBased, true);
@@ -146,13 +149,13 @@ void main() {
 
     test('rating handles num, String, and null', () {
       Map<String, dynamic> base(Object? rating) => {
-            'id': 'p1',
-            'name': 'Oat milk',
-            'category': 'dairy',
-            'price_cents': 399,
-            'plant_based': true,
-            'rating': rating,
-          };
+        'id': 'p1',
+        'name': 'Oat milk',
+        'category': 'dairy',
+        'price_cents': 399,
+        'plant_based': true,
+        'rating': rating,
+      };
       expect(productFromRow(base(4.5)).rating, 4.5);
       expect(productFromRow(base('4.5')).rating, 4.5);
       expect(productFromRow(base(null)).rating, isNull);

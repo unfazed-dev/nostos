@@ -1,7 +1,9 @@
 import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/bench/marks.dart';
+
 import 'support/fake_cart_orders.dart';
 
 class FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
@@ -168,14 +170,16 @@ void main() {
       });
 
       // Add a session
-      final sessionId = await adapter.addSession(SessionRow(
-        id: 'session-1',
-        title: 'Morning Run',
-        type: 'cardio',
-        metric: 5000,
-        unit: 'm',
-        occurredOn: DateTime.now(),
-      ));
+      final sessionId = await adapter.addSession(
+        SessionRow(
+          id: 'session-1',
+          title: 'Morning Run',
+          type: 'cardio',
+          metric: 5000,
+          unit: 'm',
+          occurredOn: DateTime.now(),
+        ),
+      );
 
       // Wait for ack
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -195,26 +199,34 @@ void main() {
       });
 
       // Inject a remote row (not added via addSession)
-      adapter.injectRemoteSession(SessionRow(
-        id: 'remote-session-1',
-        title: 'Evening Walk',
-        type: 'cardio',
-        metric: 3000,
-        unit: 'm',
-        occurredOn: DateTime.now(),
-        serverCommittedAt: DateTime.now(),
-      ));
+      adapter.injectRemoteSession(
+        SessionRow(
+          id: 'remote-session-1',
+          title: 'Evening Walk',
+          type: 'cardio',
+          metric: 3000,
+          unit: 'm',
+          occurredOn: DateTime.now(),
+          serverCommittedAt: DateTime.now(),
+        ),
+      );
 
       // Wait a bit for mark emission
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
       // Verify remoteVisible mark
       expect(
-        marks.where((m) => m.kind == MarkKind.remoteVisible && m.rowId == 'remote-session-1'),
+        marks.where(
+          (m) =>
+              m.kind == MarkKind.remoteVisible && m.rowId == 'remote-session-1',
+        ),
         isNotEmpty,
       );
       expect(
-        marks.where((m) => m.kind == MarkKind.serverAcked && m.rowId == 'remote-session-1'),
+        marks.where(
+          (m) =>
+              m.kind == MarkKind.serverAcked && m.rowId == 'remote-session-1',
+        ),
         isEmpty,
       );
     });
@@ -226,14 +238,16 @@ void main() {
       });
 
       // Add a session
-      await adapter.addSession(SessionRow(
-        id: 'session-1',
-        title: 'Run',
-        type: 'cardio',
-        metric: 5000,
-        unit: 'm',
-        occurredOn: DateTime.now(),
-      ));
+      await adapter.addSession(
+        SessionRow(
+          id: 'session-1',
+          title: 'Run',
+          type: 'cardio',
+          metric: 5000,
+          unit: 'm',
+          occurredOn: DateTime.now(),
+        ),
+      );
 
       await Future<void>.delayed(const Duration(milliseconds: 150));
       final marksBefore = marks.length;
@@ -242,21 +256,25 @@ void main() {
       await adapter.signOut();
 
       // Add same ID again
-      await adapter.addSession(SessionRow(
-        id: 'session-1',
-        title: 'Run 2',
-        type: 'cardio',
-        metric: 6000,
-        unit: 'm',
-        occurredOn: DateTime.now(),
-      ));
+      await adapter.addSession(
+        SessionRow(
+          id: 'session-1',
+          title: 'Run 2',
+          type: 'cardio',
+          metric: 6000,
+          unit: 'm',
+          occurredOn: DateTime.now(),
+        ),
+      );
 
       await Future<void>.delayed(const Duration(milliseconds: 150));
 
       // Verify we get localVisible mark again for the same ID
       final newMarks = marks.skip(marksBefore).toList();
       expect(
-        newMarks.where((m) => m.kind == MarkKind.localVisible && m.rowId == 'session-1'),
+        newMarks.where(
+          (m) => m.kind == MarkKind.localVisible && m.rowId == 'session-1',
+        ),
         isNotEmpty,
       );
     });

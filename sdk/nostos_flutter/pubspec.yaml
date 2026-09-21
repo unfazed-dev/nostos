@@ -16,8 +16,9 @@ homepage: https://github.com/unfazed-dev/nostos
 repository: https://github.com/unfazed-dev/nostos
 
 environment:
-  sdk: ^3.12.0
-  flutter: '>=3.3.0'
+  # Latest stable floor (standing rule 2026-09-21): Dart 3.13 / Flutter 3.47.
+  sdk: ^3.13.0
+  flutter: '>=3.47.0'
 
 dependencies:
   flutter:
@@ -28,8 +29,8 @@ dependencies:
   # hook/build.dart relies on is beta-versioned — see
   # docs/plans/w4-packaging-fallback.md (W0a spike) for why an exact pin
   # matters here more than it usually would.
-  flutter_rust_bridge: 2.13.0-beta.5
-  flutter_rust_bridge_hooks: 2.13.0-beta.5
+  flutter_rust_bridge: 2.13.0
+  flutter_rust_bridge_hooks: 2.13.0
   # Default SQLite storage location (getApplicationSupportDirectory) — the
   # "zero manual steps" default for Nostos.connect(); override via
   # Nostos.connect(sqlitePath: ...) if you don't want this dependency's

@@ -15,13 +15,20 @@ class StatsDeck extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
-    final monday = DateTime(now.year, now.month, now.day)
-        .subtract(Duration(days: now.weekday - 1));
+    final monday = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).subtract(Duration(days: now.weekday - 1));
 
     // Sessions per weekday, current week.
     final counts = List<int>.filled(7, 0);
     for (final s in sessions) {
-      final d = DateTime(s.occurredOn.year, s.occurredOn.month, s.occurredOn.day);
+      final d = DateTime(
+        s.occurredOn.year,
+        s.occurredOn.month,
+        s.occurredOn.day,
+      );
       final offset = d.difference(monday).inDays;
       if (offset >= 0 && offset < 7) counts[offset]++;
     }
@@ -60,13 +67,19 @@ class StatsDeck extends StatelessWidget {
               ),
               Row(
                 children: [
-                  Icon(Icons.local_fire_department_outlined,
-                      size: 16, color: AtletTokens.warn),
+                  Icon(
+                    Icons.local_fire_department_outlined,
+                    size: 16,
+                    color: AtletTokens.warn,
+                  ),
                   const SizedBox(width: 4),
-                  Text('$streak-day streak',
-                      style: TextStyle(
-                          color: AtletTokens.ink3,
-                          fontSize: AtletTokens.footnote)),
+                  Text(
+                    '$streak-day streak',
+                    style: TextStyle(
+                      color: AtletTokens.ink3,
+                      fontSize: AtletTokens.footnote,
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -77,7 +90,15 @@ class StatsDeck extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                for (final (i, label) in const ['M', 'T', 'W', 'T', 'F', 'S', 'S'].indexed) ...[
+                for (final (i, label) in const [
+                  'M',
+                  'T',
+                  'W',
+                  'T',
+                  'F',
+                  'S',
+                  'S',
+                ].indexed) ...[
                   if (i > 0) const SizedBox(width: 8),
                   Expanded(
                     child: Column(
@@ -91,17 +112,20 @@ class StatsDeck extends StatelessWidget {
                             color: i == now.weekday - 1
                                 ? AtletTokens.accent
                                 : counts[i] > 0
-                                    ? AtletTokens.accent.withValues(alpha: 0.45)
-                                    : AtletTokens.ink.withValues(alpha: 0.08),
+                                ? AtletTokens.accent.withValues(alpha: 0.45)
+                                : AtletTokens.ink.withValues(alpha: 0.08),
                             borderRadius: BorderRadius.circular(2),
                           ),
                         ),
                         const SizedBox(height: 4),
-                        Text(label,
-                            style: TextStyle(
-                                fontSize: 10,
-                                height: 1.0,
-                                color: AtletTokens.ink3)),
+                        Text(
+                          label,
+                          style: TextStyle(
+                            fontSize: 10,
+                            height: 1.0,
+                            color: AtletTokens.ink3,
+                          ),
+                        ),
                       ],
                     ),
                   ),

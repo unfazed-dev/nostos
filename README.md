@@ -5,7 +5,7 @@
 
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)]() &nbsp;
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue) &nbsp;
-![Rust](https://img.shields.io/badge/rust-1.95-orange) &nbsp;
+![Rust](https://img.shields.io/badge/rust-1.98-orange) &nbsp;
 ![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20Phase%203%2C%20v0.1%20prepared%2C%20launch%20gated-orange)
 
 Nostos is a from-scratch, **Rust-native** competitor to [PowerSync](https://powersync.com): a sync engine that keeps an on-device SQLite database in sync with a server-side Postgres, **even when the device is offline.** It targets the empty market cell that no incumbent occupies today — *Apache-2.0 + Postgres-logical-replication + 2-way offline + first-class Flutter/RN/Web SDKs + Rust-fast + free self-host.*

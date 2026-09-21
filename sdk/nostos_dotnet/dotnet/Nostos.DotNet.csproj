@@ -40,7 +40,7 @@
     <RootNamespace>Nostos</RootNamespace>
     <AssemblyName>Nostos.DotNet</AssemblyName>
     <PackageId>Nostos.DotNet</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Description>UniFFI bridge exposing nostos-client's SyncClient&lt;SqliteStorage&gt; to .NET via Nord UniFFI-CS — feasibility scaffold.</Description>
     <Authors>unfazed-dev</Authors>
     <Company>unfazed-dev</Company>

@@ -16,14 +16,14 @@
 set -u
 SRC=$1; TAG=$2; OUT=$3; shift 3
 CLIENTS=${1:-10000}; EVENTS=${2:-5000}; WINDOW=${3:-60}; ACK=${4:-1}; LISTENERS=${5:-1}
-IMAGE=${NOSTOS_LINUX_IMAGE:-rust:1.95-bookworm}
+IMAGE=${NOSTOS_LINUX_IMAGE:-rust:1.98-bookworm}
 
 docker run --rm --name "nostos-linux-soak-$TAG" \
   -v "$SRC":/src \
   -v nostos-linux-target:/target \
   -v nostos-linux-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/target \
-  -e RUSTUP_TOOLCHAIN=1.95.0 \
+  -e RUSTUP_TOOLCHAIN=1.98.0 \
   -e CARGO_INCREMENTAL=0 \
   --ulimit nofile=1048576:1048576 \
   --sysctl net.ipv4.ip_local_port_range="1024 65535" \

@@ -261,7 +261,7 @@ sent_before="${sent_before:-0}"
 # ---- 5. device leg: register token, go offline, listen -------------------
 printf "  running atlet push smoke on %s [%s] (log: $APP_LOG)…\n" "$DEVICE_MODE" "$DEVICE_ID"
 prep_device
-( cd "$APP_DIR" && flutter pub get >/dev/null 2>&1 && \
+( cd "$APP_DIR" && mkdir -p build/ios/SourcePackages build/macos/SourcePackages && flutter pub get >/dev/null 2>&1 && \
   flutter test integration_test/push_smoke_test.dart -d "$DEVICE_ID" \
     $FLUTTER_TEST_EXTRA_ARGS \
     --dart-define=SUPABASE_URL="$SUPABASE_URL" \
@@ -334,7 +334,7 @@ fi
 ORDER_LOG=/tmp/atlet-push-smoke-order.log
 printf "  running atlet order-lifecycle leg (log: $ORDER_LOG)…\n"
 prep_device
-( cd "$APP_DIR" && flutter pub get >/dev/null 2>&1 && \
+( cd "$APP_DIR" && mkdir -p build/ios/SourcePackages build/macos/SourcePackages && flutter pub get >/dev/null 2>&1 && \
   flutter test integration_test/order_push_test.dart -d "$DEVICE_ID" \
     $FLUTTER_TEST_EXTRA_ARGS \
     --dart-define=SUPABASE_URL="$SUPABASE_URL" \

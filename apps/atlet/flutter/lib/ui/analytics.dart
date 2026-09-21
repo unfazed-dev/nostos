@@ -111,9 +111,9 @@ List<MetricRow> latestMetricRows(List<RunRecord> records) {
     ..sort((a, b) {
       final engineCmp = a.engine.compareTo(b.engine);
       if (engineCmp != 0) return engineCmp;
-      return _runTypeOrder.indexOf(a.runType).compareTo(
-        _runTypeOrder.indexOf(b.runType),
-      );
+      return _runTypeOrder
+          .indexOf(a.runType)
+          .compareTo(_runTypeOrder.indexOf(b.runType));
     });
   return rows;
 }

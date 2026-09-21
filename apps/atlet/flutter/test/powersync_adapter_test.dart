@@ -25,24 +25,24 @@ void main() {
     // that attaches afterward (StreamController.broadcast drops .add() calls
     // made with zero current listeners) — same hazard nostos_adapter_test.dart
     // guards against for NostosDatabase.connectionState.
-    test('a listener attached AFTER connect misses the transition (the bug)',
-        () async {
-      final controller = StreamController<bool>.broadcast();
-      final seen = <bool>[];
-
-      controller.add(true); // "connect" fires
-
-      final sub = wireConnected(controller.stream, seen.add);
-      await Future<void>.delayed(Duration.zero);
-
-      expect(seen, isEmpty);
-      await sub.cancel();
-      await controller.close();
-    });
-
     test(
-        'a listener attached BEFORE connect surfaces initial connected=true (the fix)',
-        () async {
+      'a listener attached AFTER connect misses the transition (the bug)',
+      () async {
+        final controller = StreamController<bool>.broadcast();
+        final seen = <bool>[];
+
+        controller.add(true); // "connect" fires
+
+        final sub = wireConnected(controller.stream, seen.add);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(seen, isEmpty);
+        await sub.cancel();
+        await controller.close();
+      },
+    );
+
+    test('a listener attached BEFORE connect surfaces initial connected=true (the fix)', () async {
       final controller = StreamController<bool>.broadcast();
       final seen = <bool>[];
 
@@ -121,12 +121,12 @@ void main() {
   group('productFromRow', () {
     test('plant_based coerces from int/string/bool', () {
       Map<String, dynamic> base(Object plantBased) => {
-            'id': 'p1',
-            'name': 'Oat milk',
-            'category': 'dairy',
-            'price_cents': 399,
-            'plant_based': plantBased,
-          };
+        'id': 'p1',
+        'name': 'Oat milk',
+        'category': 'dairy',
+        'price_cents': 399,
+        'plant_based': plantBased,
+      };
       expect(productFromRow(base(true)).plantBased, true);
       expect(productFromRow(base(1)).plantBased, true);
       expect(productFromRow(base('true')).plantBased, true);
@@ -135,13 +135,13 @@ void main() {
 
     test('rating handles num, String, and null', () {
       Map<String, dynamic> base(Object? rating) => {
-            'id': 'p1',
-            'name': 'Oat milk',
-            'category': 'dairy',
-            'price_cents': 399,
-            'plant_based': true,
-            'rating': rating,
-          };
+        'id': 'p1',
+        'name': 'Oat milk',
+        'category': 'dairy',
+        'price_cents': 399,
+        'plant_based': true,
+        'rating': rating,
+      };
       expect(productFromRow(base(4.5)).rating, 4.5);
       expect(productFromRow(base('4.5')).rating, 4.5);
       expect(productFromRow(base(null)).rating, isNull);

@@ -69,7 +69,9 @@ void main() {
     // claim-gated hand-mode rules + auth=none) and the test would lie.
     const seedId = String.fromEnvironment('ROUNDTRIP_SEED_ID');
     if (seedId.isEmpty) {
-      throw StateError('ROUNDTRIP_SEED_ID dart-define required (harness seeds a row pre-launch)');
+      throw StateError(
+        'ROUNDTRIP_SEED_ID dart-define required (harness seeds a row pre-launch)',
+      );
     }
     // Scratch store — disposable, never the real app database.
     final db = await NostosDatabase.connect(
@@ -92,7 +94,9 @@ void main() {
     });
     await sawSeed.future.timeout(const Duration(seconds: 60));
     await sub0.cancel();
-    debugPrint('DEVICE_ROUNDTRIP_SYNCED first-sync complete (seed row observed)');
+    debugPrint(
+      'DEVICE_ROUNDTRIP_SYNCED first-sync complete (seed row observed)',
+    );
 
     // OFFLINE: the harness's insert must land while nobody is listening —
     // the delta then applies from the durable LSN checkpoint on resume.
@@ -100,16 +104,14 @@ void main() {
     debugPrint('DEVICE_ROUNDTRIP_READY paused, insert window open');
 
     final sawRow = Completer<void>();
-    final sub = db
-        .watch('SELECT * FROM sessions ORDER BY _pk')
-        .listen((rows) {
-          for (final row in rows) {
-            if (row['id'] == _rowId && !sawRow.isCompleted) {
-              debugPrint('DEVICE_ROUNDTRIP_PASS row=$_rowId');
-              sawRow.complete();
-            }
-          }
-        });
+    final sub = db.watch('SELECT * FROM sessions ORDER BY _pk').listen((rows) {
+      for (final row in rows) {
+        if (row['id'] == _rowId && !sawRow.isCompleted) {
+          debugPrint('DEVICE_ROUNDTRIP_PASS row=$_rowId');
+          sawRow.complete();
+        }
+      }
+    });
 
     try {
       // Hold offline through the insert window, then resume and wait for the

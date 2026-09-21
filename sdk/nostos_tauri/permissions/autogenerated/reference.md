@@ -33,7 +33,7 @@ Nostos Tauri plugin — default permissions for the connect/subscribe/write/quer
 <tr>
 <td>
 
-`nostos-tauri:allow-checkpoint`
+`cairn:allow-checkpoint`
 
 </td>
 <td>
@@ -46,7 +46,7 @@ Enables the checkpoint command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-checkpoint`
+`cairn:deny-checkpoint`
 
 </td>
 <td>
@@ -59,7 +59,7 @@ Denies the checkpoint command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-connect`
+`cairn:allow-connect`
 
 </td>
 <td>
@@ -72,7 +72,7 @@ Enables the connect command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-connect`
+`cairn:deny-connect`
 
 </td>
 <td>
@@ -85,7 +85,7 @@ Denies the connect command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-connection-state`
+`cairn:allow-connection-state`
 
 </td>
 <td>
@@ -98,7 +98,7 @@ Enables the connection_state command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-connection-state`
+`cairn:deny-connection-state`
 
 </td>
 <td>
@@ -111,7 +111,7 @@ Denies the connection_state command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-counter-decrement`
+`cairn:allow-counter-decrement`
 
 </td>
 <td>
@@ -124,7 +124,7 @@ Enables the counter_decrement command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-counter-decrement`
+`cairn:deny-counter-decrement`
 
 </td>
 <td>
@@ -137,7 +137,7 @@ Denies the counter_decrement command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-counter-increment`
+`cairn:allow-counter-increment`
 
 </td>
 <td>
@@ -150,7 +150,7 @@ Enables the counter_increment command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-counter-increment`
+`cairn:deny-counter-increment`
 
 </td>
 <td>
@@ -163,7 +163,7 @@ Denies the counter_increment command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-dead-letters`
+`cairn:allow-dead-letters`
 
 </td>
 <td>
@@ -176,7 +176,7 @@ Enables the dead_letters command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-dead-letters`
+`cairn:deny-dead-letters`
 
 </td>
 <td>
@@ -189,7 +189,7 @@ Denies the dead_letters command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-deregister-push-token`
+`cairn:allow-deregister-push-token`
 
 </td>
 <td>
@@ -202,7 +202,7 @@ Enables the deregister_push_token command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-deregister-push-token`
+`cairn:deny-deregister-push-token`
 
 </td>
 <td>
@@ -215,7 +215,7 @@ Denies the deregister_push_token command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-or-set-add`
+`cairn:allow-or-set-add`
 
 </td>
 <td>
@@ -228,7 +228,7 @@ Enables the or_set_add command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-or-set-add`
+`cairn:deny-or-set-add`
 
 </td>
 <td>
@@ -241,7 +241,7 @@ Denies the or_set_add command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-or-set-remove`
+`cairn:allow-or-set-remove`
 
 </td>
 <td>
@@ -254,7 +254,7 @@ Enables the or_set_remove command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-or-set-remove`
+`cairn:deny-or-set-remove`
 
 </td>
 <td>
@@ -267,7 +267,7 @@ Denies the or_set_remove command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-query`
+`cairn:allow-query`
 
 </td>
 <td>
@@ -280,7 +280,7 @@ Enables the query command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-query`
+`cairn:deny-query`
 
 </td>
 <td>
@@ -293,7 +293,7 @@ Denies the query command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-register-push-token`
+`cairn:allow-register-push-token`
 
 </td>
 <td>
@@ -306,7 +306,7 @@ Enables the register_push_token command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-register-push-token`
+`cairn:deny-register-push-token`
 
 </td>
 <td>
@@ -319,7 +319,7 @@ Denies the register_push_token command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-set-token`
+`cairn:allow-set-token`
 
 </td>
 <td>
@@ -332,7 +332,7 @@ Enables the set_token command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-set-token`
+`cairn:deny-set-token`
 
 </td>
 <td>
@@ -345,7 +345,7 @@ Denies the set_token command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-sign-out`
+`cairn:allow-sign-out`
 
 </td>
 <td>
@@ -358,7 +358,7 @@ Enables the sign_out command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-sign-out`
+`cairn:deny-sign-out`
 
 </td>
 <td>
@@ -371,7 +371,7 @@ Denies the sign_out command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-subscribe`
+`cairn:allow-subscribe`
 
 </td>
 <td>
@@ -384,7 +384,7 @@ Enables the subscribe command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-subscribe`
+`cairn:deny-subscribe`
 
 </td>
 <td>
@@ -397,7 +397,7 @@ Denies the subscribe command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-watch`
+`cairn:allow-watch`
 
 </td>
 <td>
@@ -410,7 +410,7 @@ Enables the watch command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-watch`
+`cairn:deny-watch`
 
 </td>
 <td>
@@ -423,7 +423,7 @@ Denies the watch command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:allow-write`
+`cairn:allow-write`
 
 </td>
 <td>
@@ -436,7 +436,7 @@ Enables the write command without any pre-configured scope.
 <tr>
 <td>
 
-`nostos-tauri:deny-write`
+`cairn:deny-write`
 
 </td>
 <td>

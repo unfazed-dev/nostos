@@ -77,7 +77,8 @@ Future<void> nostosDoorbellBackgroundHandler(RemoteMessage message) async {
     final db = await NostosDatabase.connect(
       url: _nostosUrl,
       token: creds['accessToken'] as String?,
-      sqlitePath: '${dir.path}/cairn.sqlite', // SAME file as the foreground session
+      sqlitePath:
+          '${dir.path}/cairn.sqlite', // SAME file as the foreground session
     );
     try {
       await db.subscribe('sessions'); // re-declare tables; delta applies
@@ -179,9 +180,9 @@ class PushPilot {
       debugPrint('push pilot: FCM token registered');
       // Seed the background-isolate wake (see nostosDoorbellBackgroundHandler).
       final dir = await getApplicationDocumentsDirectory();
-      await File('${dir.path}/$_sessionFileName').writeAsString(
-        jsonEncode({'accessToken': adapter.currentAccessToken}),
-      );
+      await File(
+        '${dir.path}/$_sessionFileName',
+      ).writeAsString(jsonEncode({'accessToken': adapter.currentAccessToken}));
     } on NostosPushTokenException catch (e) {
       // Non-fatal: registration retries on the next attach()/token refresh.
       debugPrint('push pilot: registerPushToken failed: $e');

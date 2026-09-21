@@ -1,0 +1,28 @@
+[package]
+name = "nostos-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Tauri 2 fixture app for the nostos plugin — proves the JS command boundary on the multi-table shape (Track A4)."
+license = "Apache-2.0"
+
+# Standalone workspace, like sdk/nostos_tauri itself: keeps the root `make ci`
+# gate free of a Tauri app build.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-cairn = { path = ".." }
+# `generate_context!` expands to serde_json for the plugins.cairn block.
+serde_json = "1"
+
+[dev-dependencies]
+# `test` = tauri::test (MockRuntime + get_ipc_response): drives the real IPC
+# boundary — ACL from capabilities/, camelCase arg names, plugin config — with
+# no webview and no WebDriver. Upgrade path: WebdriverIO @wdio/tauri-service
+# (works on macOS via its embedded driver) for a click-level rail.
+tauri = { version = "2", features = ["test"] }
+tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "process", "io-util", "net", "time", "sync"] }

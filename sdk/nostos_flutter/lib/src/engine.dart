@@ -96,7 +96,10 @@ abstract class NostosEngine {
   /// JSON scalars. Server-side rejects (unknown stream, bad params) arrive
   /// asynchronously as `stream_error` frames and are logged — they do NOT
   /// fail this call.
-  Future<String> subscribeStream({required String name, required String paramsJson});
+  Future<String> subscribeStream({
+    required String name,
+    required String paramsJson,
+  });
 
   /// Drop a stream by the id [subscribeStream] returned. Unknown id = no-op.
   /// v1 leaves local rows in place — eviction is separate; PowerSync behaves

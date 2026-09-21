@@ -10,16 +10,20 @@ typedef PasswordSignIn = Future<void> Function(String email, String password);
 typedef SendEmailOtp = Future<void> Function(String email);
 typedef VerifyEmailOtp = Future<void> Function(String email, String token);
 
-Future<void> _defaultPasswordSignIn(String email, String password) =>
-    Supabase.instance.client.auth
-        .signInWithPassword(email: email, password: password);
+Future<void> _defaultPasswordSignIn(String email, String password) => Supabase
+    .instance
+    .client
+    .auth
+    .signInWithPassword(email: email, password: password);
 
 Future<void> _defaultSendEmailOtp(String email) =>
     Supabase.instance.client.auth.signInWithOtp(email: email);
 
-Future<void> _defaultVerifyEmailOtp(String email, String token) =>
-    Supabase.instance.client.auth
-        .verifyOTP(type: OtpType.email, email: email, token: token);
+Future<void> _defaultVerifyEmailOtp(String email, String token) => Supabase
+    .instance
+    .client
+    .auth
+    .verifyOTP(type: OtpType.email, email: email, token: token);
 
 /// Signin screen. Password sign-in is the default path (deterministic for
 /// bench runs); OTP is reachable via "use a code instead" but is a secondary
@@ -112,7 +116,9 @@ class _SigninScreenState extends State<SigninScreen> {
       // a generic message here previously masked a wrong-email root cause.
       setState(() => _error = 'Sign-in failed: ${e.message}');
     } catch (e) {
-      setState(() => _error = 'Sign-in failed. Check the password and try again.');
+      setState(
+        () => _error = 'Sign-in failed. Check the password and try again.',
+      );
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -174,7 +180,9 @@ class _SigninScreenState extends State<SigninScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    _mode == _Mode.otpVerify ? 'Enter your code.' : 'Welcome back.',
+                    _mode == _Mode.otpVerify
+                        ? 'Enter your code.'
+                        : 'Welcome back.',
                     style: TextStyle(
                       fontSize: AtletTokens.title2,
                       fontWeight: FontWeight.w600,
@@ -193,8 +201,13 @@ class _SigninScreenState extends State<SigninScreen> {
                       Expanded(child: Divider(color: AtletTokens.rule)),
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Text('or use email',
-                            style: TextStyle(color: AtletTokens.ink3, fontSize: AtletTokens.footnote)),
+                        child: Text(
+                          'or use email',
+                          style: TextStyle(
+                            color: AtletTokens.ink3,
+                            fontSize: AtletTokens.footnote,
+                          ),
+                        ),
                       ),
                       Expanded(child: Divider(color: AtletTokens.rule)),
                     ],
@@ -232,7 +245,9 @@ class _SigninScreenState extends State<SigninScreen> {
                       onPressed: _submitPassword,
                     ),
                     TextButton(
-                      onPressed: _working ? null : () => setState(() => _mode = _Mode.otpRequest),
+                      onPressed: _working
+                          ? null
+                          : () => setState(() => _mode = _Mode.otpRequest),
                       child: const Text('Use a code instead'),
                     ),
                   ] else if (_mode == _Mode.otpRequest) ...[
@@ -244,19 +259,32 @@ class _SigninScreenState extends State<SigninScreen> {
                       onPressed: _requestOtp,
                     ),
                     TextButton(
-                      onPressed: _working ? null : () => setState(() => _mode = _Mode.password),
+                      onPressed: _working
+                          ? null
+                          : () => setState(() => _mode = _Mode.password),
                       child: const Text('Back to password'),
                     ),
                   ] else ...[
-                    Text('Code sent to ${_email.text}',
-                        style: TextStyle(color: AtletTokens.ink3, fontSize: AtletTokens.footnote)),
+                    Text(
+                      'Code sent to ${_email.text}',
+                      style: TextStyle(
+                        color: AtletTokens.ink3,
+                        fontSize: AtletTokens.footnote,
+                      ),
+                    ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: _otp,
                       keyboardType: TextInputType.number,
                       maxLength: 6,
-                      style: TextStyle(fontFamily: AtletTokens.monoFamily, letterSpacing: 4),
-                      decoration: const InputDecoration(labelText: 'Code', counterText: ''),
+                      style: TextStyle(
+                        fontFamily: AtletTokens.monoFamily,
+                        letterSpacing: 4,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Code',
+                        counterText: '',
+                      ),
                       onChanged: (_) => setState(() {}),
                     ),
                     const SizedBox(height: 12),
@@ -275,7 +303,10 @@ class _SigninScreenState extends State<SigninScreen> {
                   Text(
                     "By continuing you agree to Atlet's Terms and Privacy Policy.",
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: AtletTokens.footnote, color: AtletTokens.ink3),
+                    style: TextStyle(
+                      fontSize: AtletTokens.footnote,
+                      color: AtletTokens.ink3,
+                    ),
                   ),
                 ],
               ),
@@ -350,7 +381,10 @@ class _PrimaryButton extends StatelessWidget {
           ? const SizedBox(
               height: 18,
               width: 18,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
             )
           : Text(label),
     );

@@ -1,28 +1,36 @@
 {
   "name": "@nostos-sync/web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "PowerSync-style JS facade over nostos-ffi-wasm (browser: live WS via web-sys; node: apply engine only)",
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
     "build": "wasm-pack build ../../crates/nostos-ffi-wasm --target nodejs --out-dir pkg-node",
-    "build:web": "wasm-pack build ../../crates/nostos-ffi-wasm --target web --out-dir pkg-web",
+    "build:web": "wasm-pack build ../../crates/nostos-ffi-wasm --target web --out-dir pkg-web && : > pkg-web/.npmignore",
     "build:all": "npm run build && npm run build:web",
     "smoke": "node smoke.cjs && node --test e2e/attachments.spec.cjs",
     "test:e2e": "npx playwright test --config=playwright.config.cjs",
-    "test": "npm run smoke && npm run test:e2e"
+    "test": "npm run smoke && npm run test:e2e",
+    "prepack": ": > pkg-web/.npmignore",
+    "check:pack": "node check-pack.cjs"
   },
   "license": "Apache-2.0",
   "files": [
     "index.js",
     "index.d.ts",
+    "attachments.js",
+    "push.js",
+    "worker_attachment_gateway.js",
+    "worker/",
+    "sw/",
+    "pkg-web/",
     "README.md"
   ],
   "devDependencies": {
     "@playwright/test": "^1.40.0"
   },
   "dependencies": {
-    "@sqlite.org/sqlite-wasm": "3.53.0-build1"
+    "@sqlite.org/sqlite-wasm": "^3.53.4-build1"
   },
   "repository": {
     "type": "git",

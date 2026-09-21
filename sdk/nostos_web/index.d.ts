@@ -41,12 +41,30 @@ export interface Row {
 export type StorageMode = "durable" | "memory";
 
 /**
+ * Why the Worker reports the mode it does (null for a plain "durable" leader).
+ * - "follower" — another tab of this origin holds the opfs-sahpool store (one
+ *   instance per origin); this tab proxies every command to that leader tab's
+ *   Worker over a BroadcastChannel and reports the LEADER's mode. It is
+ *   promoted (opens OPFS, replays its own `connect`) when the leader closes.
+ * - "secondary-tab" — the same situation, but this tab opted out of proxying
+ *   with `allowSecondaryTab: true` on connect: a standalone memory engine with
+ *   its own socket (non-durable, may diverge from the leader).
+ * - "opfs-unavailable" — Safari Private Browsing, old browser, OPFS disallowed.
+ */
+export type StorageReason = "follower" | "secondary-tab" | "opfs-unavailable" | null;
+
+/**
  * Sync status surfaced to the UI. In the browser, the Worker pushes
- * {type:"storage", mode} after init and {type:"status", connected} on connect.
+ * {type:"storage", mode, reason, persisted} after init and
+ * {type:"status", connected} on connect. `persisted` is
+ * `navigator.storage.persisted()` — call `navigator.storage.persist()` on the
+ * main thread before spawning the Worker or the store is evictable.
  */
 export interface SyncStatus {
   connected: boolean;
   storageMode: StorageMode;
+  storageReason?: StorageReason;
+  persisted?: boolean | null;
 }
 
 /**

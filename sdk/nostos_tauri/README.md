@@ -13,7 +13,7 @@ See [A11](../../docs/plans/nostos-completion-assessment-2026-07-29.md).
 ```rust
 // src-tauri/src/lib.rs
 tauri::Builder::default()
-    .plugin(nostos_tauri::init())
+    .plugin(tauri_plugin_cairn::init())
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 ```
@@ -58,7 +58,7 @@ The plugin reads a `plugins.cairn` block (see
     "nostos": {
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "token": null,
-      "table": "tasks",
+      "tables": ["tasks", "notes"],
       "dbPath": "cairn.db"
     }
   }
@@ -182,15 +182,25 @@ cargo test --test conformance   # from sdk/nostos_tauri — also in make sdk-e2e
   ship unreachable from JS while `cargo test` stayed green).
 
 Both rails run in CI (the `sdk-e2e` job includes the `tauri` slice since
-2026-08-27, webkit dev deps installed). A WebDriver-driven Tauri app remains
-the not-yet-written top tier.
+2026-08-27, webkit dev deps installed).
+
+Third rail (2026-09-21): **`fixture/`** — a real Tauri 2 app (`cargo run`
+opens a two-table window driven over `window.__TAURI__`), whose
+`tests/ipc.rs` submits the frontend's exact `InvokeRequest`s through
+`tauri::test::get_ipc_response` — ACL (`capabilities/`), `plugins.cairn`
+config, camelCase args — against a live spine. Proves the JS command boundary
+on the multi-table shape with no webview. Click-level WebDriver (WebdriverIO
+`@wdio/tauri-service`, embedded driver so macOS works) is the upgrade path.
 
 ## Ceiling (ponytail)
 
-- **One table per `NostosState`** — configurable via `plugins.cairn.table`
-  (floor `tasks`); `subscribe`/`write`/`watch` error if `table` mismatches.
-  Multi-table is the
-  [provider-dashboard plan](../../docs/plans/nostos-provider-dashboard-multitable.md).
+- **Table set is fixed at `connect`** — `plugins.cairn.tables` (first =
+  primary, rest = `extra_tables`, ADR-0022, server cap 32; `table` is the
+  one-entry shorthand). Table-taking commands refuse tables outside the set.
+  Per-table `where_sql` via `plugins.cairn.whereSql` (`{table: predicate}`,
+  keys must be in the set). No per-table `resume_lsn` by design — the LSN is
+  stream-global (one socket, one checkpoint, ADR-0022). `subscribe` is one run
+  loop per session, `watch` is one pump per table.
 - **No published crate / npm package.** A11; `@nostos-sync/tauri` is consumed as a
   path dependency.
 - **Push REST has no retry.** A failed POST/DELETE surfaces once (the server

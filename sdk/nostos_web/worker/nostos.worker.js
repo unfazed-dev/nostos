@@ -52,6 +52,7 @@
 // the 5th arg; the Rust side wraps it in WebStorage::SqliteWasm.
 import init, { NostosSocket } from "../pkg-web/nostos_ffi_wasm.js";
 
+
 let wasmReady = false;
 let sock = null;
 let lastRowCount = -1;
@@ -72,9 +73,36 @@ let token = null;      // opaque JWT; cleared on signOut
 // Set by initStorage() on boot. Passed to NostosSocket.connect as the 5th arg.
 let dbHandle = null;
 // "durable" (OPFS-backed SQLite-WASM) or "memory" (InMemoryStorage fallback).
-// Reported to the main thread via {type:"storage", mode} so SyncStatus can
-// surface which backend is active.
+// Reported to the main thread via {type:"storage", mode, reason, persisted} so
+// SyncStatus can surface which backend is active and WHY it is not durable.
 let storageMode = "memory";
+// Why storageMode is "memory": "secondary-tab" | "opfs-unavailable" | null.
+let storageReason = null;
+
+// Multi-tab leadership (sqlite.org/wasm persistence.md, "OPFS SyncAccessHandle
+// Pool VFS"): opfs-sahpool is ONE instance per origin — a second tab's
+// installOpfsSAHPoolVfs() throws, and before this guard that tab silently
+// degraded to memory with its OWN live socket: two diverging local states and
+// non-durable writes in tab 2. Web Locks decides leadership first so the loser
+// can refuse `connect` unless the app opts in with `allowSecondaryTab`.
+// The loser then proxies to the leader over a BroadcastChannel (follower
+// proxy, end of file) instead of running its own memory engine.
+const LEADER_LOCK = "cairn:opfs-sahpool";
+let leaderLockHeld = false; // also set by the promotion path (follower proxy)
+async function acquireLeaderLock() {
+  if (typeof navigator === "undefined" || !navigator.locks) {
+    leaderLockHeld = true;
+    return true; // no Web Locks API → too old for OPFS anyway; let init decide
+  }
+  return new Promise((resolve) => {
+    navigator.locks.request(LEADER_LOCK, { ifAvailable: true }, (lock) => {
+      leaderLockHeld = lock !== null;
+      resolve(leaderLockHeld);
+      // Hold the lock for the Worker's lifetime: never settle this promise.
+      return lock ? new Promise(() => {}) : undefined;
+    });
+  });
+}
 
 // Read the engine's current full-table snapshot and push it to the main thread.
 // Used both for the initial snapshot (on `watch`) and for each change tick
@@ -121,27 +149,45 @@ async function ensureWasm() {
 // is pushed to the main thread so SyncStatus can surface it. NOT a crash — the
 // memory path is the explicit degrade fallback (ADR-0017 follow-up scope 5).
 async function initStorage() {
-  try {
-    const { openNostosDb } = await import("./sqlite_wasm_glue.js");
-    dbHandle = await openNostosDb();
-    storageMode = "durable";
-  } catch (e) {
-    // OPFS unavailable (Safari Private Browsing, old browsers) or sqlite-wasm
-    // package not installed (Node smoke — but the Worker never runs there).
-    // Degrade to InMemoryStorage: dbHandle stays null, NostosSocket.connect
-    // receives null as the 5th arg → NostosEngine::new() (memory path).
-    console.error("[nostos.worker] storage init failed:", (e && e.message) || e);
+  if (!(leaderLockHeld || (await acquireLeaderLock()))) {
     dbHandle = null;
     storageMode = "memory";
+    storageReason = "secondary-tab";
+    console.warn("[nostos.worker] another tab owns the durable store; memory mode");
+  } else {
+    try {
+      const { openNostosDb } = await import("./sqlite_wasm_glue.js");
+      dbHandle = await openNostosDb();
+      storageMode = "durable";
+    } catch (e) {
+      // OPFS unavailable (Safari Private Browsing, old browsers) or sqlite-wasm
+      // package not installed (Node smoke — but the Worker never runs there).
+      // Degrade to InMemoryStorage: dbHandle stays null, NostosSocket.connect
+      // receives null as the 5th arg → NostosEngine::new() (memory path).
+      console.error("[nostos.worker] storage init failed:", (e && e.message) || e);
+      dbHandle = null;
+      storageMode = "memory";
+      storageReason = "opfs-unavailable";
+    }
   }
-  self.postMessage({ type: "storage", mode: storageMode });
+  // MDN Storage API: origin storage is best-effort (evictable) unless the page
+  // was granted persistence. `persist()` is Window-only — the app calls it on
+  // the main thread; the Worker can only report the outcome.
+  let persisted = null;
+  try {
+    persisted = await navigator.storage.persisted();
+  } catch (_) {
+    /* no StorageManager → leave null */
+  }
+  self.postMessage({ type: "storage", mode: storageMode, reason: storageReason, persisted });
 }
 
 // Eager-init on boot: wasm first (the engine host), then sqlite-wasm (the
 // durable backend). The main thread sees WASM_READY + {type:"storage"} before
 // any command. Wasm init failure is fatal (the spec's WASM_READY poll times
-// out); storage init failure is a graceful degrade (memory mode).
-void ensureWasm()
+// out); storage init failure is a graceful degrade (memory mode). `connect`
+// awaits bootP so it can never race initStorage into a memory engine.
+const bootP = ensureWasm()
   .then(() => initStorage())
   .catch((e) =>
     self.postMessage({ id: 0, error: "wasm-init: " + String((e && e.message) || e) }),
@@ -217,7 +263,18 @@ self.onmessage = async (ev) => {
   try {
     switch (m.cmd) {
       case "connect": {
-        await ensureWasm();
+        await bootP;
+        // A follower tab never reaches here (its connect is proxied to the
+        // leader — see the follower proxy at the end of this file); a tab
+        // that opted out with allowSecondaryTab runs this on its memory engine.
+        if (sock) {
+          // A later tab's proxied connect JOINS the live session as-is (the
+          // first tab's url/table/where_sql win) instead of opening a second
+          // socket over the same store.
+          self.postMessage({ id: m.id, ok: true, checkpoint: sock.checkpoint });
+          self.postMessage({ type: "status", connected: true });
+          break;
+        }
         table = m.table;
         token = m.token ?? null;
         connParams = { url: m.url, table: m.table, where_sql: m.where_sql ?? null };
@@ -407,3 +464,95 @@ self.onmessage = async (ev) => {
     }
   }
 };
+
+// ---- Multi-tab follower proxy (2026-09-21) --------------------------------
+// A tab that lost the leader lock no longer runs a private memory engine with
+// its own socket: it forwards every command over a BroadcastChannel to the
+// leader tab's Worker (one OPFS handle, one socket — PowerSync's shared-engine
+// shape, without a SharedWorker: SharedWorkerGlobalScope exposes no `Worker`
+// and opfs-sahpool needs a dedicated worker's FileSystemSyncAccessHandle).
+// Responses route back by request id; pushes (snapshot / status / writeResult
+// / storage) mirror to every follower, so a follower's page sees the leader's
+// storage mode with reason "follower". When the leader tab closes, the Web
+// Lock queue promotes a follower: it opens OPFS and replays its own tab's
+// last `connect`. `allowSecondaryTab: true` on connect opts a tab OUT into
+// the old standalone memory engine.
+// ponytail: requests in flight at a leader change are lost (no retry); a
+// promoted follower whose tab never called connect waits for one to.
+const BUS = new BroadcastChannel("cairn:multitab");
+const MY_ID = Math.random().toString(36).slice(2);
+let standalone = false; // allowSecondaryTab: own memory engine, no proxying
+let lastConnect = null; // this tab's last connect request, replayed on promotion
+const busInflight = new Map(); // leader: negative gid → { from, id }
+let busNextId = -1;
+const sticky = new Map(); // leader: last storage / status push, replayed on hello
+const localHandler = self.onmessage;
+const pagePost = self.postMessage.bind(self);
+const isFollower = () => storageReason === "secondary-tab" && !standalone;
+
+self.postMessage = (msg) => {
+  if (msg.id != null && busInflight.has(msg.id)) {
+    // Leader answering a follower's request: back over the bus, original id.
+    const { from, id } = busInflight.get(msg.id);
+    busInflight.delete(msg.id);
+    BUS.postMessage({ bus: "res", to: from, msg: { ...msg, id } });
+    return;
+  }
+  if (isFollower() && msg.type === "storage") {
+    // Our own "memory / secondary-tab" boot push: ask the leader instead.
+    BUS.postMessage({ bus: "hello", from: MY_ID });
+    return;
+  }
+  pagePost(msg);
+  if (msg.type && !isFollower() && !standalone) {
+    if (msg.type === "storage" || msg.type === "status") sticky.set(msg.type, msg);
+    BUS.postMessage({ bus: "push", msg });
+  }
+};
+
+BUS.onmessage = (ev) => {
+  const b = ev.data || {};
+  if (isFollower()) {
+    if (b.bus === "res" && b.to === MY_ID) pagePost(b.msg);
+    else if (b.bus === "push")
+      pagePost(b.msg.type === "storage" ? { ...b.msg, reason: "follower" } : b.msg);
+    return;
+  }
+  if (storageReason === "secondary-tab") return; // standalone: not on the bus
+  if (b.bus === "hello") {
+    for (const s of sticky.values()) BUS.postMessage({ bus: "push", msg: s });
+  } else if (b.bus === "req") {
+    let m = b.msg;
+    if (m.id != null) {
+      const gid = busNextId--;
+      busInflight.set(gid, { from: b.from, id: m.id });
+      m = { ...m, id: gid };
+    }
+    localHandler({ data: m });
+  }
+};
+
+self.onmessage = async (ev) => {
+  const m = ev.data || {};
+  await bootP; // leadership is known only after boot
+  if (m.cmd === "connect") {
+    lastConnect = m;
+    if (m.allowSecondaryTab) standalone = true;
+  }
+  if (!isFollower()) return localHandler(ev);
+  BUS.postMessage({ bus: "req", from: MY_ID, msg: m });
+};
+
+// Queue for promotion: granted only once the leader's Worker (and with it the
+// lock) is gone; then held for this Worker's lifetime.
+bootP.then(() => {
+  if (storageReason !== "secondary-tab" || !navigator.locks) return;
+  navigator.locks.request(LEADER_LOCK, async () => {
+    if (standalone) return; // release straight through to the next in line
+    leaderLockHeld = true;
+    storageReason = null;
+    await initStorage(); // opens OPFS now the old leader released it; pushes storage
+    if (lastConnect) localHandler({ data: { ...lastConnect, id: undefined } });
+    await new Promise(() => {});
+  });
+});

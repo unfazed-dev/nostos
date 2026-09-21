@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:atlet/adapters/sync_adapter.dart';
 import 'package:atlet/engine_registry.dart';
+
 import 'support/fake_cart_orders.dart';
 
 /// Records init/signOut calls (with start/end markers so tests can prove
@@ -85,16 +86,22 @@ void main() {
       expect(log, ['cairn.init']);
     });
 
-    test('start() throws if an adapter is already live (must go through switchTo)', () async {
-      final log = <String>[];
-      final registry = EngineRegistry(
-        nostosFactory: () => _RecordingAdapter('cairn', log),
-        powerSyncFactory: () => _RecordingAdapter('powersync', log),
-      );
-      await registry.start(Engine.cairn, session);
+    test(
+      'start() throws if an adapter is already live (must go through switchTo)',
+      () async {
+        final log = <String>[];
+        final registry = EngineRegistry(
+          nostosFactory: () => _RecordingAdapter('cairn', log),
+          powerSyncFactory: () => _RecordingAdapter('powersync', log),
+        );
+        await registry.start(Engine.cairn, session);
 
-      expect(() => registry.start(Engine.powersync, session), throwsStateError);
-    });
+        expect(
+          () => registry.start(Engine.powersync, session),
+          throwsStateError,
+        );
+      },
+    );
 
     test('switchTo() awaits the outgoing adapter\'s signOut() to completion before constructing/init-ing the incoming one', () async {
       final log = <String>[];
@@ -119,7 +126,11 @@ void main() {
       gate.complete();
       await switchFuture;
 
-      expect(log, ['nostos.signOut.start', 'nostos.signOut.end', 'powersync.init']);
+      expect(log, [
+        'nostos.signOut.start',
+        'nostos.signOut.end',
+        'powersync.init',
+      ]);
       expect(registry.activeEngine, Engine.powersync);
       expect(registry.debugLiveAdapters, hasLength(1));
     });
@@ -159,14 +170,19 @@ void main() {
 
       expect(registry.activeEngine, Engine.cairn);
       expect(registry.debugLiveAdapters, hasLength(1));
-      expect(identical(firstNostos, secondNostos), isFalse,
-          reason: 'switching back must construct a fresh adapter, not reuse the wiped one');
+      expect(
+        identical(firstNostos, secondNostos),
+        isFalse,
+        reason: 'switching back must construct a fresh adapter, not reuse the wiped one',
+      );
       expect(identical(firstNostos, powersync), isFalse);
       expect(log, [
         'cairn.init',
-        'nostos.signOut.start', 'nostos.signOut.end',
+        'nostos.signOut.start',
+        'nostos.signOut.end',
         'powersync.init',
-        'powersync.signOut.start', 'powersync.signOut.end',
+        'powersync.signOut.start',
+        'powersync.signOut.end',
         'cairn.init',
       ]);
     });
@@ -212,27 +228,32 @@ void main() {
       await second;
 
       expect(log, [
-        'nostos.signOut.start', 'nostos.signOut.end',
+        'nostos.signOut.start',
+        'nostos.signOut.end',
         'powersync.init',
-        'powersync.signOut.start', 'powersync.signOut.end',
+        'powersync.signOut.start',
+        'powersync.signOut.end',
         'cairn.init',
       ]);
       expect(registry.activeEngine, Engine.cairn);
       expect(registry.debugLiveAdapters, hasLength(1));
     });
 
-    test('switchTo() with nothing live yet just starts the target (no signOut)', () async {
-      final log = <String>[];
-      final registry = EngineRegistry(
-        nostosFactory: () => _RecordingAdapter('cairn', log),
-        powerSyncFactory: () => _RecordingAdapter('powersync', log),
-      );
+    test(
+      'switchTo() with nothing live yet just starts the target (no signOut)',
+      () async {
+        final log = <String>[];
+        final registry = EngineRegistry(
+          nostosFactory: () => _RecordingAdapter('cairn', log),
+          powerSyncFactory: () => _RecordingAdapter('powersync', log),
+        );
 
-      await registry.switchTo(Engine.powersync, session);
+        await registry.switchTo(Engine.powersync, session);
 
-      expect(log, ['powersync.init']);
-      expect(registry.activeEngine, Engine.powersync);
-      expect(registry.debugLiveAdapters, hasLength(1));
-    });
+        expect(log, ['powersync.init']);
+        expect(registry.activeEngine, Engine.powersync);
+        expect(registry.debugLiveAdapters, hasLength(1));
+      },
+    );
   });
 }

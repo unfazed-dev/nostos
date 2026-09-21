@@ -9,41 +9,43 @@ import 'package:flutter_test/flutter_test.dart';
 /// subscribed too late and spun on its loading state forever. replayLatest
 /// must hand late subscribers the most recent value, then live events.
 void main() {
-  test('late subscriber receives the cached latest value, then live events',
-      () async {
-    final controller = StreamController<List<int>>.broadcast();
-    List<int>? last;
-    // Simulate init(): the adapter's own central subscription caches values.
-    controller.stream.listen((v) => last = v);
+  test(
+    'late subscriber receives the cached latest value, then live events',
+    () async {
+      final controller = StreamController<List<int>>.broadcast();
+      List<int>? last;
+      // Simulate init(): the adapter's own central subscription caches values.
+      controller.stream.listen((v) => last = v);
 
-    // The one-and-only snapshot fires before any UI subscriber exists.
-    controller.add([1, 2, 3]);
-    await Future<void>.delayed(Duration.zero);
+      // The one-and-only snapshot fires before any UI subscriber exists.
+      controller.add([1, 2, 3]);
+      await Future<void>.delayed(Duration.zero);
 
-    // Late subscriber (ShopScreen after an engine switch).
-    final seen = <List<int>>[];
-    final sub =
-        replayLatest(controller.stream, () => last).listen(seen.add);
-    await Future<void>.delayed(Duration.zero);
-    expect(seen, [
-      [1, 2, 3]
-    ], reason: 'late subscriber must get the replayed snapshot');
+      // Late subscriber (ShopScreen after an engine switch).
+      final seen = <List<int>>[];
+      final sub = replayLatest(controller.stream, () => last).listen(seen.add);
+      await Future<void>.delayed(Duration.zero);
+      expect(seen, [
+        [1, 2, 3],
+      ], reason: 'late subscriber must get the replayed snapshot');
 
-    // Live events still flow after the replay.
-    controller.add([4]);
-    await Future<void>.delayed(Duration.zero);
-    expect(seen.last, [4]);
+      // Live events still flow after the replay.
+      controller.add([4]);
+      await Future<void>.delayed(Duration.zero);
+      expect(seen.last, [4]);
 
-    await sub.cancel();
-    await controller.close();
-  });
+      await sub.cancel();
+      await controller.close();
+    },
+  );
 
-  test('no cached value yet: subscriber just waits for live events',
-      () async {
+  test('no cached value yet: subscriber just waits for live events', () async {
     final controller = StreamController<int>.broadcast();
     final seen = <int>[];
-    final sub =
-        replayLatest<int>(controller.stream, () => null).listen(seen.add);
+    final sub = replayLatest<int>(
+      controller.stream,
+      () => null,
+    ).listen(seen.add);
     await Future<void>.delayed(Duration.zero);
     expect(seen, isEmpty);
 

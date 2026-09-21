@@ -1353,7 +1353,7 @@ impl NostosSocket {
     /// outbox) survives a reconnect — the server resumes streaming from
     /// the persisted checkpoint.
     #[wasm_bindgen(js_name = resume)]
-    #[allow(clippy::unused_async)] // async so JS callers can `await`; no Rust await needed (synchronous socket check)
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // async so JS callers can `await`; no Rust await needed (synchronous socket check)
     pub async fn resume(&self) -> Result<bool, JsValue> {
         if self.inner.ws.ready_state() == 1 {
             // Already open — re-send the subscribe frame as a heartbeat.

@@ -46,7 +46,10 @@ on warnings.
   e2e binaries TRUNCATE the shared `tasks` table and assert exact snapshot
   contents — every test file documents this, and a parallel within-binary
   run races (caught 2026-08-17: snapshot test saw the concurrent test's
-  seed row as a 4th row).
+  seed row as a 4th row). `make pg-e2e` wraps all of this AND first drops
+  leaked INACTIVE `e2e_*`/`repro_*` slots — an aborted run leaves them behind
+  (slot names carry the pid) and the next run then fails with
+  "all replication slots are in use" (caught 2026-09-21: 7 spurious failures).
 - `make bench` — throughput benchmark. Record environment; report drop rates; never compare
   eval-only numbers against end-to-end numbers.
 - `cargo run -p nostos-client --example reactive_scroll` — end-to-end native demo.
@@ -54,6 +57,10 @@ on warnings.
 
 ## Conventions
 - Commits: single line, conventional prefix, no author mentions.
+- Toolchains track LATEST stable (standing rule 2026-09-21): `rust-toolchain.toml` is `channel = "stable"`,
+  `rust-version`/README badge/CONTRIBUTING/ci.yml `flutter-version`/pubspec `sdk:` floors name the current
+  release. At session start run `rustup update stable` + `fvm install <latest stable> && fvm global <it>`
+  (check `rustup check`, `fvm releases`); bump the named versions when they move. Never pin older.
 - Architectural decisions become `docs/adr/NNNN-<slug>.md` (next free number); code cites its ADR.
 - Measure before optimize: perf changes ship with before/after numbers or get reverted
   (Tier-5 index revert is the precedent — docs/ROADMAP.md).

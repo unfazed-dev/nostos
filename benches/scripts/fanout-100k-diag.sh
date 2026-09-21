@@ -22,7 +22,7 @@
 #   tier-spec = clients,events,window,ack,listeners (default: the two runs below)
 set -u
 SRC=$1; OUT=$2; shift 2
-IMAGE=${NOSTOS_LINUX_IMAGE:-rust:1.95-bookworm}
+IMAGE=${NOSTOS_LINUX_IMAGE:-rust:1.98-bookworm}
 LOCK=/tmp/nostos-bench.lock
 NAME=nostos-linux-fanout-100k
 LOG=$OUT/linux-fanout-diag.log
@@ -38,7 +38,7 @@ in_container() { # args: inner-script args...
     -v nostos-linux-target-fanout:/target \
     -v nostos-linux-cargo-registry-fanout:/usr/local/cargo/registry \
     -e CARGO_TARGET_DIR=/target \
-    -e RUSTUP_TOOLCHAIN=1.95.0 \
+    -e RUSTUP_TOOLCHAIN=1.98.0 \
     -e CARGO_INCREMENTAL=0 \
     -e TAG=fanout-diag \
     --ulimit nofile=1048576:1048576 \
