@@ -183,11 +183,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          # Exact pin, matching pubspec.yaml's environment.flutter floor and
-          # the version the W0a packaging spike (docs/plans/w4-packaging-fallback.md)
-          # verified native-assets against — see that doc's friction notes
-          # for why version drift here causes confusing failures.
-          flutter-version: "3.44.0"
+          # Latest stable (standing rule 2026-09-21: nostos builds on the newest
+          # stable Flutter/Dart). Bump this + pubspec.yaml's environment floor
+          # together; the W0a spike notes (docs/plans/w4-packaging-fallback.md)
+          # explain why the two drifting apart causes confusing failures.
+          flutter-version: "3.47.5"
           channel: "stable"
       - name: Enable native assets (still an opt-in flag on this Flutter/Dart era)
         run: flutter config --enable-native-assets
@@ -221,6 +221,12 @@ jobs:
       - name: atlet reference app — pub get + analyze + test
         working-directory: apps/atlet/flutter
         run: |
+          # ponytail: Flutter 3.47 SwiftPM copies plugins that depend on other
+          # plugins (firebase_messaging -> firebase_core) into
+          # build/<os>/SourcePackages with rsync and never mkdir -p's the parent,
+          # so `pub get` on a fresh checkout dies with "rsync error (code 11)".
+          # Pre-create the dirs; drop once flutter_tools creates them itself.
+          mkdir -p build/ios/SourcePackages build/macos/SourcePackages
           flutter pub get
           flutter analyze
           flutter test
