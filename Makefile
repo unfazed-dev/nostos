@@ -96,6 +96,22 @@ run: ## Run the sync server (port 8800 by default; see .env).
 pg-up: ## Start a Postgres 16 with logical replication enabled (docker).
 	docker compose -f docker/docker-compose.yml up -d postgres
 
+# pg-e2e: the real-Postgres e2e suite (NOSTOS_E2E_PG=1, --test-threads=1 — see
+# CLAUDE.md). Sweeps INACTIVE e2e_*/repro_* slots first: every test names its
+# slot after its pid, so an aborted run (Ctrl-C, PG restart) leaks them and the
+# next run dies with "all replication slots are in use" (max 20). Live slots
+# and the app slots (cairn_slot, atlet_*) are left alone.
+# Uses the `cairn` superuser (not NOSTOS_PG_URL_DEFAULT's least-privilege
+# cairn_writer): the tests create slots/publications and TRUNCATE.
+NOSTOS_E2E_PG_URL ?= postgres://cairn:cairn@localhost:5433/cairn
+.PHONY: pg-e2e
+pg-e2e: ## Real-Postgres e2e suite; drops leaked inactive e2e_* slots first.
+	@docker compose -f docker/docker-compose.yml exec -T postgres \
+	  psql -U cairn -d cairn -tAc \
+	  "SELECT count(pg_drop_replication_slot(slot_name)) FROM pg_replication_slots WHERE NOT active AND (slot_name LIKE 'e2e_%' OR slot_name LIKE 'repro_%')" \
+	  | sed 's/^/swept leaked e2e slots: /'
+	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-infra --features pg --no-fail-fast -- --test-threads=1
+
 # dev-stack: real-Postgres quickstart — compose up, wait for the publication,
 # then run nostos-server against it with PgReplicator. The readiness poll gates
 # on `cairn_pub` existing (not just `pg_isready`): during first init the
