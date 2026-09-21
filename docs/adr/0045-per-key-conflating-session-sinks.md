@@ -122,12 +122,18 @@ treats as its honesty surface. New counter; `dropped` keeps its meaning.
   sentinel is still deferred). That is a per-frame defect under plain LWW today and
   conflation neither causes nor worsens it.
 
-## Measurement gate (binding, per CLAUDE.md "measure before optimize")
+## Measurement gate — ORIGINAL, superseded 2026-09-22 (see "The instrument was wrong")
 
-Before/after on the drop-rate ladder rungs, same harness, `make bench`, with
-`BENCHMARK-METHODOLOGY.md` §6.1 headroom verdicts recorded per tier. Ship only if
-**50k stays sub-1% and at least one rung above 50k moves from over-1% to under-1%**;
-otherwise revert.
+> Before/after on the drop-rate ladder rungs, same harness, `make bench`, with
+> `BENCHMARK-METHODOLOGY.md` §6.1 headroom verdicts recorded per tier. Ship only if
+> **50k stays sub-1% and at least one rung above 50k moves from over-1% to under-1%**;
+> otherwise revert.
+
+**This gate is unmeetable, and not because of the host.** Drop rate counts frames; conflation's
+benefit is not a frame-count benefit. No drop-rate ladder, on any hardware, at any scale, could
+have scored this change. The gate was the wrong instrument from the day it was written. Its
+replacement is at the end of this document. The throughput half of it — *do not regress* —
+still stands and is still measured.
 
 **Known limitation of that gate.** The current harness runs load generator and server on
 one 10-core host, which the ladder's own signature confirms is generator-bound (flat
@@ -329,10 +335,73 @@ compared against a fresh number rather than against its own session's control. T
 shape as the `ack_progress` retraction (n=1 per arm is not a measurement), one level up: n=1 per
 *session* is not a baseline.
 
-### What is still not claimed
+### The instrument was wrong (2026-09-22) — the benefit is measurable, and needs no second host
 
-The conflation *benefit* — fewer sheds under real backlog — remains unmeasured on this host at
-the tiers where backlog naturally occurs. The 10k rung reports `elapsed_secs: 120.00` on every
-run (window expiry, so per §5 not a measurement) and the baseline at 200 keys swung
-27.11% → 1.19% across two runs. Both facts are recorded in `docs/ROADMAP.md`. A two-host
-harness is the prerequisite, and it is not built.
+Attempt 3 left the benefit unmeasured and blamed the single-host harness. That was wrong, and
+a literature pass found why within one search. Full writeup:
+`docs/plans/measuring-conflation-honestly.md`.
+
+The formal metric for staleness at a receiver is **Age of Information**: `Δ(t) = t − U(t)`,
+where `U(t)` is the largest generation time among frames that have reached the destination.
+Age rises with time and **resets when a frame with a larger generation time arrives**. A
+conflating queue is a device for making that reset happen sooner. In age terms:
+
+> Superseding 99 intermediate values costs a client nothing. Losing the 100th costs it
+> everything.
+
+That is ADR-0045's own premise — every frame is a complete row image, only the newest matters —
+stated in a metric that can express it. `drop_rate` cannot, at any scale, on any host. Attempt 3
+stopped it *penalising* conflation; nothing built on frame counts could ever *credit* it.
+
+Two results worth carrying forward: **push-out and last-generated-first-served queue disciplines
+are the formal analogue of conflation and have known AoI-optimality results** — move-to-tail is a
+push-out discipline, so the design has theory behind it, it only lacked an instrument. And the
+**penalty function matters more than raw age**; Nostos wants the threshold form `1(Δ > d)`, not
+the average.
+
+### The measurement
+
+`ReplicationEvent` carries no timestamp and does not need one. The discrete form of age —
+**convergence lag**, per key, highest LSN emitted vs. highest LSN held — needs no clocks, no wire
+change, no domain change, and no benchmark host. It is deterministic, so per the ponytail ladder
+it is not a benchmark at all: it is a test, and it runs in `make ci`.
+
+`router::tests::conflation_holds_convergence_lag_at_zero_where_a_plain_channel_loses_every_key`
+feeds **800 events over 8 keys into 16 slots** (channel 8 + overflow 8) with nothing draining,
+then drains and compares:
+
+| same 800-event stream, same 16 slots | keys left holding a stale value | sheds |
+|---|---|---|
+| drop-on-full (pre-ADR-0045) | **8 of 8** | 784 |
+| conflating overflow (ADR-0045) | **0 of 8** | **0** |
+
+The drop-on-full arm is inside the same test as a control, so the property cannot pass vacuously.
+This is the before/after `docs/ROADMAP.md` and CLAUDE.md's "measure before optimize" asked for,
+and it took no host at all.
+
+### Replacement gate (proposed — the original is superseded above)
+
+> **Convergence.** While pending distinct keys fit the overflow, conflation holds convergence lag
+> at **0 for every key**, on a stream where drop-on-full at the same memory budget leaves every
+> key stale. Pinned by a test in `make ci`, not by a benchmark run.
+>
+> **No regression.** The unbacklogged fast path measures within noise of the parent, arms
+> interleaved within one session, ≥3 runs each. (Attempt 3: 1,645,329 vs 1,715,366 median,
+> overlapping.)
+
+Adopting this in place of the original is a deliberate change to a gate marked binding, so it is
+recorded as *proposed* and left for the operator.
+
+## What is still not claimed
+
+Absolute throughput at 50k–100k still needs the load generator off the server's host — that part
+of the old gate's limitation was real and is unchanged. The 10k rung reports `elapsed_secs:
+120.00` on every run (window expiry, so per §5 not a measurement) and the baseline at 200 keys
+swung 27.11% → 1.19% across two runs. **Do not cite the 100k tier as a Nostos server limit.**
+
+`docs/plans/measuring-conflation-honestly.md` also names four harness defects that are
+independent of this ADR: the `FakeReplicator` floods flat-out so the drop rate measures where the
+system falls over rather than whether it meets a rate (the fix is an open-loop constant arrival
+rate, `wrk2 --rate`); a run that hits its timeout still reports a number instead of
+`throughput_valid: false`; there is no fixed repetition policy; and attempt 3's own A/B used a
+fixed `A,B,A,B` order, which hands the parent every cold-cache slot.

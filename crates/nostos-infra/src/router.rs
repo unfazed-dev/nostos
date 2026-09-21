@@ -886,6 +886,75 @@ mod tests {
         );
     }
 
+    /// ADR-0045's actual claim, measured: while the pending DISTINCT keys fit
+    /// the overflow, conflation holds every key's latest value no matter how
+    /// many events arrive — and a plain bounded channel of the SAME total
+    /// depth loses the latest value for every key.
+    ///
+    /// This is **convergence lag** (discrete Age of Information), and it is the
+    /// right instrument because `drop_rate` counts frames while conflation's
+    /// benefit is not a frame-count benefit: superseding 99 intermediate values
+    /// costs a client nothing, losing the 100th costs it everything. The
+    /// drop-rate ladder could never have scored this change at any scale, on
+    /// any host. See docs/plans/measuring-conflation-honestly.md.
+    #[tokio::test]
+    async fn conflation_holds_convergence_lag_at_zero_where_a_plain_channel_loses_every_key() {
+        const CAP: usize = 8; // channel 8 + overflow 8 = 16 slots
+        const KEYS: usize = 8; // <= overflow capacity: the regime ADR-0045 bounds
+        const ROUNDS: usize = 100; // 800 events into 16 slots, nothing draining
+
+        let keys: Vec<String> = (0..KEYS).map(|k| k.to_string()).collect();
+        let mut latest: HashMap<String, u64> = HashMap::new();
+        let mut feed = Vec::new();
+        for round in 0..ROUNDS {
+            for (i, k) in keys.iter().enumerate() {
+                let lsn = u64::try_from(round * KEYS + i + 1).expect("fits");
+                latest.insert(k.clone(), lsn);
+                feed.push(row(lsn, k));
+            }
+        }
+
+        // --- the conflating sink, with nothing draining it until the end ---
+        let (sink, mut rx) = TokioEventSink::channel(CAP);
+        for e in &feed {
+            sink.deliver(Arc::clone(e)).await;
+        }
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        for (pk, lsn) in drain(&mut rx) {
+            let slot = seen.entry(pk).or_default();
+            *slot = (*slot).max(lsn);
+        }
+        assert_eq!(seen.len(), KEYS, "every key is still represented");
+        for (k, want) in &latest {
+            assert_eq!(
+                seen.get(k),
+                Some(want),
+                "key {k} must converge to its latest value"
+            );
+        }
+        assert_eq!(sink.capacity_sheds(), 0, "distinct keys fit: nothing shed");
+
+        // --- drop-on-full, same memory budget: the pre-ADR-0045 contract ---
+        let (tx, mut plain_rx) = mpsc::channel::<Arc<ReplicationEvent>>(CAP * 2);
+        for e in &feed {
+            let _ = tx.try_send(Arc::clone(e));
+        }
+        drop(tx);
+        let mut plain: HashMap<String, u64> = HashMap::new();
+        while let Ok(e) = plain_rx.try_recv() {
+            let slot = plain.entry(e.op.pk().to_string()).or_default();
+            *slot = (*slot).max(e.lsn.raw());
+        }
+        let stale = latest
+            .iter()
+            .filter(|(k, v)| plain.get(*k) != Some(*v))
+            .count();
+        assert_eq!(
+            stale, KEYS,
+            "same memory, drop-on-full: every key is left holding a stale value"
+        );
+    }
+
     #[tokio::test]
     async fn overflow_still_sheds_when_full_of_distinct_rows() {
         // Conflation bounds pending DISTINCT rows; it is not unbounded memory.
