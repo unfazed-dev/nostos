@@ -163,10 +163,10 @@ There is no official Gradle plugin for the Central Publishing Portal
 them into one uploadable bundle.
 
 ```bash
-# JDK 17–21 is required. AGP 8.7 rejects newer JDKs, and this machine's
-# default (25/26) is one of them — pass JAVA_HOME explicitly:
-export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
-
+# No JAVA_HOME juggling. Gradle 9.7.1 runs on any JDK 17–26 and AGP 9.4
+# needs only JDK 17+, so the system default works. (This read "JDK 17–21
+# required" while the module was pinned to Gradle 8.9, which tops out at
+# JDK 22 — the toolchain bump removed the constraint, not a workaround.)
 cd sdk/nostos_kotlin/android
 ./gradlew centralBundle \
   -PnostosGroupId=io.github.<your-github-username> \
@@ -188,3 +188,10 @@ Signing is off unless `-PsigningInMemoryKey` is passed, so `assembleRelease`
 and CI stay green on a machine with no GPG. Verified 2026-09-21: the task
 produces a 30-file bundle (aar + sources + javadoc + pom, each with
 md5/sha1/sha256/sha512) in the layout Central expects.
+
+`centralBundle` depends on `verifyAar`, which fails the build if the release
+`.aar` ships an empty `classes.jar`. That is not hypothetical: the AGP 9
+upgrade moved Kotlin compilation to the `kotlin` source set, and the module's
+`java.srcDirs("../kotlin-sources")` silently stopped feeding the compiler — a
+3.4 MB `.aar` with the `.so` intact, 0 classes, and a green build. Run
+`./gradlew verifyAar` on its own after any source-set or AGP change.

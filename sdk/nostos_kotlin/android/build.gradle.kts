@@ -1,3 +1,6 @@
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+
 // =============================================================================
 // nostos-kotlin Android library — bundles `libnostos_kotlin.so` (arm64-v8a) +
 // the UniFFI-generated Kotlin sources into a consumable `.aar`.
@@ -8,8 +11,10 @@
 // (UniFFI's Kotlin target dispatches FFI through `com.sun.jna.*`).
 // =============================================================================
 plugins {
-    id("com.android.library") version "8.7.3"
-    kotlin("android") version "1.9.24"
+    // AGP 9 ships built-in Kotlin; applying org.jetbrains.kotlin.android on
+    // top is rejected by the new DSL —
+    // developer.android.com/build/migrate-to-built-in-kotlin
+    id("com.android.library") version "9.4.1"
     `maven-publish`
     signing
 }
@@ -24,7 +29,7 @@ version = providers.gradleProperty("nostosVersion").getOrElse("0.2.0")
 
 android {
     namespace = "run.nostos.sdk"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24
@@ -48,20 +53,21 @@ android {
         getByName("main") {
             // Generated Kotlin from `uniffi-bindgen generate --language kotlin`
             // (run from the crate root, output dir `kotlin-sources/`).
-            java.srcDirs("../kotlin-sources")
+            // MUST be `kotlin.srcDirs`, not `java.srcDirs`: AGP 9's built-in
+            // Kotlin only reads the kotlin source set, so a java-only entry
+            // compiles to an EMPTY classes.jar and the .aar silently ships
+            // nothing but the .so. `verifyAar` below is the guard.
+            kotlin.srcDirs("../kotlin-sources")
             // jniLibs default is `src/main/jniLibs` — explicit for clarity.
             jniLibs.srcDirs("src/main/jniLibs")
         }
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
 
     // .so inside the .aar — `useLegacyPackaging = false` (default) keeps the
     // .so uncompressed + page-mapped directly from the apk. AGP 8.7+
@@ -78,7 +84,7 @@ android {
     // + add an `androidTest` micro-bench harness; out of scope for the
     // feasibility scaffold.
     testOptions {
-        targetSdk = 34
+        targetSdk = 36
     }
 
     // Central rejects a component without sources + javadoc jars
@@ -165,12 +171,37 @@ signing {
     sign(publishing.publications)
 }
 
+// The runnable check for the trap above. An .aar whose classes.jar is empty
+// builds, publishes and installs without a murmur, then fails at the first
+// call — exactly what the AGP 9 built-in-Kotlin source-set change caused here.
+// Wired into `centralBundle`, so nothing uploadable is produced without it.
+val verifyAar = tasks.register("verifyAar") {
+    group = "verification"
+    description = "Fail if the release .aar ships an empty classes.jar."
+    dependsOn("bundleReleaseAar")
+    val aarDir = layout.buildDirectory.dir("outputs/aar")
+    doLast {
+        val aar = aarDir.get().asFile.listFiles()?.firstOrNull { it.name.endsWith("-release.aar") }
+            ?: error("no release .aar in ${aarDir.get().asFile}")
+        val classes = ZipFile(aar).use { zip ->
+            val entry = zip.getEntry("classes.jar") ?: error("no classes.jar in ${aar.name}")
+            ZipInputStream(zip.getInputStream(entry)).use { s ->
+                generateSequence { s.nextEntry }.count { it.name.endsWith(".class") }
+            }
+        }
+        require(classes > 0) {
+            "${aar.name} ships an empty classes.jar — the Kotlin source set is not being compiled"
+        }
+        logger.lifecycle("verifyAar: $classes classes in ${aar.name}")
+    }
+}
+
 // The uploadable artifact. `maven-metadata*` is excluded: the Portal derives
 // its own and rejects bundles that carry one.
 tasks.register<Zip>("centralBundle") {
     group = "publishing"
     description = "Build the Central Portal upload bundle (zip of the staged Maven layout)."
-    dependsOn("publishReleasePublicationToCentralBundleRepository")
+    dependsOn("publishReleasePublicationToCentralBundleRepository", verifyAar)
     from(layout.buildDirectory.dir("central-bundle"))
     exclude("**/maven-metadata*")
     archiveFileName.set("nostos-kotlin-$version-central-bundle.zip")
