@@ -496,7 +496,8 @@ slower per delivery). That is a throughput collapse at 100k sinks per event
 inside the 8 GiB VM (3.9 GiB server RSS plus 100k probe sockets), not shedding.
 Cause not yet isolated (memory pressure vs. 2-listener split vs. per-event
 sequential loop over 100k writers); it is the next perf investigation. No 100k
-rate is quoted anywhere.
+rate is quoted anywhere. **Isolated 2026-09-21 — see "100k fan-out cliff
+attributed" below: it is the per-event sequential loop.**
 
 The script's second pass did not run: its criterion was `completed=true`, which
 no ≥30k tier can reach while `attempted` counts late subscribers' events. Two
@@ -519,3 +520,69 @@ host at load1 35–48 delivered 13.3M/20M at 111,196 ops/sec and ran to the wind
 that was host load (desktop apps, a VPN and an Xcode clone), not the harness — the
 container env line was identical. The ≥30k tiers above have **not** been re-run
 with the finish-time probe; their ops/sec column stays a lower bound until they are.
+
+## 100k fan-out cliff attributed — MEASURED 2026-09-21 (Linux container, gated quiet host)
+
+Plan: `docs/plans/fanout-100k-cliff-diagnosis.md`.
+Raw: `benches/results/raw/2026-09-21-fanout-100k-run2/`.
+Recipe: `benches/scripts/fanout-100k-diag.sh <src> <out> 100000,5000,1200,1,2 50000,5000,600,1,1`
+
+The discriminating run the diagnosis plan had been blocked on since 2026-09-02
+(two prior attempts invalidated by host contention). Both tiers cleared the
+headroom gate: 100k started at host load1 **7.02**, 50k at **7.12**, each after
+a 60 s wait. Container VM: Linux 7.0.12-linuxkit aarch64, 10 vCPU, 8,124,516 kB
+RAM, 1,048,572 kB swap, nofile 1,048,576.
+
+**Toolchain changed: rustc 1.98, not the 1.95 of every earlier row here.** The
+workspace MSRV moved in `b40bc65` and the bench image could no longer build it.
+Both tiers ran in the same session on the same compiler, so the 50k-vs-100k
+contrast is internally valid; cross-date absolute comparisons carry the change.
+
+Steady state, measured from t=100 s (all clients subscribed) to window end:
+
+| tier | ops/sec | s/event | per-delivery | router dropped | router faulted | peak RSS |
+|---|---|---|---|---|---|---|
+| 50k × 5000, 1 listener | 316,314 | 0.158 | 3.16 µs | 0 | 0 | 2,712 MiB |
+| 100k × 5000, 2 listeners | 27,859 | 3.597 | 35.89 µs | 0 | 0 | 3,978 MiB |
+
+**Doubling the clients costs 22.7× the time per event** (11.4× worse per
+delivery). Linear fan-out would cost 2.0×.
+
+**Attribution: the per-event sequential fan-out loop.** Three of the four
+candidate causes are falsified by the in-VM sampler (376 ticks at 5 s):
+
+- *Kernel TCP memory pressure* — `PruneCalled`, `RcvPruned`, `TCPRcvCollapsed`,
+  `TCPAbortOnMemory`, `TCPMemoryPressures`, `TCPMemoryPressuresChrono`,
+  `TCPBacklogDrop`, `TCPZeroWindowDrop`, `TCPRcvQDrop` all **flat at 0 in both
+  tiers**.
+- *VM reclaim / swap* — `SwapFree` never moved off 1023 M, `swap_mib=0` on every
+  probe line, `MemAvailable` bottomed at 2,667 M, `psi_mem` avg60 max 0.08.
+- *Kernel CPU / scheduler* — sys share **identical at 13.1%** in both tiers, and
+  the box is *more* idle at the slow tier (42.2% vs 34.5%). `psi_cpu` avg60 max
+  2.53.
+
+What is left is application-level, and the 42% idle names the mechanism: the
+sequential fan-out (one task walking every session per event, shipped
+2026-09-02) is single-threaded, so at 100k sessions one event costs ~3.6 s of
+wall clock while nine vCPUs idle. Neither tier degrades over its run (100k
+oscillates 18k–33k ops/sec with RSS flat at 3,845–3,849 MiB), so this is a
+steady-state serialization ceiling, not accumulation.
+
+**The earlier contention hypothesis is falsified.** The diagnosis plan held that
+every collapse past 0.5 s/event coincided with desktop load, leaving the
+ladder's 1.22 s/event UNVERIFIED. Gated and quiet, the same shape measures
+**3.60 s/event** — 3× *worse* than the contended ladder run. That supersedes the
+1.22 figure.
+
+**The probe's 93.39% "drop" at 100k is not loss.** `router: matched = delivered
+= 33,108,868, dropped = 0, faulted = 0`. The undelivered 466.9 M is
+`pre_subscribe_or_not_yet_fanned_out` — the window expired with the replicator
+~331 events into a 5,000-event budget. Same at 50k (dropped 0; the 23.58%
+figure is 58.8 M not yet fanned out). Only `router_dropped` and `router_faulted`
+mean loss; both are 0 at every tier measured to date.
+
+Next: parallelise the fan-out walk (the PARKED table-sharded router). Note the
+park condition named a *real-PG* multi-client run and this is eval-only
+FakeReplicator loopback — strong evidence, not the literal trigger. Any fix
+ships with a re-run of exactly this tier pair, same gate, same toolchain.
+No 100k rate is quoted as a headline.

@@ -117,6 +117,8 @@ Headroom rule (agreed with the coordinator 2026-09-02):
 | fanout-100k-diag, first attempt (12:10) — `linux-fanout-diag.INVALID-host-load51.log` | 100k×500, 300 s, 2L | 51 → killed in connect phase | — | — | — | **INVALID** (host load 51; killed before any fan-out numbers) |
 | fanout-100k-diag run 1 (22:13–22:19) — `linux-fanout-diag.log` tier 100000 | 100k×500, 300 s, 2L | 5.88 → 3.00 (gate waited 120 s) | ~0.19 | 500 (all, by t≈95 s) | 3,906 MiB | **VALID** — no cliff in 500 events; see Run 1 |
 | fanout-100k-diag run 1 (22:20–22:22) — `linux-fanout-diag.log` tier 50000 | 50k×500, 120 s, 1L | 3.92 → 3.37 | ~0.066 | 500 (all, by t≈33 s) | 2,858 MiB | **VALID** control; see 50k control |
+| fanout-100k-diag run 2 (2026-09-21 03:19–03:41) — `2026-09-21-fanout-100k-run2/` tier 100000 | 100k×5000, 1200 s, 2L | 7.02 → 16.91 (gate waited 60 s) | **3.60** | 331 of 5000 | 3,978 MiB | **VALID** — the discriminating run; the cliff is real |
+| fanout-100k-diag run 2 (2026-09-21 03:42–03:53) — `2026-09-21-fanout-100k-run2/` tier 50000 | 50k×5000, 600 s, 1L | 7.12 → 21.96 (gate waited 60 s) | **0.158** | 3,823 of 5000 | 2,712 MiB | **VALID** control, same session/toolchain |
 
 ## Phase 3 — after the verdict
 
@@ -250,16 +252,94 @@ subscribed (run 1: 31.8 s); t=60→100 s ≈0.29 s/event; **t=100→120 s: 8
 events in 20 s = 2.5 s/event** — the ladder's 1.22 s/event regime and
 worse, arriving exactly as the desktop load did.
 
-**Status: blocked on quiet host.** The discriminating run (100k × 5000 +
-50k × 5000 under the gate) needs ~35 min with no non-harness process > 20%
-CPU; two attempts on 2026-09-02 were contaminated within the first 2–4
-minutes. Re-run command, unchanged:
-`benches/scripts/fanout-100k-diag.sh <src> benches/results/raw/2026-09-02-fanout-100k-diag-run2 100000,5000,1200,1,2 50000,5000,600,1,1`
-with the two 10 s host samplers alongside.
+**Status: RESOLVED 2026-09-21.** The discriminating run landed on a gated
+quiet host (100k started at load1 7.02 after a 60 s wait, 50k at 7.12). Both
+tiers VALID. Raw: `benches/results/raw/2026-09-21-fanout-100k-run2/`.
 
-What is established without it (VALID runs only): no kernel TCP memory
-pressure, no swap, no drops at 100k; 100k×500 runs at ~0.19 s/event, 50k×500
-at ~0.06 s/event — a slope, not a cliff. Every observed collapse to
-> 0.5 s/event so far coincided with host contention. The ladder's 100k
-figure (1.22 s/event, 11:17, no mid-run load record) must be treated as
-UNVERIFIED until the gated run lands.
+**Env delta, stated up front:** this run is built with **rustc 1.98**, not the
+1.95 of every earlier row. The workspace moved to 1.98 in `b40bc65` and the
+bench container could no longer build it. The 50k control ran in the same
+session on the same toolchain, so the 50k-vs-100k contrast — which is the whole
+discriminator — is internally valid; only cross-date absolute comparisons carry
+the compiler change.
+
+## Run 2 result — the cliff is real, and it is not the kernel
+
+Steady state (from t=100 s, when all clients are subscribed, to window end):
+
+| tier | ops/sec | s/event | per-delivery | peak RSS |
+|---|---|---|---|---|
+| 50k × 5000, 1L | 316,314 | 0.158 | 3.16 µs | 2,712 MiB |
+| 100k × 5000, 2L | 27,859 | 3.597 | 35.89 µs | 3,978 MiB |
+
+**Doubling the clients costs 22.7× the time per event** — 11.4× worse per
+individual delivery. Linear fan-out would cost exactly 2.0×.
+
+### What the sampler falsifies
+
+| hypothesis | verdict | evidence |
+|---|---|---|
+| (a1) kernel TCP memory pressure | **FALSIFIED** | `PruneCalled`, `RcvPruned`, `TCPRcvCollapsed`, `TCPAbortOnMemory`, `TCPMemoryPressures`, `TCPMemoryPressuresChrono`, `TCPBacklogDrop`, `TCPZeroWindowDrop`, `TCPRcvQDrop` — **all flat at 0 in both tiers**. `tcp_mem_pages` peaked at 79,727 (100k) vs 26,219 (50k): it scales with sockets and never reaches a pressure threshold. |
+| (b) VM memory reclaim / swap | **FALSIFIED** | `SwapFree` never moved off 1023 M in either tier; `swap_mib=0` on every probe line; `MemAvailable` bottomed at 2,667 M; `psi_mem` avg60 max 0.08. |
+| (e) kernel CPU / scheduler | **FALSIFIED** | sys share is **identical at 13.1% in both tiers**. The box is *more* idle at the slow tier: idle 42.2% (100k) vs 34.5% (50k). `psi_cpu` avg60 max 2.53. A saturated kernel looks like the opposite of this. |
+| (d) app-level fan-out loop cost | **the only survivor** | Everything else is flat while throughput collapses 11.4×. |
+
+### It is steady-state, not accumulation
+
+Bucketed into ten slices, neither tier decays: 100k oscillates 18k–33k ops/sec
+across the whole 1,200 s with **RSS flat at 3,845–3,849 MiB**, and 50k
+oscillates 187k–426k. There is no downward trend and no memory growth, so the
+O(N×E) store-scan-that-grows-with-event-count theory does **not** fit. The cost
+is a constant per-event price that is super-linear in *client count*.
+
+### The 42% idle is the tell
+
+The sequential fan-out shipped on 2026-09-02 (one task, one shared
+`Arc<ReplicationEvent>`, walking every session in order) is single-threaded.
+At 100k sessions one event takes ~3.6 s of wall clock to walk the session list,
+and the other nine vCPUs have nothing to do — which is exactly the 42% idle plus
+flat kernel counters we measured. At 50k it still keeps up. That is the
+shape of a serialization ceiling, not a resource exhaustion.
+
+### Host contention was NOT the explanation
+
+This doc's leading hypothesis was that every collapse past 0.5 s/event
+coincided with desktop load, and that the ladder's 1.22 s/event was therefore
+UNVERIFIED. On a gated quiet host the same shape measures **3.60 s/event** —
+three times *worse* than the contended ladder run. Contention was making the
+numbers look better, not worse, by starving the client swarm. **That hypothesis
+is falsified and the ladder's 1.22 s/event is superseded.**
+
+### The "93.39% drop" is not loss
+
+`router: matched=33,108,868 delivered=33,108,868 dropped=0 faulted=0` — the
+router lost nothing. The undelivered 466.9 M is
+`pre_subscribe_or_not_yet_fanned_out`: the 1,200 s window expired with the
+replicator only ~331 events into its 5,000-event budget. Same at 50k
+(`dropped=0`, 23.58% "drop" = 58.8 M not yet fanned out). The probe's `drop%`
+label conflates *lost* with *not yet sent*; only `router_dropped` and
+`router_faulted` mean loss, and both are zero at every tier measured to date.
+
+### Why run 1 saw no cliff
+
+Run 1 used a 500-event budget and reported 142,357 ops/sec at 100k vs 196,926
+at 50k — a 1.38× slope. With a 5,000-event budget the same client counts give
+27,543 vs 318,426, an 11.6× cliff. Between the two runs the 50k tier got
+*faster* (197k → 318k, amortising the connect phase) while 100k got **5.2×
+slower**. The cliff needs sustained replicator pressure to appear; a short
+budget drains before the loop falls behind. Run 1's "no cliff in 500 events"
+was correct and simply not a long enough run.
+
+## Next
+
+Shard the fan-out loop across cores. This is the PARKED table-sharded router
+(ROADMAP: parked 2026-08-24 on "full-path single-client evidence shows drain is
+not scan-bound; revisit on the first multi-client real-PG run that shows the
+O(N×E) scan binding"). Strictly the park condition named *real-PG*, and this is
+eval-only FakeReplicator loopback — so this run is strong evidence, not the
+literal trigger. It does establish that the ceiling is the single-threaded loop
+rather than the scan, which changes what the fix should be: parallelise the
+walk, do not micro-optimise the scan.
+
+Measure before optimize still applies: any fix ships with a re-run of exactly
+this pair of tiers, same gate, same toolchain.
