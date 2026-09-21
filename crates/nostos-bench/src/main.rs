@@ -119,6 +119,20 @@ pub struct RunResult {
     pub p50_us: f64,
     pub p99_us: f64,
     pub elapsed_secs: f64,
+    /// `false` when the run hit `--timeout-secs` instead of delivering every
+    /// event. The window expired, so `ops_per_sec` is a FLOOR (what got out
+    /// before we gave up) and `drop_rate` counts events still in flight rather
+    /// than events lost. Neither is a measurement, so both are withheld from
+    /// the printed table and from every aggregate in RESULTS.md.
+    ///
+    /// Latency is unaffected: p50/p99 describe the frames that DID land, and a
+    /// truncated window does not bias them. They stay reported.
+    ///
+    /// Caught 2026-09-22 on a 4-core i7-7700HQ, where the 120s default expired
+    /// at the *1k* tier and the JSON still read like a result. On faster
+    /// hardware the same default never binds, which is exactly why this has to
+    /// be a stamp in the output and not a note in a doc.
+    pub throughput_valid: bool,
     pub profile: String,
 }
 
@@ -148,16 +162,45 @@ async fn main() -> Result<()> {
         "clients", "ops/sec", "drop%", "p50(ms)", "p99(ms)", "delivered", "superseded"
     );
     for r in &results {
+        // A timed-out run still prints its row — the delivered count and the
+        // latencies are real and worth seeing — but the two figures the window
+        // corrupted are withheld rather than rendered as numbers someone could
+        // quote.
+        if r.throughput_valid {
+            println!(
+                "{:>8} {:>14.0} {:>9.2}% {:>9.2} {:>9.2} {:>10} {:>11}",
+                r.clients,
+                r.ops_per_sec,
+                r.drop_rate * 100.0,
+                r.p50_us / 1000.0,
+                r.p99_us / 1000.0,
+                r.events_delivered,
+                r.events_superseded
+            );
+        } else {
+            println!(
+                "{:>8} {:>14} {:>10} {:>9.2} {:>9.2} {:>10} {:>11}",
+                r.clients,
+                "TIMED OUT",
+                "—",
+                r.p50_us / 1000.0,
+                r.p99_us / 1000.0,
+                r.events_delivered,
+                r.events_superseded
+            );
+        }
+    }
+
+    let timed_out = results.iter().filter(|r| !r.throughput_valid).count();
+    if timed_out > 0 {
         println!(
-            "{:>8} {:>14.0} {:>9.2}% {:>9.2} {:>9.2} {:>10} {:>11}",
-            r.clients,
-            r.ops_per_sec,
-            r.drop_rate * 100.0,
-            r.p50_us / 1000.0,
-            r.p99_us / 1000.0,
-            r.events_delivered,
-            r.events_superseded
+            "\n!! {timed_out} run(s) hit --timeout-secs {} before delivering every event.",
+            cfg.timeout_secs
         );
+        println!(
+            "   ops/sec and drop% are withheld: they would describe the clock, not the system."
+        );
+        println!("   Raise --timeout-secs and re-run to get a figure.");
     }
     println!("\nResults written to {}/", cfg.out_dir);
     Ok(())
@@ -286,7 +329,10 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     };
-    let _ = timeout(deadline, wait).await;
+    // `is_ok()` means the wait loop reached `target` inside the window. On
+    // expiry every figure derived from `elapsed` below describes a truncated
+    // window instead of the workload, so the outcome is carried out of here.
+    let completed = timeout(deadline, wait).await.is_ok();
     let elapsed = start.elapsed();
 
     // The fan-out task emits events as fast as the router accepts them. At high
@@ -379,6 +425,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         p50_us: p50,
         p99_us: p99,
         elapsed_secs: elapsed.as_secs_f64(),
+        throughput_valid: completed,
         profile: cfg.profile.clone(),
     })
 }

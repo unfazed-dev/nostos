@@ -101,6 +101,84 @@ mod tests {
             "rustc_version() returned an unexpected value: {v:?}"
         );
     }
+
+    fn run(clients: usize, ops: f64, drop_rate: f64, throughput_valid: bool) -> RunResult {
+        RunResult {
+            clients,
+            events_total: 100_000,
+            events_delivered: 1,
+            events_superseded: 0,
+            ops_per_sec: ops,
+            drop_rate,
+            p50_us: 10.0,
+            p99_us: 86.0,
+            elapsed_secs: 120.0,
+            throughput_valid,
+            profile: "small".into(),
+        }
+    }
+
+    fn report_of(runs: Vec<RunResult>) -> String {
+        render_markdown(&FullReport {
+            environment: Environment {
+                rustc: UNKNOWN.into(),
+                profile: "small".into(),
+                buffer: 1024,
+                events: 100_000,
+                hostname: "test".into(),
+                cpu_cores: 8,
+            },
+            runs,
+            powersync_ceiling_ops_per_sec_low: 2_000,
+            powersync_ceiling_ops_per_sec_high: 4_000,
+        })
+    }
+
+    /// A run that hit `--timeout-secs` delivered only part of the workload, so
+    /// its ops/sec is a floor and its drop% counts in-flight events as lost.
+    /// Neither may reach the table or the headline.
+    ///
+    /// Regression guard for the 2026-09-22 finding: a 120s default expired at
+    /// the 1k tier on a 4-core host and the report rendered 824,882 ops/sec and
+    /// "1.01% drops" as if they were measurements.
+    #[test]
+    fn a_timed_out_run_is_withheld_from_the_table_and_every_aggregate() {
+        // The timed-out run is the FASTEST on paper — so if it leaked into the
+        // aggregates it would take the headline outright, not hide in it.
+        let md = report_of(vec![
+            run(1000, 9_999_999.0, 0.42, false),
+            run(5000, 500_000.0, 0.01, true),
+        ]);
+
+        assert!(md.contains("_timed out_"), "the row must be marked:\n{md}");
+        assert!(
+            !md.contains("9,999,999"),
+            "a timed-out ops/sec reached the report:\n{md}"
+        );
+        assert!(
+            md.contains("500,000 ops/sec"),
+            "the completed run must still headline:\n{md}"
+        );
+        assert!(
+            md.contains("1.00%"),
+            "max drop% must come from completed runs only (0.01 -> 1.00%):\n{md}"
+        );
+    }
+
+    /// Every tier timing out must not render a 0 ops/sec headline — `max` over
+    /// an empty set is 0.0, which would read as a measured collapse.
+    #[test]
+    fn all_runs_timed_out_yields_no_headline_figure() {
+        let md = report_of(vec![run(1000, 9_999_999.0, 0.42, false)]);
+        assert!(
+            md.contains("No run produced a valid throughput figure"),
+            "expected an explicit refusal:\n{md}"
+        );
+        assert!(
+            !md.contains("Peak sustained throughput"),
+            "a headline was emitted with no valid run:\n{md}"
+        );
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +253,21 @@ fn render_markdown(r: &FullReport) -> String {
     s.push_str("| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | vs PS high |\n");
     s.push_str("|---:|---:|---:|---:|---:|---:|---:|\n");
     for run in &r.runs {
+        // A run that hit `--timeout-secs` never finished the workload, so its
+        // ops/sec is a floor and its drop% counts in-flight events as lost.
+        // Rendering either as a number invites the quote this table exists to
+        // prevent — the row stays (delivered and latency are real) but those
+        // two cells are struck out.
+        if !run.throughput_valid {
+            s.push_str(&format!(
+                "| {} | _timed out_ | — | {:.2} | {:.2} | {} | — |\n",
+                run.clients,
+                run.p50_us / 1000.0,
+                run.p99_us / 1000.0,
+                run.events_delivered,
+            ));
+            continue;
+        }
         let ratio = run.ops_per_sec / r.powersync_ceiling_ops_per_sec_high as f64;
         s.push_str(&format!(
             "| {} | {} | {:.2}% | {:.2} | {:.2} | {} | **{:.1}×** |\n",
@@ -188,22 +281,43 @@ fn render_markdown(r: &FullReport) -> String {
         ));
     }
 
+    let timed_out = r.runs.iter().filter(|x| !x.throughput_valid).count();
+    if timed_out > 0 {
+        s.push_str(&format!(
+            "\n> **{timed_out} run(s) hit the wall-clock timeout** and delivered only part of \
+             the workload. Their ops/sec and drop% are withheld above and excluded from every \
+             figure below — a truncated window measures the clock, not the system. Re-run those \
+             tiers with a larger `--timeout-secs`.\n"
+        ));
+    }
+
     s.push_str("\n## Interpretation\n\n");
-    let best = r.runs.iter().map(|x| x.ops_per_sec).fold(0.0_f64, f64::max);
-    let ratio = best / r.powersync_ceiling_ops_per_sec_high as f64;
-    s.push_str(&format!(
-        "- **Peak sustained throughput: {} ops/sec** — **{:.1}×** PowerSync's published \
-         high ceiling (4,000 ops/sec) and **{:.1}×** the low (2,000 ops/sec).\n",
-        grouped(best),
-        ratio,
-        best / r.powersync_ceiling_ops_per_sec_low as f64,
-    ));
-    let max_drop = r.runs.iter().map(|x| x.drop_rate).fold(0.0_f64, f64::max);
-    s.push_str(&format!(
-        "- **Max drop rate across runs: {:.2}%** (lower is better; >1% is flagged as not \
-         fully honest throughput in the methodology).\n",
-        max_drop * 100.0,
-    ));
+    // Every aggregate below is computed over completed runs ONLY. A timed-out
+    // run's ops/sec is a floor, and a floor silently entering a `max` would
+    // understate the peak while looking like a measurement.
+    let valid: Vec<&RunResult> = r.runs.iter().filter(|x| x.throughput_valid).collect();
+    if valid.is_empty() {
+        s.push_str(
+            "- **No run produced a valid throughput figure** — every tier hit the wall-clock \
+             timeout. Raise `--timeout-secs` and re-run before citing anything from this file.\n",
+        );
+    } else {
+        let best = valid.iter().map(|x| x.ops_per_sec).fold(0.0_f64, f64::max);
+        let ratio = best / r.powersync_ceiling_ops_per_sec_high as f64;
+        s.push_str(&format!(
+            "- **Peak sustained throughput: {} ops/sec** — **{:.1}×** PowerSync's published \
+             high ceiling (4,000 ops/sec) and **{:.1}×** the low (2,000 ops/sec).\n",
+            grouped(best),
+            ratio,
+            best / r.powersync_ceiling_ops_per_sec_low as f64,
+        ));
+        let max_drop = valid.iter().map(|x| x.drop_rate).fold(0.0_f64, f64::max);
+        s.push_str(&format!(
+            "- **Max drop rate across runs: {:.2}%** (lower is better; >1% is flagged as not \
+             fully honest throughput in the methodology).\n",
+            max_drop * 100.0,
+        ));
+    }
     s.push_str(
         "- The synthetic `FakeReplicator` generates events faster than the router pushes \
          them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. \
