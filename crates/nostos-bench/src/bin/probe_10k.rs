@@ -159,6 +159,11 @@ async fn run(
         });
     }
     eprintln!("  [diag] listeners: {}", urls.join(" "));
+    // Prices the client swarm's own decode — see `count_frames_cheap`.
+    let skip_decode = std::env::var("NOSTOS_PROBE_SKIP_DECODE").is_ok_and(|v| v == "1");
+    if skip_decode {
+        eprintln!("  [diag] CLIENT DECODE DISABLED (frame counting only) — harness-cost probe");
+    }
 
     // Sharded per-client counters (same pattern as the main harness — avoids a
     // single contended cache line at 10k concurrent incrementers).
@@ -170,7 +175,7 @@ async fn run(
         let c = Arc::clone(cnt);
         let u = urls[i % urls.len()].clone();
         let cs = Arc::clone(&conn);
-        handles.push(tokio::spawn(client_task(u, c, cs)));
+        handles.push(tokio::spawn(client_task(u, c, cs, skip_decode)));
     }
 
     // Wait for a subscribe quorum (every client subscribed or given up). The
@@ -229,6 +234,7 @@ async fn run(
     let extract = |_: &nostos_domain::ReplicationEvent, _: &str| Some(ColumnValue::Any);
 
     let start = Instant::now();
+    let cpu_at_start = proc_cpu_secs();
     // Diagnostic: set when `run` returns, i.e. the replicator handed out its
     // whole event budget — distinguishes "loop finished" from "loop stalled".
     let fanout_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -373,6 +379,41 @@ async fn run(
         finish_secs.map_or_else(|| "n/a".to_string(), |s| format!("{s:.2}s")),
     );
 
+    // THE per-stage split (added 2026-09-21 for the 100k cliff). `busy` is the
+    // time the fan-out task actually spent working; `elapsed` is wall-clock.
+    // busy/wall near 1 => the loop IS the cost. busy/wall near 0 => the loop is
+    // starved, and the cost is the transport writers, the kernel socket path,
+    // or the in-process client tasks competing for the same runtime.
+    {
+        let ev = metrics.stage_events.load(Ordering::Relaxed).max(1);
+        let m_ns = metrics.stage_match_nanos.load(Ordering::Relaxed);
+        let d_ns = metrics.stage_deliver_nanos.load(Ordering::Relaxed);
+        let a_ns = metrics.stage_ack_scan_nanos.load(Ordering::Relaxed);
+        let busy = (m_ns + d_ns + a_ns) as f64 / 1e9;
+        eprintln!(
+            "  [diag] stages events={ev} match={:.2}ms/ev deliver={:.2}ms/ev ack_scan={:.2}ms/ev \
+             busy={busy:.2}s wall={elapsed:.2}s busy_frac={:.3}",
+            m_ns as f64 / ev as f64 / 1e6,
+            d_ns as f64 / ev as f64 / 1e6,
+            a_ns as f64 / ev as f64 / 1e6,
+            busy / elapsed.max(1e-9),
+        );
+        // CPU vs wall: the only thing here that separates "slow" from
+        // "starved". See `proc_cpu_secs`.
+        match (cpu_at_start, proc_cpu_secs()) {
+            (Some(a), Some(b)) => {
+                let cpu = b - a;
+                eprintln!(
+                    "  [diag] cpu proc_cpu={cpu:.2}s wall={elapsed:.2}s cores_used={:.2} \
+                     nproc={}",
+                    cpu / elapsed.max(1e-9),
+                    std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
+                );
+            }
+            _ => eprintln!("  [diag] cpu unavailable (no procfs)"),
+        }
+    }
+
     // Diagnostic: did the fan-out loop RETURN (replicator budget exhausted) or
     // was it still running when the window closed? A frozen `delivered` with
     // `true` here is a finite event budget, not a stall.
@@ -502,6 +543,37 @@ mod tests {
     }
 }
 
+/// Process CPU seconds (utime + stime) from `/proc/self/stat`; `None` where
+/// procfs is absent (macOS).
+///
+/// This is the discriminator the per-stage wall clocks cannot supply on their
+/// own. `stage_*_nanos` span `.await`, so a fan-out task that is descheduled
+/// mid-walk still books the interval to its stage — wall time cannot tell
+/// "slow" from "starved". CPU time can, at the process level:
+///
+/// - `cpu / wall` near the vCPU count ⇒ the process is CPU-saturated; the work
+///   is real instructions somewhere, and the fan-out task is losing the
+///   scheduler race against the client/writer tasks it wakes.
+/// - `cpu / wall` far below the vCPU count ⇒ the process is idle or blocked;
+///   the cost is a wait (kernel socket path, lock, syscall), not compute, and
+///   the "42% idle at an 11.4x collapse" observation finally has a home.
+///
+/// ponytail: USER_HZ is hardcoded to 100. It is 100 on every Linux the bench
+/// containers run; reading it properly means `sysconf(_SC_CLK_TCK)`, which
+/// means `libc` + `unsafe`, and `unsafe` is forbidden workspace-wide. Upgrade
+/// path if a platform ever disagrees: parse it out of the auxiliary vector.
+fn proc_cpu_secs() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // `comm` is parenthesised and may itself contain spaces + parens, so the
+    // field split must start after the LAST ')'.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After comm, field 0 is `state`; utime is field 11, stime field 12.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    Some((utime + stime) as f64 / 100.0)
+}
+
 /// Peak resident set size in MiB from `/proc/self/status` (`VmHWM`); `None`
 /// where procfs is absent (macOS). Memory is the likelier wall before ports
 /// at 100k in-process clients, so every tier records it.
@@ -538,7 +610,27 @@ struct ConnStats {
 
 /// One client: connect, subscribe, count received FRAMES (not messages — the
 /// server may batch N frames per WS message under backlog).
-async fn client_task(url: String, received: Arc<AtomicU64>, stats: Arc<ConnStats>) {
+/// Count frames without parsing them.
+///
+/// Every `WireFrame` serializes `"lsn":` exactly once, `payload` is hex so it
+/// cannot contain the needle, and the bench's `table`/`pk` are `tasks` and a
+/// decimal integer — so this is exact for this harness.
+///
+/// ponytail: substring count, not a parser. It exists to price the probe's OWN
+/// client-side JSON decode, which in production runs on the user's device and
+/// not on the server's CPU — including it in a server throughput number is a
+/// harness artifact. Upgrade path: if a frame ever nests an `lsn`, count at
+/// brace-depth 1 instead.
+fn count_frames_cheap(data: &[u8]) -> u64 {
+    data.windows(6).filter(|w| *w == b"\"lsn\":").count() as u64
+}
+
+async fn client_task(
+    url: String,
+    received: Arc<AtomicU64>,
+    stats: Arc<ConnStats>,
+    skip_decode: bool,
+) {
     let mut ws = None;
     let mut last_err = String::new();
     for _ in 0..50 {
@@ -577,7 +669,11 @@ async fn client_task(url: String, received: Arc<AtomicU64>, stats: Arc<ConnStats
             Message::Text(s) => s.into_bytes(),
             _ => continue,
         };
-        let n = wire::decode_frames(&bytes).len() as u64;
+        let n = if skip_decode {
+            count_frames_cheap(&bytes)
+        } else {
+            wire::decode_frames(&bytes).len() as u64
+        };
         if n > 0 {
             received.fetch_add(n, Ordering::Relaxed);
         }

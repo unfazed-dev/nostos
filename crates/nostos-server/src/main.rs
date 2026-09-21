@@ -257,11 +257,24 @@ pub struct Config {
     rules_file: String,
 
     /// Coalesce the per-event ack-progress (slot-advance) scan: recompute the
-    /// slowest acked LSN every N events instead of every event. `1` (default) =
-    /// exact ADR-0009 per-event cadence. `>1` cuts the O(sessions) scan N× — the
-    /// lever for >5k-client deploys (safe: acks are monotonic, so a cached min
-    /// never overshoots the safe-to-flush LSN; at most N events of extra WAL
-    /// retention). Example: `16` or `32` for high client counts.
+    /// slowest acked LSN every N events instead of every event. `1` = the exact
+    /// ADR-0009 per-event cadence. `>1` cuts the O(sessions) scan N× (safe: acks
+    /// are monotonic, so a cached min never overshoots the safe-to-flush LSN; at
+    /// most N events of extra WAL retention) — see the
+    /// `coalesced_ack_progress_lags_but_never_overshoots` test in nostos-application.
+    ///
+    /// Stays `1`. A 2026-09-21 change to `16` claimed 2.23× at 100k sessions and
+    /// was reverted the same day: six interleaved tiers measured `ack=1` at
+    /// 39,847 ops/sec mean and `ack=16` at 43,983, with a standard deviation of
+    /// ~70% of the mean in BOTH arms (ack=1 spread 7.99×, ack=16 3.41×). The
+    /// arms overlap completely, so the original 32,372 → 72,051 was run-to-run
+    /// noise, not the knob (benches/results/RESULTS.md).
+    ///
+    /// The knob does work — `ack_scan` drops ~8× (176 → 23 ms/ev) exactly as
+    /// designed. That stage simply is not what bounds throughput at this tier,
+    /// so coalescing buys nothing and costs WAL retention. Raise it only with a
+    /// measurement on a harness that can resolve the difference; this one
+    /// cannot.
     #[arg(long, env = "NOSTOS_ACK_PROGRESS_INTERVAL", default_value = "1")]
     ack_progress_interval: u32,
 

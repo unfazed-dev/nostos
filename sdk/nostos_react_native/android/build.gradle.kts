@@ -17,13 +17,15 @@
 // AGP versions stay single-sourced across the two Android SDKs.
 // =============================================================================
 plugins {
-    id("com.android.library") version "8.7.3"
-    kotlin("android") version "1.9.24"
+    // AGP 9 ships built-in Kotlin; applying org.jetbrains.kotlin.android on
+    // top is rejected by the new DSL —
+    // developer.android.com/build/migrate-to-built-in-kotlin
+    id("com.android.library") version "9.4.1"
 }
 
 android {
     namespace = "run.nostos.reactnative"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24
@@ -47,7 +49,9 @@ android {
             // UniFFI-generated Kotlin (`uniffi.nostos_kotlin.NostosClient`) under
             // src/main/kotlin-uniffi — output dir of `uniffi-bindgen generate`
             // in scripts/build-android.sh. Default `src/main/java` is also kept.
-            java.srcDirs("src/main/kotlin", "src/main/kotlin-uniffi")
+            // `kotlin.srcDirs`, not `java.srcDirs` — AGP 9 built-in Kotlin only
+            // reads the kotlin source set (see nostos_kotlin for the failure mode).
+            kotlin.srcDirs("src/main/kotlin", "src/main/kotlin-uniffi")
             // .so bundle — copied by scripts/build-android.sh from
             // target/aarch64-linux-android/debug/libnostos_kotlin.so (stripped).
             jniLibs.srcDirs("src/main/jniLibs")
@@ -55,13 +59,10 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
 
     // .so inside the .aar — keep nostos_kotlin's packaging choice so the test
     // app loads the .so the same way the shipped .aar does.
@@ -72,7 +73,7 @@ android {
     }
 
     testOptions {
-        targetSdk = 34
+        targetSdk = 36
     }
 }
 

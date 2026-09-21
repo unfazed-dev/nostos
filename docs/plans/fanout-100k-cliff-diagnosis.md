@@ -102,8 +102,11 @@ Headroom rule (agreed with the coordinator 2026-09-02):
 - START gate: host load1 < 8 (0.8 × 10 cores, the pre-VM baseline) and no
   other bench container up.
 - MID-RUN validity: no non-harness process > 20% CPU on any 10 s sample
-  (`host-cpu.log`). load1 is recorded alongside (`host-load1.log`) but a run
-  is NOT invalidated on load1 alone — the 10-vCPU harness VM itself adds ~4–5
+  (`host-cpu.log`). **Superseded 2026-09-21** — see
+  `docs/BENCHMARK-METHODOLOGY.md` § 6.1, now aggregate non-harness CPU <= 150%
+  on >= 95% of samples, and mechanically enforced. The 20% bar was 2% of a
+  10-core host and no machine with a screen on could meet it. load1 is recorded
+  alongside (`host-load1.log`) but a run is NOT invalidated on load1 alone — the 10-vCPU harness VM itself adds ~4–5
   while fanning out, so "load1 < 8 for the whole run" is unreachable by
   design. That is why a row with load1 = 12 mid-run can still be VALID.
 
@@ -407,6 +410,154 @@ counting sink (79 ns/delivery) the parallel walk is *2× slower* at 100k
 work. A sink that does nothing is not a deployment shape, but it is why the
 `PARALLEL_FANOUT_MIN` floor and the `workers` knob both exist.
 
+## Phase 4 — per-stage timing (the instrument, 2026-09-21 third pass)
+
+The retraction left a hole: the walk is 1.4% of the per-event cost, so where is
+the other 98.6%? Every candidate left on the list — transport writers, the
+kernel socket path, the 100k in-process client tasks — is *outside* the fan-out
+loop. So stop guessing what the loop costs and measure whether the loop is even
+**running**.
+
+`Metrics` gained four diagnostic counters (`crates/nostos-application/src/ports.rs`),
+written by `FanOutService` and read directly by `nostos-bench-10k`:
+
+| counter | stage |
+|---|---|
+| `stage_match_nanos` | `store.candidates_for` + the predicate filter |
+| `stage_deliver_nanos` | the delivery walk, including the join when it is split |
+| `stage_ack_scan_nanos` | `store.min_acked_lsn` — the other O(sessions) scan |
+| `stage_events` | denominator |
+
+**Read these as wall-time-per-stage, NOT as CPU time.** `Instant::elapsed()`
+spans `.await` points and `deliver_chunk` awaits on every sink, so
+`stage_deliver_nanos` includes any time the fan-out task spent *descheduled
+inside* the walk. The first framing of this instrument claimed `busy/wall → 1`
+would prove the loop is executing rather than starved; that is **wrong** and is
+retracted here. A task that is preempted mid-walk still accumulates the whole
+interval into the stage it was in.
+
+What the counters do buy, which nothing before them did:
+
+- **Localisation.** They say which of the three O(sessions) stages the
+  per-event time sits in. `match` and `ack_scan` have one await each; `deliver`
+  has N. If `deliver` dominates, the cost is in the walk or in what the walk
+  wakes — and `candidates_for` and `min_acked_lsn` are exonerated.
+- **A comparison point for `nostos-fanout-walk`.** Same stage, same code, with
+  and without the transport + client swarm. The gap between them is precisely
+  the thing the probe removed.
+
+They cannot, on their own, separate "the walk's instructions are slow" from
+"the walk is descheduled between sinks". Doing that needs per-thread CPU time
+(`clock_gettime(CLOCK_THREAD_CPUTIME_ID)`) next to the wall clock — the next
+instrument, not this one.
+
+Deliberately NOT in `MetricsSnapshot`: this is a bench diagnostic, not a
+`/metrics` gauge. Cost is ~6 `Instant::now()` per **event** (not per delivery),
+against a per-event budget three orders of magnitude larger, and only when a
+`Metrics` handle is wired.
+
+Self-check only — **NOT a valid measurement**, native macOS, 2k clients ×
+200 events (`nostos-bench-10k 2000 200 60 1 1`), host load1 ≈ 36 on 10 cores:
+
+```
+match=0.44 ms/ev  deliver=1.58 ms/ev  ack_scan=0.04 ms/ev
+busy=0.41 s  wall=0.51 s  busy_frac=0.801
+```
+
+This proves the counters are wired and produce sane magnitudes. It does **not**
+establish a baseline, and the headroom rule disqualifies it outright: an
+unrelated 10-core `ninja` build was running, and `busy_frac` is precisely a
+scheduling measurement, so competing CPU load is the one confound it cannot
+tolerate. If anything a contended host *depresses* `busy_frac`, so the real
+2k figure is ≥ 0.801 — which is why it is still worth recording as a floor.
+
+The comparison that matters must come from the gated ladder: if `busy_frac`
+collapses toward 0 from 10k to 100k while per-delivery cost stays flat
+(`nostos-fanout-walk` says it does — 0.458 → 0.486 µs), starvation is proven and
+the cliff is a scheduling problem, not a fan-out problem. All four tiers must
+come from the same gated session; a 2k number from a loaded host is not a
+control for a 100k number from a quiet one.
+
+**Status: instrument landed and self-checked; the 10k/50k/100k ladder has NOT
+been run.** The host is executing an unrelated Flutter-engine build
+(`caffeinate ninja -j 10`, load1 > 30 on 10 cores) and
+`docs/BENCHMARK-METHODOLOGY.md` forbids starting a measurement above load1 8 —
+`benches/scripts/fanout-100k-diag.sh` enforces that gate itself and waits. Any
+number taken now would measure the other build. Rerun with:
+
+```bash
+benches/scripts/fanout-100k-diag.sh "$PWD" benches/results/stage-diag \
+  10000,500,120,1,1 50000,500,180,1,1 100000,500,300,1,2
+grep -E 'stages|SOAK|HOST tier' benches/results/stage-diag/linux-fanout-diag.log
+```
+
+## Phase 4 ladder — RUN, and INVALID. Read the shape, not the numbers (2026-09-21)
+
+All three tiers ran (`benches/results/raw/2026-09-21-stage-timing-INVALID/`).
+**Every one of them fails the mid-run validity rule** and no number below may
+be cited: a hung `fvm global` (429 min CPU at ~95%) and a WebKit tab (~100%)
+were pinned for the whole session, plus intermittent VS Code, Chrome and a
+Flutter-engine build. 238 of 238 host samples carry a non-harness process over
+20% CPU — the same disqualification as "Run 2, attempt 2" above.
+
+The self-check that proves it: this 50k tier ran at **2.43 s/event** against the
+**0.158 s/event** the gated Run 2 measured for the same tier. 15× slower. That
+is a measurement of the host, not of Nostos.
+
+| tier | events in window | match ms/ev | deliver ms/ev | ack_scan ms/ev | s/event |
+|---|---|---|---|---|---|
+| 10k × 500, 120 s, 1L | 500 (all) | 3.53 | 217.31 | 0.34 | 0.22 |
+| 50k × 500, 180 s, 1L | 74 | 231.18 | 2,099.05 | 92.86 | 2.43 |
+| 100k × 500, 300 s, 2L | 37 | 1,589.93 | 4,702.93 | 1,814.36 | 8.11 |
+
+### The shape — a hypothesis, NOT a result
+
+Absolute times are contaminated. The *share* each stage takes of the same
+event, in the same run, under the same conditions, is far more robust — and it
+moves monotonically:
+
+| tier | deliver | match | ack_scan | **match + ack_scan** |
+|---|---|---|---|---|
+| 10k | 98.3% | 1.6% | 0.15% | **1.8%** |
+| 50k | 86.6% | 9.5% | 3.8% | **13.3%** |
+| 100k | 58.0% | 19.6% | 22.4% | **42.0%** |
+
+`match` (`candidates_for`) and `ack_scan` (`min_acked_lsn`) take the **same
+per-table `tokio::Mutex`** in `InMemorySessionStore`, as does `slowest_session`.
+Together they go from noise to nearly half the per-event cost.
+
+And the magnitude is not a scan. `min_acked_lsn` at 100k costs 1,814 ms to fold
+100k atomics — **18 µs per session**, against the ~1–5 ns an atomic load takes.
+Over 99.9% of that is not the scan executing. It is lock acquisition, or being
+descheduled while holding/waiting for it.
+
+There is also a bias working *against* this reading, which strengthens it:
+`deliver` has N await points per event while `match` and `ack_scan` have one
+each, so host contention should inflate `deliver`'s share the most. Its share
+fell anyway.
+
+**Hypothesis: the shared per-table store mutex is the 100k cliff**, and the
+"table-sharded router" parked in docs/ROADMAP.md is the named fix. That also
+retro-explains the 42% idle — a task blocked on a mutex is not burning CPU.
+
+**This is not proven and must not be cited.** What it earns is the right to be
+the *first* hypothesis the next clean run tests, instead of a fourth guess.
+
+### What the rerun needs
+
+1. A quiet host. `kill` the hung `fvm global`; close the WebKit tab. The gate
+   only checks load1 at start — it cannot see a single pinned core.
+2. `proc_cpu_secs()` (landed in `probe_10k.rs`, not yet exercised in a
+   container): `cores_used` near the vCPU count means CPU-saturated;
+   far below means blocked. That single line separates lock-contention from
+   scheduler-starvation, which the wall clocks cannot.
+3. All four tiers in ONE gated session, so cross-tier ratios are comparable.
+
+```bash
+benches/scripts/fanout-100k-diag.sh "$PWD" benches/results/stage-diag \
+  10000,500,120,1,1 50000,500,180,1,1 100000,500,300,1,2
+```
+
 ## Superseded — the original "Next" (kept for the record)
 
 
@@ -421,3 +572,275 @@ walk, do not micro-optimise the scan.
 
 Measure before optimize still applies: any fix ships with a re-run of exactly
 this pair of tiers, same gate, same toolchain.
+
+---
+
+## Phase 5 — the in-process ladder. Hypothesis falsified, server-side cost bounded (2026-09-21, fourth pass)
+
+Phase 4's ladder was contaminated and its one surviving lead — "`candidates_for`
++ `min_acked_lsn` share a per-table mutex and their combined share climbs
+1.8% → 13.3% → 42.0%" — is **falsified here**. It was an artifact of host
+contention, not a property of the store.
+
+### The instrument
+`nostos-fanout-walk` gained a `sink=wire` mode. The gap that mattered: the
+probe's drain task was `while rx.recv().await.is_some() {}`, a no-op, while the
+real transport's write loop runs `encode_event` (serde_json) per session per
+event. `TokioEventSink::deliver` only moves an `Arc` into a bounded channel —
+so **the encode was invisible to every walk number ever recorded**. `sink=wire`
+runs the real encode in each session's drain task. A `drained_wall` readout was
+added alongside `wall`, because `wall` stops at the last `try_send`, not when
+the last frame reaches the far end of its channel.
+
+### Result — linear, with the encode included
+macOS, 10 cores, 200 events, buffer 1024, default workers. 2–3 reps per cell,
+spread ≤ 3%.
+
+| sessions | `sink=tokio` µs/delivery | `sink=wire` µs/delivery | ms/event (wire) |
+|---|---|---|---|
+| 10,000 | 0.170, 0.175 | 0.211, 0.189 | 2.1, 1.9 |
+| 50,000 | 0.174, 0.172 | 0.207, 0.219 | 10.3, 11.0 |
+| 100,000 | 0.173, 0.176 | 0.223, 0.220 | 22.3, 22.0 |
+
+Ten-fold scale-up costs **+11%** per delivery. The encode is a flat ~27% tax
+at every tier, not a cliff. `drain_tax` is 1.00–1.01× everywhere: the drains
+keep up with the walk exactly. Decile buckets are flat — no decay within a run.
+
+### `min_acked_lsn` measured directly
+0.072 ms @ 10k → 0.35 ms @ 50k → 0.70 ms @ 100k. Linear, ~7 ns per session.
+At 100k that is **3% of a 22 ms event** — against the 1,814 ms/event Phase 4
+reported. Phase 4's ack_scan figure was measuring scheduler delay, not the
+fold. The `with_ack_progress_every` knob is exposed as the probe's 4th CLI arg
+(`ack_interval`) and — correcting a claim made earlier in this session — it
+**is** wired in `nostos-server` (`--ack-progress-interval` /
+`NOSTOS_ACK_PROGRESS_INTERVAL`, `main.rs:265`). What was wrong was its default:
+`1`, so every production deploy ran the per-event fold. By these isolated
+numbers coalescing looked worth ~3%. Phase 6b shows that reading was wrong.
+
+### What this bounds
+At 100k sessions the entire server side — `candidates_for`, predicate
+evaluation, the parallel walk, dedup, the bounded-channel enqueue, and the real
+wire encode — costs **22 ms per event, or 4.5M deliveries/sec.** Everything
+the 100k spine run spends above that is *not* in the fan-out loop, the store,
+or the codec.
+
+### Remaining suspects, narrowed to two
+1. The loopback socket path at 100k connections (two syscalls + two kernel
+   buffer copies per frame per session, both ends on one box).
+2. The probe's own 100k in-process **client** tasks, which decode and apply
+   every frame while sharing the server's runtime and the container's 10 vCPUs.
+
+Suspect 2 makes the cliff partly a harness-topology artifact rather than a
+server defect. Phase 6 (the gated container ladder with the `cores_used`
+readout) is what separates them.
+
+---
+
+## Phase 6 — the gated ladder, VALID. The fan-out server is 0.08% of the cliff
+
+Same script, same three tiers, quiet host, nothing else of mine running.
+`LINUX_DIAG_EXIT=0`, every tier `rc=0`. The gate did its job: the 100k tier
+waited 60 s for host load1 to fall to 4.98 before starting. Raw log archived at
+`benches/results/raw/2026-09-21-stage-ladder-VALID/`.
+
+Validity, checked rather than assumed: the 50k tier came in at 0.139 s/event
+against the previously gated baseline of 0.158 s/event — the same measurement,
+so this run is anchored. (The INVALID Phase 4 ladder was 15× off that anchor.)
+
+| tier | events in window | s/event | ops/sec | `cores_used` / `nproc` | CPU µs per delivery |
+|---|---|---|---|---|---|
+| 10k × 500, 120 s, 1L | 500 (all) | 0.019 | 534,988 | 8.03 / 10 | 15.0 |
+| 50k × 500, 180 s, 1L | 500 (all) | 0.139 | 355,124 | 8.00 / 10 | 22.2 |
+| 100k × 500, 300 s, 2L | 77 | 3.896 | 24,495 | 7.37 / 10 | **287** |
+
+### The attribution
+Phase 5 measured the entire server side in isolation at **0.222 µs per
+delivery** at 100k (fan-out walk + predicate eval + dedup + bounded-channel
+enqueue + the real wire encode). Against the 287 µs of CPU the spine actually
+burns per delivery at 100k:
+
+| tier | server-side µs/delivery | spine CPU µs/delivery | **server share** |
+|---|---|---|---|
+| 10k | 0.200 | 15.0 | 1.3% |
+| 50k | 0.213 | 22.2 | 1.0% |
+| 100k | 0.222 | 287 | **0.08%** |
+
+**The fan-out server is not the cliff and cannot be.** Fixing anything inside
+`FanOutService` or `InMemorySessionStore` has at most 1% of the problem
+available to it.
+
+### What the stage timers actually said, and why it is consistent
+The in-run stage split (match 1,014 ms/ev, deliver 2,363 ms/ev, ack_scan 499
+ms/ev at 100k) contradicts Phase 5's direct measurements of the same
+operations (1.6 ms, 9 ms, 0.70 ms) by three orders of magnitude. That is not a
+conflict — it is the `Instant::elapsed()`-spans-`.await` flaw, retracted in
+Phase 4, showing its true size. At 100k the fan-out task is descheduled for
+essentially the whole interval it books. **The stage timers measure how long
+the loop waits for a scheduler slot, not how long its work takes.** Read them
+only as a starvation signal.
+
+### Falsified again, with numbers
+- **Memory / swap:** `SwapFree` flat at 1023 MiB every sample, every tier.
+  `MemAvailable` bottoms at 2,122 MiB of 8 GiB. `psi_mem avg60 = 0.00`
+  throughout — zero memory stall.
+- **Kernel TCP pressure:** `PruneCalled`, `TCPRcvCollapsed`,
+  `TCPMemoryPressures`, `TCPZeroWindowDrop`, `TCPBacklogDrop` — **all zero
+  deltas at all three tiers.** `tcp_mem_pages` peaks at 43,008 (168 MiB) with
+  200,026 sockets allocated. Nowhere near a pressure threshold.
+- **CPU saturation:** `cores_used` *falls* 8.03 → 8.00 → 7.37 as throughput
+  collapses, with `psi_cpu avg60` never above 1.69. The box goes **less** busy
+  at the cliff. It is not out of CPU.
+- **The shared store mutex (Phase 4's lead):** falsified in Phase 5 by direct
+  measurement. `min_acked_lsn` is 0.70 ms/event at 100k, 3% of the event.
+
+### Where it is
+CPU per delivery goes 15.0 → 22.2 → **287 µs**: roughly flat from 10k to 50k,
+then 13× between 50k and 100k. Real CPU is being burned — 2,210 s of it over a
+300 s window — on something that is superlinear in session count, is not the
+fan-out loop, is not blocked on memory or the kernel's socket buffers, and
+leaves 2.6 cores idle while it runs.
+
+That shape (real CPU, superlinear, idle cores, starved application task) points
+at the two things Phase 5 named and this run does not separate: the loopback
+socket path at 200k sockets, and the probe's own 100k in-process client tasks
+competing for the same runtime.
+
+> **RETRACTED 2026-09-21 by Phase 7 below.** Everything in this section rests on
+> a single sample per configuration. Six interleaved tiers later measured the
+> within-arm spread at 7.99×, which swamps the 2.23× claimed here. Preserved
+> verbatim as the record of what was believed and why it was wrong; the numbers
+> in it are real measurements, the inference from them is not sound.
+
+### Phase 6b — the mutex hypothesis, falsified a second way
+A fourth 100k tier runs with the probe's `ack_interval` arg at 100 instead of
+1. That arg is **not** a client-side ACK cadence — it is
+`FanOutService::with_ack_progress_every`, so it cuts the O(sessions)
+`min_acked_lsn` fold from once per event to once per 100 events, changing
+nothing else. Phase 5 predicted this was worth ~3% at 100k.
+
+**It was worth 2.23×, and Phase 5's falsification is hereby withdrawn.**
+
+> **PROVISIONAL.** A later run at the same `ack=16` returned 116 events vs the
+> 207 below, with `ack_scan` 27.57 vs 11.02 ms/ev — same operation, same
+> cadence. The run-to-run variance of this tier is not yet established and the
+> dose curve below may be an ordering artifact. Six interleaved tiers are
+> running. Do not cite until then.
+
+Dose-response, 100k sessions, one script invocation, 300 s windows, gated:
+
+| `ack_progress_every` | events | s/event | ack_scan ms/ev | ops/sec | vs 1 |
+|---|---|---|---|---|---|
+| 1 | 98 | 3.061 | 348.98 | 32,372 | 1.00× |
+| 16 | 207 | 1.449 | 11.02 | 60,387 | **1.87×** |
+| 100 | 251 | 1.196 | 1.72 | 72,051 | **2.23×** |
+
+Monotonic in the knob, and the `ack=1` control reproduced across two runs
+(77 and 98 events; 24,495 and 32,372 ops/sec), so the effect sits far outside
+the ±12% run-to-run spread of this tier.
+
+So Phase 4's hypothesis was **directionally right** — the O(sessions)
+`min_acked_lsn` fold is a first-order cost at 100k — even though its stated
+magnitude (1,814 ms/ev) was a starvation artifact, and its stated mechanism
+(the per-table mutex) is probably wrong too: see below.
+
+### Why isolation understated it by 60×
+`nostos-fanout-walk` calls `min_acked_lsn` **once, at the end, with the walk
+finished and nothing else running**: 0.70 ms of warm, uncontended fold. In the
+spine it runs once per event, interleaved with the fan-out walk over the same
+100k `StoredSession`s, and it touches one `acked_lsn` atomic in every one of
+them. That is a 100k-line sweep that evicts the cache the walk just warmed,
+every event, plus it holds the same per-table `tokio::Mutex` that
+`candidates_for` needs.
+
+**The methodological lesson, recorded because it cost this session two
+reversals: an isolated microbenchmark measures a component's cost, not its
+*interaction* cost. A component that is 3% alone can be 50% in situ.** Neither
+Phase 5's number nor Phase 4's was wrong as measured; both were wrong as
+interpreted.
+
+Note this makes the *mechanism* cache-line contention, not lock contention —
+so Phase 4's "shared per-table mutex" story lands on the right path for the
+wrong reason. Unconfirmed either way; the fix does not depend on which it is.
+
+### Shipped
+`NOSTOS_ACK_PROGRESS_INTERVAL` default **1 → 16** (`nostos-server/src/main.rs`),
+the knee of the curve: 1.87× of the available 2.23×, with slot lag bounded at
+16 events. Guarded by a new test,
+`fanout::tests::coalesced_ack_progress_lags_but_never_overshoots`, pinning both
+the coalescing and the conservatism (a flushed LSN is never above the true min
+at that instant). Correction to a claim made earlier in this session: the knob
+was already wired into `nostos-server`; only its default was wrong.
+
+What Phase 5 *does* still establish, unaffected: the fan-out walk plus the
+real wire encode is linear to 100k at 0.222 µs/delivery. The per-event ack
+fold is a separate path in `run()`, not part of that walk.
+
+## Phase 7 — the replication. Phase 6b is retracted; it was noise (2026-09-21)
+
+Phase 6b claimed ack-scan coalescing was worth 2.23× at 100k, withdrew Phase 5's
+falsification on that basis, and shipped `NOSTOS_ACK_PROGRESS_INTERVAL = 16`. One
+same-config rerun disagreed by 1.8×, so six interleaved tiers were run to measure
+the variance instead of assuming it.
+
+Design: `ack=1` and `ack=16` alternating ×3, decode ON, 100k clients, 500 events,
+300 s window, 2 listeners, gated per tier. Interleaving (rather than blocking the
+arms) is what defends against drift and ordering artifacts. Result
+`LINUX_DIAG_EXIT=0`, every tier `rc=0`. Raw log:
+`benches/results/raw/2026-09-21-ack-coalescing-replication/`.
+
+| tier | arm | ops/sec | `ack_scan` ms/ev | events | load1 at end |
+|---|---|---|---|---|---|
+| 1 | `ack=1` | 57,090 | 175.89 | 190 | 16.87 |
+| 2 | `ack=16` | 35,302 | 22.95 | 113 | 17.44 |
+| 3 | `ack=1` | 7,146 | 2133.60 | 23 | 34.21 |
+| 4 | `ack=16` | 21,936 | 33.44 | 69 | 22.64 |
+| 5 | `ack=1` | 55,306 | 193.44 | 174 | 15.32 |
+| 6 | `ack=16` | 74,711 | 9.15 | 231 | 18.69 |
+
+`ack=1`: mean 39,847, range 7,146–57,090, **spread 7.99×**, sd 28,334.
+`ack=16`: mean 43,983, range 21,936–74,711, spread 3.41×, sd 27,438.
+Mean ratio 1.10×, arms **not separated**.
+
+An instrument with 8× within-arm spread cannot resolve a 2.23× effect. The
+original dose-response sampled each configuration once and read drift as signal.
+
+**Phase 5's falsification is reinstated.** The isolated walk was right: the
+`min_acked_lsn` fold is ~0.70 ms/event at 100k, roughly 3% of the cliff, and
+coalescing it buys no throughput. The contention argument in "Why isolation
+understated it by 60×" is a real mechanism — `ack_scan` separates cleanly by arm
+in all six tiers, ~8× — but it explains why the *fold* got cheaper, not why
+throughput would rise. It never did.
+
+Shipped: `NOSTOS_ACK_PROGRESS_INTERVAL` reverted to `1`. The safety test
+`coalesced_ack_progress_lags_but_never_overshoots` stays; it pins a correctness
+property that holds at any cadence.
+
+### The standing lesson, corrected
+
+The lesson recorded after Phase 6b was "an isolated microbenchmark measures a
+component's cost, not its interaction cost." That is true in general and was the
+wrong lesson here — it was used to justify overruling a good measurement with a
+noisy one. The lesson this episode actually teaches:
+
+1. **n=1 per arm is not a measurement.** Before believing any A/B on this
+   harness, measure the within-arm spread first. Here it is ~70% of the mean.
+2. **A mechanism is not an effect.** "Stage X got 8× cheaper" and "throughput
+   rose" are separate claims with separate evidence. A convincing mechanism made
+   unexplained noise feel explained.
+3. **Interleave arms.** Blocked designs confound the arm with time and load.
+4. **The load gate was start-only.** `fanout-100k-diag.sh` checked load1 < 8 at
+   tier start and never again; tiers 3 and 4 passed it and ran at 34.21 and
+   22.64. The mid-run rule was written down in *this* file while the script
+   cited `docs/BENCHMARK-METHODOLOGY.md` for it, and nothing enforced it —
+   which is how a rule can be honoured in three documents and in no code.
+   **Fixed 2026-09-21:** the rule is now canonical in
+   `docs/BENCHMARK-METHODOLOGY.md` § 6.1 (the Headroom-rule block above defers
+   to it) and recalibrated to aggregate non-harness CPU <= 150%, and the script
+   samples the host every 10 s, emits a per-tier `MIDRUN ... valid=yes|no`,
+   kills after 3 consecutive violating samples with one re-arm, and no longer hardcodes `LINUX_DIAG_EXIT=0`. The six tiers above
+   predate it and stay order-of-magnitude only.
+
+End-of-run load1 correlates with throughput only moderately (Spearman ρ ≈ 0.6
+over the six tiers) and is partly an *effect* of throughput, so it is not itself
+the identified confound. What is established is the magnitude of the variance,
+not its source.

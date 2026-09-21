@@ -116,15 +116,40 @@ What is still operator-only: a Portal account, the namespace verification, a
 GPG key, and the upload itself
 (`POST https://central.sonatype.com/api/v1/publisher/upload`).
 
-**Build environment note.** AGP 8.7.3 / Gradle 8.9 need **JDK 17–21**, and this
-machine has only 25 (Android Studio's JBR) and 26 (Homebrew) — Gradle refused to
-start with a bare `25.0.3` error. `openjdk@21` was installed for this;
-`JAVA_HOME` must point at it. Separately, the Android toolchain has drifted well
-behind the project's "track latest stable" rule: AGP 8.7.3 / Gradle 8.9 /
-Kotlin 1.9.24 against current AGP 9.4.0 / Gradle 9.7.1. That upgrade is a real
-chain (AGP 9 needs Gradle ≥ 9.6, and `kotlinOptions` is gone) and it is NOT
-done here — bumping it blind, with no device to run the instrumented tests on,
-is how a working Android build breaks.
+**Build environment note — RESOLVED 2026-09-21 (second pass).** The Android
+toolchain drift is closed. `sdk/nostos_kotlin/android` and
+`sdk/nostos_react_native/android` now run **Gradle 9.7.1 + AGP 9.4.1** with
+`compileSdk`/`targetSdk` 36 and Java 17, verified by `centralBundle` and
+`assembleRelease` respectively.
+
+The earlier "JDK 17–21 required, `JAVA_HOME` must point at `openjdk@21`" note
+is obsolete and was a consequence of the pin, not of Android: Gradle 8.9 tops
+out at JDK 22. Gradle 9.7.1 runs on JDK 17–26, so the machine's default JDK 26
+builds both modules with no `JAVA_HOME` at all. `openjdk@21` is now
+unnecessary.
+
+Two AGP 9 breaking changes had to be handled (docs read, not guessed):
+- **Built-in Kotlin.** AGP 9 compiles Kotlin itself and *rejects*
+  `org.jetbrains.kotlin.android` alongside the new DSL
+  (developer.android.com/build/migrate-to-built-in-kotlin). The plugin
+  declaration was removed from both modules; `kotlinOptions` went with it
+  (`jvmTarget` now defaults to `compileOptions.targetCompatibility`).
+- **Source sets.** Built-in Kotlin reads the `kotlin` source set only. The
+  modules declared their generated UniFFI Kotlin under `java.srcDirs`, which
+  produced a **green build shipping an empty `classes.jar`** — the `.aar` had
+  the 11.8 MB `.so` and zero classes. Fixed to `kotlin.srcDirs`, and a
+  `verifyAar` task now fails the build if `classes.jar` has no `.class`
+  entries. `centralBundle` depends on it. (Post-fix: 101 classes for
+  nostos-kotlin, 106 for nostos-react-native.)
+
+**Not bumped, deliberately.** The Flutter Android projects
+(`apps/atlet/flutter/android`, `sdk/nostos_flutter/`) pin AGP 9.0.1 /
+Kotlin 2.3.20 **and** `android.newDsl=false` + `android.builtInKotlin=false` —
+all four written by the Flutter template, which owns them. Raising AGP there
+independently of the Flutter SDK is how `flutter build` breaks; they move when
+Flutter moves. `sdk/nostos_capacitor` pins AGP 8.13.0 to match the Capacitor 8.5
+app template, and its `classpath` is overridden by the host app's buildscript
+anyway. Their Gradle *wrappers* were taken to 9.7.1.
 
 ## BLOCKER 4 — identity is still a placeholder
 
@@ -199,9 +224,67 @@ Done after the audit above was written:
 - **BLOCKER 5 closed locally** — `v0.2.0` re-cut on the current `main`. Old
   object was `8e7b548` (`git tag -a v0.2.0 8e7b548` restores it). **Deliberately
   not pushed.** Pushing the tag is the release trigger and that is your call.
-- `openjdk@21` installed via Homebrew — the Android build could not start on
-  this machine's JDK 25/26.
+- `openjdk@21` was installed via Homebrew during the first pass, then made
+  unnecessary by the Gradle 9.7.1 bump (the second pass builds on the default
+  JDK 26). Harmless to leave installed; nothing references it.
 
 Untouched, still operator-only: crates.io naming (BLOCKER 1), every credential
 (BLOCKER 2), the `@nostos-sync` npm org, identity (BLOCKER 4 proper), the tag push,
 Show HN timing, Nostos Cloud alpha.
+
+## What "shipping to Maven" actually means here
+
+Maven Central is the default artifact repository for every JVM/Android build
+tool — the thing `mavenCentral()` in a `repositories {}` block resolves
+against. An Android consumer cannot write
+`implementation("io.github.unfazed-dev:nostos-kotlin:0.2.0")` until that
+coordinate exists there. It is the Kotlin/Android equivalent of npm for
+`@nostos-sync/web` and crates.io for the Rust crates; Nostos needs all three because
+it ships to all three ecosystems.
+
+A coordinate is `groupId:artifactId:version` — here
+`io.github.unfazed-dev` : `nostos-kotlin` : `0.2.0`. The group id must be a
+namespace Sonatype has verified you control, which is why
+`io.github.<github-username>` matters: a GitHub signup verifies it with no
+domain and no DNS record.
+
+What physically ships for one release is **six files plus checksums** —
+exactly what `centralBundle` produces and what `verifyAar` now guards:
+
+| file | why Central requires it |
+|---|---|
+| `nostos-kotlin-0.2.0.aar` | the library itself (classes + the arm64 `.so`) |
+| `…-sources.jar` | required — source attachment for consumers' IDEs |
+| `…-javadoc.jar` | required — generated here by Dokka via AGP |
+| `…-0.2.0.pom` | name, description, url, licence, developers, scm — all required |
+| `.asc` per file | GPG detached signature; the only piece this repo cannot produce |
+| `.md5/.sha1/.sha256/.sha512` per file | integrity, written by Gradle |
+
+The bundle is uploaded as one zip to
+`POST https://central.sonatype.com/api/v1/publisher/upload` with a Portal
+bearer token, then released from the Portal UI. **Releases are permanent** —
+a published version can never be replaced, only superseded or deprecated.
+
+So the remaining gap is not code. It is: a Portal account, a GPG key whose
+public half is on a keyserver, and the decision to publish under
+`io.github.unfazed-dev` versus waiting for a domain.
+
+## Naming + domain — resolved into a decision doc (2026-09-21)
+
+See `docs/plans/naming-and-domain-2026-09-21.md`. Summary of what changed:
+
+- **No domain is needed to launch.** The Maven groupId gate is closed by
+  `io.github.<user>` (Portal GitHub signup, no DNS). A Cloudflare Worker does
+  NOT substitute — Central verifies a TXT record on a domain you own, and
+  `*.workers.dev` is Cloudflare's, not yours. A domain is a Nostos Cloud +
+  marketing concern only, and Cloud is not a launch deliverable.
+- **Registry state verified 2026-09-21, not remembered:** `nostos`,
+  `nostos-core` and `nostos-cli` are all TAKEN on crates.io (`nostos` squatted at
+  v0.0.0, so it is gone permanently); `nostos-server` is free; npm `nostos` is
+  taken. Every `qairn*` name is free on crates.io, npm (bare and scope),
+  pub.dev and as a Maven artifactId.
+- **Recommendation: rename to `qairn`,** because `cargo install nostos-cli`
+  already installs a stranger's crate and the CLI is the primary UX. Cheapest
+  now — zero published artifacts, zero users, one unpushed tag. Operator call;
+  the counter-argument (the nostos/trail-marker metaphor carries the launch
+  post) is a brand judgement, recorded in the decision doc.

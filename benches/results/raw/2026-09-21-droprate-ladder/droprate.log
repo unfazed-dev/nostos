@@ -1,0 +1,335 @@
+BUILD start 12:52:40 tag=fanout-diag
+warn: this might cause rustup commands to take longer time to finish than expected
+info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+    Finished `release` profile [optimized] target(s) in 0.59s
+BUILD ok 12:52:46
+HOST tier=10000 start 22:52:47 load1=2.02 waited=0s samples=host-cpu-tier10000-225247.log
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 mem=8124516kB swap=1048572kB tcp_rmem=4096-131072-33554432 tcp_wmem=4096-16384-4194304
+SOAK start 12:52:48 clients=10000 events=500 window=300 ack=1 listeners=2
+  [diag] listeners: ws://127.0.0.1:26125/sync ws://127.0.0.2:4009/sync
+[sys] 12:52:48 tcp_alloc=21 tcp_mem_pages=0 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:7324M SwapFree:1023M Dirty:0M Slab:52M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=0.16,0.03,0.01 cpu_u=449 n=0 s=117 i=7394 io=269 irq=0 sirq=137
+[sys] 12:52:53 tcp_alloc=18093 tcp_mem_pages=2304 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6974M SwapFree:1023M Dirty:0M Slab:131M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=0.15,0.03,0.01 cpu_u=503 n=0 s=190 i=12234 io=272 irq=0 sirq=164
+  [diag] subscribe quorum after 7.48s: connected=10000 subscribed=10000 connect_failed=0 complete=true (ceiling 60s, stall 5s)
+[sys] 12:52:58 tcp_alloc=20025 tcp_mem_pages=1280 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6862M SwapFree:1023M Dirty:0M Slab:134M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=0.13,0.03,0.01 cpu_u=1678 n=0 s=876 i=14869 io=280 irq=0 sirq=626
+  [diag] at window end: connected=10000 subscribed=10000 connect_failed=0 subscribed_at_start=10000 late_subscribers=0 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=5000000 delivered=5000000 dropped=0 faulted=0 events_fanned_out~=500 (matched/subscribed)
+  [diag] undelivered breakdown (events): never_connected_x_events=0 pre_subscribe_loss=0 router_dropped=0 router_faulted=0 in_flight_or_unaccounted=0 sum=0 (attempted-delivered=0)
+  [diag] completed=true (delivered 5000000 of 5000000 before the 300s window) peak_rss_mib=482
+  [diag] finish: fanout_done=true reachable=5000000 delivered=5000000 elapsed_to_finish=7.41s
+  [diag] stages events=500 match=1.78ms/ev deliver=12.83ms/ev ack_scan=0.16ms/ev busy=7.39s wall=7.41s busy_frac=0.997
+  [diag] cpu proc_cpu=67.09s wall=7.41s cores_used=9.05 nproc=10
+  [diag] fanout_task_finished=true (true = replicator budget exhausted before the window closed)
+
+=== nostos-bench-10k probe ===
+  clients   : 10000
+  events    : 500 (attempted deliveries: 5000000)
+  window    : 300s
+  ---------------------------
+  delivered : 5000000
+  ops/sec   : 674811
+  drop%     : 0.00
+  elapsed   : 7.41s
+  elapsed_to_finish : 7.41s
+  ops/sec (finish)  : 674811
+SOAK rc=0 12:53:03
+HOST tier=10000 end 22:53:03 load1=3.10 rc=0 MIDRUN samples=2 viol=0 viol_pct=0.0 other_mean=39 other_max=47 load1_max=2.50 valid=yes drop_pct=0.00 throughput_valid=yes
+HOST tier=20000 start 22:53:33 load1=2.41 waited=0s samples=host-cpu-tier20000-225333.log
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 mem=8124516kB swap=1048572kB tcp_rmem=4096-131072-33554432 tcp_wmem=4096-16384-4194304
+SOAK start 12:53:33 clients=20000 events=500 window=300 ack=1 listeners=2
+  [diag] listeners: ws://127.0.0.1:4215/sync ws://127.0.0.2:17703/sync
+[sys] 12:53:33 tcp_alloc=25 tcp_mem_pages=0 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:7377M SwapFree:1023M Dirty:0M Slab:67M psi_mem=avg60=0.00 psi_cpu=avg60=0.05 load=0.56,0.18,0.06 cpu_u=3885 n=0 s=2151 i=45587 io=334 irq=0 sirq=1536
+[sys] 12:53:38 tcp_alloc=35835 tcp_mem_pages=4352 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6663M SwapFree:1023M Dirty:0M Slab:209M psi_mem=avg60=0.00 psi_cpu=avg60=0.04 load=0.51,0.17,0.06 cpu_u=3980 n=0 s=2268 i=50323 io=334 irq=0 sirq=1578
+[sys] 12:53:43 tcp_alloc=39839 tcp_mem_pages=256 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6540M SwapFree:1023M Dirty:0M Slab:217M psi_mem=avg60=0.00 psi_cpu=avg60=0.04 load=0.47,0.17,0.06 cpu_u=4009 n=0 s=2297 i=55255 io=334 irq=0 sirq=1590
+  [diag] subscribe quorum after 11.36s: connected=20000 subscribed=20000 connect_failed=0 complete=true (ceiling 100s, stall 5s)
+[sys] 12:53:48 tcp_alloc=40025 tcp_mem_pages=1280 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6282M SwapFree:1023M Dirty:0M Slab:217M psi_mem=avg60=0.00 psi_cpu=avg60=0.04 load=1.24,0.33,0.11 cpu_u=5623 n=0 s=3247 i=56952 io=334 irq=0 sirq=2289
+[sys] 12:53:53 tcp_alloc=40025 tcp_mem_pages=1280 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6357M SwapFree:1023M Dirty:0M Slab:217M psi_mem=avg60=0.00 psi_cpu=avg60=0.03 load=1.78,0.46,0.16 cpu_u=7902 n=0 s=4550 i=57361 io=334 irq=0 sirq=3260
+  [diag] progress t=10s delivered=6511004 matched=6520000 events~=326 subscribed=20000 rss_mib=917 swap_mib=0 fanout_done=false
+[sys] 12:53:58 tcp_alloc=40025 tcp_mem_pages=1280 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6361M SwapFree:1023M Dirty:0M Slab:217M psi_mem=avg60=0.00 psi_cpu=avg60=0.03 load=2.44,0.62,0.21 cpu_u=10191 n=0 s=5830 i=57821 io=334 irq=0 sirq=4196
+  [diag] at window end: connected=20000 subscribed=20000 connect_failed=0 subscribed_at_start=20000 late_subscribers=0 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=10000000 delivered=10000000 dropped=0 faulted=0 events_fanned_out~=500 (matched/subscribed)
+  [diag] undelivered breakdown (events): never_connected_x_events=0 pre_subscribe_loss=0 router_dropped=0 router_faulted=0 in_flight_or_unaccounted=0 sum=0 (attempted-delivered=0)
+  [diag] completed=true (delivered 10000000 of 10000000 before the 300s window) peak_rss_mib=943
+  [diag] finish: fanout_done=true reachable=10000000 delivered=10000000 elapsed_to_finish=15.57s
+  [diag] stages events=500 match=3.82ms/ev deliver=26.85ms/ev ack_scan=0.36ms/ev busy=15.52s wall=15.57s busy_frac=0.997
+  [diag] cpu proc_cpu=140.89s wall=15.57s cores_used=9.05 nproc=10
+  [diag] fanout_task_finished=true (true = replicator budget exhausted before the window closed)
+
+=== nostos-bench-10k probe ===
+  clients   : 20000
+  events    : 500 (attempted deliveries: 10000000)
+  window    : 300s
+  ---------------------------
+  delivered : 10000000
+  ops/sec   : 642413
+  drop%     : 0.00
+  elapsed   : 15.57s
+  elapsed_to_finish : 15.57s
+  ops/sec (finish)  : 642413
+SOAK rc=0 12:54:00
+HOST tier=20000 end 22:54:00 load1=4.36 rc=0 MIDRUN samples=3 viol=0 viol_pct=0.0 other_mean=39 other_max=47 load1_max=3.61 valid=yes drop_pct=0.00 throughput_valid=yes
+HOST tier=40000 start 22:54:30 load1=3.32 waited=0s samples=host-cpu-tier40000-225430.log
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 mem=8124516kB swap=1048572kB tcp_rmem=4096-131072-33554432 tcp_wmem=4096-16384-4194304
+SOAK start 12:54:30 clients=40000 events=500 window=300 ack=1 listeners=2
+  [diag] listeners: ws://127.0.0.1:25723/sync ws://127.0.0.2:11049/sync
+[sys] 12:54:30 tcp_alloc=24 tcp_mem_pages=768 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:7413M SwapFree:1023M Dirty:0M Slab:72M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=1.84,0.70,0.25 cpu_u=11041 n=0 s=6346 i=88436 io=341 irq=0 sirq=4560
+[sys] 12:54:35 tcp_alloc=69027 tcp_mem_pages=12288 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6035M SwapFree:1023M Dirty:0M Slab:359M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=1.69,0.69,0.25 cpu_u=11208 n=0 s=6561 i=92961 io=341 irq=0 sirq=4623
+[sys] 12:54:40 tcp_alloc=75347 tcp_mem_pages=5376 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5822M SwapFree:1023M Dirty:0M Slab:371M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=1.56,0.68,0.25 cpu_u=11261 n=0 s=6616 i=97839 io=341 irq=0 sirq=4637
+[sys] 12:54:45 tcp_alloc=78350 tcp_mem_pages=1792 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5709M SwapFree:1023M Dirty:0M Slab:375M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=1.43,0.66,0.25 cpu_u=11286 n=0 s=6644 i=102777 io=341 irq=0 sirq=4646
+  [diag] subscribe quorum after 16.80s: connected=38325 subscribed=38325 connect_failed=0 complete=false (ceiling 200s, stall 5s)
+[sys] 12:54:50 tcp_alloc=79763 tcp_mem_pages=7168 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5228M SwapFree:1023M Dirty:0M Slab:377M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=2.12,0.82,0.30 cpu_u=12740 n=0 s=7487 i=104861 io=341 irq=0 sirq=5250
+[sys] 12:54:55 tcp_alloc=79763 tcp_mem_pages=6144 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5131M SwapFree:1023M Dirty:0M Slab:377M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=2.75,0.97,0.35 cpu_u=14925 n=0 s=8759 i=105318 io=341 irq=0 sirq=6239
+  [diag] progress t=10s delivered=6166902 matched=6172841 events~=155 subscribed=39738 rss_mib=1911 swap_mib=0 fanout_done=false
+[sys] 12:55:00 tcp_alloc=79763 tcp_mem_pages=2304 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5117M SwapFree:1023M Dirty:0M Slab:377M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=3.33,1.12,0.41 cpu_u=17189 n=0 s=10079 i=105729 io=341 irq=0 sirq=7228
+[sys] 12:55:05 tcp_alloc=79763 tcp_mem_pages=3840 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5162M SwapFree:1023M Dirty:0M Slab:377M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=3.87,1.27,0.46 cpu_u=19432 n=0 s=11411 i=106160 io=342 irq=0 sirq=8209
+  [diag] progress t=20s delivered=12317826 matched=12335580 events~=308 subscribed=40000 rss_mib=1908 swap_mib=0 fanout_done=false
+[sys] 12:55:10 tcp_alloc=80025 tcp_mem_pages=2048 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5175M SwapFree:1023M Dirty:0M Slab:377M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=4.36,1.42,0.51 cpu_u=21686 n=0 s=12696 i=106577 io=342 irq=0 sirq=9180
+[sys] 12:55:15 tcp_alloc=80025 tcp_mem_pages=2304 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5172M SwapFree:1023M Dirty:0M Slab:378M psi_mem=avg60=0.00 psi_cpu=avg60=0.00 load=4.81,1.56,0.56 cpu_u=23993 n=0 s=13993 i=106940 io=342 irq=0 sirq=10175
+  [diag] progress t=30s delivered=18394715 matched=18415580 events~=460 subscribed=40000 rss_mib=1926 swap_mib=0 fanout_done=false
+  [diag] at window end: connected=40000 subscribed=40000 connect_failed=0 subscribed_at_start=38325 late_subscribers=1675 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=19855580 delivered=19855580 dropped=0 faulted=0 events_fanned_out~=496 (matched/subscribed)
+  [diag] undelivered breakdown (events): never_connected_x_events=0 pre_subscribe_loss=144420 router_dropped=0 router_faulted=0 in_flight_or_unaccounted=0 sum=144420 (attempted-delivered=144420)
+  [diag] completed=false (delivered 19855580 of 20000000 before the 300s window) peak_rss_mib=1938
+  [diag] finish: fanout_done=true reachable=19855580 delivered=19855580 elapsed_to_finish=32.63s
+  [diag] stages events=500 match=7.23ms/ev deliver=57.05ms/ev ack_scan=0.81ms/ev busy=32.54s wall=32.63s busy_frac=0.997
+  [diag] cpu proc_cpu=296.68s wall=32.63s cores_used=9.09 nproc=10
+  [diag] fanout_task_finished=true (true = replicator budget exhausted before the window closed)
+
+=== nostos-bench-10k probe ===
+  clients   : 40000
+  events    : 500 (attempted deliveries: 20000000)
+  window    : 300s
+  ---------------------------
+  delivered : 19855580
+  ops/sec   : 608543
+  drop%     : 0.72
+  elapsed   : 32.63s
+  elapsed_to_finish : 32.63s
+  ops/sec (finish)  : 608543
+SOAK rc=0 12:55:20
+HOST tier=40000 end 22:55:20 load1=5.91 rc=0 MIDRUN samples=5 viol=0 viol_pct=0.0 other_mean=67 other_max=96 load1_max=5.38 valid=yes drop_pct=0.72 throughput_valid=yes
+HOST tier=60000 start 22:55:50 load1=4.47 waited=0s samples=host-cpu-tier60000-225550.log
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 mem=8124516kB swap=1048572kB tcp_rmem=4096-131072-33554432 tcp_wmem=4096-16384-4194304
+SOAK start 12:55:50 clients=60000 events=500 window=300 ack=1 listeners=2
+  [diag] listeners: ws://127.0.0.1:25821/sync ws://127.0.0.2:30337/sync
+[sys] 12:55:50 tcp_alloc=24 tcp_mem_pages=0 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:7380M SwapFree:1023M Dirty:0M Slab:79M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=3.12,1.52,0.58 cpu_u=25843 n=0 s=15118 i=137941 io=348 irq=0 sirq=11025
+[sys] 12:55:55 tcp_alloc=98649 tcp_mem_pages=22016 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5488M SwapFree:1023M Dirty:0M Slab:495M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=2.87,1.49,0.58 cpu_u=26063 n=0 s=15456 i=142243 io=348 irq=0 sirq=11112
+[sys] 12:56:00 tcp_alloc=107936 tcp_mem_pages=13312 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5180M SwapFree:1023M Dirty:0M Slab:517M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=2.64,1.47,0.58 cpu_u=26127 n=0 s=15531 i=147071 io=348 irq=0 sirq=11140
+[sys] 12:56:05 tcp_alloc=111935 tcp_mem_pages=8960 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5060M SwapFree:1023M Dirty:0M Slab:523M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=2.43,1.44,0.57 cpu_u=26155 n=0 s=15562 i=152009 io=348 irq=0 sirq=11150
+  [diag] subscribe quorum after 17.29s: connected=51910 subscribed=51910 connect_failed=0 complete=false (ceiling 300s, stall 5s)
+[sys] 12:56:10 tcp_alloc=113692 tcp_mem_pages=14336 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4451M SwapFree:1023M Dirty:0M Slab:527M psi_mem=avg60=0.00 psi_cpu=avg60=0.01 load=3.03,1.59,0.63 cpu_u=27306 n=0 s=16239 i=154622 io=349 irq=0 sirq=11663
+[sys] 12:56:15 tcp_alloc=116567 tcp_mem_pages=6400 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4403M SwapFree:1023M Dirty:0M Slab:530M psi_mem=avg60=0.00 psi_cpu=avg60=0.04 load=3.59,1.73,0.68 cpu_u=29505 n=0 s=17527 i=155028 io=349 irq=0 sirq=12699
+  [diag] progress t=10s delivered=6022131 matched=6016493 events~=106 subscribed=56542 rss_mib=2546 swap_mib=0 fanout_done=false
+[sys] 12:56:20 tcp_alloc=116567 tcp_mem_pages=7424 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4385M SwapFree:1023M Dirty:0M Slab:528M psi_mem=avg60=0.00 psi_cpu=avg60=0.03 load=4.10,1.86,0.73 cpu_u=31721 n=0 s=18838 i=155421 io=349 irq=0 sirq=13739
+[sys] 12:56:25 tcp_alloc=116567 tcp_mem_pages=6912 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4347M SwapFree:1023M Dirty:0M Slab:528M psi_mem=avg60=0.00 psi_cpu=avg60=0.03 load=4.58,2.00,0.78 cpu_u=33921 n=0 s=20153 i=155839 io=349 irq=0 sirq=14773
+  [diag] progress t=20s delivered=11847289 matched=11858608 events~=202 subscribed=58612 rss_mib=2665 swap_mib=0 fanout_done=false
+[sys] 12:56:30 tcp_alloc=118637 tcp_mem_pages=5376 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4247M SwapFree:1023M Dirty:0M Slab:533M psi_mem=avg60=0.00 psi_cpu=avg60=0.06 load=4.93,2.12,0.82 cpu_u=36104 n=0 s=21437 i=156287 io=349 irq=0 sirq=15798
+[sys] 12:56:35 tcp_alloc=118637 tcp_mem_pages=7680 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4171M SwapFree:1023M Dirty:0M Slab:534M psi_mem=avg60=0.00 psi_cpu=avg60=0.05 load=5.34,2.25,0.87 cpu_u=38281 n=0 s=22725 i=156705 io=349 irq=0 sirq=16829
+  [diag] progress t=30s delivered=17717105 matched=17719808 events~=302 subscribed=58612 rss_mib=2648 swap_mib=0 fanout_done=false
+[sys] 12:56:41 tcp_alloc=118637 tcp_mem_pages=3840 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4221M SwapFree:1023M Dirty:0M Slab:533M psi_mem=avg60=0.00 psi_cpu=avg60=0.05 load=5.71,2.38,0.92 cpu_u=40495 n=0 s=23967 i=157122 io=349 irq=0 sirq=17848
+[sys] 12:56:46 tcp_alloc=118637 tcp_mem_pages=14080 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4280M SwapFree:1023M Dirty:0M Slab:534M psi_mem=avg60=0.00 psi_cpu=avg60=0.07 load=6.05,2.50,0.97 cpu_u=42765 n=0 s=25244 i=157488 io=349 irq=0 sirq=18877
+  [diag] progress t=40s delivered=23566114 matched=23581008 events~=402 subscribed=58612 rss_mib=2648 swap_mib=0 fanout_done=false
+[sys] 12:56:51 tcp_alloc=118637 tcp_mem_pages=4089 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4248M SwapFree:1023M Dirty:0M Slab:532M psi_mem=avg60=0.00 psi_cpu=avg60=0.10 load=6.37,2.63,1.02 cpu_u=44990 n=0 s=26529 i=157921 io=349 irq=0 sirq=19877
+[sys] 12:56:56 tcp_alloc=118637 tcp_mem_pages=2809 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4278M SwapFree:1023M Dirty:0M Slab:534M psi_mem=avg60=0.00 psi_cpu=avg60=0.09 load=6.66,2.75,1.07 cpu_u=47241 n=0 s=27795 i=158339 io=349 irq=0 sirq=20889
+  [diag] at window end: connected=58612 subscribed=58612 connect_failed=0 subscribed_at_start=51910 late_subscribers=6702 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=28738864 delivered=28738864 dropped=0 faulted=0 events_fanned_out~=490 (matched/subscribed)
+  [diag] undelivered breakdown (events): never_connected_x_events=694000 pre_subscribe_loss=567136 router_dropped=0 router_faulted=0 in_flight_or_unaccounted=0 sum=1261136 (attempted-delivered=1261136)
+  [diag] completed=false (delivered 28738864 of 30000000 before the 300s window) peak_rss_mib=2698
+  [diag] finish: fanout_done=true reachable=28738864 delivered=28738864 elapsed_to_finish=49.15s
+  [diag] stages events=500 match=10.14ms/ev deliver=86.46ms/ev ack_scan=1.38ms/ev busy=48.99s wall=49.15s busy_frac=0.997
+  [diag] cpu proc_cpu=446.28s wall=49.15s cores_used=9.08 nproc=10
+  [diag] fanout_task_finished=true (true = replicator budget exhausted before the window closed)
+
+=== nostos-bench-10k probe ===
+  clients   : 60000
+  events    : 500 (attempted deliveries: 30000000)
+  window    : 300s
+  ---------------------------
+  delivered : 28738864
+  ops/sec   : 584723
+  drop%     : 4.20
+  elapsed   : 49.15s
+  elapsed_to_finish : 49.15s
+  ops/sec (finish)  : 584723
+SOAK rc=0 12:56:57
+HOST tier=60000 end 22:56:58 load1=7.34 rc=0 MIDRUN samples=6 viol=0 viol_pct=0.0 other_mean=55 other_max=65 load1_max=7.02 valid=yes drop_pct=4.20 throughput_valid=no
+HOST tier=80000 start 22:57:28 load1=5.01 waited=0s samples=host-cpu-tier80000-225728.log
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 mem=8124516kB swap=1048572kB tcp_rmem=4096-131072-33554432 tcp_wmem=4096-16384-4194304
+SOAK start 12:57:28 clients=80000 events=500 window=300 ack=1 listeners=2
+  [diag] listeners: ws://127.0.0.1:22441/sync ws://127.0.0.2:3947/sync
+[sys] 12:57:28 tcp_alloc=24 tcp_mem_pages=0 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:7306M SwapFree:1023M Dirty:0M Slab:82M psi_mem=avg60=0.00 psi_cpu=avg60=0.05 load=4.04,2.49,1.03 cpu_u=47800 n=0 s=28184 i=189263 io=355 irq=0 sirq=21160
+[sys] 12:57:33 tcp_alloc=109530 tcp_mem_pages=51705 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5383M SwapFree:1023M Dirty:0M Slab:567M psi_mem=avg60=0.00 psi_cpu=avg60=0.17 load=4.51,2.61,1.08 cpu_u=48017 n=0 s=32221 i=189769 io=356 irq=0 sirq=21247
+[sys] 12:57:38 tcp_alloc=140982 tcp_mem_pages=19961 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4400M SwapFree:1023M Dirty:0M Slab:680M psi_mem=avg60=0.00 psi_cpu=avg60=0.19 load=4.15,2.57,1.07 cpu_u=48224 n=0 s=32470 i=194196 io=356 irq=0 sirq=21325
+[sys] 12:57:43 tcp_alloc=148588 tcp_mem_pages=12793 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4165M SwapFree:1023M Dirty:0M Slab:700M psi_mem=avg60=0.00 psi_cpu=avg60=0.17 load=3.82,2.53,1.07 cpu_u=48287 n=0 s=32541 i=199042 io=356 irq=0 sirq=21352
+[sys] 12:57:48 tcp_alloc=151628 tcp_mem_pages=9209 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4046M SwapFree:1023M Dirty:0M Slab:706M psi_mem=avg60=0.00 psi_cpu=avg60=0.16 load=3.51,2.48,1.06 cpu_u=48318 n=0 s=32576 i=203952 io=356 irq=0 sirq=21367
+[sys] 12:57:53 tcp_alloc=152146 tcp_mem_pages=8697 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4038M SwapFree:1023M Dirty:0M Slab:708M psi_mem=avg60=0.00 psi_cpu=avg60=0.15 load=3.23,2.44,1.06 cpu_u=48323 n=0 s=32583 i=208944 io=356 irq=0 sirq=21368
+  [diag] subscribe quorum after 25.58s: connected=72110 subscribed=72110 connect_failed=0 complete=false (ceiling 400s, stall 5s)
+[sys] 12:57:58 tcp_alloc=152146 tcp_mem_pages=13817 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3262M SwapFree:1023M Dirty:0M Slab:706M psi_mem=avg60=0.00 psi_cpu=avg60=0.13 load=3.77,2.57,1.10 cpu_u=50200 n=0 s=33633 i=210088 io=356 irq=0 sirq=22182
+[sys] 12:58:03 tcp_alloc=152479 tcp_mem_pages=9465 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3291M SwapFree:1023M Dirty:0M Slab:706M psi_mem=avg60=0.00 psi_cpu=avg60=0.15 load=4.19,2.67,1.15 cpu_u=52399 n=0 s=34838 i=210561 io=356 irq=0 sirq=23143
+  [diag] progress t=10s delivered=4964468 matched=4986333 events~=68 subscribed=72454 rss_mib=3493 swap_mib=0 fanout_done=false
+[sys] 12:58:08 tcp_alloc=153575 tcp_mem_pages=11257 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3221M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.17 load=4.66,2.80,1.19 cpu_u=54623 n=0 s=36067 i=211014 io=356 irq=0 sirq=24117
+[sys] 12:58:13 tcp_alloc=153575 tcp_mem_pages=8697 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3182M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.16 load=5.09,2.92,1.24 cpu_u=56813 n=0 s=37270 i=211542 io=356 irq=0 sirq=25072
+  [diag] progress t=20s delivered=10159158 matched=10201130 events~=138 subscribed=73550 rss_mib=3567 swap_mib=0 fanout_done=false
+[sys] 12:58:18 tcp_alloc=153575 tcp_mem_pages=9465 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3196M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.21 load=5.48,3.03,1.29 cpu_u=58986 n=0 s=38531 i=212049 io=356 irq=0 sirq=26050
+[sys] 12:58:23 tcp_alloc=153575 tcp_mem_pages=13561 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3269M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.26 load=5.84,3.15,1.34 cpu_u=61213 n=0 s=39776 i=212543 io=356 irq=0 sirq=27023
+  [diag] progress t=30s delivered=15300906 matched=15276080 events~=207 subscribed=73550 rss_mib=3624 swap_mib=0 fanout_done=false
+[sys] 12:58:28 tcp_alloc=153936 tcp_mem_pages=11001 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3248M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.23 load=6.18,3.26,1.38 cpu_u=63402 n=0 s=41065 i=213029 io=356 irq=0 sirq=28025
+[sys] 12:58:33 tcp_alloc=153936 tcp_mem_pages=7929 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3288M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.25 load=6.48,3.38,1.43 cpu_u=65627 n=0 s=42296 i=213506 io=357 irq=0 sirq=28980
+  [diag] progress t=40s delivered=20347645 matched=20370889 events~=275 subscribed=73911 rss_mib=3568 swap_mib=0 fanout_done=false
+[sys] 12:58:38 tcp_alloc=153936 tcp_mem_pages=9209 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3264M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.22 load=6.76,3.49,1.48 cpu_u=67890 n=0 s=43543 i=213958 io=357 irq=0 sirq=29945
+[sys] 12:58:43 tcp_alloc=153936 tcp_mem_pages=10489 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3241M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.24 load=7.02,3.59,1.52 cpu_u=70124 n=0 s=44800 i=214429 io=357 irq=0 sirq=30926
+  [diag] progress t=50s delivered=25581186 matched=25618570 events~=346 subscribed=73911 rss_mib=3568 swap_mib=0 fanout_done=false
+[sys] 12:58:48 tcp_alloc=153936 tcp_mem_pages=9465 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3303M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.25 load=7.18,3.68,1.56 cpu_u=72423 n=0 s=46067 i=214856 io=357 irq=0 sirq=31902
+[sys] 12:58:53 tcp_alloc=153936 tcp_mem_pages=11001 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3221M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.23 load=7.41,3.79,1.61 cpu_u=74631 n=0 s=47317 i=215387 io=357 irq=0 sirq=32858
+  [diag] progress t=60s delivered=30710710 matched=30718429 events~=415 subscribed=73911 rss_mib=3574 swap_mib=0 fanout_done=false
+[sys] 12:58:58 tcp_alloc=153936 tcp_mem_pages=8697 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3226M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.24 load=7.29,3.83,1.63 cpu_u=76829 n=0 s=48563 i=215843 io=357 irq=0 sirq=33856
+[sys] 12:59:03 tcp_alloc=153936 tcp_mem_pages=8697 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3274M SwapFree:1023M Dirty:0M Slab:707M psi_mem=avg60=0.00 psi_cpu=avg60=0.26 load=7.51,3.93,1.68 cpu_u=79073 n=0 s=49831 i=216324 io=357 irq=0 sirq=34829
+  [diag] progress t=70s delivered=35736580 matched=35744377 events~=483 subscribed=73911 rss_mib=3633 swap_mib=0 fanout_done=false
+  [diag] at window end: connected=73911 subscribed=73911 connect_failed=0 subscribed_at_start=72110 late_subscribers=1801 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=36779131 delivered=36779131 dropped=0 faulted=0 events_fanned_out~=497 (matched/subscribed)
+  [diag] undelivered breakdown (events): never_connected_x_events=3044500 pre_subscribe_loss=176369 router_dropped=0 router_faulted=0 in_flight_or_unaccounted=0 sum=3220869 (attempted-delivered=3220869)
+  [diag] completed=false (delivered 36779131 of 40000000 before the 300s window) peak_rss_mib=3633
+  [diag] finish: fanout_done=true reachable=36779131 delivered=36779131 elapsed_to_finish=72.13s
+  [diag] stages events=500 match=17.69ms/ev deliver=123.97ms/ev ack_scan=2.28ms/ev busy=71.97s wall=72.13s busy_frac=0.998
+  [diag] cpu proc_cpu=646.72s wall=72.13s cores_used=8.97 nproc=10
+  [diag] fanout_task_finished=true (true = replicator budget exhausted before the window closed)
+
+=== nostos-bench-10k probe ===
+  clients   : 80000
+  events    : 500 (attempted deliveries: 40000000)
+  window    : 300s
+  ---------------------------
+  delivered : 36779131
+  ops/sec   : 509899
+  drop%     : 8.05
+  elapsed   : 72.13s
+  elapsed_to_finish : 72.13s
+  ops/sec (finish)  : 509899
+SOAK rc=0 12:59:06
+HOST tier=80000 end 22:59:06 load1=8.89 rc=0 MIDRUN samples=9 viol=0 viol_pct=0.0 other_mean=53 other_max=102 load1_max=8.62 valid=yes drop_pct=8.05 throughput_valid=no
+HOST tier=100000 start 22:59:37 load1=5.92 waited=0s samples=host-cpu-tier100000-225937.log
+env: Linux 7.0.12-linuxkit aarch64 nproc=10 nofile=1048576 mem=8124516kB swap=1048572kB tcp_rmem=4096-131072-33554432 tcp_wmem=4096-16384-4194304
+SOAK start 12:59:37 clients=100000 events=500 window=300 ack=1 listeners=2
+  [diag] listeners: ws://127.0.0.1:24177/sync ws://127.0.0.2:24429/sync
+[sys] 12:59:37 tcp_alloc=24 tcp_mem_pages=761 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:7394M SwapFree:1023M Dirty:0M Slab:94M psi_mem=avg60=0.00 psi_cpu=avg60=0.14 load=4.67,3.64,1.67 cpu_u=80244 n=0 s=50538 i=247551 io=363 irq=0 sirq=35340
+[sys] 12:59:42 tcp_alloc=99300 tcp_mem_pages=61945 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:6116M SwapFree:1023M Dirty:0M Slab:524M psi_mem=avg60=0.00 psi_cpu=avg60=0.29 load=5.10,3.75,1.71 cpu_u=80326 n=0 s=55146 i=247693 io=364 irq=0 sirq=35393
+[sys] 12:59:47 tcp_alloc=130320 tcp_mem_pages=71929 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:5240M SwapFree:1023M Dirty:0M Slab:668M psi_mem=avg60=0.00 psi_cpu=avg60=0.33 load=5.49,3.85,1.76 cpu_u=80486 n=0 s=59610 i=247922 io=364 irq=0 sirq=35445
+[sys] 12:59:52 tcp_alloc=166937 tcp_mem_pages=33529 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:4109M SwapFree:1023M Dirty:0M Slab:802M psi_mem=avg60=0.00 psi_cpu=avg60=0.33 load=5.05,3.79,1.75 cpu_u=80740 n=0 s=59907 i=252239 io=364 irq=0 sirq=35533
+[sys] 12:59:57 tcp_alloc=170670 tcp_mem_pages=29945 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3947M SwapFree:1023M Dirty:0M Slab:811M psi_mem=avg60=0.00 psi_cpu=avg60=0.31 load=4.65,3.73,1.74 cpu_u=80782 n=0 s=59964 i=257104 io=364 irq=0 sirq=35559
+[sys] 13:00:02 tcp_alloc=174126 tcp_mem_pages=26873 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3884M SwapFree:1023M Dirty:0M Slab:822M psi_mem=avg60=0.00 psi_cpu=avg60=0.28 load=4.27,3.66,1.73 cpu_u=80820 n=0 s=60000 i=262023 io=364 irq=0 sirq=35574
+[sys] 13:00:07 tcp_alloc=174403 tcp_mem_pages=26617 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3880M SwapFree:1023M Dirty:0M Slab:824M psi_mem=avg60=0.00 psi_cpu=avg60=0.26 load=3.93,3.60,1.72 cpu_u=80827 n=0 s=60005 i=267016 io=364 irq=0 sirq=35575
+[sys] 13:00:12 tcp_alloc=174575 tcp_mem_pages=26617 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3877M SwapFree:1023M Dirty:0M Slab:824M psi_mem=avg60=0.00 psi_cpu=avg60=0.23 load=3.62,3.54,1.71 cpu_u=80831 n=0 s=60010 i=272023 io=364 irq=0 sirq=35577
+[sys] 13:00:17 tcp_alloc=177267 tcp_mem_pages=23289 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3787M SwapFree:1023M Dirty:0M Slab:832M psi_mem=avg60=0.00 psi_cpu=avg60=0.22 load=3.33,3.48,1.70 cpu_u=80865 n=0 s=60041 i=276951 io=364 irq=0 sirq=35589
+  [diag] subscribe quorum after 42.05s: connected=77242 subscribed=77242 connect_failed=0 complete=false (ceiling 500s, stall 5s)
+[sys] 13:00:22 tcp_alloc=177267 tcp_mem_pages=30713 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:3063M SwapFree:1023M Dirty:0M Slab:831M psi_mem=avg60=0.00 psi_cpu=avg60=0.20 load=3.78,3.58,1.74 cpu_u=82110 n=0 s=60695 i=279540 io=364 irq=0 sirq=36069
+[sys] 13:00:27 tcp_alloc=177280 tcp_mem_pages=30969 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2877M SwapFree:1023M Dirty:0M Slab:831M psi_mem=avg60=0.00 psi_cpu=avg60=0.18 load=4.28,3.68,1.78 cpu_u=84316 n=0 s=61892 i=280084 io=364 irq=0 sirq=36975
+  [diag] progress t=10s delivered=4472792 matched=4480335 events~=57 subscribed=77255 rss_mib=3855 swap_mib=0 fanout_done=false
+[sys] 13:00:32 tcp_alloc=177280 tcp_mem_pages=24825 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2799M SwapFree:1023M Dirty:0M Slab:831M psi_mem=avg60=0.00 psi_cpu=avg60=0.20 load=4.74,3.79,1.83 cpu_u=86609 n=0 s=63160 i=280555 io=364 irq=0 sirq=37899
+[sys] 13:00:37 tcp_alloc=177280 tcp_mem_pages=25337 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2714M SwapFree:1023M Dirty:0M Slab:831M psi_mem=avg60=0.00 psi_cpu=avg60=0.18 load=5.16,3.89,1.87 cpu_u=88802 n=0 s=64373 i=281083 io=365 irq=0 sirq=38809
+  [diag] progress t=20s delivered=8974353 matched=8961125 events~=115 subscribed=77255 rss_mib=3869 swap_mib=0 fanout_done=false
+[sys] 13:00:42 tcp_alloc=177868 tcp_mem_pages=32505 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2757M SwapFree:1023M Dirty:0M Slab:831M psi_mem=avg60=0.00 psi_cpu=avg60=0.16 load=5.55,3.99,1.91 cpu_u=91092 n=0 s=65622 i=281577 io=365 irq=0 sirq=39734
+[sys] 13:00:47 tcp_alloc=183739 tcp_mem_pages=24825 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2773M SwapFree:1023M Dirty:0M Slab:845M psi_mem=avg60=0.00 psi_cpu=avg60=0.18 load=5.90,4.09,1.96 cpu_u=93374 n=0 s=66867 i=282067 io=365 irq=0 sirq=40645
+  [diag] progress t=30s delivered=13633294 matched=13645582 events~=161 subscribed=84304 rss_mib=3943 swap_mib=0 fanout_done=false
+[sys] 13:00:52 tcp_alloc=184459 tcp_mem_pages=21753 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2733M SwapFree:1023M Dirty:0M Slab:847M psi_mem=avg60=0.00 psi_cpu=avg60=0.17 load=6.23,4.19,2.00 cpu_u=95651 n=0 s=68109 i=282525 io=365 irq=0 sirq=41594
+[sys] 13:00:57 tcp_alloc=184716 tcp_mem_pages=26105 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2683M SwapFree:1023M Dirty:0M Slab:848M psi_mem=avg60=0.00 psi_cpu=avg60=0.15 load=6.53,4.29,2.04 cpu_u=97889 n=0 s=69374 i=283026 io=365 irq=0 sirq=42516
+  [diag] progress t=40s delivered=17944880 matched=17957586 events~=212 subscribed=84691 rss_mib=4054 swap_mib=0 fanout_done=false
+[sys] 13:01:02 tcp_alloc=185039 tcp_mem_pages=21753 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2673M SwapFree:1023M Dirty:0M Slab:849M psi_mem=avg60=0.00 psi_cpu=avg60=0.14 load=6.81,4.38,2.09 cpu_u=100163 n=0 s=70608 i=283572 io=365 irq=0 sirq=43423
+[sys] 13:01:07 tcp_alloc=185039 tcp_mem_pages=15865 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2682M SwapFree:1023M Dirty:0M Slab:849M psi_mem=avg60=0.00 psi_cpu=avg60=0.13 load=6.99,4.46,2.13 cpu_u=102440 n=0 s=71881 i=284001 io=365 irq=0 sirq=44372
+  [diag] progress t=50s delivered=22400264 matched=22377568 events~=263 subscribed=85014 rss_mib=4004 swap_mib=0 fanout_done=false
+[sys] 13:01:12 tcp_alloc=185039 tcp_mem_pages=19961 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2686M SwapFree:1023M Dirty:0M Slab:849M psi_mem=avg60=0.00 psi_cpu=avg60=0.15 load=7.23,4.55,2.17 cpu_u=104577 n=0 s=73030 i=284581 io=365 irq=0 sirq=45245
+[sys] 13:01:17 tcp_alloc=185292 tcp_mem_pages=17145 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2659M SwapFree:1023M Dirty:0M Slab:850M psi_mem=avg60=0.00 psi_cpu=avg60=0.20 load=6.65,4.48,2.16 cpu_u=106033 n=0 s=73618 i=285914 io=365 irq=0 sirq=45733
+  [diag] progress t=60s delivered=23670724 matched=23653413 events~=277 subscribed=85267 rss_mib=4071 swap_mib=0 fanout_done=false
+[sys] 13:01:22 tcp_alloc=185292 tcp_mem_pages=22265 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2658M SwapFree:1023M Dirty:0M Slab:850M psi_mem=avg60=0.00 psi_cpu=avg60=0.47 load=7.00,4.58,2.20 cpu_u=106718 n=0 s=73815 i=286882 io=365 irq=0 sirq=46039
+[sys] 13:01:27 tcp_alloc=185292 tcp_mem_pages=17401 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2655M SwapFree:1023M Dirty:0M Slab:850M psi_mem=avg60=0.00 psi_cpu=avg60=0.63 load=6.92,4.61,2.22 cpu_u=108030 n=0 s=74218 i=287953 io=365 irq=0 sirq=46483
+  [diag] progress t=70s delivered=23823975 matched=23823947 events~=279 subscribed=85267 rss_mib=4110 swap_mib=0 fanout_done=false
+[sys] 13:01:32 tcp_alloc=185292 tcp_mem_pages=23801 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2608M SwapFree:1023M Dirty:0M Slab:850M psi_mem=avg60=0.00 psi_cpu=avg60=0.64 load=7.17,4.70,2.27 cpu_u=109798 n=0 s=74734 i=289477 io=365 irq=0 sirq=47019
+[sys] 13:01:37 tcp_alloc=187843 tcp_mem_pages=13305 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2670M SwapFree:1023M Dirty:0M Slab:841M psi_mem=avg60=0.00 psi_cpu=avg60=0.66 load=6.59,4.62,2.25 cpu_u=111532 n=0 s=75426 i=291168 io=366 irq=0 sirq=47431
+  [diag] progress t=80s delivered=24146662 matched=24080019 events~=273 subscribed=87967 rss_mib=4072 swap_mib=0 fanout_done=false
+[sys] 13:01:42 tcp_alloc=188223 tcp_mem_pages=22777 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2639M SwapFree:1023M Dirty:0M Slab:839M psi_mem=avg60=0.00 psi_cpu=avg60=0.69 load=6.86,4.71,2.30 cpu_u=113582 n=0 s=76072 i=292581 io=366 irq=0 sirq=48021
+[sys] 13:01:47 tcp_alloc=188223 tcp_mem_pages=18937 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2643M SwapFree:1023M Dirty:0M Slab:839M psi_mem=avg60=0.00 psi_cpu=avg60=0.68 load=7.04,4.78,2.33 cpu_u=115373 n=0 s=76648 i=294086 io=366 irq=0 sirq=48564
+  [diag] progress t=90s delivered=24525356 matched=24519853 events~=278 subscribed=88198 rss_mib=4121 swap_mib=0 fanout_done=false
+[sys] 13:01:52 tcp_alloc=188223 tcp_mem_pages=12793 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2536M SwapFree:1023M Dirty:0M Slab:839M psi_mem=avg60=0.00 psi_cpu=avg60=0.68 load=7.11,4.83,2.36 cpu_u=117595 n=0 s=77375 i=295424 io=366 irq=0 sirq=49117
+[sys] 13:01:57 tcp_alloc=197779 tcp_mem_pages=13817 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2633M SwapFree:1023M Dirty:0M Slab:857M psi_mem=avg60=0.00 psi_cpu=avg60=0.73 load=7.02,4.85,2.38 cpu_u=119694 n=0 s=78231 i=296718 io=366 irq=0 sirq=49679
+  [diag] progress t=100s delivered=25171332 matched=25144197 events~=255 subscribed=98281 rss_mib=4187 swap_mib=0 fanout_done=false
+[sys] 13:02:03 tcp_alloc=199565 tcp_mem_pages=4345 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2634M SwapFree:1023M Dirty:0M Slab:853M psi_mem=avg60=0.00 psi_cpu=avg60=0.72 load=7.26,4.94,2.42 cpu_u=121755 n=0 s=78949 i=298082 io=366 irq=0 sirq=50260
+[sys] 13:02:08 tcp_alloc=199964 tcp_mem_pages=6393 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2623M SwapFree:1023M Dirty:0M Slab:856M psi_mem=avg60=0.00 psi_cpu=avg60=0.72 load=7.24,4.97,2.45 cpu_u=123732 n=0 s=79563 i=299643 io=366 irq=0 sirq=50806
+  [diag] progress t=110s delivered=25657513 matched=25639291 events~=256 subscribed=99939 rss_mib=4188 swap_mib=0 fanout_done=false
+[sys] 13:02:13 tcp_alloc=199964 tcp_mem_pages=4345 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2622M SwapFree:1023M Dirty:0M Slab:857M psi_mem=avg60=0.00 psi_cpu=avg60=0.71 load=7.46,5.06,2.49 cpu_u=125749 n=0 s=80181 i=301232 io=366 irq=0 sirq=51337
+[sys] 13:02:18 tcp_alloc=199964 tcp_mem_pages=14073 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2624M SwapFree:1023M Dirty:0M Slab:863M psi_mem=avg60=0.00 psi_cpu=avg60=0.73 load=7.43,5.09,2.51 cpu_u=127737 n=0 s=80803 i=302696 io=366 irq=0 sirq=51916
+  [diag] progress t=120s delivered=26078621 matched=26039047 events~=260 subscribed=99939 rss_mib=4188 swap_mib=0 fanout_done=false
+[sys] 13:02:23 tcp_alloc=199964 tcp_mem_pages=1017 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2622M SwapFree:1023M Dirty:0M Slab:855M psi_mem=avg60=0.00 psi_cpu=avg60=0.72 load=7.63,5.17,2.56 cpu_u=129704 n=0 s=81417 i=304391 io=366 irq=0 sirq=52469
+[sys] 13:02:28 tcp_alloc=199964 tcp_mem_pages=5369 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2562M SwapFree:1023M Dirty:0M Slab:863M psi_mem=avg60=0.00 psi_cpu=avg60=0.68 load=7.82,5.25,2.60 cpu_u=131761 n=0 s=82059 i=305843 io=366 irq=0 sirq=53027
+  [diag] progress t=130s delivered=26473353 matched=26438803 events~=264 subscribed=99939 rss_mib=4229 swap_mib=0 fanout_done=false
+[sys] 13:02:33 tcp_alloc=199964 tcp_mem_pages=761 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2565M SwapFree:1023M Dirty:0M Slab:853M psi_mem=avg60=0.00 psi_cpu=avg60=0.70 load=7.68,5.27,2.61 cpu_u=133803 n=0 s=82702 i=307417 io=366 irq=0 sirq=53584
+[sys] 13:02:38 tcp_alloc=200025 tcp_mem_pages=6137 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2485M SwapFree:1023M Dirty:0M Slab:854M psi_mem=avg60=0.00 psi_cpu=avg60=0.66 load=7.86,5.34,2.65 cpu_u=135732 n=0 s=83333 i=309065 io=367 irq=0 sirq=54123
+  [diag] progress t=140s delivered=26818662 matched=26838614 events~=268 subscribed=100000 rss_mib=4249 swap_mib=0 fanout_done=false
+[sys] 13:02:43 tcp_alloc=200025 tcp_mem_pages=3577 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2436M SwapFree:1023M Dirty:0M Slab:855M psi_mem=avg60=0.00 psi_cpu=avg60=0.72 load=8.03,5.42,2.69 cpu_u=137840 n=0 s=83923 i=310365 io=367 irq=0 sirq=54671
+[sys] 13:02:48 tcp_alloc=200025 tcp_mem_pages=3577 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2433M SwapFree:1023M Dirty:0M Slab:861M psi_mem=avg60=0.00 psi_cpu=avg60=0.74 load=8.19,5.50,2.73 cpu_u=139967 n=0 s=84653 i=311748 io=367 irq=0 sirq=55250
+  [diag] progress t=150s delivered=27408524 matched=27338614 events~=273 subscribed=100000 rss_mib=4307 swap_mib=0 fanout_done=false
+[sys] 13:02:53 tcp_alloc=200025 tcp_mem_pages=3321 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2462M SwapFree:1023M Dirty:0M Slab:852M psi_mem=avg60=0.00 psi_cpu=avg60=0.73 load=7.62,5.42,2.72 cpu_u=142077 n=0 s=85409 i=313057 io=367 irq=0 sirq=55857
+[sys] 13:02:58 tcp_alloc=200025 tcp_mem_pages=3321 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2491M SwapFree:1023M Dirty:0M Slab:853M psi_mem=avg60=0.00 psi_cpu=avg60=0.66 load=7.73,5.48,2.76 cpu_u=144290 n=0 s=86133 i=314359 io=367 irq=0 sirq=56473
+  [diag] progress t=160s delivered=27999248 matched=27938614 events~=279 subscribed=100000 rss_mib=4260 swap_mib=0 fanout_done=false
+[sys] 13:03:03 tcp_alloc=200025 tcp_mem_pages=1017 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2408M SwapFree:1023M Dirty:0M Slab:855M psi_mem=avg60=0.00 psi_cpu=avg60=0.65 load=7.91,5.56,2.80 cpu_u=146368 n=0 s=86686 i=315893 io=367 irq=0 sirq=57014
+[sys] 13:03:08 tcp_alloc=200025 tcp_mem_pages=8185 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2353M SwapFree:1023M Dirty:0M Slab:857M psi_mem=avg60=0.00 psi_cpu=avg60=0.62 load=8.08,5.63,2.84 cpu_u=148684 n=0 s=87426 i=317040 io=367 irq=0 sirq=57654
+  [diag] progress t=170s delivered=28499026 matched=28538614 events~=285 subscribed=100000 rss_mib=4373 swap_mib=0 fanout_done=false
+[sys] 13:03:13 tcp_alloc=200025 tcp_mem_pages=3321 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2337M SwapFree:1023M Dirty:0M Slab:852M psi_mem=avg60=0.00 psi_cpu=avg60=0.64 load=8.15,5.69,2.87 cpu_u=150773 n=0 s=88063 i=318287 io=367 irq=0 sirq=58226
+[sys] 13:03:18 tcp_alloc=200025 tcp_mem_pages=14841 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2408M SwapFree:1023M Dirty:0M Slab:864M psi_mem=avg60=0.00 psi_cpu=avg60=0.61 load=8.22,5.74,2.90 cpu_u=152838 n=0 s=88698 i=319770 io=367 irq=0 sirq=58765
+  [diag] progress t=180s delivered=28941451 matched=28938614 events~=289 subscribed=100000 rss_mib=4353 swap_mib=0 fanout_done=false
+[sys] 13:03:23 tcp_alloc=200025 tcp_mem_pages=27129 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2405M SwapFree:1023M Dirty:0M Slab:877M psi_mem=avg60=0.00 psi_cpu=avg60=0.63 load=8.36,5.81,2.94 cpu_u=155001 n=0 s=89331 i=321167 io=367 irq=0 sirq=59328
+[sys] 13:03:28 tcp_alloc=200025 tcp_mem_pages=5113 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2348M SwapFree:1023M Dirty:0M Slab:869M psi_mem=avg60=0.00 psi_cpu=avg60=0.64 load=8.49,5.88,2.98 cpu_u=157150 n=0 s=90006 i=322576 io=367 irq=0 sirq=59869
+  [diag] progress t=190s delivered=29343306 matched=29338614 events~=293 subscribed=100000 rss_mib=4420 swap_mib=0 fanout_done=false
+[sys] 13:03:33 tcp_alloc=200025 tcp_mem_pages=8441 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2360M SwapFree:1023M Dirty:0M Slab:865M psi_mem=avg60=0.00 psi_cpu=avg60=0.63 load=8.61,5.95,3.02 cpu_u=159430 n=0 s=90760 i=323847 io=367 irq=0 sirq=60459
+[sys] 13:03:38 tcp_alloc=200025 tcp_mem_pages=1273 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2381M SwapFree:1023M Dirty:0M Slab:853M psi_mem=avg60=0.00 psi_cpu=avg60=0.60 load=8.65,6.00,3.05 cpu_u=161685 n=0 s=91474 i=325175 io=367 irq=0 sirq=61026
+  [diag] progress t=200s delivered=30025085 matched=29938614 events~=299 subscribed=100000 rss_mib=4393 swap_mib=0 fanout_done=false
+[sys] 13:03:43 tcp_alloc=200025 tcp_mem_pages=2809 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2361M SwapFree:1023M Dirty:0M Slab:860M psi_mem=avg60=0.00 psi_cpu=avg60=0.56 load=8.75,6.07,3.09 cpu_u=163812 n=0 s=92196 i=326686 io=367 irq=0 sirq=61601
+[sys] 13:03:48 tcp_alloc=200025 tcp_mem_pages=25849 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2294M SwapFree:1023M Dirty:0M Slab:878M psi_mem=avg60=0.00 psi_cpu=avg60=0.54 load=8.85,6.13,3.12 cpu_u=166211 n=0 s=93154 i=327590 io=368 irq=0 sirq=62266
+  [diag] progress t=210s delivered=31051580 matched=31138614 events~=311 subscribed=100000 rss_mib=4448 swap_mib=0 fanout_done=false
+[sys] 13:03:53 tcp_alloc=200025 tcp_mem_pages=761 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2305M SwapFree:1023M Dirty:0M Slab:851M psi_mem=avg60=0.00 psi_cpu=avg60=0.50 load=8.79,6.17,3.15 cpu_u=168296 n=0 s=93948 i=328867 io=368 irq=0 sirq=62856
+[sys] 13:03:59 tcp_alloc=200025 tcp_mem_pages=4089 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2317M SwapFree:1023M Dirty:0M Slab:852M psi_mem=avg60=0.00 psi_cpu=avg60=0.45 load=8.88,6.23,3.19 cpu_u=170449 n=0 s=94711 i=330208 io=368 irq=0 sirq=63488
+  [diag] progress t=220s delivered=31791841 matched=31838614 events~=318 subscribed=100000 rss_mib=4393 swap_mib=0 fanout_done=false
+[sys] 13:04:04 tcp_alloc=200025 tcp_mem_pages=7417 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2344M SwapFree:1023M Dirty:0M Slab:863M psi_mem=avg60=0.00 psi_cpu=avg60=0.45 load=8.33,6.16,3.18 cpu_u=172498 n=0 s=95353 i=331685 io=370 irq=0 sirq=64009
+[sys] 13:04:09 tcp_alloc=200025 tcp_mem_pages=2553 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2346M SwapFree:1023M Dirty:0M Slab:855M psi_mem=avg60=0.00 psi_cpu=avg60=0.51 load=7.74,6.07,3.17 cpu_u=174724 n=0 s=96033 i=333041 io=370 irq=0 sirq=64597
+  [diag] progress t=230s delivered=32257169 matched=32238614 events~=322 subscribed=100000 rss_mib=4404 swap_mib=0 fanout_done=false
+[sys] 13:04:14 tcp_alloc=200025 tcp_mem_pages=4601 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2346M SwapFree:1023M Dirty:0M Slab:853M psi_mem=avg60=0.00 psi_cpu=avg60=0.52 load=7.85,6.12,3.20 cpu_u=176964 n=0 s=96748 i=334315 io=370 irq=0 sirq=65195
+[sys] 13:04:19 tcp_alloc=200025 tcp_mem_pages=15609 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2332M SwapFree:1023M Dirty:0M Slab:864M psi_mem=avg60=0.00 psi_cpu=avg60=0.49 load=7.30,6.04,3.19 cpu_u=178910 n=0 s=97338 i=335885 io=370 irq=0 sirq=65766
+  [diag] progress t=240s delivered=32730610 matched=32738614 events~=327 subscribed=100000 rss_mib=4394 swap_mib=0 fanout_done=false
+[sys] 13:04:24 tcp_alloc=200025 tcp_mem_pages=9465 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2337M SwapFree:1023M Dirty:0M Slab:861M psi_mem=avg60=0.00 psi_cpu=avg60=0.47 load=7.51,6.10,3.22 cpu_u=181127 n=0 s=98045 i=337236 io=370 irq=0 sirq=66351
+[sys] 13:04:29 tcp_alloc=200025 tcp_mem_pages=11513 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2332M SwapFree:1023M Dirty:0M Slab:860M psi_mem=avg60=0.00 psi_cpu=avg60=0.44 load=7.39,6.10,3.24 cpu_u=183252 n=0 s=98745 i=338672 io=370 irq=0 sirq=66919
+  [diag] progress t=250s delivered=33371459 matched=33338614 events~=333 subscribed=100000 rss_mib=4403 swap_mib=0 fanout_done=false
+[sys] 13:04:34 tcp_alloc=200025 tcp_mem_pages=4857 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2310M SwapFree:1023M Dirty:0M Slab:854M psi_mem=avg60=0.00 psi_cpu=avg60=0.46 load=7.60,6.17,3.28 cpu_u=185276 n=0 s=99449 i=340234 io=370 irq=0 sirq=67507
+[sys] 13:04:39 tcp_alloc=200025 tcp_mem_pages=7929 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2305M SwapFree:1023M Dirty:0M Slab:855M psi_mem=avg60=0.00 psi_cpu=avg60=0.49 load=7.07,6.08,3.26 cpu_u=187275 n=0 s=100094 i=341819 io=371 irq=0 sirq=68037
+  [diag] progress t=260s delivered=33957697 matched=33938614 events~=339 subscribed=100000 rss_mib=4417 swap_mib=0 fanout_done=false
+[sys] 13:04:44 tcp_alloc=200025 tcp_mem_pages=4601 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2318M SwapFree:1023M Dirty:0M Slab:859M psi_mem=avg60=0.00 psi_cpu=avg60=0.54 load=7.31,6.15,3.30 cpu_u=189526 n=0 s=100848 i=343068 io=371 irq=0 sirq=68620
+[sys] 13:04:49 tcp_alloc=200025 tcp_mem_pages=2041 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2335M SwapFree:1023M Dirty:0M Slab:859M psi_mem=avg60=0.00 psi_cpu=avg60=0.51 load=6.80,6.06,3.29 cpu_u=191655 n=0 s=101608 i=344492 io=371 irq=0 sirq=69227
+  [diag] progress t=270s delivered=34719088 matched=34738614 events~=347 subscribed=100000 rss_mib=4394 swap_mib=0 fanout_done=false
+[sys] 13:04:54 tcp_alloc=200025 tcp_mem_pages=5625 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2246M SwapFree:1023M Dirty:0M Slab:854M psi_mem=avg60=0.00 psi_cpu=avg60=0.46 load=7.14,6.14,3.33 cpu_u=193767 n=0 s=102359 i=346009 io=371 irq=0 sirq=69809
+  [diag] progress t=280s delivered=35538614 matched=35538614 events~=355 subscribed=100000 rss_mib=4456 swap_mib=0 fanout_done=false
+[sys] 13:04:59 tcp_alloc=200025 tcp_mem_pages=1273 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2274M SwapFree:1023M Dirty:0M Slab:853M psi_mem=avg60=0.00 psi_cpu=avg60=0.46 load=7.77,6.29,3.39 cpu_u=195990 n=0 s=103118 i=347274 io=371 irq=0 sirq=70403
+[sys] 13:05:04 tcp_alloc=200025 tcp_mem_pages=2809 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2227M SwapFree:1023M Dirty:0M Slab:853M psi_mem=avg60=0.00 psi_cpu=avg60=0.41 load=7.95,6.35,3.43 cpu_u=198190 n=0 s=103918 i=348599 io=371 irq=0 sirq=71043
+  [diag] progress t=290s delivered=36389471 matched=36338614 events~=363 subscribed=100000 rss_mib=4498 swap_mib=0 fanout_done=false
+[sys] 13:05:09 tcp_alloc=200025 tcp_mem_pages=3065 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2283M SwapFree:1023M Dirty:0M Slab:860M psi_mem=avg60=0.00 psi_cpu=avg60=0.45 load=7.39,6.26,3.41 cpu_u=200279 n=0 s=104685 i=349910 io=371 irq=0 sirq=71659
+[sys] 13:05:14 tcp_alloc=200025 tcp_mem_pages=1017 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2255M SwapFree:1023M Dirty:0M Slab:855M psi_mem=avg60=0.00 psi_cpu=avg60=0.41 load=7.36,6.28,3.43 cpu_u=202490 n=0 s=105470 i=351213 io=371 irq=0 sirq=72258
+  [diag] progress t=300s delivered=37195680 matched=37138614 events~=371 subscribed=100000 rss_mib=4456 swap_mib=0 fanout_done=false
+  [diag] at window end: connected=100000 subscribed=100000 connect_failed=0 subscribed_at_start=77242 late_subscribers=22758 (late subscribers' pre-subscribe events stay in the drop count)
+  [diag] router: matched=37138614 delivered=37138614 dropped=0 faulted=0 events_fanned_out~=371 (matched/subscribed)
+  [diag] undelivered breakdown (events): never_connected_x_events=0 pre_subscribe_or_not_yet_fanned_out=12861386 router_dropped=0 router_faulted=0 in_flight_or_unaccounted=0 sum=12861386 (attempted-delivered=12804097)
+  [diag] completed=false (delivered 37195903 of 50000000 before the 300s window) peak_rss_mib=4514
+  [diag] finish: fanout_done=false reachable=37138614 delivered=37195903 elapsed_to_finish=n/a
+  [diag] stages events=430 match=148.96ms/ev deliver=465.44ms/ev ack_scan=80.27ms/ev busy=298.71s wall=300.01s busy_frac=0.996
+  [diag] cpu proc_cpu=2237.72s wall=300.01s cores_used=7.46 nproc=10
+  [diag] fanout_task_finished=false (true = replicator budget exhausted before the window closed)
+[sys] 13:05:19 tcp_alloc=198436 tcp_mem_pages=4857 PruneCalled=0 RcvPruned=0 TCPRcvCollapsed=0 TCPAbortOnMemory=0 TCPMemoryPressures=0 TCPMemoryPressuresChrono=0 TCPBacklogDrop=0 TCPZeroWindowDrop=0 TCPRcvQDrop=0 MemAvailable:2273M SwapFree:1023M Dirty:0M Slab:873M psi_mem=avg60=0.00 psi_cpu=avg60=0.38 load=7.65,6.35,3.48 cpu_u=204562 n=0 s=106271 i=352488 io=371 irq=0 sirq=72889
+
+=== nostos-bench-10k probe ===
+  clients   : 100000
+  events    : 500 (attempted deliveries: 50000000)
+  window    : 300s
+  ---------------------------
+  delivered : 37195903
+  ops/sec   : 123982
+  drop%     : 25.61
+  elapsed   : 300.01s
+  elapsed_to_finish : n/a (window expired)
+  ops/sec (finish)  : n/a
+SOAK rc=0 13:05:20
+HOST tier=100000 end 23:05:20 load1=11.36 rc=0 MIDRUN samples=29 viol=2 viol_pct=6.9 other_mean=78 other_max=229 load1_max=14.79 valid=no drop_pct=25.61 throughput_valid=no
+LINUX_DIAG_EXIT=0

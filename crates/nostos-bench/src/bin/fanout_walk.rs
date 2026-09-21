@@ -14,7 +14,12 @@
 //! before/after instrument for changes to `FanOutService::fan_out` and
 //! `SessionStore::candidates_for`.
 //!
-//! Usage: `nostos-fanout-walk <clients> <events> [sink=tokio|noop] [buffer] [workers]`
+//! Usage: `nostos-fanout-walk <clients> <events> [sink=tokio|noop|wire] [buffer] [workers]`
+//!
+//! `sink=wire` is `tokio` plus the real `encode_event` in each session's drain
+//! task — the work the transport's write loop actually does. `deliver` only
+//! enqueues an `Arc`, so the encode is invisible to `tokio` mode: it is the
+//! single biggest thing separating this probe from the full-spine run.
 //!
 //! `workers=1` is the sequential walk that shipped before 2026-09-21 — the
 //! before number. `0` (the default) means `available_parallelism`.
@@ -35,6 +40,7 @@ use bytes::Bytes;
 use nostos_application::ports::{DeliveryDecision, EventSink, SessionStore};
 use nostos_application::FanOutService;
 use nostos_domain::{ColumnValue, Lsn, Predicate, ReplicationEvent, RowOp, SyncSession};
+use nostos_infra::router::SinkMsg;
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::TokioEventSink;
 
@@ -88,9 +94,22 @@ async fn run(clients: usize, events: u64, sink_kind: &str, buffer: usize, worker
             Arc::new(CountingSink(Arc::clone(&counter)))
         } else {
             let (sink, mut rx) = TokioEventSink::channel(buffer);
+            let drained = Arc::clone(&counter);
+            let encode = sink_kind == "wire";
             // A real drain task per session: the wakeup that `try_send` causes
-            // is part of what the walk pays for, so it must be real.
-            tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            // is part of what the walk pays for, so it must be real. In `wire`
+            // mode it also runs the real `encode_event`, which is where the
+            // transport actually serializes — `deliver` only moves an `Arc`.
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if encode {
+                        if let SinkMsg::Event(e) = &msg {
+                            std::hint::black_box(nostos_infra::wire::encode_event(e));
+                        }
+                    }
+                    drained.fetch_add(1, Ordering::Relaxed);
+                }
+            });
             Arc::new(sink)
         };
         store.add(session, sink).await;
@@ -121,6 +140,14 @@ async fn run(clients: usize, events: u64, sink_kind: &str, buffer: usize, worker
         }
     }
     let elapsed = started.elapsed().as_secs_f64();
+    // `wall` stops when the last `try_send` returns, not when the last frame
+    // reaches the far end of its channel. With `buffer` >= `events` the drains
+    // are still running, so `wall` alone under-counts the pipeline. Wait them
+    // out and report both.
+    while counter.load(Ordering::Relaxed) < delivered {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let drained_wall = started.elapsed().as_secs_f64();
 
     let per_event = elapsed / events as f64;
     println!(
@@ -141,6 +168,11 @@ async fn run(clients: usize, events: u64, sink_kind: &str, buffer: usize, worker
         per_event / clients as f64 * 1e6
     );
     println!("ops_per_sec={:.0}", delivered as f64 / elapsed);
+    println!(
+        "drained_wall={drained_wall:.3}s  per_event_drained={:.3}ms  drain_tax={:.2}x",
+        drained_wall / events as f64 * 1e3,
+        drained_wall / elapsed
+    );
     let deciles: Vec<String> = buckets.iter().map(|s| format!("{:.2}", s * 1e3)).collect();
     println!("decile_ms_per_event=[{}]", deciles.join(", "));
 

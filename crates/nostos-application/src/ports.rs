@@ -934,6 +934,29 @@ pub struct Metrics {
     pub faulted: AtomicU64,
     /// Current live session count (gauge, not counter).
     pub sessions: AtomicUsize,
+
+    /// Per-stage fan-out cost — cumulative nanoseconds spent ON the fan-out
+    /// task, split by stage. Deliberately NOT in [`MetricsSnapshot`]: this is
+    /// a diagnostic read directly by `nostos-bench-10k`, not a `/metrics` gauge.
+    ///
+    /// The question they answer is the one the 100k cliff kept dodging — is
+    /// the fan-out loop SLOW, or is it STARVED? Summed against wall-clock:
+    /// close to wall ⇒ the loop is the cost; far below wall ⇒ the loop is idle
+    /// waiting for a core and the cost is elsewhere (transport writers, the
+    /// kernel socket path, or the in-process client tasks sharing the
+    /// runtime). See docs/plans/fanout-100k-cliff-diagnosis.md.
+    ///
+    /// Cost when wired: ~6 `Instant::now()` per EVENT (not per delivery),
+    /// ~150 ns against a per-event budget three orders of magnitude larger.
+    /// `store.candidates_for` + predicate filter.
+    pub stage_match_nanos: AtomicU64,
+    /// The delivery walk itself (`deliver_chunk`, including the join when the
+    /// walk is split across workers).
+    pub stage_deliver_nanos: AtomicU64,
+    /// `store.min_acked_lsn` — the OTHER O(sessions) per-event scan.
+    pub stage_ack_scan_nanos: AtomicU64,
+    /// Events the fan-out loop has completed. Denominator for the three above.
+    pub stage_events: AtomicU64,
     /// Replication-slot health gauge (see [`SlotHealth`]). Set by `PgReplicator`
     /// from `pg_replication_slots.wal_status` on every (re)connect. `Lost` is
     /// the operator-actionable signal that nostos silently dropped WAL while

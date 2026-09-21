@@ -280,6 +280,7 @@ impl FanOutService {
     where
         F: Fn(&ReplicationEvent, &str) -> Option<ColumnValue>,
     {
+        let stage_start = self.metrics.as_ref().map(|_| std::time::Instant::now());
         let matched: Vec<_> = self
             .store
             .candidates_for(event)
@@ -287,6 +288,12 @@ impl FanOutService {
             .into_iter()
             .filter(|c| c.predicate.matches(|col| column_extractor(event, col)))
             .collect();
+        if let (Some(m), Some(t0)) = (&self.metrics, stage_start) {
+            m.stage_match_nanos.fetch_add(
+                u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let matched_count = matched.len() as u64;
 
         // Push candidate accounts (ADR-0037 §1): one entry per matched
@@ -316,6 +323,7 @@ impl FanOutService {
         // events in LSN order: event N+1's walk cannot start until N's is
         // fully drained. Only the order sessions are visited WITHIN one event
         // changes, and that was never a guarantee.
+        let walk_start = self.metrics.as_ref().map(|_| std::time::Instant::now());
         let (delivered, dropped, faulted) =
             if matched.len() >= PARALLEL_FANOUT_MIN && self.fanout_workers > 1 {
                 let workers = self.fanout_workers.min(matched.len());
@@ -446,6 +454,12 @@ impl FanOutService {
                 }
             }
         }
+        if let (Some(m), Some(t0)) = (&self.metrics, walk_start) {
+            m.stage_deliver_nanos.fetch_add(
+                u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let outcome = FanOutOutcome {
             matched: matched_count,
             delivered,
@@ -516,7 +530,19 @@ impl FanOutService {
             since = since.saturating_add(1);
             if since >= every {
                 since = 0;
+                let t0 = self.metrics.as_ref().map(|_| std::time::Instant::now());
                 slowest_acked = self.store.min_acked_lsn().await;
+                if let (Some(m), Some(t0)) = (&self.metrics, t0) {
+                    use std::sync::atomic::Ordering;
+                    m.stage_ack_scan_nanos.fetch_add(
+                        u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            if let Some(m) = &self.metrics {
+                m.stage_events
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(safe) = slowest_acked {
                 replicator.advance_progress(safe).await;
@@ -1287,5 +1313,128 @@ mod tests {
         assert!(hints
             .iter()
             .any(|h| h.account_id.is_empty() && h.tenant_id == "tenant-acme"));
+    }
+
+    /// Coalescing the ack-progress scan must never advance the slot past the
+    /// true safe-to-flush LSN. `with_ack_progress_every(N)` reuses a cached
+    /// minimum between recomputes, and the whole safety argument is that acks
+    /// are monotonic so a cached min is <= the true min. This pins that: the
+    /// slot lags, and it lags CONSERVATIVELY — never once above the truth.
+    ///
+    /// Also pins the cost model the 100k measurement turns on: the O(sessions)
+    /// scan runs once per N events, not once per event
+    /// (`benches/results/RESULTS.md`, 2026-09-21 — 2.23x at 100k sessions).
+    #[tokio::test]
+    async fn coalesced_ack_progress_lags_but_never_overshoots() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        /// Its `min_acked_lsn` rises by 1 each event, mimicking clients that
+        /// ack every event, and counts how often the fold actually ran.
+        struct AckingStore {
+            true_min: Arc<AtomicU64>,
+            scans: Arc<AtomicU64>,
+        }
+        #[async_trait]
+        impl SessionStore for AckingStore {
+            async fn add(&self, _s: SyncSession, _k: Arc<dyn EventSink>) {}
+            async fn try_add_below_cap(
+                &self,
+                s: SyncSession,
+                _k: Arc<dyn EventSink>,
+                _cap: u64,
+                _pcap: u64,
+            ) -> Result<SessionId, crate::ports::StoreRejection> {
+                Ok(s.id)
+            }
+            async fn remove(&self, _id: SessionId) {}
+            async fn candidates_for(&self, _e: &ReplicationEvent) -> Vec<SessionCandidate> {
+                Vec::new()
+            }
+            async fn len(&self) -> usize {
+                0
+            }
+            async fn min_acked_lsn(&self) -> Option<Lsn> {
+                self.scans.fetch_add(1, Ordering::Relaxed);
+                Some(Lsn::new(self.true_min.load(Ordering::Relaxed)))
+            }
+        }
+
+        /// Emits `n` events and records every LSN the loop tries to flush,
+        /// paired with the true min at that instant.
+        struct RecordingReplicator {
+            left: u64,
+            lsn: u64,
+            true_min: Arc<AtomicU64>,
+            seen: Arc<Mutex<Vec<(u64, u64)>>>,
+        }
+        #[async_trait]
+        impl ReplicatorStream for RecordingReplicator {
+            async fn next_event(&mut self) -> Option<ReplicationEvent> {
+                if self.left == 0 {
+                    return None;
+                }
+                self.left -= 1;
+                self.lsn += 1;
+                // The client acks this event before the loop asks for the min.
+                self.true_min.store(self.lsn, Ordering::Relaxed);
+                Some(ReplicationEvent::new(
+                    Lsn::new(self.lsn),
+                    RowOp::Insert {
+                        table: "tasks".into(),
+                        pk: self.lsn.to_string(),
+                        payload: Bytes::from_static(b"{}"),
+                    },
+                ))
+            }
+            async fn advance_progress(&mut self, lsn: Lsn) {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((lsn.raw(), self.true_min.load(Ordering::Relaxed)));
+            }
+        }
+
+        const EVENTS: u64 = 64;
+        const EVERY: u32 = 8;
+
+        let true_min = Arc::new(AtomicU64::new(0));
+        let scans = Arc::new(AtomicU64::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(AckingStore {
+            true_min: Arc::clone(&true_min),
+            scans: Arc::clone(&scans),
+        });
+        let mut repl = RecordingReplicator {
+            left: EVENTS,
+            lsn: 0,
+            true_min: Arc::clone(&true_min),
+            seen: Arc::clone(&seen),
+        };
+
+        let svc = FanOutService::new(store as Arc<dyn SessionStore>).with_ack_progress_every(EVERY);
+        svc.run(&mut repl, extract_org).await;
+
+        // The scan is coalesced, not skipped.
+        assert_eq!(
+            scans.load(Ordering::Relaxed),
+            EVENTS / u64::from(EVERY),
+            "the O(sessions) fold must run once per {EVERY} events"
+        );
+
+        // The safety property: every flushed LSN was <= the truth at the time.
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len() as u64, EVENTS, "every event attempts a flush");
+        for (flushed, truth) in seen.iter() {
+            assert!(
+                flushed <= truth,
+                "advanced the slot to {flushed} while the slowest client had only acked {truth}"
+            );
+        }
+        // And it really does lag — otherwise this test would pass trivially
+        // against a per-event scan and prove nothing about coalescing.
+        assert!(
+            seen.iter().any(|(flushed, truth)| flushed < truth),
+            "coalescing must actually reuse a stale min somewhere"
+        );
     }
 }

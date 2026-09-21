@@ -85,6 +85,11 @@ Each client session has a **bounded** delivery channel of depth `B` (`NOSTOS_SES
 
 **Consequence for honesty:** the benchmark reports drop rate alongside throughput. A throughput number with a high drop rate is meaningless and is called out as such. The headline number is the **highest throughput at <1% drop rate.**
 
+**Enforced (2026-09-21).** `benches/scripts/fanout-100k-diag.sh` stamps every
+tier with `drop_pct=.. throughput_valid=yes|no`. Before that this rule was
+honoured in prose only: both 2026-09-21 ack-coalescing runs produced twelve
+tiers dropping 7.9–95.7%, and their ops/sec were compared as throughput anyway.
+
 ---
 
 ## 6. System & environment
@@ -100,6 +105,79 @@ Recorded in every results artifact:
 **Reproducibility:** `make bench` from a clean clone reproduces the numbers (modulo hardware). The benchmark binary writes a JSON artifact with every input + output + environment field.
 
 **Linux-container runs (added 2026-09-02).** macOS caps a single host at ~9.2k loopback sockets (`ENOBUFS`, mbuf-cluster exhaustion), so the 10k soak runs in Docker via `benches/scripts/linux-soak.sh` (`rust:1.95-bookworm`, `--ulimit nofile=1048576`, `ip_local_port_range=1024 65535`). A Docker Desktop VM is a *different environment*: its numbers are reported only against other runs in the same container (baseline vs candidate, back-to-back), never against a macOS-native figure, and every container log starts with an `env:` line (kernel, arch, nproc, nofile, port range, mem, rustc) that the results section must quote. Host load on the Mac running the VM is recorded alongside, because it leaks into the VM.
+
+---
+
+### 6.1 The headroom rule — when a measurement counts
+
+Two halves. The second is the one that matters.
+
+- **START gate.** A *build* may run under any host load. A *measurement* only
+  starts when host load1 < 8 (0.8 × 10 cores, `sysctl vm.loadavg` — the macOS
+  host's, not the container's `/proc/loadavg`), no other bench container is up,
+  and `/tmp/nostos-bench.lock` is free.
+- **MID-RUN validity.** Sampling every 10 s for the whole tier: **aggregate
+  non-harness CPU ≤ 150%**, on at least **95% of samples**. The Docker Desktop
+  VM doing the fan-out is *harness* and is expected above 500%.
+
+Mechanically enforced by `benches/scripts/fanout-100k-diag.sh`. Every tier ends
+with `MIDRUN samples=.. viol=.. viol_pct=.. other_mean=.. other_max=..
+load1_max=.. valid=yes|no`; a tier with `valid=no` is fit for order-of-magnitude
+bounds only, never for an A/B. Logs are kept either way (the `CONTENDED.md`
+pattern), never silently re-rolled.
+
+**load1 does not invalidate a run on its own.** The 10-vCPU harness VM alone
+contributes ~4–5 to host load1 while fanning out, so "load1 < 8 for the whole
+run" is unreachable by design — a tier that ends at load1 = 12 can be perfectly
+valid. load1 is recorded for context; the aggregate-CPU clause decides.
+
+#### What "150%" means and where it comes from (recalibrated 2026-09-21)
+
+macOS `top` reports **100% = one core**, so this host has 1000% to give.
+
+- The VM's observed *peak* demand during a 100k fan-out is ~740% (`cores_used`
+  7.37/10 at the cliff, `docs/plans/fanout-100k-cliff-diagnosis.md`).
+- Headroom above that peak is therefore ~260%.
+- The bar is set at 150%, comfortably inside the headroom: at 150% of non-harness
+  load the VM can still draw 850% > the 740% it has ever wanted. Above it, other
+  work is cutting into CPU the harness has been measured to use.
+
+**Aggregate, not per-process.** Ten processes at 15% starve the VM exactly as
+much as one at 150%, and a per-process rule sees only the second.
+
+`other_mean` is recorded per tier so analysis can regress throughput on a
+continuous contention covariate. End-of-run load1 is a poor substitute: it is
+partly *caused* by throughput (Spearman ρ ≈ 0.6 over six tiers — suggestive at
+the extremes, not an identification).
+
+#### The rule this replaces, and why it was wrong
+
+The rule agreed 2026-09-02 read: *no non-harness process above 20% CPU on any
+10 s sample*. It was unenforceable and mismeasured.
+
+- **20% is 2% of this machine.** One fifth of one core out of ten, while the
+  harness itself legitimately runs at 574%. No Mac with a display attached ever
+  satisfies it — WindowServer alone idles at 30%.
+- **Per-process misses the actual failure mode**, as above.
+- **"Any sample" is not proportional.** One 10 s blip in a 300 s tier is 3% of
+  the run; discarding the tier for it optimises the wrong thing.
+
+The recalibration was made while trying to get a run to pass, which is exactly
+when a threshold is most likely to be bent, so it is pinned by a regression test
+in the script's `--self-test`: the 2026-09-02 attempt-2 sample (WindowServer 40 +
+VS Code 61 + Google 39 + ProtonVPN 29 + node 24 + secd 30 ≈ 223%) — the one run
+with a human INVALID verdict — must still come out `valid=no`, and an idling
+desktop (~75–81% aggregate) must still come out valid. A future change to
+`OTHER_LIMIT` that lets the 2026-09-02 run through fails the test.
+
+#### Why this is written down here
+
+It was not. The rule lived in `docs/plans/fanout-100k-cliff-diagnosis.md` while
+the harness cited *this* file for it, and the mid-run half went unenforced. On
+2026-09-21 an ack-coalescing A/B passed the start gate and then ran tiers at
+load1 34.21 and 22.64; the resulting 2.23× was noise and was retracted
+(RESULTS.md). A rule that is written down and not enforced is worse than no
+rule — it makes contaminated runs look gated.
 
 ---
 

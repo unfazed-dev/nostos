@@ -635,3 +635,285 @@ exist.
 
 This changes no headline number: the moat figure is 1k clients, far below the
 parallel floor, and it has not been re-measured.
+
+## Per-stage split — instrument landed, ladder INVALID (2026-09-21)
+
+**No number in this section may be cited.** The 10k/50k/100k stage ladder ran,
+but a hung `fvm global` (429 min CPU at ~95%) and a pinned WebKit tab held the
+host for the whole session: 238 of 238 sampler rows carry a non-harness process
+over 20% CPU, which disqualifies every tier under the mid-run rule in
+docs/BENCHMARK-METHODOLOGY.md. The proof is internal — the 50k tier came in at
+2.43 s/event against the 0.158 s/event the gated run measured for the same
+tier, so it is 15× off and measuring the host.
+
+Raw: `benches/results/raw/2026-09-21-stage-timing-INVALID/`.
+
+What the run does buy is a **hypothesis worth testing first** next time. Within
+each run, the share of the event taken by each stage moves monotonically:
+
+| tier | deliver | match (`candidates_for`) | ack_scan (`min_acked_lsn`) |
+|---|---|---|---|
+| 10k | 98.3% | 1.6% | 0.15% |
+| 50k | 86.6% | 9.5% | 3.8% |
+| 100k | 58.0% | 19.6% | 22.4% |
+
+`candidates_for` and `min_acked_lsn` take the same per-table `tokio::Mutex`;
+together they go from 1.8% to 42.0% of the per-event cost. At 100k,
+`min_acked_lsn` costs 18 µs per session to fold one atomic each — three to four
+orders of magnitude above the load itself, which is lock acquisition, not the
+scan. Suspect: the shared store mutex, fixed by the table-sharded router parked
+in docs/ROADMAP.md. Unproven, and stated here only so the next clean run has a
+first candidate rather than a fourth guess.
+
+## The 100k cliff, located: the fan-out server is 0.08% of it (2026-09-21, VALID)
+
+Supersedes the section above ("Per-stage split — instrument landed, ladder
+INVALID"). That ladder ran on a host pinned by my own concurrent Android
+builds; this one ran gated and quiet, `LINUX_DIAG_EXIT=0`, all tiers `rc=0`.
+Anchored: the 50k tier reproduces the previously gated baseline (0.139 vs
+0.158 s/event). Raw log: `raw/2026-09-21-stage-ladder-VALID/`.
+
+Eval-only (FakeReplicator loopback), Docker 10 vCPU / 8 GiB, rustc 1.98.
+
+| tier | s/event | ops/sec | cores_used / nproc | CPU µs/delivery |
+|---|---|---|---|---|
+| 10k × 500 | 0.019 | 534,988 | 8.03 / 10 | 15.0 |
+| 50k × 500 | 0.139 | 355,124 | 8.00 / 10 | 22.2 |
+| 100k × 500 | 3.896 | 24,495 | 7.37 / 10 | 287 |
+
+### The server side, measured in isolation
+`nostos-fanout-walk` with the new `sink=wire` mode — the full server path
+(candidates_for, predicate eval, parallel walk, dedup, bounded-channel
+enqueue, **and the real `encode_event`**, which every previous walk number
+omitted because `deliver` only moves an `Arc`). macOS, 10 cores, 200 events,
+2–3 reps per cell, spread ≤ 3%:
+
+| sessions | walk only | walk + real encode | ms/event |
+|---|---|---|---|
+| 10,000 | 0.172 µs/delivery | 0.200 µs | 2.0 |
+| 50,000 | 0.173 µs | 0.213 µs | 10.6 |
+| 100,000 | 0.175 µs | 0.222 µs | 22.2 |
+
+**Linear: +11% per delivery across a 10× scale-up.** `min_acked_lsn` measured
+directly: 0.072 / 0.35 / 0.70 ms — 3% of a 22 ms event at 100k.
+
+### Therefore
+| tier | server µs/delivery | spine CPU µs/delivery | server share |
+|---|---|---|---|
+| 10k | 0.200 | 15.0 | 1.3% |
+| 50k | 0.213 | 22.2 | 1.0% |
+| 100k | 0.222 | 287 | **0.08%** |
+
+At 100k the server side is 22 ms/event — **4.5M deliveries/sec** — while the
+spine takes 3,896 ms/event. No change inside `FanOutService` or
+`InMemorySessionStore` can address more than ~1% of the cliff.
+
+### Retractions
+- The **shared-store-mutex hypothesis** from the INVALID section is
+  **falsified**. `min_acked_lsn` costs 0.70 ms/event at 100k, not the 1,814 ms
+  that ladder reported.
+- The in-run **stage timers** (`stage_match/deliver/ack_scan_nanos`) measure
+  scheduler starvation, not work: `Instant::elapsed()` spans `.await`. They
+  disagree with direct measurement of the same operations by 3 orders of
+  magnitude and must be read only as a starvation signal.
+
+Falsified again, with numbers: swap never moved (`SwapFree` flat 1023 MiB);
+`psi_mem avg60 = 0.00` throughout; `PruneCalled` / `TCPRcvCollapsed` /
+`TCPMemoryPressures` / `TCPZeroWindowDrop` / `TCPBacklogDrop` all **zero
+deltas at all three tiers** with 200,026 sockets allocated; and `cores_used`
+*falls* to 7.37/10 at the cliff, so it is not out of CPU either.
+
+**Still open:** 287 µs of real CPU per delivery at 100k, superlinear, not in
+the fan-out loop, not memory- or kernel-bound, with 2.6 cores idle. Remaining
+suspects are the loopback socket path at 200k sockets and the probe's own 100k
+in-process client tasks sharing the server's runtime — i.e. partly a
+harness-topology artifact. Not yet separated; do not cite the 100k tier as a
+Nostos server limit.
+
+### The ack-scan coalescing "2.23×" — RETRACTED, it was noise (2026-09-21)
+
+A dose-response at 100k read 32,372 → 60,387 → 72,051 ops/sec for
+`ack_progress_every` = 1 → 16 → 100 and was published as a 2.23× win; the
+`nostos-server` default was changed from `1` to `16` on the strength of it. One
+same-config rerun disagreed, so the claim was marked PROVISIONAL and six
+interleaved tiers were run to measure the actual variance. They killed it.
+
+Six tiers, alternating arms, decode ON, 100k clients / 500 events / 300 s
+window / 2 listeners, every tier gated (`LINUX_DIAG_EXIT=0`, all `rc=0`), raw
+log in `raw/2026-09-21-ack-coalescing-replication/`:
+
+| tier | arm | ops/sec | `ack_scan` ms/ev | host load1 at end |
+|---|---|---|---|---|
+| 1 | `ack=1` | 57,090 | 175.89 | 16.87 |
+| 2 | `ack=16` | 35,302 | 22.95 | 17.44 |
+| 3 | `ack=1` | 7,146 | 2133.60 | 34.21 |
+| 4 | `ack=16` | 21,936 | 33.44 | 22.64 |
+| 5 | `ack=1` | 55,306 | 193.44 | 15.32 |
+| 6 | `ack=16` | 74,711 | 9.15 | 18.69 |
+
+| arm | n | mean | range | spread | sd |
+|---|---|---|---|---|---|
+| `ack=1` | 3 | 39,847 | 7,146–57,090 | 7.99× | 28,334 |
+| `ack=16` | 3 | 43,983 | 21,936–74,711 | 3.41× | 27,438 |
+
+Mean ratio 1.10×. **The arms overlap completely** — `ack=16`'s worst tier
+(21,936) is far below `ack=1`'s best (57,090) — and the standard deviation is
+~70% of the mean in both arms. A 2.23× separation cannot be resolved by an
+instrument with 8× within-arm spread. The original three-point ladder measured
+run-to-run drift and attributed it to the knob. **`NOSTOS_ACK_PROGRESS_INTERVAL`
+is back to `1`.**
+
+What survives, and it is not nothing: the knob does exactly what it claims to
+the stage it targets. `ack_scan` is cleanly separated by arm across all six
+tiers — 176 / 2134 / 193 ms/ev at `ack=1` against 23 / 33 / 9 at `ack=16`, ~8×
+at comparable load. The O(sessions) fold really does shrink. It simply is not
+what bounds throughput at this tier, so coalescing buys no ops/sec and costs WAL
+retention. `coalesced_ack_progress_lags_but_never_overshoots` stays — it pins a
+correctness property of the knob that holds whatever the default is.
+
+#### The methodological failure, stated plainly
+
+Three errors compounded:
+
+1. **n=1 per arm.** Three configurations, one sample each, read as a monotonic
+   dose-response. With this much variance, monotonic-looking triples arise by
+   chance routinely.
+2. **A true mechanism used as proof of an effect.** Cache-line contention on
+   `acked_lsn` is real and `ack_scan` really does drop ~8×. That licenses "the
+   fold got cheaper", not "throughput went up" — a separate claim needing its
+   own evidence. A plausible mechanism made the noise look explained.
+3. **A retraction built on the same weak footing.** The isolated-walk result
+   (0.70 ms fold = 3% of the cliff) was correct and was *withdrawn* in favour
+   of the spine number. The isolated bench was right; it was overruled by a
+   worse measurement because that measurement agreed with a story.
+
+The earlier subsection "Why the isolated measurement said 3% and the truth was
+223%" is retracted with the rest: the truth was 3%.
+
+#### The harness defect this exposed
+
+`fanout-100k-diag.sh` enforced the load gate **only at tier start**. Tiers 3
+and 4 passed the gate and then ran into load1 34.21 and 22.64; tier 3's 7,146 is
+a starved run by any reading. The mid-run validity rule existed — in
+`docs/plans/fanout-100k-cliff-diagnosis.md`, while the script cited
+`docs/BENCHMARK-METHODOLOGY.md` for it — and no code anywhere enforced it. It
+was also miscalibrated: "no non-harness process > 20% CPU" is 2% of a 10-core
+box, unmeetable with a display attached, and per-process where the harm is
+aggregate.
+
+**Fixed the same day.** The rule is now canonical in
+`docs/BENCHMARK-METHODOLOGY.md` § 6.1 and recalibrated to **aggregate
+non-harness CPU ≤ 150% on ≥ 95% of samples** (derived from the VM's measured
+740% peak against the host's 1000%), and the script samples the host every 10 s
+(`host-cpu-tier*.log`), closes each tier with `MIDRUN samples=.. viol=..
+other_mean=.. valid=yes|no`, kills a tier after 3 consecutive violating samples
+and re-arms once, and reports the worst tier rc
+in `LINUX_DIAG_EXIT` — which was hardcoded to `0`, so a gate timeout or a
+contended tier still announced a clean run. The six tiers above predate the fix
+and stay order-of-magnitude only; they cannot be retrofitted with a verdict
+because the host samples were never taken.
+
+#### The replication, re-run on the fixed harness — and the deeper problem (2026-09-21)
+
+Six interleaved tiers again, 100k × 500 × 300 s, this time with the mid-run gate
+enforced (`benches/results/raw/2026-09-21-ack-coalescing-replication-v2/`).
+`LINUX_DIAG_EXIT=0`, all six `rc=0`, five of six `valid=yes` on host contention.
+
+| # | ack | ops/sec | drop% | other_mean | contention valid |
+|---|---|---|---|---|---|
+| 1 | 1  | 45,888  | 72.46 | 123 | no (7.4% of samples over) |
+| 2 | 16 | 57,583  | 65.45 | 69  | yes |
+| 3 | 1  | 116,052 | 30.37 | 56  | yes |
+| 4 | 16 | 504,289 | 7.90  | 38  | yes |
+| 5 | 1  | 523,215 | 10.45 | 41  | yes |
+| 6 | 16 | 535,239 | 10.67 | 44  | yes |
+
+Within-arm spread got *worse*, not better: 11.40× for `ack=1`, 9.30× for
+`ack=16`, arms fully overlapping, so the revert stands. But the spread is no
+longer the interesting part.
+
+**No tier in either run has a drop rate under 1%.** This run: 7.90–72.46%. The
+first run: 55.17–95.71%. § 5 of the methodology is unambiguous — *"a throughput
+number with a high drop rate is meaningless and is called out as such; the
+headline number is the highest throughput at <1% drop rate."* By that rule not
+one of these twelve tiers is a throughput measurement, and the A/B compared
+twelve numbers the methodology already said were meaningless.
+
+That is a correction to the retraction above, which attributed the 2.23× to
+run-to-run noise. Noise is real and it is not the whole story: the instrument
+was never measuring throughput at this tier. The variance analysis was the right
+answer to the wrong question.
+
+Note what moves together in the new run — ops/sec rises monotonically with run
+order (45,888 → 535,239) while drop% falls monotonically (72.46 → 7.90), ρ ≈
+−0.77 between them, and host contention falls alongside (other_mean 123 → 44).
+Three quantities trending together over six tiers, with the treatment
+alternating across them. No design that alternates arms inside a monotonic trend
+of that size can resolve a 1.6× effect.
+
+The knob's mechanism reconfirms yet again and still does not matter:
+`ack_scan` 270.03 / 83.47 / 3.35 ms per event at `ack=1` against 13.20 / 0.19 /
+0.19 at `ack=16`.
+
+**Enforced now.** Each tier's verdict line carries
+`drop_pct=.. throughput_valid=yes|no`, true only when host contention was clean
+*and* drops are under 1%. Like the mid-run load rule, the <1% bar was written
+down in § 5 and enforced by nobody.
+
+#### The drop-rate ladder — where this harness can actually measure (2026-09-21)
+
+Raw: `benches/results/raw/2026-09-21-droprate-ladder/`. Three passes, all
+contention-clean except the 100k rung (`other_mean` 39–85 against a 150 bar), so
+these drop rates are the harness's own behaviour.
+
+| clients | n | drop% observed | ops/sec | rungs under 1% |
+|---|---|---|---|---|
+| 10,000 | 1 | 0.00 | 674,811 | 1/1 |
+| 20,000 | 1 | 0.00 | 642,413 | 1/1 |
+| 40,000 | 1 | 0.72 | 608,543 | 1/1 |
+| 45,000 | 1 | 0.00 | 462,667 | 1/1 |
+| 50,000 | 2 | 0.00, 0.12 | 429,301–568,924 | **2/2** |
+| 55,000 | 4 | 0.00, 0.00, 1.10, 1.70 | 445,006–584,211 | 2/4 |
+| 60,000 | 4 | 0.00, 0.01, 3.17, 4.20 | 537,410–584,723 | 2/4 |
+| 80,000 | 1 | 8.05 | 509,899 | 0/1 |
+| 100,000 | 1 | 25.61 | 123,982 | 0/1 |
+
+**The last client count that reproducibly holds <1% drops is 50,000** — worst of
+two passes 0.12%. That is the tier the existing 0.139 s/event baseline was taken
+at, so those numbers stand.
+
+**There is no sharp ceiling above it.** A single pass per rung said 55k passes
+and 60k fails; replicating both four times says 55k is 0.00–1.70% and 60k is
+0.00–4.20%, each landing under 1% exactly half the time, means 0.70 vs 1.84 with
+sd 0.73 vs 1.88. The two rungs cannot be separated from each other or from the
+1% line. The crisp boundary was an artifact of n=1 — the third time in one day
+that a single sample per configuration produced a clean-looking answer that did
+not survive replication.
+
+Two things the ladder settles that the 100k tier could not:
+
+1. **Aggregate throughput does not degrade with client count** across 10k–80k:
+   430k–675k deliveries/sec with no trend, while drops climb from 0 to 8%. What
+   scales badly is delivery completeness, not rate.
+2. **100k is the only rung that collapses** — 123,982 deliveries/sec, the sole
+   rung whose 300 s window expired. Every other rung finished in 7–72 s.
+
+Rungs marked n=1 are single passes and inherit exactly the caveat above; they
+are shape, not measurement. Anything cited from this ladder should come from the
+50k rung or below.
+
+**What would make the 100k tier measurable** is an open question, not a planned
+change: find the largest client count that sustains <1% drops and measure there,
+or establish that the drops are the probe's own 100k in-process client tasks
+rather than the server. Until then the standing instruction is unchanged and now
+better supported — do not cite the 100k tier as a Nostos server limit.
+
+Note also that end-of-run load1 is a poor explanatory variable because it is
+partly *caused* by throughput. Ranking the six tiers by it gives Spearman
+ρ ≈ 0.6 — suggestive at the extremes, not an identification of the confound.
+The confound remains unidentified.
+
+**Still unexplained**, and the retraction does not change it: 100k remains
+~1.2 s/event against 0.139 at 50k. The server side is 22 ms/event, so most of
+the gap is still the loopback socket path and the probe's 100k in-process client
+tasks. Do not cite the 100k tier as a Nostos server limit.
