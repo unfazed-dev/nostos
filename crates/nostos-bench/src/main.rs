@@ -318,22 +318,55 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         tokio::spawn(async move { fanout.run(&mut replicator, extract).await })
     };
 
-    // Wait until all events are received, or timeout.
+    // Wait until delivery stops advancing, or timeout.
+    //
+    // `target` is what a LOSS-FREE run receives. The router is allowed to shed
+    // (a full session channel — the `capacity_sheds` path), and a shed event
+    // never reaches a client, so the moment anything is shed `target` becomes
+    // unreachable and a plain `>= target` loop spins until the deadline. Every
+    // figure derived from `elapsed` is then diluted by however much idle the
+    // window had left.
+    //
+    // Measured 2026-09-22 on a 4-core i7-7700HQ: 99.4M events delivered, the
+    // rest shed, then ~470s of spinning against a target that could not be
+    // reached. Reported 165,712 ops/sec. The same run inside a 120s window
+    // reported 824,882. Both were the ratio of real work to an arbitrary
+    // window, and on a host that never sheds (Apple Silicon at 1k) the bug is
+    // invisible because `target` is always met.
+    //
+    // So finish on QUIESCENCE: the run is over when delivery stops moving,
+    // whether the remainder arrived or was shed. The clock stops at the last
+    // delivery, so the quiet grace never enters `elapsed`.
+    let quiet = Duration::from_secs(10);
     let target = cfg.events.saturating_mul(clients as u64);
     let deadline = Duration::from_secs(cfg.timeout_secs);
     let wait = async {
+        let mut seen = 0_u64;
+        let mut last_progress = Instant::now();
         loop {
-            if sum_received() >= target {
-                break;
+            let now = sum_received();
+            if now >= target {
+                return Instant::now();
+            }
+            if now > seen {
+                seen = now;
+                last_progress = Instant::now();
+            } else if seen > 0 && last_progress.elapsed() >= quiet {
+                // `seen > 0` so a slow ramp-up is never mistaken for the end.
+                return last_progress;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     };
-    // `is_ok()` means the wait loop reached `target` inside the window. On
-    // expiry every figure derived from `elapsed` below describes a truncated
-    // window instead of the workload, so the outcome is carried out of here.
-    let completed = timeout(deadline, wait).await.is_ok();
-    let elapsed = start.elapsed();
+    // Quiescence is a COMPLETE run — the system stopped delivering because it
+    // had nothing left to deliver. Only deadline expiry is invalid, because
+    // there the run was still making progress when the window closed and we
+    // cannot know what the total would have been.
+    let (stopped_at, completed) = match timeout(deadline, wait).await {
+        Ok(at) => (at, true),
+        Err(_) => (Instant::now(), false),
+    };
+    let elapsed = stopped_at.duration_since(start);
 
     // The fan-out task emits events as fast as the router accepts them. At high
     // client counts (10k) with no client ACKs, `FanOutService::run` does a
