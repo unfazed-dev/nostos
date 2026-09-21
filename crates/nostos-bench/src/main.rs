@@ -82,6 +82,16 @@ pub struct BenchConfig {
     pub profile: String,
 
     /// Per-session buffer depth.
+    /// Recycle primary keys over this many distinct rows. `0` (the default,
+    /// and what every historical result in RESULTS.md was measured with)
+    /// gives every event its own new row, so nothing can ever conflate.
+    ///
+    /// Non-zero is how ADR-0045's overflow conflation is measured: a real
+    /// app re-updates the same rows, a monotonic key stream never does, and
+    /// the difference is the entire effect being tested.
+    #[arg(long, env = "BENCH_DISTINCT_KEYS", default_value_t = 0)]
+    pub distinct_keys: u64,
+
     #[arg(long, env = "BENCH_BUFFER", default_value_t = 1024)]
     pub buffer: usize,
 
@@ -241,7 +251,8 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
     let repl_cfg = match cfg.profile.as_str() {
         "large" => FakeReplicatorConfig::large(cfg.events),
         _ => FakeReplicatorConfig::small(cfg.events),
-    };
+    }
+    .recycling_keys(cfg.distinct_keys);
     let mut replicator = FakeReplicator::new(repl_cfg);
 
     // Week-1 extractor: synthetic payload is opaque bytes; match on table only
