@@ -260,17 +260,22 @@ pub struct Config {
     /// slowest acked LSN every N events instead of every event. `1` = the exact
     /// ADR-0009 per-event cadence. `>1` cuts the O(sessions) scan N× (safe: acks
     /// are monotonic, so a cached min never overshoots the safe-to-flush LSN; at
-    /// most N events of extra WAL retention).
+    /// most N events of extra WAL retention) — see the
+    /// `coalesced_ack_progress_lags_but_never_overshoots` test in nostos-application.
     ///
-    /// Default is `16`, not `1`, since 2026-09-21. At 100k sessions the fold
-    /// touches one `acked_lsn` atomic in every live session while 100k client
-    /// ack-readers are writing those same cache lines, so a per-event cadence
-    /// costs over half the throughput: 32,372 → 60,387 → 72,051 ops/sec at
-    /// N = 1 → 16 → 100 (benches/results/RESULTS.md, gated 100k ladder).
-    /// `16` is the knee — 1.87× of the available 2.23× — and bounds the slot
-    /// lag at 16 events, a few KB of WAL. Set `1` to restore the strict
-    /// per-event cadence, or `100` to trade more lag for the last 19%.
-    #[arg(long, env = "NOSTOS_ACK_PROGRESS_INTERVAL", default_value = "16")]
+    /// Stays `1`. A 2026-09-21 change to `16` claimed 2.23× at 100k sessions and
+    /// was reverted the same day: six interleaved tiers measured `ack=1` at
+    /// 39,847 ops/sec mean and `ack=16` at 43,983, with a standard deviation of
+    /// ~70% of the mean in BOTH arms (ack=1 spread 7.99×, ack=16 3.41×). The
+    /// arms overlap completely, so the original 32,372 → 72,051 was run-to-run
+    /// noise, not the knob (benches/results/RESULTS.md).
+    ///
+    /// The knob does work — `ack_scan` drops ~8× (176 → 23 ms/ev) exactly as
+    /// designed. That stage simply is not what bounds throughput at this tier,
+    /// so coalescing buys nothing and costs WAL retention. Raise it only with a
+    /// measurement on a harness that can resolve the difference; this one
+    /// cannot.
+    #[arg(long, env = "NOSTOS_ACK_PROGRESS_INTERVAL", default_value = "1")]
     ack_progress_interval: u32,
 
     /// Per-table push configuration (ADR-0037 §1 amendment + §2, plan 2.4).

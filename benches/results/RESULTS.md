@@ -730,59 +730,81 @@ in-process client tasks sharing the server's runtime — i.e. partly a
 harness-topology artifact. Not yet separated; do not cite the 100k tier as a
 Nostos server limit.
 
-### The fix: ack-scan coalescing — 2.23× at 100k (2026-09-21) — **PROVISIONAL, UNDER REPLICATION**
+### The ack-scan coalescing "2.23×" — RETRACTED, it was noise (2026-09-21)
 
-> **Caveat added the same day, before this was cited anywhere.** A later 100k
-> run at the same `ack_progress_every=16` returned 116 events where the run
-> below returned 207, and reported `ack_scan` at 27.57 ms/ev where the run
-> below reported 11.02 — the same operation at the same cadence, differing
-> 2.5×. That is far outside the ±12% spread claimed below, which was inferred
-> from only two samples of the `ack=1` control. The dose-response may be real
-> and may be an ordering artifact; **six interleaved `ack=1` / `ack=16` tiers
-> are running to establish the actual variance.** Do not cite the 2.23× until
-> that lands. The shipped default change rests on this number and will be
-> reverted if it does not survive.
+A dose-response at 100k read 32,372 → 60,387 → 72,051 ops/sec for
+`ack_progress_every` = 1 → 16 → 100 and was published as a 2.23× win; the
+`nostos-server` default was changed from `1` to `16` on the strength of it. One
+same-config rerun disagreed, so the claim was marked PROVISIONAL and six
+interleaved tiers were run to measure the actual variance. They killed it.
 
-The section above concluded "the fan-out server is 0.08% of the cliff" from the
-isolated `nostos-fanout-walk` numbers. **That conclusion was too strong and is
-corrected here.** One server-side path is a first-order cost, and isolation
-could not see it.
+Six tiers, alternating arms, decode ON, 100k clients / 500 events / 300 s
+window / 2 listeners, every tier gated (`LINUX_DIAG_EXIT=0`, all `rc=0`), raw
+log in `raw/2026-09-21-ack-coalescing-replication/`:
 
-`FanOutService::run` recomputes the slowest acked LSN every
-`ack_progress_every` events. `nostos-server` shipped that at **1** — a per-event
-O(sessions) fold. Dose-response at 100k sessions, one script invocation,
-300 s windows, gated host:
+| tier | arm | ops/sec | `ack_scan` ms/ev | host load1 at end |
+|---|---|---|---|---|
+| 1 | `ack=1` | 57,090 | 175.89 | 16.87 |
+| 2 | `ack=16` | 35,302 | 22.95 | 17.44 |
+| 3 | `ack=1` | 7,146 | 2133.60 | 34.21 |
+| 4 | `ack=16` | 21,936 | 33.44 | 22.64 |
+| 5 | `ack=1` | 55,306 | 193.44 | 15.32 |
+| 6 | `ack=16` | 74,711 | 9.15 | 18.69 |
 
-| `ack_progress_every` | events / 300 s | s/event | ack_scan ms/ev | ops/sec | vs 1 |
+| arm | n | mean | range | spread | sd |
 |---|---|---|---|---|---|
-| 1 | 98 | 3.061 | 348.98 | 32,372 | 1.00× |
-| 16 | 207 | 1.449 | 11.02 | 60,387 | **1.87×** |
-| 100 | 251 | 1.196 | 1.72 | 72,051 | **2.23×** |
+| `ack=1` | 3 | 39,847 | 7,146–57,090 | 7.99× | 28,334 |
+| `ack=16` | 3 | 43,983 | 21,936–74,711 | 3.41× | 27,438 |
 
-Monotonic, and the ack=1 control reproduced across two runs (24,495 / 32,372
-ops/sec), so the effect is far outside the ±12% run-to-run spread.
+Mean ratio 1.10×. **The arms overlap completely** — `ack=16`'s worst tier
+(21,936) is far below `ack=1`'s best (57,090) — and the standard deviation is
+~70% of the mean in both arms. A 2.23× separation cannot be resolved by an
+instrument with 8× within-arm spread. The original three-point ladder measured
+run-to-run drift and attributed it to the knob. **`NOSTOS_ACK_PROGRESS_INTERVAL`
+is back to `1`.**
 
-**Shipped:** `NOSTOS_ACK_PROGRESS_INTERVAL` default 1 → **16** — the knee of the
-curve, 1.87× of the available 2.23×, bounding slot lag at 16 events (a few KB
-of WAL). Guarded by
-`fanout::tests::coalesced_ack_progress_lags_but_never_overshoots`, which pins
-both the coalescing (the fold runs once per N events) and the safety property
-(a flushed LSN is never above the true min at that instant).
+What survives, and it is not nothing: the knob does exactly what it claims to
+the stage it targets. `ack_scan` is cleanly separated by arm across all six
+tiers — 176 / 2134 / 193 ms/ev at `ack=1` against 23 / 33 / 9 at `ack=16`, ~8×
+at comparable load. The O(sessions) fold really does shrink. It simply is not
+what bounds throughput at this tier, so coalescing buys no ops/sec and costs WAL
+retention. `coalesced_ack_progress_lags_but_never_overshoots` stays — it pins a
+correctness property of the knob that holds whatever the default is.
 
-#### Why the isolated measurement said 3% and the truth was 223%
-`nostos-fanout-walk` has no clients, so `record_ack` is never called: the fold
-reads 100k `acked_lsn` atomics that **nothing ever writes** — clean, shared
-cache lines, 0.70 ms. In the spine, 100k client ack-readers write those same
-100k lines continuously, so the per-event fold becomes 100k contended
-cache-line transfers.
+#### The methodological failure, stated plainly
 
-**An isolated microbenchmark measures a component's cost, not its interaction
-cost. A path that is 3% alone was 50%+ in situ.** Neither number was wrong as
-measured; the first was wrong as interpreted.
+Three errors compounded:
 
-Raw: `raw/2026-09-21-ack-coalescing-dose/`.
+1. **n=1 per arm.** Three configurations, one sample each, read as a monotonic
+   dose-response. With this much variance, monotonic-looking triples arise by
+   chance routinely.
+2. **A true mechanism used as proof of an effect.** Cache-line contention on
+   `acked_lsn` is real and `ack_scan` really does drop ~8×. That licenses "the
+   fold got cheaper", not "throughput went up" — a separate claim needing its
+   own evidence. A plausible mechanism made the noise look explained.
+3. **A retraction built on the same weak footing.** The isolated-walk result
+   (0.70 ms fold = 3% of the cliff) was correct and was *withdrawn* in favour
+   of the spine number. The isolated bench was right; it was overruled by a
+   worse measurement because that measurement agreed with a story.
 
-**Still unexplained** after the fix: 100k remains 1.20 s/event against 0.139 at
-50k. The server side is 22 ms/event, so most of the gap is still the loopback
-socket path and the probe's 100k in-process client tasks. Do not cite the 100k
-tier as a Nostos server limit.
+The earlier subsection "Why the isolated measurement said 3% and the truth was
+223%" is retracted with the rest: the truth was 3%.
+
+#### The harness defect this exposed
+
+`fanout-100k-diag.sh` enforces `docs/BENCHMARK-METHODOLOGY.md`'s load gate
+(load1 < 8) **only at tier start**. Tiers 3 and 4 passed the gate and then ran
+into load1 34.21 and 22.64; tier 3's 7,146 is a starved run by any reading. The
+methodology's mid-run validity rule (no non-harness process > 20% CPU on any
+10 s sample) is written down and not enforced by the script. Until it is, this
+tier cannot be used for A/B comparisons — only for order-of-magnitude bounds.
+
+Note also that end-of-run load1 is a poor explanatory variable because it is
+partly *caused* by throughput. Ranking the six tiers by it gives Spearman
+ρ ≈ 0.6 — suggestive at the extremes, not an identification of the confound.
+The confound remains unidentified.
+
+**Still unexplained**, and the retraction does not change it: 100k remains
+~1.2 s/event against 0.139 at 50k. The server side is 22 ms/event, so most of
+the gap is still the loopback socket path and the probe's 100k in-process client
+tasks. Do not cite the 100k tier as a Nostos server limit.

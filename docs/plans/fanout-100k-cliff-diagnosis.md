@@ -702,6 +702,12 @@ at the two things Phase 5 named and this run does not separate: the loopback
 socket path at 200k sockets, and the probe's own 100k in-process client tasks
 competing for the same runtime.
 
+> **RETRACTED 2026-09-21 by Phase 7 below.** Everything in this section rests on
+> a single sample per configuration. Six interleaved tiers later measured the
+> within-arm spread at 7.99×, which swamps the 2.23× claimed here. Preserved
+> verbatim as the record of what was believed and why it was wrong; the numbers
+> in it are real measurements, the inference from them is not sound.
+
 ### Phase 6b — the mutex hypothesis, falsified a second way
 A fourth 100k tier runs with the probe's `ack_interval` arg at 100 instead of
 1. That arg is **not** a client-side ACK cadence — it is
@@ -765,3 +771,67 @@ was already wired into `nostos-server`; only its default was wrong.
 What Phase 5 *does* still establish, unaffected: the fan-out walk plus the
 real wire encode is linear to 100k at 0.222 µs/delivery. The per-event ack
 fold is a separate path in `run()`, not part of that walk.
+
+## Phase 7 — the replication. Phase 6b is retracted; it was noise (2026-09-21)
+
+Phase 6b claimed ack-scan coalescing was worth 2.23× at 100k, withdrew Phase 5's
+falsification on that basis, and shipped `NOSTOS_ACK_PROGRESS_INTERVAL = 16`. One
+same-config rerun disagreed by 1.8×, so six interleaved tiers were run to measure
+the variance instead of assuming it.
+
+Design: `ack=1` and `ack=16` alternating ×3, decode ON, 100k clients, 500 events,
+300 s window, 2 listeners, gated per tier. Interleaving (rather than blocking the
+arms) is what defends against drift and ordering artifacts. Result
+`LINUX_DIAG_EXIT=0`, every tier `rc=0`. Raw log:
+`benches/results/raw/2026-09-21-ack-coalescing-replication/`.
+
+| tier | arm | ops/sec | `ack_scan` ms/ev | events | load1 at end |
+|---|---|---|---|---|---|
+| 1 | `ack=1` | 57,090 | 175.89 | 190 | 16.87 |
+| 2 | `ack=16` | 35,302 | 22.95 | 113 | 17.44 |
+| 3 | `ack=1` | 7,146 | 2133.60 | 23 | 34.21 |
+| 4 | `ack=16` | 21,936 | 33.44 | 69 | 22.64 |
+| 5 | `ack=1` | 55,306 | 193.44 | 174 | 15.32 |
+| 6 | `ack=16` | 74,711 | 9.15 | 231 | 18.69 |
+
+`ack=1`: mean 39,847, range 7,146–57,090, **spread 7.99×**, sd 28,334.
+`ack=16`: mean 43,983, range 21,936–74,711, spread 3.41×, sd 27,438.
+Mean ratio 1.10×, arms **not separated**.
+
+An instrument with 8× within-arm spread cannot resolve a 2.23× effect. The
+original dose-response sampled each configuration once and read drift as signal.
+
+**Phase 5's falsification is reinstated.** The isolated walk was right: the
+`min_acked_lsn` fold is ~0.70 ms/event at 100k, roughly 3% of the cliff, and
+coalescing it buys no throughput. The contention argument in "Why isolation
+understated it by 60×" is a real mechanism — `ack_scan` separates cleanly by arm
+in all six tiers, ~8× — but it explains why the *fold* got cheaper, not why
+throughput would rise. It never did.
+
+Shipped: `NOSTOS_ACK_PROGRESS_INTERVAL` reverted to `1`. The safety test
+`coalesced_ack_progress_lags_but_never_overshoots` stays; it pins a correctness
+property that holds at any cadence.
+
+### The standing lesson, corrected
+
+The lesson recorded after Phase 6b was "an isolated microbenchmark measures a
+component's cost, not its interaction cost." That is true in general and was the
+wrong lesson here — it was used to justify overruling a good measurement with a
+noisy one. The lesson this episode actually teaches:
+
+1. **n=1 per arm is not a measurement.** Before believing any A/B on this
+   harness, measure the within-arm spread first. Here it is ~70% of the mean.
+2. **A mechanism is not an effect.** "Stage X got 8× cheaper" and "throughput
+   rose" are separate claims with separate evidence. A convincing mechanism made
+   unexplained noise feel explained.
+3. **Interleave arms.** Blocked designs confound the arm with time and load.
+4. **The load gate is start-only.** `fanout-100k-diag.sh` checks load1 < 8 at
+   tier start and never again; tiers 3 and 4 passed it and ran at 34.21 and
+   22.64. `docs/BENCHMARK-METHODOLOGY.md`'s mid-run rule is unenforced. Until
+   the script samples during the run, this tier is good for order-of-magnitude
+   bounds only, not A/B.
+
+End-of-run load1 correlates with throughput only moderately (Spearman ρ ≈ 0.6
+over the six tiers) and is partly an *effect* of throughput, so it is not itself
+the identified confound. What is established is the magnitude of the variance,
+not its source.
