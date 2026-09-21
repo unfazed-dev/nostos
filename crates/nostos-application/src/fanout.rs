@@ -36,6 +36,13 @@ use crate::ports::{
 /// plan 2.4); full ⇒ drop-and-count — never block the fan-out loop.
 const PUSH_HINT_CAPACITY: usize = 1024;
 
+/// Below this many matched sessions the walk stays on the caller's task.
+/// Spawning costs ~1 µs per chunk and a delivery costs ~0.5 µs (measured with
+/// `nostos-fanout-walk`, 2026-09-21), so splitting a small matched set is pure
+/// overhead. Only the big fan-outs — the ones the scale ladder cares about —
+/// pay for parallelism.
+const PARALLEL_FANOUT_MIN: usize = 8_192;
+
 /// The result of fanning one event out to all matching sessions.
 ///
 /// Returned per-event so the caller (the server driver, or the benchmark) can
@@ -120,6 +127,11 @@ pub struct FanOutService {
     /// application layer never reads env. Default (empty) = tenant-wide
     /// hints off; the per-account path runs unchanged.
     push_tables: PushTables,
+    /// How many tasks split the per-event delivery walk. `1` = the sequential
+    /// walk (what shipped before 2026-09-21). Default: `available_parallelism`.
+    /// Only consulted above [`PARALLEL_FANOUT_MIN`] matched sessions. See
+    /// [`Self::with_fanout_workers`].
+    fanout_workers: usize,
 }
 
 impl FanOutService {
@@ -135,7 +147,18 @@ impl FanOutService {
             ack_progress_every: 1,
             push: None,
             push_tables: PushTables::default(),
+            fanout_workers: std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get),
         }
+    }
+
+    /// Override the delivery-walk width. `1` restores the sequential walk —
+    /// which is what the bench passes to get a before number out of the same
+    /// binary. Values < 1 clamp to 1.
+    #[must_use]
+    pub fn with_fanout_workers(mut self, workers: usize) -> Self {
+        self.fanout_workers = workers.max(1);
+        self
     }
 
     /// Attach an aggregate metrics handle updated on every fan-out dispatch.
@@ -284,40 +307,41 @@ impl FanOutService {
             }
         }
 
-        let mut delivered = 0u64;
-        let mut dropped = 0u64;
-        let mut faulted = 0u64;
         // One allocation per event; every session gets a refcount bump, not a
         // clone of the two `String`s + `Bytes` in `RowOp`.
         let shared = Arc::new(event.clone());
-        for c in matched {
-            use futures_util::FutureExt as _;
-            let res = std::panic::AssertUnwindSafe(c.sink.deliver(Arc::clone(&shared)))
-                .catch_unwind()
-                .await;
-            match res {
-                Ok(DeliveryDecision::Delivered) => delivered += 1,
-                // Slow-client backpressure: the sink's bounded buffer was full.
-                Ok(DeliveryDecision::Dropped) => dropped += 1,
-                // A delivery panicked. This is a server-side problem, NOT
-                // slow-client backpressure — count it separately from
-                // `dropped` so it is never mis-attributed as a client drop in
-                // the "0% drops" moat figure, and log it (a panic here should
-                // be visible, not silent).
-                Err(payload) => {
-                    faulted += 1;
-                    let msg = payload
-                        .downcast_ref::<&str>()
-                        .map(|s| (*s).to_string())
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "non-string panic payload".to_string());
-                    warn!(
-                        error = %msg,
-                        "delivery panicked; counted as faulted, not dropped"
-                    );
+        // Wide fan-outs split the walk across tasks; small ones stay here
+        // (spawning would cost more than it saves — see PARALLEL_FANOUT_MIN).
+        // Every task is JOINED before this returns, so a sink still receives
+        // events in LSN order: event N+1's walk cannot start until N's is
+        // fully drained. Only the order sessions are visited WITHIN one event
+        // changes, and that was never a guarantee.
+        let (delivered, dropped, faulted) =
+            if matched.len() >= PARALLEL_FANOUT_MIN && self.fanout_workers > 1 {
+                let workers = self.fanout_workers.min(matched.len());
+                let chunk = matched.len().div_ceil(workers);
+                let mut rest = matched;
+                let mut handles = Vec::with_capacity(workers);
+                while !rest.is_empty() {
+                    let tail = rest.split_off(chunk.min(rest.len()));
+                    let part = std::mem::replace(&mut rest, tail);
+                    let ev = Arc::clone(&shared);
+                    handles.push(tokio::spawn(async move { deliver_chunk(part, ev).await }));
                 }
-            }
-        }
+                let mut totals = (0u64, 0u64, 0u64);
+                for h in handles {
+                    // A JoinError means the task was cancelled (runtime
+                    // shutdown) — its deliveries are simply uncounted, which
+                    // the `delivered + dropped + faulted <= matched` contract
+                    // already allows. Panics never reach here: `deliver_chunk`
+                    // catches them per-delivery and counts them as faulted.
+                    let (d, dr, f) = h.await.unwrap_or((0, 0, 0));
+                    totals = (totals.0 + d, totals.1 + dr, totals.2 + f);
+                }
+                totals
+            } else {
+                deliver_chunk(matched, Arc::clone(&shared)).await
+            };
         // ADR-0037 §4 (plan 1.3) — push doorbell enqueue, strictly off the hot
         // loop's critical path. Non-blocking contract copied from
         // `OpLogWriter`: try_send into a bounded channel, drop-on-full with a
@@ -524,6 +548,48 @@ impl FanOutService {
     }
 }
 
+/// Deliver `chunk` sequentially, returning `(delivered, dropped, faulted)`.
+///
+/// Panics inside a sink are isolated with `catch_unwind` and counted as
+/// `faulted`, preserving the JoinSet contract the per-session-task design had.
+async fn deliver_chunk(
+    chunk: Vec<crate::ports::SessionCandidate>,
+    event: Arc<ReplicationEvent>,
+) -> (u64, u64, u64) {
+    let mut delivered = 0u64;
+    let mut dropped = 0u64;
+    let mut faulted = 0u64;
+    for c in chunk {
+        use futures_util::FutureExt as _;
+        let res = std::panic::AssertUnwindSafe(c.sink.deliver(Arc::clone(&event)))
+            .catch_unwind()
+            .await;
+        match res {
+            Ok(DeliveryDecision::Delivered) => delivered += 1,
+            // Slow-client backpressure: the sink's bounded buffer was full.
+            Ok(DeliveryDecision::Dropped) => dropped += 1,
+            // A delivery panicked. This is a server-side problem, NOT
+            // slow-client backpressure — count it separately from `dropped` so
+            // a task panic is never mis-attributed as a client drop in the
+            // "0% drops" moat figure, and log it (a panic here should be
+            // visible, not silent).
+            Err(payload) => {
+                faulted += 1;
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                warn!(
+                    error = %msg,
+                    "delivery panicked; counted as faulted, not dropped"
+                );
+            }
+        }
+    }
+    (delivered, dropped, faulted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +718,64 @@ mod tests {
                 payload: Bytes::from_static(b"x"),
             },
         )
+    }
+
+    /// The parallel walk must be indistinguishable from the sequential one:
+    /// every matched session gets the event EXACTLY once, the counts agree,
+    /// and a panicking sink among thousands is still `faulted`, not `dropped`.
+    /// Sized just over `PARALLEL_FANOUT_MIN` so the chunked path is the one
+    /// under test (below it, `fan_out` stays sequential by design).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_walk_matches_the_sequential_walk() {
+        const N: usize = PARALLEL_FANOUT_MIN + 7; // +7 ⇒ a ragged last chunk
+
+        for workers in [1usize, 4] {
+            let store = make_store();
+            let counters: Vec<Arc<std::sync::atomic::AtomicU64>> = (0..N)
+                .map(|_| Arc::new(std::sync::atomic::AtomicU64::new(0)))
+                .collect();
+            for c in &counters {
+                store
+                    .add(
+                        SyncSession::new(Predicate::all("tasks")),
+                        Arc::new(CountingSink(Arc::clone(c))),
+                    )
+                    .await;
+            }
+            // One panicking sink in the crowd — it must land in `faulted`.
+            store
+                .add(
+                    SyncSession::new(Predicate::all("tasks")),
+                    Arc::new(PanickingSink),
+                )
+                .await;
+
+            let svc = FanOutService::new(store).with_fanout_workers(workers);
+            let outcome = svc.fan_out(&insert_event("tasks"), extract_org).await;
+
+            assert_eq!(outcome.matched, N as u64 + 1, "workers={workers}");
+            assert_eq!(outcome.delivered, N as u64, "workers={workers}");
+            assert_eq!(outcome.faulted, 1, "workers={workers}");
+            assert_eq!(outcome.dropped, 0, "workers={workers}");
+            // Exactly once each — no chunk skipped, no session visited twice.
+            assert!(
+                counters
+                    .iter()
+                    .all(|c| c.load(std::sync::atomic::Ordering::Relaxed) == 1),
+                "every session delivered exactly once (workers={workers})"
+            );
+        }
+    }
+
+    /// Per-session counter — cheaper than `RecordingSink` at 8k sessions.
+    struct CountingSink(Arc<std::sync::atomic::AtomicU64>);
+
+    #[async_trait]
+    impl EventSink for CountingSink {
+        async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            DeliveryDecision::Delivered
+        }
     }
 
     #[tokio::test]
