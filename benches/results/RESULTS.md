@@ -635,3 +635,32 @@ exist.
 
 This changes no headline number: the moat figure is 1k clients, far below the
 parallel floor, and it has not been re-measured.
+
+## Per-stage split — instrument landed, ladder INVALID (2026-09-21)
+
+**No number in this section may be cited.** The 10k/50k/100k stage ladder ran,
+but a hung `fvm global` (429 min CPU at ~95%) and a pinned WebKit tab held the
+host for the whole session: 238 of 238 sampler rows carry a non-harness process
+over 20% CPU, which disqualifies every tier under the mid-run rule in
+docs/BENCHMARK-METHODOLOGY.md. The proof is internal — the 50k tier came in at
+2.43 s/event against the 0.158 s/event the gated run measured for the same
+tier, so it is 15× off and measuring the host.
+
+Raw: `benches/results/raw/2026-09-21-stage-timing-INVALID/`.
+
+What the run does buy is a **hypothesis worth testing first** next time. Within
+each run, the share of the event taken by each stage moves monotonically:
+
+| tier | deliver | match (`candidates_for`) | ack_scan (`min_acked_lsn`) |
+|---|---|---|---|
+| 10k | 98.3% | 1.6% | 0.15% |
+| 50k | 86.6% | 9.5% | 3.8% |
+| 100k | 58.0% | 19.6% | 22.4% |
+
+`candidates_for` and `min_acked_lsn` take the same per-table `tokio::Mutex`;
+together they go from 1.8% to 42.0% of the per-event cost. At 100k,
+`min_acked_lsn` costs 18 µs per session to fold one atomic each — three to four
+orders of magnitude above the load itself, which is lock acquisition, not the
+scan. Suspect: the shared store mutex, fixed by the table-sharded router parked
+in docs/ROADMAP.md. Unproven, and stated here only so the next clean run has a
+first candidate rather than a fourth guess.

@@ -425,15 +425,28 @@ written by `FanOutService` and read directly by `nostos-bench-10k`:
 | `stage_ack_scan_nanos` | `store.min_acked_lsn` — the other O(sessions) scan |
 | `stage_events` | denominator |
 
-Their sum is **busy time on the fan-out task**. Against wall-clock it splits the
-two remaining stories cleanly, and they predict opposite numbers:
+**Read these as wall-time-per-stage, NOT as CPU time.** `Instant::elapsed()`
+spans `.await` points and `deliver_chunk` awaits on every sink, so
+`stage_deliver_nanos` includes any time the fan-out task spent *descheduled
+inside* the walk. The first framing of this instrument claimed `busy/wall → 1`
+would prove the loop is executing rather than starved; that is **wrong** and is
+retracted here. A task that is preempted mid-walk still accumulates the whole
+interval into the stage it was in.
 
-- `busy/wall → 1` — the loop is genuinely the cost, and the stage split says
-  which stage. Would contradict `nostos-fanout-walk`.
-- `busy/wall → 0` — the loop is **starved**: it is ready to run and not being
-  scheduled. The cost is then the ~200k other tasks on the same runtime, and
-  the fix is isolating fan-out from the client swarm (a dedicated runtime, or
-  moving the swarm out of process) — not optimising the walk.
+What the counters do buy, which nothing before them did:
+
+- **Localisation.** They say which of the three O(sessions) stages the
+  per-event time sits in. `match` and `ack_scan` have one await each; `deliver`
+  has N. If `deliver` dominates, the cost is in the walk or in what the walk
+  wakes — and `candidates_for` and `min_acked_lsn` are exonerated.
+- **A comparison point for `nostos-fanout-walk`.** Same stage, same code, with
+  and without the transport + client swarm. The gap between them is precisely
+  the thing the probe removed.
+
+They cannot, on their own, separate "the walk's instructions are slow" from
+"the walk is descheduled between sinks". Doing that needs per-thread CPU time
+(`clock_gettime(CLOCK_THREAD_CPUTIME_ID)`) next to the wall clock — the next
+instrument, not this one.
 
 Deliberately NOT in `MetricsSnapshot`: this is a bench diagnostic, not a
 `/metrics` gauge. Cost is ~6 `Instant::now()` per **event** (not per delivery),
@@ -473,6 +486,73 @@ number taken now would measure the other build. Rerun with:
 benches/scripts/fanout-100k-diag.sh "$PWD" benches/results/stage-diag \
   10000,500,120,1,1 50000,500,180,1,1 100000,500,300,1,2
 grep -E 'stages|SOAK|HOST tier' benches/results/stage-diag/linux-fanout-diag.log
+```
+
+## Phase 4 ladder — RUN, and INVALID. Read the shape, not the numbers (2026-09-21)
+
+All three tiers ran (`benches/results/raw/2026-09-21-stage-timing-INVALID/`).
+**Every one of them fails the mid-run validity rule** and no number below may
+be cited: a hung `fvm global` (429 min CPU at ~95%) and a WebKit tab (~100%)
+were pinned for the whole session, plus intermittent VS Code, Chrome and a
+Flutter-engine build. 238 of 238 host samples carry a non-harness process over
+20% CPU — the same disqualification as "Run 2, attempt 2" above.
+
+The self-check that proves it: this 50k tier ran at **2.43 s/event** against the
+**0.158 s/event** the gated Run 2 measured for the same tier. 15× slower. That
+is a measurement of the host, not of Nostos.
+
+| tier | events in window | match ms/ev | deliver ms/ev | ack_scan ms/ev | s/event |
+|---|---|---|---|---|---|
+| 10k × 500, 120 s, 1L | 500 (all) | 3.53 | 217.31 | 0.34 | 0.22 |
+| 50k × 500, 180 s, 1L | 74 | 231.18 | 2,099.05 | 92.86 | 2.43 |
+| 100k × 500, 300 s, 2L | 37 | 1,589.93 | 4,702.93 | 1,814.36 | 8.11 |
+
+### The shape — a hypothesis, NOT a result
+
+Absolute times are contaminated. The *share* each stage takes of the same
+event, in the same run, under the same conditions, is far more robust — and it
+moves monotonically:
+
+| tier | deliver | match | ack_scan | **match + ack_scan** |
+|---|---|---|---|---|
+| 10k | 98.3% | 1.6% | 0.15% | **1.8%** |
+| 50k | 86.6% | 9.5% | 3.8% | **13.3%** |
+| 100k | 58.0% | 19.6% | 22.4% | **42.0%** |
+
+`match` (`candidates_for`) and `ack_scan` (`min_acked_lsn`) take the **same
+per-table `tokio::Mutex`** in `InMemorySessionStore`, as does `slowest_session`.
+Together they go from noise to nearly half the per-event cost.
+
+And the magnitude is not a scan. `min_acked_lsn` at 100k costs 1,814 ms to fold
+100k atomics — **18 µs per session**, against the ~1–5 ns an atomic load takes.
+Over 99.9% of that is not the scan executing. It is lock acquisition, or being
+descheduled while holding/waiting for it.
+
+There is also a bias working *against* this reading, which strengthens it:
+`deliver` has N await points per event while `match` and `ack_scan` have one
+each, so host contention should inflate `deliver`'s share the most. Its share
+fell anyway.
+
+**Hypothesis: the shared per-table store mutex is the 100k cliff**, and the
+"table-sharded router" parked in docs/ROADMAP.md is the named fix. That also
+retro-explains the 42% idle — a task blocked on a mutex is not burning CPU.
+
+**This is not proven and must not be cited.** What it earns is the right to be
+the *first* hypothesis the next clean run tests, instead of a fourth guess.
+
+### What the rerun needs
+
+1. A quiet host. `kill` the hung `fvm global`; close the WebKit tab. The gate
+   only checks load1 at start — it cannot see a single pinned core.
+2. `proc_cpu_secs()` (landed in `probe_10k.rs`, not yet exercised in a
+   container): `cores_used` near the vCPU count means CPU-saturated;
+   far below means blocked. That single line separates lock-contention from
+   scheduler-starvation, which the wall clocks cannot.
+3. All four tiers in ONE gated session, so cross-tier ratios are comparable.
+
+```bash
+benches/scripts/fanout-100k-diag.sh "$PWD" benches/results/stage-diag \
+  10000,500,120,1,1 50000,500,180,1,1 100000,500,300,1,2
 ```
 
 ## Superseded — the original "Next" (kept for the record)

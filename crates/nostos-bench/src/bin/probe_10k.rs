@@ -229,6 +229,7 @@ async fn run(
     let extract = |_: &nostos_domain::ReplicationEvent, _: &str| Some(ColumnValue::Any);
 
     let start = Instant::now();
+    let cpu_at_start = proc_cpu_secs();
     // Diagnostic: set when `run` returns, i.e. the replicator handed out its
     // whole event budget — distinguishes "loop finished" from "loop stalled".
     let fanout_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -392,6 +393,20 @@ async fn run(
             a_ns as f64 / ev as f64 / 1e6,
             busy / elapsed.max(1e-9),
         );
+        // CPU vs wall: the only thing here that separates "slow" from
+        // "starved". See `proc_cpu_secs`.
+        match (cpu_at_start, proc_cpu_secs()) {
+            (Some(a), Some(b)) => {
+                let cpu = b - a;
+                eprintln!(
+                    "  [diag] cpu proc_cpu={cpu:.2}s wall={elapsed:.2}s cores_used={:.2} \
+                     nproc={}",
+                    cpu / elapsed.max(1e-9),
+                    std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
+                );
+            }
+            _ => eprintln!("  [diag] cpu unavailable (no procfs)"),
+        }
     }
 
     // Diagnostic: did the fan-out loop RETURN (replicator budget exhausted) or
@@ -521,6 +536,37 @@ mod tests {
         assert_eq!(reachable_deliveries(10, 20, 0), 0);
         assert_eq!(reachable_deliveries(10, 5, 20), 0);
     }
+}
+
+/// Process CPU seconds (utime + stime) from `/proc/self/stat`; `None` where
+/// procfs is absent (macOS).
+///
+/// This is the discriminator the per-stage wall clocks cannot supply on their
+/// own. `stage_*_nanos` span `.await`, so a fan-out task that is descheduled
+/// mid-walk still books the interval to its stage — wall time cannot tell
+/// "slow" from "starved". CPU time can, at the process level:
+///
+/// - `cpu / wall` near the vCPU count ⇒ the process is CPU-saturated; the work
+///   is real instructions somewhere, and the fan-out task is losing the
+///   scheduler race against the client/writer tasks it wakes.
+/// - `cpu / wall` far below the vCPU count ⇒ the process is idle or blocked;
+///   the cost is a wait (kernel socket path, lock, syscall), not compute, and
+///   the "42% idle at an 11.4x collapse" observation finally has a home.
+///
+/// ponytail: USER_HZ is hardcoded to 100. It is 100 on every Linux the bench
+/// containers run; reading it properly means `sysconf(_SC_CLK_TCK)`, which
+/// means `libc` + `unsafe`, and `unsafe` is forbidden workspace-wide. Upgrade
+/// path if a platform ever disagrees: parse it out of the auxiliary vector.
+fn proc_cpu_secs() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // `comm` is parenthesised and may itself contain spaces + parens, so the
+    // field split must start after the LAST ')'.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After comm, field 0 is `state`; utime is field 11, stime field 12.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    Some((utime + stime) as f64 / 100.0)
 }
 
 /// Peak resident set size in MiB from `/proc/self/status` (`VmHWM`); `None`
