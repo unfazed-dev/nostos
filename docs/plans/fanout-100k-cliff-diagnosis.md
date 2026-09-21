@@ -330,7 +330,85 @@ slower**. The cliff needs sustained replicator pressure to appear; a short
 budget drains before the loop falls behind. Run 1's "no cliff in 500 events"
 was correct and simply not a long enough run.
 
-## Next
+## Next — CORRECTED 2026-09-21 (later the same day)
+
+**The section below this one used to say the cliff was the single-threaded
+sequential fan-out loop. That attribution is wrong.** It was an inference from
+what the `[sys]` sampler falsified (kernel TCP pressure, swap, CPU saturation),
+not a direct reading of the loop. A direct reading now exists and it does not
+support the conclusion.
+
+`nostos-fanout-walk` (`crates/nostos-bench/src/bin/fanout_walk.rs`) runs the real
+`InMemorySessionStore`, the real `FanOutService`, and real `TokioEventSink`s
+with real drain tasks — with the network, the client swarm and the replicator
+removed. 200 events, macOS 10-core host, release build:
+
+| sessions | per event | per delivery | deciles |
+|---|---|---|---|
+| 10,000 | 4.58 ms | 0.458 µs | flat |
+| 50,000 | 24.24 ms | 0.485 µs | flat |
+| 100,000 | 48.58 ms | 0.486 µs | flat |
+
+**The walk is linear.** 10× the sessions costs 10.6× the time; per-delivery cost
+moves 6% across the whole range. There is no cliff in it. The other O(sessions)
+per-event path, the `min_acked_lsn` scan, is linear too and trivial: 0.072 ms at
+10k, 0.324 ms at 50k, 0.723 ms at 100k.
+
+So at 100k the entire server-side per-event cost this probe can see is ~49 ms,
+against the **3,597 ms/event** the gated container run measured. The fan-out
+loop is **~1.4%** of the observed per-event time. Parallelising it cannot fix a
+22.7× cliff.
+
+### What this leaves
+
+Everything the probe removed:
+
+- the transport writer tasks (per-session wire encode + socket write),
+- the kernel socket path at 100k concurrent connections,
+- the 100k **in-process client tasks** — `nostos-bench-10k` runs the swarm in the
+  same process and runtime as the server, so the fan-out task competes with
+  ~200k other tasks.
+
+That last one also explains the 42% idle and the "contention was flattering the
+numbers" finding without any kernel-level cause: more client tasks, more
+scheduler pressure, everything waits.
+
+**The next experiment is per-stage timing inside the container run** — timestamp
+`next_event` → `fan_out` return → per-sink queue depth → writer drain, sampled,
+at both tiers. Guessing which of the three survivors it is would be repeating
+the mistake this section corrects.
+
+## The walk was parallelised anyway — before/after
+
+Not because it fixes the cliff (it does not) but because 2× is 2× and the walk
+is the one component now measured end to end.
+
+`FanOutService` splits the delivery walk across
+`available_parallelism()` tasks once a matched set exceeds
+`PARALLEL_FANOUT_MIN` (8,192); below that it stays on the caller's task, and
+`with_fanout_workers(1)` restores the old sequential walk. Every chunk task is
+joined before `fan_out` returns, so a sink still sees events in LSN order —
+only the visit order *within* one event changes, which was never a guarantee.
+
+Same probe, `workers=1` vs default (10 cores), real `TokioEventSink`s:
+
+| sessions | sequential | parallel | speedup |
+|---|---|---|---|
+| 10,000 | 4.58 ms/event | 2.03 ms/event | **2.26×** |
+| 50,000 | 24.24 ms/event | 12.14 ms/event | **2.00×** |
+| 100,000 | 48.58 ms/event | 25.47 ms/event | **1.91×** |
+
+2× on 10 cores, not 10×: the drain tasks already occupy the runtime, so the
+producer side is not what was idle. The win is real and it is bounded.
+
+**Counter-case, recorded because it decides the threshold.** With a no-op
+counting sink (79 ns/delivery) the parallel walk is *2× slower* at 100k
+(7.88 → 15.38 ms/event) — chunking, spawning and joining cost more than the
+work. A sink that does nothing is not a deployment shape, but it is why the
+`PARALLEL_FANOUT_MIN` floor and the `workers` knob both exist.
+
+## Superseded — the original "Next" (kept for the record)
+
 
 Shard the fan-out loop across cores. This is the PARKED table-sharded router
 (ROADMAP: parked 2026-08-24 on "full-path single-client evidence shows drain is
