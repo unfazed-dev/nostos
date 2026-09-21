@@ -569,3 +569,193 @@ walk, do not micro-optimise the scan.
 
 Measure before optimize still applies: any fix ships with a re-run of exactly
 this pair of tiers, same gate, same toolchain.
+
+---
+
+## Phase 5 — the in-process ladder. Hypothesis falsified, server-side cost bounded (2026-09-21, fourth pass)
+
+Phase 4's ladder was contaminated and its one surviving lead — "`candidates_for`
++ `min_acked_lsn` share a per-table mutex and their combined share climbs
+1.8% → 13.3% → 42.0%" — is **falsified here**. It was an artifact of host
+contention, not a property of the store.
+
+### The instrument
+`nostos-fanout-walk` gained a `sink=wire` mode. The gap that mattered: the
+probe's drain task was `while rx.recv().await.is_some() {}`, a no-op, while the
+real transport's write loop runs `encode_event` (serde_json) per session per
+event. `TokioEventSink::deliver` only moves an `Arc` into a bounded channel —
+so **the encode was invisible to every walk number ever recorded**. `sink=wire`
+runs the real encode in each session's drain task. A `drained_wall` readout was
+added alongside `wall`, because `wall` stops at the last `try_send`, not when
+the last frame reaches the far end of its channel.
+
+### Result — linear, with the encode included
+macOS, 10 cores, 200 events, buffer 1024, default workers. 2–3 reps per cell,
+spread ≤ 3%.
+
+| sessions | `sink=tokio` µs/delivery | `sink=wire` µs/delivery | ms/event (wire) |
+|---|---|---|---|
+| 10,000 | 0.170, 0.175 | 0.211, 0.189 | 2.1, 1.9 |
+| 50,000 | 0.174, 0.172 | 0.207, 0.219 | 10.3, 11.0 |
+| 100,000 | 0.173, 0.176 | 0.223, 0.220 | 22.3, 22.0 |
+
+Ten-fold scale-up costs **+11%** per delivery. The encode is a flat ~27% tax
+at every tier, not a cliff. `drain_tax` is 1.00–1.01× everywhere: the drains
+keep up with the walk exactly. Decile buckets are flat — no decay within a run.
+
+### `min_acked_lsn` measured directly
+0.072 ms @ 10k → 0.35 ms @ 50k → 0.70 ms @ 100k. Linear, ~7 ns per session.
+At 100k that is **3% of a 22 ms event** — against the 1,814 ms/event Phase 4
+reported. Phase 4's ack_scan figure was measuring scheduler delay, not the
+fold. The `with_ack_progress_every` knob is exposed as the probe's 4th CLI arg
+(`ack_interval`) and — correcting a claim made earlier in this session — it
+**is** wired in `nostos-server` (`--ack-progress-interval` /
+`NOSTOS_ACK_PROGRESS_INTERVAL`, `main.rs:265`). What was wrong was its default:
+`1`, so every production deploy ran the per-event fold. By these isolated
+numbers coalescing looked worth ~3%. Phase 6b shows that reading was wrong.
+
+### What this bounds
+At 100k sessions the entire server side — `candidates_for`, predicate
+evaluation, the parallel walk, dedup, the bounded-channel enqueue, and the real
+wire encode — costs **22 ms per event, or 4.5M deliveries/sec.** Everything
+the 100k spine run spends above that is *not* in the fan-out loop, the store,
+or the codec.
+
+### Remaining suspects, narrowed to two
+1. The loopback socket path at 100k connections (two syscalls + two kernel
+   buffer copies per frame per session, both ends on one box).
+2. The probe's own 100k in-process **client** tasks, which decode and apply
+   every frame while sharing the server's runtime and the container's 10 vCPUs.
+
+Suspect 2 makes the cliff partly a harness-topology artifact rather than a
+server defect. Phase 6 (the gated container ladder with the `cores_used`
+readout) is what separates them.
+
+---
+
+## Phase 6 — the gated ladder, VALID. The fan-out server is 0.08% of the cliff
+
+Same script, same three tiers, quiet host, nothing else of mine running.
+`LINUX_DIAG_EXIT=0`, every tier `rc=0`. The gate did its job: the 100k tier
+waited 60 s for host load1 to fall to 4.98 before starting. Raw log archived at
+`benches/results/raw/2026-09-21-stage-ladder-VALID/`.
+
+Validity, checked rather than assumed: the 50k tier came in at 0.139 s/event
+against the previously gated baseline of 0.158 s/event — the same measurement,
+so this run is anchored. (The INVALID Phase 4 ladder was 15× off that anchor.)
+
+| tier | events in window | s/event | ops/sec | `cores_used` / `nproc` | CPU µs per delivery |
+|---|---|---|---|---|---|
+| 10k × 500, 120 s, 1L | 500 (all) | 0.019 | 534,988 | 8.03 / 10 | 15.0 |
+| 50k × 500, 180 s, 1L | 500 (all) | 0.139 | 355,124 | 8.00 / 10 | 22.2 |
+| 100k × 500, 300 s, 2L | 77 | 3.896 | 24,495 | 7.37 / 10 | **287** |
+
+### The attribution
+Phase 5 measured the entire server side in isolation at **0.222 µs per
+delivery** at 100k (fan-out walk + predicate eval + dedup + bounded-channel
+enqueue + the real wire encode). Against the 287 µs of CPU the spine actually
+burns per delivery at 100k:
+
+| tier | server-side µs/delivery | spine CPU µs/delivery | **server share** |
+|---|---|---|---|
+| 10k | 0.200 | 15.0 | 1.3% |
+| 50k | 0.213 | 22.2 | 1.0% |
+| 100k | 0.222 | 287 | **0.08%** |
+
+**The fan-out server is not the cliff and cannot be.** Fixing anything inside
+`FanOutService` or `InMemorySessionStore` has at most 1% of the problem
+available to it.
+
+### What the stage timers actually said, and why it is consistent
+The in-run stage split (match 1,014 ms/ev, deliver 2,363 ms/ev, ack_scan 499
+ms/ev at 100k) contradicts Phase 5's direct measurements of the same
+operations (1.6 ms, 9 ms, 0.70 ms) by three orders of magnitude. That is not a
+conflict — it is the `Instant::elapsed()`-spans-`.await` flaw, retracted in
+Phase 4, showing its true size. At 100k the fan-out task is descheduled for
+essentially the whole interval it books. **The stage timers measure how long
+the loop waits for a scheduler slot, not how long its work takes.** Read them
+only as a starvation signal.
+
+### Falsified again, with numbers
+- **Memory / swap:** `SwapFree` flat at 1023 MiB every sample, every tier.
+  `MemAvailable` bottoms at 2,122 MiB of 8 GiB. `psi_mem avg60 = 0.00`
+  throughout — zero memory stall.
+- **Kernel TCP pressure:** `PruneCalled`, `TCPRcvCollapsed`,
+  `TCPMemoryPressures`, `TCPZeroWindowDrop`, `TCPBacklogDrop` — **all zero
+  deltas at all three tiers.** `tcp_mem_pages` peaks at 43,008 (168 MiB) with
+  200,026 sockets allocated. Nowhere near a pressure threshold.
+- **CPU saturation:** `cores_used` *falls* 8.03 → 8.00 → 7.37 as throughput
+  collapses, with `psi_cpu avg60` never above 1.69. The box goes **less** busy
+  at the cliff. It is not out of CPU.
+- **The shared store mutex (Phase 4's lead):** falsified in Phase 5 by direct
+  measurement. `min_acked_lsn` is 0.70 ms/event at 100k, 3% of the event.
+
+### Where it is
+CPU per delivery goes 15.0 → 22.2 → **287 µs**: roughly flat from 10k to 50k,
+then 13× between 50k and 100k. Real CPU is being burned — 2,210 s of it over a
+300 s window — on something that is superlinear in session count, is not the
+fan-out loop, is not blocked on memory or the kernel's socket buffers, and
+leaves 2.6 cores idle while it runs.
+
+That shape (real CPU, superlinear, idle cores, starved application task) points
+at the two things Phase 5 named and this run does not separate: the loopback
+socket path at 200k sockets, and the probe's own 100k in-process client tasks
+competing for the same runtime.
+
+### Phase 6b — the mutex hypothesis, falsified a second way
+A fourth 100k tier runs with the probe's `ack_interval` arg at 100 instead of
+1. That arg is **not** a client-side ACK cadence — it is
+`FanOutService::with_ack_progress_every`, so it cuts the O(sessions)
+`min_acked_lsn` fold from once per event to once per 100 events, changing
+nothing else. Phase 5 predicted this was worth ~3% at 100k.
+
+**It was worth 2.23×, and Phase 5's falsification is hereby withdrawn.**
+
+Dose-response, 100k sessions, one script invocation, 300 s windows, gated:
+
+| `ack_progress_every` | events | s/event | ack_scan ms/ev | ops/sec | vs 1 |
+|---|---|---|---|---|---|
+| 1 | 98 | 3.061 | 348.98 | 32,372 | 1.00× |
+| 16 | 207 | 1.449 | 11.02 | 60,387 | **1.87×** |
+| 100 | 251 | 1.196 | 1.72 | 72,051 | **2.23×** |
+
+Monotonic in the knob, and the `ack=1` control reproduced across two runs
+(77 and 98 events; 24,495 and 32,372 ops/sec), so the effect sits far outside
+the ±12% run-to-run spread of this tier.
+
+So Phase 4's hypothesis was **directionally right** — the O(sessions)
+`min_acked_lsn` fold is a first-order cost at 100k — even though its stated
+magnitude (1,814 ms/ev) was a starvation artifact, and its stated mechanism
+(the per-table mutex) is probably wrong too: see below.
+
+### Why isolation understated it by 60×
+`nostos-fanout-walk` calls `min_acked_lsn` **once, at the end, with the walk
+finished and nothing else running**: 0.70 ms of warm, uncontended fold. In the
+spine it runs once per event, interleaved with the fan-out walk over the same
+100k `StoredSession`s, and it touches one `acked_lsn` atomic in every one of
+them. That is a 100k-line sweep that evicts the cache the walk just warmed,
+every event, plus it holds the same per-table `tokio::Mutex` that
+`candidates_for` needs.
+
+**The methodological lesson, recorded because it cost this session two
+reversals: an isolated microbenchmark measures a component's cost, not its
+*interaction* cost. A component that is 3% alone can be 50% in situ.** Neither
+Phase 5's number nor Phase 4's was wrong as measured; both were wrong as
+interpreted.
+
+Note this makes the *mechanism* cache-line contention, not lock contention —
+so Phase 4's "shared per-table mutex" story lands on the right path for the
+wrong reason. Unconfirmed either way; the fix does not depend on which it is.
+
+### Shipped
+`NOSTOS_ACK_PROGRESS_INTERVAL` default **1 → 16** (`nostos-server/src/main.rs`),
+the knee of the curve: 1.87× of the available 2.23×, with slot lag bounded at
+16 events. Guarded by a new test,
+`fanout::tests::coalesced_ack_progress_lags_but_never_overshoots`, pinning both
+the coalescing and the conservatism (a flushed LSN is never above the true min
+at that instant). Correction to a claim made earlier in this session: the knob
+was already wired into `nostos-server`; only its default was wrong.
+
+What Phase 5 *does* still establish, unaffected: the fan-out walk plus the
+real wire encode is linear to 100k at 0.222 µs/delivery. The per-event ack
+fold is a separate path in `run()`, not part of that walk.

@@ -664,3 +664,114 @@ orders of magnitude above the load itself, which is lock acquisition, not the
 scan. Suspect: the shared store mutex, fixed by the table-sharded router parked
 in docs/ROADMAP.md. Unproven, and stated here only so the next clean run has a
 first candidate rather than a fourth guess.
+
+## The 100k cliff, located: the fan-out server is 0.08% of it (2026-09-21, VALID)
+
+Supersedes the section above ("Per-stage split — instrument landed, ladder
+INVALID"). That ladder ran on a host pinned by my own concurrent Android
+builds; this one ran gated and quiet, `LINUX_DIAG_EXIT=0`, all tiers `rc=0`.
+Anchored: the 50k tier reproduces the previously gated baseline (0.139 vs
+0.158 s/event). Raw log: `raw/2026-09-21-stage-ladder-VALID/`.
+
+Eval-only (FakeReplicator loopback), Docker 10 vCPU / 8 GiB, rustc 1.98.
+
+| tier | s/event | ops/sec | cores_used / nproc | CPU µs/delivery |
+|---|---|---|---|---|
+| 10k × 500 | 0.019 | 534,988 | 8.03 / 10 | 15.0 |
+| 50k × 500 | 0.139 | 355,124 | 8.00 / 10 | 22.2 |
+| 100k × 500 | 3.896 | 24,495 | 7.37 / 10 | 287 |
+
+### The server side, measured in isolation
+`nostos-fanout-walk` with the new `sink=wire` mode — the full server path
+(candidates_for, predicate eval, parallel walk, dedup, bounded-channel
+enqueue, **and the real `encode_event`**, which every previous walk number
+omitted because `deliver` only moves an `Arc`). macOS, 10 cores, 200 events,
+2–3 reps per cell, spread ≤ 3%:
+
+| sessions | walk only | walk + real encode | ms/event |
+|---|---|---|---|
+| 10,000 | 0.172 µs/delivery | 0.200 µs | 2.0 |
+| 50,000 | 0.173 µs | 0.213 µs | 10.6 |
+| 100,000 | 0.175 µs | 0.222 µs | 22.2 |
+
+**Linear: +11% per delivery across a 10× scale-up.** `min_acked_lsn` measured
+directly: 0.072 / 0.35 / 0.70 ms — 3% of a 22 ms event at 100k.
+
+### Therefore
+| tier | server µs/delivery | spine CPU µs/delivery | server share |
+|---|---|---|---|
+| 10k | 0.200 | 15.0 | 1.3% |
+| 50k | 0.213 | 22.2 | 1.0% |
+| 100k | 0.222 | 287 | **0.08%** |
+
+At 100k the server side is 22 ms/event — **4.5M deliveries/sec** — while the
+spine takes 3,896 ms/event. No change inside `FanOutService` or
+`InMemorySessionStore` can address more than ~1% of the cliff.
+
+### Retractions
+- The **shared-store-mutex hypothesis** from the INVALID section is
+  **falsified**. `min_acked_lsn` costs 0.70 ms/event at 100k, not the 1,814 ms
+  that ladder reported.
+- The in-run **stage timers** (`stage_match/deliver/ack_scan_nanos`) measure
+  scheduler starvation, not work: `Instant::elapsed()` spans `.await`. They
+  disagree with direct measurement of the same operations by 3 orders of
+  magnitude and must be read only as a starvation signal.
+
+Falsified again, with numbers: swap never moved (`SwapFree` flat 1023 MiB);
+`psi_mem avg60 = 0.00` throughout; `PruneCalled` / `TCPRcvCollapsed` /
+`TCPMemoryPressures` / `TCPZeroWindowDrop` / `TCPBacklogDrop` all **zero
+deltas at all three tiers** with 200,026 sockets allocated; and `cores_used`
+*falls* to 7.37/10 at the cliff, so it is not out of CPU either.
+
+**Still open:** 287 µs of real CPU per delivery at 100k, superlinear, not in
+the fan-out loop, not memory- or kernel-bound, with 2.6 cores idle. Remaining
+suspects are the loopback socket path at 200k sockets and the probe's own 100k
+in-process client tasks sharing the server's runtime — i.e. partly a
+harness-topology artifact. Not yet separated; do not cite the 100k tier as a
+Nostos server limit.
+
+### The fix: ack-scan coalescing — 2.23× at 100k (2026-09-21)
+
+The section above concluded "the fan-out server is 0.08% of the cliff" from the
+isolated `nostos-fanout-walk` numbers. **That conclusion was too strong and is
+corrected here.** One server-side path is a first-order cost, and isolation
+could not see it.
+
+`FanOutService::run` recomputes the slowest acked LSN every
+`ack_progress_every` events. `nostos-server` shipped that at **1** — a per-event
+O(sessions) fold. Dose-response at 100k sessions, one script invocation,
+300 s windows, gated host:
+
+| `ack_progress_every` | events / 300 s | s/event | ack_scan ms/ev | ops/sec | vs 1 |
+|---|---|---|---|---|---|
+| 1 | 98 | 3.061 | 348.98 | 32,372 | 1.00× |
+| 16 | 207 | 1.449 | 11.02 | 60,387 | **1.87×** |
+| 100 | 251 | 1.196 | 1.72 | 72,051 | **2.23×** |
+
+Monotonic, and the ack=1 control reproduced across two runs (24,495 / 32,372
+ops/sec), so the effect is far outside the ±12% run-to-run spread.
+
+**Shipped:** `NOSTOS_ACK_PROGRESS_INTERVAL` default 1 → **16** — the knee of the
+curve, 1.87× of the available 2.23×, bounding slot lag at 16 events (a few KB
+of WAL). Guarded by
+`fanout::tests::coalesced_ack_progress_lags_but_never_overshoots`, which pins
+both the coalescing (the fold runs once per N events) and the safety property
+(a flushed LSN is never above the true min at that instant).
+
+#### Why the isolated measurement said 3% and the truth was 223%
+`nostos-fanout-walk` has no clients, so `record_ack` is never called: the fold
+reads 100k `acked_lsn` atomics that **nothing ever writes** — clean, shared
+cache lines, 0.70 ms. In the spine, 100k client ack-readers write those same
+100k lines continuously, so the per-event fold becomes 100k contended
+cache-line transfers.
+
+**An isolated microbenchmark measures a component's cost, not its interaction
+cost. A path that is 3% alone was 50%+ in situ.** Neither number was wrong as
+measured; the first was wrong as interpreted.
+
+Raw: `raw/2026-09-21-ack-coalescing-dose/`.
+
+**Still unexplained** after the fix: 100k remains 1.20 s/event against 0.139 at
+50k. The server side is 22 ms/event, so most of the gap is still the loopback
+socket path and the probe's 100k in-process client tasks. Do not cite the 100k
+tier as a Nostos server limit.
