@@ -37,7 +37,19 @@ set -u
 
 # Processes that ARE the harness: the Docker Desktop VM doing the fan-out is
 # expected at 400%+, and so is the sampler itself. Everything else is contention.
-HARNESS_RE='^(com\.docker|docker|Docker|qemu|vpnkit|hyperkit|top|sysctl)'
+#
+# `com.apple.Virt` is not optional — Docker Desktop on Apple Silicon runs the VM
+# under Apple's Virtualization.framework, so the process burning 574% during a
+# fan-out is named `com.apple.Virtualization...`, NOT `com.docker.*`. A first cut
+# of this list omitted it and killed a perfectly good tier 26 s in.
+# `kernel_task` is harness too: at 100k sockets it is doing the harness's I/O.
+# The cost is that thermal throttling no longer shows up here — the VM's own
+# `[sys]` PSI and idle counters are where to look for that.
+#
+# Names are matched as PREFIXES because macOS `top` truncates COMMAND to the
+# column width (`com.apple.Virtualization.VirtualMachine` prints as
+# `com.apple.Virtua`), so a pattern longer than ~16 chars can never match.
+HARNESS_RE='^(com\.docker|com\.apple\.Virt|docker|Docker|qemu|vpnkit|hyperkit|kernel_task|top|sysctl)'
 
 # stdin: `top -l 2 -stats cpu,command` output. stdout: "<cpu> <command>" for the
 # busiest NON-harness process in the LAST sample block. The first block must be
@@ -70,7 +82,8 @@ if [ "${1:-}" = "--self-test" ]; then
   got=$(printf '%s\n' \
     'Processes: 700 total, 2 running' '%CPU COMMAND' '99.0 WindowServer' '90.0 com.docker.backe' \
     'PhysMem: 15G used (2622M wired), 148M unused.' 'Load Avg: 2.34, 3.45, 4.56' \
-    '%CPU COMMAND' '412.3 com.docker.backe' '31.7 Code Helper (Ren' '22.0 Brave Browser' '5.3 top' \
+    '%CPU COMMAND' '574.0 com.apple.Virtua' '412.3 com.docker.backe' '25.5 kernel_task' \
+    '31.7 Code Helper (Ren' '22.0 Brave Browser' '5.3 top' \
     | top_worst_other)
   [ "$got" = "31.7 Code Helper (Ren" ] \
     || { echo "self-test FAILED: top_worst_other gave '$got', want '31.7 Code Helper (Ren'"; exit 1; }
