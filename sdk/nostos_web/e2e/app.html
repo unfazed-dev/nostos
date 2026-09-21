@@ -64,6 +64,8 @@
             // the Playwright spec can assert which mode is active.
             storageMode = d.mode;
             log("STORAGE_MODE=" + d.mode);
+            if (d.reason) log("STORAGE_REASON=" + d.reason);
+            if (d.persisted !== undefined) log("STORAGE_PERSISTED=" + d.persisted);
           }
           return;
         }
@@ -93,8 +95,8 @@
       }
 
       window.nostos = {
-        connect: (url, token, table, where_sql) =>
-          request("connect", { url, token, table, where_sql }),
+        connect: (url, token, table, where_sql, allowSecondaryTab) =>
+          request("connect", { url, token, table, where_sql, allowSecondaryTab }),
         // write is fire-and-forget; the async outcome arrives as a writeResult
         // push event (polled via window.nostos.events). It never throws on a
         // closed socket — the Worker's NostosSocket.write captures it offline.

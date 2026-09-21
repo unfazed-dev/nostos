@@ -16,13 +16,19 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "attachments.js",
+    "push.js",
+    "worker_attachment_gateway.js",
+    "worker/",
+    "sw/",
+    "pkg-web/",
     "README.md"
   ],
   "devDependencies": {
     "@playwright/test": "^1.40.0"
   },
   "dependencies": {
-    "@sqlite.org/sqlite-wasm": "3.53.0-build1"
+    "@sqlite.org/sqlite-wasm": "^3.53.4-build1"
   },
   "repository": {
     "type": "git",

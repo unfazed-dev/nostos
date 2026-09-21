@@ -41,12 +41,26 @@ export interface Row {
 export type StorageMode = "durable" | "memory";
 
 /**
+ * Why the Worker is in "memory" mode (null when "durable").
+ * - "secondary-tab" — another tab of this origin holds the opfs-sahpool store
+ *   (one instance per origin). The Worker REFUSES `connect` in this state
+ *   unless the connect frame carries `allowSecondaryTab: true`.
+ * - "opfs-unavailable" — Safari Private Browsing, old browser, OPFS disallowed.
+ */
+export type StorageReason = "secondary-tab" | "opfs-unavailable" | null;
+
+/**
  * Sync status surfaced to the UI. In the browser, the Worker pushes
- * {type:"storage", mode} after init and {type:"status", connected} on connect.
+ * {type:"storage", mode, reason, persisted} after init and
+ * {type:"status", connected} on connect. `persisted` is
+ * `navigator.storage.persisted()` — call `navigator.storage.persist()` on the
+ * main thread before spawning the Worker or the store is evictable.
  */
 export interface SyncStatus {
   connected: boolean;
   storageMode: StorageMode;
+  storageReason?: StorageReason;
+  persisted?: boolean | null;
 }
 
 /**

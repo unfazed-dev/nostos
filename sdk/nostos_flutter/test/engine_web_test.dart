@@ -65,6 +65,41 @@ void main() {
     },
   );
 
+  test(
+    'storage push maps mode+reason to NostosWebStorageMode and persisted',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = _engine(port);
+      final degraded = <bool>[];
+      final sub = eng.webStorageDegraded.listen(degraded.add);
+
+      port.reply({'type': 'storage', 'mode': 'durable', 'persisted': true});
+      await Future<void>.delayed(Duration.zero);
+      expect(eng.storageMode, NostosWebStorageMode.durable);
+      expect(eng.storagePersisted, true);
+
+      // A second tab of the same origin: the Worker lost the OPFS leader lock.
+      port.reply({
+        'type': 'storage',
+        'mode': 'memory',
+        'reason': 'secondary-tab',
+        'persisted': false,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(eng.storageMode, NostosWebStorageMode.secondaryTab);
+
+      // Plain OPFS degrade (Safari Private Browsing) stays `memory`.
+      port.reply({'type': 'storage', 'mode': 'memory', 'reason': 'opfs-unavailable'});
+      await Future<void>.delayed(Duration.zero);
+      expect(eng.storageMode, NostosWebStorageMode.memory);
+      expect(eng.storagePersisted, isNull);
+
+      expect(degraded, [false, true, true]);
+      await sub.cancel();
+      await eng.close();
+    },
+  );
+
   test('write correlates response by id and returns the outbox id', () async {
     final port = FakeNostosWorkerPort();
     final eng = _engine(port);

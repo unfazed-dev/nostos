@@ -72,9 +72,33 @@ let token = null;      // opaque JWT; cleared on signOut
 // Set by initStorage() on boot. Passed to NostosSocket.connect as the 5th arg.
 let dbHandle = null;
 // "durable" (OPFS-backed SQLite-WASM) or "memory" (InMemoryStorage fallback).
-// Reported to the main thread via {type:"storage", mode} so SyncStatus can
-// surface which backend is active.
+// Reported to the main thread via {type:"storage", mode, reason, persisted} so
+// SyncStatus can surface which backend is active and WHY it is not durable.
 let storageMode = "memory";
+// Why storageMode is "memory": "secondary-tab" | "opfs-unavailable" | null.
+let storageReason = null;
+
+// Multi-tab leadership (sqlite.org/wasm persistence.md, "OPFS SyncAccessHandle
+// Pool VFS"): opfs-sahpool is ONE instance per origin — a second tab's
+// installOpfsSAHPoolVfs() throws, and before this guard that tab silently
+// degraded to memory with its OWN live socket: two diverging local states and
+// non-durable writes in tab 2. Web Locks decides leadership first so the loser
+// can refuse `connect` unless the app opts in with `allowSecondaryTab`.
+// ponytail: leader election only. Upgrade path is a SharedWorker serving every
+// tab from one engine (PowerSync's `shared-powersync-<db>` shape).
+const LEADER_LOCK = "cairn:opfs-sahpool";
+async function acquireLeaderLock() {
+  if (typeof navigator === "undefined" || !navigator.locks) {
+    return true; // no Web Locks API → too old for OPFS anyway; let init decide
+  }
+  return new Promise((resolve) => {
+    navigator.locks.request(LEADER_LOCK, { ifAvailable: true }, (lock) => {
+      resolve(lock !== null);
+      // Hold the lock for the Worker's lifetime: never settle this promise.
+      return lock ? new Promise(() => {}) : undefined;
+    });
+  });
+}
 
 // Read the engine's current full-table snapshot and push it to the main thread.
 // Used both for the initial snapshot (on `watch`) and for each change tick
@@ -121,27 +145,45 @@ async function ensureWasm() {
 // is pushed to the main thread so SyncStatus can surface it. NOT a crash — the
 // memory path is the explicit degrade fallback (ADR-0017 follow-up scope 5).
 async function initStorage() {
-  try {
-    const { openNostosDb } = await import("./sqlite_wasm_glue.js");
-    dbHandle = await openNostosDb();
-    storageMode = "durable";
-  } catch (e) {
-    // OPFS unavailable (Safari Private Browsing, old browsers) or sqlite-wasm
-    // package not installed (Node smoke — but the Worker never runs there).
-    // Degrade to InMemoryStorage: dbHandle stays null, NostosSocket.connect
-    // receives null as the 5th arg → NostosEngine::new() (memory path).
-    console.error("[nostos.worker] storage init failed:", (e && e.message) || e);
+  if (!(await acquireLeaderLock())) {
     dbHandle = null;
     storageMode = "memory";
+    storageReason = "secondary-tab";
+    console.warn("[nostos.worker] another tab owns the durable store; memory mode");
+  } else {
+    try {
+      const { openNostosDb } = await import("./sqlite_wasm_glue.js");
+      dbHandle = await openNostosDb();
+      storageMode = "durable";
+    } catch (e) {
+      // OPFS unavailable (Safari Private Browsing, old browsers) or sqlite-wasm
+      // package not installed (Node smoke — but the Worker never runs there).
+      // Degrade to InMemoryStorage: dbHandle stays null, NostosSocket.connect
+      // receives null as the 5th arg → NostosEngine::new() (memory path).
+      console.error("[nostos.worker] storage init failed:", (e && e.message) || e);
+      dbHandle = null;
+      storageMode = "memory";
+      storageReason = "opfs-unavailable";
+    }
   }
-  self.postMessage({ type: "storage", mode: storageMode });
+  // MDN Storage API: origin storage is best-effort (evictable) unless the page
+  // was granted persistence. `persist()` is Window-only — the app calls it on
+  // the main thread; the Worker can only report the outcome.
+  let persisted = null;
+  try {
+    persisted = await navigator.storage.persisted();
+  } catch (_) {
+    /* no StorageManager → leave null */
+  }
+  self.postMessage({ type: "storage", mode: storageMode, reason: storageReason, persisted });
 }
 
 // Eager-init on boot: wasm first (the engine host), then sqlite-wasm (the
 // durable backend). The main thread sees WASM_READY + {type:"storage"} before
 // any command. Wasm init failure is fatal (the spec's WASM_READY poll times
-// out); storage init failure is a graceful degrade (memory mode).
-void ensureWasm()
+// out); storage init failure is a graceful degrade (memory mode). `connect`
+// awaits bootP so it can never race initStorage into a memory engine.
+const bootP = ensureWasm()
   .then(() => initStorage())
   .catch((e) =>
     self.postMessage({ id: 0, error: "wasm-init: " + String((e && e.message) || e) }),
@@ -217,7 +259,17 @@ self.onmessage = async (ev) => {
   try {
     switch (m.cmd) {
       case "connect": {
-        await ensureWasm();
+        await bootP;
+        if (storageReason === "secondary-tab" && !m.allowSecondaryTab) {
+          self.postMessage({
+            id: m.id,
+            error:
+              "secondary-tab: another tab of this origin owns the durable store. " +
+              "Pass {allowSecondaryTab:true} on connect to run this tab in memory " +
+              "(its writes are not durable and its rows may diverge from the leader tab).",
+          });
+          break;
+        }
         table = m.table;
         token = m.token ?? null;
         connParams = { url: m.url, table: m.table, where_sql: m.where_sql ?? null };

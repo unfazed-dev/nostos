@@ -224,6 +224,26 @@ by design:
 So: the browser client is offline-capable AND reload-durable; the Node facade is
 offline-capable within a session only.
 
+### Multi-tab, eviction, bundlers (2026-09-21 — see `docs/research/web-sdk-best-practices-2026-09-21.md`)
+
+- **One durable tab per origin.** `opfs-sahpool` installs once per origin
+  (sqlite.org persistence doc). The Worker takes a Web Lock (`cairn:opfs-sahpool`)
+  before opening OPFS; a second tab loses the lock, reports
+  `{type:"storage", mode:"memory", reason:"secondary-tab"}` and **refuses
+  `connect`** unless the frame carries `allowSecondaryTab: true` (then that tab
+  runs in memory with its own socket — non-durable, may diverge). Upgrade path:
+  a `SharedWorker` serving all tabs from one engine (PowerSync's shape).
+- **Ask for persistent storage.** Origin storage is best-effort and evictable
+  (MDN). Call `await navigator.storage.persist()` on the main thread before
+  spawning the Worker; the storage push carries `persisted` so the UI can warn.
+- **Guard pending writes on close** (PowerSync recipe): when `deadLetters().pending > 0`
+  add a `beforeunload` listener that calls `preventDefault()`. Do it always when
+  `storageMode === "memory"` — those writes die with the tab.
+- **Bundlers.** Construct the Worker so Vite/webpack can see it:
+  `new Worker(new URL("@nostos-sync/web/worker/nostos.worker.js", import.meta.url), { type: "module" })`.
+  `worker/`, `sw/` and `pkg-web/` ship in the npm `files` list; run
+  `npm run build:web` before packing.
+
 **A third gap is Node-only.** `NostosSocket.connect()` is wired to
 `web-sys::WebSocket` + `Window::localStorage` (default of the injectable
 `setKvStore` seam), which Node lacks, so the

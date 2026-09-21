@@ -50,8 +50,10 @@ export 'worker_port.dart' show NostosWorkerPort, FakeNostosWorkerPort;
 
 /// The storage backend the Worker reported active (ADR-0033). Surfaced on
 /// `SyncStatus` so the UI can show "degraded" when OPFS is unavailable
-/// (Safari Private Browsing) and the Worker fell back to memory.
-enum NostosWebStorageMode { durable, memory, unknown }
+/// (Safari Private Browsing) and the Worker fell back to memory, or when
+/// another tab of the same origin already owns the OPFS store
+/// ([secondaryTab] — the Worker refuses `connect` in that state).
+enum NostosWebStorageMode { durable, memory, secondaryTab, unknown }
 
 /// Flutter-web [NostosEngine] over a nostos Worker ([NostosWorkerPort]).
 class WebNostosEngine implements NostosEngine {
@@ -122,9 +124,15 @@ class WebNostosEngine implements NostosEngine {
   Stream<NostosWebStorageMode> get storageModeStream =>
       _storageController.stream;
 
+  /// Whether the browser granted this origin persistent (non-evictable)
+  /// storage, as last reported by the Worker. `null` until the storage push
+  /// arrives or when the browser has no StorageManager.
+  bool? get storagePersisted => _storagePersisted;
+  bool? _storagePersisted;
+
   @override
   Stream<bool> get webStorageDegraded =>
-      storageModeStream.map((m) => m == NostosWebStorageMode.memory);
+      storageModeStream.map((m) => m != NostosWebStorageMode.durable);
 
   // --------------------------------------------------------------------------
   // NostosEngine contract
@@ -381,10 +389,14 @@ class WebNostosEngine implements NostosEngine {
             lastError: msg['lastError'] as String?,
           ));
         case 'storage':
-          final mode = msg['mode'] == 'durable'
-              ? NostosWebStorageMode.durable
-              : NostosWebStorageMode.memory;
+          final mode = switch (msg['mode']) {
+            'durable' => NostosWebStorageMode.durable,
+            _ when msg['reason'] == 'secondary-tab' =>
+              NostosWebStorageMode.secondaryTab,
+            _ => NostosWebStorageMode.memory,
+          };
           _storageMode = mode;
+          _storagePersisted = msg['persisted'] as bool?;
           _storageController.add(mode);
       }
       return;
