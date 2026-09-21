@@ -51,8 +51,9 @@ export 'worker_port.dart' show NostosWorkerPort, FakeNostosWorkerPort;
 /// The storage backend the Worker reported active (ADR-0033). Surfaced on
 /// `SyncStatus` so the UI can show "degraded" when OPFS is unavailable
 /// (Safari Private Browsing) and the Worker fell back to memory, or when
-/// another tab of the same origin already owns the OPFS store
-/// ([secondaryTab] — the Worker refuses `connect` in that state).
+/// another tab of the same origin already owns the OPFS store and this tab
+/// opted out of proxying to it ([secondaryTab]; the default follower path
+/// reports the leader's mode with reason "follower" instead).
 enum NostosWebStorageMode { durable, memory, secondaryTab, unknown }
 
 /// Flutter-web [NostosEngine] over a nostos Worker ([NostosWorkerPort]).

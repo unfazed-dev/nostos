@@ -226,13 +226,20 @@ offline-capable within a session only.
 
 ### Multi-tab, eviction, bundlers (2026-09-21 — see `docs/research/web-sdk-best-practices-2026-09-21.md`)
 
-- **One durable tab per origin.** `opfs-sahpool` installs once per origin
-  (sqlite.org persistence doc). The Worker takes a Web Lock (`cairn:opfs-sahpool`)
-  before opening OPFS; a second tab loses the lock, reports
-  `{type:"storage", mode:"memory", reason:"secondary-tab"}` and **refuses
-  `connect`** unless the frame carries `allowSecondaryTab: true` (then that tab
-  runs in memory with its own socket — non-durable, may diverge). Upgrade path:
-  a `SharedWorker` serving all tabs from one engine (PowerSync's shape).
+- **One durable engine per origin, every tab uses it.** `opfs-sahpool` installs
+  once per origin (sqlite.org persistence doc). The Worker takes a Web Lock
+  (`cairn:opfs-sahpool`) before opening OPFS; a tab that loses the lock becomes
+  a **follower**: it proxies every command over a `BroadcastChannel` to the
+  leader tab's Worker (responses by id, pushes mirrored) and reports the
+  leader's mode with `reason:"follower"`. A later `connect` joins the live
+  session (first tab's url/table win); `close`/`signOut` from any tab end it
+  for all. When the leader tab closes, the Web Lock queue promotes a follower,
+  which opens OPFS and replays its own `connect` (in-flight requests at that
+  moment are lost). Not a `SharedWorker`: Chromium exposes no `Worker` in
+  `SharedWorkerGlobalScope` and opfs-sahpool needs a dedicated worker's sync
+  access handle. Opt a tab OUT with `allowSecondaryTab: true` on connect →
+  standalone memory engine, own socket, `reason:"secondary-tab"`. Pinned by
+  `e2e/secondary_tab.spec.cjs`.
 - **Ask for persistent storage.** Origin storage is best-effort and evictable
   (MDN). Call `await navigator.storage.persist()` on the main thread before
   spawning the Worker; the storage push carries `persisted` so the UI can warn.

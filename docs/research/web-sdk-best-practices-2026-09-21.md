@@ -43,10 +43,14 @@ Recommended, in ponytail order:
    `navigator.locks.request("nostos:" + dbName, { ifAvailable: true }, …)`. Loser
    reports `storage: "memory-secondary-tab"` and the facade throws unless the caller
    passed `allowSecondaryTab: true`. Failing loudly beats diverging silently.
-2. **Next:** `SharedWorker` variant of `nostos.worker.js` (same file, `onconnect`
-   fans ports out). Chrome/Firefox/Safari ≥ 16 support SharedWorker; Android Chrome
-   does not, so keep the dedicated-Worker path as fallback. Nostos's Worker already
-   multiplexes tables and watches per port, so this is wiring, not engine work.
+2. **Next — DONE 2026-09-21, but NOT as a SharedWorker.** Tried: Chromium exposes
+   no `Worker` constructor in `SharedWorkerGlobalScope`, and opfs-sahpool needs a
+   dedicated worker's `FileSystemSyncAccessHandle`, so a SharedWorker can neither
+   host the engine nor spawn the host. Shipped instead: the losing tab's dedicated
+   Worker proxies every command to the leader's Worker over a `BroadcastChannel`
+   (responses by id, pushes mirrored, `reason:"follower"`), and queues on the Web
+   Lock so it is promoted (opens OPFS, replays its own `connect`) when the leader
+   closes. `allowSecondaryTab: true` keeps the standalone memory engine.
 3. **Escape hatch:** document PowerSync's recipe — a per-tab unique DB name when
    multi-tab sharing is not wanted.
 
