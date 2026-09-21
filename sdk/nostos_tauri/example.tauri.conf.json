@@ -7,6 +7,8 @@
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "token": null,
       "tables": ["tasks", "notes"],
+      // Optional ADR-0012 safe-SQL predicate per table; keys must be in "tables".
+      "whereSql": { "notes": "owner_id = 'u1'" },
       "dbPath": "cairn.db",
       "orSetTables": ["tasks"],
       "counterTables": ["tasks"]

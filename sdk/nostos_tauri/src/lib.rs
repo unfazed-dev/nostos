@@ -39,7 +39,10 @@
 //!   `extra_tables` (ADR-0022, one socket, one checkpoint, server cap 32).
 //!   Every table-taking command checks membership in that set. `subscribe`'s
 //!   `table` arg is API parity only: the run loop is per session, not per
-//!   table. Per-table `where_sql` / `resume_lsn` are still not exposed.
+//!   table. Per-table `where_sql` comes from `plugins.cairn.whereSql`
+//!   (`{table: predicate}`, ADR-0012 safe-SQL). There is no per-table
+//!   `resume_lsn` by design: the LSN is stream-global — one socket, one
+//!   checkpoint per session (ADR-0022).
 //! - **Permissions**: only the six default command permissions are listed in
 //!   `permissions/default.toml`. A shipped plugin would also publish scoped
 //!   permission sets per table.
@@ -57,6 +60,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,6 +114,13 @@ pub struct NostosPluginConfig {
     /// Single-table shorthand (the v1 shape). Kept so existing
     /// `tauri.conf.json` blocks keep working; prefer `tables`.
     pub table: Option<String>,
+    /// Optional per-table safe-SQL predicates (ADR-0012), keyed by table
+    /// name: `"whereSql": {"tasks": "owner_id = 'u1'"}`. Every key MUST be in
+    /// the session table set — `connect` refuses otherwise. Tables without an
+    /// entry sync unfiltered. The server parses the predicate; a bad one
+    /// closes the socket with `invalid where_sql:` (ADR-0012), it never widens
+    /// scope past the tenant.
+    pub where_sql: Option<HashMap<String, String>>,
     /// Default on-device SQLite path. Relative paths open relative to the
     /// process working directory — desktop apps should pass an absolute path
     /// (e.g. from `app.path().app_data_dir()`) either here or per `connect`.
@@ -375,10 +386,23 @@ impl NostosState {
         let token = token.or_else(|| self.config.token.clone());
         let db_path = db_path.unwrap_or_else(|| self.config.db_path());
         let tables = self.config.tables();
+        let where_sql = self.config.where_sql.clone().unwrap_or_default();
+        if let Some(stray) = where_sql.keys().find(|k| !tables.contains(k)) {
+            return Err(format!(
+                "plugins.cairn.whereSql names table {stray:?} which is not in the session tables {tables:?}"
+            ));
+        }
         let storage = SqliteStorage::open(&db_path).map_err(|e| e.to_string())?;
         let config = SyncClientConfig {
             table: tables[0].clone(),
-            extra_tables: tables[1..].iter().map(TableSub::new).collect(),
+            where_sql: where_sql.get(&tables[0]).cloned(),
+            extra_tables: tables[1..]
+                .iter()
+                .map(|t| TableSub {
+                    name: t.clone(),
+                    where_sql: where_sql.get(t).cloned(),
+                })
+                .collect(),
             token: token.clone(),
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
             or_set_tables: self
@@ -1313,6 +1337,40 @@ mod tests {
         // store reports 0.
         let lsn = state.checkpoint().await.expect("checkpoint");
         assert_eq!(lsn, 0, "fresh store should report Lsn(0)");
+    }
+
+    /// `plugins.cairn.whereSql` deserializes camelCase and a key outside the
+    /// table set is refused at `connect` (not silently dropped).
+    #[tokio::test]
+    async fn where_sql_config_is_validated_against_tables() {
+        let cfg: NostosPluginConfig = serde_json::from_str(
+            r#"{"tables":["tasks","notes"],"whereSql":{"notes":"owner_id = 'u1'","ghost":"1=1"}}"#,
+        )
+        .expect("config parses");
+        assert_eq!(cfg.where_sql.as_ref().unwrap()["notes"], "owner_id = 'u1'");
+        let err = NostosState::with_config(cfg)
+            .connect(
+                Some("ws://localhost:0".into()),
+                None,
+                Some(":memory:".into()),
+            )
+            .await
+            .expect_err("stray whereSql key must be refused");
+        assert!(err.contains("\"ghost\""), "got: {err}");
+
+        // A predicate on a listed table connects fine.
+        let cfg: NostosPluginConfig = serde_json::from_str(
+            r#"{"tables":["tasks","notes"],"whereSql":{"notes":"owner_id = 'u1'"}}"#,
+        )
+        .expect("config parses");
+        NostosState::with_config(cfg)
+            .connect(
+                Some("ws://localhost:0".into()),
+                None,
+                Some(":memory:".into()),
+            )
+            .await
+            .expect("connect with a valid whereSql");
     }
 
     /// `write()` before `connect()` surfaces a clear error rather than

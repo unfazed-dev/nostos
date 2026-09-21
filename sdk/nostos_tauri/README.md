@@ -197,8 +197,10 @@ on the multi-table shape with no webview. Click-level WebDriver (WebdriverIO
 - **Table set is fixed at `connect`** — `plugins.cairn.tables` (first =
   primary, rest = `extra_tables`, ADR-0022, server cap 32; `table` is the
   one-entry shorthand). Table-taking commands refuse tables outside the set.
-  No per-table `where_sql`/`resume_lsn` yet; `subscribe` is one run loop per
-  session, `watch` is one pump per table.
+  Per-table `where_sql` via `plugins.cairn.whereSql` (`{table: predicate}`,
+  keys must be in the set). No per-table `resume_lsn` by design — the LSN is
+  stream-global (one socket, one checkpoint, ADR-0022). `subscribe` is one run
+  loop per session, `watch` is one pump per table.
 - **No published crate / npm package.** A11; `@nostos-sync/tauri` is consumed as a
   path dependency.
 - **Push REST has no retry.** A failed POST/DELETE surfaces once (the server
