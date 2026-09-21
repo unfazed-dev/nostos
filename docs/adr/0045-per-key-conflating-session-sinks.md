@@ -190,3 +190,69 @@ discovered.
 that sends a frame shape older clients have never seen, and with conflation held back the
 flip would change wire behaviour for existing deployments while fixing nothing they are
 not already living with. It belongs with the hybrid, as one wire-compat decision.
+
+## Attempt 2 (2026-09-22) — the redesign works; the *metric* is what blocks it
+
+Rebuilt per the plan above and it holds up. `mpsc::try_send` stays the fast path verbatim;
+`Err(Full)` **is** the backlog signal, so the success path asks nothing — no flag, no lock,
+no bookkeeping. Only the full branch folds the event into a conflating overflow map
+(`BTreeMap<lsn, event>` + `HashMap<RowKey, lsn>`), and an event is shed only once that map
+holds `capacity` distinct rows. A test asserts the overflow is never touched below the
+channel cap.
+
+The fast-path/slow-path literature names the trap attempt 1 fell into exactly: the overhead
+comes from *"instrumentation on the fast path that manipulates the metadata the fallback
+path uses."* Attempt 2 has none.
+
+**Throughput A/B, 1k clients × 100k events, 3 runs per arm, same machine and session:**
+
+| arm | ops/sec (3 runs) | median |
+|---|---|---|
+| baseline | 2,438,756 / 2,520,979 / 2,682,368 | 2,520,979 |
+| overflow conflation | 2,531,945 / 2,660,070 / 2,863,173 | 2,660,070 |
+
+0.00% drops and the full 100,000,000 deliveries in both arms. The ranges overlap, so the
+honest reading is **no measurable change** — not a 5.5% speedup.
+
+### The bug the benchmark caught and the unit tests did not
+
+First build of attempt 2 measured 111k ops/sec at **86.6% drops**. Cause: `recv()` awaited a
+message from the channel and then *discarded it* before re-consulting the overflow. Every
+unit test happened to find its message via `try_recv` and never parked, so all of them
+passed. Fixed, with a regression test that forces the park. Worth remembering: the six tests
+pinning the conflation invariants were all green while the sink was losing 86% of its
+traffic.
+
+### Why the benefit still cannot be scored — and this is the blocker
+
+`nostos-bench` computes `drop_rate = 1 - delivered / (events × clients)` where `delivered` is
+the **client-side frame count** (`crates/nostos-bench/src/main.rs`). Conflation's entire
+purpose is to send *fewer frames for the same state*. So the harness scores every supersede
+as a loss: the metric counts precisely the thing this ADR is designed to reduce.
+
+Two further harness facts found on the way, both worth keeping:
+
+1. **`nostos-bench` hardcoded `distinct_keys: 0`** — every event gets a brand-new row, so
+   there is *zero* conflation opportunity by construction. A `--distinct-keys` flag was added
+   (default `0`, so every historical number in RESULTS.md is unaffected). The server already
+   had `NOSTOS_FAKE_KEYS`, defaulting to 50; the bench never did.
+2. **The 10k rung on this host is not a measurement regime.** Every run reported
+   `elapsed_secs: 120.00` — the timeout, exactly — so its "drops" are window expiry, not sink
+   sheds. Baseline at `--distinct-keys 200` came back **27.11%** then **1.19%** on two runs,
+   a 23× swing. Per § 5 neither arm's numbers there mean anything.
+
+**Status: held on branch `adr-0045-conflating-sink` (`1cb91a9`), not merged.** Not because it
+regresses — it does not — but because merging it would make `drop%` silently wrong the moment
+conflation engages, and that number is the project's honesty surface, quoted in README and
+RESULTS.md. Shipping a change that corrupts the metric used to police changes is the exact
+failure this repo keeps finding and fixing.
+
+### The one remaining step
+
+`DeliveryDecision` needs a third variant. The decision above already says "superseded is a
+new counter, not `dropped`" — attempt 2 under-implemented it as a counter local to
+`TokioEventSink`, which the fan-out and the bench cannot see. Promoting it to
+`DeliveryDecision::Superseded`, threading it through `deliver_chunk` → `FanOutStats` →
+`Metrics`, and having the bench compute `drop = attempted - delivered - superseded` makes the
+benefit measurable and the metric honest again. That touches an application-layer port enum,
+so it is a deliberate change, not a patch.
