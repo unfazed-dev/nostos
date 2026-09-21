@@ -711,6 +711,12 @@ nothing else. Phase 5 predicted this was worth ~3% at 100k.
 
 **It was worth 2.23×, and Phase 5's falsification is hereby withdrawn.**
 
+> **PROVISIONAL.** A later run at the same `ack=16` returned 116 events vs the
+> 207 below, with `ack_scan` 27.57 vs 11.02 ms/ev — same operation, same
+> cadence. The run-to-run variance of this tier is not yet established and the
+> dose curve below may be an ordering artifact. Six interleaved tiers are
+> running. Do not cite until then.
+
 Dose-response, 100k sessions, one script invocation, 300 s windows, gated:
 
 | `ack_progress_every` | events | s/event | ack_scan ms/ev | ops/sec | vs 1 |

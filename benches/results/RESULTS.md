@@ -730,7 +730,18 @@ in-process client tasks sharing the server's runtime — i.e. partly a
 harness-topology artifact. Not yet separated; do not cite the 100k tier as a
 Nostos server limit.
 
-### The fix: ack-scan coalescing — 2.23× at 100k (2026-09-21)
+### The fix: ack-scan coalescing — 2.23× at 100k (2026-09-21) — **PROVISIONAL, UNDER REPLICATION**
+
+> **Caveat added the same day, before this was cited anywhere.** A later 100k
+> run at the same `ack_progress_every=16` returned 116 events where the run
+> below returned 207, and reported `ack_scan` at 27.57 ms/ev where the run
+> below reported 11.02 — the same operation at the same cadence, differing
+> 2.5×. That is far outside the ±12% spread claimed below, which was inferred
+> from only two samples of the `ack=1` control. The dose-response may be real
+> and may be an ordering artifact; **six interleaved `ack=1` / `ack=16` tiers
+> are running to establish the actual variance.** Do not cite the 2.23× until
+> that lands. The shipped default change rests on this number and will be
+> reverted if it does not survive.
 
 The section above concluded "the fan-out server is 0.08% of the cliff" from the
 isolated `nostos-fanout-walk` numbers. **That conclusion was too strong and is

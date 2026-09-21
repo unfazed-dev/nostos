@@ -159,6 +159,11 @@ async fn run(
         });
     }
     eprintln!("  [diag] listeners: {}", urls.join(" "));
+    // Prices the client swarm's own decode — see `count_frames_cheap`.
+    let skip_decode = std::env::var("NOSTOS_PROBE_SKIP_DECODE").is_ok_and(|v| v == "1");
+    if skip_decode {
+        eprintln!("  [diag] CLIENT DECODE DISABLED (frame counting only) — harness-cost probe");
+    }
 
     // Sharded per-client counters (same pattern as the main harness — avoids a
     // single contended cache line at 10k concurrent incrementers).
@@ -170,7 +175,7 @@ async fn run(
         let c = Arc::clone(cnt);
         let u = urls[i % urls.len()].clone();
         let cs = Arc::clone(&conn);
-        handles.push(tokio::spawn(client_task(u, c, cs)));
+        handles.push(tokio::spawn(client_task(u, c, cs, skip_decode)));
     }
 
     // Wait for a subscribe quorum (every client subscribed or given up). The
@@ -605,7 +610,27 @@ struct ConnStats {
 
 /// One client: connect, subscribe, count received FRAMES (not messages — the
 /// server may batch N frames per WS message under backlog).
-async fn client_task(url: String, received: Arc<AtomicU64>, stats: Arc<ConnStats>) {
+/// Count frames without parsing them.
+///
+/// Every `WireFrame` serializes `"lsn":` exactly once, `payload` is hex so it
+/// cannot contain the needle, and the bench's `table`/`pk` are `tasks` and a
+/// decimal integer — so this is exact for this harness.
+///
+/// ponytail: substring count, not a parser. It exists to price the probe's OWN
+/// client-side JSON decode, which in production runs on the user's device and
+/// not on the server's CPU — including it in a server throughput number is a
+/// harness artifact. Upgrade path: if a frame ever nests an `lsn`, count at
+/// brace-depth 1 instead.
+fn count_frames_cheap(data: &[u8]) -> u64 {
+    data.windows(6).filter(|w| *w == b"\"lsn\":").count() as u64
+}
+
+async fn client_task(
+    url: String,
+    received: Arc<AtomicU64>,
+    stats: Arc<ConnStats>,
+    skip_decode: bool,
+) {
     let mut ws = None;
     let mut last_err = String::new();
     for _ in 0..50 {
@@ -644,7 +669,11 @@ async fn client_task(url: String, received: Arc<AtomicU64>, stats: Arc<ConnStats
             Message::Text(s) => s.into_bytes(),
             _ => continue,
         };
-        let n = wire::decode_frames(&bytes).len() as u64;
+        let n = if skip_decode {
+            count_frames_cheap(&bytes)
+        } else {
+            wire::decode_frames(&bytes).len() as u64
+        };
         if n > 0 {
             received.fetch_add(n, Ordering::Relaxed);
         }

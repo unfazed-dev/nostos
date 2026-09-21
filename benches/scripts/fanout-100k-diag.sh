@@ -41,6 +41,7 @@ in_container() { # args: inner-script args...
     -e RUSTUP_TOOLCHAIN=1.98.0 \
     -e CARGO_INCREMENTAL=0 \
     -e TAG=fanout-diag \
+    -e NOSTOS_PROBE_SKIP_DECODE="${NOSTOS_PROBE_SKIP_DECODE:-}" \
     --ulimit nofile=1048576:1048576 \
     --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     --sysctl net.ipv4.tcp_tw_reuse=1 \
