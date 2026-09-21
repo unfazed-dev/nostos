@@ -268,3 +268,23 @@ a published version can never be replaced, only superseded or deprecated.
 So the remaining gap is not code. It is: a Portal account, a GPG key whose
 public half is on a keyserver, and the decision to publish under
 `io.github.unfazed-dev` versus waiting for a domain.
+
+## Naming + domain — resolved into a decision doc (2026-09-21)
+
+See `docs/plans/naming-and-domain-2026-09-21.md`. Summary of what changed:
+
+- **No domain is needed to launch.** The Maven groupId gate is closed by
+  `io.github.<user>` (Portal GitHub signup, no DNS). A Cloudflare Worker does
+  NOT substitute — Central verifies a TXT record on a domain you own, and
+  `*.workers.dev` is Cloudflare's, not yours. A domain is a Nostos Cloud +
+  marketing concern only, and Cloud is not a launch deliverable.
+- **Registry state verified 2026-09-21, not remembered:** `nostos`,
+  `nostos-core` and `nostos-cli` are all TAKEN on crates.io (`nostos` squatted at
+  v0.0.0, so it is gone permanently); `nostos-server` is free; npm `nostos` is
+  taken. Every `qairn*` name is free on crates.io, npm (bare and scope),
+  pub.dev and as a Maven artifactId.
+- **Recommendation: rename to `qairn`,** because `cargo install nostos-cli`
+  already installs a stranger's crate and the CLI is the primary UX. Cheapest
+  now — zero published artifacts, zero users, one unpushed tag. Operator call;
+  the counter-argument (the nostos/trail-marker metaphor carries the launch
+  post) is a brand judgement, recorded in the decision doc.
