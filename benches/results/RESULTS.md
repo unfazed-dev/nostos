@@ -813,6 +813,59 @@ contended tier still announced a clean run. The six tiers above predate the fix
 and stay order-of-magnitude only; they cannot be retrofitted with a verdict
 because the host samples were never taken.
 
+#### The replication, re-run on the fixed harness — and the deeper problem (2026-09-21)
+
+Six interleaved tiers again, 100k × 500 × 300 s, this time with the mid-run gate
+enforced (`benches/results/raw/2026-09-21-ack-coalescing-replication-v2/`).
+`LINUX_DIAG_EXIT=0`, all six `rc=0`, five of six `valid=yes` on host contention.
+
+| # | ack | ops/sec | drop% | other_mean | contention valid |
+|---|---|---|---|---|---|
+| 1 | 1  | 45,888  | 72.46 | 123 | no (7.4% of samples over) |
+| 2 | 16 | 57,583  | 65.45 | 69  | yes |
+| 3 | 1  | 116,052 | 30.37 | 56  | yes |
+| 4 | 16 | 504,289 | 7.90  | 38  | yes |
+| 5 | 1  | 523,215 | 10.45 | 41  | yes |
+| 6 | 16 | 535,239 | 10.67 | 44  | yes |
+
+Within-arm spread got *worse*, not better: 11.40× for `ack=1`, 9.30× for
+`ack=16`, arms fully overlapping, so the revert stands. But the spread is no
+longer the interesting part.
+
+**No tier in either run has a drop rate under 1%.** This run: 7.90–72.46%. The
+first run: 55.17–95.71%. § 5 of the methodology is unambiguous — *"a throughput
+number with a high drop rate is meaningless and is called out as such; the
+headline number is the highest throughput at <1% drop rate."* By that rule not
+one of these twelve tiers is a throughput measurement, and the A/B compared
+twelve numbers the methodology already said were meaningless.
+
+That is a correction to the retraction above, which attributed the 2.23× to
+run-to-run noise. Noise is real and it is not the whole story: the instrument
+was never measuring throughput at this tier. The variance analysis was the right
+answer to the wrong question.
+
+Note what moves together in the new run — ops/sec rises monotonically with run
+order (45,888 → 535,239) while drop% falls monotonically (72.46 → 7.90), ρ ≈
+−0.77 between them, and host contention falls alongside (other_mean 123 → 44).
+Three quantities trending together over six tiers, with the treatment
+alternating across them. No design that alternates arms inside a monotonic trend
+of that size can resolve a 1.6× effect.
+
+The knob's mechanism reconfirms yet again and still does not matter:
+`ack_scan` 270.03 / 83.47 / 3.35 ms per event at `ack=1` against 13.20 / 0.19 /
+0.19 at `ack=16`.
+
+**Enforced now.** Each tier's verdict line carries
+`drop_pct=.. throughput_valid=yes|no`, true only when host contention was clean
+*and* drops are under 1%. Like the mid-run load rule, the <1% bar was written
+down in § 5 and enforced by nobody.
+
+**What would make the 100k tier measurable** is an open question, not a planned
+change: find the largest client count that sustains <1% drops and measure there,
+or establish that the drops are the probe's own 100k in-process client tasks
+rather than the server. Until then the standing instruction is unchanged and now
+better supported — do not cite the 100k tier as a Nostos server limit.
+
 Note also that end-of-run load1 is a poor explanatory variable because it is
 partly *caused* by throughput. Ranking the six tiers by it gives Spearman
 ρ ≈ 0.6 — suggestive at the extremes, not an identification of the confound.

@@ -188,6 +188,7 @@ host_sampler() { # $1 = tier label
 run_tier() { # clients events window ack listeners -> rc (89 = killed for contention)
   rm -f "$OUT/.contended"
   samp=$OUT/host-cpu-tier$1-$(date +%H%M%S).log
+  mark=$(wc -l <"$LOG")
   host_sampler "$1" >"$samp" 2>&1 & hs=$!
   echo "HOST tier=$1 start $(date +%T) load1=$(host_load1) waited=${waited}s samples=$(basename "$samp")" >>"$LOG"
   in_container tier "$1" "$2" "$3" "$4" "$5" >>"$LOG" 2>&1
@@ -195,7 +196,16 @@ run_tier() { # clients events window ack listeners -> rc (89 = killed for conten
   kill "$hs" 2>/dev/null; wait "$hs" 2>/dev/null
   verdict=$(midrun_verdict "$samp")
   [ -f "$OUT/.contended" ] && rc=89
-  echo "HOST tier=$1 end $(date +%T) load1=$(host_load1) rc=$rc MIDRUN $verdict" >>"$LOG"
+  # The other half of "when does a number count" (§ 5): the headline figure is
+  # the highest throughput at <1% drops, and a throughput with a high drop rate
+  # is meaningless. That was written down and unenforced too — every tier of the
+  # two 2026-09-21 ack-coalescing runs dropped between 7.9% and 95.7%, and their
+  # ops/sec went into an A/B anyway. A tier that drops is still diagnostically
+  # useful; it is just not a throughput measurement, and now says so.
+  drop=$(tail -n +$((mark + 1)) "$LOG" | awk -F: '/^ *drop% *:/ { gsub(/ /, "", $2); d = $2 } END { print (d == "" ? "?" : d) }')
+  tput=no
+  case "$verdict" in *valid=yes*) awk -v d="$drop" 'BEGIN{exit !(d != "?" && d < 1)}' && tput=yes ;; esac
+  echo "HOST tier=$1 end $(date +%T) load1=$(host_load1) rc=$rc MIDRUN $verdict drop_pct=$drop throughput_valid=$tput" >>"$LOG"
   return $rc
 }
 

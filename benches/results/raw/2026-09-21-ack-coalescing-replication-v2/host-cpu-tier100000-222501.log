@@ -1,0 +1,27 @@
+[host] 22:25:01 tier=100000 load1=4.86 other_total=40.1 other_max=11.4 cmd=Code Helper (Ren
+[host] 22:25:13 tier=100000 load1=7.24 other_total=70.6 other_max=19.0 cmd=Code Helper (Ren
+[host] 22:25:25 tier=100000 load1=6.44 other_total=109.6 other_max=30.8 cmd=WindowServer
+[host] 22:25:37 tier=100000 load1=5.74 other_total=76.5 other_max=18.5 cmd=Code Helper (Ren
+[host] 22:25:49 tier=100000 load1=6.11 other_total=147.1 other_max=24.3 cmd=WindowServer
+[host] 22:26:02 tier=100000 load1=10.69 other_total=86.7 other_max=17.1 cmd=Code Helper (Ren
+[host] 22:26:14 tier=100000 load1=12.83 other_total=83.6 other_max=17.9 cmd=Code Helper (Ren
+[host] 22:26:27 tier=100000 load1=12.76 other_total=76.8 other_max=16.1 cmd=2.1.278
+[host] 22:26:40 tier=100000 load1=12.63 other_total=81.6 other_max=20.0 cmd=Code Helper (Ren
+[host] 22:26:53 tier=100000 load1=11.87 other_total=95.8 other_max=17.1 cmd=Brave Browser
+[host] 22:27:05 tier=100000 load1=12.20 other_total=40.7 other_max=9.0 cmd=WindowServer
+[host] 22:27:18 tier=100000 load1=11.78 other_total=61.1 other_max=18.0 cmd=Code Helper (Ren
+[host] 22:27:31 tier=100000 load1=11.91 other_total=66.5 other_max=14.1 cmd=Code Helper (Ren
+[host] 22:27:44 tier=100000 load1=11.69 other_total=33.2 other_max=4.5 cmd=2.1.278
+[host] 22:27:57 tier=100000 load1=11.13 other_total=84.0 other_max=19.4 cmd=WindowServer
+[host] 22:28:10 tier=100000 load1=11.58 other_total=146.7 other_max=21.5 cmd=WindowServer
+[host] 22:28:23 tier=100000 load1=11.51 other_total=106.6 other_max=22.3 cmd=WindowServer
+[host] 22:28:37 tier=100000 load1=10.51 other_total=78.6 other_max=19.8 cmd=WindowServer
+[host] 22:28:50 tier=100000 load1=10.52 other_total=42.6 other_max=14.3 cmd=Code Helper (Ren
+[host] 22:29:03 tier=100000 load1=12.37 other_total=38.5 other_max=12.9 cmd=Code Helper (Ren
+[host] 22:29:16 tier=100000 load1=12.47 other_total=35.6 other_max=5.9 cmd=node
+[host] 22:29:28 tier=100000 load1=11.93 other_total=29.0 other_max=4.0 cmd=node
+[host] 22:29:41 tier=100000 load1=12.77 other_total=62.0 other_max=16.1 cmd=Code Helper (Ren
+[host] 22:29:54 tier=100000 load1=11.67 other_total=44.0 other_max=20.2 cmd=2.1.278
+[host] 22:30:06 tier=100000 load1=11.95 other_total=46.6 other_max=14.0 cmd=Code Helper (Ren
+[host] 22:30:19 tier=100000 load1=12.26 other_total=40.8 other_max=11.0 cmd=python3.13
+[host] 22:30:32 tier=100000 load1=11.89 other_total=50.4 other_max=9.3 cmd=2.1.278

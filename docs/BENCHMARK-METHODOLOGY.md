@@ -85,6 +85,11 @@ Each client session has a **bounded** delivery channel of depth `B` (`NOSTOS_SES
 
 **Consequence for honesty:** the benchmark reports drop rate alongside throughput. A throughput number with a high drop rate is meaningless and is called out as such. The headline number is the **highest throughput at <1% drop rate.**
 
+**Enforced (2026-09-21).** `benches/scripts/fanout-100k-diag.sh` stamps every
+tier with `drop_pct=.. throughput_valid=yes|no`. Before that this rule was
+honoured in prose only: both 2026-09-21 ack-coalescing runs produced twelve
+tiers dropping 7.9–95.7%, and their ops/sec were compared as throughput anyway.
+
 ---
 
 ## 6. System & environment
