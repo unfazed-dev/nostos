@@ -152,4 +152,39 @@ scopes gradle with `ANDROID_SERIAL`.
   [provider-dashboard plan](../../docs/plans/nostos-provider-dashboard-multitable.md).
 - **`query` returns a JSON string**, not typed rows — deliberate, so the FFI
   surface stays one primitive wide. Deserialize on the Kotlin side.
-- **No Maven coordinate.** Packaging (AAR + POM + signing) is A11.
+- ~~**No Maven coordinate.**~~ Resolved 2026-09-21 — `android/build.gradle.kts`
+  carries `maven-publish` + `signing` and a `centralBundle` task. See below.
+
+## Publishing to Maven Central
+
+There is no official Gradle plugin for the Central Publishing Portal
+(checked 2026-09-21 against central.sonatype.org), so this build stays on stock
+`maven-publish`: it stages the artifacts into a local Maven layout and zips
+them into one uploadable bundle.
+
+```bash
+# JDK 17–21 is required. AGP 8.7 rejects newer JDKs, and this machine's
+# default (25/26) is one of them — pass JAVA_HOME explicitly:
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+
+cd sdk/nostos_kotlin/android
+./gradlew centralBundle \
+  -PnostosGroupId=io.github.<your-github-username> \
+  -PsigningInMemoryKey="$(gpg --armor --export-secret-keys <KEYID>)" \
+  -PsigningInMemoryKeyPassword=<passphrase>
+# → android/build/distributions/nostos-kotlin-0.2.0-central-bundle.zip
+```
+
+Then upload that zip to `https://central.sonatype.com/api/v1/publisher/upload`
+with a Portal bearer token. That step needs the account, a verified namespace
+and a GPG key — all operator-owned, none of them in this repo.
+
+**Namespace, the cheap path:** signing up for the Portal *with a GitHub
+account* auto-verifies `io.github.<that username>` — no domain, no DNS TXT
+record. `nostosGroupId` defaults to `io.github.unfazed-dev` for exactly that
+reason; override it the day a real domain exists.
+
+Signing is off unless `-PsigningInMemoryKey` is passed, so `assembleRelease`
+and CI stay green on a machine with no GPG. Verified 2026-09-21: the task
+produces a 30-file bundle (aar + sources + javadoc + pom, each with
+md5/sha1/sha256/sha512) in the layout Central expects.
