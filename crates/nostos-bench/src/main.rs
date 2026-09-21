@@ -109,6 +109,11 @@ pub struct RunResult {
     pub clients: usize,
     pub events_total: u64,
     pub events_delivered: u64,
+    /// Events the router accepted by REPLACING a still-waiting frame for the
+    /// same row (ADR-0045). Convergent, not lost — so it is subtracted from
+    /// the drop rate alongside `events_delivered`, and reported on its own so
+    /// the conflation benefit is visible rather than inferred.
+    pub events_superseded: u64,
     pub ops_per_sec: f64,
     pub drop_rate: f64,
     pub p50_us: f64,
@@ -139,18 +144,19 @@ async fn main() -> Result<()> {
 
     println!("\n=== Nostos Week-1 Benchmark ===\n");
     println!(
-        "{:>8} {:>14} {:>10} {:>9} {:>10} {:>10}",
-        "clients", "ops/sec", "drop%", "p50(ms)", "p99(ms)", "delivered"
+        "{:>8} {:>14} {:>10} {:>9} {:>10} {:>10} {:>11}",
+        "clients", "ops/sec", "drop%", "p50(ms)", "p99(ms)", "delivered", "superseded"
     );
     for r in &results {
         println!(
-            "{:>8} {:>14.0} {:>9.2}% {:>9.2} {:>9.2} {:>10}",
+            "{:>8} {:>14.0} {:>9.2}% {:>9.2} {:>9.2} {:>10} {:>11}",
             r.clients,
             r.ops_per_sec,
             r.drop_rate * 100.0,
             r.p50_us / 1000.0,
             r.p99_us / 1000.0,
-            r.events_delivered
+            r.events_delivered,
+            r.events_superseded
         );
     }
     println!("\nResults written to {}/", cfg.out_dir);
@@ -321,12 +327,19 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
 
     let ops_per_sec = (delivered as f64) / elapsed.as_secs_f64().max(1e-9);
     let attempted = cfg.events.saturating_mul(clients as u64).max(1);
-    let drop_rate = 1.0 - (delivered as f64 / attempted as f64);
+    // ADR-0045: `delivered` is a CLIENT-side frame count, and a superseded
+    // event is deliberately one fewer frame for the same converged state.
+    // Left out of the numerator, `drop%` would score conflation as exactly the
+    // loss conflation exists to prevent. The router's own count is the only
+    // honest source for it — the client cannot see a frame that was never sent.
+    let accounted = delivered.saturating_add(outcome.superseded);
+    let drop_rate = 1.0 - (accounted as f64 / attempted as f64);
     let (p50, p99) = (combined.percentile(0.5), combined.percentile(0.99));
 
     info!(
         clients,
         delivered,
+        superseded = outcome.superseded,
         matched = outcome.matched,
         ops_per_sec,
         drop_rate,
@@ -360,6 +373,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         clients,
         events_total: cfg.events,
         events_delivered: delivered,
+        events_superseded: outcome.superseded,
         ops_per_sec,
         drop_rate: drop_rate.clamp(0.0, 1.0),
         p50_us: p50,

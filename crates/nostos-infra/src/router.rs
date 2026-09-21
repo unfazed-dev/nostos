@@ -520,18 +520,17 @@ impl EventSink for TokioEventSink {
                     }
                     p
                 };
-                match pushed {
-                    Some(p) => {
-                        if p == Pushed::Superseded {
-                            self.superseded.fetch_add(1, Ordering::Relaxed);
-                        }
-                        self.delivered_lsn.fetch_max(lsn_raw, Ordering::Release);
+                if let Some(p) = pushed {
+                    self.delivered_lsn.fetch_max(lsn_raw, Ordering::Release);
+                    if p == Pushed::Superseded {
+                        self.superseded.fetch_add(1, Ordering::Relaxed);
+                        DeliveryDecision::Superseded
+                    } else {
                         DeliveryDecision::Delivered
                     }
-                    None => {
-                        self.capacity_sheds.fetch_add(1, Ordering::Relaxed);
-                        DeliveryDecision::Dropped
-                    }
+                } else {
+                    self.capacity_sheds.fetch_add(1, Ordering::Relaxed);
+                    DeliveryDecision::Dropped
                 }
             }
             // A control frame can't conflate (no row identity) and its whole
@@ -866,10 +865,16 @@ mod tests {
         // four sheds; now it is four supersedes and zero loss.
         let (sink, mut rx) = TokioEventSink::channel(1);
         assert_eq!(sink.deliver(row(1, "a")).await, DeliveryDecision::Delivered);
-        for lsn in 2..=6 {
+        assert_eq!(
+            sink.deliver(row(2, "b")).await,
+            DeliveryDecision::Delivered,
+            "b's first frame QUEUES — there is nothing yet to supersede"
+        );
+        for lsn in 3..=6 {
             assert_eq!(
                 sink.deliver(row(lsn, "b")).await,
-                DeliveryDecision::Delivered
+                DeliveryDecision::Superseded,
+                "every later b replaces the waiting one, and says so"
             );
         }
         assert_eq!(sink.capacity_sheds(), 0, "nothing was lost");

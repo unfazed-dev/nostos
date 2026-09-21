@@ -83,6 +83,16 @@ pub enum DeliveryDecision {
     /// The session's bounded buffer was full, so this event was dropped to
     /// protect the router from head-of-line blocking. Counted, not silent.
     Dropped,
+    /// The event was accepted, and in doing so it REPLACED a still-waiting
+    /// frame for the same row in this sink's overflow (ADR-0045). Nothing was
+    /// lost: every frame on this plane is a complete row image, so the client
+    /// converges to the same state from the newer one alone.
+    ///
+    /// Kept distinct from `Delivered` because one FEWER frame reaches the
+    /// wire. Anything that counts frames to infer loss — `nostos-bench`'s drop
+    /// rate above all — must subtract supersedes, or it scores conflation as
+    /// the very thing conflation prevents.
+    Superseded,
 }
 
 /// A delivery target for one session — implemented by the infra layer (a tokio
@@ -927,6 +937,11 @@ pub struct Metrics {
     pub delivered: AtomicU64,
     /// Events dropped (full buffer / closed sink / dedup hit).
     pub dropped: AtomicU64,
+    /// Events that superseded a still-waiting frame for the same row in a
+    /// sink's conflating overflow (ADR-0045). NOT loss — the client converges
+    /// to the same state — but one fewer frame on the wire, so it is counted
+    /// separately from both `delivered` and `dropped`.
+    pub superseded: AtomicU64,
     /// Delivery tasks that *faulted* (panicked / were cancelled) — a server-side
     /// problem, NOT slow-client backpressure. Counted separately from `dropped`
     /// so a panic is never mis-attributed as a client drop in the "0% drops"
@@ -1038,6 +1053,7 @@ impl Metrics {
             matched: self.matched.load(Ordering::Relaxed),
             delivered: self.delivered.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            superseded: self.superseded.load(Ordering::Relaxed),
             faulted: self.faulted.load(Ordering::Relaxed),
             sessions: self.sessions.load(Ordering::Relaxed),
             slot_wal_status: SlotHealth::from_u8(self.slot_wal_status.load(Ordering::Relaxed)),
@@ -1111,6 +1127,9 @@ pub struct MetricsSnapshot {
     pub matched: u64,
     pub delivered: u64,
     pub dropped: u64,
+    /// Events that superseded a still-waiting frame for the same row
+    /// (ADR-0045). Convergent, not lost. See [`Metrics::superseded`].
+    pub superseded: u64,
     /// Delivery tasks that faulted (panicked/cancelled) — distinct from
     /// `dropped` (slow-client backpressure). See [`Metrics::faulted`].
     pub faulted: u64,
