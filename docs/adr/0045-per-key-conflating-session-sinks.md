@@ -241,18 +241,98 @@ Two further harness facts found on the way, both worth keeping:
    sheds. Baseline at `--distinct-keys 200` came back **27.11%** then **1.19%** on two runs,
    a 23× swing. Per § 5 neither arm's numbers there mean anything.
 
-**Status: held on branch `adr-0045-conflating-sink` (`1cb91a9`), not merged.** Not because it
-regresses — it does not — but because merging it would make `drop%` silently wrong the moment
-conflation engages, and that number is the project's honesty surface, quoted in README and
-RESULTS.md. Shipping a change that corrupts the metric used to police changes is the exact
-failure this repo keeps finding and fixing.
+**Attempt 2 was held on a branch, not merged** — not because it regressed (it did not) but
+because merging it would have made `drop%` silently wrong the moment conflation engaged, and
+that number is the project's honesty surface, quoted in README and RESULTS.md. Shipping a
+change that corrupts the metric used to police changes is the exact failure this repo keeps
+finding and fixing.
 
-### The one remaining step
+### The step that unblocked it
 
-`DeliveryDecision` needs a third variant. The decision above already says "superseded is a
+`DeliveryDecision` needed a third variant. The decision above already said "superseded is a
 new counter, not `dropped`" — attempt 2 under-implemented it as a counter local to
-`TokioEventSink`, which the fan-out and the bench cannot see. Promoting it to
-`DeliveryDecision::Superseded`, threading it through `deliver_chunk` → `FanOutStats` →
-`Metrics`, and having the bench compute `drop = attempted - delivered - superseded` makes the
-benefit measurable and the metric honest again. That touches an application-layer port enum,
-so it is a deliberate change, not a patch.
+`TokioEventSink`, which neither the fan-out nor the bench could see.
+
+## Attempt 3 (2026-09-22) — `DeliveryDecision::Superseded`, and the metric is honest again
+
+`DeliveryDecision` now has a third variant, threaded end to end:
+
+```
+TokioEventSink::deliver  →  DeliveryDecision::Superseded
+  → deliver_chunk        →  (delivered, dropped, superseded, faulted)
+  → FanOutOutcome.superseded / FanOutOutcome::merged
+  → Metrics.superseded → MetricsSnapshot.superseded → cairn_events_superseded_total
+  → nostos-bench: drop = attempted − delivered − superseded
+```
+
+The sink returns `Superseded` for the event that REPLACES a waiting frame, not for the one it
+replaced. That is what makes the arithmetic close: a row updated *n* times while backlogged
+yields one `Delivered` (the first frame, which queues) and *n−1* `Superseded`, and exactly one
+frame reaches the wire — so `delivered` equals frames sent, and `attempted − delivered −
+superseded` equals genuine loss. The contract is now
+`delivered + dropped + superseded + faulted <= matched`.
+
+`TokioEventSink::superseded()` stays as the sink-local diagnostic the router's own unit tests
+assert against; the port variant is the aggregate view. Both are pinned:
+
+- `router::tests::overflow_conflates_a_backlogged_row_instead_of_shedding` — b's FIRST frame
+  queues (`Delivered`); every later b returns `Superseded`.
+- `fanout::tests::superseded_is_counted_apart_from_both_delivered_and_dropped` — a supersede
+  lands in neither `delivered` nor `dropped`.
+
+### The measurement
+
+One run, two formulas — the same binary and the same run, so no run-to-run noise separates
+them. 1k clients × 20,000 events, `--buffer 16 --distinct-keys 64` (a small buffer forces the
+backlog that 1k clients at the default buffer never produce):
+
+| | frames | drop% |
+|---|---|---|
+| attempted | 20,000,000 | |
+| delivered (client-side frame count) | 17,163,573 | |
+| superseded (router-side) | 380,637 | |
+| **old formula** `1 − delivered/attempted` | | **14.18%** |
+| **new formula** `1 − (delivered+superseded)/attempted` | | **12.28%** |
+
+The 1.90 pp gap is precisely the conflation the old metric scored as loss. It is not a
+throughput result and must not be quoted as one — the tiny buffer exists to manufacture
+backlog, and `--distinct-keys 64` is nothing like the default stream.
+
+Non-regression at the headline shape (1k × 100,000, default buffer, `--distinct-keys 0`):
+
+Interleaved, alternating arms, 3 runs each, one session, `--distinct-keys 0`:
+
+| run | attempt 2 (parent, `81e747b`) | attempt 3 (`Superseded`) |
+|---|---|---|
+| 1 | 2,046,799 | 2,031,996 |
+| 2 | 1,645,329 | 1,715,366 |
+| 3 | 1,520,508 | 1,692,788 |
+| **median** | **1,645,329** | **1,715,366** |
+
+Ranges overlap heavily (within-arm spread 1.35× and 1.20×), so the reading is **no measurable
+change** — not a 4.3% gain. 0.00% drops and the full 100,000,000 deliveries in every run, with
+`superseded = 0` throughout: the default stream is monotonic keys, which offers conflation
+nothing.
+
+### A methodology fact this run forced out
+
+The first three runs of attempt 3 came in at 1.74M / 1.90M / 2.03M against the **2,520,979 /
+2,660,070 medians recorded for attempts 1–2 earlier the same day**, which reads as a 30%
+regression. Re-measuring the *parent commit* in the same session settled it: attempt 2 now
+medians **1,645,329**, below attempt 3. Both arms decline run-over-run and both sit far under
+their own earlier figures, so the drift is the host, not the code.
+
+**Cross-session absolute ops/sec are not comparable on this box.** Only arms interleaved within
+one session are. The 2.52M/2.66M figures above are therefore valid as a *pair* and invalid as a
+baseline for anything measured later — as is the 2,618,601 headline in `CLAUDE.md` if it is ever
+compared against a fresh number rather than against its own session's control. This is the same
+shape as the `ack_progress` retraction (n=1 per arm is not a measurement), one level up: n=1 per
+*session* is not a baseline.
+
+### What is still not claimed
+
+The conflation *benefit* — fewer sheds under real backlog — remains unmeasured on this host at
+the tiers where backlog naturally occurs. The 10k rung reports `elapsed_secs: 120.00` on every
+run (window expiry, so per §5 not a measurement) and the baseline at 200 keys swung
+27.11% → 1.19% across two runs. Both facts are recorded in `docs/ROADMAP.md`. A two-host
+harness is the prerequisite, and it is not built.
