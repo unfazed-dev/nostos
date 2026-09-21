@@ -373,6 +373,27 @@ async fn run(
         finish_secs.map_or_else(|| "n/a".to_string(), |s| format!("{s:.2}s")),
     );
 
+    // THE per-stage split (added 2026-09-21 for the 100k cliff). `busy` is the
+    // time the fan-out task actually spent working; `elapsed` is wall-clock.
+    // busy/wall near 1 => the loop IS the cost. busy/wall near 0 => the loop is
+    // starved, and the cost is the transport writers, the kernel socket path,
+    // or the in-process client tasks competing for the same runtime.
+    {
+        let ev = metrics.stage_events.load(Ordering::Relaxed).max(1);
+        let m_ns = metrics.stage_match_nanos.load(Ordering::Relaxed);
+        let d_ns = metrics.stage_deliver_nanos.load(Ordering::Relaxed);
+        let a_ns = metrics.stage_ack_scan_nanos.load(Ordering::Relaxed);
+        let busy = (m_ns + d_ns + a_ns) as f64 / 1e9;
+        eprintln!(
+            "  [diag] stages events={ev} match={:.2}ms/ev deliver={:.2}ms/ev ack_scan={:.2}ms/ev \
+             busy={busy:.2}s wall={elapsed:.2}s busy_frac={:.3}",
+            m_ns as f64 / ev as f64 / 1e6,
+            d_ns as f64 / ev as f64 / 1e6,
+            a_ns as f64 / ev as f64 / 1e6,
+            busy / elapsed.max(1e-9),
+        );
+    }
+
     // Diagnostic: did the fan-out loop RETURN (replicator budget exhausted) or
     // was it still running when the window closed? A frozen `delivered` with
     // `true` here is a finite event budget, not a stall.

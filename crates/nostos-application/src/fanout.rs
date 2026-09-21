@@ -280,6 +280,7 @@ impl FanOutService {
     where
         F: Fn(&ReplicationEvent, &str) -> Option<ColumnValue>,
     {
+        let stage_start = self.metrics.as_ref().map(|_| std::time::Instant::now());
         let matched: Vec<_> = self
             .store
             .candidates_for(event)
@@ -287,6 +288,12 @@ impl FanOutService {
             .into_iter()
             .filter(|c| c.predicate.matches(|col| column_extractor(event, col)))
             .collect();
+        if let (Some(m), Some(t0)) = (&self.metrics, stage_start) {
+            m.stage_match_nanos.fetch_add(
+                u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let matched_count = matched.len() as u64;
 
         // Push candidate accounts (ADR-0037 §1): one entry per matched
@@ -316,6 +323,7 @@ impl FanOutService {
         // events in LSN order: event N+1's walk cannot start until N's is
         // fully drained. Only the order sessions are visited WITHIN one event
         // changes, and that was never a guarantee.
+        let walk_start = self.metrics.as_ref().map(|_| std::time::Instant::now());
         let (delivered, dropped, faulted) =
             if matched.len() >= PARALLEL_FANOUT_MIN && self.fanout_workers > 1 {
                 let workers = self.fanout_workers.min(matched.len());
@@ -446,6 +454,12 @@ impl FanOutService {
                 }
             }
         }
+        if let (Some(m), Some(t0)) = (&self.metrics, walk_start) {
+            m.stage_deliver_nanos.fetch_add(
+                u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let outcome = FanOutOutcome {
             matched: matched_count,
             delivered,
@@ -516,7 +530,19 @@ impl FanOutService {
             since = since.saturating_add(1);
             if since >= every {
                 since = 0;
+                let t0 = self.metrics.as_ref().map(|_| std::time::Instant::now());
                 slowest_acked = self.store.min_acked_lsn().await;
+                if let (Some(m), Some(t0)) = (&self.metrics, t0) {
+                    use std::sync::atomic::Ordering;
+                    m.stage_ack_scan_nanos.fetch_add(
+                        u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            if let Some(m) = &self.metrics {
+                m.stage_events
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(safe) = slowest_acked {
                 replicator.advance_progress(safe).await;

@@ -407,6 +407,74 @@ counting sink (79 ns/delivery) the parallel walk is *2× slower* at 100k
 work. A sink that does nothing is not a deployment shape, but it is why the
 `PARALLEL_FANOUT_MIN` floor and the `workers` knob both exist.
 
+## Phase 4 — per-stage timing (the instrument, 2026-09-21 third pass)
+
+The retraction left a hole: the walk is 1.4% of the per-event cost, so where is
+the other 98.6%? Every candidate left on the list — transport writers, the
+kernel socket path, the 100k in-process client tasks — is *outside* the fan-out
+loop. So stop guessing what the loop costs and measure whether the loop is even
+**running**.
+
+`Metrics` gained four diagnostic counters (`crates/nostos-application/src/ports.rs`),
+written by `FanOutService` and read directly by `nostos-bench-10k`:
+
+| counter | stage |
+|---|---|
+| `stage_match_nanos` | `store.candidates_for` + the predicate filter |
+| `stage_deliver_nanos` | the delivery walk, including the join when it is split |
+| `stage_ack_scan_nanos` | `store.min_acked_lsn` — the other O(sessions) scan |
+| `stage_events` | denominator |
+
+Their sum is **busy time on the fan-out task**. Against wall-clock it splits the
+two remaining stories cleanly, and they predict opposite numbers:
+
+- `busy/wall → 1` — the loop is genuinely the cost, and the stage split says
+  which stage. Would contradict `nostos-fanout-walk`.
+- `busy/wall → 0` — the loop is **starved**: it is ready to run and not being
+  scheduled. The cost is then the ~200k other tasks on the same runtime, and
+  the fix is isolating fan-out from the client swarm (a dedicated runtime, or
+  moving the swarm out of process) — not optimising the walk.
+
+Deliberately NOT in `MetricsSnapshot`: this is a bench diagnostic, not a
+`/metrics` gauge. Cost is ~6 `Instant::now()` per **event** (not per delivery),
+against a per-event budget three orders of magnitude larger, and only when a
+`Metrics` handle is wired.
+
+Self-check only — **NOT a valid measurement**, native macOS, 2k clients ×
+200 events (`nostos-bench-10k 2000 200 60 1 1`), host load1 ≈ 36 on 10 cores:
+
+```
+match=0.44 ms/ev  deliver=1.58 ms/ev  ack_scan=0.04 ms/ev
+busy=0.41 s  wall=0.51 s  busy_frac=0.801
+```
+
+This proves the counters are wired and produce sane magnitudes. It does **not**
+establish a baseline, and the headroom rule disqualifies it outright: an
+unrelated 10-core `ninja` build was running, and `busy_frac` is precisely a
+scheduling measurement, so competing CPU load is the one confound it cannot
+tolerate. If anything a contended host *depresses* `busy_frac`, so the real
+2k figure is ≥ 0.801 — which is why it is still worth recording as a floor.
+
+The comparison that matters must come from the gated ladder: if `busy_frac`
+collapses toward 0 from 10k to 100k while per-delivery cost stays flat
+(`nostos-fanout-walk` says it does — 0.458 → 0.486 µs), starvation is proven and
+the cliff is a scheduling problem, not a fan-out problem. All four tiers must
+come from the same gated session; a 2k number from a loaded host is not a
+control for a 100k number from a quiet one.
+
+**Status: instrument landed and self-checked; the 10k/50k/100k ladder has NOT
+been run.** The host is executing an unrelated Flutter-engine build
+(`caffeinate ninja -j 10`, load1 > 30 on 10 cores) and
+`docs/BENCHMARK-METHODOLOGY.md` forbids starting a measurement above load1 8 —
+`benches/scripts/fanout-100k-diag.sh` enforces that gate itself and waits. Any
+number taken now would measure the other build. Rerun with:
+
+```bash
+benches/scripts/fanout-100k-diag.sh "$PWD" benches/results/stage-diag \
+  10000,500,120,1,1 50000,500,180,1,1 100000,500,300,1,2
+grep -E 'stages|SOAK|HOST tier' benches/results/stage-diag/linux-fanout-diag.log
+```
+
 ## Superseded — the original "Next" (kept for the record)
 
 
