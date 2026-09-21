@@ -27,7 +27,7 @@ Requires `@tauri-apps/api` ^2 (peer dependency) and the Rust plugin
 registered:
 
 ```rust
-tauri::Builder::default().plugin(nostos_tauri::init())
+tauri::Builder::default().plugin(tauri_plugin_cairn::init())
 ```
 
 plus the capability grant (see `example.capability.json`):
@@ -44,7 +44,7 @@ plus the capability grant (see `example.capability.json`):
     "nostos": {
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "token": null,
-      "table": "tasks",
+      "tables": ["tasks", "notes"],
       "dbPath": "cairn.db"
     }
   }

@@ -1,4 +1,4 @@
-# Tauri — `nostos-tauri`
+# Tauri — `tauri-plugin-cairn`
 
 Extracted from `sdk/nostos_tauri/src/lib.rs`, `build.rs`, and `permissions/` on 2026-07-30.
 Index: [`README.md`](README.md).
@@ -11,7 +11,7 @@ reaches it through `invoke`.
 ```rust
 // src-tauri/src/lib.rs
 tauri::Builder::default()
-    .plugin(nostos_tauri::init())
+    .plugin(tauri_plugin_cairn::init())
 ```
 
 ## Commands

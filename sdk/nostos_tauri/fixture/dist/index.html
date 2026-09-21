@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>nostos fixture — multi-table</title>
+    <style>
+      body { font: 14px system-ui; margin: 1rem; }
+      pre { background: #f4f4f4; padding: .5rem; min-height: 4rem; }
+      .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    </style>
+  </head>
+  <body>
+    <h1>nostos fixture</h1>
+    <p>
+      <select id="t"><option>tasks</option><option>notes</option></select>
+      <button id="w">write row</button>
+      <span id="status">booting…</span>
+    </p>
+    <div class="cols">
+      <div><h3>tasks</h3><pre id="tasks"></pre></div>
+      <div><h3>notes</h3><pre id="notes"></pre></div>
+    </div>
+    <pre id="log"></pre>
+    <script type="module">
+      // Same wire as guest-js/index.js, inlined via withGlobalTauri so the
+      // fixture has no bundler and no node_modules.
+      const { invoke, Channel } = window.__TAURI__.core;
+      const C = (c) => `plugin:cairn|${c}`;
+      const TABLES = ["tasks", "notes"];
+      const log = (m) => (document.getElementById("log").textContent += m + "\n");
+      try {
+        await invoke(C("connect")); // url / tables / dbPath from plugins.cairn
+        await invoke(C("subscribe"), { table: TABLES[0] }); // one run loop per session
+        for (const table of TABLES) {
+          const onEvent = new Channel();
+          onEvent.onmessage = (snap) =>
+            (document.getElementById(table).textContent = JSON.stringify(snap.rows, null, 1));
+          await invoke(C("watch"), { table, onEvent });
+        }
+        document.getElementById("status").textContent = "connected: " + (await invoke(C("connection_state")));
+      } catch (e) {
+        log("boot error: " + e);
+      }
+      document.getElementById("w").onclick = async () => {
+        const table = document.getElementById("t").value;
+        try {
+          const id = await invoke(C("write"), {
+            table, op: "upsert", pk: "fx-" + Date.now(),
+            payloadJson: JSON.stringify({ title: "from fixture", table }),
+          });
+          log(`write ${table} → outbox #${id}`);
+        } catch (e) {
+          log("write error: " + e);
+        }
+      };
+    </script>
+  </body>
+</html>

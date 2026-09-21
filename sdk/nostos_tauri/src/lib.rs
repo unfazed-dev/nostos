@@ -33,12 +33,13 @@
 //!   change tick (remote apply OR local write) — the Tauri port of node's
 //!   `watch()` / Flutter's `rows_sink` (ADR-0024), NOT a poll. Floors: no
 //!   per-watch cancel handle (the pump self-terminates when JS drops the
-//!   channel — the unsubscribe path — and on session teardown); one table per
-//!   `NostosState`.
-//! - **`subscribe` where_sql / resume_lsn**: the `table` arg is accepted for
-//!   API parity; v1 asserts it matches the session's single table (one table
-//!   per `NostosState`, matching the sibling SDKs). Per-call predicate filters
-//!   + `resume_lsn` arrive with the multi-table lift.
+//!   channel — the unsubscribe path — and on session teardown).
+//! - **Multi-table (2026-09-21)**: `plugins.cairn.tables[]` is the session's
+//!   table set — the first entry is `SyncClient`'s primary table, the rest ride
+//!   `extra_tables` (ADR-0022, one socket, one checkpoint, server cap 32).
+//!   Every table-taking command checks membership in that set. `subscribe`'s
+//!   `table` arg is API parity only: the run loop is per session, not per
+//!   table. Per-table `where_sql` / `resume_lsn` are still not exposed.
 //! - **Permissions**: only the six default command permissions are listed in
 //!   `permissions/default.toml`. A shipped plugin would also publish scoped
 //!   permission sets per table.
@@ -59,7 +60,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig};
+use nostos_client::{ClientError, SqliteStorage, SyncClient, SyncClientConfig, TableSub};
 use nostos_core::{PendingWrite, WriteOp};
 use nostos_domain::Lsn;
 use serde::Deserialize;
@@ -101,9 +102,13 @@ pub struct NostosPluginConfig {
     /// Default bearer JWT used when `connect` is called without an explicit
     /// `token` — also the credential push-token registration sends.
     pub token: Option<String>,
-    /// The single table this session syncs (v1 ceiling: one table per
-    /// `NostosState`, matching the sibling SDKs; multi-table is the
-    /// provider-dashboard plan). Defaults to `"tasks"`.
+    /// Every table this session syncs. The first entry is the primary
+    /// `SyncClient` table, the rest are `extra_tables` (ADR-0022 — one socket,
+    /// one resume LSN, server cap 32). Supersedes `table`; when non-empty,
+    /// `table` is ignored. Defaults to `[table]` → `["tasks"]`.
+    pub tables: Option<Vec<String>>,
+    /// Single-table shorthand (the v1 shape). Kept so existing
+    /// `tauri.conf.json` blocks keep working; prefer `tables`.
     pub table: Option<String>,
     /// Default on-device SQLite path. Relative paths open relative to the
     /// process working directory — desktop apps should pass an absolute path
@@ -122,10 +127,13 @@ pub struct NostosPluginConfig {
 }
 
 impl NostosPluginConfig {
-    /// The resolved session table: config value or the `"tasks"` floor
-    /// (the same default `sdk/nostos_node` and the scaffold pin).
-    fn table(&self) -> String {
-        self.table.clone().unwrap_or_else(|| "tasks".to_owned())
+    /// The resolved session table set: `tables` if non-empty, else `[table]`,
+    /// else the `"tasks"` floor (the same default `sdk/nostos_node` pins).
+    fn tables(&self) -> Vec<String> {
+        match &self.tables {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => vec![self.table.clone().unwrap_or_else(|| "tasks".to_owned())],
+        }
     }
 
     /// The resolved default SQLite path (`"cairn.db"` floor).
@@ -137,9 +145,8 @@ impl NostosPluginConfig {
 }
 
 /// Plugin state, managed by Tauri. Owns a `tokio::runtime::Runtime` (home of
-/// the `subscribe()` run loop) plus at most one active session (v1: one table
-/// per client, matching `nostos-client`'s Phase-0 predicate floor and the
-/// sibling SDKs).
+/// the `subscribe()` run loop) plus at most one active session covering the
+/// configured table set (`plugins.cairn.tables`).
 ///
 /// Construct via `NostosState::new()` (the plugin's `setup` hook does this and
 /// registers it with `app.manage(...)`); drive with `connect` / `subscribe` /
@@ -188,7 +195,8 @@ pub struct NostosState {
 
 struct Session {
     client: Arc<SyncClient<SqliteStorage>>,
-    table: String,
+    /// The configured table set; every table-taking command checks membership.
+    tables: Vec<String>,
     // `JoinHandle` for the background `run_once()` task spawned by
     // `subscribe()`. `None` until subscribe() is called; aborted on
     // `abort_subscribe()` or session drop. Tied to `NostosState.rt`'s runtime.
@@ -198,6 +206,20 @@ struct Session {
     // for deterministic teardown; each pump ALSO self-terminates when its Tauri
     // channel closes (JS unsubscribe) or the client's change broadcast ends.
     watch_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Session {
+    /// The membership guard every table-taking command shares.
+    fn client_for(&self, table: &str, op: &str) -> Result<&Arc<SyncClient<SqliteStorage>>, String> {
+        if self.tables.iter().any(|t| t == table) {
+            Ok(&self.client)
+        } else {
+            Err(format!(
+                "{op}() table {table:?} is not in the session tables {:?} — add it to plugins.cairn.tables",
+                self.tables
+            ))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +350,7 @@ impl NostosState {
     /// A2 precedence — per-call args override `plugins.cairn` config, config
     /// overrides the floor: `url` falls back to `config.syncUrl`, `token` to
     /// `config.token`, `db_path` to `config.dbPath` (floor `"cairn.db"`), and
-    /// the session table to `config.table` (floor `"tasks"`, matching
+    /// the session tables to `config.tables` (floor `["tasks"]`, matching
     /// `nostos_node`). With a fully-populated config, `connect()` needs no
     /// args at all.
     ///
@@ -352,10 +374,11 @@ impl NostosState {
         };
         let token = token.or_else(|| self.config.token.clone());
         let db_path = db_path.unwrap_or_else(|| self.config.db_path());
-        let table = self.config.table();
+        let tables = self.config.tables();
         let storage = SqliteStorage::open(&db_path).map_err(|e| e.to_string())?;
         let config = SyncClientConfig {
-            table: table.clone(),
+            table: tables[0].clone(),
+            extra_tables: tables[1..].iter().map(TableSub::new).collect(),
             token: token.clone(),
             idle_timeout: Some(IDLE_RECONNECT_BACKSTOP),
             or_set_tables: self
@@ -377,7 +400,7 @@ impl NostosState {
         let client = Arc::new(SyncClient::new(url.clone(), storage, config));
         *guard = Some(Session {
             client,
-            table,
+            tables,
             run_handle: None,
             watch_tasks: Vec::new(),
         });
@@ -394,26 +417,20 @@ impl NostosState {
     /// server-pushed rows land in the on-device SQLite store, and the server's
     /// echo `WriteBack` re-emits this client's own `write()`s back through the
     /// same path. Received rows are observed via `query()` (a JS-layer row-tick
-    /// `Channel` is the ponytail upgrade). `table` MUST match the active
-    /// session's table (v1: one table per `NostosState`). Idempotent in the
+    /// `Channel` is the ponytail upgrade). `table` MUST be in the session's
+    /// table set (the run loop itself is per session). Idempotent in the
     /// sense that a second call replaces + aborts a prior run loop for the same
     /// session.
     ///
     /// # Errors
-    /// `String` if no session is active or the table mismatches.
+    /// `String` if no session is active or the table is not configured.
     pub async fn subscribe(&self, table: String) -> Result<(), String> {
         let mut guard = self.session.lock().await;
         let client = match guard.as_ref() {
             None => {
                 return Err("subscribe() called before connect()".to_string());
             }
-            Some(s) if s.table != table => {
-                return Err(format!(
-                    "subscribe() table {table:?} does not match active session table {:?} — v1 supports one table per NostosState",
-                    s.table
-                ));
-            }
-            Some(s) => Arc::clone(&s.client),
+            Some(s) => Arc::clone(s.client_for(&table, "subscribe")?),
         };
         // Spawn on the owned runtime (NOT the caller's): the run loop must keep
         // driving replication independent of the command-handler runtime.
@@ -687,10 +704,10 @@ impl NostosState {
     /// once the write is captured in the local outbox (NOT once the server
     /// acks it — ADR-0013 outbox contract). `op` is `"upsert"` / `"delete"` /
     /// `"patch"` (column-level UPDATE — `payload_json` carries only the
-    /// changed columns). `table` MUST match the active session's table.
+    /// changed columns). `table` MUST be in the session's table set.
     ///
     /// # Errors
-    /// `String` if no session is active, the table mismatches, the op string
+    /// `String` if no session is active, the table is not configured, the op string
     /// is unknown, or the durable enqueue itself failed (disk full / busy).
     pub async fn write(
         &self,
@@ -709,19 +726,7 @@ impl NostosState {
                 ))
             }
         };
-        let client = {
-            let guard = self.session.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| "write() called before connect()".to_string())?;
-            if session.table != table {
-                return Err(format!(
-                    "write() table {table:?} does not match active session table {:?} — v1 supports one table per NostosState",
-                    session.table
-                ));
-            }
-            Arc::clone(&session.client)
-        };
+        let client = self.session_client(&table, "write").await?;
         let seq = client
             .write(PendingWrite {
                 table,
@@ -734,10 +739,10 @@ impl NostosState {
         Ok(seq)
     }
 
-    /// The active session's client for a single-table command — the exact
-    /// write() guard discipline (no session → "<op>() called before
-    /// connect()"; table mismatch names the v1 one-table ceiling), shared
-    /// by the CRDT verbs so their messages match write()'s.
+    /// The active session's client for a table-taking command — ONE guard
+    /// discipline shared by write/subscribe/watch/CRDT verbs (no session →
+    /// "<op>() called before connect()"; unknown table → names the
+    /// configured set).
     async fn session_client(
         &self,
         table: &str,
@@ -747,13 +752,7 @@ impl NostosState {
         let session = guard
             .as_ref()
             .ok_or_else(|| format!("{op}() called before connect()"))?;
-        if session.table != table {
-            return Err(format!(
-                "{op}() table {table:?} does not match active session table {:?} — v1 supports one table per NostosState",
-                session.table
-            ));
-        }
-        Ok(Arc::clone(&session.client))
+        Ok(Arc::clone(session.client_for(table, op)?))
     }
 
     /// ADR-0030 add-wins OR-set: add `element` to the OR-set at `pk`.
@@ -911,12 +910,12 @@ impl NostosState {
     /// gap just triggers a redundant re-snapshot (idempotent — full snapshot,
     /// self-healing on lag).
     ///
-    /// `table` MUST match the active session's table (v1: one table per
-    /// `NostosState`).
+    /// `table` MUST be in the session's table set; each `watch()` pumps ONE
+    /// table — call it once per table you render.
     ///
     /// # Errors
-    /// `String` if no session is active, the table mismatches, or the initial
-    /// snapshot query fails.
+    /// `String` if no session is active, the table is not configured, or the
+    /// initial snapshot query fails.
     pub async fn watch(
         &self,
         table: String,
@@ -935,19 +934,7 @@ impl NostosState {
         table: String,
         emitter: Arc<dyn SnapshotEmitter>,
     ) -> Result<(), String> {
-        let (client, table) = {
-            let guard = self.session.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| "watch() called before connect()".to_string())?;
-            if session.table != table {
-                return Err(format!(
-                    "watch() table {table:?} does not match active session table {:?} — v1 supports one table per NostosState",
-                    session.table
-                ));
-            }
-            (Arc::clone(&session.client), session.table.clone())
-        };
+        let client = self.session_client(&table, "watch").await?;
 
         // (1) SUBSCRIBE FIRST — load-bearing (see `watch` doc + the nostos-client
         // invariant). Must precede the initial snapshot read; this owned
@@ -1253,7 +1240,7 @@ async fn connection_state(state: State<'_, NostosState>) -> Result<bool, String>
 
 /// Build the `nostos` Tauri plugin. Generic over `R: Runtime` so a Tauri app
 /// using any runtime (the default `Wry`, or a custom one) can register it via
-/// `tauri::Builder::default().plugin(nostos_tauri::init())`.
+/// `tauri::Builder::default().plugin(tauri_plugin_cairn::init())`.
 pub fn init<R: Runtime>() -> TauriPlugin<R, NostosPluginConfig> {
     // A2 config story: the second Builder type parameter is the
     // plugins.cairn block of tauri.conf.json — Tauri deserializes it in
@@ -1803,7 +1790,7 @@ mod tests {
             .await
             .expect_err("tasks should no longer be the session table");
         assert!(
-            err.contains("does not match active session table"),
+            err.contains("is not in the session tables"),
             "expected a table-mismatch error, got: {err}"
         );
     }
@@ -2080,9 +2067,9 @@ mod tests {
     /// Offline CRDT round-trip: a tagged table's orSetAdd enqueues a
     /// durable merge-upsert (the outbox id returns; pending ticks up in
     /// the ADR-0027 status), and an UNTAGGED table is refused by the
-    /// client gate with the three-views-of-one-truth error. Note the v1
-    /// ceiling the single-table guard enforces: the CRDT table must BE the
-    /// session table (multi-table is the provider-dashboard plan).
+    /// client gate with the three-views-of-one-truth error. The table
+    /// membership guard fires first: a CRDT table must also be in
+    /// `plugins.cairn.tables`.
     #[tokio::test]
     async fn crdt_verbs_offline_round_trip_and_gate() {
         let config = NostosPluginConfig {
@@ -2119,8 +2106,8 @@ mod tests {
 
         // The gate: a session WITHOUT the table tag refuses the verb
         // client-side (the three-views rule) before any outbox entry exists.
-        // The single-table guard fires first for OTHER tables, so this needs
-        // its own state whose session table is simply untagged.
+        // The table-membership guard fires first for OTHER tables, so this
+        // needs its own state whose session table is simply untagged.
         let untagged = NostosState::new();
         untagged
             .connect(
@@ -2137,6 +2124,48 @@ mod tests {
         assert!(
             err.to_lowercase().contains("tagged"),
             "names the three-views rule: {err}"
+        );
+    }
+    /// Multi-table lift (2026-09-21): `plugins.cairn.tables` feeds
+    /// `SyncClient.extra_tables`; every listed table passes the guard, an
+    /// unlisted one is refused naming the set; `tables` wins over `table`.
+    #[tokio::test]
+    async fn plugin_config_tables_lifts_the_one_table_ceiling() {
+        let config: NostosPluginConfig = serde_json::from_value(serde_json::json!({
+            "syncUrl": "ws://localhost:0/sync",
+            "dbPath": ":memory:",
+            "table": "ignored",
+            "tables": ["tasks", "notes"]
+        }))
+        .expect("camelCase block parses");
+        assert_eq!(
+            config.tables(),
+            vec!["tasks".to_owned(), "notes".to_owned()]
+        );
+        let state = NostosState::with_config(config);
+        state.connect(None, None, None).await.expect("connect");
+        for t in ["tasks", "notes"] {
+            state
+                .write(t.into(), "upsert".into(), "pk".into(), None)
+                .await
+                .unwrap_or_else(|e| panic!("write to configured table {t}: {e}"));
+        }
+        state
+            .subscribe("notes".into())
+            .await
+            .expect("subscribe any configured table");
+        let err = state
+            .write("ignored".into(), "upsert".into(), "x".into(), None)
+            .await
+            .expect_err("`table` is superseded by `tables`");
+        assert!(
+            err.contains("is not in the session tables [\"tasks\", \"notes\"]"),
+            "{err}"
+        );
+        let err = state.subscribe("other".into()).await.expect_err("unlisted");
+        assert!(
+            err.starts_with("subscribe() table \"other\" is not in the session tables"),
+            "{err}"
         );
     }
 }

@@ -5,8 +5,8 @@
 //! (the alternative, a pub test-support feature on the production crate, would
 //! ship test code in the plugin binary).
 
-use nostos_tauri::NostosState;
 use std::time::Duration;
+use tauri_plugin_cairn::NostosState;
 
 /// Spawn the spine binary, discover its port via the NOSTOS_E2E_PORT stdout
 /// line (the discovery contract every SDK E2E harness shares — see the
@@ -20,11 +20,12 @@ pub async fn spawn_spine() -> (u16, tokio::process::Child) {
     if !exe.exists() {
         // This crate is a SEPARATE workspace from the root, so build the
         // spine against the ROOT workspace Cargo.toml.
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("resolve root workspace from sdk/nostos_tauri");
+        // Walk up to the root workspace (this file is also #[path]-included
+        // from fixture/tests, one level deeper).
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|d| d.join("crates/nostos-infra").is_dir())
+            .expect("resolve root workspace above sdk/nostos_tauri");
         let status = std::process::Command::new("cargo")
             .args(["build", "-p", "nostos-infra", "--example", "e2e_server"])
             .arg("--manifest-path")
@@ -94,7 +95,16 @@ pub async fn http_push(port: u16, body: &str) {
 /// serverAcked marks derive from a SECOND client query(), which only sees
 /// rows the server actually fanned out (never the writer local apply).
 pub async fn observer(port: u16, tag: &str) -> NostosState {
-    let state = NostosState::new();
+    observer_tables(port, tag, &["tasks"]).await
+}
+
+/// `observer` over an explicit table set (multi-table lift, 2026-09-21): the
+/// first table is the primary, the rest ride `extra_tables` on the one socket.
+pub async fn observer_tables(port: u16, tag: &str, tables: &[&str]) -> NostosState {
+    let state = NostosState::with_config(tauri_plugin_cairn::NostosPluginConfig {
+        tables: Some(tables.iter().map(|t| (*t).to_owned()).collect()),
+        ..tauri_plugin_cairn::NostosPluginConfig::default()
+    });
     let db = std::env::temp_dir().join(format!(
         "nostos-tauri-conf-observer-{tag}-{}.sqlite",
         std::process::id()
@@ -127,8 +137,20 @@ pub async fn poll_rows_with_prefix(
     min_rows: usize,
     deadline: Duration,
 ) -> usize {
-    let sql =
-        format!("SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk LIKE '{pk_prefix}%'");
+    poll_table_rows_with_prefix(state, "tasks", pk_prefix, min_rows, deadline).await
+}
+
+/// `poll_rows_with_prefix` for an explicit table.
+pub async fn poll_table_rows_with_prefix(
+    state: &NostosState,
+    table: &str,
+    pk_prefix: &str,
+    min_rows: usize,
+    deadline: Duration,
+) -> usize {
+    let sql = format!(
+        "SELECT pk FROM cairn_data WHERE table_name = '{table}' AND pk LIKE '{pk_prefix}%'"
+    );
     let end = tokio::time::Instant::now() + deadline;
     loop {
         let rows_json = state.query(sql.clone()).await.expect("query");

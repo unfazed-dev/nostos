@@ -78,7 +78,7 @@ want rust      && run_slice rust      "cargo test -q -p nostos-client --test e2e
 # left in the tree — so it passed locally against a two-month-old binary and
 # failed in CI (fresh checkout, MODULE_NOT_FOUND) every time.
 want node      && run_slice node      "cd sdk/nostos_node && cargo build --release -q && cp \"\$(ls target/release/libnostos_node.dylib target/release/libnostos_node.so target/release/nostos_node.dll 2>/dev/null | head -1)\" nostos_node.node && node smoke_live.cjs"
-want tauri     && run_slice tauri     "cd sdk/nostos_tauri && cargo test -- --nocapture"
+want tauri     && run_slice tauri     "cd sdk/nostos_tauri && cargo test -- --nocapture && cd fixture && cargo test -- --nocapture"
 want web       && run_slice web       "cd sdk/nostos_web && npx playwright test --config=playwright.config.cjs"
 want capacitor && run_slice capacitor "cd sdk/nostos_capacitor && npm install --no-audit --no-fund && npm run build && cd example-app && npm install --no-audit --no-fund && npx playwright test --config=playwright.config.cjs"
 # dotnet — C# binding live-E2E against the shared spine (PUSH+ECHO). Loads the
