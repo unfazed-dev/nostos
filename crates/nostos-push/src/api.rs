@@ -16,6 +16,10 @@
 //! Bodies are parsed from raw Bytes (not the Json extractor) so a
 //! malformed body gets THIS crate's 400 error shape, not axum's default
 //! rejection body.
+// ponytail: clippy 1.98 `result_large_err` flags every handler because ApiError
+// is an (StatusCode, HeaderMap, Json<Value>) tuple (~200 B). Each Err is built
+// once and moved straight into the axum response; boxing it buys nothing.
+#![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
 

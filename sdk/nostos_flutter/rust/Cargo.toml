@@ -15,7 +15,7 @@ crate-type = ["cdylib", "staticlib"]
 [workspace]
 
 [dependencies]
-flutter_rust_bridge = "=2.13.0-beta.5"
+flutter_rust_bridge = "=2.13.0"
 
 # The client apply engine + sync loop this SDK wraps. Path deps (relative to
 # this crate, which lives at sdk/nostos_flutter/rust/) — not workspace deps,
@@ -42,3 +42,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
 [features]
 default = []
 iroh = ["nostos-client/iroh"]
+
+[profile.release]
+# ponytail: Rust's default release `strip = "debuginfo"` (1.77+) produces a
+# cdylib that macOS 26+/27 dyld rejects with "mis-aligned LINKEDIT string
+# pool" (measured 2026-09-21, rustc 1.95 / Darwin 27: strip=none loads, the
+# default does not). Costs ~200 KB on a ~5 MB dylib. Revisit when a newer
+# rustc/ld fixes the string-pool alignment; then delete this section.
+strip = "none"

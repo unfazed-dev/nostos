@@ -3,7 +3,7 @@
 Pre-1.0; architecture is pinned by ADRs (docs/adr/), code is moving fast.
 
 ## Setup
-- Rust 1.95.0 (rust-toolchain.toml installs it), Docker (for the Postgres e2e).
+- Rust latest stable (rust-toolchain.toml tracks `stable`; 1.98.1 as of 2026-09-21 — run `rustup update stable`), Docker (for the Postgres e2e).
 - `make setup` then `make ci` must pass before and after your change.
 
 ## Rules

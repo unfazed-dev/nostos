@@ -1,10 +1,11 @@
 [toolchain]
-# native_toolchain_rust requires an exact channel version/date for reproducible
-# builds. Pinned to match the root nostos workspace's rust-toolchain.toml
-# (1.95.0) — this crate path-deps on nostos-client/nostos-core/nostos-domain,
-# which declare rust-version = "1.95" (workspace.package), so an older pin
-# here fails to build them.
-channel = "1.95.0"
+# Tracks the LATEST stable, mirroring the root nostos workspace rust-toolchain.toml
+# (standing rule 2026-09-21). Kept as its own file so the SDK builds the same
+# way when vendored without the root. The path-deps (nostos-client/core/domain)
+# declare rust-version = 1.98 (workspace.package); an older pin here fails.
+# Verified 2026-09-21: rustc 1.98.1 also fixes the 1.95 "mis-aligned LINKEDIT
+# string pool" dlopen failure of the release cdylib on macOS 27.
+channel = "stable"
 targets = [
   "aarch64-apple-darwin",
   "aarch64-apple-ios",

@@ -56,7 +56,7 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.95"
+rust-version = "1.98"
 license = "Apache-2.0"
 # NOSTOS-IDENTITY-PENDING: legal entity + contact mailbox undecided — docs/IDENTITY.md
 authors = ["unfazed-dev"]

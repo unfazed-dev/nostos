@@ -279,8 +279,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // via `.with_state(...)`, producing two `Router<()>` instances that merge
     // cleanly — the production `sync_handler` requires `State<SyncRouterState>`
     // exactly, so we cannot collapse them into one shared AppState.
+    // `notes` is the second table the multi-table SDK conformance items
+    // (sdk/nostos_tauri tests) write to; `/push` still injects `tasks` only.
     let mut tables = HashSet::new();
     tables.insert("tasks".to_string());
+    tables.insert("notes".to_string());
     let sync_state = SyncRouterState::new(Arc::clone(&manager), Arc::clone(&auth))
         .with_buffer(1024)
         .with_write_back(echo_wb)

@@ -261,8 +261,7 @@ async fn shutdown_server(
                     &[&slot],
                 )
                 .await
-                .ok()
-                .is_some_and(|r| r.get::<_, bool>(0))
+                .is_ok_and(|r| r.get::<_, bool>(0))
             }
             Err(_) => false,
         };

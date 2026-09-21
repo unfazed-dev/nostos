@@ -553,9 +553,7 @@ fn matches_value(filter: &ColumnValue, actual: &ColumnValue) -> bool {
         // Coerce a Text row value into the filter's type, then compare.
         (ColumnValue::Number(a), ColumnValue::Text(s)) => s.parse::<i64>().ok().as_ref() == Some(a),
         (ColumnValue::Bool(a), ColumnValue::Text(s)) => parse_bool(s).as_ref() == Some(a),
-        (ColumnValue::Float(a), ColumnValue::Text(s)) => {
-            s.parse::<f64>().ok().is_some_and(|b| a == &b)
-        }
+        (ColumnValue::Float(a), ColumnValue::Text(s)) => s.parse::<f64>().is_ok_and(|b| a == &b),
         _ => false,
     }
 }

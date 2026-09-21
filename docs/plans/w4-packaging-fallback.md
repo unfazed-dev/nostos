@@ -33,7 +33,7 @@ unverified and remains W6's job (the CI release matrix).
 ## Step 1 — frb native-assets backend: WORKS
 
 ```
-cargo install flutter_rust_bridge_codegen --version 2.13.0-beta.5 --force
+cargo install flutter_rust_bridge_codegen --version 2.13.0 --force   # 2.13.0 stable since 2026-09 (was 2.13.0-beta.5)
 flutter config --enable-native-assets
 flutter create --platforms=macos hello_frb_na
 cd hello_frb_na

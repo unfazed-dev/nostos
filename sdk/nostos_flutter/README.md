@@ -240,7 +240,7 @@ per-type mapping table and the `int8`-as-string rationale.
 | macOS | Verified — `flutter test integration_test/nostos_server_test.dart -d macos` runs a real packaged `.app` against a real `cargo run -p nostos-server` (see that test's header comment) |
 | iOS / Android | Build config present (native-assets targets declared, plugin scaffold generated). The Rust glue crate is confirmed to cross-compile clean for both (`cargo ndk -t arm64-v8a build --release` and `cargo build --target aarch64-apple-ios --release`, W6). **Not yet verified**: the native-assets build hook actually firing during a real `flutter build ios`/`flutter build apk` — no device/simulator runner was exercised this pass. `.github/workflows/release.yml`'s flutter-android/flutter-ios jobs build the release artifacts; real end-to-end hook verification happens the first time that workflow runs against a real tag push. |
 | Windows / Linux | Fast-follow (per the launch plan) — not in `hook/build.dart`'s `_manifestKey()` yet, so both always take the cargo-build fallback. |
-| Web | Punted — Rust owns SQLite via `rusqlite`, not `sqlite3.wasm`; a web build needs a different storage backend entirely, out of scope here. |
+| Web | Supported (ADR-0036): the conditional import selects `WebNostosEngine`, which drives the *shared* `nostos-ffi-wasm` Worker (`web/nostos/nostos_worker.js`) with an opfs-sahpool SQLite store — durable, no COOP/COEP, Safari ≥ 16.4. Apps drop `nostos_worker.js` + `sqlite_wasm_glue.js` + `nostos_ffi_wasm.{js,_bg.wasm}` + `@sqlite.org/sqlite-wasm` under `web/` (see ADR-0036 §4); build as JS (`flutter build web`, not `--wasm`). One durable tab per origin: a second tab is refused at `connect` (`NostosWebStorageMode.secondaryTab`, Web Lock leader guard, 2026-09-21). `sqlitePath` is ignored; `LocalFileBlobStore` is `dart:io` — supply your own `BlobStore` for attachments. Browser round-trip pinned by `web/e2e/flutter_web_smoke.spec.cjs`. |
 
 ## Packaging mechanism
 
@@ -273,15 +273,16 @@ implements the prebuilt-binary pattern proved in
    inside the published pub.dev package and warrant a human look first).
 
 `flutter_rust_bridge` is pinned to an **exact** version
-(`2.13.0-beta.5`), not a caret range: `2.12.0` silently lacks
+(`2.13.0`, stable since 2026-09; was `2.13.0-beta.5`), not a caret range: `2.12.0` silently lacks
 `--integration-backend` entirely (confirmed in the spike), and the
 native-assets backend is beta-versioned — an exact pin avoids a confusing
 "unknown argument" failure on a contributor's stale global
 `flutter_rust_bridge_codegen` install.
 
-`flutter config --enable-native-assets` is required (Flutter 3.44/Dart
-3.12-era; native assets are still an opt-in flag) — run it once per machine
-before building a consumer app.
+`flutter config --enable-native-assets` — run it once per machine before
+building a consumer app. The flag still exists on Flutter 3.44 (Dart 3.12)
+through 3.47 (Dart 3.13, where the SDK docs now call the mechanism "build
+hooks"); it is harmless where the default is already on.
 
 ## Testing
 
@@ -343,7 +344,7 @@ is exercised on every tier, not just resolved):
 | pin | value | why exact |
 |---|---|---|
 | `nostos_flutter` | `0.2.0-dev.1` (path dep until first pub.dev publish) | pre-release head; see CHANGELOG |
-| `flutter_rust_bridge` | `2.13.0-beta.5` | beta-versioned native-assets backend; 2.12.0 silently lacks `--integration-backend` (see pubspec comment + docs/plans/w4-packaging-fallback.md) |
+| `flutter_rust_bridge` | `2.13.0` | native-assets backend (stable; bumped from `2.13.0-beta.5` 2026-09-21); 2.12.0 silently lacks `--integration-backend` (see pubspec comment + docs/plans/w4-packaging-fallback.md) |
 
 **Tag truth:** the repo's `v0.1.0` git tag (2026-07-05) predates the entire
 `sdk/` tree — no git tag has ever carried this package. "Track nostos's

@@ -613,7 +613,7 @@ async fn cross_tenant_param_abuse_never_leaks() {
     for evil in ["x' OR '1'='1", "'; DROP TABLE tasks;--"] {
         send_subscribe_stream(
             &mut ws,
-            &format!("evil-{}", &evil[..6].replace(['\'', ' ', ';'], "_")),
+            &format!("evil-{}", evil[..6].replace(['\'', ' ', ';'], "_")),
             "by_org",
             serde_json::json!({"org": evil}),
         )
