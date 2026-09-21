@@ -257,12 +257,20 @@ pub struct Config {
     rules_file: String,
 
     /// Coalesce the per-event ack-progress (slot-advance) scan: recompute the
-    /// slowest acked LSN every N events instead of every event. `1` (default) =
-    /// exact ADR-0009 per-event cadence. `>1` cuts the O(sessions) scan N× — the
-    /// lever for >5k-client deploys (safe: acks are monotonic, so a cached min
-    /// never overshoots the safe-to-flush LSN; at most N events of extra WAL
-    /// retention). Example: `16` or `32` for high client counts.
-    #[arg(long, env = "NOSTOS_ACK_PROGRESS_INTERVAL", default_value = "1")]
+    /// slowest acked LSN every N events instead of every event. `1` = the exact
+    /// ADR-0009 per-event cadence. `>1` cuts the O(sessions) scan N× (safe: acks
+    /// are monotonic, so a cached min never overshoots the safe-to-flush LSN; at
+    /// most N events of extra WAL retention).
+    ///
+    /// Default is `16`, not `1`, since 2026-09-21. At 100k sessions the fold
+    /// touches one `acked_lsn` atomic in every live session while 100k client
+    /// ack-readers are writing those same cache lines, so a per-event cadence
+    /// costs over half the throughput: 32,372 → 60,387 → 72,051 ops/sec at
+    /// N = 1 → 16 → 100 (benches/results/RESULTS.md, gated 100k ladder).
+    /// `16` is the knee — 1.87× of the available 2.23× — and bounds the slot
+    /// lag at 16 events, a few KB of WAL. Set `1` to restore the strict
+    /// per-event cadence, or `100` to trade more lag for the last 19%.
+    #[arg(long, env = "NOSTOS_ACK_PROGRESS_INTERVAL", default_value = "16")]
     ack_progress_interval: u32,
 
     /// Per-table push configuration (ADR-0037 §1 amendment + §2, plan 2.4).
