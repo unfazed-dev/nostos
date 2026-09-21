@@ -860,6 +860,48 @@ The knob's mechanism reconfirms yet again and still does not matter:
 *and* drops are under 1%. Like the mid-run load rule, the <1% bar was written
 down in § 5 and enforced by nobody.
 
+#### The drop-rate ladder — where this harness can actually measure (2026-09-21)
+
+Raw: `benches/results/raw/2026-09-21-droprate-ladder/`. Three passes, all
+contention-clean except the 100k rung (`other_mean` 39–85 against a 150 bar), so
+these drop rates are the harness's own behaviour.
+
+| clients | n | drop% observed | ops/sec | rungs under 1% |
+|---|---|---|---|---|
+| 10,000 | 1 | 0.00 | 674,811 | 1/1 |
+| 20,000 | 1 | 0.00 | 642,413 | 1/1 |
+| 40,000 | 1 | 0.72 | 608,543 | 1/1 |
+| 45,000 | 1 | 0.00 | 462,667 | 1/1 |
+| 50,000 | 2 | 0.00, 0.12 | 429,301–568,924 | **2/2** |
+| 55,000 | 4 | 0.00, 0.00, 1.10, 1.70 | 445,006–584,211 | 2/4 |
+| 60,000 | 4 | 0.00, 0.01, 3.17, 4.20 | 537,410–584,723 | 2/4 |
+| 80,000 | 1 | 8.05 | 509,899 | 0/1 |
+| 100,000 | 1 | 25.61 | 123,982 | 0/1 |
+
+**The last client count that reproducibly holds <1% drops is 50,000** — worst of
+two passes 0.12%. That is the tier the existing 0.139 s/event baseline was taken
+at, so those numbers stand.
+
+**There is no sharp ceiling above it.** A single pass per rung said 55k passes
+and 60k fails; replicating both four times says 55k is 0.00–1.70% and 60k is
+0.00–4.20%, each landing under 1% exactly half the time, means 0.70 vs 1.84 with
+sd 0.73 vs 1.88. The two rungs cannot be separated from each other or from the
+1% line. The crisp boundary was an artifact of n=1 — the third time in one day
+that a single sample per configuration produced a clean-looking answer that did
+not survive replication.
+
+Two things the ladder settles that the 100k tier could not:
+
+1. **Aggregate throughput does not degrade with client count** across 10k–80k:
+   430k–675k deliveries/sec with no trend, while drops climb from 0 to 8%. What
+   scales badly is delivery completeness, not rate.
+2. **100k is the only rung that collapses** — 123,982 deliveries/sec, the sole
+   rung whose 300 s window expired. Every other rung finished in 7–72 s.
+
+Rungs marked n=1 are single passes and inherit exactly the caveat above; they
+are shape, not measurement. Anything cited from this ladder should come from the
+50k rung or below.
+
 **What would make the 100k tier measurable** is an open question, not a planned
 change: find the largest client count that sustains <1% drops and measure there,
 or establish that the drops are the probe's own 100k in-process client tasks

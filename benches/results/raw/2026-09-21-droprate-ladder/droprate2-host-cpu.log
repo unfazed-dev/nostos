@@ -1,0 +1,23 @@
+[host] 23:08:53 tier=45000 load1=5.96 other_total=91.5 other_max=21.8 cmd=Figma Helper (Re
+[host] 23:09:05 tier=45000 load1=6.97 other_total=80.4 other_max=21.6 cmd=Code Helper (Ren
+[host] 23:09:17 tier=45000 load1=7.39 other_total=76.5 other_max=18.0 cmd=Figma Helper (Re
+[host] 23:09:29 tier=45000 load1=8.43 other_total=65.1 other_max=19.9 cmd=Code Helper (Ren
+[host] 23:09:41 tier=45000 load1=10.65 other_total=92.6 other_max=25.1 cmd=WindowServer
+[host] 23:07:07 tier=50000 load1=3.72 other_total=69.1 other_max=20.3 cmd=Code Helper (Ren
+[host] 23:07:19 tier=50000 load1=3.30 other_total=148.3 other_max=49.7 cmd=Figma Helper (Re
+[host] 23:07:31 tier=50000 load1=3.71 other_total=74.2 other_max=16.3 cmd=Code Helper (Ren
+[host] 23:07:43 tier=50000 load1=5.96 other_total=33.4 other_max=4.9 cmd=Figma Helper (Re
+[host] 23:07:55 tier=50000 load1=7.09 other_total=84.4 other_max=20.3 cmd=WindowServer
+[host] 23:08:07 tier=50000 load1=7.93 other_total=55.6 other_max=11.9 cmd=WindowServer
+[host] 23:08:18 tier=50000 load1=8.34 other_total=79.4 other_max=21.1 cmd=Code Helper (Ren
+[host] 23:11:59 tier=50000 load1=7.63 other_total=72.6 other_max=19.3 cmd=Code Helper (Ren
+[host] 23:12:11 tier=50000 load1=7.11 other_total=45.6 other_max=12.8 cmd=Code Helper (Ren
+[host] 23:12:22 tier=50000 load1=7.63 other_total=43.6 other_max=19.4 cmd=Code Helper (Ren
+[host] 23:12:34 tier=50000 load1=8.46 other_total=30.3 other_max=7.5 cmd=WindowServer
+[host] 23:12:46 tier=50000 load1=8.45 other_total=67.8 other_max=19.3 cmd=Code Helper (Ren
+[host] 23:10:18 tier=55000 load1=7.35 other_total=116.0 other_max=28.0 cmd=Code Helper (Ren
+[host] 23:10:30 tier=55000 load1=7.46 other_total=100.1 other_max=31.8 cmd=WindowServer
+[host] 23:10:42 tier=55000 load1=8.08 other_total=63.2 other_max=20.9 cmd=Code Helper (Ren
+[host] 23:10:54 tier=55000 load1=8.85 other_total=65.8 other_max=17.0 cmd=Code Helper (Ren
+[host] 23:11:06 tier=55000 load1=10.64 other_total=107.5 other_max=26.7 cmd=WindowServer
+[host] 23:11:18 tier=55000 load1=10.93 other_total=57.5 other_max=15.7 cmd=2.1.278

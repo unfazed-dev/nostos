@@ -1,0 +1,54 @@
+[host] 22:52:47 tier=10000 load1=2.02 other_total=47.0 other_max=15.2 cmd=Code Helper (Ren
+[host] 22:52:59 tier=10000 load1=2.50 other_total=31.8 other_max=14.8 cmd=Code Helper (Ren
+[host] 22:59:37 tier=100000 load1=5.92 other_total=34.5 other_max=17.1 cmd=Code Helper (Ren
+[host] 22:59:48 tier=100000 load1=7.81 other_total=43.1 other_max=17.1 cmd=Code Helper (Ren
+[host] 23:00:00 tier=100000 load1=6.38 other_total=55.6 other_max=18.9 cmd=Code Helper (Ren
+[host] 23:00:12 tier=100000 load1=6.34 other_total=43.6 other_max=15.0 cmd=Code Helper (Ren
+[host] 23:00:23 tier=100000 load1=6.26 other_total=51.7 other_max=23.0 cmd=Code Helper (Ren
+[host] 23:00:35 tier=100000 load1=7.69 other_total=57.7 other_max=17.6 cmd=corespotlightd
+[host] 23:00:47 tier=100000 load1=8.21 other_total=70.0 other_max=17.6 cmd=Code Helper (Ren
+[host] 23:00:59 tier=100000 load1=8.56 other_total=46.9 other_max=17.3 cmd=Code Helper (Ren
+[host] 23:01:10 tier=100000 load1=9.39 other_total=117.7 other_max=27.0 cmd=WindowServer
+[host] 23:01:22 tier=100000 load1=10.44 other_total=229.2 other_max=30.8 cmd=WindowServer
+[host] 23:01:35 tier=100000 load1=14.79 other_total=81.5 other_max=26.1 cmd=Figma Helper (Re
+[host] 23:01:48 tier=100000 load1=14.66 other_total=55.6 other_max=14.4 cmd=Figma Helper (Re
+[host] 23:02:00 tier=100000 load1=14.02 other_total=97.6 other_max=49.5 cmd=Figma Helper (Re
+[host] 23:02:12 tier=100000 load1=13.64 other_total=89.2 other_max=21.4 cmd=Code Helper (Ren
+[host] 23:02:25 tier=100000 load1=13.67 other_total=121.0 other_max=27.7 cmd=Figma Helper (Re
+[host] 23:02:37 tier=100000 load1=13.19 other_total=158.8 other_max=23.5 cmd=WindowServer
+[host] 23:02:50 tier=100000 load1=13.41 other_total=34.0 other_max=7.1 cmd=2.1.278
+[host] 23:03:02 tier=100000 load1=12.84 other_total=120.4 other_max=25.8 cmd=Code Helper (Ren
+[host] 23:03:15 tier=100000 load1=14.37 other_total=73.5 other_max=20.0 cmd=WindowServer
+[host] 23:03:27 tier=100000 load1=14.52 other_total=93.1 other_max=16.9 cmd=Code Helper (Ren
+[host] 23:03:40 tier=100000 load1=14.29 other_total=50.8 other_max=15.3 cmd=Code Helper (Ren
+[host] 23:03:52 tier=100000 load1=13.79 other_total=68.6 other_max=19.6 cmd=WindowServer
+[host] 23:04:04 tier=100000 load1=12.81 other_total=84.7 other_max=30.0 cmd=Figma Helper (Re
+[host] 23:04:17 tier=100000 load1=12.67 other_total=86.7 other_max=23.2 cmd=Code Helper (Ren
+[host] 23:04:29 tier=100000 load1=11.85 other_total=76.9 other_max=22.2 cmd=Figma Helper (Re
+[host] 23:04:41 tier=100000 load1=12.04 other_total=56.4 other_max=23.7 cmd=Code Helper (Ren
+[host] 23:04:53 tier=100000 load1=11.81 other_total=91.7 other_max=49.2 cmd=Figma Helper (Re
+[host] 23:05:05 tier=100000 load1=10.92 other_total=44.3 other_max=16.5 cmd=Code Helper (Ren
+[host] 23:05:17 tier=100000 load1=11.31 other_total=32.0 other_max=8.0 cmd=Figma Helper (Re
+[host] 22:53:33 tier=20000 load1=2.41 other_total=46.1 other_max=17.8 cmd=Code Helper (Ren
+[host] 22:53:44 tier=20000 load1=2.12 other_total=23.7 other_max=3.9 cmd=WindowServer
+[host] 22:53:56 tier=20000 load1=3.61 other_total=46.6 other_max=15.3 cmd=Code Helper (Ren
+[host] 22:54:30 tier=40000 load1=3.32 other_total=95.5 other_max=18.6 cmd=WindowServer
+[host] 22:54:42 tier=40000 load1=2.96 other_total=64.3 other_max=20.8 cmd=Code Helper (Ren
+[host] 22:54:53 tier=40000 load1=3.68 other_total=49.9 other_max=16.4 cmd=Code Helper (Ren
+[host] 22:55:05 tier=40000 load1=4.81 other_total=49.0 other_max=16.9 cmd=Code Helper (Ren
+[host] 22:55:17 tier=40000 load1=5.38 other_total=75.6 other_max=28.9 cmd=corespotlightd
+[host] 22:55:50 tier=60000 load1=4.47 other_total=58.0 other_max=18.1 cmd=Code Helper (Ren
+[host] 22:56:02 tier=60000 load1=4.42 other_total=64.9 other_max=19.4 cmd=Code Helper (Ren
+[host] 22:56:13 tier=60000 load1=5.04 other_total=63.6 other_max=18.8 cmd=Code Helper (Ren
+[host] 22:56:25 tier=60000 load1=5.95 other_total=63.3 other_max=16.6 cmd=Code Helper (Ren
+[host] 22:56:37 tier=60000 load1=6.41 other_total=47.6 other_max=16.1 cmd=Code Helper (Ren
+[host] 22:56:49 tier=60000 load1=7.02 other_total=34.3 other_max=15.7 cmd=Code Helper (Ren
+[host] 22:57:28 tier=80000 load1=5.01 other_total=28.4 other_max=3.7 cmd=2.1.278
+[host] 22:57:39 tier=80000 load1=5.37 other_total=102.5 other_max=72.4 cmd=mobileassetd
+[host] 22:57:51 tier=80000 load1=4.78 other_total=85.6 other_max=31.5 cmd=mobileassetd
+[host] 22:58:02 tier=80000 load1=5.24 other_total=68.3 other_max=20.3 cmd=Code Helper (Ren
+[host] 22:58:14 tier=80000 load1=6.52 other_total=61.1 other_max=20.0 cmd=Code Helper (Ren
+[host] 22:58:26 tier=80000 load1=7.85 other_total=43.3 other_max=19.6 cmd=PerfPowerService
+[host] 22:58:38 tier=80000 load1=8.24 other_total=25.0 other_max=3.8 cmd=WindowServer
+[host] 22:58:50 tier=80000 load1=8.53 other_total=31.7 other_max=13.7 cmd=Code Helper (Ren
+[host] 22:59:01 tier=80000 load1=8.62 other_total=35.5 other_max=14.5 cmd=Code Helper (Ren
