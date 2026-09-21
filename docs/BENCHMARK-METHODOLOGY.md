@@ -103,6 +103,37 @@ Recorded in every results artifact:
 
 ---
 
+### 6.1 The headroom rule — when a measurement counts
+
+Agreed 2026-09-02, enforced by hand until 2026-09-21, mechanical since
+(`benches/scripts/fanout-100k-diag.sh`). Two halves, and the second is the one
+that matters:
+
+- **START gate.** A *build* may run under any host load. A *measurement* only
+  starts when host load1 < 8 (0.8 × 10 cores, `sysctl vm.loadavg` — the macOS
+  host's, not the container's `/proc/loadavg`), no other bench container is up,
+  and `/tmp/nostos-bench.lock` is free.
+- **MID-RUN validity.** No non-harness process above 20% CPU on any 10 s
+  sample, for the whole tier. One violating sample marks the tier INVALID; its
+  logs are kept (the `CONTENDED.md` pattern), never silently re-rolled. The
+  Docker Desktop VM doing the fan-out is *harness* and is expected above 400%.
+
+**load1 does not invalidate a run on its own.** The 10-vCPU harness VM alone
+contributes ~4–5 to host load1 while fanning out, so "load1 < 8 for the whole
+run" is unreachable by design — a tier that ends at load1 = 12 can be perfectly
+valid. load1 is recorded for context; the 20% non-harness clause decides.
+
+**Why this is written down here.** It was not. The rule lived in
+`docs/plans/fanout-100k-cliff-diagnosis.md` while the harness cited *this* file
+for it, and the mid-run half went unenforced. On 2026-09-21 an ack-coalescing
+A/B passed the start gate and then ran tiers at load1 34.21 and 22.64; the
+resulting 2.23× was noise and was retracted (RESULTS.md). A rule that is written
+down and not enforced is worse than no rule — it makes contaminated runs look
+gated. A tier that reports `MIDRUN ... valid=no` is fit for order-of-magnitude
+bounds only, never for an A/B.
+
+---
+
 ## 7. Pure-router micro-benchmark
 
 In addition to the end-to-end WebSocket harness, a `criterion` micro-benchmark measures **just** `SessionStore.matching` + `EventSink.deliver` with no network I/O — an in-memory `RecordingSink`. This isolates the router's own ceiling from WebSocket frame encoding. Reported alongside the end-to-end number so a skeptic can see where time goes.

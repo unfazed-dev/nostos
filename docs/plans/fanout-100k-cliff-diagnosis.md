@@ -825,11 +825,17 @@ noisy one. The lesson this episode actually teaches:
    rose" are separate claims with separate evidence. A convincing mechanism made
    unexplained noise feel explained.
 3. **Interleave arms.** Blocked designs confound the arm with time and load.
-4. **The load gate is start-only.** `fanout-100k-diag.sh` checks load1 < 8 at
+4. **The load gate was start-only.** `fanout-100k-diag.sh` checked load1 < 8 at
    tier start and never again; tiers 3 and 4 passed it and ran at 34.21 and
-   22.64. `docs/BENCHMARK-METHODOLOGY.md`'s mid-run rule is unenforced. Until
-   the script samples during the run, this tier is good for order-of-magnitude
-   bounds only, not A/B.
+   22.64. The mid-run rule was written down in *this* file while the script
+   cited `docs/BENCHMARK-METHODOLOGY.md` for it, and nothing enforced it —
+   which is how a rule can be honoured in three documents and in no code.
+   **Fixed 2026-09-21:** the rule is now canonical in
+   `docs/BENCHMARK-METHODOLOGY.md` § 6.1 (the Headroom-rule block above defers
+   to it), and the script samples the host every 10 s, emits a per-tier
+   `MIDRUN ... valid=yes|no`, kills after 3 consecutive violating samples with
+   one re-arm, and no longer hardcodes `LINUX_DIAG_EXIT=0`. The six tiers above
+   predate it and stay order-of-magnitude only.
 
 End-of-run load1 correlates with throughput only moderately (Spearman ρ ≈ 0.6
 over the six tiers) and is partly an *effect* of throughput, so it is not itself

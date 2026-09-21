@@ -792,12 +792,22 @@ The earlier subsection "Why the isolated measurement said 3% and the truth was
 
 #### The harness defect this exposed
 
-`fanout-100k-diag.sh` enforces `docs/BENCHMARK-METHODOLOGY.md`'s load gate
-(load1 < 8) **only at tier start**. Tiers 3 and 4 passed the gate and then ran
-into load1 34.21 and 22.64; tier 3's 7,146 is a starved run by any reading. The
-methodology's mid-run validity rule (no non-harness process > 20% CPU on any
-10 s sample) is written down and not enforced by the script. Until it is, this
-tier cannot be used for A/B comparisons — only for order-of-magnitude bounds.
+`fanout-100k-diag.sh` enforced the load gate **only at tier start**. Tiers 3
+and 4 passed the gate and then ran into load1 34.21 and 22.64; tier 3's 7,146 is
+a starved run by any reading. The mid-run validity rule (no non-harness process
+> 20% CPU on any 10 s sample) existed — in `docs/plans/fanout-100k-cliff-diagnosis.md`,
+while the script cited `docs/BENCHMARK-METHODOLOGY.md` for it — and no code
+anywhere enforced it.
+
+**Fixed the same day.** The rule is now canonical in
+`docs/BENCHMARK-METHODOLOGY.md` § 6.1, and the script samples the host every
+10 s (`host-cpu-tier*.log`), closes each tier with
+`MIDRUN samples=.. violations=.. load1_max=.. valid=yes|no`, kills a tier after
+3 consecutive violating samples and re-arms once, and reports the worst tier rc
+in `LINUX_DIAG_EXIT` — which was hardcoded to `0`, so a gate timeout or a
+contended tier still announced a clean run. The six tiers above predate the fix
+and stay order-of-magnitude only; they cannot be retrofitted with a verdict
+because the host samples were never taken.
 
 Note also that end-of-run load1 is a poor explanatory variable because it is
 partly *caused* by throughput. Ranking the six tiers by it gives Spearman
