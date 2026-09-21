@@ -70,9 +70,11 @@ Proposed replacement, measurable at 1k on one host:
 The backlog is already inducible and already demonstrated: `--buffer 16 --distinct-keys 64` at
 1k clients produced 380,637 real supersedes. That run is the fixture.
 
-## Separately: four harness defects the same research names
+## Separately: five harness defects
 
-These are real and independent of ADR-0045.
+Four came from the research below. The fifth came from running on a second
+machine, and could not have come from anywhere else — see "What a slow host
+found" at the end. These are real and independent of ADR-0045.
 
 1. **"Pedal to the metal" is not a benchmark.** `FakeReplicator` floods as fast as it can, so the
    drop rate measures where the system falls over, not whether it meets a rate. The standard fix
@@ -80,10 +82,14 @@ These are real and independent of ADR-0045.
    rate R, drops < 1%", and the ladder should search for the largest R that holds. This reframes
    the entire drop-rate ladder and is probably the highest-value harness change in this document
    after AoI.
-2. **A run that hit its timeout must not report a number.** The 10k rung's `elapsed_secs: 120.00`
-   is the `--timeout-secs` default, i.e. window expiry. `nostos-bench` should stamp
-   `throughput_valid: false` and refuse the figure, the way `fanout-100k-diag.sh` already does
-   per tier. Today the JSON looks like a measurement.
+2. ~~**A run that hit its timeout must not report a number.**~~ **BUILT 2026-09-22 (`1449664`).**
+   The 10k rung's `elapsed_secs: 120.00` is the `--timeout-secs` default, i.e. window expiry, and
+   the JSON looked like a measurement. `RunResult` now carries `throughput_valid`; an invalid run
+   is withheld from the printed table and from **every aggregate** in RESULTS.md, and all tiers
+   timing out prints an explicit refusal rather than a `max` over an empty set (which returns
+   `0.0` and reads as a measured collapse). Latency is still reported — a truncated window does
+   not bias the frames that did land. Predicted here for the 10k rung; found corrupting the
+   **1k** rung on a 4-core host.
 3. **Repetition policy instead of ad-hoc run counts.** MLPerf's template: fix N per benchmark,
    drop fastest and slowest, report the mean of the rest, and state the tolerance the N was
    chosen to hold (5 runs → 90% within 5%). Turns variance from an argument into a number.
@@ -91,6 +97,40 @@ These are real and independent of ADR-0045.
    parent always took the cold-cache slot. Random interleaving is reported to cut run-to-run
    variance by up to 40%; fixed order reintroduces an ordering bias. Also discard the warm-up
    run, and plot the series — throttling shows as a step change that a median hides.
+5. ~~**The wait loop could not finish a lossy run.**~~ **BUILT 2026-09-22 (`59af8b7`).** It waited
+   for `sum_received() >= events × clients` — the count a *loss-free* run receives. The router is
+   allowed to shed on a full session channel and a shed event never reaches a client, so a single
+   shed made the target unreachable and the loop spun to the deadline. Runs now end on
+   **quiescence** (delivery stops advancing), with the clock stopped at the last delivery so the
+   quiet grace never enters `elapsed`.
+
+## What a slow host found (2026-09-22)
+
+A second machine became available: `unfazed-rog`, Intel i7-7700HQ, 4c/8t, 2017 mobile part,
+Arch. Slower than the Mac in every dimension. It found both bugs above within four runs, and
+**neither is reproducible on Apple Silicon**, because both require the router to shed and the Mac
+sheds nothing at the 1k tier. `target` is always met there, so `elapsed` is always honest.
+
+Defect 5 is the instructive one. The same workload, same binary, same host:
+
+| window | delivered | elapsed | reported |
+|---|---|---|---|
+| 120 s | 98,987,756 | 120.0 s | 824,882 ops/sec |
+| 600 s | 99,427,257 | 600.0 s | **165,712 ops/sec** |
+
+Five times the window, 0.4% more work, a 5× "slower" result. Both figures were work ÷ an
+arbitrary window. A reader comparing them would have concluded the system had collapsed.
+
+The methodological point, which generalises past this harness: **a benchmark validated on one
+machine is validated against that machine's failure modes.** Every figure in RESULTS.md was
+produced on hardware fast enough to hide two defects that make throughput unfalsifiable. The fix
+is not a faster host, it is a *different* one — and preferably a worse one, since a slow machine
+enters the regimes a fast one never reaches. Results live in
+`benches/results/linux-unfazed-rog-2026-09-22.md`.
+
+This does not retire the second-host requirement in the next section. That is about the generator
+competing with the server for CPU, which is unchanged: this box runs the same in-process harness,
+and its LAN is Wi-Fi, so it cannot host a network-separated arm either.
 
 ## What still genuinely needs a second host
 
