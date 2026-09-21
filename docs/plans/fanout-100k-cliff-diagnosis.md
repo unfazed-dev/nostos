@@ -102,8 +102,11 @@ Headroom rule (agreed with the coordinator 2026-09-02):
 - START gate: host load1 < 8 (0.8 × 10 cores, the pre-VM baseline) and no
   other bench container up.
 - MID-RUN validity: no non-harness process > 20% CPU on any 10 s sample
-  (`host-cpu.log`). load1 is recorded alongside (`host-load1.log`) but a run
-  is NOT invalidated on load1 alone — the 10-vCPU harness VM itself adds ~4–5
+  (`host-cpu.log`). **Superseded 2026-09-21** — see
+  `docs/BENCHMARK-METHODOLOGY.md` § 6.1, now aggregate non-harness CPU <= 150%
+  on >= 95% of samples, and mechanically enforced. The 20% bar was 2% of a
+  10-core host and no machine with a screen on could meet it. load1 is recorded
+  alongside (`host-load1.log`) but a run is NOT invalidated on load1 alone — the 10-vCPU harness VM itself adds ~4–5
   while fanning out, so "load1 < 8 for the whole run" is unreachable by
   design. That is why a row with load1 = 12 mid-run can still be VALID.
 
@@ -832,9 +835,9 @@ noisy one. The lesson this episode actually teaches:
    which is how a rule can be honoured in three documents and in no code.
    **Fixed 2026-09-21:** the rule is now canonical in
    `docs/BENCHMARK-METHODOLOGY.md` § 6.1 (the Headroom-rule block above defers
-   to it), and the script samples the host every 10 s, emits a per-tier
-   `MIDRUN ... valid=yes|no`, kills after 3 consecutive violating samples with
-   one re-arm, and no longer hardcodes `LINUX_DIAG_EXIT=0`. The six tiers above
+   to it) and recalibrated to aggregate non-harness CPU <= 150%, and the script
+   samples the host every 10 s, emits a per-tier `MIDRUN ... valid=yes|no`,
+   kills after 3 consecutive violating samples with one re-arm, and no longer hardcodes `LINUX_DIAG_EXIT=0`. The six tiers above
    predate it and stay order-of-magnitude only.
 
 End-of-run load1 correlates with throughput only moderately (Spearman ρ ≈ 0.6

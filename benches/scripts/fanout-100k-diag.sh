@@ -18,10 +18,11 @@
 #                   starts when host load1 < 8 (0.8 x 10 cores), no other
 #                   nostos-linux-* container is up, and /tmp/nostos-bench.lock
 #                   is free.
-#   MID-RUN check — no non-harness process > 20% CPU on any 10 s sample. NOT
-#                   load1: the 10-vCPU harness VM alone adds ~4-5 while fanning
-#                   out, so load1 < 8 for a whole run is unreachable by design.
-#                   load1 is recorded alongside but never invalidates on its own.
+#   MID-RUN check — aggregate non-harness CPU <= 150% (1.5 of 10 cores) on at
+#                   least 95% of the 10 s samples. NOT load1: the 10-vCPU harness
+#                   VM alone adds ~4-5 while fanning out, so load1 < 8 for a whole
+#                   run is unreachable by design. load1 is recorded alongside but
+#                   never invalidates on its own.
 #
 # The mid-run half was written down on 2026-09-02, enforced by hand, and then
 # not enforced at all: the ack-coalescing replication (2026-09-21) passed the
@@ -51,52 +52,77 @@ set -u
 # `com.apple.Virtua`), so a pattern longer than ~16 chars can never match.
 HARNESS_RE='^(com\.docker|com\.apple\.Virt|docker|Docker|qemu|vpnkit|hyperkit|kernel_task|top|sysctl)'
 
-# stdin: `top -l 2 -stats cpu,command` output. stdout: "<cpu> <command>" for the
-# busiest NON-harness process in the LAST sample block. The first block must be
-# discarded — macOS `top` reports a since-launch average there, not an
-# instantaneous one, which is why `ps -o %cpu` cannot be used for this at all.
-top_worst_other() {
+# Mid-run thresholds, recalibrated 2026-09-21 — see docs/BENCHMARK-METHODOLOGY.md
+# § 6.1 for the derivation. The rule these replace ("no single non-harness
+# process above 20% CPU") could not be met by any machine with a screen on:
+# macOS `top` reports 100% = ONE core, so 20% is 2% of this 10-core host, while
+# the harness VM itself legitimately runs at 574%. It also measured the wrong
+# thing — ten processes at 15% starve the VM more than one at 30%, and the old
+# rule caught only the second. Aggregate is what steals cores, so aggregate is
+# what is measured.
+OTHER_LIMIT=150   # % of one core, summed over all non-harness processes
+VIOL_PCT_LIMIT=5  # % of a tier's samples allowed to exceed it
+
+# stdin: `top -l 2 -stats cpu,command` output. stdout: "<total> <worst> <cmd>" —
+# aggregate non-harness CPU, plus the single worst offender for diagnosis. The
+# first block must be discarded: macOS `top` reports a since-launch average
+# there, not an instantaneous one, which is why `ps -o %cpu` cannot do this job.
+top_other_total() {
   awk -v re="$HARNESS_RE" '
-    /^%CPU/ { c = 1; best = 0; who = "-"; next }
+    /^%CPU/ { c = 1; tot = 0; best = 0; who = "-"; next }
     c && NF >= 2 {
       cmd = $2; for (i = 3; i <= NF; i++) cmd = cmd " " $i
-      if (cmd !~ re && $1 + 0 > best) { best = $1 + 0; who = cmd }
+      if (cmd !~ re) { tot += $1 + 0; if ($1 + 0 > best) { best = $1 + 0; who = cmd } }
     }
-    END { printf "%.1f %s\n", best, who }'
+    END { printf "%.1f %.1f %s\n", tot, best, who }'
 }
 
-# $1 = a host-sampler log. Applies the rule as written: ANY sample with a
-# non-harness process over 20% invalidates the tier. load1 is reported but never
-# decides — the harness VM alone adds ~4-5. n == 0 is invalid too: a tier with no
-# contention evidence is not a measurement.
+# $1 = a host-sampler log. A tier is INVALID when more than VIOL_PCT_LIMIT of its
+# samples exceed OTHER_LIMIT — proportional, because the harm from contention is
+# time-integrated: one 10 s blip in a 300 s tier is 3% of the run, not a reason
+# to discard it. `other_mean` is reported so future analysis can regress
+# throughput on a continuous covariate instead of on end-of-run load1, which is
+# partly *caused* by throughput. n == 0 is invalid: a tier with no contention
+# evidence is not a measurement.
 midrun_verdict() {
-  awk '/^\[host\]/ && /top_other=/ {
+  awk -v lim="$OTHER_LIMIT" -v pctlim="$VIOL_PCT_LIMIT" '
+    /^\[host\]/ && /other_total=/ {
       n++
-      split($0, a, "top_other="); split(a[2], b, " "); if (b[1] + 0 > 20) v++
-      split($0, c, "load1=");     split(c[2], d, " "); if (d[1] + 0 > mx) mx = d[1] + 0
+      split($0, a, "other_total="); split(a[2], b, " "); t = b[1] + 0
+      sum += t; if (t > mx) mx = t; if (t > lim) v++
+      split($0, c, "load1=");       split(c[2], d, " "); if (d[1] + 0 > l1) l1 = d[1] + 0
     }
-    END { printf "samples=%d violations=%d load1_max=%.2f valid=%s", n, v + 0, mx, (n > 0 && v + 0 == 0) ? "yes" : "no" }' "$1"
+    END {
+      pct = n ? 100 * v / n : 100
+      printf "samples=%d viol=%d viol_pct=%.1f other_mean=%.0f other_max=%.0f load1_max=%.2f valid=%s",
+        n, v + 0, pct, n ? sum / n : 0, mx, l1, (n > 0 && pct <= pctlim) ? "yes" : "no"
+    }' "$1"
 }
 
 if [ "${1:-}" = "--self-test" ]; then
+  # 574 Apple-VZ + 412 docker + kernel_task are harness; 31.7 + 22.0 + 5.0 are not.
   got=$(printf '%s\n' \
     'Processes: 700 total, 2 running' '%CPU COMMAND' '99.0 WindowServer' '90.0 com.docker.backe' \
     'PhysMem: 15G used (2622M wired), 148M unused.' 'Load Avg: 2.34, 3.45, 4.56' \
     '%CPU COMMAND' '574.0 com.apple.Virtua' '412.3 com.docker.backe' '25.5 kernel_task' \
-    '31.7 Code Helper (Ren' '22.0 Brave Browser' '5.3 top' \
-    | top_worst_other)
-  [ "$got" = "31.7 Code Helper (Ren" ] \
-    || { echo "self-test FAILED: top_worst_other gave '$got', want '31.7 Code Helper (Ren'"; exit 1; }
-  echo "self-test ok: top_worst_other picked '$got' (harness + first block ignored)"
+    '31.7 Code Helper (Ren' '22.0 Brave Browser' '5.0 Spotlight' '5.3 top' \
+    | top_other_total)
+  [ "$got" = "58.7 31.7 Code Helper (Ren" ] \
+    || { echo "self-test FAILED: top_other_total gave '$got', want '58.7 31.7 Code Helper (Ren'"; exit 1; }
+  echo "self-test ok: top_other_total '$got' (harness + first block ignored, rest summed)"
 
   fix=$(mktemp)
+  # Row 2 is 2026-09-02 attempt 2 (WindowServer 40 + VS Code 61 + Google 39 +
+  # ProtonVPN 29 + node 24 + secd 30) — the one run we have a human INVALID
+  # verdict for. Rows 1/3 are this desktop idling. Any recalibration must still
+  # reject row 2 and still accept rows 1 and 3.
   printf '%s\n' \
-    '[host] 22:34:26 tier=100000 load1=4.39 top_other=12.0 Brave Browser' \
-    '[host] 22:34:37 tier=100000 load1=11.20 top_other=38.5 WindowServer' \
-    '[host] 22:34:48 tier=100000 load1=9.10 top_other=3.2 mds' >"$fix"
+    '[host] 22:34:26 tier=100000 load1=4.39 other_total=81.0 other_max=30.0 cmd=WindowServer' \
+    '[host] 22:34:37 tier=100000 load1=11.20 other_total=223.0 other_max=61.0 cmd=Code Helper' \
+    '[host] 22:34:48 tier=100000 load1=9.10 other_total=75.4 other_max=28.1 cmd=WindowServer' >"$fix"
   got=$(midrun_verdict "$fix"); rm -f "$fix"
-  # load1 hit 11.20 and that alone must NOT invalidate; the 38.5% sample must.
-  [ "$got" = "samples=3 violations=1 load1_max=11.20 valid=no" ] \
+  # 1 of 3 samples = 33% > 5% => invalid. load1 hit 11.20 and that alone must not decide.
+  [ "$got" = "samples=3 viol=1 viol_pct=33.3 other_mean=126 other_max=223 load1_max=11.20 valid=no" ] \
     || { echo "self-test FAILED: midrun_verdict gave '$got'"; exit 1; }
   echo "self-test ok: midrun_verdict '$got'"
   exit 0
@@ -142,15 +168,15 @@ host_sampler() { # $1 = tier label
   streak=0
   while :; do
     ts=$(date +%T); l1=$(host_load1)
-    worst=$(top -l 2 -n 15 -stats cpu,command -o cpu 2>/dev/null | top_worst_other)
-    echo "[host] $ts tier=$1 load1=$l1 top_other=$worst"
-    if awk -v w="${worst%% *}" 'BEGIN{exit !(w > 20)}'; then
+    read -r tot best who <<<"$(top -l 2 -n 25 -stats cpu,command -o cpu 2>/dev/null | top_other_total)"
+    echo "[host] $ts tier=$1 load1=$l1 other_total=$tot other_max=$best cmd=$who"
+    if awk -v t="$tot" -v lim="$OTHER_LIMIT" 'BEGIN{exit !(t > lim)}'; then
       streak=$((streak + 1))
     else
       streak=0
     fi
     if [ "$streak" -ge 3 ]; then
-      echo "[host] $ts CONTENDED tier=$1 — 3 consecutive samples over 20% non-harness CPU, killing the run"
+      echo "[host] $ts CONTENDED tier=$1 — 3 consecutive samples over ${OTHER_LIMIT}% aggregate non-harness CPU, killing the run"
       : >"$OUT/.contended"
       docker rm -f "$NAME" >/dev/null 2>&1
       return

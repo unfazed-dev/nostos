@@ -794,16 +794,20 @@ The earlier subsection "Why the isolated measurement said 3% and the truth was
 
 `fanout-100k-diag.sh` enforced the load gate **only at tier start**. Tiers 3
 and 4 passed the gate and then ran into load1 34.21 and 22.64; tier 3's 7,146 is
-a starved run by any reading. The mid-run validity rule (no non-harness process
-> 20% CPU on any 10 s sample) existed — in `docs/plans/fanout-100k-cliff-diagnosis.md`,
-while the script cited `docs/BENCHMARK-METHODOLOGY.md` for it — and no code
-anywhere enforced it.
+a starved run by any reading. The mid-run validity rule existed — in
+`docs/plans/fanout-100k-cliff-diagnosis.md`, while the script cited
+`docs/BENCHMARK-METHODOLOGY.md` for it — and no code anywhere enforced it. It
+was also miscalibrated: "no non-harness process > 20% CPU" is 2% of a 10-core
+box, unmeetable with a display attached, and per-process where the harm is
+aggregate.
 
 **Fixed the same day.** The rule is now canonical in
-`docs/BENCHMARK-METHODOLOGY.md` § 6.1, and the script samples the host every
-10 s (`host-cpu-tier*.log`), closes each tier with
-`MIDRUN samples=.. violations=.. load1_max=.. valid=yes|no`, kills a tier after
-3 consecutive violating samples and re-arms once, and reports the worst tier rc
+`docs/BENCHMARK-METHODOLOGY.md` § 6.1 and recalibrated to **aggregate
+non-harness CPU ≤ 150% on ≥ 95% of samples** (derived from the VM's measured
+740% peak against the host's 1000%), and the script samples the host every 10 s
+(`host-cpu-tier*.log`), closes each tier with `MIDRUN samples=.. viol=..
+other_mean=.. valid=yes|no`, kills a tier after 3 consecutive violating samples
+and re-arms once, and reports the worst tier rc
 in `LINUX_DIAG_EXIT` — which was hardcoded to `0`, so a gate timeout or a
 contended tier still announced a clean run. The six tiers above predate the fix
 and stay order-of-magnitude only; they cannot be retrofitted with a verdict
