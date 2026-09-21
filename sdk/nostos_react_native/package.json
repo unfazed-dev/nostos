@@ -1,6 +1,6 @@
 {
   "name": "@nostos-sync/react-native",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React Native facade over nostos-swift / nostos-kotlin UniFFI bindings \u2014 Codegen TurboModule + TS facade. Hermes has no WebAssembly (issue #429), so @nostos-sync/web is a dead end in RN; this is the non-WASM RN path.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

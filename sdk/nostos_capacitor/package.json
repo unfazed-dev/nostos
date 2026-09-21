@@ -1,6 +1,6 @@
 {
   "name": "@nostos-sync/capacitor",
-  "version": "0.2.0-beta.1",
+  "version": "0.2.0",
   "description": "Capacitor v8 plugin: in-webview wasm sync (@nostos-sync/web live path) + beta native push bridge (APNs registration token + foreground events on iOS; FCM stays app-side). Push surface is beta (ADR-0037).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

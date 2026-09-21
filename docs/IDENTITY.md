@@ -19,7 +19,7 @@ manifests copy from it.
 | GitHub repo | `https://github.com/unfazed-dev/nostos` | `origin` remote; workspace + all 9 SDK manifests; landing page; Homebrew formula; release manifest script |
 | GitHub org / handle | `unfazed-dev` | `authors` / `Authors` / `Company` fields |
 | Licence | `Apache-2.0` | root `LICENSE` + one per SDK package (9/9) |
-| Version | `0.1.0` | workspace `[workspace.package]` + all 9 SDK packages |
+| Version | `0.2.0` | workspace `[workspace.package]` + all 9 SDK packages (aligned 2026-09-21) |
 
 ## PENDING — placeholders, decision not made
 
