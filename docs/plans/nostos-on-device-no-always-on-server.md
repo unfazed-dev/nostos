@@ -1,15 +1,31 @@
 # Nostos with no always-on server — the on-device shapes and what each costs
 
-**Date:** 2026-09-22. **Status:** the topology fork is **decided** — one shared
-database per app (A1), like most apps. Consequences in "What A1 settles" below.
+**Date:** 2026-09-22. **Status:** topology **decided** — one shared database per
+app, shipped to an agency's clients, and **no Nostos server anywhere**. That
+combination is possible; it is Shape B2 below. The earlier drafts of this file
+answered a narrower question and got the conclusion wrong — see "The correction"
+.
 **Prompted by:** the operator's constraint, stated plainly — *"I just do not want
 to involve another device that stays on all the time for Nostos to work."*
 
 The constraint is legitimate and the current answer ("run nostos-server on a VM
 or a spare box") is a real adoption tax. This document maps the shapes that
-satisfy the constraint, and is honest about which one dies where. The short
-answer is that it hinges on one thing only: whether every install reads from
-**one shared database** or from **its own**.
+satisfy the constraint, and is honest about which one dies where.
+
+**The correction.** Drafts 1–3 of this document treated "no Nostos server" as
+"keep logical replication, move it to the phone", concluded that a shared
+database makes that impossible, and therefore that the server is mandatory.
+The second step is right and the conclusion does not follow. **Logical
+replication is one implementation of Nostos's change-source port, not the
+definition of Nostos.** ADR-0023 D4 already says so in as many words: the
+Appwrite adapter "does not expose Postgres logical replication, so its adapter
+implements the change-source port over Appwrite's realtime/events API and the
+write-back port over its REST API. The port seam is exactly where that
+difference is absorbed."
+
+Move that adapter from the server to the device and the requirement disappears —
+without moving a replication slot, a `REPLICATION` credential, or a Postgres
+anywhere near a phone.
 
 ## The reframe that matters
 
@@ -143,17 +159,18 @@ properties of sharing one database:
 3. **WAL retention.** One phone offline for a fortnight pins the retention
    floor for every user's data.
 
-**`nostos-server` is therefore not optional for this product, it is the
-architecture.** One process holds the one slot, fans it out to many sessions,
-and is the only thing holding a privileged credential. A2 stays in this
-document as a documented power-user path (self-hosters, one-owner apps), not as
-the default.
+**So an embedded *replicator* is closed for a shared database.** Not
+"Nostos on the device" — the *replicator*. A2 stays as a documented power-user
+path (self-hosters, one-owner apps), not as a default.
 
-The remaining question is not "can we avoid the server" but **"what does the
-server actually cost"** — answered next, because the original constraint was a
-bill, not a box.
+What A1 actually proves is narrower than drafts 1–3 claimed: **if logical
+replication is your change source, you need something in the middle to
+multiplex the one slot.** It does not prove that something has to be
+`nostos-server`, or yours, or a process you pay for. Supabase already runs one
+(Shape B2). The cost of running your own is priced below for comparison, then
+Shape B answers the actual question.
 
-## What the always-on server costs, with today's numbers
+## What an always-on server costs, if you choose one (A1 baseline)
 
 Checked 2026-09-22 against the official pricing pages. `fly.toml` already
 targets Fly, and `auto_stop_machines = false` is mandatory there (a stopped
@@ -168,9 +185,11 @@ data-loss server, not a paused one).
 | Egress, NA/EU | $0.02 / GB (all inbound free; same-region free) |
 | Supabase Free Postgres | $0 — 500 MB database, 500 MB RAM, shared CPU |
 
-**The always-on server is about two dollars a month.** That is the honest
-answer to the constraint that started this document, and it is worth saying
-before designing anything around avoiding it.
+**An always-on server is about two dollars a month per deployment.** Worth
+knowing, but note what it means for an agency: it is $2/month *per client*, plus
+a deploy, a monitor, an upgrade path and a pager for each one. The objection was
+never the two dollars — it is owning centralised infrastructure on behalf of
+other people's products. Shape B removes the box, not just the bill.
 
 Three caveats that are real:
 
@@ -190,25 +209,78 @@ Three caveats that are real:
   replication slot is exactly the WAL-invalidation path above. Any "free tier"
   onboarding story has to say this out loud.
 
-### Shape B — `nostos lite`, direct to the backend's own API
+### Shape B — the backend adapter, running on the device (**the answer**)
 
-No replication at all: the client speaks the backend's REST/realtime surface
-(PostgREST + Realtime on Supabase) and keeps Nostos's local SQLite, outbox and
-reactive facade. Zero slots, zero hosting.
+No replication anywhere on the client side. `nostos-client` keeps everything it
+already has — `ApplyEngine`, `SqliteStorage`, the read VIEWs (ADR-0028), the
+reactive facade (ADR-0024), the durable outbox with its DLQ — and only the
+*source of frames* changes: instead of Nostos's `/sync` WebSocket, the device
+subscribes to the backend's own realtime surface and writes back through its own
+REST API.
 
-This is the `brick_offline_first_with_supabase` topology. Its ceiling is the
-backend's, not ours: Supabase authorises **every** Postgres-Changes event
-against **every** subscriber, on a **single thread**, and their docs tell you to
-leave Postgres Changes past **~3,000 concurrent subscribers**. Delivered
-messages are also metered — one write to 500 subscribers is 500 billed
-messages.
+This is ADR-0023 D4's adapter seam, evaluated on the device instead of on a
+server. Every piece of compute is on the phone, which is exactly the ask. There
+is no Nostos process in the middle, for anyone, ever.
 
-**What it costs us:** server-authoritative scoping moves to RLS, durable resume
-degrades from "replay since LSN X" to "retry queued requests", and the
-write-back pitch ("no `uploadData()` endpoint") stops being true.
+Two variants, and the difference decides whether it ships to an agency's
+clients:
 
-**What it buys:** the onboarding story the project currently lacks — zero
-infrastructure to start, and an upgrade trigger with a number on it.
+#### B1 — Postgres Changes (the naive one)
+
+Subscribe to `postgres_changes` per table. Simple, and it is what
+`brick_offline_first_with_supabase` does.
+
+**Ceiling, from Supabase's own docs:** Postgres Changes "authorizes every event
+against each subscriber… so throughput scales with the number of subscribers,
+not the write rate", and changes are "processed on a single thread to preserve
+their order, which means larger compute add-ons don't meaningfully increase
+Postgres Changes throughput". Their guidance: past **~3,000 concurrent
+subscribers on the same changes**, stop using it.
+
+Note what that ceiling *is*: per-subscriber fan-out work done in one place. It
+is the same axis `benches/results/RESULTS.md` measures, and the same reason
+nostos-server exists.
+
+#### B2 — Broadcast from Database (**recommended, and it scales**)
+
+A Postgres trigger calls `realtime.broadcast_changes()`, which inserts into
+`realtime.messages`; Realtime reads *that* table's WAL through **one**
+publication and fans each message out over WebSockets. Supabase's docs call
+Broadcast "the recommended method for scalability and security" and state it
+"sends each change once and fans it out to all subscribers, so it scales to far
+higher connection counts than per-subscriber authorization allows".
+
+Read that mechanism against the problem this document started with:
+
+| the problem | B2's answer |
+|---|---|
+| one slot cannot serve many devices | Realtime holds **one** publication, on `realtime.messages` |
+| something must multiplex it | Realtime does, and it is already running |
+| a privileged credential would ship in the app | none — the app carries the anon key and a user JWT |
+| scoping must be server-authoritative | RLS, in Postgres, via private-channel authorization |
+| who keeps it alive | Supabase, on the client's existing bill |
+
+**The multiplexer still exists. It is just not yours, and not a new box.** That
+is the whole difference, and it is the difference the operator asked for.
+
+**What it costs, honestly — three real design consequences:**
+
+1. **Resume stops being LSN-exact.** Nostos's durable checkpoint (ADR-0025)
+   replays from an LSN; here the device resumes from a **watermark** and issues
+   a catch-up query (`PostgREST … ?updated_at=gt.<watermark>`). That needs a
+   monotonic column on every synced table. Non-negotiable, and it is a schema
+   requirement on the client's database.
+2. **Deletes need tombstones.** A catch-up query cannot see a row that is gone,
+   and Supabase notes RLS "policies are not applied to `DELETE` statements".
+   Soft-delete (`deleted_at`) or a tombstone table, with a retention window.
+3. **`realtime.messages` is retained ~3 days** (daily partitions, older tables
+   dropped). So the catch-up query is not a fallback, it is the primary path for
+   any device that was away — which makes (1) and (2) load-bearing, not optional
+   polish.
+
+Plus: it is only available where the backend *has* a realtime fan-out. Supabase
+and Appwrite do. A bare Postgres does not, and for that, `nostos-server` remains
+the answer.
 
 ### Shape C — a pod on hardware that is allowed to stay awake
 
@@ -225,55 +297,64 @@ PGlite and still keeps a server-side Postgres as the source of truth.
 
 ## Recommendation
 
-The topology is A1, so **`nostos-server` stays, and stops being apologised for.**
-The README line:
+**Build Shape B2 and make it a first-class sync mode.** It is the only shape
+that satisfies every stated constraint at once: a shared database per app, apps
+shipped to an agency's clients, all sync compute on the end user's device, no
+Nostos server for anybody, nothing centralised that the agency has to own.
 
-> Postgres offers ~10 replication slots and a shipped app has thousands of
-> installs. Something must multiplex that one slot into many sessions, and be
-> the only holder of a privileged credential. That is `nostos-server`.
+It is also not a compromise version of Nostos. The device keeps the engine, the
+SQLite store, the read VIEWs, the reactive facade and the durable outbox. What
+changes is one port's implementation — which is what ADR-0023 D4 built the seam
+for.
 
-Then three pieces of work, in this order:
+**`nostos-server` stops being the entry point and becomes the upgrade path**, for
+the cases that actually need it: a bare Postgres with no realtime service,
+Nostos-evaluated predicates rather than RLS-plus-topics, LSN-exact replay,
+conflation and backpressure under Nostos's control (ADR-0045), or a backend whose
+realtime tier costs more than a $2 machine.
 
-1. **Make the $2 obvious.** A one-command deploy and a "what this costs" table
-   in the docs. The adoption tax was never the money, it was not knowing the
-   money. `auto_stop_machines = false` gets a one-line reason next to it.
-2. **Measure per-session RSS** so the 256 MB row can be claimed or corrected.
-   Cheapest missing number in the project; see the caveats above.
-3. **Shape B (`nostos lite`) as the zero-infrastructure trial**, with
-   "~3,000 subscribers, or the moment you need server-authoritative scoping" as
-   the documented trigger to move to a real `nostos-server`. *The upgrade path is
-   the product.* Also the answer for anyone who genuinely will not run a server.
+### The work
 
-**A2 stays documented, not default** — self-hosters and one-owner apps, where
-the database owner and the device owner are the same person. Everything under
-"If the embedded shape goes ahead" below applies only to A2.
+1. **A `ChangeSource` seam in the client.** `nostos-client` today speaks only the
+   `/sync` WebSocket (`client.rs`), with `iroh_dial.rs` as the precedent for a
+   second dial path. Factor the frame source out behind a trait; `ApplyEngine`,
+   storage, views and outbox are untouched.
+2. **A Supabase adapter behind it:** Realtime private channel → decode
+   `realtime.broadcast_changes()` payloads → `RowOp`; PostgREST catch-up query
+   from the watermark; outbox drain → PostgREST upsert/delete.
+3. **Watermark checkpointing** alongside the existing LSN checkpoint in
+   `cairn_meta`. Per table, since catch-up is per table.
+4. **`nostos link --mode direct`** generates the SQL the client's DB needs: the
+   trigger per synced table, the broadcast authorization RLS policies, and a
+   check that every synced table has a monotonic column and a soft-delete
+   column. Refuse to generate for tables that don't — that check is the whole
+   product's reliability.
+5. **`nostos doctor`** for this mode: trigger present, RLS policies present,
+   watermark columns indexed, realtime enabled.
+6. **A conformance test both modes pass.** One suite, two change sources —
+   because the moment the behaviours diverge silently, the mode becomes a
+   support burden instead of a feature.
 
-**Shape C stays rejected** by the operator's constraint.
+**Not building:** the embedded replicator (A1 impossible, A2 out of scope),
+Shape C, B1 as anything but a documented fallback.
 
-## If the embedded shape goes ahead (A2 only) — the actual work
+### Worth an ADR
 
-1. `nostos-infra` behind an `embedded` feature in `sdk/nostos_flutter/rust`
-   (today it depends only on `nostos-client`, `nostos-core`, `nostos-domain`).
-2. Verify `tokio-postgres` + rustls on `aarch64-apple-ios` and
-   `aarch64-linux-android`. Unproven; this is the first thing to test.
-3. Per-install slot naming, and a reaper for slots whose device never returns.
-   Required for A1; cheap insurance for A2, where the abandoned slot is the
-   owner's own.
-4. Credential story: a user-supplied connection string, entered or scanned at
-   setup and kept in the platform keystore. Never a `REPLICATION` role baked
-   into the bundle — `nostos doctor` should fail loudly if it finds one.
-5. Foreground-only sync loop plus resume-on-launch; no background service. Push
-   (ADR-0037) is the only wake mechanism.
+This adds a second sync topology to the public client surface, is hard to
+reverse, and trades LSN-exact resume for a watermark. That clears the ADR bar in
+`.claude/skills/grill-with-docs`. Not written yet — the decision is the
+operator's to take, and this document is the argument for it.
 
-## Open questions for the operator
+## Open questions
 
-- ~~Shared database or database-per-user?~~ **Answered 2026-09-22: shared (A1).**
-- Does Shape B get built before or after the Flutter+Supabase launch bar? Now
-  the only remaining "no server" path, so it carries more weight than it did.
-- Is A1 on Supabase Free viable at all, given projects pause after a week of
-  inactivity and a paused project invalidates the slot? Needs one live test;
-  `docs/plans/flutter-supabase-plug-and-play-launch.md` W0 flags the same gap.
-- Does 256 MB hold a real session count? Blocked on the RSS measurement.
+- ~~Shared database or database-per-user?~~ **Answered: shared.**
+- Is the `updated_at` + soft-delete schema requirement acceptable to impose on
+  client databases? It is the one thing B2 asks of them, and it is not small on
+  a legacy schema.
+- Does the agency's clients' data ever need Nostos-evaluated predicates, or is
+  RLS-plus-topic granularity enough? This is the main fidelity question.
+- Verify against a live project: trigger + RLS round trip, catch-up query cost,
+  and what a device that was offline 4 days actually receives.
 
 ## Sources
 
@@ -288,3 +369,13 @@ the database owner and the device owner are the same person. Everything under
 - Brick: [Supabase blog](https://supabase.com/blog/offline-first-flutter-apps) ·
   [brick_offline_first_with_supabase](https://pub.dev/packages/brick_offline_first_with_supabase)
 - PGlite: [about](https://pglite.dev/docs/about) · [issue #880](https://github.com/electric-sql/pglite/issues/880)
+- Supabase Realtime, fetched 2026-09-22:
+  [subscribing to database changes](https://supabase.com/docs/guides/realtime/subscribing-to-database-changes)
+  ("Broadcast … is the recommended method for scalability and security") ·
+  [Broadcast](https://supabase.com/docs/guides/realtime/broadcast)
+  (`realtime.broadcast_changes()`, one publication on `realtime.messages`,
+  ~3-day partition retention) ·
+  [Postgres Changes](https://supabase.com/docs/guides/realtime/postgres-changes)
+  (per-subscriber authorization, single-threaded, ~3,000-subscriber guidance)
+- Pricing, fetched 2026-09-22: [Fly.io](https://fly.io/docs/about/pricing/) ·
+  [Supabase](https://supabase.com/pricing)
