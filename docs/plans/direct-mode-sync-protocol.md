@@ -165,9 +165,12 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
 
 ## Implementation order
 
-1. `ChangeSource` seam in `nostos-client` (`client.rs` speaks only `/sync` today;
-   `iroh_dial.rs` is the precedent for a second path).
-2. `xid8` horizon in `cairn_meta` beside the existing LSN checkpoint.
+1. `ChangeSource` seam as **pure functions in `nostos-core`**, not in
+   `nostos-client` — see "Every SDK gets this" below for why. `nostos-client`
+   and `nostos-ffi-wasm` each supply the I/O; `iroh_dial.rs` is the precedent
+   for dial-by-scheme at the native edge.
+2. `xid8` horizon in `cairn_meta` beside the existing LSN checkpoint, carried
+   as an opaque string.
 3. `PostgrestChangeSource`: `rpc/pull` → group by `xid` → `RowOp` batches
    handed to the existing `ApplyEngine` at transaction boundaries.
 4. Realtime private-channel subscription as doorbell; pull on every reconnect.
@@ -178,9 +181,73 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    refuses any table whose RLS it cannot express as a `scope`.
 7. `nostos doctor --mode direct`: exposed schema, grants, policies, the
    public-access setting, log growth, oldest-unpruned vs. horizon lag.
-8. One conformance suite both modes pass, including **"transaction touching
-   three tables is never seen half-applied"** and **"device offline past the
-   retention window"** as first-class cases.
+8. One conformance suite both modes pass, **run per platform, not once** —
+   including **"transaction touching three tables is never seen
+   half-applied"** and **"device offline past the retention window"** as
+   first-class cases. The first of those has to hold inside the browser
+   Worker as well as on rusqlite.
+
+## Every SDK gets this, because it needs only two primitives
+
+Direct mode's entire client-side dependency is **one HTTPS POST** (`rpc/pull`)
+and **one WebSocket** (the doorbell). Server mode already requires the
+WebSocket, so direct mode adds exactly one capability — an HTTP POST — and no
+platform Nostos ships to lacks it. **Direct mode is the more portable of the two
+modes, not the less.**
+
+It reuses the platform split that already exists:
+
+| SDKs | host | pull + doorbell I/O | storage (unchanged) |
+|---|---|---|---|
+| `nostos_flutter` (native), `nostos_tauri`, `nostos_node`, `nostos_capacitor`, `nostos_react_native`, `nostos_swift`, `nostos_kotlin`, `nostos_dotnet` | native Rust via `nostos-client` | tokio HTTP + WS | `SqliteStorage` (rusqlite) |
+| `nostos_web`, `nostos_flutter` on web (ADR-0036) | wasm inside the Worker | JS `fetch` + `WebSocket`, driven from `nostos-ffi-wasm` | `SqliteWasmStorage` → sqlite-wasm `opfs-sahpool` (ADR-0033) |
+
+`nostos_tauri` takes the **native** row despite rendering a web UI:
+`sdk/nostos_tauri/Cargo.toml` depends on `nostos-client`, `nostos-core` and
+`nostos-domain`, so the webview never touches the sync path.
+
+### This is what moves the seam out of `nostos-client`
+
+`nostos-client` is tokio + rusqlite. A seam there ships direct mode to eight
+SDKs and skips the two that want it most. The pull logic belongs in
+**`nostos-core`**, which is WASM-clean — and verified so: no `async fn` and no
+`.await` anywhere in `crates/nostos-core/src/`.
+
+This is not a new pattern. `crates/nostos-ffi-wasm/src/transport.rs` already
+splits it exactly this way: the frame logic is pure Rust
+(`build_subscribe_frame`, `on_message`, `parse_checkpoint`) and the socket
+belongs to the platform. Direct mode takes the same shape:
+
+- **`nostos-core`:** `pull_request(since)` and `apply_pull(&mut engine, body)`.
+  Pure, sync, host-testable in `make ci`.
+- **platform edge:** whoever owns the socket owns the POST — `reqwest` in
+  `nostos-client`, `fetch` in the Worker.
+
+ADR-0033 made the same call for storage: `SqliteWasmStorage` lives in
+`nostos-ffi-wasm`, "NOT `nostos-core` — core stays WASM-clean". Same rule, same
+reason.
+
+### Four web-specific facts
+
+1. **The horizon travels as an opaque string.** The client never does
+   arithmetic on it — it stores it and hands it back — so there is no reason to
+   route an `xid8` through a JS `number`, where anything past 2⁵³ is silently
+   wrong. Note that the existing `Lsn(pub u64)` derives `Serialize` and so goes
+   over the wire as a JSON *number*; direct mode should not copy that. What
+   PostgREST actually emits for `xid8` is a W0 check against a live project,
+   not something to assume.
+2. **A doorbell carrying no data is what makes two subscriber stacks
+   acceptable.** Web can use `realtime-js`; native opens a raw WS to the
+   Realtime endpoint. If the channel carried rows, both paths would have to
+   agree on payload decoding. It carries "call `pull`", so they don't.
+3. **One puller per app, living in the Worker.** ADR-0033's Worker already owns
+   the sole wasm instance and the sole database, with the main thread a pure
+   `postMessage` proxy. Put the pull loop there and the horizon advances in one
+   place, so multiple tabs cannot race it.
+4. **No OPFS means no durable horizon.** Safari Private Browsing degrades to
+   `InMemoryStorage`, so every load re-snapshots — the same cost class as
+   server mode's snapshot-on-every-reconnect in that configuration, and already
+   surfaced on `SyncStatus`.
 
 ## Worth an ADR
 
