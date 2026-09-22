@@ -102,11 +102,49 @@ pub struct BenchConfig {
     /// Per-run wall-clock timeout (seconds).
     #[arg(long, env = "BENCH_TIMEOUT", default_value_t = 120)]
     pub timeout_secs: u64,
+
+    /// Offered arrival rate, events/sec, held OPEN-LOOP: event `i` is due at
+    /// `start + i/rate` no matter how long the router took for `i-1`.
+    ///
+    /// The rate is events entering the ROUTER, not frames leaving it: one
+    /// event fans out to every subscribed client, so the delivery rate this
+    /// asks for is `rate * clients` and the ops/sec column stays directly
+    /// comparable to an unpaced run.
+    ///
+    /// `0` (the default, and what every figure in RESULTS.md was measured
+    /// with) floods — which answers "where does it fall over", not "does it
+    /// meet rate R at under 1% loss". The second question is the one a user
+    /// with a workload actually has, and it needs a rate. Ladder the rate up
+    /// until the drop bar breaks, and the largest rate that held is the
+    /// answer. See `docs/plans/measuring-conflation-honestly.md`, defect 1.
+    #[arg(long, env = "BENCH_RATE", default_value_t = 0)]
+    pub rate: u64,
+
+    /// Measured repetitions per client tier. Fastest and slowest are dropped
+    /// and the rest averaged (MLPerf); the min-max spread is reported beside
+    /// the mean, because a tier whose reps disagree has not produced a figure.
+    #[arg(long, env = "BENCH_REPS", default_value_t = 5)]
+    pub reps: usize,
+
+    /// Warm-up repetitions per tier, run first and DISCARDED. The first run of
+    /// a tier pays for cold caches, lazy page faults and an unsettled
+    /// allocator; including it makes every later comparison a comparison of
+    /// warm-up cost. `0` disables.
+    #[arg(long, env = "BENCH_WARMUP", default_value_t = 1)]
+    pub warmup_reps: usize,
+
+    /// Seed for the randomised run order. Fixed by default so a run is
+    /// reproducible; change it to confirm a result is not an artefact of one
+    /// particular interleaving.
+    #[arg(long, env = "BENCH_ORDER_SEED", default_value_t = 0x000C_A110_5EED)]
+    pub order_seed: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunResult {
     pub clients: usize,
+    /// Which measured repetition this is (0-based). Warm-ups never get here.
+    pub rep: usize,
     pub events_total: u64,
     pub events_delivered: u64,
     /// Events the router accepted by REPLACING a still-waiting frame for the
@@ -133,7 +171,27 @@ pub struct RunResult {
     /// hardware the same default never binds, which is exactly why this has to
     /// be a stamp in the output and not a note in a doc.
     pub throughput_valid: bool,
+    /// The `--rate` this run offered, events/sec. `0` = unpaced flood.
+    pub target_rate: u64,
+    /// `false` when a paced run's generator fell behind its own schedule, i.e.
+    /// the load OFFERED was below the load requested. The drop rate then
+    /// describes the generator, not the system, so it is withheld exactly like
+    /// a timed-out run's. Always `true` for an unpaced run — a flood has no
+    /// schedule to miss.
+    pub rate_held: bool,
     pub profile: String,
+}
+
+/// Deterministic Fisher-Yates using the same xorshift64 the `FakeReplicator`
+/// seeds with. `rand` would be a new dependency for eight lines.
+fn shuffle<T>(v: &mut [T], seed: u64) {
+    let mut x = seed | 1; // xorshift64 requires a nonzero state
+    for i in (1..v.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
 }
 
 #[tokio::main]
@@ -145,51 +203,98 @@ async fn main() -> Result<()> {
     // Raise file-descriptor limit — 10k clients need ~20k+ FDs (sockets + pipes).
     raise_fd_limit();
 
-    let mut results = Vec::with_capacity(cfg.clients.len());
-    for &clients in &cfg.clients {
-        let r = run_one(&cfg, clients)
+    // Warm-ups first, in tier order, and thrown away. They exist to pay the
+    // cold-start costs once per tier so the measured reps don't carry them.
+    for rep in 0..cfg.warmup_reps {
+        for &clients in &cfg.clients {
+            println!(
+                "warm-up {}/{} @ {clients} clients (discarded)",
+                rep + 1,
+                cfg.warmup_reps
+            );
+            run_one(&cfg, clients, rep)
+                .await
+                .context(format!("warm-up with {clients} clients failed"))?;
+        }
+    }
+
+    // Defect 4 (docs/plans/measuring-conflation-honestly.md): a fixed
+    // `1k,5k,10k` order hands the FIRST tier every cold cache and every
+    // unsettled thermal state, run after run. That bias is systematic, not
+    // noise — it never averages out, because it lands on the same tier every
+    // time. Randomising the interleave spreads it across tiers instead, and is
+    // reported to cut run-to-run variance by up to 40% (Google Benchmark).
+    let mut schedule: Vec<(usize, usize)> = Vec::new();
+    for rep in 0..cfg.reps {
+        for &clients in &cfg.clients {
+            schedule.push((clients, rep));
+        }
+    }
+    shuffle(&mut schedule, cfg.order_seed);
+
+    let mut results = Vec::with_capacity(schedule.len());
+    for (i, &(clients, rep)) in schedule.iter().enumerate() {
+        println!(
+            "run {}/{}: {clients} clients, rep {}",
+            i + 1,
+            schedule.len(),
+            rep + 1
+        );
+        let r = run_one(&cfg, clients, rep)
             .await
             .context(format!("run with {clients} clients failed"))?;
         results.push(r);
     }
+    // Report in tier order regardless of the order they were run in.
+    results.sort_by_key(|r| (r.clients, r.rep));
 
     let env = report::Environment::collect(&cfg);
     write_reports(&cfg, &results, &env).context("failed to write reports")?;
 
+    let tiers = report::summarize(&results);
     println!("\n=== Nostos Week-1 Benchmark ===\n");
-    println!(
-        "{:>8} {:>14} {:>10} {:>9} {:>10} {:>10} {:>11}",
-        "clients", "ops/sec", "drop%", "p50(ms)", "p99(ms)", "delivered", "superseded"
-    );
-    for r in &results {
-        // A timed-out run still prints its row — the delivered count and the
-        // latencies are real and worth seeing — but the two figures the window
-        // corrupted are withheld rather than rendered as numbers someone could
-        // quote.
-        if r.throughput_valid {
-            println!(
-                "{:>8} {:>14.0} {:>9.2}% {:>9.2} {:>9.2} {:>10} {:>11}",
-                r.clients,
-                r.ops_per_sec,
-                r.drop_rate * 100.0,
-                r.p50_us / 1000.0,
-                r.p99_us / 1000.0,
-                r.events_delivered,
-                r.events_superseded
-            );
-        } else {
-            println!(
-                "{:>8} {:>14} {:>10} {:>9.2} {:>9.2} {:>10} {:>11}",
-                r.clients,
-                "TIMED OUT",
-                "—",
-                r.p50_us / 1000.0,
-                r.p99_us / 1000.0,
-                r.events_delivered,
-                r.events_superseded
-            );
-        }
+    if cfg.rate > 0 {
+        println!("offered rate: {} events/sec, open-loop\n", cfg.rate);
     }
+    println!(
+        "{:>8} {:>14} {:>21} {:>8} {:>9} {:>9} {:>7}",
+        "clients", "ops/sec", "spread", "drop%", "p50(ms)", "p99(ms)", "reps"
+    );
+    for t in &tiers {
+        // A tier with no valid repetition still prints its row — the delivered
+        // count and the latencies are real — but the two figures the invalid
+        // runs corrupted are withheld rather than rendered as numbers someone
+        // could quote.
+        let reps = format!("{}/{}", t.reps_valid, t.reps_total);
+        if t.reps_valid == 0 {
+            println!(
+                "{:>8} {:>14} {:>21} {:>8} {:>9.2} {:>9.2} {:>7}",
+                t.clients,
+                t.invalid_label(),
+                "—",
+                "—",
+                t.p50_us / 1000.0,
+                t.p99_us / 1000.0,
+                reps
+            );
+            continue;
+        }
+        println!(
+            "{:>8} {:>14.0} {:>21} {:>7.2}% {:>9.2} {:>9.2} {:>7}",
+            t.clients,
+            t.ops_per_sec,
+            format!("{:.0}–{:.0}", t.ops_min, t.ops_max),
+            t.drop_rate * 100.0,
+            t.p50_us / 1000.0,
+            t.p99_us / 1000.0,
+            reps
+        );
+    }
+    println!(
+        "\nops/sec is the trimmed mean of {} reps (fastest and slowest dropped); \
+         spread is their min-max.",
+        cfg.reps
+    );
 
     let timed_out = results.iter().filter(|r| !r.throughput_valid).count();
     if timed_out > 0 {
@@ -202,12 +307,21 @@ async fn main() -> Result<()> {
         );
         println!("   Raise --timeout-secs and re-run to get a figure.");
     }
+    let rate_missed = results.iter().filter(|r| !r.rate_held).count();
+    if rate_missed > 0 {
+        println!(
+            "\n!! {rate_missed} run(s) could not hold --rate {}: the generator fell behind its",
+            cfg.rate
+        );
+        println!("   own schedule, so the load offered was below the load requested.");
+        println!("   Those runs measure the generator. Lower --rate, or generate off-box.");
+    }
     println!("\nResults written to {}/", cfg.out_dir);
     Ok(())
 }
 
-async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
-    info!(clients, events = cfg.events, "run starting");
+async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunResult> {
+    info!(clients, rep, events = cfg.events, "run starting");
 
     // ---- shared store + use-cases (the same instances the server uses) ----
     let store: Arc<dyn nostos_application::ports::SessionStore> =
@@ -301,8 +415,12 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         "large" => FakeReplicatorConfig::large(cfg.events),
         _ => FakeReplicatorConfig::small(cfg.events),
     }
-    .recycling_keys(cfg.distinct_keys);
+    .recycling_keys(cfg.distinct_keys)
+    .paced(cfg.rate);
     let mut replicator = FakeReplicator::new(repl_cfg);
+    // Read after the replicator has moved into the fan-out task: how far the
+    // generator ever fell behind its own emission schedule.
+    let lateness = replicator.lateness_handle();
 
     // Week-1 extractor: synthetic payload is opaque bytes; match on table only
     // (ColumnValue::Any matches every value). Real column extraction arrives
@@ -448,8 +566,28 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         );
     }
 
+    // A paced run only tests the rate it managed to OFFER. A scheduler hiccup
+    // is not a result, so allow slip up to 5% of the run's nominal duration
+    // (events / rate), floored at 50 ms so a sub-second run isn't failed by
+    // timer granularity. Past that the arrival process was not the one
+    // requested, and every figure derived from it describes the generator.
+    let max_lateness = Duration::from_nanos(lateness.load(Ordering::Relaxed));
+    let rate_held = cfg.rate == 0 || {
+        let nominal = cfg.events as f64 / cfg.rate as f64;
+        max_lateness.as_secs_f64() <= (nominal * 0.05).max(0.05)
+    };
+    if !rate_held {
+        info!(
+            clients,
+            rate = cfg.rate,
+            slip_ms = max_lateness.as_millis() as u64,
+            "generator fell behind its schedule; rate figures withheld"
+        );
+    }
+
     Ok(RunResult {
         clients,
+        rep,
         events_total: cfg.events,
         events_delivered: delivered,
         events_superseded: outcome.superseded,
@@ -459,6 +597,8 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         p99_us: p99,
         elapsed_secs: elapsed.as_secs_f64(),
         throughput_valid: completed,
+        target_rate: cfg.rate,
+        rate_held,
         profile: cfg.profile.clone(),
     })
 }

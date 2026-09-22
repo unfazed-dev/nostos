@@ -8,6 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::stats::trimmed_mean;
 use crate::{BenchConfig, RunResult};
 
 /// Format a float with thousands separators (e.g. 12345.6 → "12,346").
@@ -36,6 +37,14 @@ pub struct Environment {
     pub events: u64,
     pub hostname: String,
     pub cpu_cores: usize,
+    /// Offered arrival rate, events/sec. `0` = unpaced flood.
+    pub rate: u64,
+    /// Measured repetitions per tier, and the warm-ups discarded before them.
+    pub reps: usize,
+    pub warmup_reps: usize,
+    /// Seed the tier/rep order was shuffled with — the run order is part of
+    /// the method, so it belongs in the recorded environment.
+    pub order_seed: u64,
 }
 
 impl Environment {
@@ -47,6 +56,10 @@ impl Environment {
             events: cfg.events,
             hostname: hostname(),
             cpu_cores: std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
+            rate: cfg.rate,
+            reps: cfg.reps,
+            warmup_reps: cfg.warmup_reps,
+            order_seed: cfg.order_seed,
         }
     }
 }
@@ -105,6 +118,7 @@ mod tests {
     fn run(clients: usize, ops: f64, drop_rate: f64, throughput_valid: bool) -> RunResult {
         RunResult {
             clients,
+            rep: 0,
             events_total: 100_000,
             events_delivered: 1,
             events_superseded: 0,
@@ -114,11 +128,25 @@ mod tests {
             p99_us: 86.0,
             elapsed_secs: 120.0,
             throughput_valid,
+            target_rate: 0,
+            rate_held: true,
             profile: "small".into(),
         }
     }
 
+    /// A paced run whose generator fell behind its own schedule: it offered
+    /// less load than it claimed, so its throughput and drop rate describe the
+    /// generator.
+    fn missed_rate(clients: usize, ops: f64) -> RunResult {
+        RunResult {
+            target_rate: 500_000,
+            rate_held: false,
+            ..run(clients, ops, 0.42, true)
+        }
+    }
+
     fn report_of(runs: Vec<RunResult>) -> String {
+        let tiers = summarize(&runs);
         render_markdown(&FullReport {
             environment: Environment {
                 rustc: UNKNOWN.into(),
@@ -127,7 +155,12 @@ mod tests {
                 events: 100_000,
                 hostname: "test".into(),
                 cpu_cores: 8,
+                rate: 0,
+                reps: 5,
+                warmup_reps: 1,
+                order_seed: 0x000C_A110_5EED,
             },
+            tiers,
             runs,
             powersync_ceiling_ops_per_sec_low: 2_000,
             powersync_ceiling_ops_per_sec_high: 4_000,
@@ -165,6 +198,59 @@ mod tests {
         );
     }
 
+    /// The headline is the trimmed mean of a tier's repetitions, never its best
+    /// one. A `max` over raw reps reports the luckiest run of the session as
+    /// the figure — the exact variance dishonesty `--reps` exists to stop.
+    ///
+    /// The spread, by contrast, MUST show the outlier: that is what tells a
+    /// reader the tier is unstable.
+    #[test]
+    fn the_headline_is_the_trimmed_mean_not_the_luckiest_rep() {
+        let md = report_of(vec![
+            run(1000, 400_000.0, 0.001, true),
+            run(1000, 500_000.0, 0.001, true),
+            run(1000, 500_000.0, 0.001, true),
+            run(1000, 500_000.0, 0.001, true),
+            run(1000, 9_999_999.0, 0.001, true),
+        ]);
+
+        assert!(
+            md.contains("**Peak sustained throughput: 500,000 ops/sec**"),
+            "headline must be the trimmed mean:\n{md}"
+        );
+        assert!(
+            md.contains("400,000–9,999,999"),
+            "the spread must still expose the outlier:\n{md}"
+        );
+        assert!(md.contains("| 5/5 |"), "rep count must be visible:\n{md}");
+    }
+
+    /// A generator that fell behind its schedule offered less load than it
+    /// claimed, so its numbers are the generator's, not the server's. Withheld
+    /// exactly like a timeout — and labelled differently, because the fix is
+    /// different (lower the rate, or generate off-box).
+    #[test]
+    fn a_run_that_missed_its_offered_rate_is_withheld_like_a_timeout() {
+        // Again the invalid run is the fastest in the set.
+        let md = report_of(vec![
+            missed_rate(1000, 9_999_999.0),
+            run(5000, 500_000.0, 0.01, true),
+        ]);
+
+        assert!(
+            md.contains("_rate not held_"),
+            "the row must name the failure:\n{md}"
+        );
+        assert!(
+            !md.contains("9,999,999"),
+            "an unmet-rate ops/sec reached the report:\n{md}"
+        );
+        assert!(
+            md.contains("**Peak sustained throughput: 500,000 ops/sec**"),
+            "the valid tier must still headline:\n{md}"
+        );
+    }
+
     /// Every tier timing out must not render a 0 ops/sec headline — `max` over
     /// an empty set is 0.0, which would read as a measured collapse.
     #[test]
@@ -181,10 +267,95 @@ mod tests {
     }
 }
 
+/// One client tier, aggregated over its measured repetitions.
+///
+/// Per-rep rows stay in the JSON; this is what the markdown table and the chart
+/// render, because a lone repetition is not a result. The spread across reps is
+/// part of the figure, not a footnote to it — a tier whose reps disagree by 20%
+/// has not measured anything, however good its mean looks.
+#[derive(Debug, Clone, Serialize)]
+pub struct TierSummary {
+    pub clients: usize,
+    /// Trimmed mean over the valid reps: fastest and slowest dropped (MLPerf).
+    pub ops_per_sec: f64,
+    pub ops_min: f64,
+    pub ops_max: f64,
+    /// Worst (highest) drop rate among the valid reps.
+    pub drop_rate: f64,
+    /// Worst latency across ALL reps, valid or not. A truncated window does not
+    /// bias the frames that did land, so those samples still count.
+    pub p50_us: f64,
+    pub p99_us: f64,
+    pub events_delivered: u64,
+    pub reps_valid: usize,
+    pub reps_total: usize,
+    pub timed_out: usize,
+    pub rate_missed: usize,
+}
+
+impl TierSummary {
+    /// What goes in the ops/sec cell when no repetition was usable. Naming the
+    /// reason matters: a timeout says raise `--timeout-secs`, a missed rate
+    /// says the generator, not the server, was the bottleneck.
+    #[must_use]
+    pub fn invalid_label(&self) -> &'static str {
+        if self.timed_out > 0 {
+            "_timed out_"
+        } else {
+            "_rate not held_"
+        }
+    }
+}
+
+/// Collapse per-rep runs into one summary per client tier, ascending.
+///
+/// A rep counts toward the throughput figures only if it both finished inside
+/// its window (`throughput_valid`) and offered the rate it claimed
+/// (`rate_held`). Everything else is reported, then excluded.
+#[must_use]
+pub fn summarize(runs: &[RunResult]) -> Vec<TierSummary> {
+    let mut tiers: Vec<usize> = runs.iter().map(|r| r.clients).collect();
+    tiers.sort_unstable();
+    tiers.dedup();
+
+    tiers
+        .into_iter()
+        .map(|clients| {
+            let all: Vec<&RunResult> = runs.iter().filter(|r| r.clients == clients).collect();
+            let valid: Vec<&&RunResult> = all
+                .iter()
+                .filter(|r| r.throughput_valid && r.rate_held)
+                .collect();
+            let ops: Vec<f64> = valid.iter().map(|r| r.ops_per_sec).collect();
+            let max_of =
+                |f: fn(&RunResult) -> f64| all.iter().map(|r| f(r)).fold(0.0_f64, f64::max);
+            TierSummary {
+                clients,
+                ops_per_sec: trimmed_mean(&ops),
+                ops_min: if ops.is_empty() {
+                    0.0
+                } else {
+                    ops.iter().copied().fold(f64::INFINITY, f64::min)
+                },
+                ops_max: ops.iter().copied().fold(0.0_f64, f64::max),
+                drop_rate: valid.iter().map(|r| r.drop_rate).fold(0.0_f64, f64::max),
+                p50_us: max_of(|r| r.p50_us),
+                p99_us: max_of(|r| r.p99_us),
+                events_delivered: all.iter().map(|r| r.events_delivered).max().unwrap_or(0),
+                reps_valid: valid.len(),
+                reps_total: all.len(),
+                timed_out: all.iter().filter(|r| !r.throughput_valid).count(),
+                rate_missed: all.iter().filter(|r| !r.rate_held).count(),
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Serialize)]
 struct FullReport {
     environment: Environment,
     runs: Vec<RunResult>,
+    tiers: Vec<TierSummary>,
     powersync_ceiling_ops_per_sec_low: u64,
     powersync_ceiling_ops_per_sec_high: u64,
 }
@@ -196,6 +367,7 @@ pub fn write_reports(cfg: &BenchConfig, runs: &[RunResult], env: &Environment) -
     let report = FullReport {
         environment: env.clone(),
         runs: runs.to_vec(),
+        tiers: summarize(runs),
         // PowerSync's published small-row server ceiling: 2,000–4,000 ops/sec.
         // Source: https://docs.powersync.com/resources/performance-and-limits
         powersync_ceiling_ops_per_sec_low: 2_000,
@@ -250,44 +422,88 @@ fn render_markdown(r: &FullReport) -> String {
          connected clients) with a synthetic replicator on loopback.\n\n",
     );
 
-    s.push_str("| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | vs PS high |\n");
-    s.push_str("|---:|---:|---:|---:|---:|---:|---:|\n");
-    for run in &r.runs {
-        // A run that hit `--timeout-secs` never finished the workload, so its
-        // ops/sec is a floor and its drop% counts in-flight events as lost.
-        // Rendering either as a number invites the quote this table exists to
-        // prevent — the row stays (delivered and latency are real) but those
-        // two cells are struck out.
-        if !run.throughput_valid {
+    s.push_str(
+        "| Clients | ops/sec | spread (min–max) | drop% | p50 (ms) | p99 (ms) | reps | vs PS high |\n",
+    );
+    s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    for t in &r.tiers {
+        let reps = format!("{}/{}", t.reps_valid, t.reps_total);
+        // A tier with no usable repetition keeps its row — the delivered count
+        // and the latencies are real — but the figures its invalid runs
+        // corrupted are named rather than rendered as numbers someone could
+        // quote. The label says which failure it was, because the two have
+        // different fixes.
+        if t.reps_valid == 0 {
             s.push_str(&format!(
-                "| {} | _timed out_ | — | {:.2} | {:.2} | {} | — |\n",
-                run.clients,
-                run.p50_us / 1000.0,
-                run.p99_us / 1000.0,
-                run.events_delivered,
+                "| {} | {} | — | — | {:.2} | {:.2} | {} | — |\n",
+                t.clients,
+                t.invalid_label(),
+                t.p50_us / 1000.0,
+                t.p99_us / 1000.0,
+                reps,
             ));
             continue;
         }
-        let ratio = run.ops_per_sec / r.powersync_ceiling_ops_per_sec_high as f64;
+        let ratio = t.ops_per_sec / r.powersync_ceiling_ops_per_sec_high as f64;
         s.push_str(&format!(
-            "| {} | {} | {:.2}% | {:.2} | {:.2} | {} | **{:.1}×** |\n",
-            run.clients,
-            grouped(run.ops_per_sec),
-            run.drop_rate * 100.0,
-            run.p50_us / 1000.0,
-            run.p99_us / 1000.0,
-            run.events_delivered,
+            "| {} | {} | {}–{} | {:.2}% | {:.2} | {:.2} | {} | **{:.1}×** |\n",
+            t.clients,
+            grouped(t.ops_per_sec),
+            grouped(t.ops_min),
+            grouped(t.ops_max),
+            t.drop_rate * 100.0,
+            t.p50_us / 1000.0,
+            t.p99_us / 1000.0,
+            reps,
             ratio,
         ));
+    }
+
+    s.push_str(&format!(
+        "\n> **Repetition policy:** {} measured repetitions per tier — fastest and slowest \
+         dropped, mean of the rest (MLPerf). {} warm-up repetition(s) per tier run first and \
+         discarded. Tier/rep order randomised (seed `{:#x}`) so no tier permanently owns the \
+         cold-cache slot. The `spread` column is the min-max across valid reps and is **part of \
+         the figure**: a tier whose reps disagree has not measured anything, however good its \
+         mean looks.\n",
+        r.environment.reps, r.environment.warmup_reps, r.environment.order_seed,
+    ));
+
+    if r.environment.rate > 0 {
+        s.push_str(&format!(
+            "\n> **Offered rate: {} events/sec into the router** (so `rate x clients` \
+             deliveries/sec), held open-loop (event `i` is due at \
+             `start + i/rate` regardless of what the router did with `i-1`). These figures \
+             answer *\"does the system hold this rate under the drop bar\"* — a run whose \
+             generator fell behind its own schedule is marked `_rate not held_` and excluded, \
+             because it offered less load than it claimed.\n",
+            grouped(r.environment.rate as f64),
+        ));
+    } else {
+        s.push_str(
+            "\n> **Unpaced:** the generator floods as fast as the router accepts, so these \
+             figures answer *\"where does it fall over\"*, not *\"does it meet rate R at under \
+             1% loss\"*. The second question is the one a user with a workload has; `--rate` \
+             asks it.\n",
+        );
     }
 
     let timed_out = r.runs.iter().filter(|x| !x.throughput_valid).count();
     if timed_out > 0 {
         s.push_str(&format!(
-            "\n> **{timed_out} run(s) hit the wall-clock timeout** and delivered only part of \
-             the workload. Their ops/sec and drop% are withheld above and excluded from every \
-             figure below — a truncated window measures the clock, not the system. Re-run those \
+            "\n> **{timed_out} repetition(s) hit the wall-clock timeout** and delivered only \
+             part of the workload. Their ops/sec and drop% are excluded from every figure in \
+             this file — a truncated window measures the clock, not the system. Re-run those \
              tiers with a larger `--timeout-secs`.\n"
+        ));
+    }
+    let rate_missed = r.runs.iter().filter(|x| !x.rate_held).count();
+    if rate_missed > 0 {
+        s.push_str(&format!(
+            "\n> **{rate_missed} repetition(s) could not hold the offered rate** — the \
+             generator fell behind its own schedule, so the load offered was below the load \
+             requested and the drop rate describes the generator. Excluded. Lower `--rate`, or \
+             move the generator off-box.\n"
         ));
     }
 
@@ -295,11 +511,15 @@ fn render_markdown(r: &FullReport) -> String {
     // Every aggregate below is computed over completed runs ONLY. A timed-out
     // run's ops/sec is a floor, and a floor silently entering a `max` would
     // understate the peak while looking like a measurement.
-    let valid: Vec<&RunResult> = r.runs.iter().filter(|x| x.throughput_valid).collect();
+    // Peak is a max over TIER means, never over raw repetitions: a max over
+    // reps would report the luckiest run of the session as the headline, which
+    // is exactly the variance dishonesty the repetition policy exists to stop.
+    let valid: Vec<&TierSummary> = r.tiers.iter().filter(|x| x.reps_valid > 0).collect();
     if valid.is_empty() {
         s.push_str(
-            "- **No run produced a valid throughput figure** — every tier hit the wall-clock \
-             timeout. Raise `--timeout-secs` and re-run before citing anything from this file.\n",
+            "- **No run produced a valid throughput figure** — every tier either hit the \
+             wall-clock timeout or failed to hold its offered rate. Fix that and re-run before \
+             citing anything from this file.\n",
         );
     } else {
         let best = valid.iter().map(|x| x.ops_per_sec).fold(0.0_f64, f64::max);
@@ -342,10 +562,12 @@ fn render_svg(r: &FullReport) -> String {
     let plot_w = width - pad_l - pad_r;
     let plot_h = height - pad_t - pad_b;
 
-    let best = r.runs.iter().map(|x| x.ops_per_sec).fold(1.0_f64, f64::max);
+    // Chart the tier means, not the repetitions: one bar per tier is the claim.
+    let bars: Vec<&TierSummary> = r.tiers.iter().filter(|t| t.reps_valid > 0).collect();
+    let best = bars.iter().map(|x| x.ops_per_sec).fold(1.0_f64, f64::max);
     // Y axis goes a bit above the best to leave headroom; include PS ceiling.
     let y_max = best.max(r.powersync_ceiling_ops_per_sec_high as f64) * 1.15;
-    let bar_count = r.runs.len();
+    let bar_count = bars.len();
     let group_w = plot_w / bar_count.max(1);
     let bar_w = (group_w * 3 / 5).max(8);
 
@@ -378,7 +600,7 @@ fn render_svg(r: &FullReport) -> String {
     }
 
     // Bars.
-    for (i, run) in r.runs.iter().enumerate() {
+    for (i, run) in bars.iter().enumerate() {
         let x = pad_l + i * group_w + (group_w - bar_w) / 2;
         let h = ((run.ops_per_sec / y_max) * plot_h as f64) as usize;
         let y = pad_t + (plot_h - h);
