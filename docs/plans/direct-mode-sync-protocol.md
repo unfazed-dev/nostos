@@ -188,6 +188,10 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    half-applied"** and **"device offline past the retention window"** as
    first-class cases. The first of those has to hold inside the browser
    Worker as well as on rusqlite.
+9. Push: `cairn.push_tokens` under RLS, the trigger-to-function doorbell, and
+   `registerPushToken` routed to PostgREST instead of a server socket — see
+   "Push has to keep working" below. Not a follow-up; a killed app that never
+   wakes is indistinguishable from broken sync.
 
 ## Every SDK gets this, because it needs only two primitives
 
@@ -337,6 +341,100 @@ Second sync topology on the public client surface; hard to reverse; a real
 trade-off (write amplification and one-table RLS, against no server). That
 clears the bar in `.claude/skills/grill-with-docs`. Not written — the decision
 is the operator's.
+
+Two decisions, and they are separable. The topology is one ADR. **Flipping
+`nostos link`'s default from server to direct is a second**, taken later, on the
+evidence of step 8 — see "Which mode is the default" below.
+
+## Which mode is the default
+
+Not a single answer, because direct mode has a hard prerequisite: it talks to
+**PostgREST and Realtime**. A plain self-hosted Postgres has neither, so there is
+no `rpc/pull` to call and no channel to subscribe to.
+
+| backend | default | why |
+|---|---|---|
+| Supabase, or anything running PostgREST + Realtime | **direct** | no process for the developer to operate; anon key + RLS is the whole trust story |
+| plain Postgres, self-hosted | **server** | direct mode has nothing to talk to |
+
+So the framing is *"direct is the default when the backend can serve it"*, not
+*"server mode becomes a flag"*. Server mode stays the answer for four cases
+direct cannot serve, and none of them is a deprecation candidate:
+
+1. **Join-based RLS** — `scope` covers tenant/owner; `nostos link` refuses the rest.
+2. **Presence-aware push** — see below; it needs `SessionStore`.
+3. **Non-Supabase Postgres** — the row above.
+4. **The fan-out tier** — one router moving 800k deliveries/sec beats N devices
+   each polling their own slice, once N is large enough. Where that crossover
+   sits is unmeasured.
+
+**Sequencing.** `nostos link --mode direct` ships behind the flag first — the
+ADR-0033 experimental-behind-flag precedent. The default flips only when step 8's
+conformance suite is green on rusqlite, inside the browser Worker, and on a
+physical iOS device. Inverting a default on a public client surface is the
+hard-to-reverse move, and it is the part that earns an ADR.
+
+## Push has to keep working, and it can — without an always-on process
+
+Three things nostos-server does for push today. Each needs a direct-mode answer:
+
+| what the server does | where it lives now | direct-mode replacement |
+|---|---|---|
+| holds the APNs `.p8` / FCM service-account JSON | `Rails::from_env()`, `crates/nostos-push/src/rail.rs:122` | a Supabase Edge Function secret — **never the device** |
+| decides *whom* to doorbell | `FanOutService::fan_out` enqueues one `PushHint` per matched **offline** account, `crates/nostos-application/src/fanout.rs:396` and `:450` | trigger on `cairn.changes` reads `scope`, selects the token rows for that scope |
+| receives the device token | `adapter.registerPushToken('fcm', token)` → `POST /push-tokens`, `apps/atlet/flutter/lib/push/push_pilot.dart:179` | an ordinary PostgREST insert into `cairn.push_tokens`, under RLS |
+
+### The one thing that cannot be argued away
+
+An OS-level wake requires APNs or FCM, and both authenticate the sender with a
+credential that must never ship in an APK. This is the `powersync_role` argument
+again, in a different place: **direct mode means no server the developer
+operates, not no server-side code.** The credential holder is an Edge Function —
+scale-to-zero, invoked by the same trigger that already fires the Realtime
+broadcast, so the atomicity argument at the top of this document covers it too.
+
+`nostos-pushd` is unaffected and stays the answer for an operator who wants a Rust
+daemon or is not on Supabase. Direct mode simply does not use ADR-0038's
+`RemoteNotifier` delegation.
+
+### What is genuinely lost: presence
+
+`fan_out` doorbells only accounts that are **offline**, and "offline" comes from
+`SessionStore`. Direct mode has no session store — nothing is tracking who is
+connected. The lazy answer is the right one: **always send the data-only message
+and let the client dedupe.** It already has to — the doorbell carries no data and
+every reconnect pulls, so a redundant wake costs one `rpc/pull` that returns
+zero rows. Add a `last_seen` heartbeat column only if a measurement says the
+wasted sends cost something.
+
+### What is not lost: coalescing
+
+`default_collapse_key(tenant, token)` (`crates/nostos-push/src/rail.rs:182`) is a
+pure function, and the supersede keys it feeds — FCM `collapse_key`, APNs
+`apns-collapse-id`, Web Push `Topic` — are **provider** features, not server
+features. An Edge Function setting the same headers with the same key gets the
+same behaviour ADR-0038's test-that-matters asserts: 20 sends to one target ⇒
+exactly 1 push. The 410/`UNREGISTERED` prune becomes a `delete` on the token
+row.
+
+### Atlet already has the whole rail to point at it
+
+`tool/push_smoke.sh` + `integration_test/push_smoke_test.dart` drive real FCM end
+to end and assert on both sides (server metric up, device receives the data
+message). `web/atlet-push-sw.js` and `lib/push/push_pilot_web.dart` cover the Web
+Push leg. Repointing the harness at the trigger-plus-function path reuses the
+device-side assertion verbatim — only the "server" assertion changes, from
+`cairn_push_sent_total` to the function's own log.
+
+### W0 checks this adds
+
+- **Does `pg_net` / Database Webhooks reach an Edge Function from a trigger on
+  `cairn.changes`?** Assumed, not verified. Same W0 bucket as "what does
+  PostgREST emit for `xid8`".
+- **Does a trigger-fired function see the row before the transaction commits?**
+  It must not send a doorbell for a change the device cannot yet pull.
+- **Cold-start latency of the credential holder** — sets the floor on
+  wake-to-data time for a killed app.
 
 ## Sources (fetched 2026-09-22)
 
