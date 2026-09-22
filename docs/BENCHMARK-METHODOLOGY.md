@@ -70,10 +70,21 @@ Single process (`nostos-bench`):
    - enters a read loop, incrementing a per-client `AtomicU64` and pushing receive timestamps into a latency histogram.
 3. Obtains an in-process handle to the server's `FanOutService` and constructs a `FakeReplicator` that emits `M` synthetic events as fast as the router will accept them (the router's backpressure is the rate limiter).
    - **`NOSTOS_FAKE_EPS` / `NOSTOS_FAKE_KEYS` do not apply here.** Those bound the `nostos-server` *binary's* dev default (A10, ADR-0027); `nostos-bench` builds its own `FakeReplicatorConfig` (`crates/nostos-bench/src/main.rs:226`), leaving both knobs at `0` = unpaced, monotonic keys. The measured ceiling is unaffected by them — and must stay that way, since pacing would cap the very number this document defines.
-4. Waits until the sum of per-client counters ≥ `M` (with a timeout).
-5. Computes: sustained ops/sec = `M / wall_clock`. Drop rate = `1 - (delivered / M)`. p99 latency from the histogram.
+   - **Open-loop pacing (`--rate`, default `0` = unpaced).** With a rate set, event `i` is due at `start + i/R` *regardless* of what the router did with event `i-1`, so a struggling system builds a backlog instead of quietly slowing the generator down (coordinated omission). The default stays unpaced, because pacing would cap the very ceiling §2 defines — see §5 for which question each mode answers.
+4. Waits until delivery **stops advancing** (quiescence), or the wall-clock timeout expires, whichever comes first. Quiescence is a complete run: the system stopped delivering because it had nothing left to deliver, whether the remainder arrived or was shed. Timeout expiry is not — the run was still making progress when the window closed, so its throughput and drop figures are withheld everywhere (`throughput_valid`, 2026-09-22).
+5. Computes: sustained ops/sec = `delivered / wall_clock`, with the clock stopped at the **last delivery** so the quiescence grace never inflates the window. Drop rate = `1 - ((delivered + superseded) / attempted)`. p50/p99 latency from the histogram — reported even for a timed-out run, since a truncated window does not bias the frames that did land.
 
 Run for `N ∈ {1000, 5000, 10000}` and both payload profiles.
+
+### 4.1 Repetition policy (fixed 2026-09-22)
+
+One run is not a result. `nostos-bench` runs **N = 5 measured repetitions per tier** (`--reps`), preceded by **one discarded warm-up per tier** (`--warmup-reps`), and reports the MLPerf trimmed mean: fastest and slowest dropped, mean of the rest.
+
+The **min–max spread across the kept repetitions is printed beside the mean, and is part of the figure** — a tier whose repetitions disagree by 20% has not measured anything, however good its mean looks. Worked example: the 2026-09-22 Linux host spread 524k–768k ops/sec at a single tier (±22% around the median), which is the whole finding of that run.
+
+The `(tier, repetition)` schedule is **shuffled** with a seeded Fisher–Yates (`--order-seed`, recorded in the report). A fixed `1k,5k,10k` order hands the first tier every cold cache and every unsettled thermal state, run after run; that bias is systematic rather than noise, because it lands on the same tier every time.
+
+The headline is a max over **tier means**, never over raw repetitions — a max over repetitions reports the luckiest run of the session as the figure.
 
 ---
 
@@ -84,6 +95,8 @@ Each client session has a **bounded** delivery channel of depth `B` (`NOSTOS_SES
 **Why drop-and-observe, not block:** a single stalled WebSocket must never stall the replication fan-out (head-of-line blocking). PowerSync's full-reprocessing model (their proposal #349) doesn't have this guarantee.
 
 **Consequence for honesty:** the benchmark reports drop rate alongside throughput. A throughput number with a high drop rate is meaningless and is called out as such. The headline number is the **highest throughput at <1% drop rate.**
+
+**"At what rate" is a different question from "where does it fall over" (2026-09-22).** Unpaced, the harness answers the second: the generator floods and the drop rate marks the cliff. With `--rate R` it answers the first — the one a user with a workload actually has: *does the system hold R events/sec under the 1% bar?* Ladder R up and the largest rate that holds is the answer. A repetition whose generator missed its own schedule offered less load than it claimed, and is excluded with a `rate not held` stamp: its drop rate describes the generator, not the server.
 
 **Enforced (2026-09-21).** `benches/scripts/fanout-100k-diag.sh` stamps every
 tier with `drop_pct=.. throughput_valid=yes|no`. Before that this rule was

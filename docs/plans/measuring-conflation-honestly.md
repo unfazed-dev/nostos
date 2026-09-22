@@ -1,6 +1,8 @@
 # Measuring conflation honestly — why ADR-0045's gate is the wrong instrument
 
-**Date:** 2026-09-22. **Status:** research complete, not implemented.
+**Date:** 2026-09-22. **Status:** all five harness defects built (2026-09-22);
+the convergence-lag instrument landed as a router test (`47c178c`); the gate
+replacement below is still an open operator decision.
 **Prompted by:** ADR-0045 attempt 3 shipping a correct metric fix and still failing to
 demonstrate a benefit, with the blame placed on the harness's single host.
 
@@ -76,12 +78,24 @@ Four came from the research below. The fifth came from running on a second
 machine, and could not have come from anywhere else — see "What a slow host
 found" at the end. These are real and independent of ADR-0045.
 
-1. **"Pedal to the metal" is not a benchmark.** `FakeReplicator` floods as fast as it can, so the
-   drop rate measures where the system falls over, not whether it meets a rate. The standard fix
-   is a **constant arrival rate** (`wrk2 --rate`, open-loop). The <1% bar should read "at target
-   rate R, drops < 1%", and the ladder should search for the largest R that holds. This reframes
-   the entire drop-rate ladder and is probably the highest-value harness change in this document
-   after AoI.
+**All five are built as of 2026-09-22.** Two were found by a slow host and two
+by reading the standard load-testing literature; none were found by the figures
+themselves, which is the point of the closing section.
+
+1. ~~**"Pedal to the metal" is not a benchmark.**~~ **BUILT 2026-09-22 (`0d9a7c1`).**
+   `FakeReplicator` flooded as fast as the consumer would take it, so the drop rate measured
+   where the system falls over, not whether it meets a rate. `--rate` now holds a **constant
+   arrival rate, open-loop**: event `i` is due at `start + i/R` regardless of what the router did
+   with `i-1`.
+
+   The pacing that already existed was worse than none: `sleep(1/R)` *after* each event, so a
+   consumer taking `d` per event quietly dropped the real rate to `1/(1/R + d)` — textbook
+   coordinated omission, the generator slowing to whatever the system could absorb and then
+   reporting no problem. A run whose generator now misses its own schedule is stamped
+   `rate not held` and excluded from every figure, because it offered less load than it claimed.
+   The default stays `0` (flood), so every historical figure keeps its meaning. With a rate set,
+   the <1% bar reads "at rate R, drops < 1%" and the ladder becomes a search for the largest R
+   that holds.
 2. ~~**A run that hit its timeout must not report a number.**~~ **BUILT 2026-09-22 (`1449664`).**
    The 10k rung's `elapsed_secs: 120.00` is the `--timeout-secs` default, i.e. window expiry, and
    the JSON looked like a measurement. `RunResult` now carries `throughput_valid`; an invalid run
@@ -90,13 +104,22 @@ found" at the end. These are real and independent of ADR-0045.
    `0.0` and reads as a measured collapse). Latency is still reported — a truncated window does
    not bias the frames that did land. Predicted here for the 10k rung; found corrupting the
    **1k** rung on a 4-core host.
-3. **Repetition policy instead of ad-hoc run counts.** MLPerf's template: fix N per benchmark,
-   drop fastest and slowest, report the mean of the rest, and state the tolerance the N was
-   chosen to hold (5 runs → 90% within 5%). Turns variance from an argument into a number.
-4. **Randomise arm order within a session.** Attempt 3's A/B ran a fixed `A,B,A,B,A,B`, so the
-   parent always took the cold-cache slot. Random interleaving is reported to cut run-to-run
-   variance by up to 40%; fixed order reintroduces an ordering bias. Also discard the warm-up
-   run, and plot the series — throttling shows as a step change that a median hides.
+3. ~~**Repetition policy instead of ad-hoc run counts.**~~ **BUILT 2026-09-22 (`0d9a7c1`).**
+   `--reps` (default 5) fixes N *before* the run, MLPerf-style: fastest and slowest dropped, mean
+   of the rest, with the min-max **spread** printed beside it as part of the figure rather than a
+   footnote to it. `--warmup-reps` (default 1) runs and discards a warm-up per tier. RESULTS.md
+   now tables one row per **tier**, not per run, and the headline is a max over tier means —
+   never over raw repetitions, which reports the luckiest run of the session. An ad-hoc run count
+   is an invitation to choose N after seeing the numbers; a fixed policy removes the choice.
+4. ~~**Randomise arm order within a session.**~~ **BUILT 2026-09-22 (`0d9a7c1`).** Attempt 3's
+   A/B ran a fixed `A,B,A,B,A,B`, so the parent always took the cold-cache slot — and the bench's
+   own `1k,5k,10k` had the same shape, handing the first tier every cold cache and every
+   unsettled thermal state, run after run. That bias is systematic, not noise: it never averages
+   out, because it lands on the same tier every time. The `(tier, rep)` schedule is now shuffled
+   with a seeded Fisher-Yates (`--order-seed`, recorded in the report), so the order is
+   randomised and still reproducible. Random interleaving is reported to cut run-to-run variance
+   by up to 40%. Still open from this item: **plot the series** — throttling shows as a step
+   change that any single summary statistic hides.
 5. ~~**The wait loop could not finish a lossy run.**~~ **BUILT 2026-09-22 (`59af8b7`).** It waited
    for `sum_received() >= events × clients` — the count a *loss-free* run receives. The router is
    allowed to shed on a full session channel and a shed event never reaches a client, so a single
