@@ -197,21 +197,40 @@ modes, not the less.**
 
 It reuses the platform split that already exists:
 
-| SDKs | host | pull + doorbell I/O | storage (unchanged) |
+| SDKs | how it reaches Rust | pull + doorbell I/O | storage (unchanged) |
 |---|---|---|---|
-| `nostos_flutter` (native), `nostos_tauri`, `nostos_node`, `nostos_capacitor`, `nostos_react_native`, `nostos_swift`, `nostos_kotlin`, `nostos_dotnet` | native Rust via `nostos-client` | tokio HTTP + WS | `SqliteStorage` (rusqlite) |
-| `nostos_web`, `nostos_flutter` on web (ADR-0036) | wasm inside the Worker | JS `fetch` + `WebSocket`, driven from `nostos-ffi-wasm` | `SqliteWasmStorage` → sqlite-wasm `opfs-sahpool` (ADR-0033) |
+| `nostos_flutter` (native), `nostos_tauri`, `nostos_node`, `nostos_swift`, `nostos_kotlin`, `nostos_dotnet` | `nostos-client` directly (each has its own `Cargo.toml`) | tokio HTTP + WS | `SqliteStorage` (rusqlite) |
+| `nostos_react_native` | TurboModule over the `nostos_swift` / `nostos_kotlin` UniFFI bindings — **no Rust crate of its own** (ADR-0020) | inherited from those two | inherited |
+| `nostos_web`, `nostos_capacitor`, `nostos_flutter` on web (ADR-0036) | `nostos-ffi-wasm` `--target web`, inside the Worker | JS `fetch` + `WebSocket` | `SqliteWasmStorage` → sqlite-wasm `opfs-sahpool` (ADR-0033) |
 
-`nostos_tauri` takes the **native** row despite rendering a web UI:
-`sdk/nostos_tauri/Cargo.toml` depends on `nostos-client`, `nostos-core` and
-`nostos-domain`, so the webview never touches the sync path.
+Two placements are counter-intuitive and both were checked rather than guessed:
+
+- **`nostos_tauri` is native** despite rendering a web UI —
+  `sdk/nostos_tauri/Cargo.toml` depends on `nostos-client`, `nostos-core` and
+  `nostos-domain`, so the webview never touches the sync path.
+- **`nostos_capacitor` is *not* native.** It has no Cargo.toml;
+  `sdk/nostos_capacitor/src/web.ts` loads `pkg-web/nostos_ffi_wasm.js` and drives
+  `NostosSocket` inside the WKWebView / Android WebView, on the grounds that both
+  browser globals "exist and behave exactly as in a desktop browser". So a
+  Capacitor app is a browser target for sync purposes, and direct mode reaches
+  it through the wasm row.
+
+The practical consequence: **direct mode needs two implementations, not nine.**
+`nostos-client` covers six SDKs and `nostos-ffi-wasm` covers three.
 
 ### This is what moves the seam out of `nostos-client`
 
-`nostos-client` is tokio + rusqlite. A seam there ships direct mode to eight
-SDKs and skips the two that want it most. The pull logic belongs in
-**`nostos-core`**, which is WASM-clean — and verified so: no `async fn` and no
-`.await` anywhere in `crates/nostos-core/src/`.
+`nostos-client` is tokio + rusqlite. A seam there covers six SDKs and skips the
+three that want it most. The pull logic belongs in **`nostos-core`**, whose own
+header states the contract — "**pure Rust: no tokio, no SQLite, no I/O**"
+(`crates/nostos-core/src/lib.rs:9`) — and which holds to it: the only matches for
+`async fn`, `.await` or `tokio` in `crates/nostos-core/src/` are four doc
+comments asserting their own absence.
+
+ADR-0020 is the reason this matters rather than being a tidiness preference. It
+settled that React Native **cannot** reuse the JS core, so `nostos-client` and
+`nostos-ffi-wasm` are permanently two separate consumers. Logic placed in either
+one does not reach the other; logic placed in `nostos-core` reaches both.
 
 This is not a new pattern. `crates/nostos-ffi-wasm/src/transport.rs` already
 splits it exactly this way: the frame logic is pure Rust
