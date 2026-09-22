@@ -6,7 +6,9 @@ to involve another device that stays on all the time for Nostos to work."*
 
 The constraint is legitimate and the current answer ("run nostos-server on a VM
 or a spare box") is a real adoption tax. This document maps the shapes that
-satisfy the constraint, and is honest about which one dies where.
+satisfy the constraint, and is honest about which one dies where. The short
+answer is that it hinges on one thing only: whether every install reads from
+**one shared database** or from **its own**.
 
 ## The reframe that matters
 
@@ -55,35 +57,73 @@ achievable; a background daemon is not.
 
 ## The three shapes
 
-### Shape A — embedded replicator (one slot per install)
+### Shape A — embedded replicator (the router linked into the app)
 
 The app's Rust lib links `nostos-infra` with the `pg` feature and holds the
-logical-replication connection itself.
+logical-replication connection itself. **Every install runs its own router.**
+Nobody's phone serves anybody else's, and no second device exists anywhere in
+the picture.
 
 **Works:** no second device, no hosting bill, full Nostos semantics (predicates,
 LSN checkpoints, op-log resume, write-back).
 
-**Ceiling — and it is a hard one:** every *install* holds its own replication
-slot against the Postgres. `max_replication_slots` defaults to **10**, and the
-standing advice is to keep it tight rather than generous. Three independent
-failure modes follow:
+**The number of routers is not the constraint. The number of slots is.** A
+replication slot is a property of the *database*, not of the router — so the
+count that decides whether this ships is **slots per database**, and that
+depends entirely on one question:
 
-1. **Slot count scales with installs.** 1,000 users on 1,000 phones is 1,000
-   slots on one database. Not a per-user problem — a per-*install* one.
+#### A1 — one shared Postgres behind every install
+
+The normal shape for a shipped app: you own one database, all users read from
+it. Each embedded router opens its own logical-replication connection to that
+one database, so N installs means N slots — and `max_replication_slots`
+defaults to **10**, with the standing advice to keep it tight. Each connection
+also burns a `max_wal_senders` slot and a walsender process.
+
+Three failure modes, all of them properties of the shared database:
+
+1. **Slot count scales with installs**, not with users-per-device. 1,000 users
+   with one phone each is still 1,000 slots on your one database.
 2. **One laggard pins WAL for everyone.** Each slot retains WAL from its own
    confirmed position, so a single phone offline for days sets the retention
-   floor for the whole database. Disk fills, writes halt. This is the ADR-0043
-   class, multiplied by the install count.
+   floor for the whole database. Disk fills, writes halt — the ADR-0043 class,
+   multiplied by the install count.
 3. **Uninstall leaves an abandoned slot.** Nothing on the device can clean up
-   after itself once the app is gone. `max_slot_wal_keep_size` bounds the
-   damage by invalidating the slot, at the cost of a full resync for any device
-   that was merely asleep.
+   once the app is gone. `max_slot_wal_keep_size` bounds the damage by
+   invalidating the slot, at the cost of a full resync for any device that was
+   merely asleep.
 
-It also puts a `REPLICATION`-privileged credential inside the app bundle.
+It also puts a `REPLICATION`-privileged credential in the app bundle, where any
+user can extract it and stream the whole database.
 
-**Therefore:** Shape A is sound for **one owner, few devices** — your phone,
-your Postgres, single digits of installs, `max_replication_slots` raised to
-match. It is not a shape to ship to strangers.
+**A1 is what needs `nostos-server`** — one process holding the single slot and
+fanning it out to many sessions. That is the multiplexer, and nothing on a
+phone can replace it.
+
+#### A2 — one Postgres per user
+
+Each install talks to a database that only its own owner holds: their own
+Supabase project, their own Neon/Fly instance, their own box. Every objection
+above evaporates, because each one was about *sharing*:
+
+- **One slot per database.** The ceiling never binds — one database, one
+  consumer, and that consumer is the owner's own phone.
+- **A laggard pins only its owner's WAL.** The blast radius of being offline
+  for a month is your own disk.
+- **An abandoned slot is the owner's own.** No cross-user damage, and `nostos
+  doctor` can reap it on next launch.
+- **No credential in the bundle.** The user supplies their own connection
+  string at setup, so nothing privileged ships in the binary — which is also
+  the only way a `REPLICATION` role is ever acceptable on a device.
+
+**A2 satisfies the operator's constraint with no caveat at all:** no always-on
+server, no second device, per-install Nostos, full semantics, at any number of
+users. The cost did not vanish, it moved — onboarding now includes "bring a
+database", and provisioning one per signup is a product you'd have to build
+(this is the Turso / Neon / per-tenant-project pattern, and it is a real one).
+
+**Therefore:** the fork is not phone-vs-server. It is **shared database → you
+need nostos-server; database-per-user → you don't.**
 
 ### Shape B — `nostos lite`, direct to the backend's own API
 
@@ -120,21 +160,30 @@ PGlite and still keeps a server-side Postgres as the source of truth.
 
 ## Recommendation
 
-Ship **both ends, honestly labelled**, and do not make either the default:
+**A2 is the answer to the operator's question**, and it should be built and
+documented as a first-class deployment shape, not a footnote to A1. It is the
+only shape that removes the always-on server without giving anything up:
+per-install router, full replication semantics, no second device, no ceiling
+that grows with the user count.
 
-- **Shape A as "personal mode"** — documented with the slot arithmetic in the
-  first paragraph, not a footnote. Target: the developer's own device, a family
-  app, a self-hosted-per-user deployment.
-- **Shape B as the onboarding path** — start with no infrastructure, and make
-  "~3,000 subscribers, or the moment you need server-authoritative scoping" the
-  documented trigger to point at a real `nostos-server`. *The upgrade path is the
-  product.*
+The order:
 
-Neither removes the always-on server for a multi-tenant product. That is not a
-gap in Nostos: Postgres offers ~10 replication slots and a shipped app has
-thousands of installs, so **something must multiplex one slot into many
-sessions.** That is nostos-server's entire reason to exist, and it should be said
-that way in the README.
+- **A2 — "own your database"** — embedded router, user-supplied connection
+  string, one slot per database. Build the target support first (step 2 below);
+  everything else follows.
+- **Shape B as the zero-setup onboarding path** — no database to bring at all,
+  with "~3,000 subscribers, or the moment you need server-authoritative
+  scoping" as the documented trigger to move. *The upgrade path is the product.*
+- **A1 is the shape that needs `nostos-server`**, and it is also the shape most
+  commercial apps are. Keep it, and say why it exists in one line:
+
+> Postgres offers ~10 replication slots. If every install reads from **one
+> shared** database, something must multiplex that single slot into many
+> sessions — that is `nostos-server`. If each user owns their own database, you
+> don't need it.
+
+That sentence belongs in the README. It is a choice about the *data topology*,
+not about how much compute a phone has.
 
 ## If Shape A goes ahead — the actual work
 
@@ -143,17 +192,23 @@ that way in the README.
 2. Verify `tokio-postgres` + rustls on `aarch64-apple-ios` and
    `aarch64-linux-android`. Unproven; this is the first thing to test.
 3. Per-install slot naming, and a reaper for slots whose device never returns.
-4. Credential story: a `REPLICATION` role in an app bundle is only acceptable
-   when the database owner and the device owner are the same person. Enforce
-   that in documentation *and* in `nostos doctor`.
+   Required for A1; cheap insurance for A2, where the abandoned slot is the
+   owner's own.
+4. Credential story: a user-supplied connection string, entered or scanned at
+   setup and kept in the platform keystore. Never a `REPLICATION` role baked
+   into the bundle — `nostos doctor` should fail loudly if it finds one.
 5. Foreground-only sync loop plus resume-on-launch; no background service. Push
    (ADR-0037) is the only wake mechanism.
 
 ## Open questions for the operator
 
-- Is "personal mode" a product, or a documented power-user path?
+- **The fork, first:** does the flagship story assume one shared database per
+  app (A1) or one database per user (A2)? Every other answer depends on it.
+- If A2: who provisions the per-user database — the user by hand, or Nostos via
+  a provider API? The second is a product; the first is a paragraph of docs.
 - Does Shape B get built before or after the Flutter+Supabase launch bar?
-- Is `max_replication_slots` on Supabase's free tier even raisable? Unverified;
+- Is `max_replication_slots` on Supabase's free tier even raisable? Only
+  matters for A1. Unverified;
   `docs/plans/flutter-supabase-plug-and-play-launch.md` W0 flags the same gap.
 
 ## Sources
