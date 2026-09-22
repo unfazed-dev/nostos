@@ -391,6 +391,7 @@ mod tests {
     #[test]
     fn gen_emits_typed_schema_and_model() {
         let config = ProjectConfig {
+            mode: crate::config::LinkMode::default(),
             project: "demo".to_string(),
             sync_url: "ws://127.0.0.1:8800/sync".to_string(),
             backend: Some(Backend::Supabase {
@@ -477,6 +478,7 @@ mod tests {
     #[test]
     fn gen_omits_supabase_for_plain_postgres() {
         let config = ProjectConfig {
+            mode: crate::config::LinkMode::default(),
             project: "demo".to_string(),
             sync_url: "ws://127.0.0.1:8800/sync".to_string(),
             backend: None,

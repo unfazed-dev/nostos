@@ -88,7 +88,7 @@ async fn spawn_fake(rows: Vec<Change>, horizon: u64) -> (String, Arc<Mutex<usize
         hits: Arc::clone(&hits),
     };
     let app = Router::new()
-        .route("/rest/v1/rpc/pull", axum::routing::post(pull))
+        .route("/rest/v1/rpc/cairn_pull", axum::routing::post(pull))
         .with_state(fake);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -198,7 +198,7 @@ async fn a_rejected_jwt_surfaces_as_a_status_not_as_missing_rows() {
     // missing grants all come back as an HTTP status with a usable body, and
     // must never be mistaken for "no changes".
     let app = Router::new().route(
-        "/rest/v1/rpc/pull",
+        "/rest/v1/rpc/cairn_pull",
         axum::routing::post(|| async {
             (
                 axum::http::StatusCode::UNAUTHORIZED,

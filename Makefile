@@ -111,6 +111,10 @@ pg-e2e: ## Real-Postgres e2e suite; drops leaked inactive e2e_* slots first.
 	  "SELECT count(pg_drop_replication_slot(slot_name)) FROM pg_replication_slots WHERE NOT active AND (slot_name LIKE 'e2e_%' OR slot_name LIKE 'repro_%')" \
 	  | sed 's/^/swept leaked e2e slots: /'
 	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-infra --features pg --no-fail-fast -- --test-threads=1
+# nostos-cli's pg suite too: `nostos link --mode direct` generates SQL, and the
+# only place a generator bug shows up is Postgres refusing (or silently
+# mis-scoping) it. e2e_pg_direct_sql owns the `cairn` schema, hence -threads=1.
+	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-cli --no-fail-fast -- --test-threads=1
 
 # dev-stack: real-Postgres quickstart — compose up, wait for the publication,
 # then run nostos-server against it with PgReplicator. The readiness poll gates

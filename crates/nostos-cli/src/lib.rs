@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod direct;
 pub mod dotenv;
 pub mod pg;
 pub mod prompt;

@@ -1,4 +1,4 @@
-//! Direct mode's native change source — `rpc/pull` over HTTPS.
+//! Direct mode's native change source — `rpc/cairn_pull` over HTTPS.
 //!
 //! The I/O half of [`nostos_core::pull`]. Core decodes, groups by `xid` and
 //! advances the horizon; this makes the POST and drives the paging loop. The
@@ -44,7 +44,7 @@ pub const MAX_PAGES_PER_DRAIN: usize = 64;
 /// What went wrong pulling from PostgREST.
 #[derive(Debug, thiserror::Error)]
 pub enum PostgrestError {
-    /// The URL could not be assembled into a `rpc/pull` endpoint.
+    /// The URL could not be assembled into a `rpc/cairn_pull` endpoint.
     #[error("invalid PostgREST base url {0:?}")]
     BadUrl(String),
 
@@ -142,10 +142,17 @@ impl PostgrestSource {
         self.token = None;
     }
 
-    /// The `rpc/pull` endpoint (for logs and `nostos doctor`).
+    /// The `rpc/cairn_pull` endpoint (for logs and `nostos doctor`).
+    ///
+    /// The function lives in `public` under a `nostos_` prefix, not in the
+    /// `cairn` schema: Supabase exposes `public, graphql_public` by default, so
+    /// a third schema would need a `Content-Profile` header on every request
+    /// AND an operator ticking it into "Exposed schemas". Prefixing instead
+    /// keeps the log table off the REST API entirely — `nostos link --mode
+    /// direct` generates it that way.
     #[must_use]
     pub fn pull_endpoint(&self) -> String {
-        format!("{}/rpc/pull", self.rest_base)
+        format!("{}/rpc/cairn_pull", self.rest_base)
     }
 
     /// POST one page and return the raw response body.
@@ -375,7 +382,7 @@ mod tests {
         let b = PostgrestSource::new("https://ref.supabase.co/", "anon").unwrap();
         assert_eq!(
             a.pull_endpoint(),
-            "https://ref.supabase.co/rest/v1/rpc/pull"
+            "https://ref.supabase.co/rest/v1/rpc/cairn_pull"
         );
         assert_eq!(a.pull_endpoint(), b.pull_endpoint());
     }

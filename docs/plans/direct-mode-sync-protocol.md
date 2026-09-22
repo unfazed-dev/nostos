@@ -1,13 +1,22 @@
 # Direct mode — the sync protocol, and how the device gets transactional consistency
 
-**Date:** 2026-09-22. **Status:** steps 1–5 shipped and under `make ci`; steps
-6–9 still design. Grounded in fetched docs throughout.
+**Date:** 2026-09-22. **Status:** steps 1–6 shipped and under `make ci`; steps
+7–9 still design. Grounded in fetched docs throughout.
 
 Shipped: `nostos_core::pull` (`PullCursor`, `Horizon`, the xid8 checkpoint on
-`Storage`), `nostos_client::postgrest` (`rpc/pull` + the four write ops), and
-`nostos_client::doorbell` (Realtime private channel, `vsn=1.0.0`). What is *not*
-shipped is everything that touches a real database: the SQL in this file is
-still ungenerated and unrun.
+`Storage`), `nostos_client::postgrest` (`rpc/cairn_pull` + the four write ops),
+`nostos_client::doorbell` (Realtime private channel, `vsn=1.0.0`), and
+`nostos_cli::direct` — the generator behind `nostos link --mode direct`.
+
+**The SQL below is no longer theory.** `crates/nostos-cli/tests/e2e_pg_direct_sql.rs`
+applies the generated file to a real Postgres and asserts the properties that
+cannot be tested in Rust: an in-flight transaction hides every later commit,
+a page never splits a transaction, RLS scopes the log to the caller's claims,
+`cairn_increment` is atomic, and a row that changes owner is logged as a delete
+under the old scope. It runs under `make pg-e2e`. What is still unverified is
+everything Supabase-specific — `auth`/`realtime` are stubbed there, so the
+Realtime policy, the "Allow public access" setting, and what PostgREST emits
+for `xid8` remain W0 checks against a live project.
 **Companion to:** `nostos-on-device-no-always-on-server.md` (*why* direct mode).
 **Supersedes:** this file's first draft (per-table `updated_at` watermarks),
 which conceded that cross-table transactional consistency was impossible
@@ -82,7 +91,7 @@ aborted (so its log rows never existed). Nothing new can ever appear below it.
 stores one `xid8`, not a timestamp per table:
 
 ```sql
-create function cairn.pull(since xid8, max_txns int default 200)
+create function public.cairn_pull(since xid8, max_txns int default 200)
 returns table (horizon xid8, seq bigint, xid xid8,
                table_name text, pk text, op text, row jsonb)
 language sql stable security invoker as $$
@@ -126,9 +135,12 @@ Three things fall out of this being **one function call**:
    can't. A single Postgres function does not need the fallback.
 2. **`security invoker`** means RLS applies as the calling user. Scoping stays
    in Postgres, i.e. still server-authoritative.
-3. PostgREST exposes it at `/rest/v1/rpc/pull`. Supabase's custom-schema guide
-   covers the setup: add `nostos` to "Exposed schemas" in API settings, then
-   `GRANT USAGE ON SCHEMA` + `GRANT ALL ON ALL ROUTINES` to `authenticated`.
+3. **It lives in `public` under a `nostos_` prefix, not in the `cairn` schema.**
+   Supabase exposes `public, graphql_public` by default; a third schema needs a
+   `Content-Profile` header on every request *and* an operator ticking it into
+   "Exposed schemas". Prefixing deletes both steps — and keeps the log table
+   off the REST API entirely, so there is no `GET /rest/v1/changes` whose
+   grants could be got wrong. The device posts to `/rest/v1/rpc/cairn_pull`.
 
 ## What this dissolves from the first draft
 
@@ -192,22 +204,25 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
 
 ## Implementation order
 
-1. `ChangeSource` seam as **pure functions in `nostos-core`**, not in
+1. ✅ `ChangeSource` seam as **pure functions in `nostos-core`**, not in
    `nostos-client` — see "Every SDK gets this" below for why. `nostos-client`
    and `nostos-ffi-wasm` each supply the I/O; `iroh_dial.rs` is the precedent
    for dial-by-scheme at the native edge.
-2. `xid8` horizon in `cairn_meta` beside the existing LSN checkpoint, carried
+2. ✅ `xid8` horizon in `cairn_meta` beside the existing LSN checkpoint, carried
    as an opaque string.
-3. `PostgrestChangeSource`: `rpc/pull` → group by `xid` → `RowOp` batches
+3. ✅ `PostgrestChangeSource`: `rpc/pull` → group by `xid` → `RowOp` batches
    handed to the existing `ApplyEngine` at transaction boundaries.
-4. Realtime private-channel subscription as doorbell; pull on every reconnect.
-5. Outbox drain → PostgREST write; the log trigger captures the echo, which the
+4. ✅ Realtime private-channel subscription as doorbell; pull on every reconnect.
+5. ✅ Outbox drain → PostgREST write; the log trigger captures the echo, which the
    idempotent `(table_name, pk)` store absorbs. **`WriteOp::Increment` needs a
    second generated function** — see "The write path needs one more function"
    below.
-6. `nostos link --mode direct` generates the schema, the per-table triggers, the
-   `pull` function, the broadcast trigger, the RLS policies and the grants — and
-   refuses any table whose RLS it cannot express as a `scope`.
+6. ✅ `nostos link --mode direct` generates the schema, the per-table triggers,
+   `cairn_pull`, `cairn_increment`, the broadcast trigger, the RLS policies and
+   the grants — and refuses any table whose RLS it cannot express as a `scope`.
+   `crates/nostos-cli/src/direct.rs`; applied to real Postgres by
+   `crates/nostos-cli/tests/e2e_pg_direct_sql.rs`. See "What the generator
+   refuses" below.
 7. `nostos doctor --mode direct`: exposed schema, grants, policies, the
    public-access setting, log growth, oldest-unpruned vs. horizon lag.
 8. One conformance suite both modes pass, **run per platform, not once** —
@@ -248,6 +263,33 @@ That is the security argument rather than a caveat: a forbidden write is refused
 by Postgres, not by a service the developer has to trust — and a `403` is
 therefore permanent (dead-letter it), while a `401` is an expired JWT (refresh
 and retry).
+
+### What the generator refuses, and the two things it had to decide
+
+`nostos link --mode direct` reads `nostos_rules.toml` and emits one re-runnable
+file. Cost #2 above — "RLS has to be expressible on one table" — is now
+executable: a rule is expressible only when it is exactly
+`<column> = claims.<field>`. Everything else is refused **by name**, with the
+reason, rather than generating a policy that quietly shows the wrong rows:
+
+| rule | refused because |
+|---|---|
+| `org_id = claims.org AND status = 'open'` | two comparisons, one column |
+| `priority > claims.min` | only `=` can be answered by comparing one stamped value |
+| `status = 'open'` | a literal filters rows rather than scoping them — a row that stops matching would never be sent as a removal |
+| *(no scope)* | in server mode that means "tenant-scoped by the session"; direct mode has no session, so it would be readable by every device. Opt in out loud with `--public <table>` |
+| `[streams.*]` present | a stream is a server-held predicate template; there is no server to hold it |
+
+Two decisions the generator had to make, neither of which the plan had settled:
+
+1. **Scope values are namespaced `<claim>:<value>`.** One shared column holds
+   scopes derived from different claims, so `sub` and `org_id` values must not
+   be able to collide. `cairn.current_scopes()` returns the caller's namespaced
+   set and the policy is one `= any(...)`.
+2. **A row that changes scope logs two records** — a delete under the old scope
+   and the update under the new. Without it the losing tenant keeps the row on
+   device forever, because a row they can no longer see can never be sent to
+   them again.
 
 ## Every SDK gets this, because it needs only two primitives
 
