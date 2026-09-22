@@ -426,15 +426,26 @@ Push leg. Repointing the harness at the trigger-plus-function path reuses the
 device-side assertion verbatim — only the "server" assertion changes, from
 `cairn_push_sent_total` to the function's own log.
 
-### W0 checks this adds
+### Researched in full: `direct-mode-push-and-presence.md`
 
-- **Does `pg_net` / Database Webhooks reach an Edge Function from a trigger on
-  `cairn.changes`?** Assumed, not verified. Same W0 bucket as "what does
-  PostgREST emit for `xid8`".
-- **Does a trigger-fired function see the row before the transaction commits?**
-  It must not send a doorbell for a change the device cannot yet pull.
-- **Cold-start latency of the credential holder** — sets the floor on
-  wake-to-data time for a killed app.
+Two of the three W0 checks this section originally raised came back **answered
+by the vendor docs, in our favour**:
+
+- **`pg_net` is transactional.** "HTTP requests are not started until the
+  transaction is committed", and a `ROLLBACK` discards the queue row. No
+  doorbell before the data is visible, none for an aborted write, no 2PC.
+- **`realtime.send()` from the trigger is post-commit by construction** —
+  Realtime reads the WAL. It is also Supabase's own recommendation over
+  `postgres_changes`, which authorizes per subscriber.
+
+The third is still open (**Edge Function cold-start latency**), joined by two
+new ones and by the hard platform ceilings: iOS silent push is best-effort and
+impossible after a force-quit, and Chrome forbids silent web push. Presence
+splits into two jobs — Realtime Presence for the user-visible kind, a
+`last_seen` column stamped free by `cairn.pull()` for push suppression.
+
+See `docs/plans/direct-mode-push-and-presence.md` for the ladder, the limits,
+and the verification plan.
 
 ## Sources (fetched 2026-09-22)
 
