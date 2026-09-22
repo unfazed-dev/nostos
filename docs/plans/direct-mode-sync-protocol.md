@@ -319,16 +319,17 @@ disappear." Direct mode does not need it — the change log captures `op = delet
 with the `scope` stamped by the trigger, in the writing transaction, where the
 row is still there to read. The migration stays for server mode.
 
-### Not usable as-is: seven dead `make` targets
+### Eight dead `make` targets — removed 2026-09-22
 
-`fixture-test`, `fixture-todo-test`, `fixture-todo-smoke`,
-`fixture-todo-smoke-live`, `fixture-todo-nostos-live-{up,down,proof}` all `cd`
+`fixture-test`, `fixture-e2e`, `fixture-todo-test`, `fixture-todo-smoke`,
+`fixture-todo-smoke-live` and `fixture-todo-nostos-live-{up,down,proof}` all `cd`
 into `fixtures/flutter/…`, which **`f0f3986` deleted** ("remove superseded
-Flutter fixtures (greenfield per plan D0)"). The todo fixture was the
-Supabase-live Flutter harness — `supabase/schema.sql`, `env.example.json`,
-`cairn_live_{up,down}.sh`, `integration_test/nostos_live_test.dart` — so its
-wiring is recoverable from `f0f3986^` if atlet turns out not to cover a case.
-Either way the Makefile is lying today.
+Flutter fixtures (greenfield per plan D0)"). Stripped from the Makefile;
+`docs/plans/multi-sdk-pomodoro-fixture-matrix.md` §1 had already flagged all
+eight. The todo fixture was the Supabase-live Flutter harness —
+`supabase/schema.sql`, `env.example.json`, `cairn_live_{up,down}.sh`,
+`integration_test/nostos_live_test.dart` — so its wiring is recoverable from
+`f0f3986^` if atlet turns out not to cover a case.
 
 ## Worth an ADR
 
