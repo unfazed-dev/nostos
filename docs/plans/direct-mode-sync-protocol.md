@@ -182,6 +182,8 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
 7. `nostos doctor --mode direct`: exposed schema, grants, policies, the
    public-access setting, log growth, oldest-unpruned vs. horizon lag.
 8. One conformance suite both modes pass, **run per platform, not once** —
+   `apps/atlet/flutter/test/adapter_conformance_test.dart` is the existing
+   Dart-side harness (see "The test bed already exists" below) —
    including **"transaction touching three tables is never seen
    half-applied"** and **"device offline past the retention window"** as
    first-class cases. The first of those has to hold inside the browser
@@ -267,6 +269,66 @@ reason.
    `InMemoryStorage`, so every load re-snapshots — the same cost class as
    server mode's snapshot-on-every-reconnect in that configuration, and already
    surfaced on `SyncStatus`.
+
+## The test bed already exists: `apps/atlet/flutter`
+
+Verified 2026-09-22: `flutter test test/` → **107 passed** on Flutter 3.47.5.
+
+Atlet is a Supabase-backed **Nostos vs PowerSync** app, and its shape is the
+shape direct mode needs:
+
+- **`lib/adapters/sync_adapter.dart`** — an `abstract interface class SyncAdapter`
+  of 17 methods (`watchSessions`, `placeOrder`, `signOut`, `connected`, `marks`…).
+  Direct mode is a **third implementation of this interface**, nothing more.
+- **`lib/engine_registry.dart`** — `enum Engine { nostos, powersync }` plus an
+  `EngineRegistry` that hot-swaps them with a mutual-exclusion guard ("nostos and
+  powersync adapters must never both be" live). Add `Engine.cairnDirect` and the
+  app compares three engines behind one UI.
+- **`test/adapter_conformance_test.dart`** (282 lines) — "SyncAdapter
+  conformance", already the one-suite-many-engines harness that this plan's step
+  8 asks for. It runs against a `FakeAdapter`, so a direct-mode adapter inherits
+  the assertions for free.
+- **Supabase is already wired.** `supabase_flutter: ^2.9.1`,
+  `SUPABASE_URL`/`SUPABASE_ANON_KEY` via `--dart-define` (`lib/main.dart`), and
+  four migrations + a seed under `apps/atlet/supabase/`. **The same project that
+  unlocks atlet unlocks this plan's W0 gap** — one credential, not two.
+
+`sdk/nostos_flutter/example` is the other Flutter app (a 6-table booking
+dashboard on one `/sync` socket). It is the SDK-surface demo, not an engine
+comparison: it dials `ws://127.0.0.1:8800` from `nostos dev` and has no adapter
+seam, so it exercises direct mode only after step 3 gives it something to dial.
+
+### Atlet's own migrations are the argument for direct mode, in SQL
+
+`apps/atlet/supabase/migrations/0002_powersync_replication.sql`:
+
+```sql
+create role powersync_role with replication bypassrls login;
+```
+
+That is the credential the companion doc calls unshippable — `replication`
+**and** `bypassrls`, a key to every row in the database regardless of policy.
+It is fine here because only PowerSync's cloud holds it. It is exactly what an
+agency shipping one shared database to end-user devices cannot put in an APK.
+Direct mode ships the anon key and leans on RLS instead.
+
+`0004_replica_identity_full.sql` is the other half: `replica identity full` on
+all five tables, because "under the default (PK-only) identity, tenant-scoped
+delete fan-out silently drops the event and clients never see the row
+disappear." Direct mode does not need it — the change log captures `op = delete`
+with the `scope` stamped by the trigger, in the writing transaction, where the
+row is still there to read. The migration stays for server mode.
+
+### Not usable as-is: seven dead `make` targets
+
+`fixture-test`, `fixture-todo-test`, `fixture-todo-smoke`,
+`fixture-todo-smoke-live`, `fixture-todo-nostos-live-{up,down,proof}` all `cd`
+into `fixtures/flutter/…`, which **`f0f3986` deleted** ("remove superseded
+Flutter fixtures (greenfield per plan D0)"). The todo fixture was the
+Supabase-live Flutter harness — `supabase/schema.sql`, `env.example.json`,
+`cairn_live_{up,down}.sh`, `integration_test/nostos_live_test.dart` — so its
+wiring is recoverable from `f0f3986^` if atlet turns out not to cover a case.
+Either way the Makefile is lying today.
 
 ## Worth an ADR
 
