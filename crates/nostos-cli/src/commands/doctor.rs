@@ -2,16 +2,103 @@
 //! publication, slot headroom, replication lag, `max_slot_wal_keep_size`
 //! (ADR-0043), JWKS reachability. Never creates or alters anything (that's
 //! `init`'s job).
+//!
+//! `--mode direct` checks a different machine entirely: there is no slot and no
+//! publication, so it verifies the generated schema instead — see
+//! [`crate::direct::inspect`].
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use nostos_infra::rules_file::{self, RULES_FILE_NAME};
+use clap::Args;
+
+use crate::direct::{self, Verdict};
 
 use crate::config::{NostosConfig, DEFAULT_FILE_NAME};
 use crate::dotenv;
 use crate::pg::PgControl;
 
-pub async fn run(cwd: &Path) -> Result<()> {
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// `server` (slot + publication health) or `direct` (the generated schema,
+    /// grants, policies and log growth).
+    #[arg(long, default_value = "server")]
+    pub mode: String,
+}
+
+/// Run `nostos doctor`.
+///
+/// # Errors
+/// [`anyhow::Error`] if any blocking check fails, or the mode is unknown.
+pub async fn run(args: DoctorArgs, cwd: &Path) -> Result<()> {
+    match args.mode.as_str() {
+        "server" => run_server(cwd).await,
+        "direct" => run_direct(cwd).await,
+        other => anyhow::bail!("unknown --mode `{other}` (expected `server` or `direct`)"),
+    }
+}
+
+/// Direct mode has no server to be healthy: what can be wrong is the SQL in
+/// the database. Every check is a `select`, so this is safe against production.
+async fn run_direct(cwd: &Path) -> Result<()> {
+    let rules_path = cwd.join(RULES_FILE_NAME);
+    let rules = rules_file::load(&rules_path)?.with_context(|| {
+        format!(
+            "no {RULES_FILE_NAME} at {} \u{2014} doctor checks one trigger per synced table",
+            rules_path.display()
+        )
+    })?;
+    // The `--public` set is not persisted, so an unscoped table would be
+    // refused here. Treat every unscoped table as public for the purposes of
+    // "does it have a trigger" — the scope itself is checked by the policy.
+    let public: Vec<String> = rules
+        .tables
+        .iter()
+        .filter(|t| t.sync && t.scope.as_deref().unwrap_or("").trim().is_empty())
+        .map(|t| t.table.clone())
+        .chain(
+            rules
+                .hand
+                .iter()
+                .filter(|r| r.scope.as_deref().unwrap_or("").trim().is_empty())
+                .map(|r| r.table.clone()),
+        )
+        .collect();
+    let tables = direct::plan(&rules, &public)?;
+
+    let env_path = cwd.join(".env");
+    let vars = dotenv::read(&env_path);
+    let pg_url = ["DATABASE_URL", "NOSTOS_PG_URL", "SUPABASE_DB_URL"]
+        .iter()
+        .find_map(|k| vars.get(*k).cloned().or_else(|| std::env::var(k).ok()))
+        .with_context(|| {
+            format!(
+                "no DATABASE_URL in {} or the environment \u{2014} direct mode checks the \
+                 database directly, so doctor needs a connection string (the session pooler \
+                 URL is fine; this never opens a replication slot)",
+                env_path.display()
+            )
+        })?;
+
+    let pg = PgControl::connect(&pg_url).await?;
+    let checks = direct::inspect(pg.client(), &tables).await?;
+    let mut all_ok = true;
+    for check in &checks {
+        println!("{} {}", check.glyph(), check.label);
+        if check.verdict == Verdict::Fail {
+            all_ok = false;
+        }
+    }
+    print_summary(all_ok);
+    if all_ok {
+        Ok(())
+    } else {
+        anyhow::bail!("doctor found blocking issues")
+    }
+}
+
+async fn run_server(cwd: &Path) -> Result<()> {
     let cfg = NostosConfig::load(&cwd.join(DEFAULT_FILE_NAME))?;
     let env_path = cwd.join(".env");
     let dotenv_vars = dotenv::read(&env_path);

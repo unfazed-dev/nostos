@@ -30,6 +30,14 @@ impl PgControl {
         Ok(Self { client })
     }
 
+    /// The underlying control-plane connection. `nostos doctor --mode direct`
+    /// runs catalog queries that have nothing to do with replication, so they
+    /// live in `direct::inspect` rather than growing a method here per check.
+    #[must_use]
+    pub fn client(&self) -> &tokio_postgres::Client {
+        &self.client
+    }
+
     /// `SHOW wal_level` — must be `logical` for Nostos to replicate at all.
     pub async fn wal_level(&self) -> Result<String> {
         let row = self

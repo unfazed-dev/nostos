@@ -1,12 +1,13 @@
 # Direct mode — the sync protocol, and how the device gets transactional consistency
 
-**Date:** 2026-09-22. **Status:** steps 1–6 shipped and under `make ci`; steps
-7–9 still design. Grounded in fetched docs throughout.
+**Date:** 2026-09-22. **Status:** steps 1–7 shipped and under `make ci`; steps
+8–9 still design. Grounded in fetched docs throughout.
 
 Shipped: `nostos_core::pull` (`PullCursor`, `Horizon`, the xid8 checkpoint on
 `Storage`), `nostos_client::postgrest` (`rpc/cairn_pull` + the four write ops),
 `nostos_client::doorbell` (Realtime private channel, `vsn=1.0.0`), and
-`nostos_cli::direct` — the generator behind `nostos link --mode direct`.
+`nostos_cli::direct` — the generator behind `nostos link --mode direct` and the
+verifier behind `nostos doctor --mode direct`.
 
 **The SQL below is no longer theory.** `crates/nostos-cli/tests/e2e_pg_direct_sql.rs`
 applies the generated file to a real Postgres and asserts the properties that
@@ -223,8 +224,17 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    `crates/nostos-cli/src/direct.rs`; applied to real Postgres by
    `crates/nostos-cli/tests/e2e_pg_direct_sql.rs`. See "What the generator
    refuses" below.
-7. `nostos doctor --mode direct`: exposed schema, grants, policies, the
-   public-access setting, log growth, oldest-unpruned vs. horizon lag.
+7. ✅ `nostos doctor --mode direct`: the objects, the grants (including that
+   `anon` may NOT execute `cairn_pull`), read-only policies, the per-table
+   triggers, the Realtime policy, log growth and horizon lag —
+   `nostos_cli::direct::inspect`, all `select`s, safe against production.
+   **Its load-bearing check is that the deployed `cairn_pull` pages by
+   transaction**: a row-limited one still returns rows and still advances a
+   horizon, so it looks healthy from the device while handing out half a
+   transaction. No client-side test can see that, so doctor reads the deployed
+   function's own source. The e2e deploys the bug on purpose and asserts the
+   check catches it. The "Allow public access" switch is reported as a note —
+   SQL cannot see it.
 8. One conformance suite both modes pass, **run per platform, not once** —
    `apps/atlet/flutter/test/adapter_conformance_test.dart` is the existing
    Dart-side harness (see "The test bed already exists" below) —

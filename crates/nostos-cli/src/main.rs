@@ -24,8 +24,9 @@ enum Commands {
     Init(commands::init::InitArgs),
     /// Run nostos-server locally using nostos.toml + .env.
     Dev,
-    /// Connectivity, replication health, and JWKS reachability checks.
-    Doctor,
+    /// Connectivity, replication health, and JWKS reachability checks
+    /// (`--mode direct`: the generated schema, grants, policies, log growth).
+    Doctor(commands::doctor::DoctorArgs),
     /// Generate a self-host deploy config (fly/railway) from nostos.toml.
     Deploy(commands::deploy::DeployArgs),
     /// App-side: scaffold `.nostos/` (config.json + gitignored local/).
@@ -52,7 +53,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init(args) => commands::init::run(args, &cwd).await,
         Commands::Dev => commands::dev::run(&cwd).await,
-        Commands::Doctor => commands::doctor::run(&cwd).await,
+        Commands::Doctor(args) => commands::doctor::run(args, &cwd).await,
         Commands::Deploy(args) => commands::deploy::run(args, &cwd),
         Commands::Link(args) => commands::link::run(args, &cwd).await,
         Commands::Pull(args) => commands::pull::run(args, &cwd).await,

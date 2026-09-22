@@ -581,6 +581,334 @@ commit;
     );
 }
 
+// ---------------------------------------------------------------------------
+// `nostos doctor --mode direct` — read-only verification of a deployed schema.
+// ---------------------------------------------------------------------------
+
+/// How a check came out. `Note` is information the operator needs but that
+/// cannot pass or fail — a size, or something SQL simply cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Ok,
+    Fail,
+    Note,
+}
+
+/// One line of `nostos doctor --mode direct` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub verdict: Verdict,
+    pub label: String,
+}
+
+impl Check {
+    fn new(ok: bool, label: impl Into<String>) -> Self {
+        Self {
+            verdict: if ok { Verdict::Ok } else { Verdict::Fail },
+            label: label.into(),
+        }
+    }
+    fn note(label: impl Into<String>) -> Self {
+        Self {
+            verdict: Verdict::Note,
+            label: label.into(),
+        }
+    }
+    /// The glyph `doctor` prints.
+    #[must_use]
+    pub fn glyph(&self) -> char {
+        match self.verdict {
+            Verdict::Ok => '\u{2713}',
+            Verdict::Fail => '\u{2717}',
+            Verdict::Note => '\u{2022}',
+        }
+    }
+}
+
+/// Inspect a deployed direct-mode schema. Read-only — every statement here is
+/// a `select`, so this is safe to point at production.
+///
+/// ## The check that justifies the command
+///
+/// **`cairn_pull` must page by transaction.** A deployed `pull` that pages by
+/// *rows* still returns rows, still advances a horizon, and still looks
+/// healthy from the device — it just hands out half a transaction, which the
+/// client applies atomically and cannot detect as partial. There is no
+/// client-side test for it. Reading the deployed function's own source is the
+/// only place that bug is visible, so it lives here.
+///
+/// # Errors
+/// [`anyhow::Error`] if a catalog query fails (a missing object is a failed
+/// check, not an error).
+pub async fn inspect(
+    client: &tokio_postgres::Client,
+    tables: &[DirectTable],
+) -> Result<Vec<Check>> {
+    let mut out = Vec::new();
+
+    let log_exists: bool = client
+        .query_one("select to_regclass('cairn.changes') is not null", &[])
+        .await?
+        .get(0);
+    out.push(Check::new(log_exists, "cairn.changes exists"));
+    if !log_exists {
+        out.push(Check::note(
+            "nothing else can be checked \u{2014} run `nostos link --mode direct` \
+             and apply .nostos/direct.sql",
+        ));
+        return Ok(out);
+    }
+
+    let rls: bool = client
+        .query_one(
+            "select relrowsecurity from pg_class where oid = 'cairn.changes'::regclass",
+            &[],
+        )
+        .await?
+        .get(0);
+    out.push(Check::new(
+        rls,
+        "row level security enabled on cairn.changes",
+    ));
+
+    let policies: Vec<(String, String)> = client
+        .query(
+            "select policyname, cmd from pg_policies \
+             where schemaname = 'cairn' and tablename = 'changes'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    let read_only = !policies.is_empty() && policies.iter().all(|(_, cmd)| cmd == "SELECT");
+    out.push(Check::new(
+        read_only,
+        format!(
+            "cairn.changes has read-only policies ({})",
+            if policies.is_empty() {
+                "none found \u{2014} every device would see an empty log".to_string()
+            } else {
+                policies
+                    .iter()
+                    .map(|(n, c)| format!("{n}:{c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+    ));
+
+    for (proname, args) in [
+        ("cairn_pull", "xid8, int"),
+        ("cairn_increment", "text, text, text, numeric"),
+    ] {
+        let def: Option<String> = client
+            .query_opt(
+                "select pg_get_functiondef(p.oid) from pg_proc p \
+                 join pg_namespace n on n.oid = p.pronamespace \
+                 where n.nspname = 'public' and p.proname = $1",
+                &[&proname],
+            )
+            .await?
+            .map(|r| r.get(0));
+        let Some(def) = def else {
+            out.push(Check::new(false, format!("public.{proname} exists")));
+            continue;
+        };
+        out.push(Check::new(true, format!("public.{proname} exists")));
+
+        if proname == "cairn_pull" {
+            // See the doc comment: this is the one bug no client can detect.
+            let by_txn = def.contains("select distinct") && def.contains("greatest(max_txns, 2)");
+            out.push(Check::new(
+                by_txn,
+                if by_txn {
+                    "cairn_pull pages by transaction".to_string()
+                } else {
+                    "cairn_pull does NOT page by transaction \u{2014} it can hand a device \
+                     half a transaction, which applies atomically and looks correct. \
+                     Regenerate with `nostos link --mode direct`."
+                        .to_string()
+                },
+            ));
+            let inclusive = def.contains("c.xid >= since");
+            out.push(Check::new(
+                inclusive,
+                if inclusive {
+                    "cairn_pull resumes inclusively (`xid >= since`)".to_string()
+                } else {
+                    "cairn_pull uses an exclusive lower bound \u{2014} it silently drops the \
+                     transaction sitting exactly on the horizon"
+                        .to_string()
+                },
+            ));
+        }
+
+        let granted: bool = client
+            .query_one(
+                &format!(
+                    "select has_function_privilege('authenticated', 'public.{proname}({args})', 'execute')"
+                ),
+                &[],
+            )
+            .await?
+            .get(0);
+        out.push(Check::new(
+            granted,
+            format!("authenticated may execute public.{proname}"),
+        ));
+
+        let anon_exists: bool = client
+            .query_one(
+                "select exists (select from pg_roles where rolname = 'anon')",
+                &[],
+            )
+            .await?
+            .get(0);
+        if anon_exists {
+            let anon: bool = client
+                .query_one(
+                    &format!(
+                        "select has_function_privilege('anon', 'public.{proname}({args})', 'execute')"
+                    ),
+                    &[],
+                )
+                .await?
+                .get(0);
+            out.push(Check::new(
+                !anon,
+                format!(
+                    "anon may NOT execute public.{proname}{}",
+                    if anon {
+                        " \u{2014} the publishable key can read the whole change log"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+    }
+
+    let can_select: bool = client
+        .query_one(
+            "select has_table_privilege('authenticated', 'cairn.changes', 'select')",
+            &[],
+        )
+        .await?
+        .get(0);
+    let can_write: bool = client
+        .query_one(
+            "select has_table_privilege('authenticated', 'cairn.changes', 'insert') \
+                 or has_table_privilege('authenticated', 'cairn.changes', 'update') \
+                 or has_table_privilege('authenticated', 'cairn.changes', 'delete')",
+            &[],
+        )
+        .await?
+        .get(0);
+    out.push(Check::new(
+        can_select,
+        "authenticated may read cairn.changes",
+    ));
+    out.push(Check::new(
+        !can_write,
+        "authenticated may NOT write cairn.changes (history is append-only, by the trigger)",
+    ));
+
+    for t in tables {
+        let present: bool = client
+            .query_one(
+                "select exists (select from pg_trigger g \
+                   join pg_class c on c.oid = g.tgrelid \
+                   where c.relname = $1 and g.tgname = $2 and not g.tgisinternal)",
+                &[&t.table, &format!("cairn_log_{}", t.table)],
+            )
+            .await?
+            .get(0);
+        out.push(Check::new(
+            present,
+            format!("public.{} has its change-log trigger", t.table),
+        ));
+    }
+
+    let ring: bool = client
+        .query_one(
+            "select exists (select from pg_trigger \
+             where tgname = 'cairn_changes_ring' and not tgisinternal)",
+            &[],
+        )
+        .await?
+        .get(0);
+    out.push(Check::new(
+        ring,
+        "the broadcast doorbell trigger is installed",
+    ));
+
+    let realtime_policy: bool = client
+        .query_one(
+            "select exists (select from pg_policies \
+             where schemaname = 'realtime' and tablename = 'messages' \
+               and policyname = 'cairn_ring_read')",
+            &[],
+        )
+        .await?
+        .get(0);
+    out.push(Check::new(
+        realtime_policy,
+        "the Realtime read policy exists on realtime.messages",
+    ));
+    out.push(Check::note(
+        "Realtime Authorization is only ENFORCED with \"Allow public access\" OFF in the \
+         project's Realtime settings \u{2014} SQL cannot see that switch, check it in the \
+         dashboard",
+    ));
+
+    let (rows, bytes, oldest): (i64, String, Option<f64>) = {
+        let r = client
+            .query_one(
+                "select count(*)::bigint, \
+                        pg_size_pretty(pg_total_relation_size('cairn.changes')), \
+                        extract(epoch from now() - min(logged_at))::float8 \
+                 from cairn.changes",
+                &[],
+            )
+            .await?;
+        (r.get(0), r.get(1), r.get(2))
+    };
+    out.push(Check::note(format!(
+        "change log: {rows} rows, {bytes}, oldest {} \u{2014} prune with \
+         `select cairn.prune()`",
+        oldest.map_or_else(|| "n/a".to_string(), |s| format!("{:.0}h old", s / 3600.0))
+    )));
+
+    let withheld: i64 = client
+        .query_one(
+            "select count(*)::bigint from cairn.changes \
+             where xid >= pg_snapshot_xmin(pg_current_snapshot())",
+            &[],
+        )
+        .await?
+        .get(0);
+    let oldest_txn: Option<f64> = client
+        .query_one(
+            "select max(extract(epoch from now() - xact_start))::float8 from pg_stat_activity \
+             where xact_start is not null and backend_xid is not null",
+            &[],
+        )
+        .await?
+        .get(0);
+    let lag = oldest_txn.unwrap_or(0.0);
+    out.push(Check::new(
+        lag < 30.0,
+        format!(
+            "horizon lag: {withheld} row(s) withheld behind the oldest open write \
+             transaction ({lag:.0}s). The horizon cannot pass an in-flight write, so a \
+             long transaction delays every device by its own duration."
+        ),
+    ));
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -26,7 +26,7 @@
 //! database that has a real `auth.users`, so pointing `NOSTOS_PG_URL` at a live
 //! Supabase project aborts instead of dropping its auth schema.
 
-use nostos_cli::direct::{render, DirectTable, Scoping, DEFAULT_RETENTION};
+use nostos_cli::direct::{inspect, render, DirectTable, Scoping, Verdict, DEFAULT_RETENTION};
 
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
@@ -417,6 +417,75 @@ async fn increment_is_atomic_and_a_scope_change_emits_a_delete() {
             .iter()
             .any(|(op, s)| op == "delete" && s.as_deref() == Some("sub:alice")),
         "the old owner is told to drop it: {scopes:?}"
+    );
+    fx.teardown().await;
+}
+
+/// `nostos doctor --mode direct` has to pass a fresh deploy, and — the reason
+/// the check exists at all — catch a `cairn_pull` that pages by ROWS. That
+/// deployment still returns rows and still advances a horizon, so it looks
+/// healthy from the device while handing out half a transaction. Nothing on
+/// the client can see it.
+#[tokio::test]
+async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
+    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+        eprintln!("skipping: set {E2E_FLAG}=1");
+        return;
+    }
+    let fx = Fixture::setup().await;
+    let tables = [DirectTable {
+        table: fx.tasks.clone(),
+        scoping: Scoping::Claim {
+            column: "owner_id".to_string(),
+            claim: "sub".to_string(),
+        },
+    }];
+
+    let checks = inspect(&fx.client, &tables).await.expect("inspect");
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.verdict == Verdict::Fail)
+        .map(|c| c.label.as_str())
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "a fresh deploy must be clean: {failed:?}"
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.label.contains("Allow public access")),
+        "the one thing SQL cannot see must still be reported"
+    );
+
+    // Now deploy the bug: same signature, same output columns, row-limited.
+    fx.client
+        .batch_execute(
+            r#"create or replace function public.cairn_pull(since xid8, max_txns int default 200)
+               returns table (horizon xid8, seq bigint, xid xid8,
+                              table_name text, pk text, op text, "row" jsonb)
+               language sql stable security invoker set search_path = '' as $fn$
+                 with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
+                 select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row"
+                 from cairn.changes c cross join h
+                 where c.xid >= since and c.xid < h.horizon
+                 order by c.xid, c.seq
+                 limit max_txns;
+               $fn$;"#,
+        )
+        .await
+        .expect("deploy the row-limited pull");
+
+    let checks = inspect(&fx.client, &tables).await.expect("inspect");
+    let caught = checks
+        .iter()
+        .find(|c| c.label.contains("page by transaction"))
+        .expect("the paging check must be present");
+    assert_eq!(
+        caught.verdict,
+        Verdict::Fail,
+        "a row-limited pull must be caught: {}",
+        caught.label
     );
     fx.teardown().await;
 }
