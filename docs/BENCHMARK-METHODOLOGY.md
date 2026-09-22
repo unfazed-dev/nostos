@@ -86,6 +86,8 @@ The `(tier, repetition)` schedule is **shuffled** with a seeded Fisher–Yates (
 
 The headline is a max over **tier means**, never over raw repetitions — a max over repetitions reports the luckiest run of the session as the figure.
 
+**Read `series.svg` before quoting a figure.** It plots every repetition at its *execution* position, not its table position. A **step** there — tiers changing level at the same point in the session — means the machine changed underneath the benchmark (thermal throttling, a background process, a laptop unplugged), and runs either side of it are not comparable to each other. That is invisible in a mean, a median and a spread alike: the first two hide it, the third calls it noise. `chart.svg` remains the per-tier summary.
+
 ---
 
 ## 5. Backpressure contract

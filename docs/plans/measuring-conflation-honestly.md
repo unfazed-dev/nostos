@@ -118,8 +118,14 @@ themselves, which is the point of the closing section.
    out, because it lands on the same tier every time. The `(tier, rep)` schedule is now shuffled
    with a seeded Fisher-Yates (`--order-seed`, recorded in the report), so the order is
    randomised and still reproducible. Random interleaving is reported to cut run-to-run variance
-   by up to 40%. Still open from this item: **plot the series** — throttling shows as a step
-   change that any single summary statistic hides.
+   by up to 40%.
+
+   The series plot landed with it (`3456abd`): `series.svg` draws every repetition at its
+   **execution** position, so a step — every tier changing level at the same x — separates "the
+   machine changed mid-session" from "this system is noisy". A mean hides that, a median hides
+   it, and a min-max spread reports it as variance without saying it was monotone. Plotting the
+   *table* order instead would draw a tidy line through a lie, which is what the regression test
+   holds.
 5. ~~**The wait loop could not finish a lossy run.**~~ **BUILT 2026-09-22 (`59af8b7`).** It waited
    for `sum_received() >= events × clients` — the count a *loss-free* run receives. The router is
    allowed to shed on a full session channel and a shed event never reaches a client, so a single
