@@ -29,6 +29,13 @@
 //! - Column-level decoding (opaque payload bytes only until ADR-0012).
 //! - CRDT / custom merge (ADR-0014, Phase 4).
 //!
+//! Direct mode's pull half IS here ([`PullCursor`], [`Horizon`]) — the pure
+//! decode/group/advance logic for syncing straight from the client's own
+//! Postgres through PostgREST, with no Nostos server in the path
+//! (`docs/plans/direct-mode-sync-protocol.md`). The HTTP POST that feeds it
+//! belongs to whoever owns the socket: `nostos-client` (reqwest) or
+//! `nostos-ffi-wasm` (`fetch`).
+//!
 //! The client outbox *queue contract* IS here ([`Outbox`], [`PendingWrite`]) —
 //! the durable surface for offline writes (ADR-0013). The native `rusqlite` impl
 //! of it lives in `nostos-client`, same as `Storage`.
@@ -39,12 +46,14 @@ pub mod apply;
 pub mod attachments;
 pub mod in_memory;
 pub mod outbox;
+pub mod pull;
 pub mod storage;
 
 pub use apply::{ApplyEngine, ApplyOutcome, Frame};
 pub use attachments::{retry_after_ms, AttachmentOp, AttachmentState, DEFAULT_MAX_ATTEMPTS};
 pub use in_memory::InMemoryStorage;
 pub use outbox::{Outbox, PendingWrite, WriteOp};
+pub use pull::{Horizon, PullCursor, PullError, PullOutcome, DEFAULT_MAX_ROWS};
 pub use storage::{Result, Storage, StorageError};
 
 // Re-export the domain types the client surface needs so downstream (nostos-client,
