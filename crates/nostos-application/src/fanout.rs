@@ -13,7 +13,7 @@
 //!           candidate.sink.deliver(event).await   ← bounded; slow client → Drop
 //!        │
 //!        ▼
-//!   return FanOutOutcome { delivered, dropped, faulted, matched }
+//!   return FanOutOutcome { delivered, dropped, superseded, faulted, matched }
 //! ```
 //!
 //! Complexity is **O(changed rows × matching sessions)**, not O(all sessions) —
@@ -57,10 +57,15 @@ pub struct FanOutOutcome {
     pub delivered: u64,
     /// Events dropped because a sink's bounded buffer was full.
     pub dropped: u64,
+    /// Events that replaced a still-waiting frame for the same row in a sink's
+    /// conflating overflow (ADR-0045). Convergent, not lost — but one fewer
+    /// frame on the wire, so a caller inferring drops from frame counts must
+    /// subtract this.
+    pub superseded: u64,
     /// Delivery tasks that faulted (panicked or were cancelled) — a server-side
     /// problem, NOT slow-client backpressure. Kept distinct from `dropped` so a
     /// task panic is never mis-attributed as a client drop in the "0% drops"
-    /// moat figure. `delivered + dropped + faulted <= matched`.
+    /// moat figure. `delivered + dropped + superseded + faulted <= matched`.
     pub faulted: u64,
 }
 
@@ -73,6 +78,7 @@ impl FanOutOutcome {
             matched: self.matched.saturating_add(other.matched),
             delivered: self.delivered.saturating_add(other.delivered),
             dropped: self.dropped.saturating_add(other.dropped),
+            superseded: self.superseded.saturating_add(other.superseded),
             faulted: self.faulted.saturating_add(other.faulted),
         }
     }
@@ -324,7 +330,7 @@ impl FanOutService {
         // fully drained. Only the order sessions are visited WITHIN one event
         // changes, and that was never a guarantee.
         let walk_start = self.metrics.as_ref().map(|_| std::time::Instant::now());
-        let (delivered, dropped, faulted) =
+        let (delivered, dropped, superseded, faulted) =
             if matched.len() >= PARALLEL_FANOUT_MIN && self.fanout_workers > 1 {
                 let workers = self.fanout_workers.min(matched.len());
                 let chunk = matched.len().div_ceil(workers);
@@ -336,15 +342,16 @@ impl FanOutService {
                     let ev = Arc::clone(&shared);
                     handles.push(tokio::spawn(async move { deliver_chunk(part, ev).await }));
                 }
-                let mut totals = (0u64, 0u64, 0u64);
+                let mut totals = (0u64, 0u64, 0u64, 0u64);
                 for h in handles {
                     // A JoinError means the task was cancelled (runtime
                     // shutdown) — its deliveries are simply uncounted, which
-                    // the `delivered + dropped + faulted <= matched` contract
-                    // already allows. Panics never reach here: `deliver_chunk`
-                    // catches them per-delivery and counts them as faulted.
-                    let (d, dr, f) = h.await.unwrap_or((0, 0, 0));
-                    totals = (totals.0 + d, totals.1 + dr, totals.2 + f);
+                    // the `delivered + dropped + superseded + faulted <=
+                    // matched` contract already allows. Panics never reach
+                    // here: `deliver_chunk` catches them per-delivery and
+                    // counts them as faulted.
+                    let (d, dr, s, f) = h.await.unwrap_or((0, 0, 0, 0));
+                    totals = (totals.0 + d, totals.1 + dr, totals.2 + s, totals.3 + f);
                 }
                 totals
             } else {
@@ -464,6 +471,7 @@ impl FanOutService {
             matched: matched_count,
             delivered,
             dropped,
+            superseded,
             faulted,
         };
         // Aggregate counters for /metrics (lock-free; no-op when no handle).
@@ -472,6 +480,8 @@ impl FanOutService {
             m.matched.fetch_add(outcome.matched, Ordering::Relaxed);
             m.delivered.fetch_add(outcome.delivered, Ordering::Relaxed);
             m.dropped.fetch_add(outcome.dropped, Ordering::Relaxed);
+            m.superseded
+                .fetch_add(outcome.superseded, Ordering::Relaxed);
             m.faulted.fetch_add(outcome.faulted, Ordering::Relaxed);
             if push_enqueued != 0 || push_dropped != 0 {
                 m.push_enqueued.fetch_add(push_enqueued, Ordering::Relaxed);
@@ -574,16 +584,18 @@ impl FanOutService {
     }
 }
 
-/// Deliver `chunk` sequentially, returning `(delivered, dropped, faulted)`.
+/// Deliver `chunk` sequentially, returning
+/// `(delivered, dropped, superseded, faulted)`.
 ///
 /// Panics inside a sink are isolated with `catch_unwind` and counted as
 /// `faulted`, preserving the JoinSet contract the per-session-task design had.
 async fn deliver_chunk(
     chunk: Vec<crate::ports::SessionCandidate>,
     event: Arc<ReplicationEvent>,
-) -> (u64, u64, u64) {
+) -> (u64, u64, u64, u64) {
     let mut delivered = 0u64;
     let mut dropped = 0u64;
+    let mut superseded = 0u64;
     let mut faulted = 0u64;
     for c in chunk {
         use futures_util::FutureExt as _;
@@ -594,6 +606,11 @@ async fn deliver_chunk(
             Ok(DeliveryDecision::Delivered) => delivered += 1,
             // Slow-client backpressure: the sink's bounded buffer was full.
             Ok(DeliveryDecision::Dropped) => dropped += 1,
+            // Accepted, but it replaced a waiting frame for the same row
+            // (ADR-0045). The client converges to the same state, so this is
+            // never loss — but it IS one fewer frame, which is exactly what a
+            // frame-counting drop rate would otherwise mis-read.
+            Ok(DeliveryDecision::Superseded) => superseded += 1,
             // A delivery panicked. This is a server-side problem, NOT
             // slow-client backpressure — count it separately from `dropped` so
             // a task panic is never mis-attributed as a client drop in the
@@ -613,7 +630,7 @@ async fn deliver_chunk(
             }
         }
     }
-    (delivered, dropped, faulted)
+    (delivered, dropped, superseded, faulted)
 }
 
 #[cfg(test)]
@@ -949,6 +966,43 @@ mod tests {
         assert_eq!(events_not.lock().unwrap().len(), 2);
     }
 
+    /// A sink that conflates every delivery — models a backlogged
+    /// `TokioEventSink` whose overflow already holds a frame for the row
+    /// (ADR-0045).
+    struct ConflatingSink;
+
+    #[async_trait]
+    impl EventSink for ConflatingSink {
+        async fn deliver(&self, _event: Arc<ReplicationEvent>) -> DeliveryDecision {
+            DeliveryDecision::Superseded
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_is_counted_apart_from_both_delivered_and_dropped() {
+        // The reason this variant exists. A supersede is NOT loss — the client
+        // converges to the same state — so it must never land in `dropped`,
+        // which feeds the 0%-drops figure. It is also not `delivered`: one
+        // fewer frame reaches the wire, and nostos-bench infers its drop rate
+        // from client-side frame counts, so it has to subtract this.
+        let store = make_store();
+        store
+            .add(
+                SyncSession::new(Predicate::all("tasks")),
+                Arc::new(ConflatingSink),
+            )
+            .await;
+
+        let svc = FanOutService::new(store);
+        let outcome = svc.fan_out(&insert_event("tasks"), extract_org).await;
+
+        assert_eq!(outcome.matched, 1);
+        assert_eq!(outcome.superseded, 1);
+        assert_eq!(outcome.delivered, 0);
+        assert_eq!(outcome.dropped, 0, "a supersede is never a drop");
+        assert_eq!(outcome.faulted, 0);
+    }
+
     /// A sink whose `deliver` panics — models a faulting delivery task (the
     /// `Err(JoinError)` arm of the fan-out join loop).
     struct PanickingSink;
@@ -987,12 +1041,14 @@ mod tests {
             matched: 5,
             delivered: 4,
             dropped: 1,
+            superseded: 2,
             faulted: 2,
         };
         let b = FanOutOutcome {
             matched: 3,
             delivered: 3,
             dropped: 0,
+            superseded: 1,
             faulted: 1,
         };
         let m = a.merged(b);
@@ -1002,6 +1058,7 @@ mod tests {
                 matched: 8,
                 delivered: 7,
                 dropped: 1,
+                superseded: 3,
                 faulted: 3
             }
         );

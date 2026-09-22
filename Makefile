@@ -111,6 +111,33 @@ pg-e2e: ## Real-Postgres e2e suite; drops leaked inactive e2e_* slots first.
 	  "SELECT count(pg_drop_replication_slot(slot_name)) FROM pg_replication_slots WHERE NOT active AND (slot_name LIKE 'e2e_%' OR slot_name LIKE 'repro_%')" \
 	  | sed 's/^/swept leaked e2e slots: /'
 	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-infra --features pg --no-fail-fast -- --test-threads=1
+# nostos-cli's pg suite too: `nostos link --mode direct` generates SQL, and the
+# only place a generator bug shows up is Postgres refusing (or silently
+# mis-scoping) it. e2e_pg_direct_sql owns the `cairn` schema, hence -threads=1.
+	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-cli --no-fail-fast -- --test-threads=1
+
+.PHONY: supabase-e2e
+supabase-e2e: ## Direct mode against a REAL Supabase stack (needs `supabase start` in $$SB_DIR).
+# The pg e2e above stubs `auth`, `realtime` and `net`, so everything
+# Supabase-specific is unproven there: how PostgREST renders xid8, whether
+# PT410 becomes a 410, whether the realtime.messages policy actually refuses
+# the wrong tenant, whether the Edge Function can read the token registry.
+# Every bug this has found lived in one of those. SB_DIR defaults to a sibling
+# `supabase/` project dir; override it.
+	@test -n "$$SB_DIR" || { echo "set SB_DIR to a supabase project dir (one with config.toml)"; exit 2; }
+	cd $$SB_DIR && supabase status -o json > /dev/null || { echo "run \`supabase start\` in $$SB_DIR first"; exit 2; }
+	NOSTOS_SB_ANON_KEY=$$(cd $$SB_DIR && supabase status -o json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).ANON_KEY))") \
+	NOSTOS_SB_SERVICE_KEY=$$(cd $$SB_DIR && supabase status -o json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).SERVICE_ROLE_KEY))") \
+	node scripts/e2e-supabase-direct.mjs
+
+.PHONY: web-conformance
+web-conformance: ## The browser-Worker leg of nostos_core::conformance (OPFS, headless Chromium).
+# Built WITH the off-by-default `conformance` feature: the cases must never
+# ship in an app's .wasm (ADR-0015's size budget), so the shipping bundle is
+# rebuilt straight after.
+	wasm-pack build crates/nostos-ffi-wasm --target web --out-dir pkg-web --features conformance
+	cd sdk/nostos_web && npx playwright test e2e/conformance.spec.cjs --reporter=line
+	wasm-pack build crates/nostos-ffi-wasm --target web --out-dir pkg-web
 
 # dev-stack: real-Postgres quickstart — compose up, wait for the publication,
 # then run nostos-server against it with PgReplicator. The readiness poll gates
@@ -210,78 +237,6 @@ clean: ## Remove all build artifacts.
 .PHONY: git-init
 git-init: ## Initialize git (idempotent) + initial commit.
 	@if [ ! -d .git ]; then git init -q && echo "✓ git initialized"; else echo "✓ git already initialized"; fi
-
-# ----------------------------------------------------------------------------
-# Flutter fixtures (the pomodoro reference app — see docs/testing/persona-e2e-baseline.md)
-# Deliberately NOT in `make ci`: the Rust pipeline must not pay Flutter's
-# build cost per-push. If CI coverage is wanted later, add a separate GitHub
-# Actions workflow triggered on fixtures/** paths only.
-# ----------------------------------------------------------------------------
-.PHONY: fixture-test
-fixture-test: ## fixture-test: flutter fixture unit/widget suites + persona-mapping guard.
-	cd fixtures/flutter/pomodoro && flutter test test/
-
-## fixture-e2e: smoke + persona journeys on the macOS desktop target.
-## Runs each integration file in its own flutter invocation: Flutter desktop
-## can't foreground the same .app for multiple files in one invocation
-## (known tooling limit — failures are at launch, not assertions). This
-## per-file loop is the standard desktop-integration CI pattern.
-## No host-caffeination / inter-file teardown needed: the journeys drive time
-## through an injected FakeTicker (no wall-clock), so a throttled .app cannot
-## drift. See integration_test/journeys/helpers.dart.
-.PHONY: fixture-e2e
-fixture-e2e: ## fixture-e2e: smoke + persona journeys on the macOS desktop target (per-file loop).
-	@cd fixtures/flutter/pomodoro && \
-	  for f in integration_test/smoke_test.dart integration_test/journeys/*_journey_test.dart; do \
-	    echo "=== $$f ==="; \
-	    flutter test "$$f" -d macos || exit 1; \
-	  done
-
-# ----------------------------------------------------------------------------
-# Flutter fixtures — todo (the Supabase-backed fixture: mock today, live on
-# operator credentials). Same NOT-in-`make ci` rationale as the pomodoro verbs.
-# The dual-mode smoke runs a SINGLE integration file per invocation, so it does
-# NOT hit the per-file aggregate-launch limit noted on fixture-e2e above.
-# ----------------------------------------------------------------------------
-.PHONY: fixture-todo-test
-fixture-todo-test: ## fixture-todo-test: todo fixture unit/widget suites (mocked ports).
-	cd fixtures/flutter/todo && flutter test test/
-
-## fixture-todo-smoke: dual-mode smoke, MOCK mode (no credentials needed)
-.PHONY: fixture-todo-smoke
-fixture-todo-smoke:
-	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos
-
-## fixture-todo-smoke-live: same smoke against real Supabase (needs env.json — see env.example.json)
-.PHONY: fixture-todo-smoke-live
-fixture-todo-smoke-live:
-	@if [ ! -f fixtures/flutter/todo/env.json ]; then \
-		echo "ERROR: fixtures/flutter/todo/env.json not found."; \
-		echo "       Copy env.example.json → env.json and fill SUPABASE_URL / SUPABASE_ANON_KEY /"; \
-		echo "       SUPABASE_TEST_EMAIL / SUPABASE_TEST_PASSWORD from your Supabase project."; \
-		echo "       Apply fixtures/flutter/todo/supabase/schema.sql to your project first."; \
-		exit 1; \
-	fi
-	cd fixtures/flutter/todo && flutter test integration_test/smoke_auth_test.dart -d macos --dart-define-from-file=env.json
-
-## fixture-todo-nostos-live-up: bring up the Nostos "local live" harness (real
-## nostos-server + real docker Postgres + dev JWTs — stands in for a real
-## Supabase project until W0b is unblocked; see docs/QUICKSTART.md).
-.PHONY: fixture-todo-nostos-live-up
-fixture-todo-nostos-live-up:
-	fixtures/flutter/todo/tool/nostos_live_up.sh
-
-## fixture-todo-nostos-live-down: stop the `nostos dev` process (pass PG=1 to also stop docker Postgres).
-.PHONY: fixture-todo-nostos-live-down
-fixture-todo-nostos-live-down:
-	@if [ "$(PG)" = "1" ]; then fixtures/flutter/todo/tool/nostos_live_down.sh --pg; \
-	else fixtures/flutter/todo/tool/nostos_live_down.sh; fi
-
-## fixture-todo-nostos-live-proof: the W5 acceptance test — two-user offline
-## sync + read/write tenant isolation against the harness above (must already be up).
-.PHONY: fixture-todo-nostos-live-proof
-fixture-todo-nostos-live-proof:
-	cd fixtures/flutter/todo && flutter test integration_test/nostos_live_test.dart -d macos
 
 # ----------------------------------------------------------------------------
 # Playbook (agent-native visual-plan MDX -> standalone HTML).

@@ -2345,6 +2345,9 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
          # HELP cairn_events_dropped_total Events dropped (full buffer / dedup / closed).\n\
          # TYPE cairn_events_dropped_total counter\n\
          cairn_events_dropped_total {dropped}\n\
+         # HELP cairn_events_superseded_total Events that replaced a still-waiting frame for the same row in a sink's conflating overflow (ADR-0045). NOT loss — every frame is a complete row image, so the client converges from the newer one alone. Subtract from attempted alongside dropped when computing a drop rate from frame counts.\n\
+         # TYPE cairn_events_superseded_total counter\n\
+         cairn_events_superseded_total {superseded}\n\
          # HELP cairn_events_faulted_total Delivery tasks that faulted (panicked / cancelled) — a server fault, NOT slow-client backpressure. Kept distinct from cairn_events_dropped_total so a panic is never mis-attributed as a client drop in the 0%-drops figure. Alert on any increase.\n\
          # TYPE cairn_events_faulted_total counter\n\
          cairn_events_faulted_total {faulted}\n\
@@ -2393,6 +2396,7 @@ async fn metrics_handler(metrics: Arc<Metrics>, store: Arc<dyn SessionStore>) ->
         matched = snap.matched,
         delivered = snap.delivered,
         dropped = snap.dropped,
+        superseded = snap.superseded,
         faulted = snap.faulted,
         sessions = sessions,
         slot_wal_status = snap.slot_wal_status.as_gauge_int(),

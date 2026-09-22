@@ -21,6 +21,14 @@ wasm-opt = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The direct-mode conformance suite (`nostos_core::conformance`), exported as
+# `nostos_conformance` for the browser-Worker leg. OFF by default and that is
+# the point: ADR-0015 puts a hard size budget on the .wasm, so the test cases
+# must not ship in the production bundle. The Playwright spec builds with
+# `wasm-pack build --features conformance`.
+[features]
+conformance = ["nostos-core/conformance", "dep:console_error_panic_hook"]
+
 [dependencies]
 nostos-core = { workspace = true }
 # Wave 4a: CRDT invariants (Hlc, OrSetElement, counter_apply_delta, merge_*) reused
@@ -29,6 +37,10 @@ nostos-core = { workspace = true }
 # the typed-verb orchestration name the domain types at the wasm seam.
 nostos-domain = { workspace = true }
 wasm-bindgen = "0.2"
+# `conformance` only. A wasm panic reaches JS as a bare `RuntimeError:
+# unreachable`, which is useless for a suite whose entire job is to name the
+# case that broke. Optional, so it is absent from the shipped bundle.
+console_error_panic_hook = { version = "0.1", optional = true }
 # E1: the WASM WebSocket transport. `web-sys` is feature-gated per API; the
 # list below is the exact surface the transport touches — anything else pulls
 # dead bytes into the .wasm. `js-sys` for `js_sys::Function`/`Reflect`; 

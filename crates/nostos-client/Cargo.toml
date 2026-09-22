@@ -31,6 +31,11 @@ nostos-domain = { workspace = true }
 # `workspace = true` so host-side tests still exercise the full server spine.
 nostos-infra = { path = "../nostos-infra", default-features = false }   # WireFrame decode (client ↔ server contract)
 rusqlite = { workspace = true }
+# Direct mode's one HTTPS POST (`rpc/pull`). The workspace pin is already
+# `default-features = false` + `rustls-tls`, which is the same constraint the
+# nostos-infra note above describes: openssl-sys cannot cross-compile to iOS, so
+# no rail in this crate may pull native-tls. Shares nostos-push's pin.
+reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 iroh = { workspace = true, optional = true }
@@ -43,7 +48,9 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-nostos-core = { workspace = true }
+# Run the shared conformance cases against SqliteStorage: a property proved on
+# the in-memory store is not proved on rusqlite.
+nostos-core = { workspace = true, features = ["conformance"] }
 # Examples/tests-only: wiring the in-process FanOutService (apply_bench,
 # reactive_scroll) needs nostos-application's ports. The nostos-push precedent
 # (its Cargo.toml dev-deps nostos-application): dev-deps do not change the

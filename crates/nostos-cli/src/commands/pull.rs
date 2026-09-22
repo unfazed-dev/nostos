@@ -374,6 +374,7 @@ mod tests {
         // persisted; pin the committed config's key set so a token field
         // cannot be added to `.nostos/config.json` without failing here.
         let cfg = ProjectConfig {
+            mode: crate::config::LinkMode::default(),
             project: "p".into(),
             sync_url: "wss://nostos.example.com/sync".into(),
             backend: None,
@@ -385,7 +386,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["project", "sync_url"]);
+        assert_eq!(keys, ["mode", "project", "sync_url"]);
     }
 
     #[test]

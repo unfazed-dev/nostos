@@ -40,6 +40,10 @@ pub struct InMemoryStorage {
     /// Tables whose payload is a PN-Counter CRDT (ADR-0030 addendum): applies
     /// MERGE per-replica elementwise max. Empty by default.
     counter_tables: HashSet<String>,
+    /// Direct mode's `xid8` snapshot horizon, opaque text (`crate::pull`).
+    /// `None` = fresh. Overridden rather than left on the trait default so a
+    /// direct-mode test exercises a horizon that actually persists.
+    horizon: Option<String>,
 }
 
 impl InMemoryStorage {
@@ -220,6 +224,15 @@ impl Storage for InMemoryStorage {
         Ok(())
     }
 
+    fn horizon(&self) -> crate::Result<Option<String>> {
+        Ok(self.horizon.clone())
+    }
+
+    fn save_horizon(&mut self, horizon: &str) -> crate::Result<()> {
+        self.horizon = Some(horizon.to_string());
+        Ok(())
+    }
+
     fn clear(&mut self) -> crate::Result<()> {
         // ADR-0029: reset to fresh-client state for sign-out / principal switch.
         // `rows.clear()` empties the data store; the checkpoint reset to ZERO is
@@ -232,6 +245,9 @@ impl Storage for InMemoryStorage {
         self.rows.clear();
         // ADR-0029: checkpoint → 0 is load-bearing (resume-without-snapshot guard).
         self.checkpoint = Lsn::ZERO;
+        // Same reason, direct mode's half: a surviving horizon would make the
+        // next principal resume mid-log and never see the rows below it.
+        self.horizon = None;
         self.outbox.clear();
         Ok(())
     }

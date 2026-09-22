@@ -1,7 +1,15 @@
 # Persona-driven E2E baseline for Flutter fixtures
 
-The reference implementation is `fixtures/flutter/pomodoro/`. To adopt the
-convention in any Flutter fixture (or SDK example app):
+> **Status 2026-09-22: this convention has no live implementation.** Its
+> reference app, `fixtures/flutter/pomodoro/`, was deleted in `f0f3986`
+> ("remove superseded Flutter fixtures (greenfield per plan D0)") along with
+> `fixtures/flutter/todo/`; `docs/personas/` does not exist, and neither
+> `apps/atlet/flutter` nor `sdk/nostos_flutter/example` carries an
+> `integration_test/journeys/` directory or a `persona_mapping_test.dart`. Read
+> the reference implementation at `git show f0f3986^:fixtures/flutter/pomodoro/…`.
+> The convention below is intact and adoptable; nothing currently adopts it.
+
+To adopt the convention in any Flutter app (fixture or SDK example):
 
 1. **Personas are testable specs.** `docs/personas/<slug>.md` per persona:
    profile, goals, frustrations, a Journey table (step → expected state), and

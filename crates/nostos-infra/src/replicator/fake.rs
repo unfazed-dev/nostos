@@ -18,9 +18,11 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::time::Instant;
 
 use nostos_application::ports::ReplicatorStream;
 use nostos_domain::{Lsn, Operation, ReplicationEvent, RowOp};
@@ -41,10 +43,15 @@ pub struct FakeReplicatorConfig {
     pub table: String,
     /// Seed for deterministic generation (so runs are reproducible).
     pub seed: u64,
-    /// Emit at most this many events per second. `0` = unbounded (the
-    /// benchmark default — pacing would cap the very ceiling we measure).
-    /// Set it for interactive/dev servers, where an unbounded generator is
-    /// pure load with no observer (ADR-0027 finding, A10).
+    /// Emit at this many events per second, on an OPEN-LOOP schedule: event
+    /// `i` is due at `first_call + i/R` regardless of how long the consumer
+    /// took for event `i-1`. `0` = unbounded (the ceiling-measuring default —
+    /// pacing would cap the very thing we measure).
+    ///
+    /// Open-loop is the load-testing contract: a generator that waits for the
+    /// consumer measures the consumer's pace and calls it the arrival rate.
+    /// See [`FakeReplicator::max_lateness`] for how a run that failed to hold
+    /// the rate announces itself.
     pub events_per_sec: u64,
     /// Recycle primary keys over this many distinct values. `0` = monotonic
     /// (`pk = emitted + 1`, so the table grows forever).
@@ -116,6 +123,12 @@ pub struct FakeReplicator {
     next_lsn: Arc<AtomicU64>,
     /// PRNG state (xorshift64) — deterministic from `cfg.seed`.
     rng_state: Arc<AtomicU64>,
+    /// Origin of the open-loop emission schedule, set on the first paced call.
+    /// A `tokio::time::Instant` so `start_paused` tests drive it deterministically.
+    schedule_origin: Option<Instant>,
+    /// Largest observed slip behind that schedule, nanoseconds. Shared so the
+    /// benchmark can read it after moving the replicator into its own task.
+    max_lateness_nanos: Arc<AtomicU64>,
 }
 
 impl FakeReplicator {
@@ -127,6 +140,8 @@ impl FakeReplicator {
             emitted: Arc::new(AtomicU64::new(0)),
             next_lsn: Arc::new(AtomicU64::new(1)),
             rng_state: Arc::new(AtomicU64::new(seed)),
+            schedule_origin: None,
+            max_lateness_nanos: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -135,6 +150,60 @@ impl FakeReplicator {
     #[must_use]
     pub fn emitted_count(&self) -> u64 {
         self.emitted.load(Ordering::Relaxed)
+    }
+
+    /// Largest gap between an event's scheduled emit time and its actual one.
+    ///
+    /// Zero for an unpaced run, and zero for a paced run the generator kept up
+    /// with. Non-zero means the offered load fell BELOW the requested rate, so
+    /// any drop rate measured in that run describes the generator rather than
+    /// the system under test — the one failure mode an open-loop harness must
+    /// never report as a result.
+    #[must_use]
+    pub fn max_lateness(&self) -> Duration {
+        Duration::from_nanos(self.max_lateness_nanos.load(Ordering::Relaxed))
+    }
+
+    /// Shared handle to the lateness counter, readable after the replicator has
+    /// been moved into a fan-out task (which is where a benchmark drives it).
+    #[must_use]
+    pub fn lateness_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.max_lateness_nanos)
+    }
+
+    /// Hold the open-loop schedule: event `i` is due at `origin + i/R`, the
+    /// origin being the first paced call. Early → sleep to the due time.
+    /// Late → emit immediately and record the slip.
+    ///
+    /// That distinction is the whole point. Pacing used to be a `sleep(1/R)`
+    /// *after* each event, so a consumer taking `d` per event dropped the real
+    /// rate to `1/(1/R + d)`: the generator quietly slowed to whatever the
+    /// system could absorb, and then reported no problem. That is coordinated
+    /// omission (Gil Tene, "How Not to Measure Latency") — the measurement
+    /// skips exactly the intervals where the system was struggling. A fixed
+    /// schedule cannot slow down; it accumulates a backlog, which is what a
+    /// real arrival process does.
+    ///
+    /// It also retires the old ~1 kHz ceiling: behind schedule we never sleep,
+    /// so catching up is a burst instead of a chain of per-event timers.
+    async fn await_schedule(&mut self) {
+        let rate = u128::from(self.cfg.events_per_sec);
+        let Some(origin) = self.schedule_origin else {
+            // Event 0 defines the origin, so it cannot be late against it.
+            // Recording its sub-microsecond offset would put a floor under
+            // `max_lateness` and make "the schedule was kept" unexpressible.
+            self.schedule_origin = Some(Instant::now());
+            return;
+        };
+        let offset = u128::from(self.emitted.load(Ordering::Relaxed)) * 1_000_000_000 / rate;
+        let due = origin + Duration::from_nanos(u64::try_from(offset).unwrap_or(u64::MAX));
+        let now = Instant::now();
+        if now < due {
+            tokio::time::sleep_until(due).await;
+        } else {
+            let late = u64::try_from((now - due).as_nanos()).unwrap_or(u64::MAX);
+            self.max_lateness_nanos.fetch_max(late, Ordering::Relaxed);
+        }
     }
 
     /// Deterministic xorshift64 — reproducible across runs.
@@ -224,17 +293,12 @@ impl FakeReplicator {
 #[async_trait]
 impl ReplicatorStream for FakeReplicator {
     async fn next_event(&mut self) -> Option<ReplicationEvent> {
-        // Unpaced: no I/O — yield immediately. The router's backpressure
-        // (bounded sinks) is what naturally rate-limits us to the sustainable
-        // throughput. This is the benchmark path.
-        //
-        // ponytail: pacing is a per-event sleep, so the real rate is
-        // `min(events_per_sec, 1s / timer_granularity)` (~1 kHz on tokio).
-        // Good enough for dev/demo; batch-and-sleep if a paced load test ever
-        // needs a precise high rate.
-        // `checked_div` is the `events_per_sec == 0` (unbounded) branch.
-        if let Some(nanos) = 1_000_000_000_u64.checked_div(self.cfg.events_per_sec) {
-            tokio::time::sleep(std::time::Duration::from_nanos(nanos)).await;
+        // Unpaced (`events_per_sec == 0`): no I/O at all. The router's
+        // backpressure (bounded sinks) is what rate-limits us to the
+        // sustainable throughput — that is the ceiling-measuring path, and
+        // any pacing here would cap the ceiling being measured.
+        if self.cfg.events_per_sec > 0 {
+            self.await_schedule().await;
         }
         self.next_event_inner()
     }
@@ -319,6 +383,45 @@ mod tests {
             "elapsed: {:?}",
             start.elapsed()
         );
+    }
+
+    /// Coordinated-omission guard: a consumer stall must not slow the
+    /// generator's schedule, only build a backlog it then bursts through.
+    ///
+    /// 100 events/sec is one every 10 ms. The consumer stalls 200 ms after the
+    /// first event, so events 1..=20 are all overdue when it returns and must
+    /// go out at once. Closed-loop pacing — `sleep(1/R)` *after* each event —
+    /// would take 200 ms + 20x10 ms and report a rate of ~52/sec while
+    /// claiming 100/sec was offered. Open-loop finishes in ~200 ms and records
+    /// the slip instead of absorbing it.
+    #[tokio::test]
+    async fn a_stalled_consumer_does_not_slow_the_schedule() {
+        let mut r = FakeReplicator::new(FakeReplicatorConfig::small(21).paced(100));
+        let start = std::time::Instant::now();
+        assert!(r.next_event().await.is_some());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while r.next_event().await.is_some() {}
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "the schedule slipped with the consumer (closed-loop pacing): {elapsed:?}"
+        );
+        assert!(
+            r.max_lateness() >= Duration::from_millis(100),
+            "a 200 ms stall must be recorded as slip, not absorbed: {:?}",
+            r.max_lateness()
+        );
+    }
+
+    /// The other half: a generator that keeps up reports exactly zero slip, so
+    /// `max_lateness > 0` is usable as "this run did not offer the rate it
+    /// claimed" without a fudge threshold.
+    #[tokio::test]
+    async fn a_kept_schedule_records_no_lateness() {
+        let mut r = FakeReplicator::new(FakeReplicatorConfig::small(4).paced(50));
+        while r.next_event().await.is_some() {}
+        assert_eq!(r.max_lateness(), Duration::ZERO);
     }
 
     #[tokio::test]

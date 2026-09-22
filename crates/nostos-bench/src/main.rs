@@ -73,15 +73,39 @@ pub struct BenchConfig {
     )]
     pub clients: Vec<usize>,
 
-    /// Total events to generate per run.
+    /// Total events to generate per run. Ignored when `--deliveries` is set.
     #[arg(long, env = "BENCH_EVENTS", default_value_t = 100_000)]
     pub events: u64,
+
+    /// Per-run DELIVERY budget — `events x clients`, the frames a run actually
+    /// moves. `0` (default) keeps `--events` fixed per tier, which is how every
+    /// historical figure was measured.
+    ///
+    /// A fixed event count makes a ladder do work proportional to `clients`:
+    /// at 100k events the 5k rung moves 500M frames and the 10k rung moves 1B,
+    /// so the big tier is charged twice — once for having more sessions to walk
+    /// per event, once for being handed twice the events. The tiers are then
+    /// not comparable and the slowest one dominates the session. A budget makes
+    /// every tier move the same frames, so the only variable left is the thing
+    /// the ladder is varying.
+    #[arg(long, env = "BENCH_DELIVERIES", default_value_t = 0)]
+    pub deliveries: u64,
 
     /// Payload profile: "small" (~100B) or "large" (~4KB).
     #[arg(long, env = "BENCH_PROFILE", default_value = "small")]
     pub profile: String,
 
     /// Per-session buffer depth.
+    /// Recycle primary keys over this many distinct rows. `0` (the default,
+    /// and what every historical result in RESULTS.md was measured with)
+    /// gives every event its own new row, so nothing can ever conflate.
+    ///
+    /// Non-zero is how ADR-0045's overflow conflation is measured: a real
+    /// app re-updates the same rows, a monotonic key stream never does, and
+    /// the difference is the entire effect being tested.
+    #[arg(long, env = "BENCH_DISTINCT_KEYS", default_value_t = 0)]
+    pub distinct_keys: u64,
+
     #[arg(long, env = "BENCH_BUFFER", default_value_t = 1024)]
     pub buffer: usize,
 
@@ -92,19 +116,102 @@ pub struct BenchConfig {
     /// Per-run wall-clock timeout (seconds).
     #[arg(long, env = "BENCH_TIMEOUT", default_value_t = 120)]
     pub timeout_secs: u64,
+
+    /// Offered arrival rate, events/sec, held OPEN-LOOP: event `i` is due at
+    /// `start + i/rate` no matter how long the router took for `i-1`.
+    ///
+    /// The rate is events entering the ROUTER, not frames leaving it: one
+    /// event fans out to every subscribed client, so the delivery rate this
+    /// asks for is `rate * clients` and the ops/sec column stays directly
+    /// comparable to an unpaced run.
+    ///
+    /// `0` (the default, and what every figure in RESULTS.md was measured
+    /// with) floods — which answers "where does it fall over", not "does it
+    /// meet rate R at under 1% loss". The second question is the one a user
+    /// with a workload actually has, and it needs a rate. Ladder the rate up
+    /// until the drop bar breaks, and the largest rate that held is the
+    /// answer. See `docs/plans/measuring-conflation-honestly.md`, defect 1.
+    #[arg(long, env = "BENCH_RATE", default_value_t = 0)]
+    pub rate: u64,
+
+    /// Measured repetitions per client tier. Fastest and slowest are dropped
+    /// and the rest averaged (MLPerf); the min-max spread is reported beside
+    /// the mean, because a tier whose reps disagree has not produced a figure.
+    #[arg(long, env = "BENCH_REPS", default_value_t = 5)]
+    pub reps: usize,
+
+    /// Warm-up repetitions per tier, run first and DISCARDED. The first run of
+    /// a tier pays for cold caches, lazy page faults and an unsettled
+    /// allocator; including it makes every later comparison a comparison of
+    /// warm-up cost. `0` disables.
+    #[arg(long, env = "BENCH_WARMUP", default_value_t = 1)]
+    pub warmup_reps: usize,
+
+    /// Seed for the randomised run order. Fixed by default so a run is
+    /// reproducible; change it to confirm a result is not an artefact of one
+    /// particular interleaving.
+    #[arg(long, env = "BENCH_ORDER_SEED", default_value_t = 0x000C_A110_5EED)]
+    pub order_seed: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunResult {
     pub clients: usize,
+    /// Which measured repetition this is (0-based). Warm-ups never get here.
+    pub rep: usize,
+    /// Position in the run schedule (0-based), i.e. the order this run
+    /// ACTUALLY executed in, which the shuffle makes different from the order
+    /// it is tabled in. It is the x axis of `series.svg`: throttling, a
+    /// background process waking up, or a machine going quiet halfway through
+    /// a session are all visible in execution order and in no other.
+    pub order: usize,
     pub events_total: u64,
     pub events_delivered: u64,
+    /// Events the router accepted by REPLACING a still-waiting frame for the
+    /// same row (ADR-0045). Convergent, not lost — so it is subtracted from
+    /// the drop rate alongside `events_delivered`, and reported on its own so
+    /// the conflation benefit is visible rather than inferred.
+    pub events_superseded: u64,
     pub ops_per_sec: f64,
     pub drop_rate: f64,
     pub p50_us: f64,
     pub p99_us: f64,
     pub elapsed_secs: f64,
+    /// `false` when the run hit `--timeout-secs` instead of delivering every
+    /// event. The window expired, so `ops_per_sec` is a FLOOR (what got out
+    /// before we gave up) and `drop_rate` counts events still in flight rather
+    /// than events lost. Neither is a measurement, so both are withheld from
+    /// the printed table and from every aggregate in RESULTS.md.
+    ///
+    /// Latency is unaffected: p50/p99 describe the frames that DID land, and a
+    /// truncated window does not bias them. They stay reported.
+    ///
+    /// Caught 2026-09-22 on a 4-core i7-7700HQ, where the 120s default expired
+    /// at the *1k* tier and the JSON still read like a result. On faster
+    /// hardware the same default never binds, which is exactly why this has to
+    /// be a stamp in the output and not a note in a doc.
+    pub throughput_valid: bool,
+    /// The `--rate` this run offered, events/sec. `0` = unpaced flood.
+    pub target_rate: u64,
+    /// `false` when a paced run's generator fell behind its own schedule, i.e.
+    /// the load OFFERED was below the load requested. The drop rate then
+    /// describes the generator, not the system, so it is withheld exactly like
+    /// a timed-out run's. Always `true` for an unpaced run — a flood has no
+    /// schedule to miss.
+    pub rate_held: bool,
     pub profile: String,
+}
+
+/// Deterministic Fisher-Yates using the same xorshift64 the `FakeReplicator`
+/// seeds with. `rand` would be a new dependency for eight lines.
+fn shuffle<T>(v: &mut [T], seed: u64) {
+    let mut x = seed | 1; // xorshift64 requires a nonzero state
+    for i in (1..v.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
 }
 
 #[tokio::main]
@@ -116,39 +223,141 @@ async fn main() -> Result<()> {
     // Raise file-descriptor limit — 10k clients need ~20k+ FDs (sockets + pipes).
     raise_fd_limit();
 
-    let mut results = Vec::with_capacity(cfg.clients.len());
-    for &clients in &cfg.clients {
-        let r = run_one(&cfg, clients)
+    // Warm-ups first, in tier order, and thrown away. They exist to pay the
+    // cold-start costs once per tier so the measured reps don't carry them.
+    for rep in 0..cfg.warmup_reps {
+        for &clients in &cfg.clients {
+            println!(
+                "warm-up {}/{} @ {clients} clients (discarded)",
+                rep + 1,
+                cfg.warmup_reps
+            );
+            run_one(&cfg, clients, rep)
+                .await
+                .context(format!("warm-up with {clients} clients failed"))?;
+        }
+    }
+
+    // Defect 4 (docs/plans/measuring-conflation-honestly.md): a fixed
+    // `1k,5k,10k` order hands the FIRST tier every cold cache and every
+    // unsettled thermal state, run after run. That bias is systematic, not
+    // noise — it never averages out, because it lands on the same tier every
+    // time. Randomising the interleave spreads it across tiers instead, and is
+    // reported to cut run-to-run variance by up to 40% (Google Benchmark).
+    let mut schedule: Vec<(usize, usize)> = Vec::new();
+    for rep in 0..cfg.reps {
+        for &clients in &cfg.clients {
+            schedule.push((clients, rep));
+        }
+    }
+    shuffle(&mut schedule, cfg.order_seed);
+
+    let mut results = Vec::with_capacity(schedule.len());
+    for (i, &(clients, rep)) in schedule.iter().enumerate() {
+        println!(
+            "run {}/{}: {clients} clients, rep {}",
+            i + 1,
+            schedule.len(),
+            rep + 1
+        );
+        let mut r = run_one(&cfg, clients, rep)
             .await
             .context(format!("run with {clients} clients failed"))?;
+        r.order = i;
         results.push(r);
     }
+    // Report in tier order regardless of the order they were run in.
+    results.sort_by_key(|r| (r.clients, r.rep));
 
     let env = report::Environment::collect(&cfg);
     write_reports(&cfg, &results, &env).context("failed to write reports")?;
 
+    let tiers = report::summarize(&results);
     println!("\n=== Nostos Week-1 Benchmark ===\n");
+    if cfg.rate > 0 {
+        println!("offered rate: {} events/sec, open-loop\n", cfg.rate);
+    }
     println!(
-        "{:>8} {:>14} {:>10} {:>9} {:>10} {:>10}",
-        "clients", "ops/sec", "drop%", "p50(ms)", "p99(ms)", "delivered"
+        "{:>8} {:>14} {:>21} {:>8} {:>9} {:>9} {:>7}",
+        "clients", "ops/sec", "spread", "drop%", "p50(ms)", "p99(ms)", "reps"
     );
-    for r in &results {
+    for t in &tiers {
+        // A tier with no valid repetition still prints its row — the delivered
+        // count and the latencies are real — but the two figures the invalid
+        // runs corrupted are withheld rather than rendered as numbers someone
+        // could quote.
+        let reps = format!("{}/{}", t.reps_valid, t.reps_total);
+        if t.reps_valid == 0 {
+            println!(
+                "{:>8} {:>14} {:>21} {:>8} {:>9.2} {:>9.2} {:>7}",
+                t.clients,
+                t.invalid_label(),
+                "—",
+                "—",
+                t.p50_us / 1000.0,
+                t.p99_us / 1000.0,
+                reps
+            );
+            continue;
+        }
         println!(
-            "{:>8} {:>14.0} {:>9.2}% {:>9.2} {:>9.2} {:>10}",
-            r.clients,
-            r.ops_per_sec,
-            r.drop_rate * 100.0,
-            r.p50_us / 1000.0,
-            r.p99_us / 1000.0,
-            r.events_delivered
+            "{:>8} {:>14.0} {:>21} {:>7.2}% {:>9.2} {:>9.2} {:>7}",
+            t.clients,
+            t.ops_per_sec,
+            format!("{:.0}–{:.0}", t.ops_min, t.ops_max),
+            t.drop_rate * 100.0,
+            t.p50_us / 1000.0,
+            t.p99_us / 1000.0,
+            reps
         );
+    }
+    println!(
+        "\nops/sec is the trimmed mean of {} reps (fastest and slowest dropped); \
+         spread is their min-max.",
+        cfg.reps
+    );
+
+    let timed_out = results.iter().filter(|r| !r.throughput_valid).count();
+    if timed_out > 0 {
+        println!(
+            "\n!! {timed_out} run(s) hit --timeout-secs {} before delivering every event.",
+            cfg.timeout_secs
+        );
+        println!(
+            "   ops/sec and drop% are withheld: they would describe the clock, not the system."
+        );
+        println!("   Raise --timeout-secs and re-run to get a figure.");
+    }
+    let rate_missed = results.iter().filter(|r| !r.rate_held).count();
+    if rate_missed > 0 {
+        println!(
+            "\n!! {rate_missed} run(s) could not hold --rate {}: the generator fell behind its",
+            cfg.rate
+        );
+        println!("   own schedule, so the load offered was below the load requested.");
+        println!("   Those runs measure the generator. Lower --rate, or generate off-box.");
     }
     println!("\nResults written to {}/", cfg.out_dir);
     Ok(())
 }
 
-async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
-    info!(clients, events = cfg.events, "run starting");
+impl BenchConfig {
+    /// Events this tier generates. Under a delivery budget the count shrinks as
+    /// clients grow, holding `events x clients` constant across the ladder.
+    /// Floored at 1 so a budget below the client count still runs a real event
+    /// rather than dividing to zero.
+    fn events_for(&self, clients: usize) -> u64 {
+        if self.deliveries == 0 {
+            self.events
+        } else {
+            (self.deliveries / (clients.max(1) as u64)).max(1)
+        }
+    }
+}
+
+async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunResult> {
+    let events = cfg.events_for(clients);
+    info!(clients, rep, events, "run starting");
 
     // ---- shared store + use-cases (the same instances the server uses) ----
     let store: Arc<dyn nostos_application::ports::SessionStore> =
@@ -239,10 +448,15 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
 
     // ---- drive the FakeReplicator through the real FanOutService ----
     let repl_cfg = match cfg.profile.as_str() {
-        "large" => FakeReplicatorConfig::large(cfg.events),
-        _ => FakeReplicatorConfig::small(cfg.events),
-    };
+        "large" => FakeReplicatorConfig::large(events),
+        _ => FakeReplicatorConfig::small(events),
+    }
+    .recycling_keys(cfg.distinct_keys)
+    .paced(cfg.rate);
     let mut replicator = FakeReplicator::new(repl_cfg);
+    // Read after the replicator has moved into the fan-out task: how far the
+    // generator ever fell behind its own emission schedule.
+    let lateness = replicator.lateness_handle();
 
     // Week-1 extractor: synthetic payload is opaque bytes; match on table only
     // (ColumnValue::Any matches every value). Real column extraction arrives
@@ -258,24 +472,60 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         tokio::spawn(async move { fanout.run(&mut replicator, extract).await })
     };
 
-    // Wait until all events are received, or timeout.
-    let target = cfg.events.saturating_mul(clients as u64);
+    // Wait until delivery stops advancing, or timeout.
+    //
+    // `target` is what a LOSS-FREE run receives. The router is allowed to shed
+    // (a full session channel — the `capacity_sheds` path), and a shed event
+    // never reaches a client, so the moment anything is shed `target` becomes
+    // unreachable and a plain `>= target` loop spins until the deadline. Every
+    // figure derived from `elapsed` is then diluted by however much idle the
+    // window had left.
+    //
+    // Measured 2026-09-22 on a 4-core i7-7700HQ: 99.4M events delivered, the
+    // rest shed, then ~470s of spinning against a target that could not be
+    // reached. Reported 165,712 ops/sec. The same run inside a 120s window
+    // reported 824,882. Both were the ratio of real work to an arbitrary
+    // window, and on a host that never sheds (Apple Silicon at 1k) the bug is
+    // invisible because `target` is always met.
+    //
+    // So finish on QUIESCENCE: the run is over when delivery stops moving,
+    // whether the remainder arrived or was shed. The clock stops at the last
+    // delivery, so the quiet grace never enters `elapsed`.
+    let quiet = Duration::from_secs(10);
+    let target = events.saturating_mul(clients as u64);
     let deadline = Duration::from_secs(cfg.timeout_secs);
     let wait = async {
+        let mut seen = 0_u64;
+        let mut last_progress = Instant::now();
         loop {
-            if sum_received() >= target {
-                break;
+            let now = sum_received();
+            if now >= target {
+                return Instant::now();
+            }
+            if now > seen {
+                seen = now;
+                last_progress = Instant::now();
+            } else if seen > 0 && last_progress.elapsed() >= quiet {
+                // `seen > 0` so a slow ramp-up is never mistaken for the end.
+                return last_progress;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     };
-    let _ = timeout(deadline, wait).await;
-    let elapsed = start.elapsed();
+    // Quiescence is a COMPLETE run — the system stopped delivering because it
+    // had nothing left to deliver. Only deadline expiry is invalid, because
+    // there the run was still making progress when the window closed and we
+    // cannot know what the total would have been.
+    let (stopped_at, completed) = match timeout(deadline, wait).await {
+        Ok(at) => (at, true),
+        Err(_) => (Instant::now(), false),
+    };
+    let elapsed = stopped_at.duration_since(start);
 
     // The fan-out task emits events as fast as the router accepts them. At high
     // client counts (10k) with no client ACKs, `FanOutService::run` does a
     // per-event `slowest_session` + `min_acked_lsn` scan over every session —
-    // O(N) per event — so finishing all `cfg.events` can take far longer than
+    // O(N) per event — so finishing every event can take far longer than
     // the delivery window above. Awaiting it unconditionally would hang the
     // harness at 10k (the wait-loop times out, then we block on `run()`).
     //
@@ -309,13 +559,20 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
     }
 
     let ops_per_sec = (delivered as f64) / elapsed.as_secs_f64().max(1e-9);
-    let attempted = cfg.events.saturating_mul(clients as u64).max(1);
-    let drop_rate = 1.0 - (delivered as f64 / attempted as f64);
+    let attempted = events.saturating_mul(clients as u64).max(1);
+    // ADR-0045: `delivered` is a CLIENT-side frame count, and a superseded
+    // event is deliberately one fewer frame for the same converged state.
+    // Left out of the numerator, `drop%` would score conflation as exactly the
+    // loss conflation exists to prevent. The router's own count is the only
+    // honest source for it — the client cannot see a frame that was never sent.
+    let accounted = delivered.saturating_add(outcome.superseded);
+    let drop_rate = 1.0 - (accounted as f64 / attempted as f64);
     let (p50, p99) = (combined.percentile(0.5), combined.percentile(0.99));
 
     info!(
         clients,
         delivered,
+        superseded = outcome.superseded,
         matched = outcome.matched,
         ops_per_sec,
         drop_rate,
@@ -345,15 +602,41 @@ async fn run_one(cfg: &BenchConfig, clients: usize) -> Result<RunResult> {
         );
     }
 
+    // A paced run only tests the rate it managed to OFFER. A scheduler hiccup
+    // is not a result, so allow slip up to 5% of the run's nominal duration
+    // (events / rate), floored at 50 ms so a sub-second run isn't failed by
+    // timer granularity. Past that the arrival process was not the one
+    // requested, and every figure derived from it describes the generator.
+    let max_lateness = Duration::from_nanos(lateness.load(Ordering::Relaxed));
+    let rate_held = cfg.rate == 0 || {
+        let nominal = events as f64 / cfg.rate as f64;
+        max_lateness.as_secs_f64() <= (nominal * 0.05).max(0.05)
+    };
+    if !rate_held {
+        info!(
+            clients,
+            rate = cfg.rate,
+            slip_ms = max_lateness.as_millis() as u64,
+            "generator fell behind its schedule; rate figures withheld"
+        );
+    }
+
     Ok(RunResult {
         clients,
-        events_total: cfg.events,
+        rep,
+        // Overwritten by the caller, which is what knows the schedule.
+        order: 0,
+        events_total: events,
         events_delivered: delivered,
+        events_superseded: outcome.superseded,
         ops_per_sec,
         drop_rate: drop_rate.clamp(0.0, 1.0),
         p50_us: p50,
         p99_us: p99,
         elapsed_secs: elapsed.as_secs_f64(),
+        throughput_valid: completed,
+        target_rate: cfg.rate,
+        rate_held,
         profile: cfg.profile.clone(),
     })
 }
@@ -448,5 +731,45 @@ fn raise_fd_limit() {
             65_536,
             65_536,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BenchConfig;
+    use clap::Parser;
+
+    fn cfg(args: &[&str]) -> BenchConfig {
+        let mut argv = vec!["nostos-bench"];
+        argv.extend_from_slice(args);
+        BenchConfig::parse_from(argv)
+    }
+
+    #[test]
+    fn without_a_budget_every_tier_keeps_the_fixed_event_count() {
+        let c = cfg(&["--events", "100000"]);
+        assert_eq!(c.events_for(1_000), 100_000);
+        assert_eq!(c.events_for(10_000), 100_000);
+    }
+
+    #[test]
+    fn a_budget_holds_deliveries_constant_across_the_ladder() {
+        // The defect this exists to prevent: a fixed event count makes the 10k
+        // rung move twice the frames of the 5k rung, so the ladder varies work
+        // and width together and neither rung explains the other.
+        let c = cfg(&["--deliveries", "200000000"]);
+        for clients in [1_000_usize, 5_000, 10_000] {
+            assert_eq!(
+                c.events_for(clients) * clients as u64,
+                200_000_000,
+                "tier {clients} moved a different number of frames"
+            );
+        }
+    }
+
+    #[test]
+    fn a_budget_below_the_client_count_still_runs_one_event() {
+        let c = cfg(&["--deliveries", "10"]);
+        assert_eq!(c.events_for(10_000), 1);
     }
 }

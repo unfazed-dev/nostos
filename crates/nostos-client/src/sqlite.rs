@@ -86,6 +86,13 @@ const EPOCH_KEY: &str = "epoch";
 /// (ADR-0031 D2). Stored as a `u64` decimal, same pattern as `EPOCH_KEY`.
 const RULES_CHECKSUM_KEY: &str = "rules_checksum";
 
+/// The meta key holding direct mode's `xid8` snapshot horizon
+/// (`docs/plans/direct-mode-sync-protocol.md`). Stored as opaque TEXT and never
+/// parsed — an `xid8` is a full u64 and the client does no arithmetic on it.
+/// Beside the checkpoint rather than replacing it: server mode resumes from the
+/// LSN, direct mode from this.
+const HORIZON_KEY: &str = "horizon";
+
 /// A synced table's schema as the client sees it — the minimal projection of
 /// the server's `SchemaDescriptor` (nostos-application) that the view layer
 /// needs. Defined here (not reusing `SchemaDescriptor`) because nostos-client
@@ -616,6 +623,36 @@ impl Storage for SqliteStorage {
         Ok(())
     }
 
+    fn horizon(&self) -> nostos_core::Result<Option<String>> {
+        let conn = self.conn.lock().expect("horizon: storage mutex poisoned");
+        // No row = fresh DB, or a store that has only ever synced in server
+        // mode. Either way the caller starts from `Horizon::fresh()`.
+        conn.query_row(
+            "SELECT value FROM cairn_meta WHERE key = ?1",
+            rusqlite::params![HORIZON_KEY],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(rusqlite_err)
+    }
+
+    fn save_horizon(&mut self, horizon: &str) -> nostos_core::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("save_horizon: storage mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![HORIZON_KEY, horizon],
+        )
+        .map_err(rusqlite_err)?;
+        Ok(())
+    }
+
     fn apply_batch(
         &mut self,
         ops: &[(RowOp, u64)],
@@ -972,6 +1009,17 @@ impl Storage for SqliteStorage {
         tx.execute(
             "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, '0')",
             rusqlite::params![RULES_CHECKSUM_KEY],
+        )
+        .map_err(rusqlite_err)?;
+
+        // 3c. Horizon → gone. Direct mode's half of the same unsoundness: a
+        //     surviving `xid8` makes the next principal resume mid-log and
+        //     never see the rows below it. DELETE, not `'0'` — absent means
+        //     "fresh" to `Horizon::fresh()`, and `'0'` would mean the same
+        //     thing less obviously.
+        tx.execute(
+            "DELETE FROM cairn_meta WHERE key = ?1",
+            rusqlite::params![HORIZON_KEY],
         )
         .map_err(rusqlite_err)?;
 
@@ -2460,6 +2508,25 @@ mod tests {
         // on a rules change), same as save_epoch.
         s.save_rules_checksum(43).unwrap();
         assert_eq!(s.rules_checksum().unwrap(), 43, "checksum overwritten");
+    }
+
+    #[test]
+    fn horizon_roundtrips_as_opaque_text_and_clear_wipes_it() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        assert_eq!(s.horizon().unwrap(), None, "fresh DB has no horizon");
+
+        // Past 2^53 on purpose: an xid8 is a full u64 and must survive as text.
+        s.save_horizon("9007199254740995").unwrap();
+        assert_eq!(s.horizon().unwrap().as_deref(), Some("9007199254740995"));
+
+        s.save_horizon("9007199254741100").unwrap();
+        assert_eq!(s.horizon().unwrap().as_deref(), Some("9007199254741100"));
+
+        // ADR-0029: a surviving horizon would resume the next principal
+        // mid-log, so sign-out must take it back to absent.
+        // Disambiguated: `Outbox::clear` is the other `clear` on this type.
+        Storage::clear(&mut s).unwrap();
+        assert_eq!(s.horizon().unwrap(), None, "clear() wipes the horizon");
     }
 
     #[test]

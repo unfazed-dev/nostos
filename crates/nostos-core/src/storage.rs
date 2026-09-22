@@ -96,6 +96,35 @@ pub trait Storage {
         Ok(())
     }
 
+    /// The `xid8` snapshot horizon this client last pulled to in direct mode
+    /// (`crate::pull`), or `None` on a fresh database — the caller then starts
+    /// from [`crate::Horizon::fresh`].
+    ///
+    /// Opaque text, never a number: the client does no arithmetic on it, and
+    /// routing an `xid8` through a JS `number` is silently wrong past 2^53.
+    /// Sits beside the LSN checkpoint rather than replacing it — server mode
+    /// resumes from the LSN, direct mode from this, and a database that has
+    /// synced in both modes holds both.
+    ///
+    /// Default `Ok(None)` — a backend that doesn't override it re-pulls the
+    /// whole retained log on every launch. Same "defaults degrade, never lie"
+    /// stance as [`Self::epoch`].
+    fn horizon(&self) -> crate::Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Persist the horizon. Called *after* the batch it covers has committed,
+    /// so a crash in the window leaves the horizon behind the rows and the next
+    /// pull re-applies them idempotently. Advancing it first would skip rows
+    /// that never landed.
+    ///
+    /// Non-fatal on failure, exactly like [`Self::save_epoch`]: the cost is a
+    /// re-read, and it must never kill a commit that already succeeded. Default
+    /// no-op.
+    fn save_horizon(&mut self, _horizon: &str) -> crate::Result<()> {
+        Ok(())
+    }
+
     /// Atomically apply a batch of row operations and advance the checkpoint.
     ///
     /// **Atomicity contract:** every `op` in `ops` AND the checkpoint advance to

@@ -51,6 +51,12 @@
 // surfaced on SyncStatus. The db_handle is passed to NostosSocket.connect as
 // the 5th arg; the Rust side wraps it in WebStorage::SqliteWasm.
 import init, { NostosSocket } from "../pkg-web/nostos_ffi_wasm.js";
+// The conformance suite is behind an off-by-default cargo feature (ADR-0015's
+// size budget), so it is absent from the bundle an app ships. Import the
+// module namespace too and look it up at call time rather than naming the
+// export — a static `import { nostosConformance }` would fail to link against
+// the production bundle.
+import * as wasm from "../pkg-web/nostos_ffi_wasm.js";
 
 
 let wasmReady = false;
@@ -257,6 +263,31 @@ self.onmessage = async (ev) => {
   if (m.cmd === "ping") {
     await ensureWasm();
     self.postMessage({ id: m.id, ok: "pong", checkpoint: 0 });
+    return;
+  }
+
+  // The browser leg of the cross-platform conformance suite
+  // (`nostos_core::conformance`). Runs against whatever backend this Worker
+  // actually booted with — durable OPFS when sqlite-wasm came up, memory when
+  // it degraded — so the reply carries the mode the cases ran on. A failing
+  // case throws out of wasm, which is the point: it must not be ignorable.
+  if (m.cmd === "conformance") {
+    await bootP;
+    if (typeof wasm.nostosConformance !== "function") {
+      self.postMessage({
+        id: m.id,
+        error:
+          "this bundle has no conformance suite - rebuild with " +
+          "`wasm-pack build crates/nostos-ffi-wasm --target web --features conformance`",
+      });
+      return;
+    }
+    try {
+      const cases = wasm.nostosConformance(dbHandle ?? undefined);
+      self.postMessage({ id: m.id, ok: Array.from(cases), storageMode });
+    } catch (e) {
+      self.postMessage({ id: m.id, error: (e && e.message) || String(e), storageMode });
+    }
     return;
   }
 

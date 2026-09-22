@@ -2127,7 +2127,6 @@ mod tests {
     use nostos_domain::{Lsn, RowOp};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
-    use tokio::sync::mpsc;
 
     /// A canned op-log reader for the reconnect-resume branch tests (ADR-0025
     /// slice 4b). `replay_calls` distinguishes "replay attempted + empty"
@@ -2202,7 +2201,7 @@ mod tests {
         Arc<Mutex<SocketSubs>>,
         Arc<SessionManager>,
         Arc<TokioEventSink>,
-        mpsc::Receiver<crate::router::SinkMsg>,
+        crate::router::SinkReceiver,
     ) {
         let subs = Arc::new(Mutex::new(SocketSubs {
             ids: Vec::new(),

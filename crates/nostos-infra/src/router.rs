@@ -12,6 +12,30 @@
 //! full-reprocessing model (their proposal #349) doesn't have this guarantee.
 //! See `BENCHMARK-METHODOLOGY.md` §5 for the contract.
 //!
+//! ## Overflow conflation (ADR-0045)
+//!
+//! Shedding is now the *second* thing tried, not the first. When `try_send`
+//! reports the channel full, the event is folded into a per-session overflow
+//! map keyed by `(table, pk)`: a second event for a row already waiting
+//! **supersedes** it rather than queueing behind it. The client converges to
+//! the same state either way, because its apply is already LSN-gated
+//! last-writer-wins per row (`nostos-client/src/sqlite.rs`) — it would have
+//! discarded the older frame itself. An event is only shed once the overflow
+//! is full of *distinct* rows, so the loss bound became the client's
+//! subscription shape instead of the producer's rate.
+//!
+//! **The fast path is untouched.** A successful `try_send` does exactly what
+//! it did before — no flag, no lock, no bookkeeping. This is deliberate: the
+//! first attempt at this (branch `adr-0045-conflating-sink`) replaced the
+//! channel outright with a conflating queue and cost 39% of the 1k headline,
+//! because every delivery paid for machinery that only earns anything under
+//! backlog. `Err(Full)` *is* the backlog signal; nothing else needs to ask.
+//!
+//! Overflow drains after the channel, so a row can in principle be delivered
+//! after a newer event for a *different* row. That is harmless — the client's
+//! apply gate is per `(table, pk)`, so each row still lands its own highest
+//! LSN.
+//!
 //! The receiver half is drained by the transport adapter (one task per
 //! WebSocket connection) which serializes events onto the wire.
 //!
@@ -25,8 +49,10 @@
 //! makes such delivers return `Dropped` instead of silently buffering to a
 //! dead client.
 
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -73,6 +99,8 @@ pub enum SinkMsg {
 ///   recently-delivered LSNs (defense-in-depth against double-delivery).
 pub struct TokioEventSink {
     tx: mpsc::Sender<SinkMsg>,
+    /// Conflating overflow, touched ONLY when `tx.try_send` reports full.
+    overflow: Arc<OverflowShared>,
     /// Lifetime open-flag, flipped to false when the transport task ends.
     open: AtomicBool,
     /// Highest LSN the client ACKed applying. 0 = no ack yet.
@@ -87,6 +115,12 @@ pub struct TokioEventSink {
     /// loss signal). Deliberately EXCLUDES dedup drops and closed-sink drops
     /// — only capacity loss tells a client its stream has a gap.
     capacity_sheds: AtomicU64,
+    /// Events that replaced a still-waiting frame for the same row in the
+    /// overflow (ADR-0045). Counted separately from `capacity_sheds` on
+    /// purpose: a superseded frame is state the client still converges to, so
+    /// folding the two together would inflate the drop figure this project
+    /// uses as its honesty surface.
+    superseded: AtomicU64,
 }
 
 /// Fixed-capacity ring of delivered LSNs for intra-connection dedup.
@@ -125,20 +159,206 @@ impl DedupRing {
     }
 }
 
+/// A row identity — `(table, pk)` — borrowed from the event itself, so the
+/// overflow index costs an `Arc` refcount bump rather than two `String`
+/// clones. Only ever built on the overflow path, never on the fast path.
+#[derive(Clone)]
+struct RowKey(Arc<ReplicationEvent>);
+
+impl RowKey {
+    #[inline]
+    fn parts(&self) -> (&str, &str) {
+        (self.0.op.table(), self.0.op.pk())
+    }
+}
+
+impl Hash for RowKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let (table, pk) = self.parts();
+        table.hash(state);
+        pk.hash(state);
+    }
+}
+
+impl PartialEq for RowKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for RowKey {}
+
+/// What a successful overflow push did.
+#[derive(Debug, PartialEq, Eq)]
+enum Pushed {
+    /// A row not already waiting took a new slot.
+    Queued,
+    /// It replaced a still-waiting frame for the same row.
+    Superseded,
+}
+
+/// The per-session overflow: a conflating map that only fills once the main
+/// channel is full. Bounded by DISTINCT rows.
+struct Overflow {
+    /// Waiting events by LSN. `BTreeMap` so `pop_first` drains in ascending
+    /// LSN order without a separate sort; LSNs are unique per row change.
+    by_lsn: BTreeMap<u64, Arc<ReplicationEvent>>,
+    /// Row identity → the LSN of that row's waiting entry.
+    live: HashMap<RowKey, u64>,
+    /// Max distinct rows held before an event is genuinely shed.
+    capacity: usize,
+}
+
+impl Overflow {
+    fn push(&mut self, ev: Arc<ReplicationEvent>) -> Option<Pushed> {
+        let key = RowKey(Arc::clone(&ev));
+        let lsn = ev.lsn.raw();
+        if let Some(old) = self.live.get(&key).copied() {
+            // Move-to-tail: drop the stale frame, keep this row's latest. The
+            // map is keyed by LSN, so "tail" is automatic.
+            self.by_lsn.remove(&old);
+            self.live.insert(key, lsn);
+            self.by_lsn.insert(lsn, ev);
+            return Some(Pushed::Superseded);
+        }
+        if self.by_lsn.len() >= self.capacity {
+            return None;
+        }
+        self.live.insert(key, lsn);
+        self.by_lsn.insert(lsn, ev);
+        Some(Pushed::Queued)
+    }
+
+    fn pop(&mut self) -> Option<Arc<ReplicationEvent>> {
+        let (lsn, ev) = self.by_lsn.pop_first()?;
+        let key = RowKey(Arc::clone(&ev));
+        if self.live.get(&key) == Some(&lsn) {
+            self.live.remove(&key);
+        }
+        Some(ev)
+    }
+}
+
+/// Overflow plus a lock-free "is there anything in it" hint.
+struct OverflowShared {
+    map: Mutex<Overflow>,
+    /// Read by the receiver before taking the lock, so the common case (no
+    /// backlog, nothing waiting) costs one relaxed atomic load per drained
+    /// batch instead of a mutex acquisition.
+    ///
+    /// Cannot cause a lost wakeup: the overflow only becomes non-empty when
+    /// the channel is FULL, and a receiver never parks on a full channel.
+    non_empty: AtomicBool,
+}
+
+/// The overflow's critical sections are short map operations that leave no
+/// partial state, so a panic elsewhere while holding this lock leaves nothing
+/// to repair. Recover from poisoning rather than wedging the session.
+fn lock(m: &Mutex<Overflow>) -> MutexGuard<'_, Overflow> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Why [`SinkReceiver::try_recv`] came back empty. Mirrors
+/// `mpsc::error::TryRecvError` so the drain loops read the same.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TryRecvError {
+    Empty,
+    Disconnected,
+}
+
+/// The draining half of a [`TokioEventSink`]: the bounded channel plus the
+/// overflow behind it. API-compatible with `mpsc::Receiver<SinkMsg>` so the
+/// transport's batching loop did not change.
+pub struct SinkReceiver {
+    rx: mpsc::Receiver<SinkMsg>,
+    overflow: Arc<OverflowShared>,
+}
+
+impl SinkReceiver {
+    /// Await the next message. `None` once the sink is gone and both the
+    /// channel and the overflow are drained.
+    pub async fn recv(&mut self) -> Option<SinkMsg> {
+        loop {
+            match self.try_recv() {
+                Ok(msg) => return Some(msg),
+                Err(TryRecvError::Disconnected) => return None,
+                Err(TryRecvError::Empty) => {}
+            }
+            // Safe to park: the overflow was empty a moment ago, and it can
+            // only refill via a `try_send` that found the channel FULL —
+            // which this `recv` would return from immediately.
+            if let Some(msg) = self.rx.recv().await {
+                return Some(msg);
+            }
+            // Every sender is gone. Loop once more so the overflow drains
+            // before the stream is reported as ended.
+            if !self.overflow.non_empty.load(Ordering::Acquire) {
+                return None;
+            }
+        }
+    }
+
+    /// Take the next message if one is ready: channel first, then overflow.
+    ///
+    /// # Errors
+    /// [`TryRecvError::Empty`] if nothing is ready, [`TryRecvError::Disconnected`]
+    /// if the sink is gone too.
+    pub fn try_recv(&mut self) -> Result<SinkMsg, TryRecvError> {
+        match self.rx.try_recv() {
+            Ok(msg) => return Ok(msg),
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                return self.pop_overflow().ok_or(TryRecvError::Disconnected)
+            }
+        }
+        self.pop_overflow().ok_or(TryRecvError::Empty)
+    }
+
+    fn pop_overflow(&mut self) -> Option<SinkMsg> {
+        if !self.overflow.non_empty.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut map = lock(&self.overflow.map);
+        let ev = map.pop();
+        if map.by_lsn.is_empty() {
+            self.overflow.non_empty.store(false, Ordering::Release);
+        }
+        ev.map(SinkMsg::Event)
+    }
+}
+
 impl TokioEventSink {
     /// Create a sink and its draining receiver. `buffer` is the bounded depth.
     #[must_use]
-    pub fn channel(buffer: usize) -> (Self, mpsc::Receiver<SinkMsg>) {
-        let (tx, rx) = mpsc::channel(buffer.max(1));
+    pub fn channel(buffer: usize) -> (Self, SinkReceiver) {
+        let cap = buffer.max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        let overflow = Arc::new(OverflowShared {
+            map: Mutex::new(Overflow {
+                by_lsn: BTreeMap::new(),
+                live: HashMap::new(),
+                capacity: cap,
+            }),
+            non_empty: AtomicBool::new(false),
+        });
         let sink = Self {
             tx,
+            overflow: Arc::clone(&overflow),
             open: AtomicBool::new(true),
             acked_lsn: AtomicU64::new(0),
             delivered_lsn: AtomicU64::new(0),
             dedup: Mutex::new(DedupRing::new()),
             capacity_sheds: AtomicU64::new(0),
+            superseded: AtomicU64::new(0),
         };
-        (sink, rx)
+        (sink, SinkReceiver { rx, overflow })
+    }
+
+    /// Count of events that superseded a still-waiting frame for the same row
+    /// (ADR-0045). Never folded into [`Self::capacity_sheds`].
+    #[must_use]
+    pub fn superseded(&self) -> u64 {
+        self.superseded.load(Ordering::Relaxed)
     }
 
     /// Capacity-shed count for this sink (ADR-0040 continuity signal). The
@@ -288,7 +508,34 @@ impl EventSink for TokioEventSink {
                 self.delivered_lsn.fetch_max(lsn_raw, Ordering::Release);
                 DeliveryDecision::Delivered
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
+            // Backlogged. `Err(Full)` IS the signal — the success path above
+            // never has to ask. Fold the event into the conflating overflow;
+            // only shed once that is full of distinct rows.
+            Err(mpsc::error::TrySendError::Full(SinkMsg::Event(ev))) => {
+                let pushed = {
+                    let mut map = lock(&self.overflow.map);
+                    let p = map.push(ev);
+                    if p.is_some() {
+                        self.overflow.non_empty.store(true, Ordering::Release);
+                    }
+                    p
+                };
+                if let Some(p) = pushed {
+                    self.delivered_lsn.fetch_max(lsn_raw, Ordering::Release);
+                    if p == Pushed::Superseded {
+                        self.superseded.fetch_add(1, Ordering::Relaxed);
+                        DeliveryDecision::Superseded
+                    } else {
+                        DeliveryDecision::Delivered
+                    }
+                } else {
+                    self.capacity_sheds.fetch_add(1, Ordering::Relaxed);
+                    DeliveryDecision::Dropped
+                }
+            }
+            // A control frame can't conflate (no row identity) and its whole
+            // contract is ordering, so it keeps the pre-ADR-0045 behaviour.
+            Err(mpsc::error::TrySendError::Full(SinkMsg::Control(_))) => {
                 self.capacity_sheds.fetch_add(1, Ordering::Relaxed);
                 DeliveryDecision::Dropped
             }
@@ -336,27 +583,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivers_until_buffer_full_then_drops() {
-        // buffer depth 2 → 3rd send must drop.
+    async fn delivers_until_channel_and_overflow_are_full_then_drops() {
+        // Depth 2 → the channel takes 2 and the ADR-0045 overflow takes 2 more
+        // DISTINCT rows (`ev` varies the pk with the lsn, so none conflate).
+        // The 5th is the first genuine shed.
         let (sink, mut rx) = TokioEventSink::channel(2);
+        for lsn in 1..=4 {
+            assert_eq!(
+                sink.deliver(Arc::new(ev(lsn))).await,
+                DeliveryDecision::Delivered,
+                "lsn {lsn} should still find room"
+            );
+        }
         assert_eq!(
-            sink.deliver(Arc::new(ev(1))).await,
-            DeliveryDecision::Delivered
-        );
-        assert_eq!(
-            sink.deliver(Arc::new(ev(2))).await,
-            DeliveryDecision::Delivered
-        );
-        // Buffer full now.
-        assert_eq!(
-            sink.deliver(Arc::new(ev(3))).await,
+            sink.deliver(Arc::new(ev(5))).await,
             DeliveryDecision::Dropped
         );
+        assert_eq!(sink.capacity_sheds(), 1);
+        assert_eq!(sink.superseded(), 0, "distinct rows never conflate");
 
         // Drain one → next send succeeds again.
         rx.recv().await.unwrap();
         assert_eq!(
-            sink.deliver(Arc::new(ev(4))).await,
+            sink.deliver(Arc::new(ev(6))).await,
             DeliveryDecision::Delivered
         );
     }
@@ -562,5 +811,203 @@ mod tests {
         assert_eq!(EventSink::last_delivered_lsn(&sink), None);
         sink.deliver(Arc::new(ev(7))).await;
         assert_eq!(EventSink::last_delivered_lsn(&sink), Some(Lsn::new(7)));
+    }
+
+    // ---- ADR-0045: overflow conflation ----
+
+    /// An event for a specific row, so tests can push the SAME row twice
+    /// (`ev` above varies the pk with the lsn).
+    fn row(lsn: u64, pk: &str) -> Arc<ReplicationEvent> {
+        Arc::new(ReplicationEvent::new(
+            Lsn::new(lsn),
+            RowOp::Update {
+                table: "t".into(),
+                pk: pk.into(),
+                payload: Bytes::from_static(b"x"),
+            },
+        ))
+    }
+
+    fn drain(rx: &mut SinkReceiver) -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                SinkMsg::Event(e) => out.push((e.op.pk().to_string(), e.lsn.raw())),
+                SinkMsg::Control(_) => out.push(("<control>".into(), 0)),
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn fast_path_never_touches_the_overflow() {
+        // The whole point of the redesign: a delivery that fits does exactly
+        // what it did before ADR-0045.
+        let (sink, mut rx) = TokioEventSink::channel(8);
+        for lsn in 1..=8 {
+            assert_eq!(
+                sink.deliver(row(lsn, "a")).await,
+                DeliveryDecision::Delivered
+            );
+        }
+        assert!(!sink.overflow.non_empty.load(Ordering::Acquire));
+        assert_eq!(sink.superseded(), 0);
+        assert_eq!(
+            drain(&mut rx).len(),
+            8,
+            "no conflation below the channel cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_conflates_a_backlogged_row_instead_of_shedding() {
+        // Channel of 1, then five updates to ONE row. Pre-ADR-0045 that was
+        // four sheds; now it is four supersedes and zero loss.
+        let (sink, mut rx) = TokioEventSink::channel(1);
+        assert_eq!(sink.deliver(row(1, "a")).await, DeliveryDecision::Delivered);
+        assert_eq!(
+            sink.deliver(row(2, "b")).await,
+            DeliveryDecision::Delivered,
+            "b's first frame QUEUES — there is nothing yet to supersede"
+        );
+        for lsn in 3..=6 {
+            assert_eq!(
+                sink.deliver(row(lsn, "b")).await,
+                DeliveryDecision::Superseded,
+                "every later b replaces the waiting one, and says so"
+            );
+        }
+        assert_eq!(sink.capacity_sheds(), 0, "nothing was lost");
+        assert_eq!(sink.superseded(), 4, "four replaced a waiting frame");
+        assert_eq!(
+            drain(&mut rx),
+            vec![("a".to_string(), 1), ("b".to_string(), 6)],
+            "channel first, then the row's LATEST value"
+        );
+    }
+
+    /// ADR-0045's actual claim, measured: while the pending DISTINCT keys fit
+    /// the overflow, conflation holds every key's latest value no matter how
+    /// many events arrive — and a plain bounded channel of the SAME total
+    /// depth loses the latest value for every key.
+    ///
+    /// This is **convergence lag** (discrete Age of Information), and it is the
+    /// right instrument because `drop_rate` counts frames while conflation's
+    /// benefit is not a frame-count benefit: superseding 99 intermediate values
+    /// costs a client nothing, losing the 100th costs it everything. The
+    /// drop-rate ladder could never have scored this change at any scale, on
+    /// any host. See docs/plans/measuring-conflation-honestly.md.
+    #[tokio::test]
+    async fn conflation_holds_convergence_lag_at_zero_where_a_plain_channel_loses_every_key() {
+        const CAP: usize = 8; // channel 8 + overflow 8 = 16 slots
+        const KEYS: usize = 8; // <= overflow capacity: the regime ADR-0045 bounds
+        const ROUNDS: usize = 100; // 800 events into 16 slots, nothing draining
+
+        let keys: Vec<String> = (0..KEYS).map(|k| k.to_string()).collect();
+        let mut latest: HashMap<String, u64> = HashMap::new();
+        let mut feed = Vec::new();
+        for round in 0..ROUNDS {
+            for (i, k) in keys.iter().enumerate() {
+                let lsn = u64::try_from(round * KEYS + i + 1).expect("fits");
+                latest.insert(k.clone(), lsn);
+                feed.push(row(lsn, k));
+            }
+        }
+
+        // --- the conflating sink, with nothing draining it until the end ---
+        let (sink, mut rx) = TokioEventSink::channel(CAP);
+        for e in &feed {
+            sink.deliver(Arc::clone(e)).await;
+        }
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        for (pk, lsn) in drain(&mut rx) {
+            let slot = seen.entry(pk).or_default();
+            *slot = (*slot).max(lsn);
+        }
+        assert_eq!(seen.len(), KEYS, "every key is still represented");
+        for (k, want) in &latest {
+            assert_eq!(
+                seen.get(k),
+                Some(want),
+                "key {k} must converge to its latest value"
+            );
+        }
+        assert_eq!(sink.capacity_sheds(), 0, "distinct keys fit: nothing shed");
+
+        // --- drop-on-full, same memory budget: the pre-ADR-0045 contract ---
+        let (tx, mut plain_rx) = mpsc::channel::<Arc<ReplicationEvent>>(CAP * 2);
+        for e in &feed {
+            let _ = tx.try_send(Arc::clone(e));
+        }
+        drop(tx);
+        let mut plain: HashMap<String, u64> = HashMap::new();
+        while let Ok(e) = plain_rx.try_recv() {
+            let slot = plain.entry(e.op.pk().to_string()).or_default();
+            *slot = (*slot).max(e.lsn.raw());
+        }
+        let stale = latest
+            .iter()
+            .filter(|(k, v)| plain.get(*k) != Some(*v))
+            .count();
+        assert_eq!(
+            stale, KEYS,
+            "same memory, drop-on-full: every key is left holding a stale value"
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_still_sheds_when_full_of_distinct_rows() {
+        // Conflation bounds pending DISTINCT rows; it is not unbounded memory.
+        let (sink, mut rx) = TokioEventSink::channel(1);
+        sink.deliver(row(1, "a")).await; // fills the channel
+        assert_eq!(sink.deliver(row(2, "b")).await, DeliveryDecision::Delivered); // overflow
+        assert_eq!(sink.deliver(row(3, "c")).await, DeliveryDecision::Dropped); // overflow full
+        assert_eq!(sink.capacity_sheds(), 1, "the shed is the resync trigger");
+        assert_eq!(drain(&mut rx).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn overflow_drains_after_the_channel_in_ascending_lsn() {
+        let (sink, mut rx) = TokioEventSink::channel(2);
+        sink.deliver(row(10, "a")).await;
+        sink.deliver(row(11, "b")).await; // channel now full
+        sink.deliver(row(12, "c")).await; // overflow
+        sink.deliver(row(13, "d")).await; // overflow
+        let got = drain(&mut rx);
+        assert_eq!(
+            got.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+            vec![10, 11, 12, 13]
+        );
+    }
+
+    #[tokio::test]
+    async fn recv_returns_overflow_before_parking() {
+        // The lost-wakeup case: everything in the channel is drained and the
+        // remaining work is in the overflow. `recv()` must not park on it.
+        let (sink, mut rx) = TokioEventSink::channel(1);
+        sink.deliver(row(1, "a")).await;
+        sink.deliver(row(2, "b")).await; // overflow
+        assert!(matches!(rx.recv().await, Some(SinkMsg::Event(_))));
+        let second = rx.recv().await.expect("overflow must not park");
+        let SinkMsg::Event(e) = second else {
+            panic!("expected an event")
+        };
+        assert_eq!(e.lsn.raw(), 2);
+    }
+
+    #[tokio::test]
+    async fn recv_does_not_swallow_the_message_it_parked_for() {
+        // Regression: `recv()` used to await a message and then DISCARD it
+        // before re-consulting the channel, losing ~86% of deliveries. The
+        // other unit tests never parked, so only the benchmark caught it.
+        let (sink, mut rx) = TokioEventSink::channel(4);
+        let handle = tokio::spawn(async move { rx.recv().await });
+        tokio::task::yield_now().await;
+        sink.deliver(row(42, "a")).await;
+        let got = handle.await.unwrap().expect("parked recv must yield it");
+        let SinkMsg::Event(e) = got else {
+            panic!("expected an event")
+        };
+        assert_eq!(e.lsn.raw(), 42, "the awaited message must be returned");
     }
 }

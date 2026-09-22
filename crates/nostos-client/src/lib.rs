@@ -15,6 +15,13 @@
 //! - [`client::SyncClient`] — the tokio orchestrator: subscribe with the durable
 //!   `resume_lsn`, drive the apply engine, `Ack` each commit, reconnect with
 //!   backoff.
+//! - [`doorbell::listen`] — direct mode's wake-up: a Supabase Realtime private
+//!   channel whose every message means "call `rpc/pull`". Contentless on
+//!   purpose (ADR-0037).
+//! - [`postgrest::PostgrestSource`] — direct mode's change source: `rpc/pull`
+//!   against the client's own Postgres, no Nostos server in the path
+//!   (`docs/plans/direct-mode-sync-protocol.md`). The decode/group/advance
+//!   logic it drives is in `nostos-core` so the browser Worker reuses it.
 //!
 //! ## What's NOT here (ponytail — deferred)
 //!
@@ -25,15 +32,19 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod doorbell;
 /// `#[cfg(feature = "iroh")]` — ADR-0041 spike: dial-by-scheme for
 /// `iroh://` sync URLs (WebSocket handshake over an iroh bidirectional
 /// stream; the session loop is unchanged).
 #[cfg(feature = "iroh")]
 pub mod iroh_dial;
+pub mod postgrest;
 pub mod sqlite;
 
 pub use client::{
     ClientError, SessionOutcome, StreamDecl, StreamHandle, StreamSubscription, SyncClient,
     SyncClientConfig, TableSub, WriteQueueStatus,
 };
+pub use doorbell::{listen, DoorbellConfig, DoorbellError, Inbound};
+pub use postgrest::{DrainOutcome, PostgrestError, PostgrestSource, MAX_PAGES_PER_DRAIN};
 pub use sqlite::SqliteStorage;

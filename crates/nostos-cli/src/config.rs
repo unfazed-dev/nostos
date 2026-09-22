@@ -225,12 +225,32 @@ pub enum Backend {
     },
 }
 
+/// How the app syncs (`docs/plans/direct-mode-sync-protocol.md`). `server` is
+/// the historical shape: a nostos-server holds the replication slot and fans
+/// out over `/sync`. `direct` removes the server entirely — the device pulls
+/// from the client's own Postgres through PostgREST and is woken by a Realtime
+/// broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkMode {
+    /// Sync through a nostos-server WebSocket. The default, so an existing
+    /// `config.json` written before direct mode existed still parses.
+    #[default]
+    Server,
+    /// Sync straight from Postgres. No Nostos server in the path.
+    Direct,
+}
+
 /// `.nostos/config.json` — the app-side project config `nostos link` writes and
 /// `nostos gen` / `nostos pull` read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     /// Human project name (informational).
     pub project: String,
+    /// Server mode or direct mode. Absent in files written before direct mode
+    /// shipped, which `serde(default)` reads as `server` — the old behaviour.
+    #[serde(default)]
+    pub mode: LinkMode,
     /// The nostos-server `/sync` WebSocket URL (`ws://` or `wss://`).
     pub sync_url: String,
     /// Backend preset (ADR-0023 D4). `None` = plain Postgres.
@@ -398,6 +418,7 @@ mod project_config_tests {
 
     fn supabase_cfg() -> ProjectConfig {
         ProjectConfig {
+            mode: LinkMode::default(),
             project: "demo".into(),
             sync_url: "wss://nostos.example.com/sync".into(),
             backend: Some(Backend::Supabase {
@@ -425,6 +446,7 @@ mod project_config_tests {
     fn http_base_translates_scheme_and_strips_path() {
         assert_eq!(supabase_cfg().http_base(), "https://nostos.example.com");
         let pg = ProjectConfig {
+            mode: LinkMode::default(),
             project: "p".into(),
             sync_url: "ws://127.0.0.1:8800/sync".into(),
             backend: None,
