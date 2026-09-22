@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nostos conformance — browser Worker leg</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+  </head>
+  <body>
+    <h1>nostos_core::conformance in a Worker</h1>
+    <p id="status">spawning worker…</p>
+    <!--
+      The third platform leg of the direct-mode conformance suite. The same
+      four cases run on `InMemoryStorage` (nostos-core), on rusqlite
+      (nostos-client) and — here — on the Worker's OPFS-backed SQLite-WASM
+      store, because a property proved on one Storage implementation is not
+      proved on another.
+
+      This page spawns the SHIPPING worker, not a bespoke harness: whatever
+      backend it boots with is the backend the cases run against, and the
+      reply says which one it was.
+    -->
+    <script type="module">
+      const log = (m) => console.log("[conformance] " + m);
+      const worker = new Worker("/worker/nostos.worker.js", { type: "module" });
+      const seen = { storage: null, cases: null, error: null };
+
+      worker.onmessage = (ev) => {
+        const d = ev.data || {};
+        if (d.type === "storage") {
+          seen.storage = d;
+          log("STORAGE mode=" + d.mode + " reason=" + (d.reason ?? "-"));
+          // Only now is dbHandle settled, so the cases run on the real backend
+          // rather than racing OPFS init into the memory fallback.
+          worker.postMessage({ id: 1, cmd: "conformance" });
+          return;
+        }
+        if (d.id !== 1) return;
+        if (d.error) {
+          seen.error = d.error;
+          log("FAILED " + d.error);
+        } else {
+          seen.cases = d.ok;
+          seen.mode = d.storageMode;
+          log("COVERED " + d.ok.length + " on " + d.storageMode + ": " + d.ok.join(","));
+        }
+      };
+      worker.onerror = (e) => {
+        seen.error = String((e && e.message) || e);
+        log("WORKER_ERROR " + seen.error);
+      };
+
+      window.__seen = seen;
+      document.getElementById("status").textContent = "awaiting storage mode…";
+    </script>
+  </body>
+</html>

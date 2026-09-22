@@ -116,6 +116,29 @@ pg-e2e: ## Real-Postgres e2e suite; drops leaked inactive e2e_* slots first.
 # mis-scoping) it. e2e_pg_direct_sql owns the `cairn` schema, hence -threads=1.
 	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-cli --no-fail-fast -- --test-threads=1
 
+.PHONY: supabase-e2e
+supabase-e2e: ## Direct mode against a REAL Supabase stack (needs `supabase start` in $$SB_DIR).
+# The pg e2e above stubs `auth`, `realtime` and `net`, so everything
+# Supabase-specific is unproven there: how PostgREST renders xid8, whether
+# PT410 becomes a 410, whether the realtime.messages policy actually refuses
+# the wrong tenant, whether the Edge Function can read the token registry.
+# Every bug this has found lived in one of those. SB_DIR defaults to a sibling
+# `supabase/` project dir; override it.
+	@test -n "$$SB_DIR" || { echo "set SB_DIR to a supabase project dir (one with config.toml)"; exit 2; }
+	cd $$SB_DIR && supabase status -o json > /dev/null || { echo "run \`supabase start\` in $$SB_DIR first"; exit 2; }
+	NOSTOS_SB_ANON_KEY=$$(cd $$SB_DIR && supabase status -o json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).ANON_KEY))") \
+	NOSTOS_SB_SERVICE_KEY=$$(cd $$SB_DIR && supabase status -o json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).SERVICE_ROLE_KEY))") \
+	node scripts/e2e-supabase-direct.mjs
+
+.PHONY: web-conformance
+web-conformance: ## The browser-Worker leg of nostos_core::conformance (OPFS, headless Chromium).
+# Built WITH the off-by-default `conformance` feature: the cases must never
+# ship in an app's .wasm (ADR-0015's size budget), so the shipping bundle is
+# rebuilt straight after.
+	wasm-pack build crates/nostos-ffi-wasm --target web --out-dir pkg-web --features conformance
+	cd sdk/nostos_web && npx playwright test e2e/conformance.spec.cjs --reporter=line
+	wasm-pack build crates/nostos-ffi-wasm --target web --out-dir pkg-web
+
 # dev-stack: real-Postgres quickstart — compose up, wait for the publication,
 # then run nostos-server against it with PgReplicator. The readiness poll gates
 # on `cairn_pub` existing (not just `pg_isready`): during first init the

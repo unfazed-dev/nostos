@@ -1,8 +1,9 @@
 # Direct mode — the sync protocol, and how the device gets transactional consistency
 
 **Date:** 2026-09-22. **Status:** all nine steps implemented and under
-`make ci`; step 8's browser-Worker leg is the one gap. Grounded in fetched docs
-throughout.
+`make ci`, and the whole protocol now runs against a REAL Supabase stack —
+PostgREST, Realtime, GoTrue and the Edge Runtime, not stubs. Grounded in
+fetched docs throughout.
 
 Shipped: `nostos_core::pull` (`PullCursor`, `Horizon`, the xid8 checkpoint on
 `Storage`), `nostos_client::postgrest` (`rpc/cairn_pull` + the four write ops),
@@ -16,10 +17,17 @@ applies the generated file to a real Postgres and asserts the properties that
 cannot be tested in Rust: an in-flight transaction hides every later commit,
 a page never splits a transaction, RLS scopes the log to the caller's claims,
 `cairn_increment` is atomic, and a row that changes owner is logged as a delete
-under the old scope. It runs under `make pg-e2e`. What is still unverified is
-everything Supabase-specific — `auth`/`realtime` are stubbed there, so the
-Realtime policy, the "Allow public access" setting, and what PostgREST emits
-for `xid8` remain W0 checks against a live project.
+under the old scope. It runs under `make pg-e2e`.
+
+**And the Supabase-specific half is no longer theory either.**
+`scripts/e2e-supabase-direct.mjs` drives the same generated SQL through a real
+Supabase stack (`supabase start`) — 30 checks, green — and settles the W0 list:
+PostgREST emits `xid8` as a JSON **string** (a `number` would round the cursor
+past 2^53), `raise sqlstate 'PT410'` really does arrive as HTTP 410 with
+`code: "PT410"`, `auth.jwt()` inside `cairn.current_scopes()` sees real GoTrue
+claims, and the generated policy on `realtime.messages` both delivers the ring
+to its own tenant and refuses another one by name. It found four bugs no amount
+of reasoning had — see "What the live stack found" below.
 **Companion to:** `nostos-on-device-no-always-on-server.md` (*why* direct mode).
 **Supersedes:** this file's first draft (per-table `updated_at` watermarks),
 which conceded that cross-table transactional consistency was impossible
@@ -583,6 +591,61 @@ splits into two jobs — Realtime Presence for the user-visible kind, a
 
 See `docs/plans/direct-mode-push-and-presence.md` for the ladder, the limits,
 and the verification plan.
+
+## What the live stack found
+
+Four bugs, none of which the Rust e2e could see, because each one lives in a
+Supabase behaviour that a stub gets right by construction. Run it with
+`node scripts/e2e-supabase-direct.mjs` against `supabase start`.
+
+**1. `revoke … from public` does not revoke anything on Supabase.** The
+generated SQL revoked EXECUTE from the PUBLIC pseudo-role before granting
+narrowly, and the comment claimed that stopped the anon key. It does not:
+Supabase's DEFAULT PRIVILEGES grant EXECUTE to `anon`, `authenticated` and
+`service_role` **by name** at creation time, and revoking from PUBLIC leaves a
+grant made to a named role standing. Every generated function came out with
+`anon=X`. For the `security invoker` ones that was only defence in depth — the
+table grants still refused the anon key — but the push RPCs are `security
+definer`, so it was an anonymous caller registering a push token under the
+`public` scope. The revokes now name the roles. `nostos doctor --mode direct`
+already asserted "anon may NOT execute public.cairn_pull"; it had simply never
+been pointed at a project where default privileges apply.
+
+**2. The Edge Function could never read the token registry.** It used
+`createClient(..., { db: { schema: "cairn" } })`, and `nostos` is deliberately
+not an exposed schema — the same decision that moved `cairn_pull` into
+`public`. Every call returned `500 Invalid schema: cairn`, which reaches
+nobody: the push is dropped, `pg_net` records the response in a table the
+operator never looks at, and the device just never wakes. Fixed with
+`public.cairn_push_targets(p_scope)`, `security definer`, granted to
+`service_role` only, with a doctor check for its absence.
+
+**3. `SqliteWasmStorage` never persisted the direct-mode horizon.**
+`Storage::horizon` has a default of `Ok(None)`, which means "fresh database",
+so the browser client re-pulled the entire retained change log on every launch
+— silently, forever. Found the first time the conformance suite ran on OPFS,
+which is exactly why the third leg exists: rusqlite overrode it, in-memory
+overrode it, and a property proved on those two is not proved on this one.
+
+**4. A write is not necessarily visible to the very next pull.** The horizon is
+`pg_snapshot_xmin`, so a just-committed row stays hidden while ANY older
+transaction is still open — and on a Supabase stack `pg_net`'s own queue worker
+opens one on a timer. This is the design working, not a bug, but it is a
+contract the client has to honour: pull again. The harness polls; `nostos doctor`
+reports the same thing as "horizon lag".
+
+Two things remain notes rather than checks, because no assertion can settle
+them:
+
+- **"Allow public access" is a dashboard switch.** The policy on
+  `realtime.messages` governs PRIVATE channels only. With public access left
+  on — which is the default, and what a local stack ships with — the wrong
+  tenant joins the same topic by simply not asking for a private one and no
+  policy is ever consulted. Verified: the refused tenant is refused with
+  `private: true` and admitted with `private: false`.
+- **FCM delivery itself is unexercised.** Everything up to the
+  `messages:send` call is proven; the call needs a service account.
+
 
 ## Sources (fetched 2026-09-22)
 

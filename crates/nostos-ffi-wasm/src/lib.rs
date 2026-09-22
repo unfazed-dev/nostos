@@ -106,6 +106,21 @@ impl Storage for WebStorage {
             WebStorage::SqliteWasm(s) => s.save_epoch(epoch),
         }
     }
+    /// Direct mode's resume point. Delegated rather than defaulted: the
+    /// trait's `Ok(None)` means "fresh database", so a missing arm here is a
+    /// client that re-pulls the whole retained log on every launch.
+    fn horizon(&self) -> nostos_core::Result<Option<String>> {
+        match self {
+            WebStorage::Memory(s) => s.horizon(),
+            WebStorage::SqliteWasm(s) => s.horizon(),
+        }
+    }
+    fn save_horizon(&mut self, horizon: &str) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.save_horizon(horizon),
+            WebStorage::SqliteWasm(s) => s.save_horizon(horizon),
+        }
+    }
     fn apply_batch(
         &mut self,
         ops: &[(RowOp, u64)],
@@ -209,6 +224,50 @@ impl Outbox for WebStorage {
             WebStorage::SqliteWasm(s) => Outbox::clear(s),
         }
     }
+}
+
+/// Run the direct-mode conformance suite against THIS platform's storage.
+///
+/// The suite lives in `nostos_core::conformance` because a property proved on
+/// rusqlite is not proved on OPFS: the browser leg is a different `Storage`
+/// implementation with its own transaction boundaries, and the four cases are
+/// exactly the ones whose failure is invisible (a half-applied transaction, a
+/// double-applied echo, a horizon ahead of its rows, a stale horizon after a
+/// re-snapshot). Pass the Worker's sqlite-wasm db handle to run against OPFS;
+/// pass nothing to run against `InMemoryStorage`.
+///
+/// Returns the case names it covered. A failing case PANICS, which reaches JS
+/// as a `RuntimeError` naming the case — there is no `catch_unwind` in wasm,
+/// and a suite that reported failures as values could be ignored by a caller
+/// that forgot to look.
+///
+/// Behind the off-by-default `conformance` feature: ADR-0015 puts a hard size
+/// budget on the `.wasm`, and test cases have no business in the bundle an app
+/// ships. Build the test bundle with
+/// `wasm-pack build crates/nostos-ffi-wasm --target web --features conformance`.
+#[cfg(feature = "conformance")]
+#[wasm_bindgen(js_name = nostosConformance)]
+pub fn nostos_conformance(db: Option<js_sys::Object>) -> js_sys::Array {
+    // Otherwise a failing case arrives in JS as `RuntimeError: unreachable`,
+    // which names nothing. With the hook the assert text and the case name go
+    // to console.error before the trap.
+    console_error_panic_hook::set_once();
+    nostos_core::conformance::run_all(|| match db.as_ref() {
+        // Each case wants a FRESH store. `Storage::clear` resets the
+        // checkpoint to 0 as well as dropping the rows, which is what "fresh"
+        // has to mean here — a surviving checkpoint would make the next case
+        // resume instead of snapshot.
+        Some(handle) => {
+            let mut s = SqliteWasmStorage::new(handle.clone());
+            let _ = Storage::clear(&mut s);
+            let _ = Outbox::clear(&mut s);
+            WebStorage::SqliteWasm(s)
+        }
+        None => WebStorage::Memory(InMemoryStorage::default()),
+    })
+    .into_iter()
+    .map(JsValue::from)
+    .collect()
 }
 
 impl WebStorage {

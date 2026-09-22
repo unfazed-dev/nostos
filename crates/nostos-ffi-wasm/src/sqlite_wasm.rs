@@ -445,6 +445,34 @@ impl Storage for SqliteWasmStorage {
             .unwrap_or(0))
     }
 
+    /// The direct-mode `xid8` horizon, mirroring native `SqliteStorage`
+    /// (sqlite.rs L626) down to the `cairn_meta` key.
+    ///
+    /// Overriding this is NOT optional even though the trait has a default:
+    /// `Ok(None)` means "fresh database", so a browser client would re-pull
+    /// the entire retained change log on every single launch and never say
+    /// why. The default is the honest degrade for a backend that has no
+    /// durable store; this one does. (Caught by the browser leg of
+    /// `nostos_core::conformance` — the Rust legs could not see it.)
+    fn horizon(&self) -> nostos_core::Result<Option<String>> {
+        Ok(self.select_value_str("SELECT value FROM cairn_meta WHERE key = 'horizon'", None))
+    }
+
+    /// Persist the horizon. Called after the batch it covers has committed, so
+    /// a crash in the window leaves the horizon behind the rows and the next
+    /// pull re-applies them idempotently.
+    fn save_horizon(&mut self, horizon: &str) -> nostos_core::Result<()> {
+        let bind = js_sys::Array::new();
+        bind.push(&JsValue::from_str(horizon));
+        bind.push(&JsValue::from_str(horizon));
+        self.exec(
+            "INSERT INTO cairn_meta (key, value) VALUES ('horizon', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = ?2",
+            Some(&bind),
+        )?;
+        Ok(())
+    }
+
     fn save_epoch(&self, epoch: u64) -> nostos_core::Result<()> {
         // INSERT OR IGNORE ensures the key exists, then UPDATE sets the value.
         let bind = js_sys::Array::new();
@@ -545,6 +573,10 @@ impl Storage for SqliteWasmStorage {
         //   UPDATE cairn_meta SET value='0' WHERE key='checkpoint';
         // The checkpoint → 0 is load-bearing (resume-without-snapshot guard).
         self.call_void("clearAll", &[])?;
+        // ...and so is dropping the horizon: `clearAll` predates direct mode
+        // and only knows about the LSN checkpoint. A surviving horizon would
+        // make the next principal resume a log they have no rows from.
+        self.exec("DELETE FROM cairn_meta WHERE key = 'horizon'", None)?;
         Ok(())
     }
 

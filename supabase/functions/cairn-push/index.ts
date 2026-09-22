@@ -35,15 +35,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response("missing scope", { status: 400 });
   }
 
+  // Read the registry through `public.cairn_push_targets`, NOT through
+  // `cairn.push_tokens`. The `cairn` schema is deliberately not exposed to the
+  // Data API — Supabase exposes `public, graphql_public` and nothing else — so
+  // `{ db: { schema: "cairn" } }` here fails with `500 Invalid schema: cairn`
+  // and no notification is ever sent. Found against a real Supabase stack.
   const db = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    { db: { schema: "cairn" } },
   );
-  const { data: tokens, error } = await db
-    .from("push_tokens")
-    .select("platform, token")
-    .eq("scope", scope);
+  const { data: tokens, error } = await db.rpc("cairn_push_targets", {
+    p_scope: scope,
+  });
   if (error) return new Response(error.message, { status: 500 });
   if (!tokens?.length) return new Response("no tokens", { status: 200 });
 

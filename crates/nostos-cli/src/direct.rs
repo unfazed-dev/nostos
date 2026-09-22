@@ -639,8 +639,18 @@ grant execute on function cairn.current_scopes() to authenticated;
 
 -- Postgres grants EXECUTE to PUBLIC on every new function, which would hand the
 -- whole change log to the anon key. Revoke first, then grant narrowly.
-revoke all on function public.cairn_pull(xid8, int) from public;
-revoke all on function public.cairn_increment(text, text, text, numeric) from public;
+--
+-- `from public` alone is NOT enough on Supabase, and this is the kind of thing
+-- only a real project shows you: the platform's DEFAULT PRIVILEGES grant
+-- EXECUTE to `anon`, `authenticated` and `service_role` BY NAME at creation
+-- time, and revoking from the PUBLIC pseudo-role does not touch a grant made to
+-- a named role. Every function here came out with `anon=X` until the roles were
+-- named. For a `security invoker` function that is only defence in depth (the
+-- table grants still hold the line); a `security definer` one bypasses those,
+-- so naming the roles is what actually closes it.
+revoke all on function public.cairn_pull(xid8, int) from public, anon, authenticated;
+revoke all on function public.cairn_increment(text, text, text, numeric)
+  from public, anon, authenticated;
 grant execute on function public.cairn_pull(xid8, int) to authenticated;
 grant execute on function public.cairn_increment(text, text, text, numeric) to authenticated;
 "#,
@@ -777,6 +787,20 @@ begin
 end;
 $fn$;
 
+-- How the Edge Function reads the registry -- and the reason it is a function
+-- rather than a select on cairn.push_tokens. `nostos` is deliberately not an
+-- exposed schema (the same decision that put cairn_pull in `public`), so a
+-- service-role client pointed at it gets `500 Invalid schema: cairn` and no
+-- push is ever sent. Caught against a real Supabase stack, not by reasoning.
+--
+-- security definer to reach the unexposed table; granted to `service_role`
+-- ONLY, so the anon and authenticated keys cannot enumerate anybody's tokens.
+create or replace function public.cairn_push_targets(p_scope text)
+returns table (platform text, token text)
+language sql stable security definer set search_path = '' as $fn$
+  select t.platform, t.token from cairn.push_tokens t where t.scope = p_scope;
+$fn$;
+
 -- "I am awake." Cheap enough to send on every foreground and every pull.
 create or replace function public.cairn_heartbeat(p_device_id text)
 returns void language plpgsql security definer set search_path = '' as $fn$
@@ -844,12 +868,21 @@ create trigger cairn_changes_wake
 -- Devices talk to all of this through the three functions above and nothing
 -- else: no direct table access, so there is no policy to get wrong and no way
 -- to enumerate another tenant's tokens.
-revoke all on function public.cairn_register_push_token(text, text) from public;
-revoke all on function public.cairn_deregister_push_token(text) from public;
-revoke all on function public.cairn_heartbeat(text) from public;
+-- Named roles, not just PUBLIC -- see the revoke block above. These are
+-- `security definer`, so a leftover `anon=X` is not defence in depth: it is an
+-- anonymous caller registering a push token under the `public` scope, or
+-- reading another tenant's tokens outright.
+revoke all on function public.cairn_register_push_token(text, text)
+  from public, anon, authenticated;
+revoke all on function public.cairn_deregister_push_token(text)
+  from public, anon, authenticated;
+revoke all on function public.cairn_heartbeat(text) from public, anon, authenticated;
+revoke all on function public.cairn_push_targets(text) from public, anon, authenticated;
 grant execute on function public.cairn_register_push_token(text, text) to authenticated;
 grant execute on function public.cairn_deregister_push_token(text) to authenticated;
 grant execute on function public.cairn_heartbeat(text) to authenticated;
+-- Not `authenticated`: the registry is the Edge Function's business only.
+grant execute on function public.cairn_push_targets(text) to service_role;
 alter table cairn.push_tokens     enable row level security;
 alter table cairn.device_presence enable row level security;
 alter table cairn.push_cooldown   enable row level security;
@@ -1238,6 +1271,69 @@ pub async fn inspect(
                     .to_string()
             },
         ));
+        // The push RPCs are `security definer`, so a stray EXECUTE grant is
+        // not defence in depth -- it bypasses every table grant and policy.
+        // Supabase hands `anon` EXECUTE on new public functions by default
+        // privileges, and `revoke ... from public` does not take it away, so
+        // this really does fire on a project that was set up by hand.
+        for (proname, args) in [
+            ("cairn_register_push_token", "text, text"),
+            ("cairn_deregister_push_token", "text"),
+            ("cairn_heartbeat", "text"),
+            ("cairn_push_targets", "text"),
+        ] {
+            let signature = format!("public.{proname}({args})");
+            let leaked: bool = client
+                .query_one(
+                    "select coalesce((select has_function_privilege('anon', $1, 'execute') \
+                     from pg_roles where rolname = 'anon'), false)",
+                    &[&signature],
+                )
+                .await?
+                .get(0);
+            if leaked {
+                out.push(Check::new(
+                    false,
+                    format!(
+                        "anon may execute {signature} \u{2014} it is security definer, so \
+                         this is a hole, not defence in depth. Re-run `nostos link --mode \
+                         direct --push` and re-apply."
+                    ),
+                ));
+            }
+        }
+
+        // The check that catches a silently dead push path: the Edge Function
+        // runs with the service role and must reach `cairn.push_tokens`, but
+        // `nostos` is not an exposed schema. A function that reads the table
+        // through the Data API gets `Invalid schema: cairn` and drops every
+        // notification with no error anywhere the operator will look.
+        let (targets_rpc, service_may_call): (bool, bool) = {
+            let r = client
+                .query_one(
+                    "select to_regprocedure('public.cairn_push_targets(text)') is not null, \
+                            coalesce(has_function_privilege('service_role', \
+                              'public.cairn_push_targets(text)', 'execute'), false)",
+                    &[],
+                )
+                .await?;
+            (r.get(0), r.get(1))
+        };
+        out.push(Check::new(
+            targets_rpc && service_may_call,
+            if targets_rpc {
+                "the Edge Function can read the token registry (service_role may execute \
+                 public.cairn_push_targets)"
+                    .to_string()
+            } else {
+                "public.cairn_push_targets is MISSING \u{2014} the Edge Function would have \
+                 to read the unexposed `cairn` schema, which fails with `Invalid schema: \
+                 nostos` and drops every notification. Re-run `nostos link --mode direct \
+                 --push`."
+                    .to_string()
+            },
+        ));
+
         let (tokens, awake): (i64, i64) = {
             let r = client
                 .query_one(
@@ -1493,7 +1589,19 @@ mod tests {
             sql.contains("'public'\n  ], null);"),
             "public scope element"
         );
-        assert!(sql.contains("revoke all on function public.cairn_pull(xid8, int) from public;"));
+        // Naming the roles is load-bearing, not stylistic: Supabase's default
+        // privileges grant EXECUTE to `anon` BY NAME, and revoking from the
+        // PUBLIC pseudo-role leaves that grant standing.
+        assert!(sql.contains(
+            "revoke all on function public.cairn_pull(xid8, int) from public, anon, authenticated;"
+        ));
+        for line in sql.lines().filter(|l| l.starts_with("revoke all on function")) {
+            let whole = line.trim_end();
+            assert!(
+                whole.contains("from public, anon, authenticated") || whole.ends_with(')'),
+                "a revoke that names only PUBLIC leaves anon holding EXECUTE: {whole}"
+            );
+        }
         assert!(sql
             .contains("grant execute on function public.cairn_pull(xid8, int) to authenticated;"));
         assert!(
@@ -1537,6 +1645,11 @@ mod tests {
             "function public.cairn_register_push_token(p_platform text, p_token text)",
             "function public.cairn_deregister_push_token(p_token text)",
             "function public.cairn_heartbeat(p_device_id text)",
+            // The Edge Function's only way into the registry: `nostos` is not an
+            // exposed schema, so a direct table read fails with `Invalid
+            // schema: cairn` and drops every notification silently.
+            "function public.cairn_push_targets(p_scope text)",
+            "grant execute on function public.cairn_push_targets(text) to service_role;",
             "https://ref.functions.supabase.co/cairn-push",
             // The atomic per-scope debounce, which is also the pg_net rate guard.
             "on conflict (scope) do update set last_push_at = now()",
