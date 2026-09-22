@@ -380,9 +380,49 @@ await section("retention", async () => {
     status === 410,
     `HTTP ${status} ${JSON.stringify(body).slice(0, 90)}`,
   );
-  const fresh = await pull(alice.token, "0");
-  check("a re-snapshot (since 0) is still served", fresh.status === 200, `HTTP ${fresh.status}`);
+  // A 410 the device cannot act on is a device bricked by a long holiday, so
+  // the recovery path is part of the retention story, not a follow-up.
+  const snap = await rest("/rpc/cairn_snapshot", { token: alice.token, body: {} });
+  check(
+    "a pruned device can still re-snapshot",
+    snap.status === 200 && Array.isArray(snap.body) && snap.body.length > 0,
+    `HTTP ${snap.status}`,
+  );
+  const horizons = new Set((snap.body ?? []).map((r) => r.horizon));
+  check(
+    "the whole snapshot comes from ONE cross-table view",
+    horizons.size === 1,
+    `${horizons.size} distinct horizon(s)`,
+  );
+  check(
+    "it announces every synced table, empty ones included",
+    ["nostos_e2e_notes", "nostos_e2e_catalog"].every((tbl) =>
+      snap.body.some((r) => r.table_name === tbl && r.pk === null)),
+    (snap.body ?? [])
+      .filter((r) => r.pk === null && r.table_name)
+      .map((r) => r.table_name)
+      .join(","),
+  );
+  check(
+    "and carries only rows RLS lets this device see",
+    snap.body
+      .filter((r) => r.table_name === "nostos_e2e_notes" && r.row)
+      .every((r) => r.row.owner_id === alice.sub),
+    `${snap.body.filter((r) => r.row).length} row(s)`,
+  );
+  const otherSnap = await rest("/rpc/cairn_snapshot", { token: null, body: {} });
+  check(
+    "the anon key cannot snapshot",
+    otherSnap.status >= 400,
+    `HTTP ${otherSnap.status}`,
+  );
   sql("update cairn.retention set pruned_below = '0'::xid8 where id = 1;");
+  const resumed = await pull(alice.token, snap.body[0].horizon);
+  check(
+    "and the snapshot's horizon is a valid resume point",
+    resumed.status === 200,
+    `HTTP ${resumed.status}`,
+  );
 });
 
 await section("doorbell", async () => {

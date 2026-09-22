@@ -25,7 +25,7 @@ use crate::{ApplyEngine, Horizon, PullCursor, Storage};
 /// ```no_run
 /// # use nostos_core::{conformance, InMemoryStorage};
 /// let covered = conformance::run_all(InMemoryStorage::default);
-/// assert_eq!(covered.len(), 4);
+/// assert_eq!(covered.len(), 5);
 /// ```
 pub fn run_all<S: Storage>(mut make: impl FnMut() -> S) -> Vec<&'static str> {
     let mut ran = Vec::new();
@@ -42,7 +42,74 @@ pub fn run_all<S: Storage>(mut make: impl FnMut() -> S) -> Vec<&'static str> {
     a_resnapshot_leaves_no_stale_horizon(make());
     ran.push("a_resnapshot_leaves_no_stale_horizon");
 
+    a_snapshot_reaps_rows_deleted_while_away(make());
+    ran.push("a_snapshot_reaps_rows_deleted_while_away");
+
     ran
+}
+
+/// One `cairn_snapshot()` row. The horizon-only row and the per-table header
+/// row both carry nulls; see the generated SQL for why the headers exist.
+fn snap(horizon: u64, table: Option<&str>, pk: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "horizon": horizon.to_string(),
+        "table_name": table,
+        "pk": pk,
+        "row": pk.map(|p| serde_json::json!({ "id": p })),
+    })
+}
+
+/// A snapshot carries PRESENT rows only — there are no tombstones in it. So a
+/// row deleted server-side while the device was past the retention window is
+/// simply absent, and only the end-of-table reap removes it locally. Get this
+/// wrong and the device keeps a row nobody else can see, forever, with no
+/// error: the failure mode the whole suite is about.
+fn a_snapshot_reaps_rows_deleted_while_away<S: Storage>(storage: S) {
+    let mut engine = ApplyEngine::new(storage);
+    let mut cursor = PullCursor::fresh();
+    cursor
+        .apply(
+            &mut engine,
+            &body(&[
+                row(1, 100, "orders", "stays", "insert", 101),
+                row(2, 100, "orders", "goes", "insert", 101),
+            ]),
+        )
+        .expect("seed");
+
+    // The server's picture now has only `stays`, and a table that went empty.
+    let snapshot = serde_json::to_string(&serde_json::json!([
+        snap(400, None, None),
+        snap(400, Some("orders"), None),
+        snap(400, Some("orders"), Some("stays")),
+        snap(400, Some("invoices"), None),
+    ]))
+    .expect("encode snapshot");
+
+    let out = cursor
+        .apply_snapshot(&mut engine, &snapshot, &[])
+        .expect("apply snapshot");
+
+    let pks = engine.storage().pks_for_table("orders").expect("read back");
+    assert!(pks.contains(&"stays".to_string()), "a confirmed row survives");
+    assert!(
+        !pks.contains(&"goes".to_string()),
+        "a row the snapshot did not confirm must be reaped, not kept forever"
+    );
+    assert_eq!(
+        out.horizon.as_ref().map(nostos_horizon_str),
+        Some("400".to_string()),
+        "the snapshot's horizon is the new resume point"
+    );
+    assert_eq!(
+        engine.storage().horizon().expect("read the horizon"),
+        Some("400".to_string()),
+        "and it is durable, or the next launch re-snapshots for nothing"
+    );
+}
+
+fn nostos_horizon_str(h: &crate::Horizon) -> String {
+    h.as_str().to_string()
 }
 
 /// One change row in a `cairn_pull` response.
@@ -226,6 +293,6 @@ mod tests {
     #[test]
     fn the_in_memory_store_conforms() {
         let covered = super::run_all(InMemoryStorage::default);
-        assert_eq!(covered.len(), 4, "every case ran: {covered:?}");
+        assert_eq!(covered.len(), 5, "every case ran: {covered:?}");
     }
 }

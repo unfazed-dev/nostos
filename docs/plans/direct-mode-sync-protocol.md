@@ -634,6 +634,45 @@ opens one on a timer. This is the design working, not a bug, but it is a
 contract the client has to honour: pull again. The harness polls; `nostos doctor`
 reports the same thing as "horizon lag".
 
+## The way back from a 410
+
+Making retention a hard 410 left a hole the plan had marked `ponytail:` — the
+device is told to re-snapshot and has nothing to call. `cairn_pull` refusing is
+correct; a refusal the device cannot act on is a device bricked by a long
+holiday. So the generator now also emits:
+
+```sql
+create or replace function public.cairn_snapshot()
+returns table (horizon xid8, table_name text, pk text, "row" jsonb)
+language sql stable security invoker as $$
+  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
+  select h.horizon, null::text, null::text, null::jsonb from h
+  union all select h.horizon, 'tasks'::text, null::text, null::jsonb from h
+  union all select h.horizon, 'tasks'::text, r.id::text, to_jsonb(r)
+            from public.tasks r, h
+  -- ...one pair of branches per synced table
+$$;
+```
+
+Three things are load-bearing, and each has a test:
+
+- **One statement.** The horizon and every table's rows come from a single
+  snapshot, so a re-snapshot is as cross-table consistent as a pull. Two
+  statements would rebuild the device from two different points in time.
+- **`security invoker`.** The same RLS that decides what a pull returns decides
+  what the snapshot contains, which is what makes them interchangeable.
+- **A header row per table** (`pk` null). A snapshot carries present rows only,
+  so without it an empty table is indistinguishable from a table the snapshot
+  forgot — and the device would keep rows the server no longer has.
+
+`PullCursor::apply_snapshot` applies it through `ApplyEngine`'s existing
+snapshot-window machinery (ADR-0014/ADR-0025), so a row deleted server-side
+while the device was away is reaped at the end of its table rather than
+lingering forever, and the outbox's pending-local writes are exempt from that
+reap. `PostgrestSource::fetch_snapshot` is the transport. The conformance suite
+gained a fifth case for it — `a_snapshot_reaps_rows_deleted_while_away` — so it
+holds on all three platforms, OPFS included.
+
 Two things remain notes rather than checks, because no assertion can settle
 them:
 

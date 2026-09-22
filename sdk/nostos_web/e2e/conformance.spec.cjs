@@ -1,6 +1,6 @@
 // The browser-Worker leg of `nostos_core::conformance` (direct-mode plan, step 8).
 //
-// The same four cases run three times, once per Storage implementation:
+// The same cases run three times, once per Storage implementation:
 //   - `InMemoryStorage`  — nostos-core's own unit tests
 //   - `SqliteStorage`    — crates/nostos-client/tests/conformance_sqlite.rs
 //   - `SqliteWasmStorage`— here, in a real Worker over OPFS
@@ -88,11 +88,12 @@ test("the conformance suite passes on the Worker's own storage backend", async (
     );
 
     expect(seen.error, `conformance failed: ${seen.error}`).toBeFalsy();
-    expect(seen.cases, "the four cases ran").toEqual([
+    expect(seen.cases, "every case ran").toEqual([
       "a_multi_table_transaction_is_never_seen_in_pieces",
       "an_echoed_page_applies_twice_with_the_same_result",
       "the_horizon_never_runs_ahead_of_the_rows",
       "a_resnapshot_leaves_no_stale_horizon",
+      "a_snapshot_reaps_rows_deleted_while_away",
     ]);
     // The whole point of the browser leg: it has to have run on OPFS, not on
     // the in-memory degrade path, or it proves nothing the Rust legs did not.

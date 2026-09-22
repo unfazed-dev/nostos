@@ -16,7 +16,7 @@ fn sqlite_storage_conforms() {
     });
     assert_eq!(
         covered.len(),
-        4,
+        5,
         "every conformance case ran against rusqlite: {covered:?}"
     );
 }

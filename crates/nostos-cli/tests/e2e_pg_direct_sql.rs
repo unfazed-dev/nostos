@@ -57,6 +57,18 @@ do $$ begin
   if not exists (select from pg_roles where rolname = 'authenticated') then
     create role authenticated;
   end if;
+  -- `anon` too: the generated revokes name the Data API roles rather than
+  -- just PUBLIC, because Supabase's default privileges grant EXECUTE to them
+  -- BY NAME and a revoke from the PUBLIC pseudo-role leaves that standing.
+  -- The file has always required `authenticated`; this is the same class of
+  -- requirement, and `nostos link --mode direct` already refuses any backend
+  -- but Supabase.
+  if not exists (select from pg_roles where rolname = 'anon') then
+    create role anon;
+  end if;
+  if not exists (select from pg_roles where rolname = 'service_role') then
+    create role service_role;
+  end if;
 end $$;
 grant authenticated to current_user;
 create or replace function auth.jwt() returns jsonb language sql stable as $fn$
@@ -562,6 +574,66 @@ async fn a_horizon_below_the_pruned_window_is_refused_with_pt410() {
         "PostgREST turns PT410 into HTTP 410, which the client maps to \
          PostgrestError::Gone; got {code}: {err}"
     );
+    fx.teardown().await;
+}
+
+/// The way back from a PT410. A refusal the device cannot act on would be a
+/// device bricked by a long holiday, so the snapshot is part of the retention
+/// design: current rows of every synced table plus a horizon, from ONE
+/// statement, scoped by the same RLS that scopes a pull.
+#[tokio::test]
+async fn a_pruned_device_can_re_snapshot_and_resume() {
+    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+        eprintln!("skipping: set {E2E_FLAG}=1");
+        return;
+    }
+    let fx = Fixture::setup().await;
+    fx.insert("alice", "kept").await;
+    fx.insert("bob", "theirs").await;
+
+    let rows = fx
+        .client
+        .query("select horizon::text, table_name, pk, \"row\" from public.cairn_snapshot()", &[])
+        .await
+        .expect("snapshot");
+    assert!(!rows.is_empty(), "a snapshot always carries its horizon");
+
+    let horizons: std::collections::HashSet<String> =
+        rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    assert_eq!(
+        horizons.len(),
+        1,
+        "every row must come from ONE snapshot or the tables disagree"
+    );
+
+    // The header row per table is what makes an empty table distinguishable
+    // from a table the snapshot forgot.
+    let headers: Vec<String> = rows
+        .iter()
+        .filter(|r| r.get::<_, Option<String>>(2).is_none())
+        .filter_map(|r| r.get::<_, Option<String>>(1))
+        .collect();
+    assert!(
+        headers.contains(&fx.tasks),
+        "the snapshot must announce {}, got {headers:?}",
+        fx.tasks
+    );
+
+    let bodies = rows
+        .iter()
+        .filter(|r| r.get::<_, Option<String>>(2).is_some())
+        .count();
+    assert_eq!(bodies, 2, "both rows are in the picture (no RLS role set)");
+
+    // And the horizon it hands back is a horizon a pull will accept.
+    let horizon = horizons.into_iter().next().expect("one horizon");
+    fx.client
+        .query(
+            "select * from public.cairn_pull($1::text::xid8, 200)",
+            &[&horizon],
+        )
+        .await
+        .expect("the snapshot's horizon must be a valid resume point");
     fx.teardown().await;
 }
 

@@ -207,6 +207,45 @@ impl PostgrestSource {
         Ok(body)
     }
 
+    /// Fetch a full `cairn_snapshot()` — the current rows of every synced
+    /// table plus a horizon, from one statement.
+    ///
+    /// The recovery half of [`PostgrestError::Gone`]. That error is permanent
+    /// in the retry sense: the rows the device is missing have been pruned and
+    /// no amount of pulling will produce them. This is the only way forward,
+    /// and [`nostos_core::PullCursor::apply_snapshot`] is what turns the body
+    /// into storage writes.
+    ///
+    /// # Errors
+    /// [`PostgrestError::Transport`] if the request fails, or
+    /// [`PostgrestError::Status`] on a non-2xx. Never `Gone`: a snapshot has
+    /// no horizon to be below the retention window.
+    pub async fn fetch_snapshot(&self) -> Result<String, PostgrestError> {
+        let bearer = self.token.as_deref().unwrap_or(&self.apikey);
+        let res = self
+            .http
+            .post(format!("{}/rpc/cairn_snapshot", self.rest_base))
+            .header("apikey", &self.apikey)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await
+            .map_err(|e| PostgrestError::Transport(e.to_string()))?;
+        let status = res.status();
+        let body = res
+            .text()
+            .await
+            .map_err(|e| PostgrestError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            return Err(PostgrestError::Status {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(body)
+    }
+
     /// Pull until the log is caught up (or [`MAX_PAGES_PER_DRAIN`] is reached),
     /// applying each page atomically.
     ///

@@ -258,6 +258,115 @@ impl PullCursor {
     }
 }
 
+/// One row of a `cairn_snapshot()` response. `table_name` null marks the
+/// horizon-only row; `pk` null marks a table header (the table is covered by
+/// this snapshot, and may legitimately be empty).
+#[derive(Debug, serde::Deserialize)]
+struct SnapshotRow {
+    horizon: String,
+    table_name: Option<String>,
+    pk: Option<String>,
+    row: Option<serde_json::Value>,
+}
+
+impl PullCursor {
+    /// Rebuild from a `cairn_snapshot()` response and resume from its horizon.
+    ///
+    /// This is the answer to [`crate::pull`]'s one unrecoverable error: a
+    /// device offline longer than the retention window gets a 410, and no
+    /// amount of pulling will ever fix it because the rows it needs are gone.
+    /// Only a fresh picture of the current state can.
+    ///
+    /// Applied as a **snapshot window** per table, not as a stream of inserts.
+    /// The difference is deletions: the snapshot carries present rows only, so
+    /// a row deleted server-side while the device was away is absent rather
+    /// than tombstoned, and only the window's end-of-table reap removes it.
+    /// `exempt_pks` is the outbox's pending-local set — the user's own unacked
+    /// writes are not in the server's picture yet and must survive the reap
+    /// (ADR-0025 hole #1).
+    ///
+    /// # Errors
+    /// [`PullError::Decode`] if the body is not a `cairn_snapshot()` array, or
+    /// [`PullError::Storage`] if a table's apply does not commit. A failure
+    /// part-way leaves the horizon untouched, so the next attempt re-snapshots
+    /// rather than resuming from a picture that was never finished.
+    pub fn apply_snapshot<S: Storage>(
+        &mut self,
+        engine: &mut ApplyEngine<S>,
+        body: &str,
+        exempt_pks: &[String],
+    ) -> Result<PullOutcome, PullError> {
+        let rows: Vec<SnapshotRow> =
+            serde_json::from_str(body).map_err(|e| PullError::Decode(e.to_string()))?;
+        let Some(horizon) = rows.first().map(|r| Horizon::new(r.horizon.clone())) else {
+            return Err(PullError::Decode(
+                "empty snapshot: cairn_snapshot always returns at least the horizon row".into(),
+            ));
+        };
+
+        // Group by table so each window opens once. The generated SQL already
+        // emits them contiguously; grouping here means a future change to that
+        // ordering cannot silently reopen a window and reap live rows.
+        let mut tables: Vec<String> = Vec::new();
+        let mut by_table: std::collections::HashMap<String, Vec<&SnapshotRow>> =
+            std::collections::HashMap::new();
+        for r in &rows {
+            let Some(table) = r.table_name.as_ref() else {
+                continue;
+            };
+            if !by_table.contains_key(table) {
+                tables.push(table.clone());
+            }
+            by_table.entry(table.clone()).or_default().push(r);
+        }
+
+        let mut rows_applied = 0;
+        let mut checkpoint = engine.checkpoint()?;
+        for table in &tables {
+            engine.snapshot_boundary(table, true, exempt_pks)?;
+            // `lsn` only has to be monotonic within the batch; the resume point
+            // is the horizon, saved below.
+            let mut lsn = checkpoint.0;
+            for r in by_table.get(table).into_iter().flatten() {
+                let (Some(pk), Some(value)) = (r.pk.as_ref(), r.row.as_ref()) else {
+                    continue; // the table header row
+                };
+                lsn += 1;
+                if let Some(out) = engine.feed(Frame {
+                    lsn,
+                    op: Operation::Insert,
+                    table: table.clone(),
+                    pk: pk.clone(),
+                    payload: Some(
+                        serde_json::to_vec(value).map_err(|e| PullError::Decode(e.to_string()))?,
+                    ),
+                    txn_id: None,
+                })? {
+                    rows_applied += out.rows_applied;
+                    checkpoint = out.checkpoint;
+                }
+            }
+            if let Some(out) = engine.flush()? {
+                rows_applied += out.rows_applied;
+                checkpoint = out.checkpoint;
+            }
+            // Reaps every local pk this snapshot did not re-confirm.
+            engine.snapshot_boundary(table, false, &[])?;
+        }
+
+        // Only now: the picture is complete and durable.
+        self.since = horizon.clone();
+        let _ = engine.storage_mut().save_horizon(horizon.as_str());
+
+        Ok(PullOutcome {
+            rows_applied,
+            checkpoint,
+            horizon: Some(horizon),
+            more: false,
+        })
+    }
+}
+
 impl Default for PullCursor {
     fn default() -> Self {
         Self::fresh()

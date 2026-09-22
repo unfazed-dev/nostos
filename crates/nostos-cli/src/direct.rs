@@ -280,6 +280,7 @@ pub fn render_with_push(
     log_trigger_fn(&mut s);
     per_table_triggers(&mut s, tables);
     pull_fn(&mut s);
+    snapshot_fn(&mut s, tables);
     increment_fn(&mut s, tables);
     doorbell(&mut s);
     policies_and_grants(&mut s);
@@ -519,6 +520,56 @@ $fn$;
     );
 }
 
+/// `public.cairn_snapshot()` — the only way back from a 410.
+///
+/// `cairn_pull` refuses a horizon below the pruned window, which is correct: a
+/// short answer would be indistinguishable from "nothing happened" and the rows
+/// in the gap would never arrive. But a refusal the client cannot act on is a
+/// device bricked by going on holiday. This is the act: the CURRENT rows of
+/// every synced table plus a horizon to resume from, all from ONE statement, so
+/// the snapshot is as cross-table consistent as a pull is.
+///
+/// One header row per table (`pk` null) so the payload says which tables it
+/// covers even when a table is empty — otherwise a table emptied server-side
+/// while the device was away would keep its stale local rows forever.
+fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
+    let mut branches = String::new();
+    for t in tables {
+        let _ = write!(
+            branches,
+            "  union all\n  select h.horizon, '{table}'::text, null::text, null::jsonb from h\n  \
+             union all\n  select h.horizon, '{table}'::text, r.{pk}::text, to_jsonb(r) \
+             from public.{table} r, h\n",
+            table = t.table,
+            pk = PK_COLUMN,
+        );
+    }
+    let _ = write!(
+        s,
+        r#"
+-- The re-snapshot path. `cairn_pull` answers a horizon below the retention
+-- window with 410; this is what the client does about it. Returns the current
+-- rows of every synced table AND the horizon to resume from, from one
+-- statement -- so, like a pull, it is one consistent cross-table view.
+--
+-- The first row for each table has a null `pk`: it announces that the table is
+-- part of this snapshot. Without it an empty table is indistinguishable from a
+-- table the snapshot forgot, and the device would keep rows the server no
+-- longer has.
+--
+-- security invoker, so RLS on each base table decides what is in the snapshot.
+-- That is the same authority that decides what a pull returns, which is what
+-- makes the two interchangeable.
+create or replace function public.cairn_snapshot()
+returns table (horizon xid8, table_name text, pk text, "row" jsonb)
+language sql stable security invoker set search_path = '' as $fn$
+  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
+  select h.horizon, null::text, null::text, null::jsonb from h
+{branches}$fn$;
+"#
+    );
+}
+
 fn increment_fn(s: &mut String, tables: &[DirectTable]) {
     let allowed = tables
         .iter()
@@ -649,9 +700,11 @@ grant execute on function cairn.current_scopes() to authenticated;
 -- table grants still hold the line); a `security definer` one bypasses those,
 -- so naming the roles is what actually closes it.
 revoke all on function public.cairn_pull(xid8, int) from public, anon, authenticated;
+revoke all on function public.cairn_snapshot() from public, anon, authenticated;
 revoke all on function public.cairn_increment(text, text, text, numeric)
   from public, anon, authenticated;
 grant execute on function public.cairn_pull(xid8, int) to authenticated;
+grant execute on function public.cairn_snapshot() to authenticated;
 grant execute on function public.cairn_increment(text, text, text, numeric) to authenticated;
 "#,
     );
@@ -1007,8 +1060,13 @@ pub async fn inspect(
         ),
     ));
 
+    // `cairn_snapshot` is checked alongside the other two because without it a
+    // 410 is terminal: the device is told to re-snapshot and has nothing to
+    // call. A deploy that predates it looks healthy right up to the first
+    // device that comes back after the retention window.
     for (proname, args) in [
         ("cairn_pull", "xid8, int"),
+        ("cairn_snapshot", ""),
         ("cairn_increment", "text, text, text, numeric"),
     ] {
         let def: Option<String> = client
@@ -1579,6 +1637,41 @@ mod tests {
     }
 
     /// Two claims must never collide in the one shared column, and the anon
+    /// A 410 the device cannot act on is a device bricked by a long holiday,
+    /// so the snapshot is part of the retention design, not a follow-up.
+    #[test]
+    fn the_snapshot_is_one_statement_and_announces_every_table() {
+        let sql = sample_sql();
+        let body = sql
+            .split("create or replace function public.cairn_snapshot()")
+            .nth(1)
+            .expect("cairn_snapshot is generated")
+            .split("$fn$;")
+            .next()
+            .expect("the function body terminates");
+        // One `with h as (...)` feeding every branch: the snapshot has to be as
+        // cross-table consistent as a pull, which means one statement.
+        assert_eq!(
+            body.matches("pg_current_snapshot()").count(),
+            1,
+            "more than one snapshot would make the tables mutually inconsistent"
+        );
+        assert!(!body.contains(';'), "the body must be a single statement");
+        for table in ["tasks", "projects", "countries"] {
+            assert!(
+                body.contains(&format!("select h.horizon, '{table}'::text, null::text")),
+                "{table} needs a header row, or an empty {table} is \
+                 indistinguishable from one the snapshot forgot"
+            );
+            assert!(body.contains(&format!("from public.{table} r, h")));
+        }
+        // Same authority as the pull, or the two are not interchangeable.
+        assert!(body.contains("security invoker"));
+        assert!(sql.contains(
+            "revoke all on function public.cairn_snapshot() from public, anon, authenticated;"
+        ));
+    }
+
     /// key must never reach the log.
     #[test]
     fn scopes_are_namespaced_and_the_functions_are_revoked_from_public() {
@@ -1692,7 +1785,10 @@ mod tests {
         assert!(sql.contains("\nbegin;\n") && sql.trim_end().ends_with("commit;"));
         // Nothing may fail on a second apply.
         assert!(!sql.contains("create table cairn.changes ("));
-        assert_eq!(sql.matches("create or replace function").count(), 6);
+        // current_scopes, log_change, cairn_pull, cairn_snapshot,
+        // cairn_increment, ring, prune. All `or replace`, so re-applying the
+        // file is a no-op rather than a duplicate-object error.
+        assert_eq!(sql.matches("create or replace function").count(), 7);
         assert_eq!(
             sql.matches("drop policy if exists").count(),
             sql.matches("create policy").count()
