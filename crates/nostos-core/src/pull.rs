@@ -41,9 +41,24 @@ use serde::Deserialize;
 use crate::{ApplyEngine, Frame, Storage, StorageError};
 use nostos_domain::{Lsn, Operation};
 
-/// Default page size for one `rpc/pull` call — matches the `max_rows` default
-/// on the SQL side.
-pub const DEFAULT_MAX_ROWS: usize = 2000;
+/// Default page size for one `rpc/pull` call, in **transactions** — matches the
+/// `max_txns` default on the SQL side.
+///
+/// ponytail: rows per page is bounded only by the largest transaction in it. No
+/// pagination scheme can fix that — an atomic apply has to hold a whole
+/// transaction regardless — so the knob is transactions and the number is a
+/// round guess, not a measurement.
+pub const DEFAULT_MAX_TXNS: usize = 200;
+
+/// The floor `rpc/pull` clamps `max_txns` to, mirrored from the SQL's
+/// `greatest(max_txns, 2)`.
+///
+/// **Two is what guarantees progress.** `since` is inclusive, so a full page's
+/// cursor resumes at its own last transaction; if a page could hold only one
+/// transaction, that resume point would equal the page's only transaction and
+/// the next pull would return the identical page forever. At two or more, the
+/// last xid is strictly above the first, which is at or above `since`.
+pub const MIN_MAX_TXNS: usize = 2;
 
 /// The `xid8` snapshot horizon, carried as an opaque string.
 ///
@@ -112,17 +127,6 @@ pub enum PullError {
     #[error("xid {0:?} is not a u64 — cannot group the transaction it belongs to")]
     BadXid(String),
 
-    /// One transaction produced more log rows than a whole page holds, so
-    /// holding its tail back leaves nothing to apply and the pull cannot
-    /// progress. The caller raises `max_rows`.
-    #[error("transaction {xid} exceeds a page of {max_rows} rows — raise max_rows")]
-    PageTooSmall {
-        /// The oversized transaction.
-        xid: String,
-        /// The page size that could not hold it.
-        max_rows: usize,
-    },
-
     /// The apply did not commit. Rows before it may have; the horizon did not.
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -130,34 +134,30 @@ pub enum PullError {
 
 /// The device's pull position: where to resume from, and how much to ask for.
 ///
-/// Request and apply share one cursor so they cannot disagree about `max_rows`.
-/// They must not: the request's `max_rows` is what decides whether a page was
-/// cut mid-transaction, and an apply that assumed a different number would
-/// commit half a transaction.
+/// Request and apply share one cursor so they cannot disagree about `max_txns`.
+/// They must not: the request's `max_txns` is what tells the apply whether the
+/// page was full, and a page believed short is a cursor that jumps to the
+/// horizon without having consumed everything below it.
 #[derive(Debug, Clone)]
 pub struct PullCursor {
     since: Horizon,
-    max_rows: usize,
+    max_txns: usize,
 }
 
 impl PullCursor {
     /// A cursor for a device with no stored horizon.
     #[must_use]
     pub fn fresh() -> Self {
-        Self::resume(Horizon::fresh(), DEFAULT_MAX_ROWS)
+        Self::resume(Horizon::fresh(), DEFAULT_MAX_TXNS)
     }
 
-    /// A cursor resuming from a stored horizon. `max_rows == 0` is treated as
-    /// [`DEFAULT_MAX_ROWS`] — a zero page can never make progress.
+    /// A cursor resuming from a stored horizon. `max_txns` is clamped up to
+    /// [`MIN_MAX_TXNS`], the same clamp the SQL applies.
     #[must_use]
-    pub fn resume(since: Horizon, max_rows: usize) -> Self {
+    pub fn resume(since: Horizon, max_txns: usize) -> Self {
         Self {
             since,
-            max_rows: if max_rows == 0 {
-                DEFAULT_MAX_ROWS
-            } else {
-                max_rows
-            },
+            max_txns: max_txns.max(MIN_MAX_TXNS),
         }
     }
 
@@ -175,7 +175,7 @@ impl PullCursor {
     /// why the decoder below accepts either form.
     #[must_use]
     pub fn request_body(&self) -> String {
-        serde_json::json!({ "since": self.since.as_str(), "max_rows": self.max_rows }).to_string()
+        serde_json::json!({ "since": self.since.as_str(), "max_txns": self.max_txns }).to_string()
     }
 
     /// Decode a pull response, apply it through `engine`, and advance the
@@ -186,12 +186,24 @@ impl PullCursor {
     /// transaction per Postgres transaction, which is the cross-table
     /// consistency property.
     ///
-    /// **A full page is assumed to be cut mid-transaction.** `limit max_rows`
-    /// knows nothing about transaction boundaries, so the trailing `xid` group
-    /// is held back and the cursor resumes *at* that xid to re-read it whole.
-    /// The `since` bound is inclusive, which is what makes that re-read
-    /// possible; on a page that was not full there is nothing to hold back and
-    /// the cursor jumps to the response's horizon.
+    /// **Every page is whole transactions**, which the SQL guarantees by
+    /// limiting on distinct `xid` rather than on rows. So nothing is ever
+    /// truncated here: a client-side truncation plus an inclusive `since`
+    /// livelocks (the re-read returns the same rows, fills the page again, and
+    /// cuts the same tail forever), and that is the whole reason the function
+    /// pages the way it does. `nostos doctor` checks the deployed function
+    /// against this contract — a row-limited `pull` would silently apply half a
+    /// transaction, which no client-side check can detect.
+    ///
+    /// Where the cursor lands:
+    ///
+    /// - **Short page** → the response's horizon. Everything below it is
+    ///   consumed, and the horizon's own transaction is still in flight, so the
+    ///   bound stays inclusive to catch its rows next time.
+    /// - **Full page** → the page's last `xid`, re-read next time and absorbed
+    ///   idempotently. It cannot jump to the horizon: transactions between the
+    ///   page's end and the horizon have not been seen. [`MIN_MAX_TXNS`] is
+    ///   what makes this strictly forward.
     pub fn apply<S: Storage>(
         &mut self,
         engine: &mut ApplyEngine<S>,
@@ -200,28 +212,18 @@ impl PullCursor {
         let rows: Vec<PullRow> =
             serde_json::from_str(body).map_err(|e| PullError::Decode(e.to_string()))?;
 
-        let more = rows.len() >= self.max_rows;
+        // Rows come back `order by xid, seq`, so each transaction is one
+        // contiguous run and counting boundaries counts transactions.
+        let txns = rows.windows(2).filter(|w| w[0].xid != w[1].xid).count()
+            + usize::from(!rows.is_empty());
+        let more = txns >= self.max_txns;
+
         // Every row carries the same horizon — one function call, one snapshot.
         let horizon = rows.first().map(|r| Horizon::new(r.horizon.clone()));
 
-        let applicable = if more {
-            // `more` implies non-empty, so the tail xid exists.
-            let tail = rows[rows.len() - 1].xid.clone();
-            let keep = rows.iter().take_while(|r| r.xid != tail).count();
-            if keep == 0 {
-                return Err(PullError::PageTooSmall {
-                    xid: tail,
-                    max_rows: self.max_rows,
-                });
-            }
-            &rows[..keep]
-        } else {
-            &rows[..]
-        };
-
         let mut rows_applied = 0;
         let mut checkpoint = engine.checkpoint()?;
-        for row in applicable {
+        for row in &rows {
             if let Some(out) = engine.feed(row.to_frame()?)? {
                 rows_applied += out.rows_applied;
                 checkpoint = out.checkpoint;
@@ -234,11 +236,7 @@ impl PullCursor {
 
         // Rows are durable; only now may the horizon move past them.
         let next = if more {
-            applicable
-                .last()
-                .map(|r| Horizon::new(r.xid.clone()))
-                // `keep > 0` above guarantees a last row.
-                .or_else(|| horizon.clone())
+            rows.last().map(|r| Horizon::new(r.xid.clone()))
         } else {
             horizon
         };
@@ -277,8 +275,9 @@ pub struct PullOutcome {
     /// The cursor's new position, or `None` if it did not move — an empty
     /// response, or a page whose horizon equalled the one we asked from.
     pub horizon: Option<Horizon>,
-    /// The page was full: call `rpc/pull` again immediately rather than waiting
-    /// for a doorbell.
+    /// The page held `max_txns` transactions, so there is probably more log
+    /// behind it: call `rpc/pull` again immediately rather than waiting for a
+    /// doorbell.
     pub more: bool,
 }
 
@@ -387,19 +386,22 @@ mod tests {
     #[test]
     fn request_body_sends_the_horizon_as_a_string() {
         let c = PullCursor::fresh();
-        assert_eq!(c.request_body(), r#"{"max_rows":2000,"since":"0"}"#);
+        assert_eq!(c.request_body(), r#"{"max_txns":200,"since":"0"}"#);
 
         // The one number that must never become a JS number: past 2^53.
         let big = PullCursor::resume(Horizon::new("9007199254740995"), 10);
         assert_eq!(
             big.request_body(),
-            r#"{"max_rows":10,"since":"9007199254740995"}"#
+            r#"{"max_txns":10,"since":"9007199254740995"}"#
         );
     }
 
     #[test]
-    fn zero_max_rows_falls_back_to_the_default() {
-        assert_eq!(PullCursor::resume(Horizon::fresh(), 0).max_rows, 2000);
+    fn max_txns_is_clamped_to_the_progress_floor() {
+        // A one-transaction page would resume at its own only transaction and
+        // re-read the identical page forever.
+        assert_eq!(PullCursor::resume(Horizon::fresh(), 1).max_txns, 2);
+        assert_eq!(PullCursor::resume(Horizon::fresh(), 0).max_txns, 2);
     }
 
     #[test]
@@ -415,7 +417,7 @@ mod tests {
 
         let out = c.apply(&mut e, &body).unwrap();
         assert_eq!(out.rows_applied, 4);
-        assert!(!out.more);
+        assert!(!out.more, "2 txns is well short of the 200-txn page");
         assert_eq!(out.horizon, Some(Horizon::new("500")));
         assert_eq!(c.since(), &Horizon::new("500"));
         assert_eq!(e.storage().row_count(), 3);
@@ -423,10 +425,9 @@ mod tests {
     }
 
     #[test]
-    fn a_full_page_holds_its_trailing_transaction_back_whole() {
+    fn a_full_page_resumes_at_its_last_transaction_not_the_horizon() {
         let mut e = engine();
-        let mut c = PullCursor::resume(Horizon::new("99"), 3);
-        // xid 101's rows are cut by the limit — 101 must not land at all.
+        let mut c = PullCursor::resume(Horizon::new("99"), 2);
         let body = page(&[
             row("500", 1, "100", "orders", "o1", "insert"),
             row("500", 2, "100", "order_lines", "l1", "insert"),
@@ -434,26 +435,44 @@ mod tests {
         ]);
 
         let out = c.apply(&mut e, &body).unwrap();
-        assert!(out.more, "a full page is assumed cut mid-transaction");
-        assert_eq!(out.rows_applied, 2);
-        // Resume AT the held-back xid: `since` is inclusive, so it re-reads whole.
-        assert_eq!(c.since(), &Horizon::new("100"));
-        assert_eq!(e.storage().rows_for("orders").len(), 1);
+        assert!(out.more, "the page held max_txns transactions");
+        assert_eq!(
+            out.rows_applied, 3,
+            "whole transactions — nothing held back"
+        );
+        // NOT the horizon: transactions between 101 and 500 are unseen.
+        assert_eq!(c.since(), &Horizon::new("101"));
     }
 
+    /// The livelock regression: a row-limited page plus an inclusive `since`
+    /// re-reads the same truncated page forever. Three pages, each full until
+    /// the last, must walk the cursor strictly forward and land on the horizon.
     #[test]
-    fn a_transaction_bigger_than_a_page_is_an_error_not_a_half_apply() {
+    fn paging_makes_strict_progress_and_finishes_on_the_horizon() {
         let mut e = engine();
-        let mut c = PullCursor::resume(Horizon::new("99"), 2);
-        let body = page(&[
-            row("500", 1, "100", "orders", "o1", "insert"),
-            row("500", 2, "100", "orders", "o2", "insert"),
-        ]);
+        let mut c = PullCursor::resume(Horizon::fresh(), 2);
 
-        let err = c.apply(&mut e, &body).unwrap_err();
-        assert!(matches!(err, PullError::PageTooSmall { max_rows: 2, .. }));
-        assert_eq!(e.storage().row_count(), 0, "nothing may land");
-        assert_eq!(c.since(), &Horizon::new("99"), "cursor must not move");
+        let p1 = page(&[
+            row("500", 1, "100", "orders", "o1", "insert"),
+            row("500", 2, "101", "orders", "o2", "insert"),
+        ]);
+        assert!(c.apply(&mut e, &p1).unwrap().more);
+        assert_eq!(c.since(), &Horizon::new("101"));
+
+        // `since` is inclusive, so 101 comes back — and re-applies idempotently.
+        let p2 = page(&[
+            row("500", 2, "101", "orders", "o2", "insert"),
+            row("500", 3, "102", "orders", "o3", "insert"),
+        ]);
+        assert!(c.apply(&mut e, &p2).unwrap().more);
+        assert_eq!(c.since(), &Horizon::new("102"), "strictly forward");
+
+        // Last page: one transaction, short of max_txns → caught up.
+        let p3 = page(&[row("500", 3, "102", "orders", "o3", "insert")]);
+        let out = c.apply(&mut e, &p3).unwrap();
+        assert!(!out.more);
+        assert_eq!(c.since(), &Horizon::new("500"));
+        assert_eq!(e.storage().row_count(), 3, "the overlap did not duplicate");
     }
 
     #[test]

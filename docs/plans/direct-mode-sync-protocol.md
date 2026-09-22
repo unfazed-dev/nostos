@@ -75,18 +75,38 @@ aborted (so its log rows never existed). Nothing new can ever appear below it.
 stores one `xid8`, not a timestamp per table:
 
 ```sql
-create function cairn.pull(since xid8, max_rows int default 2000)
+create function cairn.pull(since xid8, max_txns int default 200)
 returns table (horizon xid8, seq bigint, xid xid8,
                table_name text, pk text, op text, row jsonb)
 language sql stable security invoker as $$
-  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
+  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
+  page as (
+    select distinct c.xid
+    from cairn.changes c, h
+    where c.xid >= since and c.xid < h.horizon
+    order by c.xid
+    limit greatest(max_txns, 2)
+  )
   select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c.row
-  from cairn.changes c, h
-  where c.xid >= since and c.xid < h.horizon
-  order by c.xid, c.seq
-  limit max_rows;
+  from cairn.changes c
+  join page p on p.xid = c.xid
+  cross join h
+  order by c.xid, c.seq;
 $$;
 ```
+
+**The page is `max_txns` transactions, not `max_rows` rows — and that is
+load-bearing, not a preference.** A row limit knows nothing about transaction
+boundaries, so it can cut one in half, and the client then has to hold the
+partial tail back and re-read it. That combination livelocks: `since` must be
+*inclusive* (the horizon's own transaction is still in flight and its rows
+arrive later), so a re-read returns the same rows, fills the page again, and
+truncates the same tail forever. Paging by transaction dissolves it — every page
+is whole transactions, the client truncates nothing, and `greatest(max_txns, 2)`
+guarantees a full page spans at least two transactions so the cursor always
+advances. Rows per page is then bounded only by the largest transaction in it,
+which no pagination scheme can fix: an atomic apply has to hold the whole
+transaction anyway.
 
 Three things fall out of this being **one function call**:
 

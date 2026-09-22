@@ -53,7 +53,7 @@ pub use apply::{ApplyEngine, ApplyOutcome, Frame};
 pub use attachments::{retry_after_ms, AttachmentOp, AttachmentState, DEFAULT_MAX_ATTEMPTS};
 pub use in_memory::InMemoryStorage;
 pub use outbox::{Outbox, PendingWrite, WriteOp};
-pub use pull::{Horizon, PullCursor, PullError, PullOutcome, DEFAULT_MAX_ROWS};
+pub use pull::{Horizon, PullCursor, PullError, PullOutcome, DEFAULT_MAX_TXNS, MIN_MAX_TXNS};
 pub use storage::{Result, Storage, StorageError};
 
 // Re-export the domain types the client surface needs so downstream (nostos-client,
