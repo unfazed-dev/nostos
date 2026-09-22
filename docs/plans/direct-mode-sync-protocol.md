@@ -1,7 +1,7 @@
 # Direct mode — the sync protocol, and how the device gets transactional consistency
 
-**Date:** 2026-09-22. **Status:** steps 1–7 shipped and under `make ci`; steps
-8–9 still design. Grounded in fetched docs throughout.
+**Date:** 2026-09-22. **Status:** steps 1–7 shipped, 8 partly and under `make ci`; steps
+9 still design. Grounded in fetched docs throughout.
 
 Shipped: `nostos_core::pull` (`PullCursor`, `Horizon`, the xid8 checkpoint on
 `Storage`), `nostos_client::postgrest` (`rpc/cairn_pull` + the four write ops),
@@ -235,7 +235,16 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    function's own source. The e2e deploys the bug on purpose and asserts the
    check catches it. The "Allow public access" switch is reported as a note —
    SQL cannot see it.
-8. One conformance suite both modes pass, **run per platform, not once** —
+8. 🟡 One conformance suite both modes pass, **run per platform, not once** —
+   `nostos_core::conformance` (feature-gated, four cases) is the suite;
+   `nostos-core`'s own test runs it on `InMemoryStorage` and
+   `crates/nostos-client/tests/conformance_sqlite.rs` runs it on rusqlite.
+   **The browser-Worker leg is not wired up** — `nostos-ffi-wasm` has to export
+   `run_all` first, and the Dart harness has to call it through the bridge.
+   Retention is now a real case end to end: `cairn.prune()` records how far it
+   pruned, `cairn_pull` raises `PT410` for a horizon below that (PostgREST →
+   HTTP 410), and the client surfaces `PostgrestError::Gone` rather than an
+   empty page. The original text: —
    `apps/atlet/flutter/test/adapter_conformance_test.dart` is the existing
    Dart-side harness (see "The test bed already exists" below) —
    including **"transaction touching three tables is never seen

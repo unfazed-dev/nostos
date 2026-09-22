@@ -48,7 +48,9 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-nostos-core = { workspace = true }
+# Run the shared conformance cases against SqliteStorage: a property proved on
+# the in-memory store is not proved on rusqlite.
+nostos-core = { workspace = true, features = ["conformance"] }
 # Examples/tests-only: wiring the in-process FanOutService (apply_bench,
 # reactive_scroll) needs nostos-application's ports. The nostos-push precedent
 # (its Cargo.toml dev-deps nostos-application): dev-deps do not change the

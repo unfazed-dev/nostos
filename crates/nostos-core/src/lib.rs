@@ -44,6 +44,10 @@
 
 pub mod apply;
 pub mod attachments;
+/// The cross-platform conformance suite (feature `conformance`, always on
+/// under `cfg(test)`) — see the module docs.
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
 pub mod in_memory;
 pub mod outbox;
 pub mod pull;

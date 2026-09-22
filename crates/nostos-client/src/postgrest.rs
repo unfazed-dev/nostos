@@ -63,6 +63,18 @@ pub enum PostgrestError {
         body: String,
     },
 
+    /// The device's horizon is below what the log still retains: it was
+    /// offline longer than the retention window, and the rows in the gap are
+    /// gone. **Not** a transport failure and not fixable by retrying — the
+    /// caller must clear local state, reset the horizon to [`Horizon::fresh`]
+    /// and re-snapshot.
+    ///
+    /// Generated SQL raises `PT410`, which PostgREST turns into HTTP 410. The
+    /// alternative — returning fewer rows — is silent loss: nothing on the
+    /// device can tell a pruned gap from an empty one.
+    #[error("the change log has been pruned past this device's horizon: {0}")]
+    Gone(String),
+
     /// A queued write is not sendable as it stands (an upsert with no payload,
     /// an unparseable increment). Permanent — retrying cannot fix the queue
     /// entry, so it belongs in the dead-letter queue.
@@ -81,11 +93,13 @@ impl PostgrestError {
     /// `4xx` is the request's fault and will fail identically forever — with
     /// **one exception that matters**: `401` is usually an expired JWT, which
     /// a token refresh fixes, so it is retryable. `429` and `5xx` are the
-    /// server asking for backoff.
+    /// server asking for backoff. [`Self::Gone`] is permanent in the retry
+    /// sense but not in the give-up sense: the fix is a re-snapshot, not a
+    /// dead letter.
     #[must_use]
     pub fn is_permanent(&self) -> bool {
         match self {
-            Self::BadUrl(_) | Self::BadWrite(_) => true,
+            Self::BadUrl(_) | Self::BadWrite(_) | Self::Gone(_) => true,
             Self::Status { status, .. } => {
                 !(*status == 401 || *status == 429 || (500..600).contains(status))
             }
@@ -178,6 +192,12 @@ impl PostgrestSource {
             .text()
             .await
             .map_err(|e| PostgrestError::Transport(e.to_string()))?;
+        if status.as_u16() == 410 {
+            // Only the pull can be Gone: 410 is the retention guard the
+            // generated `cairn_pull` raises, and nothing else in the schema
+            // uses that status.
+            return Err(PostgrestError::Gone(body));
+        }
         if !status.is_success() {
             return Err(PostgrestError::Status {
                 status: status.as_u16(),

@@ -402,3 +402,46 @@ async fn an_upsert_with_no_payload_never_leaves_the_device() {
         "rejected before the request, not after"
     );
 }
+
+/// A device that was offline past the retention window must be told, not
+/// quietly handed a shorter answer: the rows in the gap cannot arrive any
+/// other way, so a short answer is silent loss. The generated `cairn_pull`
+/// raises `PT410`, PostgREST turns that into 410, and the client surfaces it
+/// as its own variant rather than a generic status the caller would retry.
+#[tokio::test]
+async fn a_pruned_horizon_surfaces_as_gone_not_as_an_empty_page() {
+    let app = Router::new().route(
+        "/rest/v1/rpc/cairn_pull",
+        axum::routing::post(|| async {
+            (
+                axum::http::StatusCode::GONE,
+                r#"{"code":"PT410","message":"pruned past this horizon"}"#,
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::mem::forget(tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    }));
+
+    let src = PostgrestSource::new(&format!("http://{addr}"), "anon-key").unwrap();
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    let engine = Arc::new(Mutex::new(ApplyEngine::new(storage)));
+    let cursor = Arc::new(Mutex::new(PullCursor::resume(Horizon::new("900"), 200)));
+
+    let err = src
+        .drain(&engine, &cursor)
+        .await
+        .expect_err("a pruned horizon is an error, not an empty drain");
+    assert!(
+        matches!(err, PostgrestError::Gone(_)),
+        "410 must surface as Gone, got: {err:?}"
+    );
+    assert!(
+        err.is_permanent(),
+        "retrying cannot un-prune the log; the fix is a re-snapshot"
+    );
+    // The cursor must not have moved: the re-snapshot resets it deliberately.
+    assert_eq!(cursor.lock().unwrap().since().as_str(), "900");
+}

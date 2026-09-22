@@ -489,3 +489,52 @@ async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
     );
     fx.teardown().await;
 }
+
+/// Offline past the retention window. Pruning the log leaves a hole that no
+/// later pull can fill, so `cairn_pull` must refuse a horizon below it rather
+/// than return a short answer — a short answer is indistinguishable from
+/// "nothing happened", and the rows in the hole would never arrive.
+#[tokio::test]
+async fn a_horizon_below_the_pruned_window_is_refused_with_pt410() {
+    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+        eprintln!("skipping: set {E2E_FLAG}=1");
+        return;
+    }
+    let fx = Fixture::setup().await;
+    fx.insert("alice", "old").await;
+    let old_horizon = fx.pull("0", 200).await[0].0.clone();
+
+    // Age the log past the window and prune it.
+    fx.client
+        .batch_execute("update cairn.changes set logged_at = now() - interval '30 days';")
+        .await
+        .expect("age the log");
+    let pruned: i64 = fx
+        .client
+        .query_one("select cairn.prune()", &[])
+        .await
+        .expect("prune")
+        .get(0);
+    assert_eq!(pruned, 1, "one row was old enough");
+
+    // A fresh device is fine; a device resuming into the hole is not.
+    assert!(
+        fx.pull("0", 200).await.is_empty(),
+        "a fresh horizon still works after a prune"
+    );
+    let err = fx
+        .client
+        .query(
+            "select * from public.cairn_pull($1::text::xid8, 200)",
+            &[&old_horizon],
+        )
+        .await
+        .expect_err("resuming into a pruned gap must raise");
+    let code = err.code().map(|c| c.code().to_string()).unwrap_or_default();
+    assert_eq!(
+        code, "PT410",
+        "PostgREST turns PT410 into HTTP 410, which the client maps to \
+         PostgrestError::Gone; got {code}: {err}"
+    );
+    fx.teardown().await;
+}

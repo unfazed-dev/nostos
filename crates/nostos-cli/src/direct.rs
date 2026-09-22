@@ -280,6 +280,16 @@ create table if not exists cairn.changes (
 );
 create index if not exists changes_xid_seq_idx    on cairn.changes (xid, seq);
 create index if not exists changes_logged_at_idx  on cairn.changes (logged_at);
+
+-- How far the log has been pruned. Without this a device that was away longer
+-- than the retention window resumes from a horizon whose rows are gone and
+-- gets a shorter answer instead of an error -- the rows in the gap would
+-- simply never arrive. One row, so the guard in cairn_pull is a lookup.
+create table if not exists cairn.retention (
+  id           int  primary key default 1 check (id = 1),
+  pruned_below xid8 not null default '0'::xid8
+);
+insert into cairn.retention (id) values (1) on conflict do nothing;
 "#,
     );
 }
@@ -412,7 +422,23 @@ fn pull_fn(s: &mut String) {
 create or replace function public.cairn_pull(since xid8, max_txns int default 200)
 returns table (horizon xid8, seq bigint, xid xid8,
                table_name text, pk text, op text, "row" jsonb)
-language sql stable security invoker set search_path = '' as $fn$
+language plpgsql stable security invoker set search_path = '' as $fn$
+declare
+  v_pruned xid8;
+begin
+  -- A device resuming from a horizon that has been pruned away must be TOLD,
+  -- not quietly given a shorter answer: the rows in the gap can never arrive
+  -- any other way. PostgREST turns a `PTxyz` sqlstate into HTTP xyz, so this
+  -- reaches the client as 410 Gone -- re-snapshot and reset the horizon.
+  select r.pruned_below into v_pruned from cairn.retention r;
+  if since <> '0'::xid8 and v_pruned is not null and since <= v_pruned then
+    raise sqlstate 'PT410' using
+      message = 'cairn: the change log has been pruned past this horizon',
+      detail  = 'the device was offline longer than the retention window',
+      hint    = 'reset the stored horizon and re-snapshot the synced tables';
+  end if;
+
+  return query
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
   page as (
     select distinct c.xid
@@ -426,6 +452,7 @@ language sql stable security invoker set search_path = '' as $fn$
   join page p on p.xid = c.xid
   cross join h
   order by c.xid, c.seq;
+end;
 $fn$;
 "#,
     );
@@ -546,6 +573,7 @@ create policy cairn_ring_read on realtime.messages
 
 grant usage on schema cairn to authenticated;
 grant select on cairn.changes to authenticated;
+grant select on cairn.retention to authenticated;
 grant execute on function cairn.current_scopes() to authenticated;
 
 -- Postgres grants EXECUTE to PUBLIC on every new function, which would hand the
@@ -568,10 +596,19 @@ fn prune(s: &mut String, retention: &str) {
 --   select cron.schedule('nostos-prune', '0 * * * *', $$select cairn.prune()$$);
 create or replace function cairn.prune(retain interval default interval '{retention}')
 returns bigint language plpgsql security definer set search_path = '' as $fn$
-declare n bigint;
+declare
+  n        bigint;
+  v_high   xid8;
 begin
-  delete from cairn.changes where logged_at < now() - retain;
-  get diagnostics n = row_count;
+  with gone as (
+    delete from cairn.changes where logged_at < now() - retain returning xid
+  )
+  select count(*), max(xid) into n, v_high from gone;
+  if v_high is not null then
+    update cairn.retention
+       set pruned_below = case when pruned_below > v_high then pruned_below else v_high end
+     where id = 1;
+  end if;
   return n;
 end;
 $fn$;
@@ -728,6 +765,18 @@ pub async fn inspect(
                     "cairn_pull does NOT page by transaction \u{2014} it can hand a device \
                      half a transaction, which applies atomically and looks correct. \
                      Regenerate with `nostos link --mode direct`."
+                        .to_string()
+                },
+            ));
+            let guards_retention = def.contains("PT410");
+            out.push(Check::new(
+                guards_retention,
+                if guards_retention {
+                    "cairn_pull reports a pruned horizon as 410 rather than a short answer"
+                        .to_string()
+                } else {
+                    "cairn_pull does NOT guard the retention window \u{2014} a device that was \
+                     offline too long resumes into a gap and never receives the missing rows"
                         .to_string()
                 },
             ));
