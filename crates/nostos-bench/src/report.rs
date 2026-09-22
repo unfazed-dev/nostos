@@ -45,6 +45,10 @@ pub struct Environment {
     /// Seed the tier/rep order was shuffled with — the run order is part of
     /// the method, so it belongs in the recorded environment.
     pub order_seed: u64,
+    /// Per-run delivery budget, `0` = none (fixed `events` per tier). With a
+    /// budget the `events` field above is the flag's value, not what any tier
+    /// ran; each run records its own count in `RunResult::events_total`.
+    pub deliveries: u64,
 }
 
 impl Environment {
@@ -60,6 +64,7 @@ impl Environment {
             reps: cfg.reps,
             warmup_reps: cfg.warmup_reps,
             order_seed: cfg.order_seed,
+            deliveries: cfg.deliveries,
         }
     }
 }
@@ -189,6 +194,7 @@ mod tests {
                 reps: 5,
                 warmup_reps: 1,
                 order_seed: 0x000C_A110_5EED,
+                deliveries: 0,
             },
             tiers,
             runs,
@@ -554,6 +560,13 @@ fn render_markdown(r: &FullReport) -> String {
          mean looks.\n",
         r.environment.reps, r.environment.warmup_reps, r.environment.order_seed,
     ));
+
+    if r.environment.deliveries > 0 {
+        s.push_str(&format!(
+            "\n> **Delivery budget: {} frames per run.** Each tier generates              `budget / clients` events, so every tier moves the same number of frames and              differs only in how many sessions each event must reach. A fixed `--events`              instead charges the widest tier twice — more sessions per event *and* more              events — which is a ladder measuring two things at once.\n",
+            grouped(r.environment.deliveries as f64),
+        ));
+    }
 
     if r.environment.rate > 0 {
         s.push_str(&format!(

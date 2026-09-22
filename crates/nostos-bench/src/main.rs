@@ -73,9 +73,23 @@ pub struct BenchConfig {
     )]
     pub clients: Vec<usize>,
 
-    /// Total events to generate per run.
+    /// Total events to generate per run. Ignored when `--deliveries` is set.
     #[arg(long, env = "BENCH_EVENTS", default_value_t = 100_000)]
     pub events: u64,
+
+    /// Per-run DELIVERY budget — `events x clients`, the frames a run actually
+    /// moves. `0` (default) keeps `--events` fixed per tier, which is how every
+    /// historical figure was measured.
+    ///
+    /// A fixed event count makes a ladder do work proportional to `clients`:
+    /// at 100k events the 5k rung moves 500M frames and the 10k rung moves 1B,
+    /// so the big tier is charged twice — once for having more sessions to walk
+    /// per event, once for being handed twice the events. The tiers are then
+    /// not comparable and the slowest one dominates the session. A budget makes
+    /// every tier move the same frames, so the only variable left is the thing
+    /// the ladder is varying.
+    #[arg(long, env = "BENCH_DELIVERIES", default_value_t = 0)]
+    pub deliveries: u64,
 
     /// Payload profile: "small" (~100B) or "large" (~4KB).
     #[arg(long, env = "BENCH_PROFILE", default_value = "small")]
@@ -327,8 +341,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+impl BenchConfig {
+    /// Events this tier generates. Under a delivery budget the count shrinks as
+    /// clients grow, holding `events x clients` constant across the ladder.
+    /// Floored at 1 so a budget below the client count still runs a real event
+    /// rather than dividing to zero.
+    fn events_for(&self, clients: usize) -> u64 {
+        if self.deliveries == 0 {
+            self.events
+        } else {
+            (self.deliveries / (clients.max(1) as u64)).max(1)
+        }
+    }
+}
+
 async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunResult> {
-    info!(clients, rep, events = cfg.events, "run starting");
+    let events = cfg.events_for(clients);
+    info!(clients, rep, events, "run starting");
 
     // ---- shared store + use-cases (the same instances the server uses) ----
     let store: Arc<dyn nostos_application::ports::SessionStore> =
@@ -419,8 +448,8 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
 
     // ---- drive the FakeReplicator through the real FanOutService ----
     let repl_cfg = match cfg.profile.as_str() {
-        "large" => FakeReplicatorConfig::large(cfg.events),
-        _ => FakeReplicatorConfig::small(cfg.events),
+        "large" => FakeReplicatorConfig::large(events),
+        _ => FakeReplicatorConfig::small(events),
     }
     .recycling_keys(cfg.distinct_keys)
     .paced(cfg.rate);
@@ -463,7 +492,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
     // whether the remainder arrived or was shed. The clock stops at the last
     // delivery, so the quiet grace never enters `elapsed`.
     let quiet = Duration::from_secs(10);
-    let target = cfg.events.saturating_mul(clients as u64);
+    let target = events.saturating_mul(clients as u64);
     let deadline = Duration::from_secs(cfg.timeout_secs);
     let wait = async {
         let mut seen = 0_u64;
@@ -496,7 +525,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
     // The fan-out task emits events as fast as the router accepts them. At high
     // client counts (10k) with no client ACKs, `FanOutService::run` does a
     // per-event `slowest_session` + `min_acked_lsn` scan over every session —
-    // O(N) per event — so finishing all `cfg.events` can take far longer than
+    // O(N) per event — so finishing every event can take far longer than
     // the delivery window above. Awaiting it unconditionally would hang the
     // harness at 10k (the wait-loop times out, then we block on `run()`).
     //
@@ -530,7 +559,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
     }
 
     let ops_per_sec = (delivered as f64) / elapsed.as_secs_f64().max(1e-9);
-    let attempted = cfg.events.saturating_mul(clients as u64).max(1);
+    let attempted = events.saturating_mul(clients as u64).max(1);
     // ADR-0045: `delivered` is a CLIENT-side frame count, and a superseded
     // event is deliberately one fewer frame for the same converged state.
     // Left out of the numerator, `drop%` would score conflation as exactly the
@@ -580,7 +609,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
     // requested, and every figure derived from it describes the generator.
     let max_lateness = Duration::from_nanos(lateness.load(Ordering::Relaxed));
     let rate_held = cfg.rate == 0 || {
-        let nominal = cfg.events as f64 / cfg.rate as f64;
+        let nominal = events as f64 / cfg.rate as f64;
         max_lateness.as_secs_f64() <= (nominal * 0.05).max(0.05)
     };
     if !rate_held {
@@ -597,7 +626,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
         rep,
         // Overwritten by the caller, which is what knows the schedule.
         order: 0,
-        events_total: cfg.events,
+        events_total: events,
         events_delivered: delivered,
         events_superseded: outcome.superseded,
         ops_per_sec,
@@ -702,5 +731,45 @@ fn raise_fd_limit() {
             65_536,
             65_536,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BenchConfig;
+    use clap::Parser;
+
+    fn cfg(args: &[&str]) -> BenchConfig {
+        let mut argv = vec!["nostos-bench"];
+        argv.extend_from_slice(args);
+        BenchConfig::parse_from(argv)
+    }
+
+    #[test]
+    fn without_a_budget_every_tier_keeps_the_fixed_event_count() {
+        let c = cfg(&["--events", "100000"]);
+        assert_eq!(c.events_for(1_000), 100_000);
+        assert_eq!(c.events_for(10_000), 100_000);
+    }
+
+    #[test]
+    fn a_budget_holds_deliveries_constant_across_the_ladder() {
+        // The defect this exists to prevent: a fixed event count makes the 10k
+        // rung move twice the frames of the 5k rung, so the ladder varies work
+        // and width together and neither rung explains the other.
+        let c = cfg(&["--deliveries", "200000000"]);
+        for clients in [1_000_usize, 5_000, 10_000] {
+            assert_eq!(
+                c.events_for(clients) * clients as u64,
+                200_000_000,
+                "tier {clients} moved a different number of frames"
+            );
+        }
+    }
+
+    #[test]
+    fn a_budget_below_the_client_count_still_runs_one_event() {
+        let c = cfg(&["--deliveries", "10"]);
+        assert_eq!(c.events_for(10_000), 1);
     }
 }
