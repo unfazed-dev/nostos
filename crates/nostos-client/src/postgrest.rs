@@ -368,6 +368,81 @@ impl PostgrestSource {
             body,
         })
     }
+
+    /// Register a push token for the signed-in user (ADR-0037's
+    /// `registerPushToken`, routed to PostgREST because direct mode has no
+    /// server socket to carry it).
+    ///
+    /// The scope is **not** a parameter: the generated function takes it from
+    /// the caller's own JWT, so a device cannot register against another
+    /// tenant no matter what it sends. `platform` is `fcm`, `apns` or
+    /// `webpush` — the same three the other SDKs use.
+    ///
+    /// # Errors
+    /// [`PostgrestError`] on transport failure or any non-success status.
+    pub async fn register_push_token(
+        &self,
+        platform: &str,
+        token: &str,
+    ) -> Result<(), PostgrestError> {
+        self.rpc(
+            "cairn_register_push_token",
+            &serde_json::json!({ "p_platform": platform, "p_token": token }),
+        )
+        .await
+    }
+
+    /// Drop a push token. Idempotent — a token that is not registered is a
+    /// zero-row delete, which is success.
+    ///
+    /// # Errors
+    /// [`PostgrestError`] on transport failure or any non-success status.
+    pub async fn deregister_push_token(&self, token: &str) -> Result<(), PostgrestError> {
+        self.rpc(
+            "cairn_deregister_push_token",
+            &serde_json::json!({ "p_token": token }),
+        )
+        .await
+    }
+
+    /// "This device is awake." Direct mode has no server holding sockets, so
+    /// presence is something the device asserts; the push trigger skips any
+    /// scope with a recent heartbeat because the Realtime ring already reached
+    /// it. Cheap enough to send on every foreground and every successful
+    /// drain.
+    ///
+    /// # Errors
+    /// [`PostgrestError`] on transport failure or any non-success status.
+    pub async fn heartbeat(&self, device_id: &str) -> Result<(), PostgrestError> {
+        self.rpc(
+            "cairn_heartbeat",
+            &serde_json::json!({ "p_device_id": device_id }),
+        )
+        .await
+    }
+
+    /// POST a `void`-returning RPC and discard the body.
+    async fn rpc(&self, name: &str, body: &serde_json::Value) -> Result<(), PostgrestError> {
+        let bearer = self.token.as_deref().unwrap_or(&self.apikey);
+        let res = self
+            .http
+            .post(format!("{}/rpc/{name}", self.rest_base))
+            .header("apikey", &self.apikey)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| PostgrestError::Transport(e.to_string()))?;
+        let status = res.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(PostgrestError::Status {
+            status: status.as_u16(),
+            body: res.text().await.unwrap_or_default(),
+        })
+    }
 }
 
 /// The result of one [`PostgrestSource::drain`].

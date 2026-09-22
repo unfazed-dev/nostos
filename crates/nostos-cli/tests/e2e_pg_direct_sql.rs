@@ -26,7 +26,9 @@
 //! database that has a real `auth.users`, so pointing `NOSTOS_PG_URL` at a live
 //! Supabase project aborts instead of dropping its auth schema.
 
-use nostos_cli::direct::{inspect, render, DirectTable, Scoping, Verdict, DEFAULT_RETENTION};
+use nostos_cli::direct::{
+    inspect, render_with_push, DirectTable, PushConfig, Scoping, Verdict, DEFAULT_RETENTION,
+};
 
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
@@ -74,6 +76,15 @@ returns void language sql as $fn$
 $fn$;
 grant usage on schema realtime to authenticated;
 grant select on realtime.messages to authenticated;
+-- pg_net stands in as a recorder: the wake trigger only has to prove it fires
+-- once per scope per cooldown, not that HTTP works.
+create schema if not exists net;
+create table if not exists net.sent (id bigserial primary key, url text, body jsonb);
+create or replace function net.http_post(url text, body jsonb default '{}'::jsonb,
+  params jsonb default '{}'::jsonb, headers jsonb default '{}'::jsonb, timeout_milliseconds int default 5000)
+returns bigint language sql as $fn$
+  insert into net.sent (url, body) values (url, body) returning id;
+$fn$;
 ";
 
 /// Refuse to touch a database that looks like a real Supabase project.
@@ -122,7 +133,7 @@ impl Fixture {
             .await
             .expect("creating the synced table");
 
-        let sql = render(
+        let sql = render_with_push(
             &[DirectTable {
                 table: tasks.clone(),
                 scoping: Scoping::Claim {
@@ -131,6 +142,11 @@ impl Fixture {
                 },
             }],
             DEFAULT_RETENTION,
+            Some(&PushConfig {
+                endpoint: "https://example.test/nostos-push".to_string(),
+                presence_window: "90 seconds".to_string(),
+                cooldown: "30 seconds".to_string(),
+            }),
         );
         client
             .batch_execute(&sql)
@@ -141,6 +157,12 @@ impl Fixture {
             .batch_execute(&sql)
             .await
             .expect("the generated SQL must apply twice");
+        // The shared secret is set out of band so it never lands in a file —
+        // `nostos doctor --mode direct` fails while it is unset, on purpose.
+        client
+            .batch_execute("update cairn.push_config set secret = 'test-secret' where id = 1;")
+            .await
+            .expect("set the push secret");
 
         Self { client, tasks }
     }
@@ -184,9 +206,13 @@ impl Fixture {
         let _ = self
             .client
             .batch_execute(
-                "drop schema if exists cairn cascade; \
+                "drop schema if exists net cascade; \
+                 drop schema if exists cairn cascade; \
                  drop function if exists public.cairn_pull(xid8, int); \
-                 drop function if exists public.cairn_increment(text, text, text, numeric);",
+                 drop function if exists public.cairn_increment(text, text, text, numeric); \
+                 drop function if exists public.cairn_register_push_token(text, text); \
+                 drop function if exists public.cairn_deregister_push_token(text); \
+                 drop function if exists public.cairn_heartbeat(text);",
             )
             .await;
     }
@@ -536,5 +562,90 @@ async fn a_horizon_below_the_pruned_window_is_refused_with_pt410() {
         "PostgREST turns PT410 into HTTP 410, which the client maps to \
          PostgrestError::Gone; got {code}: {err}"
     );
+    fx.teardown().await;
+}
+
+/// How many requests the `pg_net` recorder stub has seen.
+async fn sent(client: &tokio_postgres::Client) -> i64 {
+    client
+        .query_one("select count(*)::bigint from net.sent", &[])
+        .await
+        .expect("count")
+        .get(0)
+}
+
+/// Push only fires for a scope nobody is listening on, and at most once per
+/// cooldown. The second half is not politeness: `pg_net` sends one HTTP
+/// request per call, so without the per-scope debounce a bulk write would
+/// become one request per row.
+#[tokio::test]
+async fn push_skips_awake_devices_and_debounces_the_rest() {
+    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+        eprintln!("skipping: set {E2E_FLAG}=1");
+        return;
+    }
+    let fx = Fixture::setup().await;
+
+    // A signed-in device registers a token. The scope comes from the JWT, so
+    // the device cannot name someone else's.
+    fx.client
+        .batch_execute("select set_config('request.jwt.claims', '{\"sub\":\"alice\"}', false);")
+        .await
+        .expect("claims");
+    fx.client
+        .execute(
+            "select public.cairn_register_push_token('fcm', 'tok-alice')",
+            &[],
+        )
+        .await
+        .expect("register");
+    let scope: String = fx
+        .client
+        .query_one("select scope from cairn.push_tokens", &[])
+        .await
+        .expect("read the token")
+        .get(0);
+    assert_eq!(scope, "sub:alice", "the scope is stamped from the JWT");
+
+    // Awake: the Realtime ring already reached them, so no push.
+    fx.client
+        .execute("select public.cairn_heartbeat('device-1')", &[])
+        .await
+        .expect("heartbeat");
+    fx.insert("alice", "while awake").await;
+    assert_eq!(sent(&fx.client).await, 0, "an awake device is not pushed");
+
+    // Asleep: the first write wakes them, the next four are debounced.
+    fx.client
+        .batch_execute(
+            "update cairn.device_presence set last_seen = now() - interval '10 minutes';",
+        )
+        .await
+        .expect("age the presence row");
+    for i in 0..5 {
+        fx.insert("alice", &format!("while asleep {i}")).await;
+    }
+    assert_eq!(
+        sent(&fx.client).await,
+        1,
+        "five writes to one sleeping scope are one push, not five"
+    );
+
+    let body: serde_json::Value = fx
+        .client
+        .query_one("select body from net.sent", &[])
+        .await
+        .expect("read the request")
+        .get(0);
+    assert_eq!(
+        body,
+        serde_json::json!({ "scope": "sub:alice" }),
+        "the doorbell carries no data \u{2014} the device pulls, and RLS decides"
+    );
+
+    fx.client
+        .batch_execute("select set_config('request.jwt.claims', '', false);")
+        .await
+        .expect("reset");
     fx.teardown().await;
 }

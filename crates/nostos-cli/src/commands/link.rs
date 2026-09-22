@@ -31,6 +31,11 @@ pub struct LinkArgs {
     /// Direct mode: how long `cairn.prune()` keeps change rows.
     #[arg(long, default_value = direct::DEFAULT_RETENTION)]
     pub retention: String,
+    /// Direct mode: also generate the push path, posting to this Edge Function
+    /// URL when a change arrives for a scope with no awake device. Omit and no
+    /// push objects are generated at all.
+    #[arg(long)]
+    pub push: Option<String>,
     /// Backend kind: `postgres` | `supabase` | `appwrite` (ADR-0023 D4).
     /// Defaults to `postgres` when omitted.
     #[arg(long)]
@@ -140,7 +145,11 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
         )
     })?;
     let tables = direct::plan(&rules, &args.public)?;
-    let sql = direct::render(&tables, &args.retention);
+    let push = args.push.as_ref().map(|endpoint| direct::PushConfig {
+        endpoint: endpoint.clone(),
+        ..direct::PushConfig::default()
+    });
+    let sql = direct::render_with_push(&tables, &args.retention, push.as_ref());
 
     let config = ProjectConfig {
         mode: LinkMode::Direct,
@@ -169,6 +178,12 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
         direct::OUTPUT_FILE
     );
     println!("      then turn OFF \"Allow public access\" in the project's Realtime settings,");
+    if push.is_some() {
+        println!(
+            "      push is included \u{2014} `create extension if not exists pg_net;`, set \
+             `cairn.push_config.secret`, and deploy supabase/functions/cairn-push."
+        );
+    }
     println!("      then `nostos doctor --mode direct` to check it landed.");
     Ok(())
 }

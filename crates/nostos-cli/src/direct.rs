@@ -49,6 +49,46 @@ pub const DEFAULT_RETENTION: &str = "7 days";
 /// `.nostos/direct.sql` — the generated file, relative to `.nostos/`.
 pub const OUTPUT_FILE: &str = "direct.sql";
 
+/// Schemas and tables the change-log trigger must never be attached to.
+/// `net` is `pg_net`'s own request/response queue — instrumenting it would
+/// make every push attempt a change row, which fires another push. `nostos`'s
+/// own tables are the machinery itself, and `device_presence` in particular is
+/// written on every heartbeat: logging it would turn a liveness ping into
+/// fan-out traffic for every device in the scope.
+pub const RESERVED_TABLES: &[&str] = &[
+    "changes",
+    "retention",
+    "push_tokens",
+    "device_presence",
+    "push_cooldown",
+    "push_config",
+    "http_request_queue",
+    "_http_response",
+];
+
+/// Where the doorbell-for-a-sleeping-device path posts. `None` = no push
+/// section is generated at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushConfig {
+    /// The Edge Function URL `pg_net` posts to.
+    pub endpoint: String,
+    /// How long after a heartbeat a device still counts as awake.
+    pub presence_window: String,
+    /// The floor between two pushes to one scope. Also the `pg_net` rate
+    /// guard: without it 10,000 write transactions are 10,000 HTTP requests.
+    pub cooldown: String,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            presence_window: "90 seconds".to_string(),
+            cooldown: "30 seconds".to_string(),
+        }
+    }
+}
+
 /// How one table's rows are scoped in the shared change log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scoping {
@@ -119,6 +159,11 @@ pub fn plan(rules: &SyncRules, public_tables: &[String]) -> Result<Vec<DirectTab
     let mut out = Vec::with_capacity(active.len());
     for (table, scope) in active {
         check_ident(table, "table name")?;
+        if RESERVED_TABLES.contains(&table) {
+            bail!(
+                "table `{table}` is one of direct mode's own: instrumenting it would feed                  the machinery back into itself (a push attempt logging a change that                  fires another push, or a heartbeat fanning out to every device).                  Remove it from the sync set."
+            );
+        }
         let scope = scope.map(str::trim).filter(|s| !s.is_empty());
         let scoping = match (scope, public.contains(table)) {
             (Some(text), true) => bail!(
@@ -207,6 +252,18 @@ fn check_ident(name: &str, what: &str) -> Result<()> {
 /// which is what lets an operator diff two runs after a rules edit.
 #[must_use]
 pub fn render(tables: &[DirectTable], retention: &str) -> String {
+    render_with_push(tables, retention, None)
+}
+
+/// [`render`] plus the push path. Separate because push is opt-in: without
+/// `--push <url>` none of it is emitted, so the default schema stays the four
+/// objects the protocol actually needs.
+#[must_use]
+pub fn render_with_push(
+    tables: &[DirectTable],
+    retention: &str,
+    push: Option<&PushConfig>,
+) -> String {
     let mut s = String::with_capacity(8 * 1024);
     let claims: BTreeSet<&str> = tables
         .iter()
@@ -227,6 +284,10 @@ pub fn render(tables: &[DirectTable], retention: &str) -> String {
     doorbell(&mut s);
     policies_and_grants(&mut s);
     prune(&mut s, retention);
+    if let Some(cfg) = push {
+        push_path(&mut s, cfg);
+    }
+    s.push_str("\ncommit;\n");
     s
 }
 
@@ -612,9 +673,187 @@ begin
   return n;
 end;
 $fn$;
-
-commit;
 "
+    );
+}
+
+/// The push path: token registry, presence, and the trigger that wakes a
+/// device nobody is listening on.
+///
+/// ## Why presence is checked in SQL, not guessed
+///
+/// A doorbell only has to reach devices that are *not* already connected — a
+/// live device got the Realtime ring milliseconds ago. Server mode knows who
+/// is connected because it holds the sockets; direct mode has no server, so
+/// the device says so itself with `cairn_heartbeat()`. A stale heartbeat is
+/// the only "offline" signal that exists here, and it is a heuristic: a device
+/// that dies mid-window is pushed a little late, and one that was awake very
+/// recently may be skipped. That is the honest cost of having no server.
+///
+/// ## Why the cooldown is load-bearing, not politeness
+///
+/// `pg_net` is transactional — requests are not started until the transaction
+/// commits — but it is still one HTTP request per call, and its worker has a
+/// finite rate. Ten thousand separate write transactions would be ten thousand
+/// requests. The `on conflict … where` below is an atomic per-scope debounce:
+/// only the statement that actually updates the row sends, so concurrent
+/// writers collapse into one push without a lock or an advisory queue.
+fn push_path(s: &mut String, cfg: &PushConfig) {
+    let PushConfig {
+        endpoint,
+        presence_window,
+        cooldown,
+    } = cfg;
+    let _ = write!(
+        s,
+        r#"
+-- ===========================================================================
+-- Push (`nostos link --mode direct --push <url>`). A killed app that never
+-- wakes is indistinguishable from broken sync, so this is not a follow-up.
+-- ===========================================================================
+
+create table if not exists cairn.push_config (
+  id               int  primary key default 1 check (id = 1),
+  endpoint         text not null,
+  secret           text,
+  presence_window  interval not null default interval '{presence_window}',
+  cooldown         interval not null default interval '{cooldown}'
+);
+insert into cairn.push_config (id, endpoint) values (1, '{endpoint}')
+on conflict (id) do update set endpoint = excluded.endpoint;
+-- The shared secret the Edge Function checks. Set it out of band, so it is
+-- never written into a file that lands in git:
+--   update cairn.push_config set secret = '<random>' where id = 1;
+
+create table if not exists cairn.push_tokens (
+  scope      text not null,
+  platform   text not null check (platform in ('fcm', 'apns', 'webpush')),
+  token      text not null,
+  updated_at timestamptz not null default now(),
+  primary key (scope, platform, token)
+);
+create index if not exists push_tokens_scope_idx on cairn.push_tokens (scope);
+
+create table if not exists cairn.device_presence (
+  scope     text not null,
+  device_id text not null,
+  last_seen timestamptz not null default now(),
+  primary key (scope, device_id)
+);
+create index if not exists device_presence_seen_idx on cairn.device_presence (scope, last_seen);
+
+create table if not exists cairn.push_cooldown (
+  scope        text primary key,
+  last_push_at timestamptz not null default now()
+);
+
+-- security definer, and here that IS the authority: the scope comes from the
+-- caller's own JWT via cairn.current_scopes(), never from an argument, so a
+-- device cannot register a token against somebody else's scope no matter what
+-- it sends.
+create or replace function public.cairn_register_push_token(p_platform text, p_token text)
+returns void language plpgsql security definer set search_path = '' as $fn$
+declare v_scopes text[] := cairn.current_scopes();
+begin
+  if p_platform not in ('fcm', 'apns', 'webpush') then
+    raise sqlstate 'PT400' using message = 'cairn: unknown push platform';
+  end if;
+  if coalesce(array_length(v_scopes, 1), 0) = 0 then
+    raise sqlstate 'PT401' using
+      message = 'cairn: no scope in the caller''s claims',
+      hint    = 'register the token while signed in';
+  end if;
+  insert into cairn.push_tokens (scope, platform, token)
+  select s, p_platform, p_token from unnest(v_scopes) as s
+  on conflict (scope, platform, token) do update set updated_at = now();
+end;
+$fn$;
+
+create or replace function public.cairn_deregister_push_token(p_token text)
+returns void language plpgsql security definer set search_path = '' as $fn$
+begin
+  delete from cairn.push_tokens
+   where token = p_token and scope = any (cairn.current_scopes());
+end;
+$fn$;
+
+-- "I am awake." Cheap enough to send on every foreground and every pull.
+create or replace function public.cairn_heartbeat(p_device_id text)
+returns void language plpgsql security definer set search_path = '' as $fn$
+begin
+  insert into cairn.device_presence (scope, device_id)
+  select s, p_device_id from unnest(cairn.current_scopes()) as s
+  on conflict (scope, device_id) do update set last_seen = now();
+end;
+$fn$;
+
+create or replace function cairn.wake_absent_devices() returns trigger
+language plpgsql security definer set search_path = '' as $fn$
+declare
+  v_cfg cairn.push_config%rowtype;
+begin
+  select * into v_cfg from cairn.push_config where id = 1;
+  if v_cfg.endpoint is null or v_cfg.endpoint = '' then
+    return null;
+  end if;
+  -- pg_net is an extension and may not be installed; `nostos doctor --mode
+  -- direct` reports that. Silently skipping beats failing every write.
+  if to_regproc('net.http_post') is null then
+    return null;
+  end if;
+  -- Somebody is listening: the Realtime ring already reached them.
+  if exists (
+    select 1 from cairn.device_presence
+     where scope = new.scope and last_seen > now() - v_cfg.presence_window
+  ) then
+    return null;
+  end if;
+  -- The debounce, and the advisory lock in front of it is not an
+  -- optimization. One shared row per scope means a row lock per scope, held
+  -- until the writing transaction commits -- so a long transaction would block
+  -- EVERY other writer in that scope. A delayed sync is acceptable; a blocked
+  -- write is not. `pg_try_advisory_xact_lock` never waits: a writer that finds
+  -- the scope taken skips, which is exactly what the debounce would have told
+  -- it to do anyway. (Found by the pg e2e, which deadlocked without it.)
+  if not pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope)) then
+    return null;
+  end if;
+  insert into cairn.push_cooldown (scope, last_push_at) values (new.scope, now())
+  on conflict (scope) do update set last_push_at = now()
+   where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown;
+  if not found then
+    return null;
+  end if;
+  perform net.http_post(
+    url     := v_cfg.endpoint,
+    body    := jsonb_build_object('scope', new.scope),
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'Authorization', 'Bearer ' || coalesce(v_cfg.secret, '')
+    )
+  );
+  return null;
+end;
+$fn$;
+
+drop trigger if exists cairn_changes_wake on cairn.changes;
+create trigger cairn_changes_wake
+  after insert on cairn.changes
+  for each row execute function cairn.wake_absent_devices();
+
+-- Devices talk to all of this through the three functions above and nothing
+-- else: no direct table access, so there is no policy to get wrong and no way
+-- to enumerate another tenant's tokens.
+revoke all on function public.cairn_register_push_token(text, text) from public;
+revoke all on function public.cairn_deregister_push_token(text) from public;
+revoke all on function public.cairn_heartbeat(text) from public;
+grant execute on function public.cairn_register_push_token(text, text) to authenticated;
+grant execute on function public.cairn_deregister_push_token(text) to authenticated;
+grant execute on function public.cairn_heartbeat(text) to authenticated;
+alter table cairn.push_tokens     enable row level security;
+alter table cairn.device_presence enable row level security;
+alter table cairn.push_cooldown   enable row level security;
+"#
     );
 }
 
@@ -879,6 +1118,37 @@ pub async fn inspect(
         ));
     }
 
+    // The anti-feedback assertion. A change-log trigger on pg_net's queue turns
+    // every push attempt into a change row, which fires another push; one on
+    // cairn.device_presence turns a liveness ping into fan-out for every device
+    // in the scope. Neither is reachable through `nostos link` — it refuses the
+    // names — but a hand-applied migration can do it, and the symptom is an
+    // unexplained write storm rather than an error.
+    let feedback: Vec<String> = client
+        .query(
+            "select n.nspname || '.' || c.relname \
+             from pg_trigger g join pg_class c on c.oid = g.tgrelid \
+             join pg_namespace n on n.oid = c.relnamespace \
+             where not g.tgisinternal and g.tgname like 'cairn\\_log\\_%' \
+               and n.nspname in ('net', 'cairn')",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    out.push(Check::new(
+        feedback.is_empty(),
+        if feedback.is_empty() {
+            "neither pg_net nor nostos's own tables are instrumented".to_string()
+        } else {
+            format!(
+                "change-log triggers on {feedback:?} \u{2014} these feed the machinery back \
+                 into itself (a push logging a change that fires another push). Drop them."
+            )
+        },
+    ));
+
     let ring: bool = client
         .query_one(
             "select exists (select from pg_trigger \
@@ -928,6 +1198,62 @@ pub async fn inspect(
          `select cairn.prune()`",
         oldest.map_or_else(|| "n/a".to_string(), |s| format!("{:.0}h old", s / 3600.0))
     )));
+
+    let push_installed: bool = client
+        .query_one("select to_regclass('cairn.push_config') is not null", &[])
+        .await?
+        .get(0);
+    if push_installed {
+        let (endpoint, has_secret): (Option<String>, bool) = {
+            let r = client
+                .query_one(
+                    "select endpoint, coalesce(secret, '') <> '' from cairn.push_config \
+                     where id = 1",
+                    &[],
+                )
+                .await?;
+            (r.get(0), r.get(1))
+        };
+        out.push(Check::new(
+            endpoint.as_deref().is_some_and(|e| !e.is_empty()),
+            format!(
+                "push endpoint configured ({})",
+                endpoint.as_deref().unwrap_or("unset")
+            ),
+        ));
+        out.push(Check::new(
+            has_secret,
+            "cairn.push_config.secret is set \u{2014} without it the Edge Function cannot tell              a real doorbell from anyone who found the URL",
+        ));
+        let pg_net: bool = client
+            .query_one("select to_regproc('net.http_post') is not null", &[])
+            .await?
+            .get(0);
+        out.push(Check::new(
+            pg_net,
+            if pg_net {
+                "pg_net is installed".to_string()
+            } else {
+                "pg_net is NOT installed \u{2014} the wake trigger skips silently, so a killed                  app never learns there is anything to sync. `create extension pg_net;`"
+                    .to_string()
+            },
+        ));
+        let (tokens, awake): (i64, i64) = {
+            let r = client
+                .query_one(
+                    "select (select count(*)::bigint from cairn.push_tokens), \
+                            (select count(*)::bigint from cairn.device_presence \
+                              where last_seen > now() - (select presence_window \
+                                                           from cairn.push_config where id = 1))",
+                    &[],
+                )
+                .await?;
+            (r.get(0), r.get(1))
+        };
+        out.push(Check::note(format!(
+            "push: {tokens} registered token(s), {awake} device(s) currently counted as awake"
+        )));
+    }
 
     let withheld: i64 = client
         .query_one(
@@ -1183,6 +1509,66 @@ mod tests {
     fn the_increment_allow_list_is_the_synced_table_set() {
         let sql = sample_sql();
         assert!(sql.contains("if p_table not in ('tasks', 'projects', 'countries') then"));
+    }
+
+    #[test]
+    fn push_is_opt_in_and_never_instruments_its_own_tables() {
+        let plain = sample_sql();
+        assert!(
+            !plain.contains("cairn.push_tokens"),
+            "no --push means no push objects at all"
+        );
+
+        let with_push = render_with_push(
+            &[DirectTable {
+                table: "tasks".to_string(),
+                scoping: Scoping::Claim {
+                    column: "owner_id".to_string(),
+                    claim: "sub".to_string(),
+                },
+            }],
+            DEFAULT_RETENTION,
+            Some(&PushConfig {
+                endpoint: "https://ref.functions.supabase.co/cairn-push".to_string(),
+                ..PushConfig::default()
+            }),
+        );
+        for needle in [
+            "function public.cairn_register_push_token(p_platform text, p_token text)",
+            "function public.cairn_deregister_push_token(p_token text)",
+            "function public.cairn_heartbeat(p_device_id text)",
+            "https://ref.functions.supabase.co/cairn-push",
+            // The atomic per-scope debounce, which is also the pg_net rate guard.
+            "on conflict (scope) do update set last_push_at = now()",
+            "pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope))",
+            "where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown",
+            // Skipping when pg_net is absent beats failing every write.
+            "if to_regproc('net.http_post') is null then",
+        ] {
+            assert!(with_push.contains(needle), "push SQL is missing: {needle}");
+        }
+        // The trigger is attached to public tables only — never to nostos's own.
+        assert!(!with_push.contains("execute function cairn.log_change('scope'"));
+        assert_eq!(
+            with_push
+                .matches("after insert or update or delete on")
+                .count(),
+            1,
+            "exactly one synced table is instrumented"
+        );
+    }
+
+    #[test]
+    fn direct_modes_own_tables_are_refused_as_sync_targets() {
+        for reserved in ["changes", "device_presence", "push_tokens"] {
+            let rules = toggles(&[(reserved, true, Some("org_id = claims.org_id"))]);
+            let message = err(&rules, &[]);
+            assert!(
+                message.contains("machinery back into itself")
+                    || message.contains("feed the machinery"),
+                "`{reserved}` must be refused: {message}"
+            );
+        }
     }
 
     #[test]

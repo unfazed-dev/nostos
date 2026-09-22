@@ -1,13 +1,15 @@
 # Direct mode — the sync protocol, and how the device gets transactional consistency
 
-**Date:** 2026-09-22. **Status:** steps 1–7 shipped, 8 partly and under `make ci`; steps
-9 still design. Grounded in fetched docs throughout.
+**Date:** 2026-09-22. **Status:** all nine steps implemented and under
+`make ci`; step 8's browser-Worker leg is the one gap. Grounded in fetched docs
+throughout.
 
 Shipped: `nostos_core::pull` (`PullCursor`, `Horizon`, the xid8 checkpoint on
 `Storage`), `nostos_client::postgrest` (`rpc/cairn_pull` + the four write ops),
 `nostos_client::doorbell` (Realtime private channel, `vsn=1.0.0`), and
 `nostos_cli::direct` — the generator behind `nostos link --mode direct` and the
-verifier behind `nostos doctor --mode direct`.
+verifier behind `nostos doctor --mode direct` — plus `nostos_core::conformance`
+(one suite, run per platform) and the opt-in push path.
 
 **The SQL below is no longer theory.** `crates/nostos-cli/tests/e2e_pg_direct_sql.rs`
 applies the generated file to a real Postgres and asserts the properties that
@@ -251,10 +253,28 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    half-applied"** and **"device offline past the retention window"** as
    first-class cases. The first of those has to hold inside the browser
    Worker as well as on rusqlite.
-9. Push: `cairn.push_tokens` under RLS, the trigger-to-function doorbell, and
-   `registerPushToken` routed to PostgREST instead of a server socket — see
-   "Push has to keep working" below. Not a follow-up; a killed app that never
-   wakes is indistinguishable from broken sync.
+9. ✅ Push, opt-in behind `nostos link --mode direct --push <url>`:
+   `cairn.push_tokens` + `cairn.device_presence` + `cairn.push_cooldown`,
+   `cairn_register_push_token` / `cairn_deregister_push_token` /
+   `cairn_heartbeat` (all `security definer`, all taking the scope from the
+   caller's own JWT so a device cannot register against another tenant), the
+   `cairn.wake_absent_devices()` trigger → `pg_net` → Edge Function, and the
+   matching `PostgrestSource` methods. The reference function is
+   `supabase/functions/cairn-push/index.ts` (data-only FCM v1, shared-secret
+   bearer, `--no-verify-jwt`). **Deploying it and supplying FCM credentials is
+   the operator's; nothing here has sent a real notification.**
+
+   Two findings from building it:
+
+   - **The debounce cannot take a row lock.** One shared cooldown row per scope
+     is a row lock per scope held until the writing transaction commits, so a
+     long transaction would block *every other writer in that scope*. A delayed
+     sync is acceptable; a blocked write is not. `pg_try_advisory_xact_lock`
+     goes in front: it never waits, and a writer that finds the scope taken
+     skips — which is what the debounce would have told it anyway. **The pg e2e
+     found this by deadlocking.**
+   - That same debounce is the answer to the open `pg_net` rate question: five
+     writes to one sleeping scope are one request, not five.
 
 ### The write path needs one more function than `pull`
 
