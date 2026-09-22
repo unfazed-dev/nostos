@@ -263,20 +263,33 @@ Read that mechanism against the problem this document started with:
 **The multiplexer still exists. It is just not yours, and not a new box.** That
 is the whole difference, and it is the difference the operator asked for.
 
-**What it costs, honestly — three real design consequences:**
+**What it costs, honestly.** The protocol has six non-negotiable rules, all of
+them published by prior implementations and two of them published as warnings.
+They are worked out with sources in
+[`direct-mode-sync-protocol.md`](direct-mode-sync-protocol.md); in summary:
 
-1. **Resume stops being LSN-exact.** Nostos's durable checkpoint (ADR-0025)
-   replays from an LSN; here the device resumes from a **watermark** and issues
-   a catch-up query (`PostgREST … ?updated_at=gt.<watermark>`). That needs a
-   monotonic column on every synced table. Non-negotiable, and it is a schema
-   requirement on the client's database.
-2. **Deletes need tombstones.** A catch-up query cannot see a row that is gone,
-   and Supabase notes RLS "policies are not applied to `DELETE` statements".
-   Soft-delete (`deleted_at`) or a tombstone table, with a retention window.
-3. **`realtime.messages` is retained ~3 days** (daily partitions, older tables
-   dropped). So the catch-up query is not a fallback, it is the primary path for
-   any device that was away — which makes (1) and (2) load-bearing, not optional
-   polish.
+1. The checkpoint is **`(updated_at, pk)`**, never a bare timestamp — a bare one
+   loses rows at page boundaries (RxDB, Confluent JDBC both say so).
+2. `updated_at` is stamped by a **database trigger**, never by the client.
+3. **Soft delete is mandatory**, with a purge window longer than the longest
+   tolerated absence.
+4. The realtime stream is a **doorbell**; every reconnect resyncs from the
+   checkpoint before trusting a streamed frame (RxDB's `RESYNC`, and Nostos's own
+   ADR-0037 doctrine).
+5. The watermark is captured **before** the catch-up query, accepting duplicate
+   delivery — free for Nostos, whose `(table_name, pk)` row images are idempotent.
+6. Private channels need RLS on `realtime.messages` **and** "Allow public
+   access" disabled — a setting, not a policy.
+
+Rule 4 is what retires the ~3-day `realtime.messages` retention: a device away
+for a fortnight takes the same code path as one that dropped a socket for a
+second.
+
+**And one thing direct mode cannot have: cross-table transactional
+consistency.** Per-table watermarks mean a device can hold an order line whose
+header has not arrived. PowerSync built a service for exactly this and had it
+Jepsen-verified. That is the strongest remaining argument for `nostos-server` —
+and it is a correctness argument, which is a better one than throughput.
 
 Plus: it is only available where the backend *has* a realtime fan-out. Supabase
 and Appwrite do. A bare Postgres does not, and for that, `nostos-server` remains
