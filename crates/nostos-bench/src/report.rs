@@ -119,6 +119,7 @@ mod tests {
         RunResult {
             clients,
             rep: 0,
+            order: 0,
             events_total: 100_000,
             events_delivered: 1,
             events_superseded: 0,
@@ -145,9 +146,38 @@ mod tests {
         }
     }
 
+    /// Place a run at a position in the execution schedule. The whole point of
+    /// the series plot is that this differs from the table position.
+    fn at(order: usize, rep: usize, mut r: RunResult) -> RunResult {
+        r.order = order;
+        r.rep = rep;
+        r
+    }
+
     fn report_of(runs: Vec<RunResult>) -> String {
+        render_markdown(&full_report(runs))
+    }
+
+    fn series_of(runs: Vec<RunResult>) -> String {
+        render_series_svg(&full_report(runs))
+    }
+
+    /// Pull `points="x,y x,y ..."` out of the rendered polyline.
+    fn polyline_points(svg: &str) -> Vec<(usize, usize)> {
+        let start = svg.find("points=\"").expect("no polyline in series svg") + 8;
+        let end = start + svg[start..].find('"').unwrap();
+        svg[start..end]
+            .split_whitespace()
+            .map(|pair| {
+                let (x, y) = pair.split_once(',').unwrap();
+                (x.parse().unwrap(), y.parse().unwrap())
+            })
+            .collect()
+    }
+
+    fn full_report(runs: Vec<RunResult>) -> FullReport {
         let tiers = summarize(&runs);
-        render_markdown(&FullReport {
+        FullReport {
             environment: Environment {
                 rustc: UNKNOWN.into(),
                 profile: "small".into(),
@@ -164,7 +194,59 @@ mod tests {
             runs,
             powersync_ceiling_ops_per_sec_low: 2_000,
             powersync_ceiling_ops_per_sec_high: 4_000,
-        })
+        }
+    }
+
+    /// The series must be drawn in the order runs EXECUTED, not the order they
+    /// are tabled in. These three repetitions decline monotonically in
+    /// execution order — a textbook throttling step — while in table (rep)
+    /// order they read 100k, 300k, 200k: noise. Plot the table order and the
+    /// step disappears, which is the failure this guards.
+    #[test]
+    fn the_series_is_drawn_in_execution_order_not_table_order() {
+        let svg = series_of(vec![
+            at(2, 0, run(1000, 100_000.0, 0.0, true)),
+            at(0, 1, run(1000, 300_000.0, 0.0, true)),
+            at(1, 2, run(1000, 200_000.0, 0.0, true)),
+        ]);
+
+        let points = polyline_points(&svg);
+        assert_eq!(
+            points.len(),
+            3,
+            "every valid rep must be plotted: {points:?}"
+        );
+        assert!(
+            points.windows(2).all(|w| w[0].0 < w[1].0),
+            "x must advance with execution order: {points:?}"
+        );
+        // y grows downward, so a falling throughput is a rising y.
+        assert!(
+            points.windows(2).all(|w| w[0].1 < w[1].1),
+            "the throttling step was flattened — series drawn in table order: {points:?}"
+        );
+    }
+
+    /// A repetition with no usable throughput still happened, and *when* it
+    /// happened is information. It is marked on the axis rather than plotted
+    /// at a value it never measured.
+    #[test]
+    fn an_invalid_repetition_is_marked_on_the_axis_not_plotted() {
+        let svg = series_of(vec![
+            at(0, 0, run(1000, 300_000.0, 0.0, true)),
+            at(1, 1, run(1000, 9_999_999.0, 0.42, false)),
+            at(2, 2, run(1000, 200_000.0, 0.0, true)),
+        ]);
+
+        assert_eq!(
+            polyline_points(&svg).len(),
+            2,
+            "the timed-out rep was plotted as a data point"
+        );
+        assert!(
+            svg.contains("#dc2626"),
+            "the timed-out rep must still be marked on the axis:\n{svg}"
+        );
     }
 
     /// A run that hit `--timeout-secs` delivered only part of the workload, so
@@ -390,6 +472,10 @@ pub fn write_reports(cfg: &BenchConfig, runs: &[RunResult], env: &Environment) -
     let svg = render_svg(&report);
     fs::write(Path::new(&cfg.out_dir).join("chart.svg"), svg).context("write svg")?;
 
+    // Per-repetition series — the plot no summary statistic can replace.
+    let series = render_series_svg(&report);
+    fs::write(Path::new(&cfg.out_dir).join("series.svg"), series).context("write series svg")?;
+
     Ok(())
 }
 
@@ -487,6 +573,15 @@ fn render_markdown(r: &FullReport) -> String {
              asks it.\n",
         );
     }
+
+    s.push_str(
+        "\n> **Look at [`series.svg`](series.svg) before quoting anything here.** It plots every \
+         repetition in the order it actually ran. A mean, a median and a spread all describe a \
+         session as if its runs were interchangeable; a *step* in that series says they were \
+         not — the machine changed underneath the benchmark (thermal throttling, a background \
+         process, a laptop unplugged) and the tiers before and after the step are not comparable \
+         to each other. [`chart.svg`](chart.svg) is the per-tier summary.\n",
+    );
 
     let timed_out = r.runs.iter().filter(|x| !x.throughput_valid).count();
     if timed_out > 0 {
@@ -633,6 +728,155 @@ fn render_svg(r: &FullReport) -> String {
         width - pad_r - 4,
         ps_y - 6,
         r.powersync_ceiling_ops_per_sec_high
+    ));
+
+    svg.push_str("</svg>\n");
+    svg
+}
+
+/// One colour per client tier in the series plot.
+const PALETTE: [&str; 5] = ["#7c3aed", "#0ea5e9", "#16a34a", "#f59e0b", "#db2777"];
+
+/// Every repetition plotted in EXECUTION order — defect 4's remaining half.
+///
+/// Thermal throttling, a background process waking up, or a workstation going
+/// quiet halfway through a session all show as a **step**: the runs after some
+/// point sit at a different level than the runs before it, across every tier at
+/// once. A mean hides that. A median hides it. A min-max spread reports it as
+/// "variance" without saying it was monotone, which is the difference between
+/// "this machine is noisy" and "this machine changed".
+///
+/// The x axis is therefore the order runs actually executed — which the
+/// randomised schedule deliberately makes different from the order they are
+/// tabled in. Plotting the table order would draw a tidy line through a lie.
+fn render_series_svg(r: &FullReport) -> String {
+    let (width, height) = (720usize, 420usize);
+    let (pad_l, pad_r, pad_t, pad_b) = (64usize, 120usize, 48usize, 60usize);
+    let plot_w = width - pad_l - pad_r;
+    let plot_h = height - pad_t - pad_b;
+
+    let mut runs: Vec<&RunResult> = r.runs.iter().collect();
+    runs.sort_by_key(|x| x.order);
+    let n = runs.len();
+
+    // Only valid repetitions carry a y value. A timed-out or rate-missed run
+    // has a position on the x axis but no throughput to plot — it is marked on
+    // the baseline instead, because *when* it happened is real information.
+    let usable = |x: &RunResult| x.throughput_valid && x.rate_held;
+    let best = runs
+        .iter()
+        .filter(|x| usable(x))
+        .map(|x| x.ops_per_sec)
+        .fold(1.0_f64, f64::max);
+    let y_max = best * 1.15;
+
+    let x_of = |order: usize| -> usize {
+        if n <= 1 {
+            pad_l + plot_w / 2
+        } else {
+            pad_l + plot_w * order / (n - 1)
+        }
+    };
+    let y_of = |ops: f64| -> usize { pad_t + plot_h - ((ops / y_max) * plot_h as f64) as usize };
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+         font-family=\"sans-serif\" font-size=\"12\">\n"
+    ));
+    svg.push_str("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n");
+    svg.push_str(&format!(
+        "<text x=\"{pad_l}\" y=\"20\" font-size=\"16\" font-weight=\"bold\">Every repetition, in the order it ran</text>\n"
+    ));
+    svg.push_str(&format!(
+        "<text x=\"{pad_l}\" y=\"36\" fill=\"#666\">a step here means the machine changed mid-session, not that the system is noisy</text>\n"
+    ));
+
+    // Y gridlines + labels.
+    for i in 0..=4_u32 {
+        let frac = f64::from(i) / 4.0;
+        let y = pad_t + ((1.0 - frac) * plot_h as f64) as usize;
+        svg.push_str(&format!(
+            "<line x1=\"{pad_l}\" y1=\"{y}\" x2=\"{}\" y2=\"{y}\" stroke=\"#eee\"/>\n",
+            width - pad_r
+        ));
+        svg.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"end\" fill=\"#666\">{}</text>\n",
+            pad_l - 8,
+            y + 4,
+            grouped(y_max * frac),
+        ));
+    }
+    svg.push_str(&format!(
+        "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" fill=\"#666\">run order (1..{n})</text>\n",
+        pad_l + plot_w / 2,
+        height - 14,
+    ));
+
+    // One polyline per tier, so a step that hits every tier at the same x is
+    // unmistakably the machine and not the workload.
+    for (i, tier) in r.tiers.iter().enumerate() {
+        let colour = PALETTE[i % PALETTE.len()];
+        let points: Vec<(usize, usize)> = runs
+            .iter()
+            .filter(|x| x.clients == tier.clients && usable(x))
+            .map(|x| (x_of(x.order), y_of(x.ops_per_sec)))
+            .collect();
+        if points.len() > 1 {
+            let path: Vec<String> = points.iter().map(|(x, y)| format!("{x},{y}")).collect();
+            svg.push_str(&format!(
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"2\"/>\n",
+                path.join(" ")
+            ));
+        }
+        for (x, y) in &points {
+            svg.push_str(&format!(
+                "<circle cx=\"{x}\" cy=\"{y}\" r=\"4\" fill=\"{colour}\"/>\n"
+            ));
+        }
+        // Legend.
+        let ly = pad_t + 14 * i;
+        svg.push_str(&format!(
+            "<circle cx=\"{}\" cy=\"{}\" r=\"4\" fill=\"{colour}\"/>\n",
+            width - pad_r + 12,
+            ly - 4
+        ));
+        svg.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"#444\">{} clients</text>\n",
+            width - pad_r + 22,
+            ly,
+            tier.clients
+        ));
+    }
+
+    // X ticks: every run when there are few, thinned otherwise. A step is
+    // worth much more when you can attribute it to a run index — "the step is
+    // at run 5" is a question you can go and answer.
+    let tick_every = (n / 12).max(1);
+    for (i, run) in runs.iter().enumerate() {
+        if i % tick_every != 0 && i + 1 != n {
+            continue;
+        }
+        svg.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" fill=\"#999\" font-size=\"10\">{}</text>\n",
+            x_of(run.order),
+            pad_t + plot_h + 32,
+            i + 1,
+        ));
+    }
+
+    // Invalid repetitions: position only, no throughput claimed.
+    let baseline = pad_t + plot_h;
+    for run in runs.iter().filter(|x| !usable(x)) {
+        svg.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" fill=\"#dc2626\" font-weight=\"bold\">x</text>\n",
+            x_of(run.order),
+            baseline + 14,
+        ));
+    }
+    svg.push_str(&format!(
+        "<line x1=\"{pad_l}\" y1=\"{baseline}\" x2=\"{}\" y2=\"{baseline}\" stroke=\"#333\"/>\n",
+        width - pad_r
     ));
 
     svg.push_str("</svg>\n");

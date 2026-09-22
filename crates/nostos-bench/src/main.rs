@@ -145,6 +145,12 @@ pub struct RunResult {
     pub clients: usize,
     /// Which measured repetition this is (0-based). Warm-ups never get here.
     pub rep: usize,
+    /// Position in the run schedule (0-based), i.e. the order this run
+    /// ACTUALLY executed in, which the shuffle makes different from the order
+    /// it is tabled in. It is the x axis of `series.svg`: throttling, a
+    /// background process waking up, or a machine going quiet halfway through
+    /// a session are all visible in execution order and in no other.
+    pub order: usize,
     pub events_total: u64,
     pub events_delivered: u64,
     /// Events the router accepted by REPLACING a still-waiting frame for the
@@ -240,9 +246,10 @@ async fn main() -> Result<()> {
             schedule.len(),
             rep + 1
         );
-        let r = run_one(&cfg, clients, rep)
+        let mut r = run_one(&cfg, clients, rep)
             .await
             .context(format!("run with {clients} clients failed"))?;
+        r.order = i;
         results.push(r);
     }
     // Report in tier order regardless of the order they were run in.
@@ -588,6 +595,8 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
     Ok(RunResult {
         clients,
         rep,
+        // Overwritten by the caller, which is what knows the schedule.
+        order: 0,
         events_total: cfg.events,
         events_delivered: delivered,
         events_superseded: outcome.superseded,
