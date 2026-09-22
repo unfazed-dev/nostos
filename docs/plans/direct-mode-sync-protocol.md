@@ -1,206 +1,213 @@
-# Direct mode — the sync protocol, as the prior art says to build it
+# Direct mode — the sync protocol, and how the device gets transactional consistency
 
 **Date:** 2026-09-22. **Status:** design, grounded in fetched docs; no code yet.
-**Companion to:** `nostos-on-device-no-always-on-server.md`, which argues *why*
-direct mode (Shape B2) is the shape. This document is *how*, and it exists
-because the naive version of this protocol silently loses rows.
+**Companion to:** `nostos-on-device-no-always-on-server.md` (*why* direct mode).
+**Supersedes:** this file's first draft (per-table `updated_at` watermarks),
+which conceded that cross-table transactional consistency was impossible
+without a sync server. **It isn't.** The concession was an artefact of the wrong
+change-source design, and the operator was right to refuse it.
 
-Direct mode = the device subscribes to the backend's own realtime surface and
-writes through its own REST API. No Nostos server. Everything in `nostos-client`
-above the frame source is unchanged.
+Direct mode = the device syncs from the client's own Postgres via PostgREST +
+Realtime. No Nostos server, no second box, every sync decision made on the
+device.
 
-The design below is not invented here. Four independent implementations of this
-exact protocol — WatermelonDB, RxDB, Confluent's JDBC source, PowerSync —
-publish the same rules, and two of them publish them as warnings.
+## The design: a change log in the client's own database
 
-## Rule 1 — the checkpoint is `(updated_at, pk)`, never a bare timestamp
+One append-only table in a `cairn` schema. A trigger on each synced table
+appends to it **inside the writing transaction** — the transactional outbox
+pattern, whose entire purpose is to make the data change and the change
+notification atomic without two-phase commit.
 
-A bare `WHERE updated_at > $watermark` loses rows whenever two rows share a
-timestamp and the page boundary falls between them.
+```sql
+create table cairn.changes (
+  seq        bigserial primary key,
+  xid        xid8        not null default pg_current_xact_id(),
+  table_name text        not null,
+  pk         text        not null,
+  op         text        not null,          -- insert | update | delete
+  row        jsonb,                          -- full row image; null on delete
+  scope      text                            -- tenant/owner, stamped by trigger
+);
+create index on cairn.changes (xid, seq);
+```
 
-RxDB states the requirement as a data-layout precondition: documents must be
-**"deterministically sortable by their last write time"**, where *deterministic*
-means "even if two documents have the same last write time, they have a
-predictable sort order", and the fix is "using the *primaryKey* as second sort
-parameter **as part of the checkpoint**".
+Everything below follows from two properties of that table: **one sequence
+across every table**, and **a transaction ID on every row**.
 
-Confluent's JDBC source connector reaches the same conclusion from the CDC side:
-`timestamp+incrementing` mode "is the most robust because it can combine the
-unique, immutable row IDs with modification timestamps to **guarantee
-modifications are not missed** even if the process dies in the middle of an
-incremental update query."
+## Why this gives cross-table transactional consistency
 
-**So:** `cairn_meta` stores `(updated_at, pk)` per table, and catch-up is
-`WHERE (updated_at, pk) > ($ts, $pk) ORDER BY updated_at, pk`. Two agreeing
-sources, one of them a decade of production CDC.
+`pg_current_xact_id()` returns the writing transaction's ID, typed `xid8` — and
+the PostgreSQL docs are explicit that `xid8` "does not wrap around during the
+life of an installation", so it is a permanent monotonic identity, not a
+recycled counter.
 
-## Rule 2 — `updated_at` is written by the database, never by the client
+So every change row carries the transaction that produced it, across all
+tables. The device groups a pull by `xid` and applies each group in **one SQLite
+transaction**. A transaction that touched three tables lands as three tables'
+worth of rows or none of them.
 
-A device's clock is not trustworthy and a device is the last thing that should
-be deciding its own watermark position. WatermelonDB's pull-endpoint contract
-says to "mark the current server time **synchronously** with the queries".
+That is the same property PowerSync's server-side checkpoints provide — "only
+fully committed transactions are part of the state… different tables and buckets
+are all included in the same consistent checkpoint" — obtained here from
+Postgres itself rather than from a service. Nostos's own `ReplicationEvent`
+already carries `txn_id` (`crates/nostos-domain/src/events.rs`), and
+`ApplyEngine` already applies at commit boundaries, so the client-side half of
+this **already exists**; only the frame source changes.
 
-**So:** `nostos link --mode direct` generates a `BEFORE UPDATE` trigger that
-stamps `updated_at = now()`, and refuses a table that lets the client write the
-column. A client-writable watermark column is a data-loss bug with a plausible
-appearance.
+## Why it cannot lose a row: the snapshot horizon
 
-## Rule 3 — soft delete is mandatory, not a preference
+The hazard that kills naive change logs: `seq` is assigned when the row is
+*inserted*, but the row becomes visible when its transaction *commits*. A
+transaction that grabs `seq = 100` and commits five seconds after one that
+grabbed `seq = 101` will appear *below* a watermark that has already advanced
+past it. The row is then never read again. Silent, permanent loss.
 
-A catch-up query cannot see a row that is gone. Every implementation of this
-protocol solves it the same way and none of them make it optional.
+Postgres exports the fix, and the docs name this exact use case: the transaction
+ID and snapshot functions exist "to determine **which transactions were
+committed between two snapshots**."
 
-RxDB: "documents are **never deleted**, instead the `_deleted` field is set to
-`true`. This is needed so that the deletion state of a document exists in the
-database and can be replicated to other instances."
+`pg_current_snapshot()` returns `xmin:xmax:xip_list`, and
+`pg_snapshot_xmin(...)` is the lowest transaction ID **still in progress**.
+Every `xid` below it is finished — committed (so its log rows are visible) or
+aborted (so its log rows never existed). Nothing new can ever appear below it.
 
-WatermelonDB's pull response carries an explicit `deleted` array — "IDs of all
-records that were deleted on the server since `lastPulledAt`" — which is the
-same thing with a different carrier: the server must retain the fact of the
-deletion for at least as long as the longest plausible client absence.
+**That makes the horizon a safe, monotonic, gapless checkpoint.** The device
+stores one `xid8`, not a timestamp per table:
 
-Supabase adds a specific reason not to rely on the realtime DELETE event for
-this: "RLS policies are not applied to `DELETE` statements, because there is no
-way for Postgres to verify that a user has access to a deleted record", and
-filtering delete events at all requires `replica identity full`.
+```sql
+create function cairn.pull(since xid8, max_rows int default 2000)
+returns table (horizon xid8, seq bigint, xid xid8,
+               table_name text, pk text, op text, row jsonb)
+language sql stable security invoker as $$
+  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
+  select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c.row
+  from cairn.changes c, h
+  where c.xid >= since and c.xid < h.horizon
+  order by c.xid, c.seq
+  limit max_rows;
+$$;
+```
 
-**So:** `deleted_at timestamptz` on every synced table, the read VIEW filters it,
-and a documented purge window that must exceed the longest tolerated absence.
-`nostos link` refuses a table without it.
+Three things fall out of this being **one function call**:
 
-## Rule 4 — the realtime stream is a doorbell, and reconnect always resyncs
+1. **The snapshot and the rows come from one transaction**, so the checkpoint is
+   marked synchronously with the query. WatermelonDB's backend contract demands
+   exactly this — "perform all queries synchronously or in a write lock… to
+   ensure that no changes are made to the database while you're fetching
+   changes (otherwise **some records would never be returned in a pull
+   query**)" — and offers a lossy duplicate-tolerant fallback for backends that
+   can't. A single Postgres function does not need the fallback.
+2. **`security invoker`** means RLS applies as the calling user. Scoping stays
+   in Postgres, i.e. still server-authoritative.
+3. PostgREST exposes it at `/rest/v1/rpc/pull`. Supabase's custom-schema guide
+   covers the setup: add `nostos` to "Exposed schemas" in API settings, then
+   `GRANT USAGE ON SCHEMA` + `GRANT ALL ON ALL ROUTINES` to `authenticated`.
 
-This is the rule that retires the "`realtime.messages` is only retained ~3 days"
-worry, and it is the one most likely to be skipped.
+## What this dissolves from the first draft
 
-RxDB, explicitly: "When the client goes offline and online again, it might happen
-that the `pullStream$` has missed out some events. Therefore the `pullStream$`
-should also emit a **RESYNC** event each time the client reconnects, so that the
-client can become in sync with the backend via checkpoint iteration." And if a
-backend cannot provide a complete stream, RxDB's advice is to emit *only* RESYNC
-— "anything unknown has changed on the server".
+| first draft's "non-negotiable" rule | status now |
+|---|---|
+| composite `(updated_at, pk)` checkpoint | **gone** — one `xid8` horizon |
+| `updated_at` trigger on every synced table | **gone** — no clock involved anywhere |
+| soft delete mandatory on user tables | **gone** — the log records `op = delete` |
+| watermark-before-query, tolerate duplicates | **gone** — one RPC, one snapshot |
+| no cross-table transactional consistency | **gone** — group by `xid` |
 
-Nostos already holds this position in its own words: push is a **"wake-up
-trigger, not a data channel"** (`docs/STRATEGY.md:214`, ADR-0037). Direct mode
-does not need a new principle, it needs the existing one applied to a second
-change source.
+WatermelonDB's own tips anticipate this. After describing the timestamp approach
+they warn it needs a stored procedure enforcing "uniqueness and monotonicity" to
+protect "against weird edge cases — such as records being lost due to server
+clock time changes (NTP time sync, leap seconds, etc.)", then name the
+alternative: "an auto-incrementing counter sequence, but you must ensure that
+this sequence is **consistent across all collections**." A single change log is
+that sequence, consistent across all collections by construction.
 
-**So:** the Supabase Realtime subscription is never the source of truth. Every
-reconnect runs checkpoint iteration before trusting a single streamed frame, and
-a streamed frame is only a fast path that saves a round trip. Missed messages,
-dropped sockets, 3-day partition drops and a fortnight in a drawer all collapse
-into the same code path — the one that is exercised on every single reconnect
-rather than only in the rare case.
+## What survives
 
-## Rule 5 — take the watermark *before* the query, and let duplicates happen
+**The realtime stream is a doorbell, and every reconnect pulls.** A second
+trigger on `cairn.changes` calls `realtime.broadcast_changes()` on a
+scope-keyed private channel. A message means "call `pull`", nothing more. RxDB
+states the rule: "when the client goes offline and online again, it might happen
+that `pullStream$` has missed out some events. Therefore `pullStream$` should
+also emit a RESYNC event each time the client reconnects." Nostos already holds
+the same position — push is a "wake-up trigger, not a data channel"
+(`docs/STRATEGY.md:214`, ADR-0037). This also makes the ~3-day
+`realtime.messages` retention a non-issue: a device away for a month takes the
+same code path as one that blinked.
 
-WatermelonDB's contract is emphatic here: the pull "MUST provide a consistent
-view of changes since `lastPulledAt`", achieved by performing "all queries
-synchronously or in a write lock", because otherwise "**some records would never
-be returned in a pull query**". And when that is impossible — which it is for a
-device issuing N independent PostgREST requests — the instruction is to "return a
-`lastPulledAt` timestamp marked BEFORE querying starts."
+**Private channels need the setting, not just the policy.** Supabase: access is
+controlled "by adding Row Level Security policies to the `realtime.messages`
+table", and "to enforce private channels you need to **disable the 'Allow public
+access' setting** in Realtime Settings". `nostos doctor` checks the setting.
 
-That trades duplicate delivery for zero loss, which is the right trade **and is
-free for Nostos specifically**: `cairn_data` is keyed `PRIMARY KEY (table_name,
-pk)` and a frame is a complete row image, so re-applying a row is a no-op by
-construction. Nostos's storage model already pays for this.
+## The honest costs — five, and none of them is a correctness hole
 
-**So:** advance the watermark to a value captured before the first request in a
-catch-up pass, never to the max seen in the results.
-
-## Rule 6 — private channels, and the setting that silently disables them
-
-`realtime.broadcast_changes()` requires broadcast authorization. Supabase's
-authorization guide: access is controlled "by adding Row Level Security policies
-to the `realtime.messages` table", and — the footgun — **"to enforce private
-channels you need to disable the 'Allow public access' setting in Realtime
-Settings"**.
-
-**So:** `nostos doctor` checks the setting, not just the policies. A project with
-correct RLS and public access left on is an open channel, and nothing in the app
-behaves differently.
-
-## What direct mode cannot have, and this is the real cost
-
-**Cross-table transactional consistency.** Per-table watermarks mean a device
-can hold an order line whose order header has not arrived. No amount of care in
-rules 1–6 fixes it, because the consistency unit is the table.
-
-PowerSync built a service to solve exactly this and had it Jepsen-verified. Their
-description of what the service buys: a checkpoint is "a single point-in-time on
-the server (similar to an LSN in Postgres) with a consistent state: only fully
-committed transactions are part of the state. The client only updates its local
-state when it has all the data matching a checkpoint… There is no intermediate
-state while downloading large sets of changes such as large server-side
-transactions. **Different tables and buckets are all included in the same
-consistent checkpoint.**"
-
-That is a correctness argument for a sync server, and it is a much better one
-than the throughput argument this project has been making. Two consequences:
-
-1. **`nostos-server`'s pitch should lead with consistency, not ops/sec.** It
-   applies at commit boundaries with `txn_id` and `lsn` on every event
-   (`crates/nostos-domain/src/events.rs`); direct mode has neither. The
-   benchmark numbers are a second-order claim next to "your client never sees a
-   half-applied transaction".
-2. **Direct mode must say this out loud.** It is correct for
-   single-table-at-a-time reads and per-row invariants — the large majority of
-   app screens. It is wrong for anything that reads two tables and requires them
-   to agree. That sentence belongs in the mode's first paragraph.
-
-A partial mitigation worth exploring later, not at first ship: have the trigger
-broadcast a transaction marker so the device can buffer to commit boundaries for
-*streamed* frames. It does nothing for the catch-up path, which is the primary
-path per rule 4, so it is polish rather than a fix.
-
-## Also true, and worth stating
-
-**Electric does not do this at all.** Their writes guide pairs sync with ordinary
-web-service calls for the write path — Electric is read-path only. Direct mode
-keeping Nostos's durable outbox and writing through PostgREST is therefore a
-*larger* surface than Electric offers, not a reduced one.
-
-**Brick is the closest existing thing**, and Supabase's own blog post about it
-calls the request-queue-around-Supabase approach "an admittedly brittle
-solution". Rules 1–6 are the difference between that and a protocol, and they
-are also the reason this is worth building rather than wrapping.
+1. **Write amplification.** Every change to a synced table writes a second row,
+   in the same transaction, so writes get slower and the database grows. This is
+   the price of the outbox pattern and it is the main reason to prefer logical
+   replication when you *can* run a server.
+2. **RLS has to be expressible on one table.** The log holds row images from
+   many tables, so one policy on `cairn.changes` must say what N table policies
+   say. The `scope` column stamped by the trigger covers the common
+   tenant/owner case. A client whose RLS involves joins across tables is real
+   work, and `nostos link` should refuse rather than guess.
+3. **A long write transaction delays everyone.** The horizon cannot pass an
+   in-flight write, so a 30-second transaction holds sync back 30 seconds.
+   Logical replication has the identical property — nothing can be emitted
+   before commit — so this is not a regression, but it is worth knowing.
+4. **Retention and re-snapshot.** Prune the log on a window; a device that was
+   away longer re-snapshots the tables through PostgREST and resets its horizon.
+   Needs the same "read the horizon first, then the rows" discipline.
+5. **`track_commit_timestamp` is deliberately not used.** It would give real
+   commit times via `pg_xact_commit_timestamp`, but the docs say it only works
+   "for transactions that were committed after it was enabled" and that "commit
+   timestamp information is routinely removed during vacuum". The snapshot
+   horizon needs no server setting and no vacuum-sensitive data.
 
 ## Implementation order
 
-Rules 1–6 are not optional and they are not phases. A direct mode shipped
-without rule 4 loses data for any device offline longer than the broadcast
-retention window, and the symptom is a row that is quietly missing forever.
-
-1. `ChangeSource` seam in `nostos-client` (`client.rs` today speaks only `/sync`;
+1. `ChangeSource` seam in `nostos-client` (`client.rs` speaks only `/sync` today;
    `iroh_dial.rs` is the precedent for a second path).
-2. Composite `(updated_at, pk)` checkpoint per table in `cairn_meta`.
-3. PostgREST catch-up with keyset pagination; watermark captured pre-query.
-4. Realtime private-channel subscription decoding `broadcast_changes` payloads
-   into `RowOp`; RESYNC on every reconnect.
-5. Outbox drain → PostgREST upsert / soft-delete.
-6. `nostos link --mode direct`: trigger + RLS policy + column generation, and a
-   hard refusal for any table missing `updated_at` or `deleted_at`.
-7. `nostos doctor --mode direct`: policies, the public-access setting, watermark
-   indexes, realtime enabled.
-8. One conformance suite both modes pass, with a "device offline past the
-   retention window" case as a first-class test rather than an edge case.
+2. `xid8` horizon in `cairn_meta` beside the existing LSN checkpoint.
+3. `PostgrestChangeSource`: `rpc/pull` → group by `xid` → `RowOp` batches
+   handed to the existing `ApplyEngine` at transaction boundaries.
+4. Realtime private-channel subscription as doorbell; pull on every reconnect.
+5. Outbox drain → PostgREST write; the log trigger captures the echo, which the
+   idempotent `(table_name, pk)` store absorbs.
+6. `nostos link --mode direct` generates the schema, the per-table triggers, the
+   `pull` function, the broadcast trigger, the RLS policies and the grants — and
+   refuses any table whose RLS it cannot express as a `scope`.
+7. `nostos doctor --mode direct`: exposed schema, grants, policies, the
+   public-access setting, log growth, oldest-unpruned vs. horizon lag.
+8. One conformance suite both modes pass, including **"transaction touching
+   three tables is never seen half-applied"** and **"device offline past the
+   retention window"** as first-class cases.
+
+## Worth an ADR
+
+Second sync topology on the public client surface; hard to reverse; a real
+trade-off (write amplification and one-table RLS, against no server). That
+clears the bar in `.claude/skills/grill-with-docs`. Not written — the decision
+is the operator's.
 
 ## Sources (fetched 2026-09-22)
 
-- WatermelonDB, [implementing your sync backend](https://watermelondb.dev/docs/Sync/Backend)
-  — pull-endpoint contract, consistent-view requirement, watermark-before-query.
-- RxDB, [replication protocol](https://rxdb.info/replication.html) — deterministic
-  sort requirement, `_deleted` requirement, RESYNC-on-reconnect.
-- Confluent, [JDBC source connector](https://docs.confluent.io/kafka-connectors/jdbc/current/source-connector/overview.html)
-  — `timestamp+incrementing` as the robust mode.
+- PostgreSQL 18, [system information functions §9.27.8–9.27.9](https://www.postgresql.org/docs/current/functions-info.html)
+  — `pg_current_xact_id`, `xid8` non-wrapping, `pg_current_snapshot`,
+  `pg_snapshot_xmin`, "which transactions were committed between two snapshots",
+  and the `track_commit_timestamp` caveats.
+- PostgreSQL 18, [replication settings](https://www.postgresql.org/docs/current/runtime-config-replication.html)
+  — `track_commit_timestamp`.
+- [Transactional outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html)
+  — atomic data change + notification without 2PC.
+- WatermelonDB, [sync backend](https://watermelondb.dev/docs/Sync/Backend)
+  — consistent-view requirement; the clock-skew warning; the cross-collection
+  sequence alternative.
+- RxDB, [replication protocol](https://rxdb.info/replication.html) — RESYNC on
+  every reconnect; deterministic ordering.
 - PowerSync, [consistency](https://docs.powersync.com/architecture/consistency)
-  — causal+ via cross-table checkpoints, Jepsen-verified.
-- Supabase, [Realtime authorization](https://supabase.com/docs/guides/realtime/authorization) ·
-  [Broadcast](https://supabase.com/docs/guides/realtime/broadcast) ·
-  [Postgres Changes](https://supabase.com/docs/guides/realtime/postgres-changes)
-  — RLS on `realtime.messages`, the public-access setting, DELETE/RLS caveat.
-- Electric, [writes guide](https://electric-sql.com/docs/guides/writes) — read-path
-  only; writes via ordinary web services.
-- Supabase, [offline-first with Brick](https://supabase.com/blog/offline-first-flutter-apps)
-  — "an admittedly brittle solution".
+  — what a cross-table checkpoint buys, Jepsen-verified.
+- Supabase, [custom schemas](https://supabase.com/docs/guides/api/using-custom-schemas) ·
+  [Realtime authorization](https://supabase.com/docs/guides/realtime/authorization) ·
+  [Broadcast](https://supabase.com/docs/guides/realtime/broadcast)
+- Confluent, [JDBC source connector](https://docs.confluent.io/kafka-connectors/jdbc/current/source-connector/overview.html)
+  — why timestamp-only incremental queries miss rows.

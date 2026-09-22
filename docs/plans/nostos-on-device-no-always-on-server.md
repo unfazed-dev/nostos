@@ -263,33 +263,28 @@ Read that mechanism against the problem this document started with:
 **The multiplexer still exists. It is just not yours, and not a new box.** That
 is the whole difference, and it is the difference the operator asked for.
 
-**What it costs, honestly.** The protocol has six non-negotiable rules, all of
-them published by prior implementations and two of them published as warnings.
-They are worked out with sources in
-[`direct-mode-sync-protocol.md`](direct-mode-sync-protocol.md); in summary:
+**How it works, and what it costs.** The change source is a **change log in
+the client's own database**: a trigger on each synced table appends to one
+append-only `cairn.changes` table inside the writing transaction (the
+transactional outbox pattern), stamped with `pg_current_xact_id()`. The device
+pulls through a single PostgREST RPC that reads its own snapshot horizon
+(`pg_snapshot_xmin(pg_current_snapshot())`), groups the rows by transaction ID,
+and applies each transaction atomically. Worked out with sources in
+[`direct-mode-sync-protocol.md`](direct-mode-sync-protocol.md).
 
-1. The checkpoint is **`(updated_at, pk)`**, never a bare timestamp — a bare one
-   loses rows at page boundaries (RxDB, Confluent JDBC both say so).
-2. `updated_at` is stamped by a **database trigger**, never by the client.
-3. **Soft delete is mandatory**, with a purge window longer than the longest
-   tolerated absence.
-4. The realtime stream is a **doorbell**; every reconnect resyncs from the
-   checkpoint before trusting a streamed frame (RxDB's `RESYNC`, and Nostos's own
-   ADR-0037 doctrine).
-5. The watermark is captured **before** the catch-up query, accepting duplicate
-   delivery — free for Nostos, whose `(table_name, pk)` row images are idempotent.
-6. Private channels need RLS on `realtime.messages` **and** "Allow public
-   access" disabled — a setting, not a policy.
+Two properties matter. **One sequence across every table** plus **a transaction
+ID on every row** gives the device cross-table transactional consistency — the
+same property PowerSync built a service for — with no server. And the snapshot
+horizon makes the checkpoint gapless: every transaction below it is settled, and
+nothing new can ever appear below it, which is the failure mode that kills naive
+change logs.
 
-Rule 4 is what retires the ~3-day `realtime.messages` retention: a device away
-for a fortnight takes the same code path as one that dropped a socket for a
-second.
+It also dissolves every schema requirement an `updated_at` design would impose:
+no watermark columns, no soft deletes on user tables, no clock anywhere.
 
-**And one thing direct mode cannot have: cross-table transactional
-consistency.** Per-table watermarks mean a device can hold an order line whose
-header has not arrived. PowerSync built a service for exactly this and had it
-Jepsen-verified. That is the strongest remaining argument for `nostos-server` —
-and it is a correctness argument, which is a better one than throughput.
+The real costs are write amplification (a second row per change, same
+transaction), RLS that has to be expressible on one log table, and a log to
+prune. Full list in the protocol doc; none of them is a correctness hole.
 
 Plus: it is only available where the backend *has* a realtime fan-out. Supabase
 and Appwrite do. A bare Postgres does not, and for that, `nostos-server` remains
