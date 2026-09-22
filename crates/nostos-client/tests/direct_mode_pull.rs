@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, Json, Router};
 use nostos_client::{PostgrestError, PostgrestSource, SqliteStorage};
-use nostos_core::{ApplyEngine, Horizon, PullCursor, Storage};
+use nostos_core::{ApplyEngine, Horizon, PendingWrite, PullCursor, Storage, WriteOp};
 use serde::Deserialize;
 
 /// One row of `cairn.changes` as the fake holds it.
@@ -226,4 +226,179 @@ async fn a_rejected_jwt_surfaces_as_a_status_not_as_missing_rows() {
     }
     // Nothing applied, and the cursor did not move — a retry re-reads.
     assert_eq!(cursor.lock().unwrap().since(), &Horizon::fresh());
+}
+
+// ---------------------------------------------------------------------------
+// The write half. Direct mode's writes go straight to PostgREST as the user,
+// so RLS on the target table is the only thing authorizing them.
+// ---------------------------------------------------------------------------
+
+/// Every request the fake saw: method, path+query, `Prefer`, body.
+type Seen = Arc<Mutex<Vec<(String, String, String, String)>>>;
+
+async fn spawn_write_fake(status: axum::http::StatusCode) -> (String, Seen) {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let app = Router::new().fallback(move |req: axum::extract::Request| {
+        let sink = Arc::clone(&sink);
+        async move {
+            let method = req.method().to_string();
+            let path = req
+                .uri()
+                .path_and_query()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let prefer = req
+                .headers()
+                .get("Prefer")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = axum::body::to_bytes(req.into_body(), 64 * 1024)
+                .await
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            sink.lock().unwrap().push((method, path, prefer, body));
+            (status, "")
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    std::mem::forget(server);
+    (format!("http://{addr}"), seen)
+}
+
+#[tokio::test]
+async fn each_write_op_maps_to_the_right_postgrest_request() {
+    let (base, seen) = spawn_write_fake(axum::http::StatusCode::NO_CONTENT).await;
+    let src = PostgrestSource::new(&base, "anon-key").unwrap();
+
+    src.push_write(&PendingWrite {
+        table: "orders".into(),
+        op: WriteOp::Upsert,
+        pk: "o1".into(),
+        payload_json: Some(r#"{"id":"o1","total":9}"#.into()),
+    })
+    .await
+    .unwrap();
+
+    src.push_write(&PendingWrite {
+        table: "orders".into(),
+        op: WriteOp::Patch,
+        pk: "o1".into(),
+        payload_json: Some(r#"{"total":10}"#.into()),
+    })
+    .await
+    .unwrap();
+
+    src.push_write(&PendingWrite {
+        table: "orders".into(),
+        op: WriteOp::Delete,
+        pk: "o1".into(),
+        payload_json: None,
+    })
+    .await
+    .unwrap();
+
+    // ADR-0030: the increment MUST be server-side or concurrent increments lose
+    // updates, and a PATCH body cannot express `SET x = x + ?`.
+    src.push_write(&PendingWrite {
+        table: "counters".into(),
+        op: WriteOp::Increment,
+        pk: "c1".into(),
+        payload_json: Some(r#"{"field":"hits","delta":3}"#.into()),
+    })
+    .await
+    .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+
+    let (m, p, prefer, body) = &seen[0];
+    assert_eq!((m.as_str(), p.as_str()), ("POST", "/rest/v1/orders"));
+    assert!(prefer.contains("resolution=merge-duplicates"), "{prefer}");
+    assert_eq!(body, r#"{"id":"o1","total":9}"#);
+
+    let (m, p, _, body) = &seen[1];
+    assert_eq!(
+        (m.as_str(), p.as_str()),
+        ("PATCH", "/rest/v1/orders?id=eq.o1")
+    );
+    assert_eq!(
+        body, r#"{"total":10}"#,
+        "patch sends only the changed columns"
+    );
+
+    let (m, p, _, body) = &seen[2];
+    assert_eq!(
+        (m.as_str(), p.as_str()),
+        ("DELETE", "/rest/v1/orders?id=eq.o1")
+    );
+    assert!(body.is_empty());
+
+    let (m, p, _, body) = &seen[3];
+    assert_eq!(
+        (m.as_str(), p.as_str()),
+        ("POST", "/rest/v1/rpc/cairn_increment")
+    );
+    let args: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(args["p_table"], "counters");
+    assert_eq!(args["p_pk"], "c1");
+    assert_eq!(args["p_field"], "hits");
+    assert_eq!(args["p_delta"], 3);
+}
+
+#[tokio::test]
+async fn an_rls_rejection_is_permanent_and_an_expired_token_is_not() {
+    let (base, _) = spawn_write_fake(axum::http::StatusCode::FORBIDDEN).await;
+    let src = PostgrestSource::new(&base, "anon-key").unwrap();
+    let err = src
+        .push_write(&PendingWrite {
+            table: "orders".into(),
+            op: WriteOp::Delete,
+            pk: "someone-elses".into(),
+            payload_json: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        err.is_permanent(),
+        "RLS will keep refusing — dead-letter it rather than spin"
+    );
+
+    let (base, _) = spawn_write_fake(axum::http::StatusCode::UNAUTHORIZED).await;
+    let src = PostgrestSource::new(&base, "anon-key").unwrap();
+    let err = src
+        .push_write(&PendingWrite {
+            table: "orders".into(),
+            op: WriteOp::Delete,
+            pk: "o1".into(),
+            payload_json: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(!err.is_permanent(), "401 is a refresh, not a dead letter");
+}
+
+#[tokio::test]
+async fn an_upsert_with_no_payload_never_leaves_the_device() {
+    let (base, seen) = spawn_write_fake(axum::http::StatusCode::NO_CONTENT).await;
+    let src = PostgrestSource::new(&base, "anon-key").unwrap();
+    let err = src
+        .push_write(&PendingWrite {
+            table: "orders".into(),
+            op: WriteOp::Upsert,
+            pk: "o1".into(),
+            payload_json: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.is_permanent());
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "rejected before the request, not after"
+    );
 }

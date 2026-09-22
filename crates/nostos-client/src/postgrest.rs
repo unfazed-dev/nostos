@@ -19,6 +19,9 @@
 //! - **No snapshot.** A fresh device or one offline past the log's retention
 //!   window needs a table snapshot through PostgREST and a horizon reset; see
 //!   [`nostos_core::Horizon::fresh`].
+//! - **No outbox policy.** [`PostgrestSource::push_write`] sends one write and
+//!   classifies the answer; attempts, backoff and the dead-letter queue already
+//!   exist on the `Outbox` trait for server mode and are not duplicated here.
 //! - **No token refresh.** [`PostgrestSource::set_token`] is the seam; whoever
 //!   owns the auth session calls it. Same division as
 //!   `apps/atlet/flutter/lib/push/push_pilot.dart`, which re-registers per
@@ -26,7 +29,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use nostos_core::{ApplyEngine, Horizon, PullCursor, PullError, Storage};
+use nostos_core::{ApplyEngine, Horizon, PendingWrite, PullCursor, PullError, Storage, WriteOp};
 
 /// Pages one [`PostgrestSource::drain`] call will fetch before returning with
 /// `more = true`.
@@ -60,10 +63,37 @@ pub enum PostgrestError {
         body: String,
     },
 
+    /// A queued write is not sendable as it stands (an upsert with no payload,
+    /// an unparseable increment). Permanent — retrying cannot fix the queue
+    /// entry, so it belongs in the dead-letter queue.
+    #[error("unsendable write: {0}")]
+    BadWrite(String),
+
     /// The response decoded but could not be applied. Rows before the failure
     /// may have committed; the horizon did not, so a retry re-reads them.
     #[error(transparent)]
     Pull(#[from] PullError),
+}
+
+impl PostgrestError {
+    /// Whether a retry is pointless.
+    ///
+    /// `4xx` is the request's fault and will fail identically forever — with
+    /// **one exception that matters**: `401` is usually an expired JWT, which
+    /// a token refresh fixes, so it is retryable. `429` and `5xx` are the
+    /// server asking for backoff.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            Self::BadUrl(_) | Self::BadWrite(_) => true,
+            Self::Status { status, .. } => {
+                !(*status == 401 || *status == 429 || (500..600).contains(status))
+            }
+            // Transport: retry. Pull: the rows did not commit and the horizon
+            // did not move, so a retry re-reads and re-applies idempotently.
+            Self::Transport(_) | Self::Pull(_) => false,
+        }
+    }
 }
 
 /// A PostgREST endpoint the device pulls its change log from.
@@ -73,8 +103,8 @@ pub enum PostgrestError {
 #[derive(Debug, Clone)]
 pub struct PostgrestSource {
     http: reqwest::Client,
-    /// The fully-assembled `…/rest/v1/rpc/pull` URL.
-    rpc_pull: String,
+    /// `…/rest/v1` — the base every request is built from.
+    rest_base: String,
     /// Supabase's `apikey` header. Public by design (it is the anon key); RLS,
     /// not this, is what scopes the rows.
     apikey: String,
@@ -94,7 +124,7 @@ impl PostgrestSource {
         }
         Ok(Self {
             http: reqwest::Client::new(),
-            rpc_pull: format!("{base}/rest/v1/rpc/pull"),
+            rest_base: format!("{base}/rest/v1"),
             apikey: apikey.into(),
             token: None,
         })
@@ -112,10 +142,10 @@ impl PostgrestSource {
         self.token = None;
     }
 
-    /// The endpoint being pulled (for logs and `nostos doctor`).
+    /// The `rpc/pull` endpoint (for logs and `nostos doctor`).
     #[must_use]
-    pub fn endpoint(&self) -> &str {
-        &self.rpc_pull
+    pub fn pull_endpoint(&self) -> String {
+        format!("{}/rpc/pull", self.rest_base)
     }
 
     /// POST one page and return the raw response body.
@@ -127,7 +157,7 @@ impl PostgrestSource {
         let bearer = self.token.as_deref().unwrap_or(&self.apikey);
         let res = self
             .http
-            .post(&self.rpc_pull)
+            .post(self.pull_endpoint())
             .header("apikey", &self.apikey)
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -204,6 +234,115 @@ impl PostgrestSource {
     }
 }
 
+/// The primary-key column direct-mode writes filter on.
+///
+/// ponytail: `id`, matching the outbox's own v1 convention
+/// (`nostos_core::PendingWrite::pk` documents it). A per-table pk column is a
+/// `nostos link` concern — it already has to read the schema to generate
+/// triggers — and belongs in generated config, not in a client-side guess.
+const PK_COLUMN: &str = "id";
+
+impl PostgrestSource {
+    /// Send one queued write through PostgREST, as the signed-in user.
+    ///
+    /// The row never travels through a Nostos server, so the *only* thing
+    /// authorizing it is RLS on the target table — which is the security
+    /// argument for direct mode, not a caveat: a write the policy forbids is
+    /// rejected by Postgres, not by a service the developer has to trust.
+    ///
+    /// The echo is expected. The write fires the change-log trigger, the device
+    /// pulls its own row back, and the idempotent `(table, pk)` upsert absorbs
+    /// it. No suppression, no client-id round trip.
+    ///
+    /// | [`WriteOp`] | request |
+    /// |---|---|
+    /// | `Upsert` | `POST /<table>` with `Prefer: resolution=merge-duplicates` |
+    /// | `Patch` | `PATCH /<table>?id=eq.<pk>` — never inserts |
+    /// | `Delete` | `DELETE /<table>?id=eq.<pk>` — 0 rows matched is success |
+    /// | `Increment` | `POST /rpc/cairn_increment` |
+    ///
+    /// **`Increment` is the one that cannot be a plain table call.** ADR-0030's
+    /// guarantee is that Postgres serializes concurrent increments
+    /// (`SET x = x + ?`), and a PATCH body can only carry a literal — so
+    /// expressing it client-side means read-modify-write and a lost update
+    /// under concurrency. It therefore needs a generated function, the second
+    /// one `nostos link --mode direct` must emit after `pull`.
+    pub async fn push_write(&self, write: &PendingWrite) -> Result<(), PostgrestError> {
+        let bearer = self.token.as_deref().unwrap_or(&self.apikey);
+        let table = &write.table;
+        let pk = &write.pk;
+
+        let mut req = match write.op {
+            WriteOp::Upsert => self
+                .http
+                .post(format!("{}/{table}", self.rest_base))
+                // Upsert = insert-or-update, which is what PostgREST's
+                // merge-duplicates resolution does. The payload is a full row
+                // image, so it always carries the pk the conflict resolves on.
+                .header("Prefer", "resolution=merge-duplicates,return=minimal"),
+            WriteOp::Patch => self
+                .http
+                .patch(format!("{}/{table}?{PK_COLUMN}=eq.{pk}", self.rest_base))
+                .header("Prefer", "return=minimal"),
+            WriteOp::Delete => self
+                .http
+                .delete(format!("{}/{table}?{PK_COLUMN}=eq.{pk}", self.rest_base)),
+            WriteOp::Increment => self
+                .http
+                .post(format!("{}/rpc/cairn_increment", self.rest_base))
+                .header("Prefer", "return=minimal"),
+        };
+
+        req = req
+            .header("apikey", &self.apikey)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+
+        req = match write.op {
+            WriteOp::Delete => req,
+            WriteOp::Increment => {
+                // The outbox payload is `{"field": "<col>", "delta": <i64>}`;
+                // the function needs the target as well.
+                let inner: serde_json::Value =
+                    serde_json::from_str(write.payload_json.as_deref().unwrap_or("{}"))
+                        .map_err(|e| PostgrestError::BadWrite(format!("increment payload: {e}")))?;
+                req.body(
+                    serde_json::json!({
+                        "p_table": table,
+                        "p_pk": pk,
+                        "p_field": inner.get("field"),
+                        "p_delta": inner.get("delta"),
+                    })
+                    .to_string(),
+                )
+            }
+            WriteOp::Upsert | WriteOp::Patch => {
+                let body = write.payload_json.clone().ok_or_else(|| {
+                    PostgrestError::BadWrite(format!(
+                        "{} on {table}/{pk} has no payload",
+                        write.op.as_wire_str()
+                    ))
+                })?;
+                req.body(body)
+            }
+        };
+
+        let res = req
+            .send()
+            .await
+            .map_err(|e| PostgrestError::Transport(e.to_string()))?;
+        let status = res.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = res.text().await.unwrap_or_default();
+        Err(PostgrestError::Status {
+            status: status.as_u16(),
+            body,
+        })
+    }
+}
+
 /// The result of one [`PostgrestSource::drain`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DrainOutcome {
@@ -234,7 +373,30 @@ mod tests {
     fn the_rpc_url_is_assembled_once_and_tolerates_a_trailing_slash() {
         let a = PostgrestSource::new("https://ref.supabase.co", "anon").unwrap();
         let b = PostgrestSource::new("https://ref.supabase.co/", "anon").unwrap();
-        assert_eq!(a.endpoint(), "https://ref.supabase.co/rest/v1/rpc/pull");
-        assert_eq!(a.endpoint(), b.endpoint());
+        assert_eq!(
+            a.pull_endpoint(),
+            "https://ref.supabase.co/rest/v1/rpc/pull"
+        );
+        assert_eq!(a.pull_endpoint(), b.pull_endpoint());
+    }
+
+    #[test]
+    fn permanence_matches_who_is_at_fault() {
+        let permanent = |status| {
+            PostgrestError::Status {
+                status,
+                body: String::new(),
+            }
+            .is_permanent()
+        };
+        // 401 is the exception: an expired JWT is fixed by refreshing.
+        assert!(!permanent(401), "refresh the token and retry");
+        assert!(permanent(403), "RLS said no; it will keep saying no");
+        assert!(permanent(404), "no such table / function");
+        assert!(permanent(409), "constraint violation — dead-letter it");
+        assert!(!permanent(429));
+        assert!(!permanent(503));
+        assert!(PostgrestError::BadWrite("no payload".into()).is_permanent());
+        assert!(!PostgrestError::Transport("reset".into()).is_permanent());
     }
 }

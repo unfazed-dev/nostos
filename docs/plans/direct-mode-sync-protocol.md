@@ -1,6 +1,13 @@
 # Direct mode — the sync protocol, and how the device gets transactional consistency
 
-**Date:** 2026-09-22. **Status:** design, grounded in fetched docs; no code yet.
+**Date:** 2026-09-22. **Status:** steps 1–5 shipped and under `make ci`; steps
+6–9 still design. Grounded in fetched docs throughout.
+
+Shipped: `nostos_core::pull` (`PullCursor`, `Horizon`, the xid8 checkpoint on
+`Storage`), `nostos_client::postgrest` (`rpc/pull` + the four write ops), and
+`nostos_client::doorbell` (Realtime private channel, `vsn=1.0.0`). What is *not*
+shipped is everything that touches a real database: the SQL in this file is
+still ungenerated and unrun.
 **Companion to:** `nostos-on-device-no-always-on-server.md` (*why* direct mode).
 **Supersedes:** this file's first draft (per-table `updated_at` watermarks),
 which conceded that cross-table transactional consistency was impossible
@@ -195,7 +202,9 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    handed to the existing `ApplyEngine` at transaction boundaries.
 4. Realtime private-channel subscription as doorbell; pull on every reconnect.
 5. Outbox drain → PostgREST write; the log trigger captures the echo, which the
-   idempotent `(table_name, pk)` store absorbs.
+   idempotent `(table_name, pk)` store absorbs. **`WriteOp::Increment` needs a
+   second generated function** — see "The write path needs one more function"
+   below.
 6. `nostos link --mode direct` generates the schema, the per-table triggers, the
    `pull` function, the broadcast trigger, the RLS policies and the grants — and
    refuses any table whose RLS it cannot express as a `scope`.
@@ -212,6 +221,33 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    `registerPushToken` routed to PostgREST instead of a server socket — see
    "Push has to keep working" below. Not a follow-up; a killed app that never
    wakes is indistinguishable from broken sync.
+
+### The write path needs one more function than `pull`
+
+Three of the four outbox ops are plain PostgREST:
+
+| `WriteOp` | request |
+|---|---|
+| `Upsert` | `POST /<table>`, `Prefer: resolution=merge-duplicates` |
+| `Patch` | `PATCH /<table>?id=eq.<pk>` — never inserts, matching the op's contract |
+| `Delete` | `DELETE /<table>?id=eq.<pk>` — zero rows matched is success |
+
+`Increment` is not, and it cannot be made to be. ADR-0030's guarantee is that
+**Postgres** serializes concurrent increments (`SET x = x + ?`), which is what
+removes the client read-modify-write and therefore the lost update. A PATCH body
+carries literals, so expressing an increment through one puts the read back on
+the device. Direct mode therefore needs `cairn_increment(p_table, p_pk, p_field,
+p_delta)` alongside `pull` — two generated functions, not one.
+
+The echo needs no handling. A write fires the change-log trigger, the device
+pulls its own row back, and the idempotent `(table, pk)` upsert absorbs it. No
+client-id round trip, no suppression list.
+
+RLS on the target table is the *only* thing authorizing a direct-mode write.
+That is the security argument rather than a caveat: a forbidden write is refused
+by Postgres, not by a service the developer has to trust — and a `403` is
+therefore permanent (dead-letter it), while a `401` is an expired JWT (refresh
+and retry).
 
 ## Every SDK gets this, because it needs only two primitives
 
