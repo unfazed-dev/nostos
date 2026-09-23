@@ -420,12 +420,7 @@ async fn client_write_round_trips_through_replication() {
 /// Does a wire frame's decoded payload contain the given title string?
 /// (The frame payload is hex-encoded JSON; decode then substring-match.)
 fn frame_contains_title(frame: &serde_json::Value, title: &str) -> bool {
-    let hex = frame.get("payload").and_then(|v| v.as_str()).unwrap_or("");
-    if hex.is_empty() {
-        return false;
-    }
-    let bytes = common::decode_payload_hex(hex);
-    String::from_utf8_lossy(&bytes).contains(title)
+    common::frame_payload_contains(frame, title)
 }
 
 /// Idempotent delete: a delete of an absent row is success. (Guards the v1
@@ -856,7 +851,7 @@ async fn own_tenant_writes_flow_normally() {
 }
 
 // ===========================================================================
-// P3 — PATCH (column-level UPDATE), PowerSync PATCH parity. A patch updates
+// P3 — PATCH (column-level UPDATE). A patch updates
 // only the columns present in its payload of an EXISTING row; never inserts;
 // idempotent on an absent row; cross-tenant patch is Forbidden (ADR-0018).
 // ===========================================================================
@@ -887,7 +882,7 @@ fn patch_frame(id: uuid::Uuid, title: &str, client_write_id: &str) -> String {
 }
 
 /// A patch updates ONLY the columns present in its payload; other columns are
-/// untouched (P3 PowerSync PATCH parity).
+/// untouched (P3 column-level PATCH).
 #[tokio::test]
 async fn patch_updates_only_specified_columns() {
     if std::env::var(E2E_FLAG).is_err() {

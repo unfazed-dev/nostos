@@ -1,7 +1,7 @@
 //! Shared helpers for the nostos-infra integration tests.
 //!
-//! Pulled out of `e2e_pg_replication.rs` so the WS-contract smoke tests and the
-//! PowerSync smoke tests can reuse the same subscribe/collect/decode logic.
+//! Pulled out of `e2e_pg_replication.rs` so the WS-contract smoke tests can
+//! reuse the same subscribe/collect/decode logic.
 //! This is the standard Rust `tests/common/mod.rs` convention: a module that is
 //! `mod common;`-included by each integration test binary but never compiled as
 //! its own test target.
@@ -387,6 +387,31 @@ pub async fn subscribe_and_collect_at(
 /// specific tests inspect them inline.
 pub fn is_data_frame(v: &serde_json::Value) -> bool {
     v.get("type").and_then(|t| t.as_str()) != Some("resume_info")
+}
+
+/// Every row event carried by a frame, whichever wire shape it arrived in.
+///
+/// The transport batches (`transport.rs` C3): a frame is EITHER the legacy
+/// single object OR a JSON array of them, and the production client decodes
+/// both. A test that reads `frame["payload"]` directly therefore passes only
+/// while the stream is quiet enough that nothing batches — and reports "the
+/// row never arrived" for a row that did arrive, inside an array. Caught
+/// 2026-09-23: `e2e_pg_writeback` was green alone and red after
+/// `e2e_pg_write_amp`, whose 200 rows leave enough WAL backlog to make the
+/// drain-immediately path batch. Route every frame read through this.
+pub fn frame_events(frame: &serde_json::Value) -> Vec<&serde_json::Value> {
+    frame
+        .as_array()
+        .map_or_else(|| vec![frame], |items| items.iter().collect())
+}
+
+/// True when any event in `frame` carries `needle` in its decoded payload.
+/// Batch-aware via [`frame_events`].
+pub fn frame_payload_contains(frame: &serde_json::Value, needle: &str) -> bool {
+    frame_events(frame).into_iter().any(|e| {
+        let hex = e.get("payload").and_then(serde_json::Value::as_str);
+        hex.is_some_and(|h| String::from_utf8_lossy(&decode_payload_hex(h)).contains(needle))
+    })
 }
 
 /// Decode the server's hex-encoded wire payload back to bytes, for assertions.
