@@ -117,6 +117,16 @@ Templated tables skip the per-scope cooldown, because a debounced banner is a
 lost banner. The ceiling is one `pg_net` request per templated row, and the
 operator opted into that by choosing the table.
 
+The rows come from `nostos link --visible <entry>`, where `<entry>` uses the
+`NOSTOS_PUSH_TABLES` visible/action grammar, so one line of config works in
+both modes. The generated SQL replaces the whole set rather than merging into
+it. `--deploy --fcm-service-account <json>` then rolls out the rest through
+the `supabase` CLI: it applies the SQL with `pg_net`, mints the shared secret
+on both sides, and deploys the function. `--push` writes the function into the
+app repo, compiled into the binary so it matches the SQL it was generated
+with. Per app, only the Firebase/APNs setup and the app's notification
+categories are still manual.
+
 ### 3. Token registry in the customer's Postgres, tenant force-stamped
 
 `cairn_push_tokens(token, platform, account_id, tenant_id, updated_at)` —

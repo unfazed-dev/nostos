@@ -281,8 +281,10 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    `cairn.wake_absent_devices()` trigger → `pg_net` → Edge Function, and the
    matching `PostgrestSource` methods. The reference function is
    `supabase/functions/cairn-push/index.ts` (data-only FCM v1, shared-secret
-   bearer, `--no-verify-jwt`). **Deploying it and supplying FCM credentials is
-   the operator's; nothing here has sent a real notification.**
+   bearer, `--no-verify-jwt`). `--push` writes the function into the app repo,
+   `--visible` adds templated alert pushes (ADR-0037 §2b), and `--deploy
+   --fcm-service-account <json>` rolls all of it out through the `supabase`
+   CLI. Firebase/APNs setup is still the operator's.
 
    Two findings from building it:
 

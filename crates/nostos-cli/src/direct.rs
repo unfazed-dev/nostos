@@ -78,6 +78,109 @@ pub struct PushConfig {
     /// The floor between two pushes to one scope. Also the `pg_net` rate
     /// guard: without it 10,000 write transactions are 10,000 HTTP requests.
     pub cooldown: String,
+    /// `nostos link --visible`: the tables whose changes arrive as the
+    /// notification itself rather than as a silent doorbell.
+    pub templates: Vec<PushTemplate>,
+}
+
+/// One `cairn.push_templates` row — a visible (or, with a category, action)
+/// push per change to `table`, ADR-0037 §2b.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushTemplate {
+    pub table: String,
+    pub title: String,
+    pub body: String,
+    pub category: Option<String>,
+    pub route: Option<String>,
+}
+
+/// Parse one `--visible` spec. The grammar is server mode's
+/// `NOSTOS_PUSH_TABLES` visible/action entries, so one line of config moves
+/// between the modes unchanged: `table:visible[@/route/{id}]:<title>:<body>`
+/// or `table:action[@/route/{id}]:<category>:<title>:<body>`. The body is the
+/// greedy remainder and may contain colons.
+///
+/// ponytail: a second parser of the grammar in nostos-server's
+/// `parse_push_tables`; move both into nostos-infra when a third caller shows.
+///
+/// # Errors
+/// [`anyhow::Error`] naming the spec when it is not one of the two shapes, or
+/// a table, category or route breaks the identifier/route rules.
+pub fn parse_visible(spec: &str) -> Result<PushTemplate> {
+    let shape = "expected table:visible[@/route]:<title>:<body> or \
+                 table:action[@/route]:<category>:<title>:<body>";
+    let Some((table, rest)) = spec.split_once(':') else {
+        bail!("--visible {spec:?}: {shape}");
+    };
+    let Some((mode, rest)) = rest.split_once(':') else {
+        bail!("--visible {spec:?}: {shape}");
+    };
+    let (mode, route) = match mode.split_once('@') {
+        Some((m, r)) => (m, Some(r.trim().to_string())),
+        None => (mode, None),
+    };
+    let (category, rest) = match mode.trim() {
+        "visible" => (None, rest),
+        "action" => match rest.split_once(':') {
+            Some((c, r)) => (Some(c.trim().to_string()), r),
+            None => bail!("--visible {spec:?}: {shape}"),
+        },
+        other => bail!("--visible {spec:?}: mode {other:?} \u{2014} {shape}"),
+    };
+    let Some((title, body)) = rest.split_once(':') else {
+        bail!("--visible {spec:?}: {shape}");
+    };
+    let table = table.trim();
+    if !is_identifier(table) {
+        bail!("--visible {spec:?}: table {table:?} must match ^[a-z_][a-z0-9_]*$");
+    }
+    // The category is the contract with the app's registered notification
+    // categories, so a typo must fail here, not as a button-less banner.
+    if let Some(c) = category.as_deref().filter(|c| !is_identifier(c)) {
+        bail!("--visible {spec:?}: category {c:?} must match ^[a-z_][a-z0-9_]*$");
+    }
+    if let Some(r) = route
+        .as_deref()
+        .filter(|r| !r.starts_with('/') || r.chars().any(char::is_whitespace))
+    {
+        bail!("--visible {spec:?}: route {r:?} must start with '/' and hold no whitespace");
+    }
+    Ok(PushTemplate {
+        table: table.to_string(),
+        title: title.trim().to_string(),
+        body: body.trim().to_string(),
+        category,
+        route,
+    })
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('_' | 'a'..='z'))
+        && chars.all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// The `cairn.push_templates` rows, as the flags say they are: the set is
+/// replaced, not merged, so dropping a `--visible` and re-applying stops that
+/// table's banners.
+#[must_use]
+pub fn templates_sql(templates: &[PushTemplate]) -> String {
+    let lit = |v: &str| format!("'{}'", v.replace('\'', "''"));
+    let opt = |v: &Option<String>| v.as_deref().map_or("null".to_string(), lit);
+    let mut s = String::from("delete from cairn.push_templates;\n");
+    for t in templates {
+        let _ = writeln!(
+            s,
+            "insert into cairn.push_templates (table_name, title, body, category, route) \
+             values ({}, {}, {}, {}, {});",
+            lit(&t.table),
+            lit(&t.title),
+            lit(&t.body),
+            opt(&t.category),
+            opt(&t.route)
+        );
+    }
+    s
 }
 
 impl Default for PushConfig {
@@ -86,6 +189,7 @@ impl Default for PushConfig {
             endpoint: String::new(),
             presence_window: "90 seconds".to_string(),
             cooldown: "30 seconds".to_string(),
+            templates: Vec::new(),
         }
     }
 }
@@ -806,6 +910,7 @@ fn push_path(s: &mut String, cfg: &PushConfig) {
         endpoint,
         presence_window,
         cooldown,
+        templates,
     } = cfg;
     let _ = write!(
         s,
@@ -855,9 +960,8 @@ create table if not exists cairn.push_cooldown (
 -- doorbell, but it always shows an alert -- so a table the user must hear about
 -- gets a row here, and its changes arrive as the notification itself. `{{col}}`
 -- in title/body/route is filled from the changed row by the Edge Function; a
--- non-null category makes it an action push. Operator-owned, like the secret:
---   insert into cairn.push_templates values
---     ('order_events', 'Order update', 'Your order is {{status}}', 'order_status', '/history/{{id}}');
+-- non-null category makes it an action push. The rows come from `nostos link
+-- --visible`, at the end of this section.
 create table if not exists cairn.push_templates (
   table_name text primary key,
   title      text not null,
@@ -1011,6 +1115,7 @@ alter table cairn.push_cooldown   enable row level security;
 alter table cairn.push_templates  enable row level security;
 "#
     );
+    s.push_str(&templates_sql(templates));
 }
 
 // ---------------------------------------------------------------------------
@@ -1866,6 +1971,47 @@ mod tests {
             1,
             "exactly one synced table is instrumented"
         );
+    }
+
+    #[test]
+    fn visible_specs_parse_like_nostos_push_tables_and_render_quoted() {
+        let action = parse_visible(
+            "order_events:action@/history/{id}:order_status:Atlet: order:Your order's {status}",
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            PushTemplate {
+                table: "order_events".to_string(),
+                title: "Atlet".to_string(),
+                // The body is the greedy remainder, colons and all.
+                body: "order:Your order's {status}".to_string(),
+                category: Some("order_status".to_string()),
+                route: Some("/history/{id}".to_string()),
+            }
+        );
+        let plain = parse_visible("orders:visible:New order:Order {id} placed").unwrap();
+        assert_eq!((&plain.category, &plain.route), (&None, &None));
+
+        for bad in [
+            "orders",
+            "orders:silent",
+            "orders:visible:title only",
+            "orders:action:order_status:title only",
+            "Orders:visible:t:b",
+            "orders:action:Order-Status:t:b",
+            "orders:visible@history:t:b",
+        ] {
+            assert!(parse_visible(bad).is_err(), "{bad:?} must be refused");
+        }
+
+        let sql = templates_sql(&[action]);
+        assert!(
+            sql.starts_with("delete from cairn.push_templates;\n"),
+            "{sql}"
+        );
+        assert!(sql.contains("'order:Your order''s {status}', 'order_status', '/history/{id}'"));
+        assert!(templates_sql(&[plain]).contains(", null, null);"));
     }
 
     #[test]

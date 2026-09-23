@@ -27,7 +27,8 @@
 //! Supabase project aborts instead of dropping its auth schema.
 
 use nostos_cli::direct::{
-    inspect, render_with_push, DirectTable, PushConfig, Scoping, Verdict, DEFAULT_RETENTION,
+    inspect, parse_visible, render_with_push, templates_sql, DirectTable, PushConfig, Scoping,
+    Verdict, DEFAULT_RETENTION,
 };
 
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
@@ -158,6 +159,7 @@ impl Fixture {
                 endpoint: "https://example.test/nostos-push".to_string(),
                 presence_window: "90 seconds".to_string(),
                 cooldown: "30 seconds".to_string(),
+                templates: Vec::new(),
             }),
         );
         client
@@ -753,12 +755,14 @@ async fn a_visible_template_pushes_every_change_with_its_row() {
         return;
     }
     let fx = Fixture::setup().await;
+    // Exactly what `nostos link --visible` writes, so its quoting meets a real
+    // Postgres here.
+    let spec = format!(
+        "{}:action@/tasks/{{id}}:task_status:Task update:Now: {{title}}",
+        fx.tasks
+    );
     fx.client
-        .batch_execute(&format!(
-            "insert into cairn.push_templates values \
-               ('{}', 'Task update', 'Now: {{title}}', 'task_status', '/tasks/{{id}}');",
-            fx.tasks
-        ))
+        .batch_execute(&templates_sql(&[parse_visible(&spec).expect("spec")]))
         .await
         .expect("template");
 
