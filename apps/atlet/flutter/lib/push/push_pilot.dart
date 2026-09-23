@@ -24,19 +24,25 @@ import 'push_pilot_web_stub.dart'
 /// payload is at most `{table, lsn}`; the wake target is always the sync
 /// connection (resume / cold-open), never the push rail.
 
-/// Same const as [NostosAdapter]'s `_nostosUrl` — keep the two in sync. Both
-/// read the same `NOSTOS_SYNC_URL` dart-define, so they can only disagree if
-/// the defaults are edited apart.
-const String _nostosUrl = String.fromEnvironment(
-  'NOSTOS_SYNC_URL',
-  defaultValue: 'ws://localhost:8080/sync',
+/// Same consts as main.dart's — keep them in sync. Both read the same
+/// dart-defines, so they can only disagree if the defaults are edited apart.
+const String _supabaseUrl = String.fromEnvironment(
+  'SUPABASE_URL',
+  defaultValue: 'https://PROJECT_REF.supabase.co',
+);
+const String _supabaseAnonKey = String.fromEnvironment(
+  'SUPABASE_ANON_KEY',
+  defaultValue: 'PLACEHOLDER_ANON_KEY',
 );
 
-/// A nostos doorbell: FCM data payload carrying `{table, lsn}` (ADR-0037 §2).
+/// A nostos doorbell: server mode's `{table, lsn}` (ADR-0037 §2), or direct
+/// mode's `{cairn: ring}` from the `cairn-push` Edge Function (ADR-0045).
 /// Pure so the routing decision is unit-testable (push_pilot_test.dart) —
 /// everything non-Firebase that handles a [RemoteMessage] flows through it.
 bool isNostosDoorbell(Map<String, dynamic>? data) =>
-    data != null && data.containsKey('table') && data.containsKey('lsn');
+    data != null &&
+    ((data.containsKey('table') && data.containsKey('lsn')) ||
+        data['cairn'] == 'ring');
 
 // Action pushes (`{title, body, category}` data, ADR-0037 §2 `action` mode)
 // never render from Dart: iOS draws the system alert + the category's
@@ -57,8 +63,10 @@ const String _sessionFileName = 'nostos_push_pilot_session.json';
 /// is what makes a cold-open cheap (delta applies, not a resync).
 ///
 /// ponytail: the access token is whatever attach() last persisted — it can
-/// be stale (Supabase access tokens live ~1h), in which case the WS
-/// handshake 401s and this wake is a no-op. Harmless: a doorbell is a hint,
+/// be stale (Supabase access tokens live ~1h), in which case the pull 401s,
+/// the first sync never lands, and this wake times out as a no-op (the
+/// timeout also keeps it inside the OS's ~30s background budget).
+/// Harmless: a doorbell is a hint,
 /// and the next foreground app-open syncs regardless. Upgrade: refresh the
 /// token from Supabase inside this isolate when a no-op wake is ever
 /// observed in practice.
@@ -73,16 +81,22 @@ Future<void> nostosDoorbellBackgroundHandler(RemoteMessage message) async {
   if (!await file.exists()) return; // pilot never attached — nothing to wake
   final creds = jsonDecode(await file.readAsString());
   if (creds is! Map<String, dynamic>) return;
+  final (token, userId) = (creds['accessToken'], creds['userId']);
+  if (token is! String || userId is! String) return; // pre-direct file
   try {
-    final db = await NostosDatabase.connect(
-      url: _nostosUrl,
-      token: creds['accessToken'] as String?,
-      sqlitePath:
-          '${dir.path}/cairn.sqlite', // SAME file as the foreground session
+    // SAME file and scope as the foreground session (the live app is
+    // direct-only; the server-mode adapter is the bench's).
+    final db = await openNostosDirect(
+      supabaseUrl: _supabaseUrl,
+      anonKey: _supabaseAnonKey,
+      accessToken: token,
+      userId: userId,
+      dbDir: dir.path,
     );
     try {
-      await db.subscribe('sessions'); // re-declare tables; delta applies
-      await db.waitForFirstSync();
+      // Direct mode pulls the whole scope; the table only satisfies the API.
+      await db.subscribe('orders');
+      await db.waitForFirstSync().timeout(const Duration(seconds: 20));
     } finally {
       await db.close(); // NOT signOut() — the local store must survive
     }
@@ -180,9 +194,12 @@ class PushPilot {
       debugPrint('push pilot: FCM token registered');
       // Seed the background-isolate wake (see nostosDoorbellBackgroundHandler).
       final dir = await getApplicationDocumentsDirectory();
-      await File(
-        '${dir.path}/$_sessionFileName',
-      ).writeAsString(jsonEncode({'accessToken': adapter.currentAccessToken}));
+      await File('${dir.path}/$_sessionFileName').writeAsString(
+        jsonEncode({
+          'accessToken': adapter.currentAccessToken,
+          'userId': adapter.currentUserId,
+        }),
+      );
     } on NostosPushTokenException catch (e) {
       // Non-fatal: registration retries on the next attach()/token refresh.
       debugPrint('push pilot: registerPushToken failed: $e');

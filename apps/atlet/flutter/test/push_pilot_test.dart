@@ -9,6 +9,11 @@ void main() {
       expect(isNostosDoorbell({'table': 'sessions', 'lsn': '0/1A2B3C'}), isTrue);
     });
 
+    test('accepts the direct-mode ring {cairn: ring} (ADR-0045)', () {
+      expect(isNostosDoorbell({'cairn': 'ring'}), isTrue);
+      expect(isNostosDoorbell({'cairn': 'other'}), isFalse);
+    });
+
     test('rejects payloads missing either key', () {
       expect(isNostosDoorbell({'table': 'sessions'}), isFalse);
       expect(isNostosDoorbell({'lsn': '0/1A2B3C'}), isFalse);
