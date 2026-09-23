@@ -7,15 +7,20 @@ adr_decision:
   result_of_real_tradeoff: true
   rejected_alternatives: "Raise DEFAULT_SESSION_BUFFER to 16-32k (measured zero-loss in ADR-0040 but buys time, not a bound); disconnect slow clients at a high watermark (correct for event-shaped data, wrong for state-shaped); block fan-out on a full sink (one slow client stalls every client); make the op-log default-on and replay mid-session (reverses ADR-0025's opt-in posture and adds a Postgres write per commit)."
   all_three_true: true
-status: proposed
+status: accepted
 ---
 
 # ADR-0045: Per-key conflating session sinks
 
-- **Status:** Proposed (2026-09-22). **Implemented and reverted the same day** — the
-  design is sound and its invariants are test-pinned, but the first implementation cost
-  **39% of the 1k headline** and the gate below is binding. Work preserved on the local
-  branch `adr-0045-conflating-sink` (`6044dbc`); see "Implementation attempt".
+- **Status:** Accepted (2026-09-23). Three implementation attempts are recorded below —
+  the first cost **39% of the 1k headline** and was reverted the same day, and the
+  original gate was superseded once the instrument turned out to be wrong. The shipped
+  design is attempt 3 (`DeliveryDecision::Superseded`), and the **replacement gate is
+  met**: convergence lag holds at 0 for every key under
+  `router::tests::conflation_holds_convergence_lag_at_zero_where_a_plain_channel_loses_every_key`
+  in `make ci`, with drop-on-full as an in-test control, and the unbacklogged fast path
+  measures within noise of the parent (1,645,329 vs 1,715,366 median, overlapping).
+  Accepted by the operator 2026-09-23.
 - **Date:** 2026-09-22
 - **References:** ADR-0009 (ack-driven resume, one checkpoint per socket), ADR-0025
   (op-log backfill; `(table_name, pk)` compaction index), ADR-0030 (CRDT merge tier —
@@ -379,7 +384,7 @@ The drop-on-full arm is inside the same test as a control, so the property canno
 This is the before/after `docs/ROADMAP.md` and CLAUDE.md's "measure before optimize" asked for,
 and it took no host at all.
 
-### Replacement gate (proposed — the original is superseded above)
+### Replacement gate (adopted 2026-09-23 — the original is superseded above)
 
 > **Convergence.** While pending distinct keys fit the overflow, conflation holds convergence lag
 > at **0 for every key**, on a stream where drop-on-full at the same memory budget leaves every
@@ -389,8 +394,10 @@ and it took no host at all.
 > interleaved within one session, ≥3 runs each. (Attempt 3: 1,645,329 vs 1,715,366 median,
 > overlapping.)
 
-Adopting this in place of the original is a deliberate change to a gate marked binding, so it is
-recorded as *proposed* and left for the operator.
+Adopting this in place of the original was a deliberate change to a gate marked binding, so it was
+left for the operator. **Adopted 2026-09-23**, and the ADR moved to *accepted* with it. The
+original gate stands superseded, not passed: absolute throughput at 50k–100k is still unmeasured
+(see "What is still not claimed"), and nothing below is a throughput claim.
 
 ## What is still not claimed
 
