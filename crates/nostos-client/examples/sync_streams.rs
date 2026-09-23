@@ -1,6 +1,6 @@
 //! # sync_streams — the P5 "lazy parameterized stream" demo (ADR-0039).
 //!
-//! Demonstrates PowerSync Sync-Streams parity end-to-end, in one process,
+//! Demonstrates Nostos's sync streams end-to-end, in one process,
 //! fully runnable with `cargo run -p nostos-client --example sync_streams`:
 //!
 //! 1. An in-process axum sync server (the real `/sync` handler) with a rules

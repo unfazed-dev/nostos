@@ -8,28 +8,28 @@
 ![Rust](https://img.shields.io/badge/rust-1.98-orange) &nbsp;
 ![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20Phase%203%2C%20v0.1%20prepared%2C%20launch%20gated-orange)
 
-Nostos is a from-scratch, **Rust-native** competitor to [PowerSync](https://powersync.com): a sync engine that keeps an on-device SQLite database in sync with a server-side Postgres, **even when the device is offline.** It targets the empty market cell that no incumbent occupies today — *Apache-2.0 + Postgres-logical-replication + 2-way offline + first-class Flutter/RN/Web SDKs + Rust-fast + free self-host.*
+Nostos is a from-scratch, **Rust-native** sync engine that keeps an on-device SQLite database in sync with a server-side Postgres, **even when the device is offline.** It targets the empty market cell that no incumbent occupies today — *Apache-2.0 + Postgres-logical-replication + 2-way offline + first-class Flutter/RN/Web SDKs + Rust-fast + free self-host.*
 
-> **Status:** alpha — Phase 3 🚧, v0.1 prepared, launch gated on the operator (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). Not production-ready. The server fan-out moat is proven (2,618,601 ops/sec aggregate fan-out @ 1k clients, 0.00% drops — median of 3 passes, 2026-09-02, eval-only: FakeReplicator on loopback; PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2–4k ops/sec replication ingest and 2–20k ops/sec per-client sync — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator, native client, and write-back v1 are shipped. Public launch is now gated on the Flutter+Supabase plug-and-play bar — see [`docs/plans/flutter-supabase-plug-and-play-launch.md`](docs/plans/flutter-supabase-plug-and-play-launch.md).
+> **Status:** alpha — Phase 3 🚧, v0.1 prepared, launch gated on the operator (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). Not production-ready. The server fan-out moat is proven (2,618,601 ops/sec aggregate fan-out @ 1k clients, 0.00% drops — median of 3 passes, 2026-09-02, eval-only: FakeReplicator on loopback — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator, native client, and write-back v1 are shipped. Public launch is now gated on the Flutter+Supabase plug-and-play bar — see [`docs/plans/flutter-supabase-plug-and-play-launch.md`](docs/plans/flutter-supabase-plug-and-play-launch.md).
 
 ---
 
 ## Why Nostos exists
 
-PowerSync is the incumbent — and still carries real, current limits Nostos exploits. The defensible wedges (audited July 2026):
+Nostos's defensible wedges (audited July 2026):
 
-| Wedge | The incumbent's limit | Nostos's answer |
-|---|---|---|
-| **Server throughput** | PowerSync's server is **TypeScript/Node.js** — published replication-ingest rate ~2–4k ops/sec, per-client sync 2–20k ops/sec; no published aggregate fan-out figure | **Pure-Rust server** (tokio + axum) — 2,618,601 ops/sec aggregate fan-out @ 1k clients, 0.00% drops (median of 3, 2026-09-02; eval-only: FakeReplicator on loopback) |
-| **License** | PowerSync's server is **FSL** (source-available, no-compete, 2-yr wait to Apache) | **Apache-2.0 today** — server, core, and every SDK. Clean for enterprise legal |
-| **Write-back** | You build & host the `uploadData()` endpoint; ElectricSQL is read-only | **Direct write-back** — Nostos writes to your Postgres for you, no customer-built endpoints |
-| **Self-host** | PowerSync Cloud is metered per-op; FSL "Open Edition" carries the license delay | **Free, full-featured, unlimited self-host** — no feature gates |
+| Wedge | Nostos's answer |
+|---|---|
+| **Server throughput** | **Pure-Rust server** (tokio + axum) — 2,618,601 ops/sec aggregate fan-out @ 1k clients, 0.00% drops (median of 3, 2026-09-02; eval-only: FakeReplicator on loopback) |
+| **License** | **Apache-2.0 today** — server, core, and every SDK. Clean for enterprise legal |
+| **Write-back** | **Direct write-back** — Nostos writes to your Postgres for you, no customer-built endpoints |
+| **Self-host** | **Free, full-featured, unlimited self-host** — no feature gates |
 
 **Sync rules:** an operator-facing `nostos_rules.toml` declares what each client can read — `all` (zero-config dev default), `toggles` (per-table on/off + scope), or `hand` (raw predicate grammar) — with a checksum-gated resync so a rules edit is never silently missed by a connected client. See [ADR-0031](docs/adr/0031-sync-rules-modes-and-checksum-resync.md).
 
-Meanwhile **ElectricSQL abandoned 2-way offline sync (read-path only)**, **Zero is web-only**, **Zero disabled offline writes**, and **Supabase Realtime has no offline layer**. Nostos fills the open cell. (PowerSync shipped dynamic **Sync Streams** to GA in May 2026, so the old "static buckets only" framing no longer holds — see the honest comparison in [`docs/COMPARISON.md`](docs/COMPARISON.md).)
+Meanwhile **ElectricSQL abandoned 2-way offline sync (read-path only)**, **Zero is web-only**, **Zero disabled offline writes**, and **Supabase Realtime has no offline layer**. Nostos fills the open cell. See the honest comparison in [`docs/COMPARISON.md`](docs/COMPARISON.md).
 
-**Migrating from PowerSync or Realm?** See the guides in [`docs/migrations/`](docs/migrations/): [`from-powersync.md`](docs/migrations/from-powersync.md) · [`from-realm.md`](docs/migrations/from-realm.md).
+**Migrating from Realm?** See the guide in [`docs/migrations/`](docs/migrations/): [`from-realm.md`](docs/migrations/from-realm.md).
 
 Full strategic brief: [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
@@ -107,6 +107,9 @@ The domain layer knows nothing about tokio, postgres, or axum. The application l
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, and
 **[`docs/api/`](docs/api/README.md) for the API reference** — one page per SDK, every signature
 extracted from source and cited to the file it came from.
+
+New to all of this? [`docs/nostos-explained.html`](docs/nostos-explained.html) is a
+self-contained, click-it-yourself explanation of direct mode — open it in a browser.
 
 ---
 
@@ -191,7 +194,7 @@ Vite WS proxy is wired. Ctrl-C stops the dev server.
 
 ## The Week-1 deliverable
 
-A benchmark that answers: ***"How fast can Nostos's server fan Postgres-style replication events out to thousands of concurrent WebSocket clients?"*** (PowerSync publishes no comparable aggregate fan-out figure — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md).)
+A benchmark that answers: ***"How fast can Nostos's server fan Postgres-style replication events out to thousands of concurrent WebSocket clients?"*** (See [`benches/results/RESULTS.md`](benches/results/RESULTS.md).)
 
 The harness:
 1. Spawns **N** in-process WebSocket client tasks (1k / 5k / 10k).
@@ -206,7 +209,7 @@ Output: `benches/results/RESULTS.md` + a JSON artifact + an SVG chart. See [`doc
 
 ## License
 
-**Apache-2.0**, end to end — server, core, and every SDK. No FSL, no BSL, no "source-available" asterisk. This is a deliberate wedge against PowerSync's licensing and a procurement advantage for enterprise buyers.
+**Apache-2.0**, end to end — server, core, and every SDK. No FSL, no BSL, no "source-available" asterisk. This is a deliberate wedge and a procurement advantage for enterprise buyers.
 
 ---
 

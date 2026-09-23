@@ -14,7 +14,7 @@
 ## Context
 
 Users need OS-level push when the app is backgrounded or killed. No
-partial-replication engine ships this (research §1): PowerSync, ElectricSQL,
+partial-replication engine ships this (research §1): ElectricSQL,
 Replicache/Zero, Ditto, RxDB, WatermelonDB, InstantDB and Supabase all leave
 wake to OS schedulers or DIY FCM glue. Incumbent push tools are
 database-blind — FCM topics are public broadcast strings; every app hand-wires
@@ -59,6 +59,44 @@ checkpoint is the correctness mechanism. Because iOS kills apps receive only
 templates: a static per-table title/body with optional single-column
 interpolation. No rules engine, no scheduling, no A/B — that is the
 marketing-platform layer nostos explicitly does not build.
+
+### 2a. Routing keys on visible pushes — amendment 2026-09-23
+
+A visible push that cannot say *what it is about* dumps the user on the app's
+home screen. v1 carried `{title, body, category}`; an app could only infer
+the destination from `category`, which is a notification *class*, not a row.
+Every incumbent solves this the same way — routing data travels in the
+payload's data half — and the Atlet pilot proved the shape locally before
+nostos's wire could carry it.
+
+Visible payloads therefore carry an optional `data: map<string,string>`:
+
+| rail | where it lands | why |
+|---|---|---|
+| APNs | top-level siblings of `aps` | that dictionary *is* `userInfo` on tap (Apple, "Generating a remote notification") |
+| FCM | `message.data` (merged with action mode's `title`/`body`/`category`) | `data` is delivered in all three app states; `notification` alone is not |
+| Web Push | a `data` object inside the encrypted payload | what a service worker reads as `event.data.json().data` |
+
+String→string, not JSON: FCM's `data` is a `map<string,string>` on the wire,
+so any richer type has to be stringified anyway — nostos stringifies nowhere
+and the three rails stay byte-comparable.
+
+**Silent payloads do not get this.** A doorbell is `{table, lsn}`; a routing
+key on a wake-up is row data looking for an excuse.
+
+**Still not a data channel** (§2 stands). The payload is plaintext at the
+vendor, which is exactly Apple's own rule: an identifier the app resolves
+locally is fine, the record is not. Enforced, not merely documented —
+`validate_data` rejects the keys a rail would eat (`aps`; FCM's `from`,
+`message_type`, `notification`, `google.*`, `gcm.*`; nostos's own `title`,
+`body`, `category`, `table`, `lsn`) and caps the map at 1024 serialized bytes
+against APNs/FCM's 4096-byte ceiling.
+
+Two producers: `nostos-pushd`'s `POST /v1/send` takes the whole map, and
+`NOSTOS_PUSH_TABLES` grows one sugar — `orders:visible@/orders/{id}:…` sets
+`cairn_route` with the same `{col}` interpolation title/body use. One key
+rather than a map there because that config is a colon-delimited string; a
+map means JSON-in-env, and nobody has asked for a second key.
 
 ### 3. Token registry in the customer's Postgres, tenant force-stamped
 

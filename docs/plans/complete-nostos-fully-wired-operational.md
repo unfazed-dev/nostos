@@ -28,7 +28,7 @@
 
 | Area | State | Evidence |
 |---|---|---|
-| Throughput moat | **142,336 ops/sec @ 1k clients, 0.00% drops = 35.6× PowerSync-high**; 185k @ 5k clients; 45,964 @ 10k with 17.26% drops (known WS-write-path limit) | `benches/results/RESULTS.md` |
+| Throughput moat | **142,336 ops/sec @ 1k clients, 0.00% drops = 35.6× a competitor's published ceiling**; 185k @ 5k clients; 45,964 @ 10k with 17.26% drops (known WS-write-path limit) | `benches/results/RESULTS.md` |
 | Real replication | `PgReplicator` fully implemented (848 LOC, pgoutput + pgwire-replication, ack-driven slot advance per ADR-0009), **but off by default** behind cargo feature `pg`; default binary runs `FakeReplicator` | `crates/nostos-infra/src/replicator/pg.rs`, `nostos-server/src/main.rs:199-268` |
 | Predicate engine | Boolean tree + typed comparisons + JSON extractor + safe-SQL-subset compiler (`parse_predicate_expr`), ~1.5M predicate-evals/sec; equality index built, measured 4-8× regression, reverted | `nostos-domain/src/predicate.rs`, `predicate_compile.rs`, ADR-0012 |
 | Client SDK core | `nostos-core` apply engine + atomic checkpoint `Storage` trait; `nostos-client` SqliteStorage + reconnect/resume; chaos-tested | ADR-0016, `crates/nostos-client/tests/chaos_resume.rs` |
@@ -44,11 +44,11 @@
 3. **The moat isn't wired to the wire.** Subscribe carries only equality `FilterClause`s; the Tier-7 SQL-subset compiler is unreachable by any client.
 4. **No write-back.** Zero write code (confirmed by ADR-0013 and route audit). Nostos is read-only sync — the headline claim "2-way offline" is currently false.
 5. **The browser can't connect.** WASM bridge applies frames it can never receive; `web/` doesn't consume the built pkg.
-6. **Docs materially stale.** README/ARCHITECTURE say "Week-1 spike / PgReplicator stubbed / 5 crates" (there are 9, replicator is real); ROADMAP footer says "Phase 0 🚧"; WEEK-01-PLAN acceptance boxes unticked though exceeded; bench JSON records `rustc "0.1.0"` / `hostname "unknown"` violating its own methodology §6; COMPARISON quotes eval-only numbers against PowerSync's end-to-end numbers (apples-to-oranges if published).
+6. **Docs materially stale.** README/ARCHITECTURE say "Week-1 spike / PgReplicator stubbed / 5 crates" (there are 9, replicator is real); ROADMAP footer says "Phase 0 🚧"; WEEK-01-PLAN acceptance boxes unticked though exceeded; bench JSON records `rustc "0.1.0"` / `hostname "unknown"` violating its own methodology §6; COMPARISON quotes eval-only numbers against a competitor's end-to-end numbers (apples-to-oranges if published).
 7. **Strategy drift (July 2026 market check, sourced):**
-   - PowerSync shipped **Sync Streams (dynamic, on-demand sync) to GA in May 2026**; Sync Rules are now "legacy" — Nostos's "static buckets" attack line is gone. Sources: [Sync Streams overview](https://docs.powersync.com/sync/streams/overview), [May 2026 changelog](https://powersync.com/blog/powersync-changelog-may-2026).
-   - The 1,000-bucket cap is a soft default (10k configurable): [performance & limits](https://docs.powersync.com/resources/performance-and-limits).
-   - Still true: PowerSync service is Node/TS with the 2–4k ops/sec replication ceiling ([source](https://github.com/powersync-ja/powersync-service)); FSL license (2-yr Apache conversion); ElectricSQL is read-path only ([writes guide](https://electric-sql.com/docs/guides/writes)); Zero disabled offline writes; Supabase has no first-party offline layer.
+   - A comparable engine shipped **dynamic, on-demand sync to GA in May 2026**, retiring its old fixed-partition sync-rules model — Nostos's "static buckets" attack line is gone.
+   - The bucket-cap figure that attack line cited was a soft default (10k configurable), not a hard cap.
+   - Still true: the leading comparable service is Node/TS with a 2–4k ops/sec replication ceiling; FSL license (2-yr Apache conversion); ElectricSQL is read-path only ([writes guide](https://electric-sql.com/docs/guides/writes)); Zero disabled offline writes; Supabase has no first-party offline layer.
    - New threat: **Supabase acquired Triplit (Oct 2025)** explicitly citing offline demand ([announcement](https://supabase.com/blog/triplit-joins-supabase)).
    - Net: the defensible wedge today is **Rust server throughput + Apache-2.0-now + write-back without endpoints + free self-host**. Positioning docs must be rewritten before any launch.
 
@@ -76,9 +76,9 @@ Highest-risk-first: the replication boundary is where the benchmarked engine mee
 
 ## What this is
 Rust-native local-first sync engine: Postgres logical replication → Rust fan-out server →
-on-device SQLite, offline-capable, Apache-2.0 end to end. Competes with PowerSync on server
-throughput (Rust vs Node) and license (Apache-2.0 vs FSL). Moat proof: 142k ops/sec @ 1k
-clients, 0% drops = 35.6× PowerSync's ceiling — see benches/results/RESULTS.md.
+on-device SQLite, offline-capable, Apache-2.0 end to end. Competes with comparable sync engines
+on server throughput (Rust vs Node) and license (Apache-2.0 vs FSL). Moat proof: 142k ops/sec @ 1k
+clients, 0% drops = 35.6× a competitor's published ceiling — see benches/results/RESULTS.md.
 
 ## Crate map (hexagonal — dependencies point inward, violations fail review)
 | crate | role | may depend on |
@@ -259,7 +259,7 @@ Rules:
 - ALWAYS report drop rates next to throughput. 45k ops/sec @ 17% drops is not
   45k ops/sec.
 - NEVER let an eval-only number (predicate evals/sec) be compared against an
-  end-to-end number (PowerSync's ops/sec). Same-denominator comparisons only.
+  end-to-end number (a competitor's ops/sec). Same-denominator comparisons only.
 - Perf work follows the Tier discipline: baseline first, change, re-measure,
   and REVERT if the change regresses (Tier-5 index revert is the precedent).
 - Run benches on an otherwise-idle machine; report variance across ≥3 runs if
@@ -438,7 +438,7 @@ indent_size = 2
 
 - [x] **Step 4: docs/WEEK-01-PLAN.md** — add a banner at the top: `> **Historical document (executed).** Outcome: 142,336 ops/sec @ 1k clients, 0% drops = 35.6× target baseline — see benches/results/RESULTS.md. Kept for methodology.` Tick the acceptance boxes that RESULTS.md proves; where the 10k-client `<1% drop` bar was NOT met (17.26% drops), do NOT tick — annotate: `10k-client drop rate 17.26% — WS write path is the known limit; fix tracked in plan Phase C3.`
 
-- [x] **Step 5: docs/COMPARISON.md + docs/STRATEGY.md (positioning rewrite)** — apply the July-2026 market facts from Part I §7: remove/rewrite "static buckets only" and "1,000-bucket hard cap" attack lines (Sync Streams GA; cap is soft); reposition the wedge as (1) Rust server throughput vs Node's 2–4k ops/sec replication ceiling, (2) Apache-2.0 **today** vs FSL's 2-year delay, (3) write-back without customer-built endpoints (vs ElectricSQL read-only and PowerSync's uploadData), (4) free full-featured self-host. Add a "Threats" note: Supabase/Triplit first-party offline ambitions. In COMPARISON.md, label every Nostos number as eval-only or end-to-end and only compare same-denominator pairs.
+- [x] **Step 5: docs/COMPARISON.md + docs/STRATEGY.md (positioning rewrite)** — apply the July-2026 market facts from Part I §7: remove/rewrite "static buckets only" and "1,000-bucket hard cap" attack lines (Sync Streams GA; cap is soft); reposition the wedge as (1) Rust server throughput vs Node's 2–4k ops/sec replication ceiling, (2) Apache-2.0 **today** vs FSL's 2-year delay, (3) write-back without customer-built endpoints (vs ElectricSQL read-only and comparable SDKs' uploadData), (4) free full-featured self-host. Add a "Threats" note: Supabase/Triplit first-party offline ambitions. In COMPARISON.md, label every Nostos number as eval-only or end-to-end and only compare same-denominator pairs.
 
 - [x] **Step 6: Fix bench env capture** — in `crates/nostos-bench/src/report.rs`, the results JSON records `rustc: "rustc 0.1.0 (nostos-bench build)"` and `hostname: "unknown"`. Replace with real values: shell out once at report time (`rustc --version` via `std::process::Command`, hostname via `std::process::Command::new("hostname")`), falling back to `"unknown"` only on error. Add a unit test asserting the rustc field starts with `"rustc 1."` on the build machine.
 
@@ -712,7 +712,7 @@ The known limit: 45,964 ops/sec @ 17.26% drops at 10k clients — per-connection
 
 - [x] **Step 1: Baseline** — `make bench` at 1k/5k/10k on an idle machine; record env + 3-run variance into `benches/results/` (bench-runner persona's format).
 - [x] **Step 2: Batch the write path** — in the per-session sink→socket pump, drain up to N pending frames (start N=64) from the session channel and send as one WS message containing a JSON array of frames; client `decode` already iterates frames? — **check first**: if the client/wire decode expects one frame per message, extend `decode` to accept `[{...},{...}]` arrays (server can then batch without a wire version bump; old single-frame messages remain valid). Keep the flush immediate when the channel is empty (no latency tax at low rates): batching only kicks in under backlog.
-- [x] **Step 3: Re-measure** — same 3×3 matrix. Accept if: 10k-client drop rate < 1% at ≥ PowerSync-ceiling throughput AND 1k-client headline within noise of baseline. Otherwise revert and record the numbers in `docs/ROADMAP.md` the way Tier 5 did.
+- [x] **Step 3: Re-measure** — same 3×3 matrix. Accept if: 10k-client drop rate < 1% at ≥ a competitor's published ceiling throughput AND 1k-client headline within noise of baseline. Otherwise revert and record the numbers in `docs/ROADMAP.md` the way Tier 5 did.
 - [x] **Step 4: Reconnect-storm probe (decision point, advisor-flagged)** — batching fixes steady-state throughput; a reconnect storm is a different failure mode. Extend `nostos-bench` (or a one-off harness in `benches/`) to drop and simultaneously reconnect 5k of the 10k clients mid-stream, each re-subscribing with a `resume_lsn`; record peak per-session queue depth, drop rate, and time-to-drain. If the storm exceeds sustainable queue depth (sustained drops after batching), file the finding + numbers as the opening measurement of a follow-up admission-control/token-bucket task **before Phase D lands**; if it drains cleanly, record the numbers and move on — do not build admission control speculatively.
 - [x] **Step 5: Commit (either outcome)** — `git commit -m "feat: batched WS writes — 10k-client drops X% -> Y%"` or `git commit -m "docs: WS batching measured, regressed 1k headline, reverted"` (+ storm numbers in the message body of the ROADMAP note, commit itself single-line)
 
@@ -908,8 +908,8 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 
 - [x] **Step 1:** Final sweeps: docs-curator persona sweep (A3's checklist); bench-runner re-runs the headline benchmark with fixed env capture (A6 step 6) and refreshes `benches/results/RESULTS.md`.
   - A6 step 6 env capture shipped in `ccbe262`. The 1k headline was **not** re-run — the 142k result is valid and the founder's call whether to regenerate the marquee number; **APPEND-only** v0.1 section added with the C3 1k/5k/10k picture (1k unchanged, 10k drop ceiling honestly diagnosed). Per the L4 escalation: rewriting the 35.6× headline is a founder-facing marketing decision, not an implementation task — append, don't rewrite.
-- [x] **Step 2:** `git tag v0.1.0`; draft the launch post (Show HN + "PowerSync vs Nostos" with same-denominator tables and the honest 10k-client story) into `docs/launch/` for operator review. **Do not publish anything — operator's call.**
-  - Local `v0.1.0` tag created (in-repo metadata; **NOT** pushed — no remote configured, and the handoff scopes "tagging beyond a local v0.1.0" as operator's call). Drafts at `docs/launch/show-hn-draft.md` + `docs/launch/powersync-vs-nostos-draft.md` — both foreground the honest 10k story, use same-denominator tables only, and explicitly retire the stale "static buckets" / "1k cap" attack lines (PowerSync Sync Streams GA, May 2026). **Nothing published.**
+- [x] **Step 2:** `git tag v0.1.0`; draft the launch post (Show HN + a competitor-comparison piece with same-denominator tables and the honest 10k-client story) into `docs/launch/` for operator review. **Do not publish anything — operator's call.**
+  - Local `v0.1.0` tag created (in-repo metadata; **NOT** pushed — no remote configured, and the handoff scopes "tagging beyond a local v0.1.0" as operator's call). Draft at `docs/launch/show-hn-draft.md` — foregrounds the honest 10k story, uses same-denominator tables only, and explicitly retires the stale "static buckets" / "1k cap" attack lines (a comparable engine's dynamic-sync GA, May 2026). **Nothing published.**
 - [x] **Step 3:** Update `docs/ROADMAP.md` footer to Phase 3 posture.
   - Footer now reads "Phase 3 🚧 — v0.1 prepared, launch gated on operator." Honest about what shipped vs what's still operator-gated (RN SDK, Nostos Cloud alpha, Show HN timing).
 
@@ -933,7 +933,7 @@ Per the writing-plans scope rule, these are independent subsystems; each gets it
 ## Risks
 
 1. **[HIGH] pgoutput edge cases** (toasted values, large transactions, DDL mid-stream) surface during B2/B3 real-DB testing — pg-integrator persona's checklist exists for exactly this; budget slack in Phase B.
-2. **[HIGH] Competitive window**: PowerSync Sync Streams GA killed the buckets attack line; Supabase/Triplit may ship first-party offline. Mitigation: A6 repositioning now, F2 launch sooner over feature-completeness.
+2. **[HIGH] Competitive window**: a comparable engine's dynamic-sync GA killed the buckets attack line; Supabase/Triplit may ship first-party offline. Mitigation: A6 repositioning now, F2 launch sooner over feature-completeness.
 3. **[MED] Write-back trust boundary**: D2's identifier validation + allowlist + parameterized values is the security-critical surface; domain-guardian + a focused review pass before merge (never ponytail this away).
 4. **[MED] wire compat churn**: C1/C3/D2 all touch the wire. All changes are additive-optional (serde defaults), so old clients keep working; still, land C1 → C3 → D2 in order, never parallel.
 5. **[MED] Slot retention growth** if clients disconnect mid-snapshot or a slow client never acks — the WAL-bloat eviction policy (ADR-0016, `EvictionPolicy` + `max_slot_wal_keep_size`) exists but is off by default; B4's dev-stack should enable a sane default and the cloud-beta plan must treat it as required config.

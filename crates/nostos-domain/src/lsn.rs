@@ -3,8 +3,7 @@
 //! An LSN is a 64-bit offset into the WAL. In Nostos it doubles as our
 //! checkpoint/cursor: a client records the highest LSN it has applied, and on
 //! reconnect asks the server to resume from there. This is what makes sync
-//! incremental and resumable (vs PowerSync's full-reprocessing model — see
-//! ADR-0003).
+//! incremental and resumable (see ADR-0003).
 
 use std::fmt;
 use std::num::ParseIntError;

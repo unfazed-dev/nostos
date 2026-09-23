@@ -10,7 +10,7 @@ in ADRs and `docs/plans/`.
 
 **NostosDatabase**:
 The SQL-core sync handle — `connect`/`subscribe`/`watch(sql)`/`getAll`/`execute`/`write`.
-The ratified low-level surface (2026-07-13 PowerSync-style redesign). Raw SQL lives here.
+The ratified low-level surface (2026-07-13 redesign). Raw SQL lives here.
 _Avoid_: Client, Engine, Connection (those mean other things in this codebase).
 
 **NostosStore** (facade):
@@ -33,7 +33,7 @@ _Avoid_: query-observable (rxdart/ng-elf vocabulary). The facade's primary type 
 **Collapsed write**:
 nostos's write model — the client writes locally + enqueues; nostos-server's `PgWriteBack`
 applies the write upstream (server-gated by `NOSTOS_WRITE_TABLES`). The dev does NOT write an
-`uploadData` callback. This is the DX moat vs PowerSync's split upload model.
+`uploadData` callback. This is the DX moat vs a split upload model.
 _Avoid_: upload, sync-write, push-write.
 
 **SyncStatus**:
@@ -64,7 +64,7 @@ _Avoid_: Confidence, Freshness-score.
 ## Example dialogue
 
 > **Dev:** "If I `todos.watch()` in three widgets, do I get three upstream subscriptions?"
-> **Nostos:** "No — `watch()` returns a hot `ValueListenable` ref-counted per query; one re-execution fans out to all three. That's why we don't use PowerSync's cold-stream-per-call — at our throughput that would storm."
+> **Nostos:** "No — `watch()` returns a hot `ValueListenable` ref-counted per query; one re-execution fans out to all three. That's why we don't use a cold-stream-per-call — at our throughput that would storm."
 >
 > **Dev:** "Can I show a 'data is fresh' badge?"
 > **Nostos:** "Not yet — `DataTrust` is gated behind the backfill and orphan-reconcile P0s. Until those land, `SyncStatus` is honest about `syncing`/`reconciling` but doesn't grade trust, because a permanent `stale` would be worse than no grade."

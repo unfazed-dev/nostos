@@ -1,7 +1,7 @@
 // @nostos-sync/react-native — TS facade over the NativeNostos TurboModule.
 //
-// Mirrors `@nostos-sync/web`'s PowerSync-shaped API (connect / subscribe / write /
-// query / checkpoint), Promise-returning. TWO row-access paths:
+// Mirrors `@nostos-sync/web`'s connect/subscribe/write API (connect / subscribe /
+// write / query / checkpoint), Promise-returning. TWO row-access paths:
 //   • POLL — `subscribe(table)` starts the live replication loop on the native
 //     side (the UniFFI `run_with_reconnect` loop inside nostos-swift/kotlin);
 //     the app polls `pollRows(table)` / `query(sql)` to drain applied rows.
@@ -144,7 +144,7 @@ interface WatchHandle {
 }
 
 /**
- * PowerSync-style sync client for React Native. Wraps the NativeNostos
+ * Sync client for React Native. Wraps the NativeNostos
  * TurboModule (which, in Wave B, wraps nostos-swift / nostos-kotlin's UniFFI
  * `NostosClient`, which wraps `nostos_client::SyncClient<SqliteStorage>`).
  *

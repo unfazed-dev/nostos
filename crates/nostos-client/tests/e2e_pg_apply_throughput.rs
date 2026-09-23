@@ -9,13 +9,9 @@
 //!
 //! ## Honest framing (docs/BENCHMARK-METHODOLOGY.md discipline)
 //!
-//! This is a THIRD kind of number, distinct from both existing ones:
+//! This is a distinct kind of number from the existing one:
 //! - vs the 833k ops/sec aggregate fan-out ceiling: different path (that one is
 //!   FakeReplicator→fan-out→WS with NO decode and NO client apply).
-//! - vs PowerSync's published per-client sync rate (2–20k ops/sec): closest
-//!   same-stage comparator (Service→client apply), but their figure is their
-//!   published environment, not this harness — cite side-by-side, never as a
-//!   cross-environment multiple.
 //!
 //! Loopback networking; single server process; single client; op-log OFF
 //! (opt-in writer absent, mirroring the headline bench's configuration).

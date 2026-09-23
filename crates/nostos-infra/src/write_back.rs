@@ -997,7 +997,7 @@ mod pg {
             }
         }
 
-        /// Patch (column-level UPDATE) — P3 PowerSync parity. Mirrors the
+        /// Patch (column-level UPDATE) — the P3 patch op-type. Mirrors the
         /// upsert builder's trust-boundary discipline (allowlist → ident regex
         /// → parameterized values) but emits `UPDATE … SET … WHERE pk=$pk`
         /// instead of `INSERT … ON CONFLICT`. A patch NEVER inserts.

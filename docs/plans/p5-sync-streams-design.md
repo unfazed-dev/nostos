@@ -4,11 +4,10 @@
   (`2b282b3`), 2 rules (`0a500b8`), 3 wire (`9328047`), 4 snapshot port+adapter
   (`fd30612`), 5 transport (`d717beb`), 6 server (`628feb7`), 7 client (`5d3f898`),
   8 Flutter (`7dbb687`), 9 e2e (`5b43ff7` — compiled, self-skips; live-PG run
-  blocked by Docker Desktop VM corruption on the dev machine). Closes the biggest remaining feature gap in
-  the parity plan (`docs/plans/powersync-sdk-parity-plan.md:251`; table row :194; P5
-  deferral :77-80).
-- **Goal:** PowerSync Sync-Streams parity — NAMED, per-client-PARAMETERIZED streams with
-  lazy `syncStream(name, params).subscribe()` — without weakening ADR-0011/0018 tenancy.
+  blocked by Docker Desktop VM corruption on the dev machine). Closes the biggest remaining feature gap
+  in the now-superseded SDK-parity plan.
+- **Goal:** named, per-client-parameterized sync streams with lazy
+  `syncStream(name, params).subscribe()` — without weakening ADR-0011/0018 tenancy.
 
 ## Decisions (summary)
 
@@ -92,7 +91,7 @@ New `ClientMessage` variants (:44), serde-tagged, all additive:
 - **Mid-session routing:** the reader already routes mid-socket `Subscribe`
   (`transport.rs:653-743`); the two new frames join that match. Unsubscribe removes the
   session from the store and (v1) leaves local rows in place — eviction is separate;
-  PowerSync behaves the same.
+  comparable engines behave the same.
 
 ## 3. Snapshot semantics for a lazily-added stream
 **Targeted per-stream snapshot, never a full re-snapshot.** Extend `SnapshotSource`
@@ -130,7 +129,7 @@ takes `Vec<TableSubFfi>` + a `StreamSink`
 (`sdk/nostos_flutter/lib/src/nostos.dart:120-140`). Add frb methods
 `subscribe_stream(name, params_json) -> String` (stream id) + `unsubscribe_stream(id)`
 (params as a JSON STRING — the same no-codegen trick P3 used for `op`, parity plan
-:106). Dart surface, PowerSync-shaped:
+:106). Dart surface, sync-stream-shaped:
 
 ```dart
 final sub = db.syncStream('lists', {'owner': uid}).subscribe();

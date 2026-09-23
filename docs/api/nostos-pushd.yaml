@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: nostos-pushd
-  version: 0.4.0
+  version: 0.5.0
   description: >
     Standalone push daemon (ADR-0038): token-addressed APNs / FCM HTTP v1 /
     Web Push sends with debounce coalescing. NOT a marketing platform —
@@ -22,6 +22,10 @@ info:
     ZERO items sent. Phase 2 admits per item; 202 returns per-item results
     in request order; 503 only when EVERY item failed admission (safe to
     retry the whole batch).
+
+    v0.5.0 (2026-09-23, ADR-0037 section 2a): visible payloads carry an
+    optional string->string `data` map — the routing keys an app reads when
+    the notification is tapped. Additive: a body without it is unchanged.
 servers:
   - url: http://localhost:8090
 tags: [tokens, send, receipts, meta]
@@ -283,6 +287,20 @@ components:
               type: string
               maxLength: 128
               description: Client-registered notification category (action buttons)
+            data:
+              type: object
+              additionalProperties: { type: string }
+              description: >
+                Routing keys the app reads on tap (v0.5.0, ADR-0037 section
+                2a) — APNs delivers them as siblings of `aps` (i.e. in
+                userInfo), FCM in message.data, Web Push in a `data` object
+                inside the encrypted payload. String values only: FCM's data
+                map is map<string,string> on the wire. 400 on a key reserved
+                by a rail (`aps`, `from`, `message_type`, `notification`,
+                `google.*`, `gcm.*`) or by nostos (`title`, `body`,
+                `category`, `table`, `lsn`), or on a map over 1024
+                serialized bytes. Identifiers only — the payload is
+                plaintext at the vendor.
           required: [title, body]
       required: [visible]
     SendRequest:

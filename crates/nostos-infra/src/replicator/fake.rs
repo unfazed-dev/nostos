@@ -64,7 +64,7 @@ pub struct FakeReplicatorConfig {
 }
 
 impl FakeReplicatorConfig {
-    /// Small-row workload (~100 B) — the PowerSync "small row" regime.
+    /// Small-row workload (~100 B) — the "small row" regime.
     #[must_use]
     pub fn small(total: u64) -> Self {
         Self {

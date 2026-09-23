@@ -5,7 +5,7 @@
 //! when it opens a sync session. The server evaluates each incoming row change
 //! against the set of live predicates and delivers only the matches.
 //!
-//! **This replaces PowerSync's static buckets.** Buckets are cardinality-bound
+//! **This replaces static buckets.** Buckets are cardinality-bound
 //! (one per unique filter value, hard-capped at 1,000/user). Predicates are
 //! evaluated live and have no fixed ceiling — a user can scroll 100,000 items
 //! and sync exactly what they look at.

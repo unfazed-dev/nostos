@@ -107,8 +107,8 @@ the engine is innocent.
 - Empty `NOSTOS_CORS_ORIGINS` → `CorsLayer::permissive()` + `allow_credentials(true)` (browser-rejected combo; explicit-origins is the documented prod path). `main.rs:461-462`
 - Asymmetric JWT claim validation: JWKS checks `exp`; HS256 doesn't; `validate_aud=false` on both. `jwks.rs:90`, `auth.rs:74`
 - `apply_local` `WriteOp::Patch` is a no-op (ponytail). `sqlite.rs:660`
-- **Stale positioning docs**: CLAUDE.md + README headline say 142k/35.6×; actual is **833k @ 1k clients/0% drops** (208× PowerSync). Project memory under-sells the moat. `CLAUDE.md`, `README.md:13,23,209` vs `benches/results/RESULTS.md`
-  > **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+- **Stale positioning docs**: CLAUDE.md + README headline say 142k/35.6×; actual is **833k @ 1k clients/0% drops** (208× a competitor's published ceiling). Project memory under-sells the moat. `CLAUDE.md`, `README.md:13,23,209` vs `benches/results/RESULTS.md`
+  > **Correction 2026-08-06:** the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 - frb 2.13.0-beta.5 dependency (beta tag adds risk; pin + migration path needed pre-launch). `sdk/nostos_flutter`
 
 ---
@@ -165,31 +165,31 @@ layer — the **dynamic predicate engine** (ADR-0003/0011/0012) is the headline
 differentiator, not a gap.
 
 **What nostos does BETTER:**
-1. **Rust throughput** — 142k ops/sec @ 1k clients e2e vs PowerSync's published
+1. **Rust throughput** — 142k ops/sec @ 1k clients e2e vs a competitor's published
    ~2–4k server replication ceiling ≈ **35× headroom** (833k current = ~208×).
    No other competitor publishes a comparable end-to-end fan-out number
    (Electric only benches its storage engine; everyone else is TS/Elixir/Go).
-   > **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
-2. **Apache-2.0 today, no FSL/AGPL trap** — PowerSync server is FSL (2-yr wait,
+   > **Correction 2026-08-06:** the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+2. **Apache-2.0 today, no FSL/AGPL trap** — a leading competitor's server is FSL (2-yr wait,
    no-compete); Triplit is AGPL-3.0 (network-copyleft); Couchbase SG CE is
    source-available. nostos is the **only** Postgres-native 2-way offline sync
    engine that is Apache-2.0 on day one.
 3. **Collapsed-apply write-back DX** — direct write-back (ADR-0013), no
-   `uploadData()` to build/host (PowerSync's #1 DX complaint), no split
+   `uploadData()` to build/host (a common DX complaint about comparable sync SDKs), no split
    endpoint contract. Electric can't write at all.
 
 **What nostos LACKS vs 2026 table-stakes (none are moats — all are buyer demands):**
 1. **Operational instrumentation** — zero `opentelemetry`/`tracing`/`prometheus`
    symbols in server source; zero runbook/playbook/observability markdown.
-   PowerSync/Electric/Couchbase all ship OTel + metrics + alerting. Infra teams
+   Electric/Couchbase all ship OTel + metrics + alerting. Infra teams
    will not sign without this.
-2. **Managed cloud** — every commercial competitor has one (PowerSync Cloud,
-   Electric Cloud, y-sweet.cloud, Triplit Cloud, Couchbase Capella). ADR-0006
+2. **Managed cloud** — every commercial competitor has one (Electric Cloud,
+   y-sweet.cloud, Triplit Cloud, Couchbase Capella). ADR-0006
    plans open-core cloud; nothing ships. Self-host only today.
 3. **Compliance certs** (SOC 2 / HIPAA) — zero customers, zero certs. Hard
    blocker for healthcare/finance buyers.
 4. **Per-row RLS fidelity** — nostos auth is one `auth_scope` tenant column
-   (ADR-0018), coarser than PowerSync passthrough to Supabase RLS or
+   (ADR-0018), coarser than a comparable sync SDK's passthrough to Supabase RLS or
    Couchbase's sync-function. STRATEGY.md §2 concedes.
 5. **Client SDK breadth** — Flutter + WASM only. RN (ADR-0020) and broader
    surface still being built.
@@ -207,7 +207,7 @@ prominently):**
   adopters if unclear.
 
 **Industry verdict:** credible for a 2026 self-host launch; **not a drop-in
-PowerSync replacement**. Position honestly as "Apache-2.0 self-host for early
+replacement for the leading hosted sync product**. Position honestly as "Apache-2.0 self-host for early
 adopters who want Rust throughput and don't want to build `uploadData()`," with
 cloud + SOC 2 on a published roadmap.
 
@@ -300,6 +300,5 @@ multi-node bench.
   `docs/SECURITY.md`, `docs/BENCHMARK-METHODOLOGY.md`,
   `docs/plans/flutter-supabase-plug-and-play-launch.md`,
   `docs/plans/launch-readiness-gap-list.md`, `benches/results/RESULTS.md`.
-- Industry: PowerSync docs (sync streams, FSL, performance), Electric
-  (shapes, writes, pivot), Replicache, Triplit, CR-SQLite, Y-Sweet, LiveStore,
+- Industry: Electric docs (shapes, writes, pivot), Replicache, Triplit, CR-SQLite, Y-Sweet, LiveStore,
   Couchbase Sync Gateway, PouchDB — full URLs in the slice-7 transcript.

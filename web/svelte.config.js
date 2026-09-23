@@ -10,8 +10,8 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
  * runtime: the admin hits the nostos-cloud JSON API (/v1/*) client-side; the
  * landing is pure static + a Three.js hero.
  *
- * mdsvex lets us write docs/blog as .md routes (the "migrate from PowerSync"
- * guides land here later).
+ * mdsvex lets us write docs/blog as .md routes (migration guides land
+ * here later).
  *
  * @type {import('@sveltejs/kit').Config}
  */

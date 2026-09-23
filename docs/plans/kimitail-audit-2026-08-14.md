@@ -46,6 +46,6 @@ Over-engineering and complexity only — correctness/security/perf out of scope.
 
 ## Checked and deliberately not flagged
 
-Hexagonal port traits (all have real impls + callers); `fnv.rs` (cheaper than a dep); CRDT module (fully wired per ADRs); snapshot-reconcile/outbox contracts (load-bearing); `NostosEngine`/`NostosWorkerPort` Dart traits (2 real impls each, forced by frb); legacy Dart aliases (doc/example readers); archive/ (operator-ruled reference); render-playbook.py unused blocks (byte-identical-with-upstream policy); all `ponytail:`/`kimitail:` marked debt; web demo/landing/admin pages; nostos_adapter vs powersync_adapter (two impls is the product).
+Hexagonal port traits (all have real impls + callers); `fnv.rs` (cheaper than a dep); CRDT module (fully wired per ADRs); snapshot-reconcile/outbox contracts (load-bearing); `NostosEngine`/`NostosWorkerPort` Dart traits (2 real impls each, forced by frb); legacy Dart aliases (doc/example readers); archive/ (operator-ruled reference); render-playbook.py unused blocks (byte-identical-with-upstream policy); all `ponytail:`/`kimitail:` marked debt; web demo/landing/admin pages; nostos_adapter vs a comparison adapter (two impls is the product).
 
 net: -1,209 lines, -13 deps possible (finding 1 retracted after investigation — see above).

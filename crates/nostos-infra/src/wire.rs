@@ -3,8 +3,7 @@
 //! The Week-1 wire format is JSON (human-debuggable; the benchmark doesn't
 //! depend on encoding speed yet). Phase 2 will add a compact binary mode
 //! (length-prefixed, protobuf-ish) selected by a header byte — but JSON first
-//! keeps the demo legible and the comparison to PowerSync fair (their protocol
-//! is also JSON-shaped on the wire).
+//! keeps the demo legible.
 //!
 //! Frames are also what the benchmark client counts — one received frame ==
 //! one delivered event.
@@ -86,7 +85,7 @@ pub enum ClientMessage {
     Write {
         /// Target table — MUST be in the server's `NOSTOS_WRITE_TABLES` allowlist.
         table: String,
-        /// `"upsert"`, `"delete"`, or `"patch"` (P3 PowerSync PATCH parity).
+        /// `"upsert"`, `"delete"`, or `"patch"` (P3 column-level PATCH).
         op: String,
         /// Primary-key value (v1 convention: pk column is `id`).
         pk: String,
@@ -121,8 +120,7 @@ pub enum ClientMessage {
         params: serde_json::Map<String, serde_json::Value>,
     },
     /// Drop a previously-subscribed sync stream by its client-chosen `id`
-    /// (P5 §1). v1 leaves local rows in place — eviction is separate;
-    /// PowerSync behaves the same.
+    /// (P5 §1). v1 leaves local rows in place — eviction is separate.
     #[serde(rename = "unsubscribe_stream")]
     UnsubscribeStream { id: String },
 }
@@ -138,8 +136,7 @@ pub struct FilterClause {
 /// malformed frame (the transport closes the socket in that case).
 ///
 /// This is the inbound counterpart to [`encode_event`] — both JSON, so the wire
-/// stays human-debuggable (the benchmark protocol is JSON-shaped; PowerSync's
-/// is too).
+/// stays human-debuggable (the benchmark protocol is JSON-shaped).
 #[must_use]
 pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
     serde_json::from_slice::<ClientMessage>(data).ok()

@@ -13,8 +13,8 @@
 // OPEN as of RN 0.84; the RN 0.84 release notes have zero WASM mentions).
 // Nostos's `@nostos-sync/web` WASM core (`nostos-ffi-wasm`) is therefore a dead end
 // inside RN. This TurboModule bridges to the already-shipped `nostos-swift` /
-// `nostos-kotlin` UniFFI bindings instead — the SAME shape PowerSync's RN SDK
-// validated (pure-TS facade over a native JSI backend).
+// `nostos-kotlin` UniFFI bindings instead — a validated shape: a pure-TS
+// facade over a native JSI backend.
 //
 // METHOD-BY-METHOD MAPPING (spec → UniFFI in sdk/nostos_swift + sdk/nostos_kotlin)
 //   connect(url, token, dbPath) → NostosClient::new(url, token, db_path) + NostosClient::connect() -> Result<(), NostosError>

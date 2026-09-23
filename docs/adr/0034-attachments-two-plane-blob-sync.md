@@ -19,8 +19,8 @@ The contract's Tier-1 extension (v1.2, ratified 2026-08-08) adds T6 — attachme
 The driving constraint is a moat constraint, not a convenience: **blobs must never transit the
 Nostos server.** Proxying blob bytes would pollute the fan-out throughput that is Nostos's headline
 advantage (833k ops/sec aggregate, 0% drops — `benches/results/RESULTS.md`) and make the server
-stateful (it is deliberately stateless beyond the replication slot). PowerSync takes the same
-posture with its `AbstractRemoteStorageAdapter`.
+stateful (it is deliberately stateless beyond the replication slot). This is a common posture
+among sync engines that ship a remote-storage-adapter abstraction for blob upload/download.
 
 The open design questions this ADR resolves:
 1. Where does the "queue" live, given `nostos-core` is WASM-clean (no async, no I/O) and the
@@ -86,8 +86,8 @@ v1 ships **weaker ordering**, not strong cross-row ordering:
 write until the attachment is `synced`) would require an outbox dependency mechanism — a real
 design change that trades the simple, crash-safe flat queue for a benefit that the common case
 does not need. The metadata `state` is already a sufficient coordination primitive for an app
-that wants the gate (it reads `state` and decides). This matches PowerSync's
-`AbstractRemoteStorageAdapter`, where the upload is async and the app coordinates.
+that wants the gate (it reads `state` and decides). This matches the common
+remote-storage-adapter pattern, where the upload is async and the app coordinates.
 
 **Upgrade path (not v1):** if a measurement shows user-visible races from concurrent
 upload/download of related attachments (the advisor's MEDIUM risk), a per-row "dependencies"
@@ -145,8 +145,8 @@ Hooks are best-effort (a failing wipe is swallowed) so one cannot block the core
 - **Positive — metadata plane is free.** No new wire frame, no new apply path; the existing
   replication + outbox + read-views carry the metadata. Offline-first works automatically
   (state writes queue in the durable outbox).
-- **Positive — PowerSync-parity feature.** `AttachmentStorageAdapter` mirrors
-  `AbstractRemoteStorageAdapter`; `SupabaseStorageAdapter` is the zero-config default for the
+- **Positive — parity feature.** `AttachmentStorageAdapter` mirrors the common
+  remote-storage-adapter shape; `SupabaseStorageAdapter` is the zero-config default for the
   taught Supabase path.
 - **Negative — weaker cross-row ordering.** Documented above with the upgrade path. Apps that
   need the gate read `state` reactively.

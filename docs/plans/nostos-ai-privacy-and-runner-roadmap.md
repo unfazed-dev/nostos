@@ -5,21 +5,20 @@ revision — no implementation without explicit operator go (standing scope rule
 plans only, nostos tree only).
 
 This roadmap sits ABOVE the two existing plans
-(`nostos-flutter-powersync-connection-redesign.md`, `nostos-cloud-trust-and-coverage.md`).
+(the ratified client-SDK redesign plan, `nostos-cloud-trust-and-coverage.md`).
 On ratification it should feed a `docs/STRATEGY.md` update.
 
 ## Why (verified, not asserted)
 
-Operator directive: match PowerSync's feature surface so the Rust/throughput moat
-comparison is clean, then differentiate hard on encryption/compliance PowerSync
-lacks, aimed at AI apps. Three grounded findings reshaped the strategy:
+Operator directive: match comparable sync engines' feature surface so the Rust/throughput moat
+comparison is clean, then differentiate hard on encryption/compliance those engines
+lack, aimed at AI apps. Three grounded findings reshaped the strategy:
 
-1. **PowerSync already has basic E2EE + HIPAA** ([data-encryption](https://docs.powersync.com/client-sdks/advanced/data-encryption),
-   [security](https://docs.powersync.com/resources/security)). So basic encryption
+1. **Comparable sync engines already have basic E2EE + HIPAA support.** So basic encryption
    is **table stakes, not a differentiator** — claiming otherwise is a credibility hit.
 2. **The AI ↔ E2EE conflict is the real, unowned gap.** Putting an AI model in the
    path breaks E2EE (the model host sees plaintext) ([analysis](https://blog.cryptographyengineering.com/2025/01/17/lets-talk-about-ai-and-end-to-end-encryption/)).
-   PowerSync has no AI-privacy story. That is the opening.
+   Comparable sync engines have no AI-privacy story. That is the opening.
 3. **The "Rust inference runner that beats Ollama on concurrency" already exists**
    under MIT: [Mistral.rs](https://github.com/ericlbuehler/mistral.rs) — pure Rust,
    continuous batching + PagedAttention, GGUF/GGML/SafeTensors, multimodal,
@@ -69,7 +68,7 @@ lacks, aimed at AI apps. Three grounded findings reshaped the strategy:
   exfil via embeddings, no metadata leak.
 - **Enabling primitive — granular ("pixel") encryption**: per-field encryption with
   selective decrypt, so a model/server can be authorized for specific fields, never
-  the whole row. Goes beyond PowerSync's all-or-nothing client-side E2EE.
+  the whole row. Goes beyond comparable engines' all-or-nothing client-side E2EE.
 
 ## nostos-AI — decoupled AI layer (NEW)
 
@@ -97,13 +96,13 @@ concurrent-agent workload + hard nostos sync/memory/boundary integration at the
 engine level. Trade-off accepted: ongoing upstream-merge burden in exchange for
 owning the inference path.
 
-## Parity track (match PowerSync — do NOT claim to beat)
+## Parity track (match the competitive bar — do NOT claim to beat)
 
-Closes the "PowerSync offers X nostos doesn't" gaps so the moat comparison is clean:
+Closes the "competitors offer X nostos doesn't" gaps so the moat comparison is clean:
 
 - **HIPAA BAA** + **GDPR** (data residency + right-to-erasure) + **SOC 2 Type II**.
-- **Dashboard** parity (PowerSync's is cloud-only / paid-self-host; nostos ships one
-  free for self-host — itself a wedge).
+- **Dashboard** parity (the comparable-engine dashboard is cloud-only / paid-self-host;
+  nostos ships one free for self-host — itself a wedge).
 - **Sync-Streams expressiveness** (parameterized queries, lazy `subscribe(name, params)`)
   — the deferred P5 from the parity plan.
 
@@ -115,7 +114,7 @@ Closes the "PowerSync offers X nostos doesn't" gaps so the moat comparison is cl
 - **P2 — nostos-AI orchestrator.** Universal routing + RAG-over-synced-data +
   persistent memory + MCP client + WYSIWYS, over cloud APIs + external runners.
 - **P3 — nostos-AI runner.** Fork + extend Mistral.rs; integrate as the local backend.
-- Existing plans proceed in parallel: Flutter PowerSync-style redesign (WS1–WS6),
+- Existing plans proceed in parallel: the Flutter client-SDK redesign (WS1–WS6),
   cloud-trust + coverage (license verify + cloud e2e).
 
 ## Honest risk register (verified vs. assumed)
@@ -133,7 +132,7 @@ Closes the "PowerSync offers X nostos doesn't" gaps so the moat comparison is cl
 - **Fork upstream-merge burden** (Mistral.rs moves fast). **Mitigation:** keep the
   fork's divergence narrow — nostos-specific layers as an outer crate, minimal engine
   patches upstreamed.
-- **Pre-1.0 maturity** vs PowerSync's production miles. Not solvable by roadmap;
+- **Pre-1.0 maturity** vs comparable engines' production miles. Not solvable by roadmap;
   named plainly.
 
 ## Preserve (moat — do NOT regress)

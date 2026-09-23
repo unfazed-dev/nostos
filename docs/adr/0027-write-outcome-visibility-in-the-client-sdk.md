@@ -88,7 +88,7 @@ promise working, and the SDK docs say to render it as "N unsynced changes."
 state). `NostosDatabase` folds two independent streams (connection + outbox) into
 the one `ValueListenable<SyncStatus>`.
 
-We stopped well short of PowerSync's twelve-member `SyncStatus`. Superhuman's
+We stopped well short of a twelve-member `SyncStatus` some sync engines ship. Superhuman's
 offline design collapses *all* network failure into a single "offline" state on
 the grounds of "fewer states, fewer code paths," and that restraint is worth
 respecting: each extra state is a branch every consuming app must handle.

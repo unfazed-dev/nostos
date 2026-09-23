@@ -4,7 +4,7 @@
 
 ## Goal
 
-Give Nostos a first-class answer to PowerSync's sync-rules / stream editor: a
+Give Nostos a first-class answer to the sync-rules / stream-editor pattern used by comparable sync products: a
 `nostos_rules.toml` file with **three mutually exclusive sync modes** (`all`,
 `toggles`, `hand`), a schema-introspecting `nostos rules init`, a toggle editor
 that owns the file in `toggles` mode, a restricted claims grammar that compiles
@@ -130,8 +130,8 @@ Apply to **every** task below. Violations fail review.
 - `OR` and `NOT` in the v1 rules grammar (the underlying `PredicateExpr` and
   `parse_predicate_expr` support them; the *rules* grammar accepts `AND` only).
 - `IN`, `LIKE`, `BETWEEN`, `IS NULL`, aggregates, subqueries.
-- Bucket/partition modelling, priority buckets, or PowerSync-style
-  `bucket_definitions`.
+- Bucket/partition modelling, priority buckets, or bucket-based
+  `bucket_definitions`-style configuration.
 - Multi-file rule includes, per-environment rule overlays, rule inheritance.
 - A hosted/multi-tenant rules editor, rule versioning history, or rollback UI.
 - Coupling rules to writes: `NOSTOS_WRITE_TABLES` remains an independent
@@ -162,7 +162,7 @@ Apply to **every** task below. Violations fail review.
 
 1. **Context** — nostos has server-enforced predicates (ADR-0011) and a dynamic
    predicate compiler (ADR-0012) but no operator-facing way to declare *what
-   syncs*. PowerSync has sync rules; nostos has env vars.
+   syncs*. Comparable sync products have declarative sync rules; nostos has env vars.
 2. **Decision — three mutually exclusive modes**, `sync_mode` in
    `nostos_rules.toml`:
    - `all` — everything replicated is synced. No rules evaluated; equivalent to
@@ -1843,7 +1843,7 @@ session only — an operator who "helpfully" persists it has created an XSS
 target.
 
 **Constraint:** do not touch any performance claim, throughput number, or
-PowerSync multiple in any of these files (Global Constraint 7).
+competitor-comparison multiple in any of these files (Global Constraint 7).
 
 **Steps**
 1. Write the docs.

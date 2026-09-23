@@ -18,7 +18,7 @@
 //!
 //! Complexity is **O(changed rows × matching sessions)**, not O(all sessions) —
 //! the table index prunes the candidate set before filter evaluation. This is
-//! what scales past PowerSync's static-bucket model (ADR-0003).
+//! what scales past a static-bucket model (ADR-0003).
 
 use std::sync::Arc;
 
@@ -265,8 +265,8 @@ impl FanOutService {
     }
 
     /// Fan a single event out to all matching sessions. This is the unit the
-    /// benchmark counts as "one op" — and the unit PowerSync's 2-4k ops/sec
-    /// ceiling refers to (one row change processed through the router).
+    /// benchmark counts as "one op" (one row change processed through the
+    /// router).
     ///
     /// `column_extractor` lifts column values out of the event's payload so the
     /// domain-layer [`Predicate`] can be evaluated. The extractor is supplied
@@ -1325,6 +1325,7 @@ mod tests {
                         title: "Changed".into(),
                         body: "{label} updated".into(),
                         category: None,
+                        data: std::collections::BTreeMap::new(),
                     },
                 )],
             ))

@@ -1,6 +1,6 @@
 # @nostos-sync/web
 
-PowerSync-style JS facade over the `nostos-ffi-wasm` apply engine.
+JS facade over the `nostos-ffi-wasm` apply engine.
 
 **Status: v0.1 alpha, not published to npm.** This package has **two distinct
 paths**, and they differ in what they can do — read both before judging scope:
@@ -68,7 +68,7 @@ const rows = sock.rowsFor("tasks");
 Requires a browser (or a Playwright/vitest browser env): `WebSocket` and
 `localStorage` must exist. This is the path `e2e/browser_live.spec.cjs` drives.
 
-## Node API — `NostosClient` (PowerSync-shaped, apply-engine only)
+## Node API — `NostosClient` (apply-engine only)
 
 From `index.js`. `connect()` here does **not** open a socket — see *Ceiling*.
 
@@ -243,7 +243,7 @@ offline-capable within a session only.
 - **Ask for persistent storage.** Origin storage is best-effort and evictable
   (MDN). Call `await navigator.storage.persist()` on the main thread before
   spawning the Worker; the storage push carries `persisted` so the UI can warn.
-- **Guard pending writes on close** (PowerSync recipe): when `deadLetters().pending > 0`
+- **Guard pending writes on close**: when `deadLetters().pending > 0`
   add a `beforeunload` listener that calls `preventDefault()`. Do it always when
   `storageMode === "memory"` — those writes die with the tab.
 - **Bundlers.** Construct the Worker so Vite/webpack can see it:
@@ -275,4 +275,4 @@ Also still open:
 
 ## What this proves
 
-Nostos's wasm apply engine loads and runs in Node 22 via `require()`, with a PowerSync-shaped JS surface on top — moving Nostos from 3/10 to 5/10 platform coverage.
+Nostos's wasm apply engine loads and runs in Node 22 via `require()`, with a plain JS surface on top — moving Nostos from 3/10 to 5/10 platform coverage.

@@ -71,7 +71,7 @@ thread. Until then the browser's durability story is the `localStorage` checkpoi
 replay-from-`resume_lsn`, and Safari Private Browsing disallows OPFS, so any durable backend will
 still need the in-memory fallback.
 
-ADR-0017 also found **no prior art for nostos's shape**: PowerSync, RxDB, Dexie, ElectricSQL and
+ADR-0017 also found **no prior art for nostos's shape**: RxDB, Dexie, ElectricSQL and
 Triplit are all TypeScript already running in a Worker. None is a Rust→wasm client with a `Storage`
 trait on the main thread.
 
@@ -114,7 +114,7 @@ this backwards is the most common way to sit waiting for rows that were never re
 
 Writes are **collapsed**: you do not implement an upload endpoint. The server's `PgWriteBack`
 applies queued mutations to Postgres directly. This is the deliberate difference from
-PowerSync's `uploadData` (ADR-0013), and it is why no SDK here has a connector class.
+a split `uploadData` model (ADR-0013), and it is why no SDK here has a connector class.
 
 **Write-back is gated server-side and empty by default.** Set `NOSTOS_WRITE_TABLES=tasks,…` or
 every write is refused. This trips up everyone once.

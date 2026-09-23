@@ -25,7 +25,7 @@ customer.
 | A2 | Fill `<repo>` placeholders in `docs/launch/show-hn-draft.md`, review both drafts, publish | Drafts are factually consistent with RESULTS.md (833k/208×, 10k drop rate honestly disclosed) |
 | A3 | Show HN timing decision | Per ROADMAP.md footer: operator call |
 
-> **Correction 2026-08-06:** row A2's "833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+> **Correction 2026-08-06:** row A2's "833k/208×" — the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 
 ## B. Pre-push fixes (Claude-doable, ~1 day total, all Small)
 
@@ -38,7 +38,7 @@ customer.
 | B5 | ADR-0012 status line stale — still says wire/subscribe integration outstanding; Task C1 closed it | ADR-0012:3 vs plan C1 |
 | B6 | STRATEGY.md Front-6 "three tiers" conflict-resolution claim needs shipped/deferred qualifier (only LWW shipped) | STRATEGY.md:122-125 vs ADR-0014 |
 
-> **Correction 2026-08-06:** row B1's "142k/35.6×"/"833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+> **Correction 2026-08-06:** row B1's "142k/35.6×"/"833k/208×" — the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 
 ## C. Hardening before first design partner / paying customer
 
@@ -58,7 +58,7 @@ customer.
 
 1. **Launch gate raised**: hold public launch until the Flutter+Supabase path is
    whole. Bar: Flutter dev → local-first offline Supabase todo app in **≤5 min**,
-   plug-and-play, zero Rust visible, DX beats PowerSync-for-Supabase.
+   plug-and-play, zero Rust visible, DX beats existing Supabase-integrated sync SDKs.
 2. **Who runs the server**: the `nostos` CLI (prebuilt binary; `nostos init`
    auto-wires Supabase publication/config, `nostos dev` runs locally). CLI is
    free, Apache-2.0, no payment gate — license stays the moat.
@@ -89,11 +89,11 @@ this on first contact (W5 did). Typed payload mapping is deferred per
 ADR-0016/0012; before launch either implement basic type mapping or document
 the string-typing contract loudly in QUICKSTART + SDK README.
 
-*F5 research verdict (2026-07-12, industry survey: pgoutput/Debezium/PowerSync/
+*F5 research verdict (2026-07-12, industry survey: pgoutput/Debezium/
 ElectricSQL/Supabase-Realtime/wal2json/RFC 8259):* implement **server-side
 OID-keyed mapping inside PgReplicator** — pgoutput Relation messages already
 carry column type OIDs (`RelationMeta` currently discards them; pg.rs:89,842),
-so no client schema artifact is needed (preserves the anti-PowerSync
+so no client schema artifact is needed (preserves the no-client-schema-artifact
 differentiator; matches Supabase Realtime + current ElectricSQL direction).
 Mapping: bool→bool; int2/4→number; float→number with NaN/±Inf→string guard
 (RFC 8259 forbids them); numeric/decimal→string (arbitrary precision);
@@ -135,7 +135,7 @@ QUICKSTART documents the WARP fix.
 | F1 | **Write-back has no tenant enforcement** — allowlist-only gate; `Principal` never reaches the write path; authenticated user can write other tenants' rows (RLS is bypassed by the privileged PG connection) | transport.rs:392-405, write_back.rs (no principal refs) |
 | F2 | Prebuilt native binaries for the Flutter package (no Rust toolchain on dev machines) — cross-compile + release pipeline | new |
 | F3 | Verify current Supabase docs: logical replication needs the direct connection (pooler won't carry it); free-tier/IPv4 caveats affect the "5 min on free tier" promise | docs-first check at plan time |
-| F4 | Client-side query/watch DX for Flutter (PowerSync's watch-SQL is the feature to match; `rows_for` is InMemory-only today) | in_memory.rs:59 |
+| F4 | Client-side query/watch DX for Flutter (a comparable SDK's watch-SQL is the feature to match; `rows_for` is InMemory-only today) | in_memory.rs:59 |
 
 ## D. Known-deferred, fine to keep deferring (already honestly disclosed)
 

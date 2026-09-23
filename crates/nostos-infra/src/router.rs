@@ -8,8 +8,7 @@
 //! `deliver()` call returns `DeliveryDecision::Dropped` — counted, not silent.
 //!
 //! Why drop-and-observe instead of block? A single stalled WebSocket must
-//! **never** stall the replication fan-out (head-of-line blocking). PowerSync's
-//! full-reprocessing model (their proposal #349) doesn't have this guarantee.
+//! **never** stall the replication fan-out (head-of-line blocking).
 //! See `BENCHMARK-METHODOLOGY.md` §5 for the contract.
 //!
 //! ## Overflow conflation (ADR-0045)

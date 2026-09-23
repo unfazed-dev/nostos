@@ -15,7 +15,7 @@ Rules:
 - ALWAYS report drop rates next to throughput. 45k ops/sec @ 17% drops is not
   45k ops/sec.
 - NEVER let an eval-only number (predicate evals/sec) be compared against an
-  end-to-end number (PowerSync's ops/sec). Same-denominator comparisons only.
+  end-to-end number (a full-path ops/sec figure). Same-denominator comparisons only.
 - Perf work follows the Tier discipline: baseline first, change, re-measure,
   and REVERT if the change regresses (Tier-5 index revert is the precedent).
 - Run benches on an otherwise-idle machine; report variance across ≥3 runs if

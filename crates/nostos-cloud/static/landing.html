@@ -81,7 +81,7 @@
       <a class="btn btn-ghost" href="https://github.com/unfazed-dev/nostos" target="_blank" rel="noopener">Star on GitHub →</a>
     </div>
     <div class="badges">
-      <span>🦀 Rust server</span><span>📄 Apache-2.0</span><span>🐘 Postgres-native</span><span>⚡ 35× PowerSync throughput</span>
+      <span>🦀 Rust server</span><span>📄 Apache-2.0</span><span>🐘 Postgres-native</span>
     </div>
   </div>
 </div>
@@ -89,11 +89,11 @@
 <div class="wrap" id="features">
   <section>
     <h2>Why Nostos</h2>
-    <p class="lead" style="color:var(--muted)">PowerSync is Node-bottlenecked, FSL-licensed, and bucket-capped. ElectricSQL gave up on offline writes. Zero is web-only. Nostos is the open, Rust-fast one that does it all.</p>
+    <p class="lead" style="color:var(--muted)">ElectricSQL gave up on offline writes. Zero is web-only. Nostos is the open, Rust-fast one that does it all.</p>
     <div class="grid">
       <div class="card"><div class="ico">🔀</div><h3>Dynamic Reactive Sync</h3><p>Subscribe with a live predicate; scroll forever. No 1,000-bucket ceiling — the server evaluates changes against authenticated predicates, live.</p></div>
       <div class="card"><div class="ico">⬆️</div><h3>Direct Write-Back</h3><p>No more <code>uploadData()</code> endpoints. Point Nostos at your Postgres; it applies queued mutations with transactional conflict detection.</p></div>
-      <div class="card"><div class="ico">⚡</div><h3>Rust-fast server</h3><p>A pure-Rust (tokio + axum) server fans replication to thousands of WebSocket clients at 5–10× PowerSync's throughput ceiling.</p></div>
+      <div class="card"><div class="ico">⚡</div><h3>Rust-fast server</h3><p>A pure-Rust (tokio + axum) server fans replication to thousands of WebSocket clients.</p></div>
       <div class="card"><div class="ico">🔓</div><h3>Apache-2.0, end to end</h3><p>Server included. No FSL trap, no 2-year wait, no no-compete clause. Self-host free and unlimited, forever.</p></div>
       <div class="card"><div class="ico">📱</div><h3>Every platform, one core</h3><p>Flutter, React Native, Web (WASM/OPFS), Node — all first-class from one Rust core.</p></div>
       <div class="card"><div class="ico">🐘</div><h3>Supabase-native</h3><p>Works with Supabase out of the box — and Neon, CockroachDB, or any standard Postgres.</p></div>
@@ -106,14 +106,14 @@
     <h2>The landscape</h2>
     <p class="sub">Nostos owns the one cell no competitor occupies: open + Postgres + 2-way offline + every platform + Rust.</p>
     <table>
-      <thead><tr><th></th><th>Nostos</th><th>PowerSync</th><th>Electric</th><th>Zero</th><th>Supabase Realtime</th></tr></thead>
+      <thead><tr><th></th><th>Nostos</th><th>Electric</th><th>Zero</th><th>Supabase Realtime</th></tr></thead>
       <tbody>
-        <tr><td>Offline writes</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>2-way sync</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">read-only</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><td>Postgres-native</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><td>Rust-fast server</td><td class="yes">✓</td><td class="no">Node</td><td class="no">Elixir</td><td class="no">TS</td><td class="no">TS</td></tr>
-        <tr><td>Truly open (OSI)</td><td class="yes">✓ Apache</td><td class="no">FSL</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><td>No static buckets</td><td class="yes">✓</td><td class="no">1k cap</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>Offline writes</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>2-way sync</td><td class="yes">✓</td><td class="no">read-only</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>Postgres-native</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>Rust-fast server</td><td class="yes">✓</td><td class="no">Elixir</td><td class="no">TS</td><td class="no">TS</td></tr>
+        <tr><td>Truly open (OSI)</td><td class="yes">✓ Apache</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>No static buckets</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
       </tbody>
     </table>
   </div>
@@ -122,10 +122,10 @@
 <div class="wrap" id="benchmark">
   <section>
     <h2>Auditable throughput moat</h2>
-    <p class="lead" style="color:var(--muted)">A public benchmark, not a marketing number. Nostos's Rust server fans replication events to thousands of clients at 35× PowerSync's published ceiling.</p>
+    <p class="lead" style="color:var(--muted)">A public benchmark, not a marketing number. Nostos's Rust server fans replication events to thousands of clients.</p>
     <div class="benchmark">
       <div class="bench-num">142,000+ ops/sec</div>
-      <div class="bench-sub">Nostos @ 1,000 concurrent WebSocket clients, 0% drops · vs PowerSync's documented ~2–4k ops/sec Node ceiling · <a href="https://github.com/unfazed-dev/nostos/tree/main/benches" target="_blank" rel="noopener">methodology &amp; raw data →</a></div>
+      <div class="bench-sub">Nostos @ 1,000 concurrent WebSocket clients, 0% drops · <a href="https://github.com/unfazed-dev/nostos/tree/main/benches" target="_blank" rel="noopener">methodology &amp; raw data →</a></div>
     </div>
   </section>
 </div>
@@ -167,7 +167,7 @@
 <div class="waitlist" id="waitlist">
   <div class="wrap">
     <h2>Start building today</h2>
-    <p style="color:var(--muted)">Join the launch waitlist — first access to Cloud, plus the PowerSync migration guide.</p>
+    <p style="color:var(--muted)">Join the launch waitlist — first access to Cloud.</p>
     <form id="wl-form">
       <input type="email" id="wl-email" placeholder="you@company.com" required>
       <button class="btn btn-primary" type="submit">Join waitlist</button>

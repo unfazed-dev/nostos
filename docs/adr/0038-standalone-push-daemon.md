@@ -10,7 +10,7 @@
 ADR-0037 shipped sync-aware push inside nostos-server (plan 24/24, piloted on real APNs/FCM rails in atlet). The operator then asked whether push should become a dedicated crate so developers "just update config (p8, Google token)". Evidence gathered 2026-08-17:
 
 - The credential story already exists and is env-only (`crates/nostos-infra/src/push/mod.rs:22-28`): `NOSTOS_FCM_CREDENTIALS_JSON`, `NOSTOS_APNS_KEY_P8/KEY_ID/TEAM_ID/BUNDLE_ID`, `NOSTOS_WEBPUSH_VAPID_*`; each rail is `from_env()` → unset = off.
-- No sync competitor ships push (PowerSync, ElectricSQL, Supabase document it as DIY userland; re-verified 2026-08-17).
+- No sync competitor ships push (ElectricSQL, Supabase document it as DIY userland; re-verified 2026-08-17).
 - The public Rust push-crate landscape is stale (`fcm` 0.9.2 predates the legacy-API shutdown; `a2` quiet; `google-fcm1` auto-generated).
 - Self-hosted push demand is proven (ntfy ≈33k stars).
 

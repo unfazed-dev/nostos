@@ -18,8 +18,8 @@ import java.util.concurrent.ConcurrentHashMap
  * synchronous (they block on an owned tokio runtime inside `nostos_kotlin`),
  * so each `@ReactMethod` resolves its [Promise] inline on the calling thread
  * before returning. This matches the `ponytail:` block-on-owned-runtime
- * decision documented in `sdk/nostos_swift/src/lib.rs` and lifts the SAME shape
- * PowerSync's RN SDK validated (native sync client reachable from JS).
+ * decision documented in `sdk/nostos_swift/src/lib.rs` and lifts a validated
+ * shape: a native sync client reachable from JS.
  *
  * TurboModules are singletons per React instance (instantiated by RN with a
  * no-arg equivalent — the [ReactApplicationContext] constructor here). There

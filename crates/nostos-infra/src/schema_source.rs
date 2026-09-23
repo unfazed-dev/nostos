@@ -1,8 +1,8 @@
-//! Typed-schema endpoint adapter (WS1 — Flutter PowerSync-style redesign,
+//! Typed-schema endpoint adapter (WS1 — Flutter auto-schema redesign,
 //! Option-C): read the publication's tables + columns + types from the
 //! Postgres catalog and hand them to nostos-server's `GET /schema` as a
 //! [`SchemaDescriptor`], so the Flutter SDK can auto-build its typed tables
-//! instead of hand-writing a `Schema` (the headline DX win over PowerSync).
+//! instead of hand-writing a `Schema`.
 //!
 //! ## Why this exists
 //!

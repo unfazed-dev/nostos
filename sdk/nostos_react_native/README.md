@@ -1,7 +1,7 @@
 # @nostos-sync/react-native
 
 React Native facade over the **nostos-swift** (iOS) and **nostos-kotlin** (Android)
-UniFFI bindings. PowerSync-shaped API (`connect` / `subscribe` / `write` /
+UniFFI bindings. A connect/subscribe/write API (`connect` / `subscribe` / `write` /
 `query` / `checkpoint`), Promise-returning, with TWO row-access paths — poll
 (`subscribe` + `pollRows`) and **reactive push** (`watch`). Same Rust
 `nostos_client::SyncClient<SqliteStorage>` engine the native, Tauri, Flutter,
@@ -15,7 +15,7 @@ Nostos's [`@nostos-sync/web`](../nostos_web) ships a WebAssembly core
 is OPEN, and the RN 0.84 release notes have zero WASM mentions. So
 `@nostos-sync/web` is a dead end inside RN.
 
-This package takes the path PowerSync's RN SDK validated: a **pure-TypeScript
+This package takes a validated RN sync-SDK path: a **pure-TypeScript
 facade** over a **Codegen Turbo Native Module** that calls the already-shipped
 `sdk/nostos_swift` (iOS) and `sdk/nostos_kotlin` (Android) UniFFI bindings. No
 WASM, no new Rust.

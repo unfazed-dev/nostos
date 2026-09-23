@@ -373,7 +373,7 @@ impl SqliteStorage {
 
     /// Run an arbitrary read-only SQL query against the durable store and
     /// return each row as a `serde_json::Map<String, Value>` keyed by column
-    /// name. This is the PowerSync-parity read surface (P1-Rust): a Flutter
+    /// name. This is the P1-Rust read surface: a Flutter
     /// `watch(sql)` call can run any `SELECT` against `cairn_data` and render
     /// the result set directly, without a parallel query engine or a
     /// column-level decoder (ADR-0012 is still future work).
@@ -457,7 +457,7 @@ impl SqliteStorage {
 
     /// Materialize one SQLite `VIEW` per synced table, projected over the opaque
     /// `cairn_data` BLOB via JSON1 (WS2 read foundation). After this, the dev
-    /// writes natural PowerSync-style SQL — `SELECT title FROM tasks` — and it
+    /// writes plain SQL over the synced table — `SELECT title FROM tasks` — and it
     /// resolves against the view, which `json_extract`s each column out of the
     /// replication payload. The Pg path emits a column-named JSON object (see
     /// `tuple_to_json_payload` in nostos-infra), so column identity is IN the
@@ -473,7 +473,7 @@ impl SqliteStorage {
     ///
     /// Each view is `DROP VIEW IF EXISTS` + `CREATE VIEW`, so re-applying a
     /// *changed* schema refreshes the projection in place — bumping the
-    /// declared schema IS the client migration (PowerSync model: the synced
+    /// declared schema IS the client migration (the synced
     /// `cairn_data` rows are schemaless; views are cheap, data is untouched).
     /// Runs at connect time, before any watch() statement is armed, so no
     /// cursor is open over the view mid-DDL.
@@ -493,8 +493,8 @@ impl SqliteStorage {
             // an empty list (it would yield invalid `SELECT FROM`).
             // Lead with `pk AS _pk` so the view carries the row's replication
             // key — the same `_pk` the subscribe row-stream stamps
-            // (`row_to_json_object` in nostos_flutter). Without it, a PowerSync-
-            // style `SELECT * FROM <table>` returns no key, making write-back
+            // (`row_to_json_object` in nostos_flutter). Without it, a plain
+            // `SELECT * FROM <table>` returns no key, making write-back
             // (delete/edit, which key on `_pk`) impossible through the clean DX.
             let cols: Vec<String> = std::iter::once("pk AS _pk".to_string())
                 .chain(
@@ -2011,8 +2011,8 @@ mod tests {
 
     /// `query()` runs an arbitrary SELECT against `cairn_data`, and the bundled
     /// SQLite's JSON1 lets the dev `json_extract` straight out of the opaque
-    /// payload BLOB. This is the PowerSync-parity read surface: a Flutter
-    /// `watch(sql)` can run any SELECT and render the result set directly,
+    /// payload BLOB. This is the same read surface a Flutter `watch(sql)` call
+    /// uses: it can run any SELECT and render the result set directly,
     /// without a column decoder or a parallel query engine.
     #[test]
     fn query_runs_select_with_json1_against_opaque_payload() {
@@ -2055,7 +2055,7 @@ mod tests {
 
     /// WS2 read foundation: `apply_schema` materializes a `VIEW` per table over
     /// the opaque `cairn_data` BLOB, so `SELECT col FROM <table>` returns typed
-    /// values — PowerSync-style read DX WITHOUT materialized typed tables. This
+    /// values — a plain-SQL read DX WITHOUT materialized typed tables. This
     /// is the load-bearing claim of slice-1, asserted end-to-end.
     #[test]
     fn apply_schema_creates_queryable_view_over_opaque_payload() {
@@ -2095,8 +2095,8 @@ mod tests {
             r.get("title").and_then(serde_json::Value::as_str),
             Some("buy milk")
         );
-        // SQLite models JSON booleans as INTEGER 0/1 (no native bool type —
-        // same as PowerSync's SQLite layer). The Dart API (WS3) maps 0/1 ↔ bool.
+        // SQLite models JSON booleans as INTEGER 0/1 (no native bool type).
+        // The Dart API (WS3) maps 0/1 ↔ bool.
         assert_eq!(
             r.get("completed").and_then(serde_json::Value::as_i64),
             Some(0)
@@ -2104,7 +2104,7 @@ mod tests {
 
         // The view carries the replication key as `_pk` (matches the subscribe
         // row-stream's convention) ÔÇö write-back (delete/edit) keys on it, and
-        // `SELECT * FROM tasks` exposes it for the PowerSync-style DX.
+        // `SELECT * FROM tasks` exposes it for that plain-SQL DX.
         let pk_rows = s.query("SELECT _pk FROM tasks").unwrap();
         assert_eq!(
             pk_rows[0].get("_pk").and_then(serde_json::Value::as_str),

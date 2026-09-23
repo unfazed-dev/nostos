@@ -100,8 +100,7 @@ impl RowOp {
     }
 
     /// High-level operation classification — used in metrics & benchmark
-    /// reporting (PowerSync publishes separate small-row / large-row / txn
-    /// ceilings, so we classify the same way).
+    /// reporting (classified as small-row / large-row / txn ceilings).
     #[inline]
     #[must_use]
     pub fn operation(&self) -> Operation {

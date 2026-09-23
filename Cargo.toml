@@ -19,8 +19,8 @@
 #                         tokio/axum/postgres live.
 #   nostos-server          the composition root / main binary. Wires adapters to
 #                         ports and runs an axum HTTP/WS server.
-#   nostos-bench           the benchmark harness — Week-1 deliverable: proves ≥5×
-#                         PowerSync's 2-4k ops/sec throughput ceiling.
+#   nostos-bench           the benchmark harness — Week-1 deliverable: measures the
+#                         aggregate fan-out throughput (the headline moat).
 #   nostos-core            the platform-agnostic client sync engine — pure Rust
 #                         (no tokio, no SQLite): the Storage seam + the apply
 #                         state machine. WASM-clean; what the FFI bridges bind.
@@ -215,7 +215,7 @@ missing_panics_doc = "allow"
 similar_names = "allow"
 too_many_lines = "allow"
 # doc-style preference; we backtick code identifiers but not prose product
-# names like PowerSync / Postgres / WebSocket throughout the docs.
+# names like Postgres / WebSocket throughout the docs.
 doc_markdown = "allow"
 
 [profile.release]

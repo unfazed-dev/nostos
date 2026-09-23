@@ -9,9 +9,9 @@ predicates (ADR-0011) and a dynamic predicate compiler, `PredicateExpr`
 (`crates/nostos-domain/src/predicate.rs`, ADR-0012). What it lacks is an
 operator-facing way to declare *what syncs* — today that's env vars
 (`NOSTOS_WRITE_TABLES` for writes; nothing equivalent for reads) and whatever
-predicates a caller wires up in code. PowerSync's answer to this is "sync
+predicates a caller wires up in code. The common answer to this is "sync
 rules" — a declarative, versioned config surface operators edit directly.
-nostos has the predicate engine PowerSync's rules would compile to, but no
+nostos has the predicate engine such rules would compile to, but no
 config format, no mode model, and no resync trigger tied to a rules change.
 This ADR defines that surface.
 
@@ -231,7 +231,7 @@ ADR ships with (see Consequences).
   no concurrency control between them — see the last-writer-wins `ponytail:`
   above.
 - **Non-goals (v1):** `OR`/`NOT` composition, joins across tables, and
-  bucket/partition grammar (PowerSync-style bucket checksums, already called
+  bucket/partition grammar (bucket-style checksums, already called
   out as deferred moat machinery in ADR-0025's Divergence section) are out of
   scope — the grammar is intentionally the minimal `AND`-only subset that
   compiles to `PredicateExpr` today. A live in-place predicate swap (re-scope

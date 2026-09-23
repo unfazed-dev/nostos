@@ -274,7 +274,7 @@ and applies each transaction atomically. Worked out with sources in
 
 Two properties matter. **One sequence across every table** plus **a transaction
 ID on every row** gives the device cross-table transactional consistency — the
-same property PowerSync built a service for — with no server. And the snapshot
+same property comparable sync services build a hosted checkpoint service for — with no server. And the snapshot
 horizon makes the checkpoint gapless: every transaction below it is settled, and
 nothing new can ever appear below it, which is the failure mode that kills naive
 change logs.

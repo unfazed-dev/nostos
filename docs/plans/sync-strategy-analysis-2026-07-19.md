@@ -1,6 +1,6 @@
 # Nostos Sync Strategy — Analysis & Recommendation
 
-**Date:** 2026-07-19 · **Author:** tech-lead (Claude, GLM-5.2) · **Method:** 3-agent fan-out (code archaeology + industry research + PowerSync competitive) + architecture-domain consultant (conf HIGH)
+**Date:** 2026-07-19 · **Author:** tech-lead (Claude, GLM-5.2) · **Method:** 3-agent fan-out (code archaeology + industry research + competitive analysis) + architecture-domain consultant (conf HIGH)
 
 ---
 
@@ -56,14 +56,14 @@ Source: code-archaeology agent over `crates/` + `sdk/nostos_flutter/`.
 | Strategy | When to use | Representatives |
 |---|---|---|
 | **Local-first (full)** — local is canonical, sync is optimization | Ownership + offline + collaboration | Linear, Obsidian, Automerge, **nostos** |
-| ↳ *optimistic writes + store-and-forward* (sub-pattern) | Offline *writes* | **nostos**, PowerSync (FIFO upload queue), Replicache (mutator+rebase) |
+| ↳ *optimistic writes + store-and-forward* (sub-pattern) | Offline *writes* | **nostos**, Replicache (mutator+rebase) |
 | ↳ *read-only offline* | Dashboards, reference data | ElectricSQL (read-path), Firebase+persistence |
 | **Online-first / server-authoritative cache** | Traditional SaaS, low write concurrency | REST/GraphQL, Convex |
 | **Real-time push (WS/SSE)** | Live dashboards, chat, presence | Supabase Realtime, Firebase, Liveblocks |
 | **Polling** | Low-frequency, no push infra | Traditional REST, RxDB polling |
 | **CRDT-based** (mathematically convergent, no central authority) | Concurrent multi-writer + offline + **decentralized** | Yjs, Automerge, Loro, Ditto |
 | **Operational Transform** | Centralized collaborative text editing | Google Docs, ShareDB |
-| **Log-based / logical replication** (WAL stream) | Server-authoritative + offline, DB already exists | **nostos**, PowerSync, ElectricSQL, Datomic |
+| **Log-based / logical replication** (WAL stream) | Server-authoritative + offline, DB already exists | **nostos**, ElectricSQL, Datomic |
 | **Patch-based** (idempotent server patches) | Flexible mutation semantics | Replicache, Datomic |
 
 **Best-practice hierarchy** (use the simplest that works): polling → real-time push → server-authoritative WAL/patch → CRDTs.
@@ -74,7 +74,7 @@ Source: code-archaeology agent over `crates/` + `sdk/nostos_flutter/`.
 
 ## 4. "Do we need a strategy enum?" — verdict: **NO**
 
-**Industry consensus (strong):** exposing a *top-level consistency-model enum* in one product is an **anti-pattern** — it creates confusing mental models and edge cases at strategy boundaries. No mainstream sync engine does it (PowerSync, Replicache, ElectricSQL, Convex, Zero are each opinionated about *one* strategy). The dominant *good* pattern is **per-field opt-in**: default LWW server-authoritative, allow specific fields to opt into CRDT semantics (Ditto does this).
+**Industry consensus (strong):** exposing a *top-level consistency-model enum* in one product is an **anti-pattern** — it creates confusing mental models and edge cases at strategy boundaries. No mainstream sync engine does it (Replicache, ElectricSQL, Convex, Zero are each opinionated about *one* strategy). The dominant *good* pattern is **per-field opt-in**: default LWW server-authoritative, allow specific fields to opt into CRDT semantics (Ditto does this).
 
 **nostos is already on the right side of this:** ADR-0004 / ADR-0014 ratify a 3-tier conflict model —
 - **tier (a) LWW** — shipped (today).
@@ -118,14 +118,12 @@ Source: code-archaeology agent over `crates/` + `sdk/nostos_flutter/`.
 
 **nostos's one coherent model:** *Server-authoritative offline-first sync over Postgres logical replication.* Local SQLite reads, optimistic local writes, store-and-forward outbox, ack-driven LSN resume, LWW-by-WAL-order conflicts. Per-field conflict-tier upgrade path (CRDT / custom-merge) reserved per ADR-0014.
 
-**Why one strategy is a feature, not a gap:** every mature sync engine is opinionated about one consistency model (PowerSync, Replicache, ElectricSQL, Convex, Zero). A product that exposes a runtime strategy switch is signaling it couldn't pick — and forcing *you* to debug the boundary cases. nostos picks: server-authoritative + LWW, because Postgres is the source of truth and Postgres already enforces your invariants. When you need field-level CRDT semantics (collaborative text, counters), tier-(b) is the reserved seam — opt in *per field*, not per app.
+**Why one strategy is a feature, not a gap:** every mature sync engine is opinionated about one consistency model (Replicache, ElectricSQL, Convex, Zero). A product that exposes a runtime strategy switch is signaling it couldn't pick — and forcing *you* to debug the boundary cases. nostos picks: server-authoritative + LWW, because Postgres is the source of truth and Postgres already enforces your invariants. When you need field-level CRDT semantics (collaborative text, counters), tier-(b) is the reserved seam — opt in *per field*, not per app.
 
 **Mapping competitor "strategies" to nostos:**
 
 | Competitor feature | nostos equivalent |
 |---|---|
-| PowerSync "persistent FIFO upload queue" | nostos durable outbox + store-and-forward (identical pattern) |
-| PowerSync Sync Rules / Sync Streams DSL | nostos dynamic predicates (ADR-0003/0011/0012) — native code, no DSL cap |
 | Replicache mutator+rebase | nostos collapsed write-back + server-authoritative apply |
 | ElectricSQL Shapes (read-only) | nostos predicates over `cairn_data` views |
 | CRDT mode (Yjs/Ditto) | nostos tier-(b), reserved per ADR-0014 |
@@ -133,24 +131,7 @@ Source: code-archaeology agent over `crates/` + `sdk/nostos_flutter/`.
 
 ---
 
-## 7. PowerSync gaps nostos can exploit (ranked by defensibility)
-
-From competitive research (primary sources 🔥):
-
-| Wedge | Defensibility | Detail |
-|---|---|---|
-| **W1: License** | **Highest** | PowerSync is **FSL-1.1-ALv2** (source-available, *not* OSI; Competing-Use clause blocks anyone building a sync product; 2-year-per-release clock to Apache-2.0). nostos is **Apache-2.0** zero-restriction. Unavailable to a whole class of buyers (procurement, product-vendors). **Lead with this.** |
-| **W2: Throughput ceiling** | High | PowerSync's *own published* service ceiling: ~2,000–4,000 ops/sec (small rows), ~5,000 ops/sec total, ~60 tx/sec small txns. nostos claims 142k ops/sec @ 1k clients / 0% drops. **Caveat:** PowerSync publishes no number *at 1k concurrent clients*, so the "35×" is vs the service ceiling — apples-to-oranges until nostos publishes a matched-load bench. Risk: PowerSync publishes a higher number and closes the lane. |
-| **W3: No bucket-storage tax** | High | PowerSync requires a **second database** (Mongo or Postgres) just for bucket state — extra ops, failure mode, cost. nostos: source Postgres is the only DB. PowerSync cannot remove this without rewriting storage. |
-| **W4: Dynamic predicates over a DSL** | Lowest | PowerSync locks you into Sync Streams DSL with a 1,000-bucket-per-user fan-out cap (`PSYNC_S2305`). nostos predicates are native code, no such cap. Real, but PowerSync can extend the DSL / raise the cap — least durable. |
-
-**Honest strengths to respect (not a hit piece):** PowerSync has the **broadest SDK coverage** (Flutter, RN, KMP, Swift, Web) — Flutter-first-class is exactly nostos's target, so nostos must match Flutter parity. PowerSync has mature ops (Cloud dashboard, monitoring, Sync Diagnostics), strong cross-data consistency, and beyond-Postgres sources (Mongo/MySQL/SQLServer/Convex). It is the production reference for Flutter local-first in 2026. **nostos's edge is narrow and specific — license + throughput + architectural simplicity.**
-
-**Not recommended as wedges:** AI-privacy (PowerSync already ships E2EE + HIPAA — contested lane); collapsed-write-back (`NOSTOS_WRITE_TABLES` allowlist is itself friction — a tradeoff, not an advantage).
-
----
-
-## 8. Claim list (Gate 4 — verified / assumed / unknown)
+## 7. Claim list (Gate 4 — verified / assumed / unknown)
 
 **VERIFIED (observed this session):**
 - nostos has exactly one sync strategy; no `SyncStrategy`/`sync_mode`/`consistency` type exists (grep over `crates/` returned zero definitions). [code agent]
@@ -158,19 +139,16 @@ From competitive research (primary sources 🔥):
 - Disconnected path = durable SQLite outbox + optimistic local apply + dead-letter. [`client.rs`, `outbox.rs:53-59`]
 - LWW conflict resolution, tier-(a) shipped, tiers (b)/(c) reserved. [ADR-0014]
 - Reads are local-SQLite, offline-capable. [`nostos_database.dart:223-226`]
-- "Store-and-forward" is a sub-pattern of local-first, not a distinct strategy. [agent 2, Ink&Switch + PowerSync + Replicache primary docs]
-- PowerSync published ceiling ~5k ops/sec; FSL-1.1-ALv2 license; requires 2nd bucket-storage DB. [agent 2, primary docs 🔥]
+- "Store-and-forward" is a sub-pattern of local-first, not a distinct strategy. [agent 2, Ink&Switch + Replicache primary docs]
 
 **ASSUMED (reasonable inference, couldn't fully verify):**
-- "Top-level strategy enum is an anti-pattern" — *inferred from absence of counterexamples + architectural opinionation across PowerSync/Replicache/ElectricSQL; no single citable statement.* [agent 2 flagged ❄️] Carried into recommendation with appropriate hedging.
-- nostos's 142k ops/sec @ 1k clients — from project memory / `benches/results/RESULTS.md`, **not re-verified this session**. The "35×" comparison is vs PowerSync's *service* ceiling, not a matched-load bench.
+- "Top-level strategy enum is an anti-pattern" — *inferred from absence of counterexamples + architectural opinionation across Replicache/ElectricSQL; no single citable statement.* [agent 2 flagged ❄️] Carried into recommendation with appropriate hedging.
+- nostos's 142k ops/sec @ 1k clients — from project memory / `benches/results/RESULTS.md`, **not re-verified this session**. The "35×" comparison is vs a competitor's published *service* ceiling, not a matched-load bench.
 - Consultant recommendation (d)+(c) — conf HIGH, convergent with code + industry evidence, but it is a judgment call, not a proof.
 
 **UNKNOWN (didn't / couldn't check):**
 - Whether a real user will demand CRDT semantics before Phase 4 (the CRITICAL risk).
-- PowerSync's response (if any) to nostos's benchmark claim.
 - Additional env vars in `nostos-cloud` / `nostos-cli` beyond `nostos-server` (code agent scoped to `nostos-server/main.rs`).
-- PowerSync's dedicated multi-region topology (no public docs found).
 
 ---
 
@@ -178,8 +156,6 @@ From competitive research (primary sources 🔥):
 
 **Industry / taxonomy (primary 🔥):** Ink & Switch local-first manifesto; Kleppmann local-first PDF + "CRDTs: The Hard Parts"; Loro "When Not to Use CRDTs"; PostgreSQL logical-replication docs; CouchDB/PouchDB conflict docs; RxDB replication docs; WatermelonDB sync docs; Supabase Realtime docs.
 
-**PowerSync (primary 🔥):** Performance-and-Limits; Architecture (bucket system); Handling Update Conflicts; Sync Streams; Self-Hosting; Deployment Architecture; Monitoring; FSL legal page; GitHub issues #785 (multi-tab deadlock), #120 (watchOS), #314 (libsqliteJni.so).
+**Secondary 🌡️:** QueryPlane comparison (2026-02); merginit guide (2025); wal.sh; evilmartians; HN threads.
 
-**Secondary 🌡️:** QueryPlane comparison (2026-02); PowerSync blog; merginit guide (2025); wal.sh; evilmartians; HN threads.
-
-Full URL list in the agent transcripts (sessions `ac038b1e2f7b79ca9` industry + `a19e8f61a6604a724` PowerSync).
+Full URL list in the agent transcripts (sessions `ac038b1e2f7b79ca9` industry + `a19e8f61a6604a724` competitive analysis).

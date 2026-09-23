@@ -5,11 +5,10 @@
 
 ## Context
 
-WS1 of the Flutter PowerSync-style redesign (Option-C,
-`docs/plans/nostos-flutter-powersync-connection-redesign.md`) needs the client to
+WS1 of the Flutter reactive-query redesign (Option-C) needs the client to
 discover the publication's typed schema (tables, columns, SQLite affinities) to
-auto-build its typed read surface — the headline DX win over PowerSync's
-hand-written `Schema`. (This originally read "auto-build its typed **tables**",
+auto-build its typed read surface — the headline DX win: no hand-written
+`Schema` to maintain. (This originally read "auto-build its typed **tables**",
 which the client never did and now never will: the descriptor drives one SQLite
 **VIEW** per table over the opaque `cairn_data` payload, and materialized typed
 tables are rejected — [ADR-0028](0028-client-read-views-over-opaque-payload.md).
@@ -37,7 +36,8 @@ injected synthetic `Insert` events into the existing `WireFrame` stream rather
 than add a frame type — so a schema wire frame would be a brand-new third shape
 with real pre-v1 wire-compat cost. The side-band GET pattern is already
 established (`/healthz`, `/metrics`, both CORS-handled), and REST-schema + WS
-changes is exactly PowerSync's own split (the parity target).
+changes is exactly the split used by comparable sync engines (the parity
+target).
 
 Surface, mirroring `SnapshotSource` (ADR-0014):
 
@@ -74,5 +74,4 @@ Surface, mirroring `SnapshotSource` (ADR-0014):
 
 - Supersedes the deferral noted in ADR-0019 ("relation-metadata wire frame ...
   so the client stops guessing at parse time").
-- Plan: `docs/plans/nostos-flutter-powersync-connection-redesign.md` (WS1).
 - Mirrors: `SnapshotSource` / `PgSnapshotter` (ADR-0014).

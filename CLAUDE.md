@@ -2,17 +2,14 @@
 
 ## What this is
 Rust-native local-first sync engine: Postgres logical replication → Rust fan-out server →
-on-device SQLite, offline-capable, Apache-2.0 end to end. Competes with PowerSync on server
-throughput (Rust vs Node) and license (Apache-2.0 vs FSL). Moat proof: 2,618,601 ops/sec
+on-device SQLite, offline-capable, Apache-2.0 end to end. Moat proof: 2,618,601 ops/sec
 aggregate fan-out @ 1k clients, 0.00% drops (eval-only: FakeReplicator loopback; median of 3,
 spread 2.52M–2.68M, measured 2026-09-02 on the Arc-shared sequential fan-out — the earlier
 833,307 was the old fan-out, preserved as historical), plus the
 FULL-PATH real-PG → client-apply figure measured 2026-08-24: ~34.8k–36.2k rows/sec sustained,
-zero-drop at buffer 32768 — see benches/results/RESULTS.md. PowerSync publishes no comparable
-aggregate fan-out figure — its published rates are 2–4k ops/sec replication ingest and 2–20k
-ops/sec per-client sync (a different pipeline stage); never cite a cross-stage ratio, only
-same-stage, same-units comparisons per docs/BENCHMARK-METHODOLOGY.md. (Week-1 baseline was
-142k/35.6×, preserved as historical.)
+zero-drop at buffer 32768 — see benches/results/RESULTS.md. Never cite a cross-stage ratio
+against another engine's figures, only same-stage, same-units comparisons per
+docs/BENCHMARK-METHODOLOGY.md. (Week-1 baseline was 142k, preserved as historical.)
 
 ## Crate map (hexagonal — dependencies point inward, violations fail review)
 | crate | role | may depend on |

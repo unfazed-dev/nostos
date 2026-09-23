@@ -5,7 +5,7 @@
 
 ## Context
 
-We need a business model that (a) maximizes adoption (open) and (b) captures enough revenue to fund the company. PowerSync monetizes via metered Cloud + FSL self-host. The strategy doc identifies the wedge: be the *clean-open* default and capture value through operations and trust.
+We need a business model that (a) maximizes adoption (open) and (b) captures enough revenue to fund the company. Some competing sync engines monetize via metered Cloud plus a source-available self-host license. The strategy doc identifies the wedge: be the *clean-open* default and capture value through operations and trust.
 
 ## Decision
 
@@ -29,7 +29,7 @@ We need a business model that (a) maximizes adoption (open) and (b) captures eno
 ## Rationale
 
 - **Land-and-expand:** dev tries OSS locally (5-min setup) → ships to free Cloud → grows → Pro → Enterprise. No bait-and-switch.
-- **Transparent pricing** is itself a wedge vs PowerSync's per-op metering (the #1 cost complaint).
+- **Transparent pricing** is itself a wedge against per-op metering (the #1 cost complaint in this space).
 - The Rust server's low footprint is a **Cloud margin advantage** — cost-to-serve is lower than a Node equivalent, so even cheap per-op pricing stays healthy.
 
 ## Consequences
@@ -40,6 +40,6 @@ We need a business model that (a) maximizes adoption (open) and (b) captures eno
 
 ## Alternatives considered
 
-- **Cripple open-core** (gate direct-write-back or CRDTs behind Enterprise). Rejected — creates the resentment we're exploiting against PowerSync; shrinks the funnel.
-- **Per-op metering like PowerSync.** Rejected — it's their #1 complaint; we win on pricing trust by being predictable.
+- **Cripple open-core** (gate direct-write-back or CRDTs behind Enterprise). Rejected — creates the same metering resentment we're exploiting; shrinks the funnel.
+- **Per-op metering.** Rejected — it's the #1 complaint about that model; we win on pricing trust by being predictable.
 - **Pure SaaS (no self-host).** Rejected — forfeits the OSS-driven adoption wedge and the Realm-exodus market.

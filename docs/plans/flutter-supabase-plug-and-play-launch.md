@@ -11,7 +11,7 @@ public launch now gates on this plan). Companion: `launch-readiness-gap-list.md`
    → fully local-first, offline-capable todo app in **≤5 minutes**. Plug and
    play: add dependency, connect Supabase project, publication/auth/config
    auto-wired. Zero Rust visible. Must be a measurably better experience than
-   PowerSync-for-Supabase.
+   existing sync-for-Supabase integrations.
 2. **Who runs the server:** the `nostos` CLI (prebuilt binary; free, Apache-2.0,
    no payment gate — the license stays the moat). `nostos init` auto-wires,
    `nostos dev` runs locally, production self-host = one-click template.
@@ -21,11 +21,11 @@ public launch now gates on this plan). Companion: `launch-readiness-gap-list.md`
 
 ## The competitive delta we must deliver (research-verified, July 2026)
 
-PowerSync Supabase+Flutter today: two signups/two dashboards, SQL step,
-dashboard-authored Sync Streams with a Validate→Deploy cycle, hand-written
-`PowerSyncBackendConnector` (~30-40 lines) with a documented synchronous-write
-footgun, duplicated client-side Dart schema. Their guide claims 10–15 min for
-the wiring alone; realistic custom-app time 45–60+ min. Flutter SDK is
+A comparable sync-for-Supabase integration today: two signups/two dashboards, SQL step,
+dashboard-authored stream rules with a Validate→Deploy cycle, a hand-written
+backend-connector class (~30-40 lines) with a documented synchronous-write
+footgun, duplicated client-side Dart schema. Its guide claims 10–15 min for
+the wiring alone; realistic custom-app time 45–60+ min. Its Flutter SDK is
 HTTP-only; Flutter web is beta.
 
 Nostos's story: **one control plane (your Supabase project + one CLI)**, no
@@ -45,9 +45,9 @@ rules."
   replication). Free plan direct connection is **IPv6-only**; IPv4 add-on is
   Pro+. `postgres` role can CREATE PUBLICATION + create slots. Slot/walsender
   cap is **5 on Nano–Medium** compute, shared with Realtime/Pipelines/backups.
-  Idle-instance WAL growth is a known footgun (PowerSync's guide tells users to
-  hand-tune `max_wal_size`/`max_slot_wal_keep_size`) — `nostos init` should
-  handle/warn automatically.
+  Idle-instance WAL growth is a known footgun (comparable sync products' guides
+  tell users to hand-tune `max_wal_size`/`max_slot_wal_keep_size`) — `nostos init`
+  should handle/warn automatically.
 - **Programmatic setup:** Management API runs SQL (`POST
   /v1/projects/{ref}/database/query`, beta) with PAT or OAuth; official
   "Connect Supabase" OAuth-app program exists for one-click integrations.
@@ -57,9 +57,9 @@ rules."
 - **Packaging:** Dart build hooks ("native assets") are stable (Flutter ≥3.38 /
   Dart ≥3.10) and pub.dev-publishable; frb 2.12+ recommends its native-assets
   backend (`native_toolchain_rust`) — Cargokit upstream archived 2026-03.
-  PowerSync v2.0 (May 2026) validated exactly this pattern at scale.
-  **Rust keeps owning SQLite** (cross-isolate watch invalidation is why
-  PowerSync moved their pool into Rust). Flutter web: punt v1 (custom
+  A comparable sync product's v2.0 (May 2026) release validated exactly this
+  pattern at scale. **Rust keeps owning SQLite** (cross-isolate watch
+  invalidation is why that product moved its connection pool into Rust). Flutter web: punt v1 (custom
   sqlite3.wasm approach later; do NOT reuse nostos-ffi-wasm via JS interop).
 
 ## Workstreams
@@ -77,8 +77,8 @@ Needs the operator-provided Supabase project (see Operator items).
 - [ ] Write the one-page W4 fallback if native-assets blocks: frb's maintained
       Cargokit fork with `precompiled_binaries` (URL + signed pubkey), same
       release artifacts. Exit: fallback documented even if unused.
-- [ ] Re-check PowerSync onboarding hasn't materially improved (competitor
-      target moves).
+- [ ] Re-check the leading competitor's onboarding hasn't materially improved
+      (competitor target moves).
 
 ### W1 — Write-back tenant enforcement (security; scoped to write path ONLY)
 - [ ] ADR: extend ADR-0011's server-enforced tenant scoping to writes
@@ -239,9 +239,7 @@ pub.dev, brew, drafts).
 Supabase: setup-replication-external, manual-replication-faq,
 connecting-to-postgres, ipv4-address, compute-add-ons, auth/signing-keys,
 auth/jwts, row-level-security, build-a-supabase-oauth-integration, Management
-API reference. PowerSync: integration-guides/supabase, client-sdks Flutter,
-May-2026 changelog (Sync Streams GA, v2.0 packaging), pricing, self-hosting,
-handling-writes. Flutter/Dart: docs.flutter.dev bind-native-code,
+API reference. Flutter/Dart: docs.flutter.dev bind-native-code,
 dart.dev/tools/hooks, flutter_rust_bridge manual (cargokit, native-assets,
 precompiled), native_toolchain_rust, cargokit precompiled_binaries.md, drift
 web/streams docs. Full URLs in session research reports.

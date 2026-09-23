@@ -8,16 +8,9 @@
 
 **Nostos's Rust server sustains high-throughput aggregate fan-out — Postgres-style replication events delivered to thousands of concurrent WebSocket clients — with zero drops.** The measured figure and its scope live in [benches/results/RESULTS.md](../benches/results/RESULTS.md).
 
-**No PowerSync ratio is claimed.** PowerSync publishes no comparable aggregate fan-out figure anywhere in its docs, blog, or benchmark repos. Its published rates ([docs](https://docs.powersync.com/resources/performance-and-limits), verified 2026-08-06) belong to different pipeline stages:
+**No cross-engine ratio is claimed.** Compare only same-stage, same-units figures from any other engine. A replication-ingest rate (Postgres → sync service), a per-client sync rate (service → *one* client), a MB/sec throughput or a txn/sec rate belongs to a different pipeline stage or a different unit than aggregate fan-out, and is never set against it.
 
-| Metric | PowerSync rate | Pipeline stage |
-|---|---|---|
-| Replication ingest (small rows) | ~2,000–4,000 ops/sec | Postgres → PowerSync Service — a different stage from fan-out |
-| Replication ingest (large rows) | ~5 MB/sec | same ingest stage, and a different *unit* — never set against ops/sec |
-| Small-transaction rate | ~60 txn/sec | ingest-side transaction rate |
-| Per-client sync | ~2,000–20,000 ops/sec | Service → *one* client — not an aggregate across clients |
-
-> **Retired framing (Correction 2026-08-06):** an earlier revision of this section claimed a "≥5×" ratio by dividing Nostos's aggregate fan-out figure by PowerSync's replication-ingest rate — two different stages of two different pipelines under one "ops/sec" label. That framing is retired; the full record lives in RESULTS.md's "Correction (2026-08-06)". Same-stage, same-units comparisons only, ever. Nostos's server is Rust where PowerSync's is Node.js, but an architecture difference is not a benchmark — only a measured same-stage comparison would be, and none exists today.
+> **Retired framing (Correction 2026-08-06):** an earlier revision of this section claimed a "≥5×" ratio by dividing Nostos's aggregate fan-out figure by another engine's replication-ingest rate — two different stages of two different pipelines under one "ops/sec" label. That framing is retired; the full record lives in RESULTS.md's "Correction (2026-08-06)". Same-stage, same-units comparisons only, ever. An architecture difference is not a benchmark — only a measured same-stage comparison would be, and none exists today.
 
 ---
 
@@ -53,7 +46,7 @@ enum RowOp {
 
 - **Distribution:** 80% Insert, 15% Update, 5% Delete (typical append-heavy app).
 - **Payload profiles:**
-  - `small` — 100-byte payload (the PowerSync "small row" regime).
+  - `small` — 100-byte payload.
   - `large` — 4 KB payload (exposes per-byte copy cliffs).
 - **Predicate fan-in:** each event matches a configurable fraction of connected clients. Default: **all clients match** (worst-case fan-out — every event goes to every session). This is the hardest case for the router.
 
@@ -94,7 +87,7 @@ The headline is a max over **tier means**, never over raw repetitions — a max 
 
 Each client session has a **bounded** delivery channel of depth `B` (`NOSTOS_SESSION_BUFFER`, default 1024). The router's `deliver()` is **non-blocking with drop semantics**: if a client's channel is full, the event for that client is dropped and a `session.dropped` counter increments.
 
-**Why drop-and-observe, not block:** a single stalled WebSocket must never stall the replication fan-out (head-of-line blocking). PowerSync's full-reprocessing model (their proposal #349) doesn't have this guarantee.
+**Why drop-and-observe, not block:** a single stalled WebSocket must never stall the replication fan-out (head-of-line blocking).
 
 **Consequence for honesty:** the benchmark reports drop rate alongside throughput. A throughput number with a high drop rate is meaningless and is called out as such. The headline number is the **highest throughput at <1% drop rate.**
 
@@ -202,13 +195,11 @@ In addition to the end-to-end WebSocket harness, a `criterion` micro-benchmark m
 
 ---
 
-## 8. How the comparison to PowerSync is framed
+## 8. How cross-engine comparisons are framed
 
-The `RESULTS.md` always states, verbatim:
+Compare only same-stage, same-units figures from any other engine (§1). An aggregate fan-out figure is never divided by another engine's replication-ingest rate, per-client sync rate, MB/sec or txn/sec. Every Nostos figure carries its scope — eval-only (synthetic replicator on loopback) or full path (real Postgres → client apply) — and the two are never compared against each other.
 
-> *PowerSync publishes a server-side ceiling of ~2,000–4,000 ops/sec for small rows. Nostos's measurement is of the same logical operation — fanning row-change events to connected clients. The comparison is scoped: Nostos's number is from a synthetic replicator on loopback; PowerSync's is from their docs. The ratio is the point, not the absolute.*
-
-We do not claim end-to-end superiority — only that the **server fan-out path** is materially faster, which is the moat.
+We do not claim end-to-end superiority — the moat is the **server fan-out path**.
 
 ---
 
@@ -217,4 +208,3 @@ We do not claim end-to-end superiority — only that the **server fan-out path**
 - If the WebSocket accept loop is the bottleneck (not the router), we say so and report the router-only number.
 - If we hit OS connection limits before the router saturates, we say so and report the highest achievable client count.
 - If the drop rate is >1% at the target throughput, we report the throughput at <1% drops instead, and flag the gap.
-- If we **don't** beat PowerSync ≥3×, we say so — that's a signal to pivot the architecture, not a number to spin.

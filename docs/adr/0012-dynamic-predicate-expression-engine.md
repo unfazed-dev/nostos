@@ -9,7 +9,7 @@ Front 1 ("Dynamic Reactive Sync — kill the buckets") is marketed as Nostos's
 headline moat. The Phase-0 `Predicate` (single table + AND-of-equalities over
 `ColumnValue::{Text, Any}`) proved the fan-out path and the predicate-based
 delivery architecture, but it was **not** the boolean-tree expression engine the
-strategy doc sells. PowerSync's bucket ceiling is the wedge; the predicate engine
+strategy doc sells. The static bucket ceiling is the wedge; the predicate engine
 is the IP that replaces it.
 
 The critical enabling fact (now realized): the domain `Predicate::matches` takes
@@ -199,7 +199,7 @@ still full-evals every non-indexable predicate. The complexity isn't worth it at
 this scale.
 
 **The real conclusion:** ~150-170 evt/s through 10k predicates is ~1.5M
-predicate-evals/sec — already **orders of magnitude above** the PowerSync 2-4k
+predicate-evals/sec — already **orders of magnitude above** the 2-4k
 ops/sec ceiling this moat targets. The eval loop is structurally the cost, but
 it is **not the binding constraint**. The index solves a problem that doesn't
 bind. Recorded here so the experiment isn't repeated: a per-event index rebuild
@@ -264,9 +264,9 @@ already diverged, which the original decision did not anticipate:
 
 So one subscription returned two different row sets depending on which path
 served it. That is the same path-vs-path shape as the op-log replay bug (audit
-finding 6) and PowerSync's CVE-2026-30870: rules applied on one path and not
-another. A deferral is defensible; a silent disagreement between two paths is
-not.
+finding 6) and a known CVE pattern in this space: rules applied on one path and
+not another. A deferral is defensible; a silent disagreement between two paths
+is not.
 
 ### Decision
 

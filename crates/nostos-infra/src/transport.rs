@@ -1479,8 +1479,7 @@ async fn register_stream(
 }
 
 /// Drop a stream by its client-chosen id (P5 §1). Unknown id = idempotent
-/// no-op. v1 leaves local rows in place — eviction is separate; PowerSync
-/// behaves the same.
+/// no-op. v1 leaves local rows in place — eviction is separate.
 async fn unregister_stream(id: &str, subs: &Arc<Mutex<SocketSubs>>, manager: &Arc<SessionManager>) {
     let removed = { subs.lock().await.streams.remove(id) };
     if let Some(sub) = removed {

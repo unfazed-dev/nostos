@@ -15,8 +15,7 @@ date: 2026-07-30
 
 - **Status:** Accepted
 - **Date:** 2026-07-30
-- **Supersedes:** the "materialized typed tables" architecture in
-  [`docs/plans/nostos-flutter-powersync-connection-redesign.md`](../plans/nostos-flutter-powersync-connection-redesign.md)
+- **Supersedes:** the earlier "materialized typed tables" architecture
   (D1 + Architecture changes). Corrects the "auto-build its typed tables" phrasing
   in [ADR-0021](0021-client-schema-discovery-rest.md).
 

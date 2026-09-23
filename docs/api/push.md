@@ -49,12 +49,19 @@ rail):
 - `table:visible:<title>:<body>` — a visible notification; `{col}`
   statically interpolates the triggering row's column value (a missing column
   → empty string; no expression language),
+- `table:visible@<route>:<title>:<body>` — the same, plus the in-app
+  destination a tap should open. `<route>` takes `{col}` too and must start
+  with `/`; it ships as the payload key `cairn_route` (ADR-0037 §2a). `@`
+  rather than one more `:` because the body is the greedy remainder. Works
+  on `action` entries as well
+  (`table:action@<route>:<category>:<title>:<body>`); a silent doorbell
+  rejects it at startup — a wake-up carries no routing keys,
 - `table:liveactivity:<json>` — **experimental** Live Activity updates, see
   below; `<json>` is a JSON object whose string leaves may carry `{col}`
   placeholders.
 
 ```
-NOSTOS_PUSH_TABLES='tasks;orders:visible:New order:Order {id} placed;deliveries:liveactivity:{"status":"{status}","eta_min":"{eta_min}"}'
+NOSTOS_PUSH_TABLES='tasks;orders:visible@/orders/{id}:New order:Order {id} placed;deliveries:liveactivity:{"status":"{status}","eta_min":"{eta_min}"}'
 ```
 
 Startup fails on a typo'd table, an unknown mode, a malformed liveactivity
@@ -62,6 +69,31 @@ template, or a duplicate entry — a table silently not pushing is the failure
 mode this refuses to allow. Colons cannot appear in title/body and semicolons
 cannot appear anywhere in an entry (they separate entries — including inside
 a liveactivity JSON template).
+
+### Routing keys — where a tap lands
+
+A visible push carries an optional string→string `data` map that reaches the
+app on tap: APNs puts it next to `aps` (which is what `userInfo` returns),
+FCM in `message.data`, Web Push in a `data` object inside the encrypted
+payload. `NOSTOS_PUSH_TABLES` sets the one key `cairn_route` via `@route`
+above; `nostos-pushd`'s `POST /v1/send` takes the whole map:
+
+```json
+{"token": "…", "payload": {"visible": {
+  "title": "Order shipped",
+  "body": "Order 983979e8 is on its way",
+  "category": "order_status",
+  "data": {"cairn_route": "/orders/983979e8", "order_id": "983979e8"}
+}}}
+```
+
+Refused with a 400 (and at startup, for the config path): keys a rail would
+eat — `aps`, FCM's `from` / `message_type` / `notification` / `google.*` /
+`gcm.*`, and nostos's own `title`, `body`, `category`, `table`, `lsn` — or a
+map over 1024 serialized bytes (APNs and FCM cap the whole payload at 4096).
+
+Silent doorbells carry no `data`: the payload stays `{table, lsn}`. And the
+map is plaintext at the vendor — put identifiers in it, not the row.
 
 Tables listed here also doorbell the tenant's fully-offline accounts
 (`NOSTOS_TENANT_COLUMN` targeting); every other table only doorbells via

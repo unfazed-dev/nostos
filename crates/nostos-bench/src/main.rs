@@ -1,8 +1,7 @@
 //! # nostos-bench — Week-1 throughput benchmark harness.
 //!
 //! Measures the headline moat: how fast can Nostos's server fan replication
-//! events out to thousands of concurrent WebSocket clients, compared to
-//! PowerSync's published 2–4k ops/sec Node.js ceiling?
+//! events out to thousands of concurrent WebSocket clients?
 //!
 //! ## Design
 //!

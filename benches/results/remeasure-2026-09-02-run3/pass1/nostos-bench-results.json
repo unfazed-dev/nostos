@@ -19,7 +19,5 @@
       "elapsed_secs": 120.000460125,
       "profile": "small"
     }
-  ],
-  "powersync_ceiling_ops_per_sec_low": 2000,
-  "powersync_ceiling_ops_per_sec_high": 4000
+  ]
 }

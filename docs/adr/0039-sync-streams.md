@@ -2,13 +2,13 @@
 
 - **Status:** Accepted (implemented 2026-08-18; slices 1–9 on `main`).
 - **Date:** 2026-08-18
-- **References:** ADR-0009 (one checkpoint per socket), ADR-0011 (tenancy), ADR-0012 (safe-SQL-subset predicates), ADR-0013 (echo/idempotent apply), ADR-0022 (multi-table-per-socket), ADR-0031 (rules file + reload), design draft `docs/plans/p5-sync-streams-design.md` (the binding text), parity plan `docs/plans/powersync-sdk-parity-plan.md` (P5 row).
+- **References:** ADR-0009 (one checkpoint per socket), ADR-0011 (tenancy), ADR-0012 (safe-SQL-subset predicates), ADR-0013 (echo/idempotent apply), ADR-0022 (multi-table-per-socket), ADR-0031 (rules file + reload), design draft `docs/plans/p5-sync-streams-design.md` (the binding text).
 
 ## Context
 
-PowerSync's Sync Streams are the biggest remaining SDK-parity feature gap
-(parity plan :194, :251): named, per-client-parameterized subscriptions with
-lazy `syncStream(name, params).subscribe()`. Nostos's `where_sql` (ADR-0012) is
+Sync Streams — named, per-client-parameterized subscriptions with lazy
+`syncStream(name, params).subscribe()` — are the biggest remaining
+SDK-parity feature gap. Nostos's `where_sql` (ADR-0012) is
 per-table-subscription and client-authored SQL text — fine for static shapes,
 but it means client bytes reach the server as a query string, and there is no
 way to add/drop a shaped subscription mid-session without reconnecting.
@@ -96,7 +96,7 @@ untagged, table-level boundaries reconcile (`nostos-client/src/client.rs`).
   The socket checkpoint + idempotent apply prevent duplicate rows. Upgrade
   path: per-stream LSN cursors if re-snapshot cost proves out (measure first).
 - **v1 unsubscribe leaves local rows in place** — eviction is a separate
-  concern; PowerSync behaves the same.
+  concern; that's consistent with how comparable sync engines behave.
 - **stream_error is log-only on the client in v1** (no app surface). The
   active set keeps the entry, so a server-side definition fix + reconnect
   self-heals.
@@ -113,7 +113,7 @@ untagged, table-level boundaries reconcile (`nostos-client/src/client.rs`).
 
 ## Consequences
 
-- PowerSync Sync-Streams parity for the v1 shape (named, parameterized, lazy)
+- Sync-Streams parity for the v1 shape (named, parameterized, lazy)
   with a strictly stronger injection/tenancy story than client-authored SQL.
 - The `where_sql` path is untouched; streams coexist with predicate
   subscriptions on one socket.

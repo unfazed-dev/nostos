@@ -289,7 +289,7 @@ async fn tier_cap_rejects_over_limit_sequentially() {
 
 /// Smoke-check that the op distribution is roughly 80/15/5 — guards against a
 /// future change to `pick_op` silently skewing the workload (the benchmark
-/// depends on this split to be comparable to PowerSync's regime).
+/// depends on this split staying stable).
 #[tokio::test]
 async fn fake_replicator_op_distribution_is_roughly_80_15_5() {
     let mut repl = FakeReplicator::new(FakeReplicatorConfig::small(10_000));

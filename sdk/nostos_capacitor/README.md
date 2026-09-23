@@ -22,7 +22,7 @@ A [Capacitor v8](https://capacitorjs.com/) plugin that runs
   server-side table, applies inbound frames through the pure apply-engine,
   ACKs per committed batch, and persists the resume LSN to localStorage so a
   reload resumes from where it left off.
-- Exposes the PowerSync-shaped API in the Capacitor plugin convention:
+- Exposes a connect/subscribe/write API in the Capacitor plugin convention:
   `connect`, `subscribe`, `write`, `query`, `watch`, `checkpoint`,
   `rowCount`, `close`, `configure`, `reconnect`.
 - **Beta push bridge**: the native sides obtain the OS push token (iOS APNs)

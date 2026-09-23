@@ -1,7 +1,7 @@
 {
   "name": "@nostos-sync/web",
   "version": "0.2.0",
-  "description": "PowerSync-style JS facade over nostos-ffi-wasm (browser: live WS via web-sys; node: apply engine only)",
+  "description": "JS facade over nostos-ffi-wasm (browser: live WS via web-sys; node: apply engine only)",
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {

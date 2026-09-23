@@ -140,7 +140,7 @@ impl WriteBack for EchoWriteBack {
         payload_json: &str,
         _tenant: Option<nostos_domain::TenantScope<'_>>,
     ) -> Result<(), WriteBackError> {
-        // P3 PowerSync PATCH parity: record the patch as an Update carrying
+        // P3 column-level PATCH: record the patch as an Update carrying
         // the partial tuple image.
         let lsn = self.next_lsn.fetch_add(10, Ordering::Relaxed);
         let ev = ReplicationEvent::new(

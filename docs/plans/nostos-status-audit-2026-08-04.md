@@ -59,7 +59,7 @@ v0.2 launch plan (`flutter-supabase-plug-and-play-launch.md`): W0a–W8 **all im
 
 ### Tier C — honesty / hardening, not blockers
 7. **Real-PG write-amp re-measurement (ADR-0025-mandated) — OPEN.** RESULTS.md unchanged since slice-2 (`4c892ad`). 833k/0% is honest *as the in-memory fan-out ceiling* (oplog attach is opt-in via `NOSTOS_BENCH_OPLOG=1`, channel-send cost invisible, `main.rs:161–168`); it is **not** end-to-end (FakeReplicator, loopback, no client apply). Never compare eval-only vs end-to-end numbers.
-   > **Correction 2026-08-06:** this item's closing directive ("quote the 208× high multiple only") is retired — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch); see benches/results/RESULTS.md §Correction.
+   > **Correction 2026-08-06:** this item's closing directive ("quote the 208× high multiple only") is retired — the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch); see benches/results/RESULTS.md §Correction.
 8. **Token-refresh hardening gap (disclosed):** P1 *fixed* via the `setToken` swap contract, auto-wired in `NostosDatabase.supabase` (`nostos.dart:486–495`) off `onAuthStateChange`. But a **live socket is NOT torn down mid-flight on token expiry** — refresh takes effect next reconnect. Raw `Nostos` users must wire refresh themselves.
 9. **WS1 web durability — deferred past v0.1 by design** (ADR-0017 addendum, IndexedDB mirror rejected). Web is **live-only**, not just non-durable (`NostosSocket::write`, `ffi-wasm/lib.rs:496`). Open: a Worker landing Storage + Outbox together.
 10. **WS3 CRDT tenant+OR-set — falls through to clobber** (no-tenant merge only). The community-row fixture exercising it is not built.

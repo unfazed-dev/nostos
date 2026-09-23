@@ -1,9 +1,9 @@
-// @nostos-sync/web — PowerSync-style facade over the nostos-ffi-wasm apply engine.
+// @nostos-sync/web — JS facade over the nostos-ffi-wasm apply engine.
 //
 // REDUCED-SCOPE PROOF (ponytail: ceiling + upgrade path below)
 // ------------------------------------------------------------
 // This package loads the wasm-pack `--target nodejs` build of
-// nostos-ffi-wasm in Node 22+ and exposes a PowerSync-shaped API
+// nostos-ffi-wasm in Node 22+ and exposes a connect/subscribe/write API
 // (connect / subscribe / watch / write / query) PLUS the typed Tier-1 surface
 // (writeBatch / OR-set / PN-counter / dead-letter visibility — ADR-0030/0032)
 // as a thin wrapper over the wasm apply-engine surface (`NostosEngine`, `Frame`,
@@ -71,7 +71,7 @@ function wasm() {
 }
 
 /**
- * PowerSync-style sync client. Reduced-scope: see file header — no live
+ * Sync client. Reduced-scope: see file header — no live
  * transport in node; this wraps the apply engine.
  */
 class NostosClient {
@@ -112,7 +112,7 @@ class NostosClient {
 
   /**
    * Write a row into the apply engine (client-side insert).
-   * ponytail: real PowerSync writes go through the server mutation
+   * ponytail: real writes go through the server mutation
    * pipeline; this proof feeds frames directly to demonstrate the
    * apply boundary. LSN is synthesized from Date.now() because there
    * is no server in the loop. Ceiling: replace with a server round-trip

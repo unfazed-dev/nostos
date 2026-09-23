@@ -88,7 +88,7 @@ Before/after `make bench --clients 1000`, clean `--release`, 3× median, same ma
 0.00%.** 3% is conservative relative to the 833k-ops/sec headline margin; any non-zero
 drop directly falsifies the "0.00% drops" headline and is non-negotiable.
 
-> **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+> **Correction 2026-08-06:** the N× cross-vendor framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 
 **VERDICT 2026-07-31 — PASS.** Empirical before/after on the same dev machine, `--clients 1000
 --events 50000`, `NOSTOS_FAKE_EPS=0 NOSTOS_FAKE_KEYS=0`, 3 runs each:

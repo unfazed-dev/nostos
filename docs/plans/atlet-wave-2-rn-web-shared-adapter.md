@@ -6,8 +6,7 @@ for execution; no task in this plan has started.
 
 ## Why this wave, why now
 
-Ratified decision #9 in `docs/plans/atlet-nostos-vs-powersync-app-suite.md`
-fixes the rollout order: pilot (Flutter, done) → **RN+web (shared TS
+Ratified decision #9 fixes the rollout order: pilot (Flutter, done) → **RN+web (shared TS
 adapter)** → kotlin+swift → node+capacitor+tauri → dotnet last. Each wave is
 its own follow-on plan; the adapter spec freezes at pilot retro. That freeze
 happened in Task 16 (`apps/atlet/spec/adapter.md` is now v1,
@@ -62,9 +61,8 @@ explicitly rather than left to repeat:
 
 - **In scope:** a shared TypeScript `SyncAdapter` port (mirroring
   `sync_adapter.dart`'s shape) consumed by both a React Native app and a web
-  app, each wired to NostosAdapter/PowerSyncAdapter equivalents for their
-  respective SDKs, running the same Core-4 + storage bench suite, on the
-  local profile.
+  app, each wired to a NostosAdapter for their respective SDKs, running the
+  same Core-4 + storage bench suite, on the local profile.
 - **Out of scope (unchanged from the master plan):** cloud profile execution
   (documented stub only until local numbers are stable — open item #3 from
   Task 16's brief), any comparative/moat numbers, FSL legal review, waves
@@ -77,22 +75,17 @@ explicitly rather than left to repeat:
    does wave 2 need a wrapper task first (mirroring pilot Task 6's
    scaffold-before-adapters ordering)? Needs a source check against
    `sdk/` before task 1 is written.
-2. **PowerSync web/RN SDK surface:** `packages/powersync` for web/RN differs
-   in API shape from `powersync` (Flutter) — needs the same "verify exact
-   signatures before compiling adapter code" discipline the master plan
-   applied to Flutter (its own Global Constraints line), not an assumption
-   that the Dart-side research carries over.
-3. **One shared TS adapter file consumed by two app targets, or two
+2. **One shared TS adapter file consumed by two app targets, or two
    thin platform packages sharing a core:** RN and web have different
    storage/runtime primitives (SQLite via RN bridge vs. wa-sqlite/OPFS on
-   web for nostos; RN vs. IndexedDB backends for PowerSync). "Shared TS
+   web for nostos; other sync SDKs split RN vs. IndexedDB backends similarly). "Shared TS
    adapter" per decision #9 likely means a shared *interface + marks +
    conformance test* module (mirroring pilot Tasks 7/8), with platform-
    specific adapter implementations underneath — needs confirming before
    task breakdown, not assumed from the pilot's single-runtime shape.
-4. **Web durability:** per `[[nostos-adr-audit-2026-07-30]]` (project
+3. **Web durability:** per `[[nostos-adr-audit-2026-07-30]]` (project
    memory), nostos's web path is live-only with no browser outbox — the
-   IndexedDB mirror was rejected in the ADR-0017 addendum. If item 3's
+   IndexedDB mirror was rejected in the ADR-0017 addendum. If item 2's
    offline-queue-drain conformance check applies to the web SDK at all, it
    needs to be scoped against that known limitation, not assumed to work
    like the native adapters.
@@ -109,11 +102,11 @@ sharing one TS adapter layer:
 2. Port `spec/adapter.md` v1 + `spec/metrics.md` to a shared
    `packages/atlet-adapter-ts` (or equivalent) — interface + `MarkDeriver`
    port + conformance test harness, engine-neutral.
-3. RN NostosAdapter + RN PowerSyncAdapter (own conformance-item assignment,
+3. RN NostosAdapter (own conformance-item assignment,
    explicit per the retro's rule above).
-4. Web NostosAdapter + web PowerSyncAdapter (own conformance-item assignment;
+4. Web NostosAdapter (own conformance-item assignment;
    explicit disclosure against the web-durability limitation in open
-   question 4).
+   question 3).
 5. Engine toggle + full-wipe flow, ported per-platform.
 6. UI parity (signin/home/detail/shop/analytics) — reuse the pilot's design
    tokens/assets where the web/RN design system allows; do not silently
