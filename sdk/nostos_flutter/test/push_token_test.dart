@@ -321,6 +321,40 @@ void main() {
     },
   );
 
+  test('direct mode (ADR-0045) registers and deregisters through the '
+      'PostgREST RPCs, with the project key and the rotated JWT', () async {
+    final (server, requests) = await _startServer(200);
+    final db = NostosDatabase.forTest(
+      Nostos.withEngine(_PushFakeEngine()),
+      const NostosSchema(tables: []),
+      httpBase: 'http://127.0.0.1:${server.port}/rest/v1',
+      token: 'jwt-old',
+      anonKey: 'anon-key',
+    );
+    await db.setToken('jwt-new');
+
+    await db.registerPushToken('fcm', 'tok-123');
+    await db.signOut();
+
+    expect(requests, hasLength(2));
+    final (reg, dereg) = (requests.first, requests.last);
+    expect(reg.method, 'POST');
+    expect(reg.path, '/rest/v1/rpc/cairn_register_push_token');
+    expect(reg.body, '{"p_platform":"fcm","p_token":"tok-123"}');
+    expect(dereg.method, 'POST');
+    expect(dereg.path, '/rest/v1/rpc/cairn_deregister_push_token');
+    expect(dereg.body, '{"p_token":"tok-123"}');
+    for (final r in requests) {
+      expect(r.headers['apikey'], 'anon-key');
+      expect(
+        r.headers['authorization'],
+        'Bearer jwt-new',
+        reason: 'setToken must rotate the push credential too',
+      );
+    }
+    await server.close();
+  });
+
   test(
     'a token with URL-unsafe characters is percent-encoded on DELETE',
     () async {

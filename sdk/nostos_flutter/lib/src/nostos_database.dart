@@ -37,6 +37,7 @@ class NostosDatabase {
     this._seedToken,
     this._supabaseAuth, {
     this._localOnly = false,
+    this._anonKey,
   }) {
     // ADR-0037 §3: every SDK deregisters its push tokens in its sign-out hook
     // — a leaked registration would push the previous principal's data to the
@@ -62,8 +63,16 @@ class NostosDatabase {
     String? httpBase,
     String? token,
     Future<String?> Function()? sessionRefresh,
+    String? anonKey,
   }) {
-    final db = NostosDatabase._(nostos, schema, httpBase ?? '', token, false);
+    final db = NostosDatabase._(
+      nostos,
+      schema,
+      httpBase ?? '',
+      token,
+      false,
+      anonKey: anonKey,
+    );
     db._sessionRefresh = sessionRefresh;
     return db;
   }
@@ -78,6 +87,12 @@ class NostosDatabase {
   /// `DELETE /push-tokens/{token}`), derived from the same WS [url] the sync
   /// connection uses — see [_deriveHttpBase].
   final String _httpBase;
+
+  /// Direct mode only (ADR-0045): the project's publishable key. Non-null
+  /// means [_httpBase] is PostgREST (`{supabaseUrl}/rest/v1`) and the push
+  /// tokens go through the `nostos_*_push_token` RPCs that `nostos link --mode
+  /// direct --push` generates, not `nostos-server`'s `/push-tokens`.
+  final String? _anonKey;
 
   /// The explicit token passed to [connect], when auth wasn't Supabase. The
   /// push-token REST calls read this (or the live Supabase session, when
@@ -419,12 +434,16 @@ class NostosDatabase {
   /// [scope] is the change-log scope and the private Realtime channel this
   /// device may join (`sub:<user-uuid>`).
   ///
-  /// ponytail: the push-token REST seam ([registerPushToken]) points at a
-  /// `nostos-server` base that does not exist here, so it fails rather than
-  /// registering. Direct mode's equivalent already exists one layer down
-  /// (`PostgrestSource::register_push_token` → `cairn_register_push_token`);
-  /// wiring it up means threading that RPC through this class, which the
-  /// pilot does not need yet.
+  /// [registerPushToken] works here once the project was linked with
+  /// `nostos link --mode direct --push <url>`: it calls the generated RPC,
+  /// which files the token under this JWT's scopes. Rotate [token] with
+  /// [setToken] — the RPCs authenticate with the same credential as the pull.
+  ///
+  /// ponytail: no presence heartbeat (`cairn_heartbeat`) is sent, so the push
+  /// trigger treats every device as absent and rings even a foregrounded one
+  /// (once per scope per cooldown). A doorbell is idempotent, so the cost is
+  /// one redundant pull; send the heartbeat from the run loop if push volume
+  /// ever matters.
   static Future<NostosDatabase> direct({
     required String supabaseUrl,
     required String anonKey,
@@ -451,7 +470,17 @@ class NostosDatabase {
       counterFields: counterFields,
     );
     nostos.applySchema(schema.toClientTables());
-    return NostosDatabase._(nostos, schema, '', token, false);
+    final base = supabaseUrl.endsWith('/')
+        ? supabaseUrl.substring(0, supabaseUrl.length - 1)
+        : supabaseUrl;
+    return NostosDatabase._(
+      nostos,
+      schema,
+      '$base/rest/v1',
+      token,
+      false,
+      anonKey: anonKey,
+    );
   }
 
   /// Shared open path for [connect] and [supabase]: open the [Nostos]
@@ -841,8 +870,12 @@ class NostosDatabase {
   /// failure as fatal and ends its loop, which leaves the device silently
   /// unsynced for the rest of the session.
   ///
-  /// Tears nothing down; see [Nostos.setToken].
-  Future<void> setToken(String? token) => _nostos.setToken(token);
+  /// Tears nothing down; see [Nostos.setToken]. The push-token calls pick the
+  /// new token up too — they share the sync connection's credential.
+  Future<void> setToken(String? token) {
+    if (!_supabaseAuth) _seedToken = token;
+    return _nostos.setToken(token);
+  }
 
   /// Tear down the underlying [Nostos] session (sync loop + watch pump) AND the
   /// status listener. Safe to call with no subscription; idempotent.
@@ -974,15 +1007,20 @@ class NostosDatabase {
   /// `FirebaseMessaging.onTokenRefresh` on Android, APNs
   /// `didRegisterForRemoteNotificationsWithDeviceToken` on iOS.
   ///
+  /// In direct mode (ADR-0045) the same call is
+  /// `POST /rest/v1/rpc/cairn_register_push_token` with
+  /// `{"p_platform": …, "p_token": …}`; the RPC stamps the scope from the JWT.
+  ///
   /// Throws [ArgumentError] for an unknown platform, or
   /// [NostosPushTokenException] when the server replies anything other than
-  /// `204`. Registered tokens are deregistered automatically by [signOut].
+  /// `204` (any `2xx` in direct mode). Registered tokens are deregistered
+  /// automatically by [signOut].
   Future<void> registerPushToken(String platform, String token) async {
     if (_localOnly) {
       throw StateError(
         'registerPushToken() on a NostosDatabase.local database: there is no '
         'server to register with. Push requires a sync URL — reopen via '
-        'NostosDatabase.connect/open/supabase.',
+        'NostosDatabase.connect/open/supabase/direct.',
       );
     }
     if (!_pushPlatforms.contains(platform)) {
@@ -996,9 +1034,14 @@ class NostosDatabase {
       throw ArgumentError.value(token, 'token', 'must be non-empty');
     }
     await _pushTokensRest(
+      'register',
       'POST',
-      '/push-tokens',
-      body: jsonEncode(<String, String>{'platform': platform, 'token': token}),
+      _anonKey == null ? '/push-tokens' : '/rpc/cairn_register_push_token',
+      body: jsonEncode(
+        _anonKey == null
+            ? <String, String>{'platform': platform, 'token': token}
+            : <String, String>{'p_platform': platform, 'p_token': token},
+      ),
     );
     _registeredPushTokens.add(token);
   }
@@ -1008,8 +1051,11 @@ class NostosDatabase {
   /// receive on this token (e.g. the user disables notifications);
   /// [signOut] deregisters every session-registered token automatically.
   ///
+  /// Direct mode: `POST /rest/v1/rpc/cairn_deregister_push_token` with
+  /// `{"p_token": …}`.
+  ///
   /// Throws [NostosPushTokenException] when the server replies anything other
-  /// than `204`.
+  /// than `204` (any `2xx` in direct mode).
   Future<void> deregisterPushToken(String token) async {
     if (_localOnly) {
       throw StateError(
@@ -1017,10 +1063,20 @@ class NostosDatabase {
         'server to deregister from.',
       );
     }
-    await _pushTokensRest(
-      'DELETE',
-      '/push-tokens/${Uri.encodeComponent(token)}',
-    );
+    if (_anonKey == null) {
+      await _pushTokensRest(
+        'deregister',
+        'DELETE',
+        '/push-tokens/${Uri.encodeComponent(token)}',
+      );
+    } else {
+      await _pushTokensRest(
+        'deregister',
+        'POST',
+        '/rpc/cairn_deregister_push_token',
+        body: jsonEncode(<String, String>{'p_token': token}),
+      );
+    }
     _registeredPushTokens.remove(token);
   }
 
@@ -1037,6 +1093,7 @@ class NostosDatabase {
   /// phone). The refreshed token is re-read via [_restAuthToken], never
   /// threaded through by hand.
   Future<void> _pushTokensRest(
+    String operation,
     String method,
     String path, {
     String? body,
@@ -1050,9 +1107,14 @@ class NostosDatabase {
         response = await _restRoundTrip(method, path, body: body);
       }
     }
-    if (response.statusCode != 204) {
+    // A void RPC answers 204 or 200 depending on the PostgREST release; the
+    // Rust PostgrestSource accepts any 2xx for the same reason.
+    final ok = _anonKey == null
+        ? response.statusCode == 204
+        : response.statusCode >= 200 && response.statusCode < 300;
+    if (!ok) {
       throw NostosPushTokenException(
-        operation: method == 'POST' ? 'register' : 'deregister',
+        operation: operation,
         statusCode: response.statusCode,
         body: response.body,
       );
@@ -1069,6 +1131,8 @@ class NostosDatabase {
     final headers = <String, String>{
       if (body != null) 'content-type': 'application/json',
       if (token != null) 'authorization': 'Bearer $token',
+      // PostgREST's gateway rejects any request without the project key.
+      'apikey': ?_anonKey,
     };
     return _retryConn(
       () => method == 'POST'
