@@ -62,6 +62,7 @@ pub const RESERVED_TABLES: &[&str] = &[
     "device_presence",
     "push_cooldown",
     "push_config",
+    "push_templates",
     "http_request_queue",
     "_http_response",
 ];
@@ -849,6 +850,22 @@ create table if not exists cairn.push_cooldown (
   last_push_at timestamptz not null default now()
 );
 
+-- Visible pushes, per table (ADR-0037 §2 `visible`/`action`, the rows of server
+-- mode's NOSTOS_PUSH_TABLES). iOS never wakes a user-quit app for a silent
+-- doorbell, but it always shows an alert -- so a table the user must hear about
+-- gets a row here, and its changes arrive as the notification itself. `{{col}}`
+-- in title/body/route is filled from the changed row by the Edge Function; a
+-- non-null category makes it an action push. Operator-owned, like the secret:
+--   insert into cairn.push_templates values
+--     ('order_events', 'Order update', 'Your order is {{status}}', 'order_status', '/history/{{id}}');
+create table if not exists cairn.push_templates (
+  table_name text primary key,
+  title      text not null,
+  body       text not null,
+  category   text,
+  route      text
+);
+
 -- security definer, and here that IS the authority: the scope comes from the
 -- caller's own JWT via cairn.current_scopes(), never from an argument, so a
 -- device cannot register a token against somebody else's scope no matter what
@@ -906,7 +923,9 @@ $fn$;
 create or replace function cairn.wake_absent_devices() returns trigger
 language plpgsql security definer set search_path = '' as $fn$
 declare
-  v_cfg cairn.push_config%rowtype;
+  v_cfg  cairn.push_config%rowtype;
+  v_tpl  cairn.push_templates%rowtype;
+  v_body jsonb := jsonb_build_object('scope', new.scope);
 begin
   select * into v_cfg from cairn.push_config where id = 1;
   if v_cfg.endpoint is null or v_cfg.endpoint = '' then
@@ -924,25 +943,36 @@ begin
   ) then
     return null;
   end if;
-  -- The debounce, and the advisory lock in front of it is not an
-  -- optimization. One shared row per scope means a row lock per scope, held
-  -- until the writing transaction commits -- so a long transaction would block
-  -- EVERY other writer in that scope. A delayed sync is acceptable; a blocked
-  -- write is not. `pg_try_advisory_xact_lock` never waits: a writer that finds
-  -- the scope taken skips, which is exactly what the debounce would have told
-  -- it to do anyway. (Found by the pg e2e, which deadlocked without it.)
-  if not pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope)) then
-    return null;
-  end if;
-  insert into cairn.push_cooldown (scope, last_push_at) values (new.scope, now())
-  on conflict (scope) do update set last_push_at = now()
-   where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown;
-  if not found then
-    return null;
+  select * into v_tpl from cairn.push_templates where table_name = new.table_name;
+  if found and new.op <> 'delete' then
+    -- A visible push is the news itself, so it skips the debounce: a
+    -- debounced banner is a lost banner. The operator chose these tables, and
+    -- one request per row of them is the cost of choosing.
+    v_body := v_body || jsonb_build_object(
+      'row', new.row, 'title', v_tpl.title, 'body', v_tpl.body,
+      'category', v_tpl.category, 'route', v_tpl.route);
+  else
+    -- The debounce, and the advisory lock in front of it is not an
+    -- optimization. One shared row per scope means a row lock per scope, held
+    -- until the writing transaction commits -- so a long transaction would
+    -- block EVERY other writer in that scope. A delayed sync is acceptable; a
+    -- blocked write is not. `pg_try_advisory_xact_lock` never waits: a writer
+    -- that finds the scope taken skips, which is exactly what the debounce
+    -- would have told it to do anyway. (Found by the pg e2e, which deadlocked
+    -- without it.)
+    if not pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope)) then
+      return null;
+    end if;
+    insert into cairn.push_cooldown (scope, last_push_at) values (new.scope, now())
+    on conflict (scope) do update set last_push_at = now()
+     where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown;
+    if not found then
+      return null;
+    end if;
   end if;
   perform net.http_post(
     url     := v_cfg.endpoint,
-    body    := jsonb_build_object('scope', new.scope),
+    body    := v_body,
     headers := jsonb_build_object(
       'Content-Type', 'application/json',
       'Authorization', 'Bearer ' || coalesce(v_cfg.secret, '')
@@ -978,6 +1008,7 @@ grant execute on function public.cairn_push_targets(text) to service_role;
 alter table cairn.push_tokens     enable row level security;
 alter table cairn.device_presence enable row level security;
 alter table cairn.push_cooldown   enable row level security;
+alter table cairn.push_templates  enable row level security;
 "#
     );
 }

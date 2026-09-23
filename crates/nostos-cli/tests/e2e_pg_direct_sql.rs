@@ -741,3 +741,43 @@ async fn push_skips_awake_devices_and_debounces_the_rest() {
         .expect("reset");
     fx.teardown().await;
 }
+
+/// A table with a visible template pushes EVERY change, not one per cooldown:
+/// iOS shows an alert to a user-quit app but never wakes it for a silent
+/// doorbell, so for these tables the push is the only news the user gets, and
+/// a debounced one is a lost one (atlet, 2026-09-23).
+#[tokio::test]
+async fn a_visible_template_pushes_every_change_with_its_row() {
+    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+        eprintln!("skipping: set {E2E_FLAG}=1");
+        return;
+    }
+    let fx = Fixture::setup().await;
+    fx.client
+        .batch_execute(&format!(
+            "insert into cairn.push_templates values \
+               ('{}', 'Task update', 'Now: {{title}}', 'task_status', '/tasks/{{id}}');",
+            fx.tasks
+        ))
+        .await
+        .expect("template");
+
+    for i in 0..3 {
+        fx.insert("alice", &format!("visible {i}")).await;
+    }
+    assert_eq!(sent(&fx.client).await, 3, "no debounce on a visible table");
+
+    let body: serde_json::Value = fx
+        .client
+        .query_one("select body from net.sent order by id limit 1", &[])
+        .await
+        .expect("read the request")
+        .get(0);
+    assert_eq!(body["scope"], "sub:alice");
+    assert_eq!(body["title"], "Task update");
+    assert_eq!(body["body"], "Now: {title}", "the Edge Function fills it");
+    assert_eq!(body["category"], "task_status");
+    assert_eq!(body["route"], "/tasks/{id}");
+    assert_eq!(body["row"]["title"], "visible 0");
+    fx.teardown().await;
+}
