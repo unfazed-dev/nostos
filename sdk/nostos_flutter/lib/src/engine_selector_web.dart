@@ -33,3 +33,25 @@ Future<NostosEngine> createNostosEngine({
     ..start();
   return engine;
 }
+
+/// Direct mode is native-only for now: the loop lives in `nostos-client`
+/// (tokio + reqwest), and the web backend is `nostos-ffi-wasm`, which has
+/// neither. Throwing here keeps `flutter build web` compiling for an app that
+/// offers both modes, and fails loudly on the platform that cannot serve it.
+///
+/// ponytail: the ceiling is the transport, not the protocol — `PullCursor` is
+/// already WASM-clean. Porting means a fetch/WebSocket source behind the same
+/// `apply`/`apply_snapshot` calls in `nostos-ffi-wasm`.
+Future<NostosEngine> createDirectNostosEngine({
+  required String supabaseUrl,
+  required String anonKey,
+  required String scope,
+  String? token,
+  String? sqlitePath,
+  Map<String, String> counterFields = const <String, String>{},
+}) async {
+  throw UnsupportedError(
+    'direct mode is not available on web yet — use Nostos.connect against a '
+    'nostos-server, or run this build on iOS/Android/desktop.',
+  );
+}

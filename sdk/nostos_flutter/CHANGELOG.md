@@ -38,7 +38,7 @@ superset — highlights, newest first:
   `waitForFirstSync` resolves immediately (there is no first sync).
   `Nostos.withEngine` also grew optional `orSetTables`/`counterTables` so
   fake-engine tests can pin the CRDT tier declarations.
-- `syncStream(name, params).subscribe()` — PowerSync-shaped parameterized
+- `syncStream(name, params).subscribe()` — parameterized
   streams on the live session (P5 slice 8); web engine throws
   `UnimplementedError` (native-only v1).
 - Flutter-web engine (`WebNostosEngine`) over the shared `nostos-ffi-wasm`

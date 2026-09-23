@@ -357,9 +357,8 @@ cut when the release pipeline runs for real — an operator call.
 [`apps/atlet`](../apps/atlet) in this repo is the reference consumer, kept
 green in CI (analyze + full `flutter test`, 107 tests):
 
-- `lib/adapters/nostos_adapter.dart` — side-by-side with
-  `powersync_adapter.dart` behind the frozen `SyncAdapter` contract v1.1
-  (`apps/atlet/spec/adapter.md`): init/addSession/deleteSession/
+- `lib/adapters/nostos_adapter.dart` — implements the frozen `SyncAdapter`
+  contract v1.1 (`apps/atlet/spec/adapter.md`): init/addSession/deleteSession/
   watchSessions/watchProducts/connected/setConnected/signOut.
 - `lib/push/push_pilot.dart` — the push reference: FCM mobile + VAPID web,
   gated by `--dart-define=ATLET_PUSH_PILOT=true`, with the

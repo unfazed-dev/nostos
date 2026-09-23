@@ -131,8 +131,8 @@ abstract class NostosHandle implements RustOpaqueInterface {
   /// [`SqliteStorage`] the client binds at `subscribe()` time, and
   /// `with_storage` reaches the concrete backend the same way `rows_for`
   /// does in `emit_snapshot` below (the closure param is `&SqliteStorage`,
-  /// not `&Storage`, so `.query()` is callable in that position). Parity
-  /// feature P1 — see `docs/plans/powersync-sdk-parity-plan.md`.
+  /// not `&Storage`, so `.query()` is callable in that position). P1 read
+  /// feature.
   ///
   /// This is a read-side accessor on the same `Mutex<Connection>` as the
   /// write path; it shares no mutation surface with the outbox (see the
@@ -254,7 +254,7 @@ abstract class NostosHandle implements RustOpaqueInterface {
 
   /// Drop a stream by the id [`Self::subscribe_stream`] returned. Unknown
   /// id = no-op (idempotent). v1 leaves local rows in place — eviction is
-  /// separate; PowerSync behaves the same.
+  /// separate.
   ///
   /// # Errors
   /// Returns an error string if `subscribe()` hasn't been called.
@@ -301,7 +301,7 @@ abstract class NostosHandle implements RustOpaqueInterface {
   ///
   /// `op` is `"upsert"` (insert-or-update), `"delete"`, or `"patch"`
   /// (column-level UPDATE of an existing row — `payload` carries only the
-  /// columns to change; P3 PowerSync PATCH parity).
+  /// columns to change; P3 column-level PATCH).
   ///
   /// # Errors
   /// Returns an error string if `subscribe()` hasn't been called yet, `op`

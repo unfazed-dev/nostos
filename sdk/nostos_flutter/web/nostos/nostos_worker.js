@@ -477,7 +477,7 @@ self.onmessage = async (ev) => {
 // ---- Multi-tab follower proxy (2026-09-21) --------------------------------
 // A tab that lost the leader lock no longer runs a private memory engine with
 // its own socket: it forwards every command over a BroadcastChannel to the
-// leader tab's Worker (one OPFS handle, one socket — PowerSync's shared-engine
+// leader tab's Worker (one OPFS handle, one socket — a single shared-engine
 // shape, without a SharedWorker: SharedWorkerGlobalScope exposes no `Worker`
 // and opfs-sahpool needs a dedicated worker's FileSystemSyncAccessHandle).
 // Responses route back by request id; pushes (snapshot / status / writeResult

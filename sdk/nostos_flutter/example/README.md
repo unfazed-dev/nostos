@@ -23,7 +23,7 @@ invoices, 6 chat messages).
 > replication, so the tables must already exist upstream. For local dev,
 > `docker/pg-init/` seeds the Docker Postgres on boot; for Supabase, paste
 > [`supabase/schema.sql`](../../supabase/schema.sql) into the SQL editor (see
-> "Run it (Supabase)" below). This matches PowerSync — no sync tool provisions
+> "Run it (Supabase)" below). No sync tool provisions
 > your source schema.
 
 The app connects to `ws://127.0.0.1:8800/sync` by default
@@ -87,7 +87,7 @@ single flow — no separate step.
 
 ### Realtime chat (synced table = realtime stream)
 The **Chat** tab is a realtime messaging interface between providers and clients.
-This uses the 2026 local-first best practice (PowerSync / LiveStore pattern): the
+This follows current local-first practice: the
 synced `messages` table **IS** the realtime stream — no separate WebSocket. The
 view watches `messages` reactively via `watchMapped`; sending a message writes to
 the local outbox and it round-trips back through nostos replication in ~2-4s.

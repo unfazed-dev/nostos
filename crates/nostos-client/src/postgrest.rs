@@ -49,13 +49,13 @@ pub enum PostgrestError {
     BadUrl(String),
 
     /// The request never completed (DNS, TLS, connection, timeout). Retryable.
-    #[error("pull request failed: {0}")]
+    #[error("PostgREST request failed: {0}")]
     Transport(String),
 
     /// PostgREST answered, but not with a result set. `401`/`403` is the usual
     /// one and it means the JWT, the exposed schema, or the grants — not the
     /// protocol.
-    #[error("pull returned HTTP {status}: {body}")]
+    #[error("PostgREST returned HTTP {status}: {body}")]
     Status {
         /// The HTTP status code.
         status: u16,

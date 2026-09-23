@@ -1,7 +1,7 @@
 // Chat view — realtime messaging via the synced `messages` table.
 //
-// This is the 2026 local-first best practice (confirmed via research:
-// PowerSync, LiveStore, Electric): a synced table IS the realtime stream. No
+// This is the 2026 local-first best practice: a synced table IS the
+// realtime stream. No
 // separate WebSocket. Messages flow through nostos replication like any other
 // row; the chat view watches the table reactively via db.collection<Message>,
 // and sending a message writes to the local outbox → it round-trips back

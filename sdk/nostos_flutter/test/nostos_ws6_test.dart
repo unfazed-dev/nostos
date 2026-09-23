@@ -101,7 +101,7 @@ void main() {
 }
 
 /// A minimal typed record decoded from a row, with a `fromRow` factory — the
-/// PowerSync-parity convention this WS6 mapper wraps.
+/// row-decoding convention this WS6 mapper wraps.
 class Task {
   const Task({required this.pk, required this.title, required this.completed});
 
