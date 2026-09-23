@@ -44,6 +44,7 @@ pub struct WebPushRail {
     subject: String,
     /// Production rejects non-`https://` endpoints (SSRF guard); test-only
     /// seam for the plain-HTTP fixture server.
+
     #[cfg(test)]
     allow_http_endpoints: bool,
 }
@@ -181,22 +182,7 @@ impl WebPushRail {
             }
             None => {}
         }
-        let plain = match payload {
-            PushPayload::Silent { table, lsn } => {
-                json!({ "table": table, "lsn": lsn.0.to_string() })
-            }
-            PushPayload::Visible {
-                title,
-                body,
-                category,
-                ..
-            } => match category {
-                // `category` rides the (encrypted) payload so the client SW
-                // can map it to action buttons — same field FCM/APNs carry.
-                Some(c) => json!({ "title": title, "body": body, "category": c }),
-                None => json!({ "title": title, "body": body }),
-            },
-        };
+        let plain = plain_payload(payload);
         // set_payload borrows; the buffer must outlive build() (encryption
         // happens there).
         let plain_bytes = serde_json::to_vec(&plain).unwrap_or_default();
@@ -369,6 +355,37 @@ fn b64url(bytes: &[u8]) -> String {
     out
 }
 
+/// The (soon to be encrypted) JSON a service worker receives. Extracted so
+/// the shape is testable: everything after this is ECE ciphertext.
+fn plain_payload(payload: &PushPayload) -> serde_json::Value {
+    match payload {
+        PushPayload::Silent { table, lsn } => {
+            json!({ "table": table, "lsn": lsn.0.to_string() })
+        }
+        PushPayload::Visible {
+            title,
+            body,
+            category,
+            data,
+        } => {
+            // `category` rides the (encrypted) payload so the client SW
+            // can map it to action buttons — same field FCM/APNs carry.
+            let mut plain = json!({ "title": title, "body": body });
+            if let Some(c) = category {
+                plain["category"] = json!(c);
+            }
+            // Nested, unlike APNs: a Web Push payload has no vendor envelope
+            // to sit beside, and `event.data.json().data` is what a service
+            // worker reads — the same nesting the FCM JS SDK hands
+            // `onBackgroundMessage`.
+            if !data.is_empty() {
+                plain["data"] = json!(data);
+            }
+            plain
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +492,7 @@ mod tests {
                     title: "Tasks changed".into(),
                     body: "New items to sync".into(),
                     category: None,
+                    data: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -484,6 +502,29 @@ mod tests {
         assert_eq!(req.header("urgency"), Some("high"));
         assert_eq!(req.header("ttl"), Some("3600"));
         assert_eq!(req.header("topic"), Some("sync-tasks"));
+    }
+
+    #[test]
+    fn webpush_routing_keys_nest_under_data() {
+        let plain = plain_payload(&PushPayload::Visible {
+            title: "Order shipped".into(),
+            body: "On its way".into(),
+            category: Some("order_status".into()),
+            data: [("cairn_route".to_string(), "/orders/42".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        assert_eq!(
+            plain,
+            json!({
+                "title": "Order shipped", "body": "On its way",
+                "category": "order_status",
+                "data": { "cairn_route": "/orders/42" },
+            })
+        );
+        // No routing keys = no `data` key at all: an SW that checks for it
+        // must not find an empty object.
+        assert!(plain_payload(&silent()).get("data").is_none());
     }
 
     #[tokio::test]

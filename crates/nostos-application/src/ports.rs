@@ -191,6 +191,10 @@ pub enum PushTemplate {
         title: String,
         body: String,
         category: Option<String>,
+        /// Routing keys for the tap — values interpolate `{col}` like
+        /// title/body, so `/orders/{id}` becomes the deep link to the row
+        /// that just changed. Empty for a push nobody needs to route.
+        data: std::collections::BTreeMap<String, String>,
     },
 }
 
@@ -509,8 +513,8 @@ pub trait WriteBack: Send + Sync {
 
     /// Patch (column-level UPDATE) one existing row: `payload_json` is a JSON
     /// object of only the columns to change. Columns absent from the payload
-    /// are left untouched — unlike an upsert, a patch NEVER inserts. Matches
-    /// PowerSync's PATCH op-type (P3 parity). The `pk` identifies the row
+    /// are left untouched — unlike an upsert, a patch NEVER inserts (the P3
+    /// op-type). The `pk` identifies the row
     /// (v1 convention: pk column is `id`).
     ///
     /// A patch of a row that does not exist is a success (idempotent) — so a
@@ -640,7 +644,7 @@ pub trait OpLogWriter: Send + Sync {
 /// Reads a table's current rows as a one-shot snapshot, delivered to a
 /// freshly-subscribing session as `Insert` events BEFORE live fan-out — so a
 /// client that connects to an already-populated table sees pre-existing rows
-/// immediately (PowerSync parity), not nothing-until-the-first-mutation.
+/// immediately, not nothing-until-the-first-mutation.
 ///
 /// The transport calls this once per subscribe (after registering the session,
 /// before spawning the writer task) and delivers each returned event to THAT
@@ -826,7 +830,7 @@ pub trait OpLogSource: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Schema discovery (WS1 — Flutter PowerSync-style redesign, Option-C).
+// Schema discovery (WS1 — Flutter auto-schema redesign, Option-C).
 // ---------------------------------------------------------------------------
 
 /// One column in a synced table's schema, reported by [`SchemaSource`] so the
@@ -883,8 +887,7 @@ pub enum SchemaError {
 
 /// Read the publication's typed schema (tables/columns/SQLite-affinity) so a
 /// client can auto-build its typed tables (WS1). The Flutter SDK's default is
-/// to fetch this on connect rather than hand-write a `Schema` (the headline DX
-/// win over PowerSync).
+/// to fetch this on connect rather than hand-write a `Schema`.
 ///
 /// The schema-side sibling of [`SnapshotSource`]: same port/adapter shape,
 /// backed by `PgSchemaSource` under `NOSTOS_REPLICATOR=pg`. ponytail: no tenant

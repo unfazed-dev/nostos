@@ -1140,6 +1140,66 @@ async fn send_rate_limited_429_after_burst_other_tenant_unaffected() {
     assert_eq!(s7, reqwest::StatusCode::TOO_MANY_REQUESTS, "{body7}");
 }
 
+/// Routing keys (ADR-0037 §2a): the map a tap resolves to is accepted, and
+/// the keys a rail would eat are refused at the edge rather than silently
+/// dropped on the wire.
+#[tokio::test]
+async fn send_visible_routing_keys_validated_at_the_edge() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    let with_data = |data: serde_json::Value| {
+        json!({
+            "token": TOKEN_A,
+            "payload": {"visible": {"title": "t", "body": "b", "data": data}},
+        })
+    };
+
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &with_data(json!({"cairn_route": "/orders/42", "order_id": "42"})),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "routed: {body}");
+
+    // `aps` is APNs' own dictionary — our keys are its siblings.
+    let (status, body) = d
+        .post("/v1/send", Some(KEY_A), &with_data(json!({"aps": "x"})))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "aps: {body}");
+    assert!(
+        body["error"].as_str().expect("err").contains("data"),
+        "{body}"
+    );
+
+    // FCM reserves this one for itself.
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &with_data(json!({"google.x": "y"})),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "google.*: {body}");
+
+    // Over the 1024-byte serialized cap (APNs/FCM refuse 4096 total).
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &with_data(json!({"k": "x".repeat(1025)})),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "oversize: {body}");
+
+    // Exactly one send reached the rail: the three rejects never got there.
+    // 50ms debounce window + slack, same as the other dispatch assertions.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(*calls.lock().unwrap(), 1, "only the valid send dispatched");
+}
+
 /// Finding 2b: every capped field answers 400; the exact boundary passes.
 #[tokio::test]
 async fn send_field_caps_each_oversized_field_400() {

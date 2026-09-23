@@ -113,10 +113,14 @@ curl -s -X POST localhost:8090/v1/send \
   -H "Authorization: Bearer $API" -H 'Content-Type: application/json' \
   -d '{"token":"a1b2...","payload":{"silent":{"table":"tasks","lsn":"1234"}}}'
 
-# Visible notification (operator template, already interpolated)
+# Visible notification (operator template, already interpolated). Optional
+# `data` is where a tap lands: string->string routing keys the app reads back
+# from userInfo (APNs) / message.data (FCM) / event.data.json().data (Web
+# Push). ADR-0037 section 2a; reserved keys and the 1024-byte cap in
+# docs/api/push.md.
 curl -s -X POST localhost:8090/v1/send \
   -H "Authorization: Bearer $API" -H 'Content-Type: application/json' \
-  -d '{"token":"a1b2...","payload":{"visible":{"title":"Tasks changed","body":"You have new tasks"}}}'
+  -d '{"token":"a1b2...","payload":{"visible":{"title":"Tasks changed","body":"You have new tasks","data":{"cairn_route":"/tasks"}}}}'
 
 # Poll the append-only receipt log (outcome + echoed metadata per push)
 curl -s "localhost:8090/v1/receipts?since=0" -H "Authorization: Bearer $API"
