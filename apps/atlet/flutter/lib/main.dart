@@ -353,14 +353,7 @@ class _HomeScreenState extends State<HomeScreen> {
       'order banner: ${e.orderId.substring(0, 8)} '
       '${e.previousStatus} -> ${e.status} route=${historyRoute(e.id)}',
     );
-    // Out of the foreground the server's alert push (cairn.push_templates)
-    // already showed this event; a silent ring that woke the app to sync
-    // would otherwise post it a second time.
-    if (_pushPilotEnabled &&
-        !kIsWeb &&
-        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
-      return;
-    }
+    if (!postsOwnBanner(pushPilot: _pushPilotEnabled, web: kIsWeb)) return;
     // Web has no MethodChannel: the snackbar IS the foreground banner.
     if (kIsWeb) {
       _notify(payload['body']! as String);

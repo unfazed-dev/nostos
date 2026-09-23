@@ -60,4 +60,16 @@ void main() {
     expect(attemptsFor([b, a], 'ev-1'), [a]);
     expect(attemptsFor([b, a], 'ev-2').single.error, 'not authorized');
   });
+
+  test(
+    'with the push pilot on a phone, the server push is the only banner',
+    () {
+      // Caught 2026-09-23: every order update showed twice, the templated
+      // push and the app's own banner, app open or not.
+      expect(postsOwnBanner(pushPilot: true, web: false), isFalse);
+      expect(postsOwnBanner(pushPilot: false, web: false), isTrue);
+      // Direct mode's cairn-push sends to FCM tokens only; web keeps its snackbar.
+      expect(postsOwnBanner(pushPilot: true, web: true), isTrue);
+    },
+  );
 }

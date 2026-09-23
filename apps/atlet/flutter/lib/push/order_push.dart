@@ -87,6 +87,18 @@ void recordPushAttempt(PushAttempt attempt) {
   pushLog.value = [attempt, ...pushLog.value];
 }
 
+/// Whether the app posts its own banner for an order event, or leaves it to
+/// the server's templated push (`cairn.push_templates`, ADR-0037 §2b).
+///
+/// The push reaches a phone in every app state, open included: direct mode
+/// sends no presence heartbeat (see `NostosDatabase.direct`), so the trigger
+/// counts the device as absent, and AppDelegate's ForegroundBanner shows the
+/// push while the app is in front. A banner of our own would be the second
+/// copy. If a heartbeat ever ships, the open app gets no push, and this has
+/// to become "post while in the foreground".
+bool postsOwnBanner({required bool pushPilot, required bool web}) =>
+    web || !pushPilot;
+
 /// Attempts for one event, newest first.
 List<PushAttempt> attemptsFor(List<PushAttempt> all, String eventId) =>
     all.where((a) => a.eventId == eventId).toList();
