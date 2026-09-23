@@ -244,8 +244,7 @@ pub struct PendingWrite {
 /// server maps to an INSERT … ON CONFLICT DO UPDATE regardless of whether the
 /// row pre-existed; a patch is "change only these columns of an existing row."
 ///
-/// Patch matches PowerSync's PATCH op-type (P3 parity,
-/// `docs/plans/powersync-sdk-parity-plan.md`): column-level LWW, idempotent,
+/// Patch is the P3 column-level PATCH op-type: column-level LWW, idempotent,
 /// never inserts. "Deletes always win" — a patch and a delete racing on the
 /// same pk resolve to the row being gone (delete is terminal); a patch of an
 /// absent row is a no-op success (mirrors delete-of-missing).

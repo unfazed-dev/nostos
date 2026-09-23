@@ -356,7 +356,7 @@ struct StreamRegistry {
 
 /// A live sync-stream subscription (P5 §4). `unsubscribe()` (or drop) queues
 /// `unsubscribe_stream` and stops the reconnect re-send. v1 leaves local rows
-/// in place on unsubscribe — eviction is separate; PowerSync behaves the same.
+/// in place on unsubscribe — eviction is separate.
 pub struct StreamHandle {
     id: String,
     streams: Arc<std::sync::Mutex<StreamRegistry>>,
@@ -399,7 +399,7 @@ impl Drop for StreamHandle {
     }
 }
 
-/// The builder returned by [`SyncClient::sync_stream`] — PowerSync's
+/// The builder returned by [`SyncClient::sync_stream`] — the
 /// `syncStream(name, params).subscribe()` shape (P5 §4).
 pub struct StreamSubscription<'a, S>
 where
@@ -648,7 +648,7 @@ where
     }
 
     /// Declare a parameterized sync-stream subscription (P5 —
-    /// docs/plans/p5-sync-streams-design.md §4), PowerSync's
+    /// docs/plans/p5-sync-streams-design.md §4), the
     /// `syncStream(name, params).subscribe()` shape.
     ///
     /// Lazy: the `subscribe_stream` frame goes out on the live socket if one

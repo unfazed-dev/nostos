@@ -134,7 +134,7 @@ advance watermark LSN                ← durable checkpoint (ADR-0009, shipped)
 **Three properties that make this fast:**
 1. **O(changed rows × matching sessions)**, never O(all sessions). The `Predicate.table` index prunes the candidate set before evaluation.
 2. **Cheap clone** — `RowOp.payload` is `Arc<[u8]>`, so a 1-to-10,000 fan-out doesn't copy the payload 10,000 times.
-3. **Bounded backpressure** — per-session channels with a hard cap. A stalled client is dropped with a metric increment; it can never stall the router. (PowerSync's proposal #349 admits their full-reprocessing approach doesn't have this property.)
+3. **Bounded backpressure** — per-session channels with a hard cap. A stalled client is dropped with a metric increment; it can never stall the router.
 
 ---
 

@@ -11,7 +11,7 @@ import 'engine.dart' show ClientTableFfi;
 ///
 /// Build it either by parsing the server descriptor ([NostosSchema.fromSchemaDescriptor])
 /// — which [NostosDatabase.connect] does automatically when no `schema` is
-/// passed — or by DECLARING it in the app (PowerSync-style):
+/// passed — or by DECLARING it in the app:
 ///
 /// ```dart
 /// const schema = NostosSchema(tables: [

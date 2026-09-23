@@ -73,10 +73,10 @@ tables. The device groups a pull by `xid` and applies each group in **one SQLite
 transaction**. A transaction that touched three tables lands as three tables'
 worth of rows or none of them.
 
-That is the same property PowerSync's server-side checkpoints provide — "only
-fully committed transactions are part of the state… different tables and buckets
-are all included in the same consistent checkpoint" — obtained here from
-Postgres itself rather than from a service. Nostos's own `ReplicationEvent`
+That is the same property comparable sync engines' server-side checkpoints
+provide — "only fully committed transactions are part of the state… different
+tables and buckets are all included in the same consistent checkpoint" —
+obtained here from Postgres itself rather than from a service. Nostos's own `ReplicationEvent`
 already carries `txn_id` (`crates/nostos-domain/src/events.rs`), and
 `ApplyEngine` already applies at commit boundaries, so the client-side half of
 this **already exists**; only the frame source changes.
@@ -103,8 +103,7 @@ stores one `xid8`, not a timestamp per table:
 
 ```sql
 create function public.cairn_pull(since xid8, max_txns int default 200)
-returns table (horizon xid8, seq bigint, xid xid8,
-               table_name text, pk text, op text, row jsonb)
+returns jsonb   -- ONE value, not a set: see "Why a scalar" below
 language sql stable security invoker as $$
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
   page as (
@@ -121,6 +120,19 @@ language sql stable security invoker as $$
   order by c.xid, c.seq;
 $$;
 ```
+
+**Why a scalar.** PostgREST caps a set-returning response at `db-max-rows`
+— 1000 on a stock Supabase project — and announces the cut with nothing but a
+`content-range: 0-999/*` header on a `200 OK`. No 206, no error, and `Range`
+and `offset` are both ignored on an RPC, so there is no paging past it either.
+A page of `max_txns` transactions has no row bound at all, so the tail would be
+dropped and the device would then store a horizon *past rows it never saw* —
+silent, permanent loss, and invisible from the client. Returning one `jsonb`
+value makes the response one row however big it gets, so the cap cannot reach
+it; PostgREST renders a jsonb scalar as the bare array the device already
+parses, so the wire shape is unchanged. Measured 2026-09-22 against a real
+project: a 1010-row snapshot came back as 1000 rows, `200 OK`, with two whole
+tables missing from the payload.
 
 **The page is `max_txns` transactions, not `max_rows` rows — and that is
 load-bearing, not a preference.** A row limit knows nothing about transaction
@@ -269,8 +281,10 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    `cairn.wake_absent_devices()` trigger → `pg_net` → Edge Function, and the
    matching `PostgrestSource` methods. The reference function is
    `supabase/functions/cairn-push/index.ts` (data-only FCM v1, shared-secret
-   bearer, `--no-verify-jwt`). **Deploying it and supplying FCM credentials is
-   the operator's; nothing here has sent a real notification.**
+   bearer, `--no-verify-jwt`). `--push` writes the function into the app repo,
+   `--visible` adds templated alert pushes (ADR-0037 §2b), and `--deploy
+   --fcm-service-account <json>` rolls all of it out through the `supabase`
+   CLI. Firebase/APNs setup is still the operator's.
 
    Two findings from building it:
 
@@ -423,16 +437,16 @@ reason.
 
 Verified 2026-09-22: `flutter test test/` → **107 passed** on Flutter 3.47.5.
 
-Atlet is a Supabase-backed **Nostos vs PowerSync** app, and its shape is the
+Atlet is a Supabase-backed **multi-engine comparison** app, and its shape is the
 shape direct mode needs:
 
 - **`lib/adapters/sync_adapter.dart`** — an `abstract interface class SyncAdapter`
   of 17 methods (`watchSessions`, `placeOrder`, `signOut`, `connected`, `marks`…).
   Direct mode is a **third implementation of this interface**, nothing more.
-- **`lib/engine_registry.dart`** — `enum Engine { nostos, powersync }` plus an
-  `EngineRegistry` that hot-swaps them with a mutual-exclusion guard ("nostos and
-  powersync adapters must never both be" live). Add `Engine.cairnDirect` and the
-  app compares three engines behind one UI.
+- **`lib/engine_registry.dart`** — an `enum Engine` with a comparison-engine slot
+  alongside `nostos`, plus an `EngineRegistry` that hot-swaps them with a
+  mutual-exclusion guard (only one adapter may be live at a time). Add
+  `Engine.cairnDirect` and the app compares three engines behind one UI.
 - **`test/adapter_conformance_test.dart`** (282 lines) — "SyncAdapter
   conformance", already the one-suite-many-engines harness that this plan's step
   8 asks for. It runs against a `FakeAdapter`, so a direct-mode adapter inherits
@@ -449,19 +463,17 @@ seam, so it exercises direct mode only after step 3 gives it something to dial.
 
 ### Atlet's own migrations are the argument for direct mode, in SQL
 
-`apps/atlet/supabase/migrations/0002_powersync_replication.sql`:
-
-```sql
-create role powersync_role with replication bypassrls login;
-```
+`apps/atlet/supabase/migrations/0002_replication_publication.sql` originally
+created a login role `with replication bypassrls` for a second sync engine
+(dropped, repo and live, 2026-09-23).
 
 That is the credential the companion doc calls unshippable — `replication`
 **and** `bypassrls`, a key to every row in the database regardless of policy.
-It is fine here because only PowerSync's cloud holds it. It is exactly what an
+It is fine here because only a managed sync cloud holds it. It is exactly what an
 agency shipping one shared database to end-user devices cannot put in an APK.
 Direct mode ships the anon key and leans on RLS instead.
 
-`0004_replica_identity_full.sql` is the other half: `replica identity full` on
+`0005_replica_identity_full.sql` is the other half: `replica identity full` on
 all five tables, because "under the default (PK-only) identity, tenant-scoped
 delete fan-out silently drops the event and clients never see the row
 disappear." Direct mode does not need it — the change log captures `op = delete`
@@ -532,8 +544,8 @@ Three things nostos-server does for push today. Each needs a direct-mode answer:
 ### The one thing that cannot be argued away
 
 An OS-level wake requires APNs or FCM, and both authenticate the sender with a
-credential that must never ship in an APK. This is the `powersync_role` argument
-again, in a different place: **direct mode means no server the developer
+credential that must never ship in an APK. This is the shared-replication-role
+argument again, in a different place: **direct mode means no server the developer
 operates, not no server-side code.** The credential holder is an Edge Function —
 scale-to-zero, invoked by the same trigger that already fires the Realtime
 broadcast, so the atomicity argument at the top of this document covers it too.
@@ -643,7 +655,7 @@ holiday. So the generator now also emits:
 
 ```sql
 create or replace function public.cairn_snapshot()
-returns table (horizon xid8, table_name text, pk text, "row" jsonb)
+returns jsonb   -- one value, for the same reason as the pull
 language sql stable security invoker as $$
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
   select h.horizon, null::text, null::text, null::jsonb from h
@@ -701,8 +713,6 @@ them:
   sequence alternative.
 - RxDB, [replication protocol](https://rxdb.info/replication.html) — RESYNC on
   every reconnect; deterministic ordering.
-- PowerSync, [consistency](https://docs.powersync.com/architecture/consistency)
-  — what a cross-table checkpoint buys, Jepsen-verified.
 - Supabase, [custom schemas](https://supabase.com/docs/guides/api/using-custom-schemas) ·
   [Realtime authorization](https://supabase.com/docs/guides/realtime/authorization) ·
   [Broadcast](https://supabase.com/docs/guides/realtime/broadcast)

@@ -696,10 +696,17 @@ pub(crate) fn build_payload(
             title,
             body,
             category,
+            data,
         }) => PushPayload::Visible {
             title: interpolate(title, payload),
             body: interpolate(body, payload),
             category: category.clone(),
+            // Same `{col}` substitution as title/body — a route template is
+            // only useful if it names the row that changed.
+            data: data
+                .iter()
+                .map(|(k, v)| (k.clone(), interpolate(v, payload)))
+                .collect(),
         },
         _ => PushPayload::Silent {
             table: table.to_string(),
@@ -1084,6 +1091,11 @@ mod tests {
                     title: "New activity".into(),
                     body: "Order {id} changed ({missing})".into(),
                     category: None,
+                    // Routing keys interpolate by the same rules — a route
+                    // that cannot name the row that changed is useless.
+                    data: [("cairn_route".to_string(), "/orders/{id}".to_string())]
+                        .into_iter()
+                        .collect(),
                 },
             )],
             metrics,
@@ -1101,8 +1113,12 @@ mod tests {
                 title: "New activity".into(),
                 body: "Order ord-42 changed ()".into(),
                 category: None,
+                data: [("cairn_route".to_string(), "/orders/ord-42".to_string())]
+                    .into_iter()
+                    .collect(),
             },
-            "{{col}} interpolates; a missing column substitutes empty"
+            "{{col}} interpolates in title, body and routing keys; a missing column \
+             substitutes empty"
         );
     }
 
@@ -1133,6 +1149,7 @@ mod tests {
                     title: String::new(),
                     body: String::new(),
                     category: None,
+                    data: std::collections::BTreeMap::new(),
                 },
             )],
             live,

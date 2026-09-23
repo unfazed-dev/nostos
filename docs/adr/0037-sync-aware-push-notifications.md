@@ -14,7 +14,7 @@
 ## Context
 
 Users need OS-level push when the app is backgrounded or killed. No
-partial-replication engine ships this (research §1): PowerSync, ElectricSQL,
+partial-replication engine ships this (research §1): ElectricSQL,
 Replicache/Zero, Ditto, RxDB, WatermelonDB, InstantDB and Supabase all leave
 wake to OS schedulers or DIY FCM glue. Incumbent push tools are
 database-blind — FCM topics are public broadcast strings; every app hand-wires
@@ -59,6 +59,73 @@ checkpoint is the correctness mechanism. Because iOS kills apps receive only
 templates: a static per-table title/body with optional single-column
 interpolation. No rules engine, no scheduling, no A/B — that is the
 marketing-platform layer nostos explicitly does not build.
+
+### 2a. Routing keys on visible pushes — amendment 2026-09-23
+
+A visible push that cannot say *what it is about* dumps the user on the app's
+home screen. v1 carried `{title, body, category}`; an app could only infer
+the destination from `category`, which is a notification *class*, not a row.
+Every incumbent solves this the same way — routing data travels in the
+payload's data half — and the Atlet pilot proved the shape locally before
+nostos's wire could carry it.
+
+Visible payloads therefore carry an optional `data: map<string,string>`:
+
+| rail | where it lands | why |
+|---|---|---|
+| APNs | top-level siblings of `aps` | that dictionary *is* `userInfo` on tap (Apple, "Generating a remote notification") |
+| FCM | `message.data` (merged with action mode's `title`/`body`/`category`) | `data` is delivered in all three app states; `notification` alone is not |
+| Web Push | a `data` object inside the encrypted payload | what a service worker reads as `event.data.json().data` |
+
+String→string, not JSON: FCM's `data` is a `map<string,string>` on the wire,
+so any richer type has to be stringified anyway — nostos stringifies nowhere
+and the three rails stay byte-comparable.
+
+**Silent payloads do not get this.** A doorbell is `{table, lsn}`; a routing
+key on a wake-up is row data looking for an excuse.
+
+**Still not a data channel** (§2 stands). The payload is plaintext at the
+vendor, which is exactly Apple's own rule: an identifier the app resolves
+locally is fine, the record is not. Enforced, not merely documented —
+`validate_data` rejects the keys a rail would eat (`aps`; FCM's `from`,
+`message_type`, `notification`, `google.*`, `gcm.*`; nostos's own `title`,
+`body`, `category`, `table`, `lsn`) and caps the map at 1024 serialized bytes
+against APNs/FCM's 4096-byte ceiling.
+
+Two producers: `nostos-pushd`'s `POST /v1/send` takes the whole map, and
+`NOSTOS_PUSH_TABLES` grows one sugar — `orders:visible@/orders/{id}:…` sets
+`cairn_route` with the same `{col}` interpolation title/body use. One key
+rather than a map there because that config is a colon-delimited string; a
+map means JSON-in-env, and nobody has asked for a second key.
+
+### 2b. Visible pushes in direct mode — amendment 2026-09-23
+
+Direct mode shipped the doorbell only: `cairn.wake_absent_devices()` →
+`cairn-push` Edge Function → a silent `content-available` push. The Atlet pilot
+showed what §2 already said: iOS never wakes a user-quit app for a silent push
+and throttles the rest, so order updates only appeared once the app was
+reopened.
+
+`cairn.push_templates (table_name, title, body, category, route)` is the
+direct-mode `NOSTOS_PUSH_TABLES`, one row per visible table. A change to such a
+table posts `{scope, row, title, body, category, route}`. The Edge Function
+fills `{col}` and sends the fcm.rs shapes: `action` when category is set,
+`visible` when it is not. The row goes only to the customer's own function,
+and only the filled-in strings reach Apple or Google, which is the §2 posture.
+
+Templated tables skip the per-scope cooldown, because a debounced banner is a
+lost banner. The ceiling is one `pg_net` request per templated row, and the
+operator opted into that by choosing the table.
+
+The rows come from `nostos link --visible <entry>`, where `<entry>` uses the
+`NOSTOS_PUSH_TABLES` visible/action grammar, so one line of config works in
+both modes. The generated SQL replaces the whole set rather than merging into
+it. `--deploy --fcm-service-account <json>` then rolls out the rest through
+the `supabase` CLI: it applies the SQL with `pg_net`, mints the shared secret
+on both sides, and deploys the function. `--push` writes the function into the
+app repo, compiled into the binary so it matches the SQL it was generated
+with. Per app, only the Firebase/APNs setup and the app's notification
+categories are still manual.
 
 ### 3. Token registry in the customer's Postgres, tenant force-stamped
 

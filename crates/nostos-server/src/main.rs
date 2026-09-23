@@ -1125,7 +1125,7 @@ async fn main() -> anyhow::Result<()> {
     // ---- snapshot-on-subscribe adapter (ADR-0014) ----
     // Under `NOSTOS_REPLICATOR=pg` (feature `pg`) inject a real `PgSnapshotter`
     // so a freshly-subscribing client receives the table's pre-existing rows
-    // before live fan-out (PowerSync parity — closes the "Flutter app shows 1
+    // before live fan-out (closes the "Flutter app shows 1
     // of 5 rows" gap). Otherwise `snapshotter` stays `None` (the default set in
     // `SyncRouterState::new`) and subscribe-time snapshots are skipped.
     #[cfg(feature = "pg")]
@@ -1244,7 +1244,7 @@ async fn main() -> anyhow::Result<()> {
     // ---- typed-schema endpoint adapter (WS1) ----
     // Under `NOSTOS_REPLICATOR=pg` inject a `PgSchemaSource` so `GET /schema`
     // can serve the publication's tables/columns/affinities for the Flutter
-    // SDK's auto-schema (PowerSync-style redesign, Option-C). Otherwise
+    // SDK's auto-schema (Option-C redesign). Otherwise
     // `schema_source` stays `None` and `GET /schema` returns 404.
     #[cfg(feature = "pg")]
     if cfg.replicator == "pg" {
@@ -1610,6 +1610,37 @@ fn resolve_tenant_col<'a>(sync_auth: &str, tenant_column: &'a str) -> Option<&'a
     }
 }
 
+/// The one well-known routing key an operator can configure: where a tap on
+/// this table's notification should land. Anything richer goes through
+/// nostos-pushd's `/v1/send` (whose `data` is an arbitrary map).
+///
+/// ponytail: one key, not a map, because `NOSTOS_PUSH_TABLES` is a
+/// colon/semicolon string — a map means JSON-in-env. Promote it when a
+/// second key is actually asked for.
+const PUSH_ROUTE_KEY: &str = "cairn_route";
+
+fn push_route_data(
+    route: Option<&str>,
+    entry: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut data = std::collections::BTreeMap::new();
+    if let Some(route) = route {
+        if !route.starts_with('/') {
+            anyhow::bail!(
+                "NOSTOS_PUSH_TABLES: route {route:?} must start with '/' \
+                 (table:visible@/orders/{{id}}:<title>:<body>) in {entry:?}"
+            );
+        }
+        if route.chars().any(char::is_whitespace) {
+            anyhow::bail!("NOSTOS_PUSH_TABLES: route {route:?} must not contain whitespace");
+        }
+        data.insert(PUSH_ROUTE_KEY.to_string(), route.to_string());
+    }
+    nostos_infra::push::validate_data(&data)
+        .map_err(|e| anyhow::anyhow!("NOSTOS_PUSH_TABLES: {e} in {entry:?}"))?;
+    Ok(data)
+}
+
 fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<PushTablesConfig> {
     use nostos_application::ports::{PushTables, PushTemplate};
 
@@ -1637,6 +1668,21 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
                     Some((m, a)) => (m.trim(), Some(a)),
                     None => (rest.trim(), None),
                 };
+                // `visible@/orders/{id}` — the optional deep link a tap
+                // resolves to (ADR-0037 §2 amendment). `@` rather than one
+                // more `:` because the body is the greedy remainder: this
+                // syntax has no free colon position left.
+                let (mode, route) = match mode.split_once('@') {
+                    Some((m, r)) => (m.trim(), Some(r.trim())),
+                    None => (mode, None),
+                };
+                if route.is_some() && !matches!(mode, "visible" | "action") {
+                    anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: only visible/action entries take an @route \
+                         (a doorbell carries no routing keys): {entry:?}"
+                    );
+                }
+                let data = push_route_data(route, entry)?;
                 match (mode, args) {
                     ("silent", None) => PushTemplate::Silent,
                     ("silent", Some(_)) => {
@@ -1652,6 +1698,7 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
                                 title: title.trim().to_string(),
                                 body: body.trim().to_string(),
                                 category: None,
+                                data,
                             },
                             None => anyhow::bail!(
                                 "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
@@ -1685,6 +1732,7 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
                                     title: title.trim().to_string(),
                                     body: body.trim().to_string(),
                                     category: Some(category.to_string()),
+                                    data,
                                 },
                                 None => anyhow::bail!(
                                     "NOSTOS_PUSH_TABLES: \"action\" entries need a category, \
@@ -1723,6 +1771,7 @@ fn parse_push_tables(raw: &str, tenant_column: Option<&str>) -> anyhow::Result<P
                             title: String::new(),
                             body: String::new(),
                             category: None,
+                            data,
                         }
                     }
                     ("liveactivity", None) => anyhow::bail!(
@@ -3189,6 +3238,7 @@ mod parse_push_tables_tests {
                 // Body keeps further colons (greedy remainder semantics).
                 body: "Your order {id} is {status}:really".into(),
                 category: Some("order_status".into()),
+                data: std::collections::BTreeMap::new(),
             })
         );
 
@@ -3200,6 +3250,48 @@ mod parse_push_tables_tests {
 
         let err = parse_push_tables("orders:action", None);
         assert!(err.is_err(), "bare action mode is rejected");
+    }
+
+    #[test]
+    fn parses_route_suffix_into_a_routing_key() {
+        let cfg = parse_push_tables(
+            "orders:visible@/orders/{id}:New order:Order {id} placed;\
+             deliveries:action@/deliveries/{id}:order_status:Out for delivery:{id}",
+            None,
+        )
+        .expect("valid @route config");
+        assert_eq!(
+            cfg.tables.get("orders"),
+            Some(&PushTemplate::Visible {
+                title: "New order".into(),
+                body: "Order {id} placed".into(),
+                category: None,
+                // `{id}` stays a placeholder here — the router interpolates
+                // it against the row that actually committed.
+                data: [("cairn_route".to_string(), "/orders/{id}".to_string())]
+                    .into_iter()
+                    .collect(),
+            })
+        );
+        assert_eq!(
+            cfg.tables.get("deliveries").and_then(|t| match t {
+                PushTemplate::Visible { data, .. } => data.get("cairn_route"),
+                PushTemplate::Silent => None,
+            }),
+            Some(&"/deliveries/{id}".to_string()),
+            "action entries route too"
+        );
+
+        for bad in [
+            // A doorbell has nothing to route.
+            "orders:silent@/orders/{id}",
+            "orders@/orders/{id}",
+            // Relative routes and whitespace fail at startup, not in prod.
+            "orders:visible@orders/{id}:t:b",
+            "orders:visible@/orders/{id} x:t:b",
+        ] {
+            assert!(parse_push_tables(bad, None).is_err(), "{bad:?} must fail");
+        }
     }
 
     #[test]
@@ -3217,7 +3309,8 @@ mod parse_push_tables_tests {
             Some(&PushTemplate::Visible {
                 title: "New order".into(),
                 body: "Order {id} placed".into(),
-                category: None
+                category: None,
+                data: std::collections::BTreeMap::new(),
             })
         );
         assert_eq!(cfg.tables.get("absent"), None);
@@ -3262,7 +3355,8 @@ mod parse_push_tables_tests {
             Some(&PushTemplate::Visible {
                 title: String::new(),
                 body: String::new(),
-                category: None
+                category: None,
+                data: std::collections::BTreeMap::new(),
             })
         );
         assert_eq!(

@@ -1,8 +1,9 @@
-# Atlet — nostos vs PowerSync comparison suite
+# Atlet — nostos benchmark suite
 
 Benchmark-first training app (Atlet design) exercising every nostos SDK against
-one Supabase database, with PowerSync behind the same adapter for neck-to-neck
-internal evaluation.
+one Supabase database. The app runs direct-mode nostos (ADR-0045) and nothing
+else — no engine picker; the Analytics tab's suite is what still runs two
+engines, server-mode against direct-mode, behind the same adapter.
 
 ## Isolation rules
 - Not a Cargo workspace member. `make ci` and `sdk-e2e` never touch this tree.
@@ -10,5 +11,5 @@ internal evaluation.
 
 ## Numbers policy
 All numbers produced here are **internal evaluation — not a published benchmark**.
-Publication requires: FSL legal review + docs/BENCHMARK-METHODOLOGY.md conformance
-+ landing in benches/results/RESULTS.md.
+Publication requires docs/BENCHMARK-METHODOLOGY.md conformance + landing in
+benches/results/RESULTS.md.

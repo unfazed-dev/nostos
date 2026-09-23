@@ -1,5 +1,5 @@
 // Node smoke for @nostos-sync/web — proves the package `require()`s in node 22
-// and drives the wasm apply engine through the PowerSync-style facade.
+// and drives the wasm apply engine through the facade.
 //
 // REDUCED-SCOPE: does NOT exercise NostosSocket.connect() (the live WS
 // transport) — see index.js header. Apply engine only.

@@ -9,8 +9,8 @@
 
 **Title options (pick one):**
 
-- *Show HN: Nostos — a Rust, Apache-2.0 PowerSync alternative with 2-way offline sync*
-- *Show HN: We built a Postgres→SQLite sync engine in Rust that hits 833k ops/sec*
+- *Show HN: Nostos — a Rust, Apache-2.0 sync engine with 2-way offline sync*
+- *Show HN: We built a Postgres→SQLite sync engine in Rust that hits 2.6M ops/sec*
 - *Show HN: Nostos — local-first sync, Rust-fast, Apache-open, no write-back endpoints*
 
 ---
@@ -41,53 +41,39 @@ Postgres logical replication, 2-way offline, free self-host.
 
 ## The honest benchmark
 
-We measured server fan-out. PowerSync publishes no comparable aggregate fan-out
-figure — their published rates are ~2,000–4,000 ops/sec replication ingest
-(Postgres → PowerSync Service, a different pipeline stage) and 2,000–20,000
-ops/sec per-client sync ([their docs][ps-limits]).
+We measured server fan-out.
 
-[ps-limits]: https://docs.powersync.com/resources/performance-and-limits
+| Tier | Nostos | Drops |
+|------|-------|-------|
+| **1k clients** | **2,618,601 ops/sec** | **0%** |
+| 10k clients (Linux container) | 854,631 ops/sec | 0% |
 
-| Tier | Nostos | Drops | PowerSync comparator |
-|------|-------|-------|----------------------|
-| **1k clients** | **833,307 ops/sec** | **0%** | **none published** (no aggregate fan-out figure) |
-| 5k clients | 660k ops/sec | 0.91% | none published |
-| 10k clients (probe) | ~483k ops/sec | ~61.4% | throughput high, drops NOT under 1% |
-
-The **headline is 1k @ 0% drops, 833,307 ops/sec aggregate fan-out.**
+The **headline is 1k @ 0% drops, 2,618,601 ops/sec aggregate fan-out** (median of 3 passes).
 That's a real number, end-to-end through the fan-out pipeline (synthetic source
 on loopback, real router, real bounded WS fan-out, real WS client receive). The
 original Week-1 proof was 142k ops/sec aggregate fan-out (historical baseline);
-the v0.1 WS write-path + router work multiplied the 1k figure ~6×.
+the WS write-path, router and Arc-shared fan-out work since took it to 2.62M.
 
-The **10k-client story is honest, not pretty.** Throughput at 10k is still
-~483k ops/sec, but the current architecture drops ~61% of frames because
-`FanOutService::run` does a per-event full-store scan (`O(N×E)`) for ack/
-eviction. WS write batching (Task C3) helped at every tier but didn't fix the
-binding 10k cost — that's the **table-sharded router**, tracked for Phase 2.
-We're not shipping sub-1%-drops-at-10k yet; we're shipping "we know exactly
-what to fix and the 1k number is real."
+The **10k-client story is honest, not pretty.** In a Linux container 10k
+clients take all 50M events at 0% drops. On a loaded macOS host the same soak
+is load-sensitive: one run dropped 64.7% at load 10.7, the next dropped none.
+The 1k number is the headline; 10k is a regime we report, not a claim.
 
 **Never compare denominators**: the 1k number is end-to-end fan-out; the
 predicate engine's ~1.5M evals/sec is eval-only. Same-denominator only.
 
 ## Why we built it
 
-PowerSync is the incumbent. Their client is great. We're not attacking them on
-features — Sync Streams GA killed the old "static buckets" attack line and we
-retired it. The defensible wedges are:
+The defensible wedges are:
 
-1. **Rust server throughput.** PowerSync's server is Node/TS with a published
-   ~2–4k ops/sec replication-ingest rate and 2–20k ops/sec per-client sync (no
-   published aggregate fan-out figure). Nostos's is Rust — 833,307 ops/sec
+1. **Rust server throughput.** Nostos's server is Rust — 2,618,601 ops/sec
    aggregate fan-out @ 1k clients, 0% drops.
-2. **Apache-2.0 today.** PowerSync's server is FSL (2-year conversion, no-
-   compete). Enterprise legal hates FSL. Nostos is Apache-2.0 now.
+2. **Apache-2.0 today.** Server, core, and every SDK. Enterprise legal can
+   sign off without a source-available asterisk.
 3. **Write-back without endpoints.** Nostos writes to your Postgres for you
-   (ADR-0013). PowerSync's `uploadData()` is "you build and host it."
-   ElectricSQL is read-only.
-4. **Free, full-featured, unlimited self-host.** No FSL delay, no metered-per-
-   op Cloud tax on the OSS edition.
+   (ADR-0013). ElectricSQL is read-only.
+4. **Free, full-featured, unlimited self-host.** No license delay, no feature
+   gates.
 
 ## What's v0.1 and what's next
 
@@ -129,7 +115,7 @@ make web-demo                                          # /demo in browser
 ```
 
 We're looking for design partners — especially anyone currently hosting
-PowerSync's `uploadData()` who'd rather not. Founder contact in the repo.
+their own upload endpoint who'd rather not. Founder contact in the repo.
 
 We'd love feedback on: the benchmark methodology, the write-back trust
 boundary, and whether the 10k-client honesty reads right.

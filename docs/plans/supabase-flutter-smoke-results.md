@@ -91,4 +91,4 @@ publications, 0 public-schema tables. Test artifacts dropped: slots
 Nostos's core value proposition — Postgres logical replication → Rust fan-out →
 on-device apply, with server-enforced tenant isolation and typed payloads — is
 empirically solid against a real Supabase project. The remaining work is SDK-DX
-parity (see `powersync-sdk-parity-plan.md`), not engine correctness.
+parity, not engine correctness.

@@ -27,8 +27,9 @@ needs.
 
 Server-side, OID-keyed mapping inside `PgReplicator`, applied identically to
 BOTH the streaming path and the initial-snapshot path. Zero config knobs,
-zero client-side type machinery — this is the anti-PowerSync differentiator
-(no separate sync-rules/schema DSL) and matches the direction Supabase
+zero client-side type machinery — this is the differentiator against
+sync-rules/schema-DSL designs (no separate DSL to maintain) and matches the
+direction Supabase
 Realtime and current ElectricSQL both take.
 
 `RelationMeta.columns` becomes `Vec<(String, i32)>` — `(column name, type

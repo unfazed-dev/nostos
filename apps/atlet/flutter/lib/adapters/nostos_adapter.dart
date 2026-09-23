@@ -12,8 +12,44 @@ import 'sync_adapter.dart';
 /// they're unit-testable without the native Rust bridge — see
 /// nostos_adapter_test.dart.
 class NostosAdapter implements SyncAdapter {
+  /// Server mode: sync through a `nostos-server` `/sync` socket.
+  NostosAdapter() : engine = 'cairn', _open = _openServer;
+
+  /// Direct mode: sync straight with Supabase, no `nostos-server` anywhere
+  /// (ADR-0045). Everything past `init()` is the same code — the mode only
+  /// decides who is on the other end of the pull, so the adapter takes an
+  /// opener instead of having a second copy of itself.
+  ///
+  /// [anonKey] is the project's publishable key, the only credential the app
+  /// ships; RLS on the deployed schema is what actually gates the rows.
+  NostosAdapter.direct({required String anonKey})
+    : engine = 'cairn-direct',
+      _open =
+          (({
+            required String supabaseUrl,
+            required String accessToken,
+            required String userId,
+            required String dbDir,
+          }) => openNostosDirect(
+            supabaseUrl: supabaseUrl,
+            anonKey: anonKey,
+            accessToken: accessToken,
+            userId: userId,
+            dbDir: dbDir,
+          ));
+
   @override
-  final String engine = 'cairn';
+  final String engine;
+
+  /// How this adapter opens its database — the one thing server and direct
+  /// mode do differently.
+  final Future<NostosDatabase> Function({
+    required String supabaseUrl,
+    required String accessToken,
+    required String userId,
+    required String dbDir,
+  })
+  _open;
 
   /// nostos-server `/sync` endpoint for the Atlet local profile
   /// (docker-compose.atlet.yml binds nostos-server on 0.0.0.0:8080; `/sync`
@@ -21,6 +57,18 @@ class NostosAdapter implements SyncAdapter {
   static const String _nostosUrl = String.fromEnvironment(
     'NOSTOS_SYNC_URL',
     defaultValue: 'ws://localhost:8080/sync',
+  );
+
+  static Future<NostosDatabase> _openServer({
+    required String supabaseUrl,
+    required String accessToken,
+    required String userId,
+    required String dbDir,
+  }) => NostosDatabase.connect(
+    url: _nostosUrl,
+    token: accessToken,
+    schema: _schema,
+    sqlitePath: '$dbDir/cairn.sqlite',
   );
 
   // Created once, never recreated: the conformance test's `marks` listener
@@ -45,11 +93,14 @@ class NostosAdapter implements SyncAdapter {
   List<ProductRow>? _lastProducts;
   List<CartItemRow>? _lastCart;
   List<OrderRow>? _lastOrders;
+  List<OrderEventRow>? _lastOrderEvents;
   bool? _lastConnected;
   StreamController<List<CartItemRow>>? _cartController;
   StreamController<List<OrderRow>>? _ordersController;
+  StreamController<List<OrderEventRow>>? _orderEventsController;
   StreamSubscription<dynamic>? _cartSub;
   StreamSubscription<dynamic>? _ordersSub;
+  StreamSubscription<dynamic>? _orderEventsSub;
 
   /// Signed-in user id, stamped into cart/order write payloads because
   /// those tables are `user_id NOT NULL DEFAULT auth.uid()` and nostos-server
@@ -79,13 +130,14 @@ class NostosAdapter implements SyncAdapter {
     _productsController = StreamController<List<ProductRow>>.broadcast();
     _cartController = StreamController<List<CartItemRow>>.broadcast();
     _ordersController = StreamController<List<OrderRow>>.broadcast();
+    _orderEventsController = StreamController<List<OrderEventRow>>.broadcast();
     _connectedController = StreamController<bool>.broadcast();
 
-    final db = await NostosDatabase.connect(
-      url: _nostosUrl,
-      token: accessToken,
-      schema: _schema,
-      sqlitePath: '$dbDir/cairn.sqlite',
+    final db = await _open(
+      supabaseUrl: supabaseUrl,
+      accessToken: accessToken,
+      userId: userId,
+      dbDir: dbDir,
     );
     _db = db;
 
@@ -105,6 +157,7 @@ class NostosAdapter implements SyncAdapter {
       NostosTableSub(name: 'products'),
       NostosTableSub(name: 'cart_items'),
       NostosTableSub(name: 'orders'),
+      NostosTableSub(name: 'order_events'),
     ]);
 
     // Typed collection handles (ADR-0032 T2): the taught surface for "table,
@@ -121,6 +174,10 @@ class NostosAdapter implements SyncAdapter {
     final orders = db.collection<OrderRow>(
       table: 'orders',
       fromRow: orderFromRow,
+    );
+    final orderEvents = db.collection<OrderEventRow>(
+      table: 'order_events',
+      fromRow: orderEventFromRow,
     );
 
     // sessions: the sort needs `(server_committed_at IS NULL) DESC`, an
@@ -160,6 +217,13 @@ class NostosAdapter implements SyncAdapter {
       _lastOrders = items;
       _ordersController?.add(items);
     });
+
+    _orderEventsSub = orderEvents
+        .watch(orderBy: [Order.desc('created_at')])
+        .listen((items) {
+          _lastOrderEvents = items;
+          _orderEventsController?.add(items);
+        });
 
     _ready = true;
   }
@@ -228,6 +292,15 @@ class NostosAdapter implements SyncAdapter {
   );
 
   @override
+  Stream<List<OrderEventRow>> watchOrderEvents() => replayLatest(
+    _requireController(
+      _orderEventsController,
+      'watchOrderEvents() before init()',
+    ),
+    () => _lastOrderEvents,
+  );
+
+  @override
   Stream<List<OrderRow>> watchOrders() => replayLatest(
     _requireController(_ordersController, 'watchOrders() before init()'),
     () => _lastOrders,
@@ -287,11 +360,13 @@ class NostosAdapter implements SyncAdapter {
     await _productsSub?.cancel();
     await _cartSub?.cancel();
     await _ordersSub?.cancel();
+    await _orderEventsSub?.cancel();
     await _connSub?.cancel();
     _sessionsSub = null;
     _productsSub = null;
     _cartSub = null;
     _ordersSub = null;
+    _orderEventsSub = null;
     _connSub = null;
 
     await _db?.signOut(); // ADR-0029: full local wipe + client teardown
@@ -302,16 +377,19 @@ class NostosAdapter implements SyncAdapter {
     await _productsController?.close();
     await _cartController?.close();
     await _ordersController?.close();
+    await _orderEventsController?.close();
     await _connectedController?.close();
     _sessionsController = null;
     _productsController = null;
     _cartController = null;
     _ordersController = null;
+    _orderEventsController = null;
     _connectedController = null;
     _lastSessions = null;
     _lastProducts = null;
     _lastCart = null;
     _lastOrders = null;
+    _lastOrderEvents = null;
     _lastConnected = null;
 
     _deriver.reset();
@@ -324,15 +402,35 @@ class NostosAdapter implements SyncAdapter {
       _db ?? (throw StateError('NostosAdapter.init() must be called first'));
 
   /// PILOT (ADR-0037): register this device's push token against the live
-  /// engine's REST surface (`POST /push-tokens`, same JWT as `/sync`).
-  /// Passthrough so callers never hold the SDK directly; the SDK's sign-out
-  /// hook deregisters session-registered tokens automatically.
+  /// engine — `POST /push-tokens` in server mode, the
+  /// `cairn_register_push_token` RPC in direct mode (ADR-0045), same JWT as
+  /// the sync either way. Passthrough so callers never hold the SDK directly;
+  /// the SDK's sign-out hook deregisters session-registered tokens
+  /// automatically.
   Future<void> registerPushToken(String platform, String token) =>
       _requireDb().registerPushToken(platform, token);
 
   /// PILOT (ADR-0037): the access token the live session was opened with —
   /// what the push pilot persists for its background-isolate wake.
   String? get currentAccessToken => _accessToken;
+
+  /// The signed-in user — the background wake rebuilds the direct-mode scope
+  /// (`sub:<id>`) from it.
+  String? get currentUserId => _userId;
+
+  /// Swap the credential the live engine syncs with, without tearing it down.
+  ///
+  /// `NostosDatabase.direct` takes the token once; `NostosDatabase.supabase`
+  /// would have wired the rotation itself, but direct mode is opened by URL
+  /// and key, so the caller owns it. A Supabase JWT lives about an hour, and
+  /// an engine still holding the dead one does not merely sync slowly: the
+  /// doorbell counts an auth failure as fatal and ENDS its loop, so the device
+  /// goes quiet for the rest of the session while the UI still reads "Online"
+  /// (caught 2026-09-23 — an order sat at `shipped` for ten minutes).
+  Future<void> setToken(String accessToken) async {
+    _accessToken = accessToken;
+    await _requireDb().setToken(accessToken);
+  }
 
   Stream<T> _requireController<T>(StreamController<T>? c, String what) =>
       (c ?? (throw StateError('NostosAdapter: $what'))).stream;
@@ -352,6 +450,27 @@ StreamSubscription<NostosConnectionState> wireConnectionState(
 ) => connectionState.listen((state) {
   onConnected(state == NostosConnectionState.connected);
 });
+
+/// Opens Atlet's direct-mode database (ADR-0045). Shared by
+/// [NostosAdapter.direct] and the push pilot's background wake, which must
+/// land on the SAME SQLite file with the same scope.
+Future<NostosDatabase> openNostosDirect({
+  required String supabaseUrl,
+  required String anonKey,
+  required String accessToken,
+  required String userId,
+  required String dbDir,
+}) => NostosDatabase.direct(
+  supabaseUrl: supabaseUrl,
+  anonKey: anonKey,
+  // The scope the change-log trigger stamps, and the private Realtime
+  // channel this device may join — see .nostos/direct.sql's
+  // `cairn.current_scopes()`.
+  scope: 'sub:$userId',
+  token: accessToken,
+  schema: _schema,
+  sqlitePath: '$dbDir/cairn_direct.sqlite',
+);
 
 final NostosSchema _schema = NostosSchema(
   tables: [
@@ -394,6 +513,18 @@ final NostosSchema _schema = NostosSchema(
       ],
     ),
     NostosTable(
+      name: 'order_events',
+      primaryKey: const ['id'],
+      columns: [
+        NostosColumn.text('id'),
+        NostosColumn.text('order_id'),
+        NostosColumn.text('status'),
+        NostosColumn.text('previous_status'),
+        NostosColumn.text('note'),
+        NostosColumn.text('created_at'),
+      ],
+    ),
+    NostosTable(
       name: 'orders',
       primaryKey: const ['id'],
       columns: [
@@ -418,6 +549,18 @@ CartItemRow cartItemFromRow(Map<String, dynamic> row) => CartItemRow(
   productId: row['product_id'] as String,
   qty: _asInt(row['qty']),
   addedAt: DateTime.parse(row['added_at'] as String),
+);
+
+/// Maps a decoded `order_events` row to [OrderEventRow]. Read-only table —
+/// there is no matching write payload; migration 0007's trigger is the only
+/// writer.
+OrderEventRow orderEventFromRow(Map<String, dynamic> row) => OrderEventRow(
+  id: row['id'] as String,
+  orderId: row['order_id'] as String,
+  status: row['status'] as String,
+  previousStatus: row['previous_status'] as String?,
+  note: row['note'] as String?,
+  createdAt: DateTime.parse(row['created_at'] as String),
 );
 
 /// Maps a decoded `orders` row to [OrderRow].

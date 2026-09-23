@@ -7,10 +7,11 @@
 
 Nostos ships a JS core (`@nostos-sync/web` over `nostos-ffi-wasm`) for the browser. The
 obvious "cheap" path for a React Native SDK would be to reuse that JS core —
-mirroring how PowerSync's `@powersync/react-native` shares `@powersync/js`.
+mirroring how some sync SDKs share a single JS core across web and React
+Native.
 
-It does not work. PowerSync's JS core is **pure TypeScript**; Nostos's is
-**WebAssembly**. RN's default engine (Hermes) does not ship
+It does not work. That pattern works when the JS core is **pure TypeScript**;
+Nostos's is **WebAssembly**. RN's default engine (Hermes) does not ship
 `global.WebAssembly` in any release through RN 0.84 (Feb 2026): the official
 RN 0.84 blog has zero WebAssembly/WASM mentions, and Hermes issue #429 (opened
 2020-12) is still open with no linked PR. Maintainer guidance is that JS-only
@@ -40,8 +41,9 @@ public-API churn.
   dominated by WS + SQLite I/O, so the perf win is marginal; and it needs
   hand-written `unsafe` C++ that breaks the workspace `forbid(unsafe_code)` and
   the "reuse existing bindings" rule. Defer until a measurement demands it.
-- **Pure-TS re-implementation of the sync engine** (the PowerSync .NET/RN
-  approach) — rejected: abandons the Rust core + the throughput moat.
+- **Pure-TS re-implementation of the sync engine** (the approach some
+  cross-platform SDKs take) — rejected: abandons the Rust core + the
+  throughput moat.
 
 ## Consequences
 

@@ -2,7 +2,10 @@
 //! `local/`) at the app repo root. See ADR-0023 D1/D3. Distinct from the
 //! operator `nostos init` (publication + `nostos.toml`).
 
-use std::path::Path;
+use std::fmt::Write as _;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Result};
 use clap::Args;
@@ -36,6 +39,23 @@ pub struct LinkArgs {
     /// push objects are generated at all.
     #[arg(long)]
     pub push: Option<String>,
+    /// Direct mode, with `--push`: a table whose changes arrive AS the
+    /// notification, the only kind iOS shows a user-quit app (ADR-0037 §2b).
+    /// Repeat per table. Server mode's `NOSTOS_PUSH_TABLES` grammar:
+    /// `table:visible[@/route/{id}]:<title>:<body>` or
+    /// `table:action[@/route/{id}]:<category>:<title>:<body>`, `{col}` filled
+    /// from the changed row.
+    #[arg(long, requires = "push")]
+    pub visible: Vec<String>,
+    /// Direct mode, with `--push`: also roll it out through the `supabase` CLI
+    /// (`supabase login` first) — apply `.nostos/direct.sql` with `pg_net`, mint
+    /// the shared secret on both sides, deploy the `cairn-push` Edge Function.
+    #[arg(long, requires_all = ["push", "fcm_service_account"])]
+    pub deploy: bool,
+    /// The Firebase service-account JSON `--deploy` hands the Edge Function as
+    /// `FCM_SERVICE_ACCOUNT`. Read, never copied into the repo.
+    #[arg(long)]
+    pub fcm_service_account: Option<PathBuf>,
     /// Backend kind: `postgres` | `supabase` | `appwrite` (ADR-0023 D4).
     /// Defaults to `postgres` when omitted.
     #[arg(long)]
@@ -145,8 +165,24 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
         )
     })?;
     let tables = direct::plan(&rules, &args.public)?;
+    let templates = args
+        .visible
+        .iter()
+        .map(|spec| direct::parse_visible(spec))
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(t) = templates
+        .iter()
+        .find(|t| !tables.iter().any(|d| d.table == t.table))
+    {
+        bail!(
+            "--visible names `{}`, which is not a synced table: its changes never \
+             reach cairn.changes, so it could never push",
+            t.table
+        );
+    }
     let push = args.push.as_ref().map(|endpoint| direct::PushConfig {
         endpoint: endpoint.clone(),
+        templates,
         ..direct::PushConfig::default()
     });
     let sql = direct::render_with_push(&tables, &args.retention, push.as_ref());
@@ -165,6 +201,11 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
 
     let sql_path = cwd.join(DOT_NOSTOS_DIR).join(direct::OUTPUT_FILE);
     std::fs::write(&sql_path, &sql)?;
+    if push.is_some() {
+        let dir = cwd.join(PUSH_FN_DIR);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("index.ts"), PUSH_FN)?;
+    }
 
     println!("\u{2713} wrote `.nostos/config.json` (mode: direct)");
     println!(
@@ -173,18 +214,162 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
         tables.len(),
         args.retention
     );
-    println!(
-        "next: apply it \u{2014} `psql \"$DATABASE_URL\" -f .nostos/{}`",
-        direct::OUTPUT_FILE
-    );
-    println!("      then turn OFF \"Allow public access\" in the project's Realtime settings,");
     if push.is_some() {
+        println!("\u{2713} wrote `{PUSH_FN_DIR}/index.ts`");
+    }
+    if let (true, Some(service_account)) = (args.deploy, &args.fcm_service_account) {
+        deploy("supabase", cwd, &project_ref(url)?, &sql, service_account)?;
         println!(
-            "      push is included \u{2014} `create extension if not exists pg_net;`, set \
-             `cairn.push_config.secret`, and deploy supabase/functions/cairn-push."
+            "\u{2713} applied `.nostos/{}`, set the push secret, deployed cairn-push",
+            direct::OUTPUT_FILE
         );
+        println!("next: turn OFF \"Allow public access\" in the project's Realtime settings,");
+    } else {
+        println!(
+            "next: apply it \u{2014} `psql \"$DATABASE_URL\" -f .nostos/{}`",
+            direct::OUTPUT_FILE
+        );
+        println!("      then turn OFF \"Allow public access\" in the project's Realtime settings,");
+        if push.is_some() {
+            println!(
+                "      push is included \u{2014} rerun with `--deploy --fcm-service-account \
+                 <json>` to roll it out, or by hand: `create extension if not exists \
+                 pg_net;`, set `cairn.push_config.secret`, deploy {PUSH_FN_DIR}."
+            );
+        }
     }
     println!("      then `nostos doctor --mode direct` to check it landed.");
+    Ok(())
+}
+
+/// Where `--push` writes the Edge Function, the layout `supabase functions
+/// deploy` reads.
+const PUSH_FN_DIR: &str = "supabase/functions/cairn-push";
+
+/// The Edge Function source, compiled in so an app repo gets the version its
+/// SQL was generated against — the trigger's request body is their contract.
+const PUSH_FN: &str = include_str!("../../../../supabase/functions/cairn-push/index.ts");
+
+/// `https://<ref>.supabase.co` -> `<ref>`. `--deploy` drives a hosted project
+/// through the Management API, so a local or self-hosted URL is refused rather
+/// than guessed at.
+fn project_ref(url: &str) -> Result<String> {
+    url.trim_end_matches('/')
+        .strip_prefix("https://")
+        .and_then(|host| host.strip_suffix(".supabase.co"))
+        .filter(|r| !r.is_empty() && !r.contains(['.', '/']))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--deploy needs a hosted project (https://<ref>.supabase.co), got `{url}`"
+            )
+        })
+}
+
+/// `--deploy`: the push rollout, through the `supabase` CLI (`bin`, a parameter
+/// so the test can stand a recorder in for it).
+///
+/// The shared secret is minted here and written to both sides in one run, so
+/// they cannot drift; a step that fails leaves them apart until the next
+/// `--deploy`, which re-mints both. Secrets travel in 0600 files under the
+/// gitignored `.nostos/local/`, never in argv (visible to `ps`), and the files
+/// are removed whether or not the rollout succeeded.
+fn deploy(
+    bin: &str,
+    cwd: &Path,
+    project_ref: &str,
+    sql: &str,
+    service_account: &Path,
+) -> Result<()> {
+    use rand::RngCore;
+
+    let sa: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(service_account)?)?;
+    let sa_line = serde_json::to_string(&sa)?;
+    if ["project_id", "client_email", "private_key"]
+        .iter()
+        .any(|k| sa.get(k).is_none())
+        || sa_line.contains('\'')
+    {
+        bail!(
+            "{} is not a Firebase service-account JSON (needs project_id, client_email, private_key)",
+            service_account.display()
+        );
+    }
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let secret = bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+
+    let local = cwd.join(DOT_NOSTOS_DIR).join(LOCAL_DIR);
+    let sql_file = local.join("deploy.sql");
+    let env_file = local.join("nostos-push.env");
+    let result = (|| {
+        write_private(
+            &sql_file,
+            &format!(
+                "create extension if not exists pg_net;\n{sql}\n\
+                 update cairn.push_config set secret = '{secret}' where id = 1;\n"
+            ),
+        )?;
+        // Single-quoted: the dotenv parser keeps the key's `\n` escapes as-is.
+        write_private(
+            &env_file,
+            &format!("NOSTOS_PUSH_SECRET={secret}\nFCM_SERVICE_ACCOUNT='{sa_line}'\n"),
+        )?;
+        let sql_arg = sql_file.to_string_lossy();
+        let env_arg = env_file.to_string_lossy();
+        for args in [
+            &[
+                "db",
+                "query",
+                "--linked",
+                "--project-ref",
+                project_ref,
+                "-f",
+                &sql_arg,
+            ][..],
+            &[
+                "secrets",
+                "set",
+                "--project-ref",
+                project_ref,
+                "--env-file",
+                &env_arg,
+            ],
+            &[
+                "functions",
+                "deploy",
+                "cairn-push",
+                "--project-ref",
+                project_ref,
+                "--no-verify-jwt",
+                "--use-api",
+            ],
+        ] {
+            let status = Command::new(bin)
+                .args(args)
+                .current_dir(cwd)
+                .stdout(Stdio::null())
+                .status()?;
+            if !status.success() {
+                bail!("`supabase {}` failed ({status})", args[..2].join(" "));
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&sql_file);
+    let _ = std::fs::remove_file(&env_file);
+    result
+}
+
+fn write_private(path: &Path, content: &str) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(content.as_bytes())?;
     Ok(())
 }
 
@@ -243,4 +428,94 @@ fn ensure_gitignore_local(cwd: &Path) -> Result<()> {
     content.push('\n');
     std::fs::write(&path, content)?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A `supabase` stand-in: records its argv and the files it was handed,
+    /// then exits with `code`.
+    fn fake_supabase(dir: &Path, code: u8) -> String {
+        let bin = dir.join("supabase");
+        let log = dir.join("log");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho \"ARGS $*\" >> {log}\nprev=\nfor a in \"$@\"; do\n  \
+                 case \"$prev\" in -f|--env-file) cat \"$a\" >> {log};; esac\n  prev=$a\ndone\n\
+                 exit {code}\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin.to_string_lossy().into_owned()
+    }
+
+    fn app_dir() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nostos-link-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join(DOT_NOSTOS_DIR).join(LOCAL_DIR)).unwrap();
+        std::fs::write(
+            dir.join("sa.json"),
+            r#"{"project_id":"p","client_email":"e@p","private_key":"-----BEGIN-----\nk\n-----END-----\n"}"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn deploy_sets_one_secret_on_both_sides_and_leaves_no_secret_behind() {
+        let dir = app_dir();
+        let bin = fake_supabase(&dir, 0);
+        deploy(&bin, &dir, "abc", "select 1;", &dir.join("sa.json")).unwrap();
+
+        let log = std::fs::read_to_string(dir.join("log")).unwrap();
+        let secret = log
+            .split("set secret = '")
+            .nth(1)
+            .and_then(|rest| rest.get(..64))
+            .unwrap();
+        assert!(secret.chars().all(|c| c.is_ascii_hexdigit()), "{secret}");
+        assert!(log.contains("create extension if not exists pg_net;\nselect 1;"));
+        assert!(log.contains(&format!("NOSTOS_PUSH_SECRET={secret}\n")));
+        assert!(log.contains(r#"FCM_SERVICE_ACCOUNT='{"client_email":"e@p","#));
+        let argv: Vec<&str> = log.lines().filter(|l| l.starts_with("ARGS ")).collect();
+        assert_eq!(argv.len(), 3, "{log}");
+        assert!(argv[0].starts_with("ARGS db query --linked --project-ref abc -f "));
+        assert!(argv[1].starts_with("ARGS secrets set --project-ref abc --env-file "));
+        assert_eq!(
+            argv[2],
+            "ARGS functions deploy cairn-push --project-ref abc --no-verify-jwt --use-api"
+        );
+        assert!(
+            argv.iter().all(|l| !l.contains(secret)),
+            "the secret stays out of argv"
+        );
+
+        // A failed rollout still takes its secrets with it.
+        let failing = fake_supabase(&dir, 1);
+        assert!(deploy(&failing, &dir, "abc", "select 1;", &dir.join("sa.json")).is_err());
+        let local = dir.join(DOT_NOSTOS_DIR).join(LOCAL_DIR);
+        assert_eq!(
+            std::fs::read_dir(&local).unwrap().count(),
+            0,
+            "no secret file left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deploy_targets_only_a_hosted_project() {
+        assert_eq!(project_ref("https://abc.supabase.co/").unwrap(), "abc");
+        for url in [
+            "http://127.0.0.1:54321",
+            "https://db.example.com",
+            "https://.supabase.co",
+        ] {
+            assert!(project_ref(url).is_err(), "{url}");
+        }
+    }
 }

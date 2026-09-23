@@ -34,7 +34,7 @@ use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 
-use common::{decode_payload_hex, subscribe_and_collect};
+use common::subscribe_and_collect;
 
 /// Env gate. The test self-skips when PG isn't available so unit-test CI stays green.
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
@@ -194,11 +194,9 @@ async fn pg_insert_reaches_ws_client() {
         "expected at least one frame from the PG insert; got none"
     );
     // The payload is hex-encoded JSON on the wire; decode + match the title.
-    let saw = frames.iter().any(|f| {
-        let hex = f.get("payload").and_then(|v| v.as_str()).unwrap_or("");
-        let bytes = decode_payload_hex(hex);
-        String::from_utf8_lossy(&bytes).contains(&title)
-    });
+    let saw = frames
+        .iter()
+        .any(|f| common::frame_payload_contains(f, &title));
     assert!(
         saw,
         "inserted title '{title}' not found in any frame payload"

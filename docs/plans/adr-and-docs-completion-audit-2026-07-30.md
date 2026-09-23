@@ -26,7 +26,7 @@ two of them plausibly block a launch.
 | **ROADMAP:54** Flutter SDK | "(ADR-0015 — **deferred**.)" | **SHIPPED** with a first-class `Stream` | `NostosDatabase.watch` |
 
 **0013 is the one that matters.** The landing page sells "Direct Write-Back — no more
-`uploadData()` endpoints" as the differentiator against PowerSync, and `STRATEGY.md` builds the
+`uploadData()` endpoints" as the differentiator against comparable sync SDKs, and `STRATEGY.md` builds the
 competitive argument on it. A reader who checks the ADR is told the feature is a deferred design
 sketch. That is the single most misleading line in the repo.
 

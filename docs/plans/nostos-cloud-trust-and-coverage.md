@@ -4,7 +4,7 @@
 implementation without explicit operator go (standing scope rule: plans only,
 nostos tree only).
 
-Companion to `docs/plans/nostos-flutter-powersync-connection-redesign.md`. That
+Companion to the ratified client-SDK redesign plan. That
 plan covers the client SDK; this one covers the **server/cloud trust plane** the
 client never sees.
 

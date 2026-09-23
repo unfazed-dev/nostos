@@ -11,8 +11,8 @@ One adapter per (SDK, engine). The app and bench runner speak ONLY this surface.
   session's access token. Idempotent.
 - `signOut()` — disconnect + FULL local wipe (engine DB files deleted).
 - `addSession(session) -> id` / `deleteSession` (**v1.1 correction** — v1
-  also listed `updateSession` here. It was never implemented in `SyncAdapter`,
-  `NostosAdapter`, or `PowerSyncAdapter` — the pilot's UI has no session-edit
+  also listed `updateSession` here. It was never implemented in `SyncAdapter` or
+  `NostosAdapter` — the pilot's UI has no session-edit
   flow, so nothing ever called for it. Dropped rather than retained as
   "reserved": an unimplemented operation on a frozen contract is exactly the
   defect class this spec exists to prevent, and re-adding it later needs its

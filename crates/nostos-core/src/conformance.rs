@@ -91,7 +91,10 @@ fn a_snapshot_reaps_rows_deleted_while_away<S: Storage>(storage: S) {
         .expect("apply snapshot");
 
     let pks = engine.storage().pks_for_table("orders").expect("read back");
-    assert!(pks.contains(&"stays".to_string()), "a confirmed row survives");
+    assert!(
+        pks.contains(&"stays".to_string()),
+        "a confirmed row survives"
+    );
     assert!(
         !pks.contains(&"goes".to_string()),
         "a row the snapshot did not confirm must be reaped, not kept forever"

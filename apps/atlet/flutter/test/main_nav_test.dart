@@ -1,7 +1,7 @@
 // Tests for the I-1 fix (final-review-verdict.md): the bottom-nav shell in
-// main.dart that makes Shop and Analytics reachable from a signed-in Home.
-// benchStoreOpener is injected (mirrors AnalyticsScreen's own store
-// injection) so the Analytics tab never touches the real path_provider
+// main.dart that makes Shop and History reachable from a signed-in Home.
+// benchStoreOpener is injected (mirrors HistoryScreen's own store
+// injection) so the History tab never touches the real path_provider
 // platform channel under test.
 
 import 'dart:io';
@@ -30,8 +30,8 @@ void _mockConnectivityPlus() {
       .setMockMethodCallHandler(methodChannel, (MethodCall call) async => null);
 }
 
-/// See test/analytics_test.dart's `_settle` for why `pumpAndSettle()` is
-/// wrong here: AnalyticsScreen's indeterminate CircularProgressIndicators
+/// See test/history_test.dart's `_settle` for why `pumpAndSettle()` is
+/// wrong here: HistoryScreen's indeterminate CircularProgressIndicators
 /// (loading state, run/upload buttons) keep scheduling frames forever.
 Future<void> _settle(WidgetTester tester) async {
   for (var i = 0; i < 10; i++) {
@@ -66,7 +66,7 @@ void main() {
 
       expect(find.byKey(const Key('nav-tab-home')), findsOneWidget);
       expect(find.byKey(const Key('nav-tab-shop')), findsOneWidget);
-      expect(find.byKey(const Key('nav-tab-analytics')), findsOneWidget);
+      expect(find.byKey(const Key('nav-tab-history')), findsOneWidget);
     });
 
     testWidgets('starts on Home', (tester) async {
@@ -75,7 +75,7 @@ void main() {
 
       expect(find.widgetWithText(AppBar, 'Home'), findsOneWidget);
       expect(find.byType(ShopScreen), findsNothing);
-      expect(find.byKey(const Key('analytics-screen')), findsNothing);
+      expect(find.byKey(const Key('history-screen')), findsNothing);
     });
 
     testWidgets('tapping Shop shows ShopScreen', (tester) async {
@@ -85,8 +85,8 @@ void main() {
       await tester.tap(find.byKey(const Key('nav-tab-shop')));
       await tester.pump();
 
-      // No engine is selected in this harness (engineRegistry.current is
-      // null until switchTo() runs, which would hit a real adapter), so
+      // No engine is live in this harness (engineRegistry.current is null
+      // until start() runs, which would hit a real adapter), so
       // ShopScreen renders its "no engine" status branch, not the
       // shop-screen-keyed grid. Proving the tab wiring works only needs
       // ShopScreen to be reached, not loaded with data — shop_test.dart
@@ -94,19 +94,19 @@ void main() {
       expect(find.byType(ShopScreen), findsOneWidget);
     });
 
-    testWidgets(
-      'tapping Analytics shows AnalyticsScreen with the eval banner',
-      (tester) async {
-        await tester.pumpWidget(harness());
-        await tester.pump();
+    testWidgets('tapping History shows the order-event feed', (tester) async {
+      await tester.pumpWidget(harness());
+      await tester.pump();
 
-        await tester.tap(find.byKey(const Key('nav-tab-analytics')));
-        await _settle(tester);
+      await tester.tap(find.byKey(const Key('nav-tab-history')));
+      await _settle(tester);
 
-        expect(find.byKey(const Key('analytics-screen')), findsOneWidget);
-        expect(find.byKey(const Key('analytics-eval-banner')), findsOneWidget);
-      },
-    );
+      expect(find.byKey(const Key('history-screen')), findsOneWidget);
+      // No engine in this harness, so the feed is empty — and the bench UI
+      // that used to sit above it is gone (user request 2026-09-23).
+      expect(find.byKey(const Key('history-feed-empty')), findsOneWidget);
+      expect(find.byKey(const Key('bench-eval-banner')), findsNothing);
+    });
 
     testWidgets('tapping back to Home returns to the training screen', (
       tester,

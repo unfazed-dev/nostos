@@ -84,6 +84,48 @@ class Nostos {
     );
   }
 
+  /// Open a connection with no `nostos-server` in it: this device talks to
+  /// your Supabase project directly — PostgREST for the pull and the push,
+  /// Realtime for the doorbell, RLS for who may read what (ADR-0045).
+  ///
+  /// Everything below this line is identical to [connect]: same durable
+  /// outbox, same `watch` streams, same offline behaviour. What changes is who
+  /// enforces the rules — Postgres instead of a Rust process you operate.
+  ///
+  /// [scope] is the value your change-log trigger stamps, and the private
+  /// Realtime channel this device may join: `sub:<user-uuid>` for a
+  /// user-scoped app (`'sub:${supabase.auth.currentUser!.id}'`).
+  /// [anonKey] is the project's publishable key — the only credential that
+  /// ships inside the app, which is why the deployed policies, not this call,
+  /// decide what a device can see. Run `nostos doctor --mode direct` to check
+  /// them.
+  ///
+  /// [counterFields] names the column `cairn_increment` adds to, per table —
+  /// required before [counterIncrement] on that table (server mode reads it
+  /// from `NOSTOS_COUNTER_COLUMNS`; there is no server here to read it from).
+  ///
+  /// Native-only today; on web this throws [UnsupportedError].
+  static Future<Nostos> direct({
+    required String supabaseUrl,
+    required String anonKey,
+    required String scope,
+    String? token,
+    String? sqlitePath,
+    Map<String, String> counterFields = const <String, String>{},
+  }) async {
+    return Nostos._(
+      await createDirectNostosEngine(
+        supabaseUrl: supabaseUrl,
+        anonKey: anonKey,
+        scope: scope,
+        token: token,
+        sqlitePath: sqlitePath,
+        counterFields: counterFields,
+      ),
+      counterTables: counterFields.keys.toSet(),
+    );
+  }
+
   /// The set of tables the active subscription covers (empty before the first
   /// subscribe). Drives the [watch]/[write] membership checks.
   final Set<String> _subscribedTables = {};
@@ -148,7 +190,7 @@ class Nostos {
   Future<void> subscribe(String table, {String? where}) =>
       subscribeTables([NostosTableSub(name: table, whereSql: where)]);
 
-  /// P5 sync streams (docs/plans/p5-sync-streams-design.md), PowerSync-shaped:
+  /// P5 sync streams (docs/plans/p5-sync-streams-design.md):
   /// `db.syncStream('lists', {'owner': uid}).subscribe()`. The stream is
   /// server-defined (`[streams.<name>]` in `nostos_rules.toml`) and
   /// client-parameterized — [params] binds the template's `:param`
@@ -243,7 +285,7 @@ class Nostos {
   /// routes through here.
   Future<String> query(String sql) => _engine.query(sql: sql);
 
-  /// Reactive SQL watch (PowerSync parity P1). Re-runs [sql] whenever the
+  /// Reactive SQL watch (P1). Re-runs [sql] whenever the
   /// synced data changes (the same change-tick [watch] pumps) and emits the
   /// decoded result set. Requires an active subscription first (v1: one
   /// table per `Nostos` instance — see the class doc). `sql` typically uses
@@ -254,8 +296,7 @@ class Nostos {
   /// lets the caller project / filter / join with arbitrary SQL — at the
   /// cost of a fresh `SELECT` per tick.
   ///
-  /// Optional PowerSync-parity refinements (audit table "Full-parity audit"
-  /// in docs/plans/powersync-sdk-parity-plan.md):
+  /// Optional refinements:
   /// - [triggerOnTables] — tables whose mutation should re-run [sql].
   ///   Defaults to the subscribed table. v1 is one-table-per-handle, so
   ///   every entry MUST equal the subscribed table; any other name throws
@@ -275,7 +316,7 @@ class Nostos {
     if (_subscribedTables.isEmpty) {
       throw StateError('watchQuery("$sql") called without subscribe() first.');
     }
-    // PowerSync `triggerOnTables` parity: validate against the subscribed set.
+    // Validate `triggerOnTables` against the subscribed set.
     // Multi-table (D1/ADR-0022): any subscribed table is a legal trigger
     // (default = all subscribed). A name outside the set can never fire, so
     // fail loudly.
@@ -304,7 +345,7 @@ class Nostos {
   }
 
   /// Reactive typed-record watch (WS6, opt-in). Like [watchQuery] but decodes
-  /// each row into a typed record via [fromRow]. PowerSync parity: PowerSync
+  /// each row into a typed record via [fromRow]. [watchQuery]
   /// returns untyped `Map` rows and documents a user-written `fromRow`; this
   /// folds the `.map(fromRow)` boilerplate into the call. Requires an active
   /// subscription first (see [watchQuery]).
@@ -332,7 +373,7 @@ class Nostos {
   /// - `"delete"` — delete by primary key.
   /// - `"patch"` — column-level UPDATE of an existing row; [payload] carries
   ///   ONLY the columns to change, columns absent are untouched, and the row
-  ///   is never inserted (P3 PowerSync PATCH parity).
+  ///   is never inserted (P3 column-level PATCH).
   ///
   /// [table] must be in the active subscription (see the class doc).
   Future<int> write(
@@ -564,8 +605,7 @@ class Nostos {
   /// `duration` of the previous resets the timer; only the last tick of a
   /// burst propagates. Used by [watchQuery] to coalesce ticks BEFORE the
   /// `asyncMap` that runs the SQL, bounding `_engine.query` calls per
-  /// throttle window (PowerSync `throttle` contract — see
-  /// docs/plans/powersync-sdk-parity-plan.md).
+  /// throttle window.
   ///
   /// Single-subscription: matches `asyncMap`'s per-call semantics (each
   /// `watchQuery()` caller gets its own debounce pipeline). Cancelling the
@@ -664,7 +704,7 @@ class NostosSupabase {
   }
 }
 
-/// A declared sync stream (P5) — the PowerSync `syncStream(name, params)`
+/// A declared sync stream (P5) — the `syncStream(name, params)`
 /// shape. Call [subscribe] to activate it on the live session.
 class NostosSyncStream {
   const NostosSyncStream._(this._engine, this.name, this.params);
@@ -690,8 +730,7 @@ class NostosSyncStream {
 }
 
 /// A live sync-stream subscription (P5). [unsubscribe] stops the flow; v1
-/// leaves local rows in place (eviction is separate; PowerSync behaves the
-/// same).
+/// leaves local rows in place (eviction is separate).
 class NostosStreamSubscription {
   const NostosStreamSubscription._(this._engine, this.id);
 

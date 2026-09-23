@@ -49,7 +49,7 @@ Names below are canonical; each SDK uses its language casing (`waitForFirstSync`
 | `setToken(token?)` | live credential swap — never reconnect to refresh | ✅ Flutter; port |
 | `signOut()` | disconnect + **wipe** local data (ADR-0029: full-wipe IS the isolation) | ✅ all 9 |
 | `status` | reactive `SyncStatus` (conn, hasSynced, lastSyncedAt, pendingWrites, deadLetteredWrites, lastWriteError) | ✅ Flutter rich; others partial |
-| `waitForFirstSync()` | **NEW** — awaitable initial-sync barrier (PowerSync parity; today devs poll `hasSynced`). Must also resolve correctly on reconnect (advisor followup) | ❌ |
+| `waitForFirstSync()` | **NEW** — awaitable initial-sync barrier (comparable-SDK parity; today devs poll `hasSynced`). Must also resolve correctly on reconnect (advisor followup) | ❌ |
 
 ### T2 — Reads (all reactive verbs have one-shot twins)
 | Verb | Semantics | Today |
@@ -88,14 +88,14 @@ lint-friendly name that makes SQL usage greppable in app code.
 ## Excluded from v1 (deliberate, with re-entry triggers)
 | Excluded | Why | Add when |
 |---|---|---|
-| Attachments/blobs | PowerSync/RxDB have it; no Nostos app needs it yet | first app with media |
+| Attachments/blobs | RxDB has it; no Nostos app needs it yet | first app with media |
 | Relations/joins | compose two `watch` streams; document the pattern | measured pain in a real app |
 | Client migrations | view-based reads (ADR-0028) make schema evolution server-side | native columns ever materialize |
 | Fluent query builder | zero expressiveness over predicates, 9× codegen cost | predicate set outgrows v1 operators |
 | Pause/resume sync granularity | `disconnect()` covers it | background-fetch platform work |
 
 ## Coverage validation (survey 2026-08-07)
-Checked against: [PowerSync SDK updates](https://releases.powersync.com/announcements/react-native-client-sdk) (watch/writeTransaction/waitForFirstSync/attachments/executeBatch), [WatermelonDB CRUD](https://watermelondb.dev/docs/CRUD) (write-txn, observe, findAndObserve), [RxDB](https://rxdb.info/alternatives.html) (reactive queries, CRDT, attachments), Triplit/InstantDB/[Zero](https://marmelab.com/blog/2025/02/28/zero-sync-engine.html) (typed queries, transact, fetchById, pagination). Every competitor verb is either in the contract, consciously excluded above, or an artifact of their architecture (e.g. Zero's server-side ZQL).
+Checked against: [WatermelonDB CRUD](https://watermelondb.dev/docs/CRUD) (write-txn, observe, findAndObserve), [RxDB](https://rxdb.info/alternatives.html) (reactive queries, CRDT, attachments), Triplit/InstantDB/[Zero](https://marmelab.com/blog/2025/02/28/zero-sync-engine.html) (typed queries, transact, fetchById, pagination). Every competitor verb is either in the contract, consciously excluded above, or an artifact of their architecture (e.g. Zero's server-side ZQL).
 
 ## Sequencing (ratified)
 1. **This contract** (done — this document).
@@ -144,7 +144,7 @@ without Wave-2 opfs-sahpool durability. See ADR-0035.)*
   `SupabaseStorageAdapter` ships; everything else is interface-only.
 - **Blobs never transit the Nostos server.** This is a moat constraint, not a
   convenience: proxying blobs would pollute fan-out throughput and make the
-  server stateful. Same posture as PowerSync's `AbstractRemoteStorageAdapter`.
+  server stateful. Same posture as comparable sync SDKs' remote-storage-adapter interfaces.
 - Queue implementation lives **once, in `nostos-core`** (WASM-clean), surfaced
   to Flutter (filesystem blob store) and Web (OPFS blob store).
 

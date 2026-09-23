@@ -351,11 +351,13 @@ impl PayloadDto {
                 title,
                 body,
                 category,
+                data,
             } => Self::Visible(VisibleDto {
                 visible: VisibleBody {
                     title: title.clone(),
                     body: body.clone(),
                     category: category.clone(),
+                    data: data.clone(),
                 },
             }),
         }
@@ -384,6 +386,11 @@ struct VisibleBody {
     body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     category: Option<String>,
+    /// Omitted when empty: the daemon's DTO defaults it, so an operator
+    /// running an older nostos-pushd still accepts every push that carries no
+    /// routing keys.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    data: super::PushData,
 }
 
 #[derive(serde::Deserialize)]
@@ -1004,12 +1011,30 @@ mod tests {
                 title: "t".to_string(),
                 body: "b".to_string(),
                 category: None,
+                data: std::collections::BTreeMap::new(),
             }))
             .unwrap();
         assert_eq!(
             visible["visible"],
             serde_json::json!({"title": "t", "body": "b"}),
-            "None category omitted, not serialized as null"
+            "None category omitted, not serialized as null; empty data likewise — \
+             an older nostos-pushd must still accept this body"
+        );
+
+        let routed =
+            serde_json::to_value(PayloadDto::from_push(&super::super::PushPayload::Visible {
+                title: "t".to_string(),
+                body: "b".to_string(),
+                category: None,
+                data: [("cairn_route".to_string(), "/orders/42".to_string())]
+                    .into_iter()
+                    .collect(),
+            }))
+            .unwrap();
+        assert_eq!(
+            routed["visible"]["data"],
+            serde_json::json!({"cairn_route": "/orders/42"}),
+            "routing keys survive the delegation hop (ADR-0038 §3)"
         );
     }
 
@@ -1125,6 +1150,7 @@ mod tests {
                     title: "New activity".to_string(),
                     body: "Order {id} changed ({missing})".to_string(),
                     category: Some("ORDER".to_string()),
+                    data: std::collections::BTreeMap::new(),
                 },
             )]
             .into_iter()

@@ -31,7 +31,6 @@ Ecosystem survey (what devs already know):
 | Prisma | `prisma/schema.prisma` = single schema file, codegen to client | Schema is a repo artifact, client is generated |
 | FlutterFire | `flutterfire configure` emits `lib/firebase_options.dart` | Mobile runtimes can't read repo dirs — embed via codegen, not assets |
 | Expo | `.expo/` fully gitignored (local state only) | Dot-dirs signal "tool-owned" |
-| PowerSync | client `PowerSyncBackendConnector` (fetchCredentials/uploadData) | Backend specifics live behind a small connector interface |
 
 ## Decision
 
@@ -113,8 +112,8 @@ assembly of already-defined ports — change source (`ReplicatorStream`), snapsh
   absorbed; SDKs and `.nostos/` are unaffected.
 
 Client SDKs never branch on backend kind beyond auth credential acquisition (mirroring
-PowerSync's connector split): the generated config carries a `backend` block the SDK's
-auth module consumes; sync protocol code is backend-agnostic.
+the common backend-connector split pattern): the generated config carries a `backend`
+block the SDK's auth module consumes; sync protocol code is backend-agnostic.
 
 ## Consequences
 

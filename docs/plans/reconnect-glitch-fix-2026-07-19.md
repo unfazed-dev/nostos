@@ -25,18 +25,18 @@ persist. Glitch window = outbox-flush round-trip.
 ## Research synthesis (industry best practice, July 2026)
 
 ### The unanimous pattern — keep the client cursor OPAQUE
-Every mature sync engine (Replicache cookie, PowerSync operation_id, CouchDB
+Every mature sync engine (Replicache cookie, a comparable engine's operation_id, CouchDB
 sequence) keeps the **client cursor in a separate space from the DB's WAL LSN,
 opaque to the client; the server is the sole arbiter of resumability.** nostos's
 trap — letting a synthetic LSN participate in `resume_lsn < slot.restart_lsn` —
 "is not documented as such precisely because the standard pattern makes it
 impossible by construction." 🔥
 
-### The flash-fix pattern — write-checkpoint barrier (PowerSync)
+### The flash-fix pattern — write-checkpoint barrier
 *"While mutations are present in the upload queue, the client does not advance
 to a new checkpoint… the client never has to resolve conflicts locally."* 🔥🔥
 Gate applying incoming server data on the outbox being reconciled. Variants:
-- **Write-checkpoint barrier** (PowerSync): buffer incoming until outbox drains + acks.
+- **Write-checkpoint barrier** (a comparable sync engine): buffer incoming until outbox drains + acks.
 - **Replay-on-top** (Replicache): apply server data, replay pending mutations on top, reveal. Simpler — no buffering.
 
 ### Snapshot-vs-resume — resume is the norm, not the exception
@@ -75,7 +75,7 @@ re-apply the pending outbox writes locally **before the broadcast tick** so the
 optimistic state is always on top when the watch emits. Eliminates the flash.
 
 Scope: client-side only (`crates/nostos-client`). Additive — cannot break resume
-or slot-loss (worst case a no-op re-apply). Matches PowerSync's template per the
+or slot-loss (worst case a no-op re-apply). Matches a comparable engine's template per the
 research. Demo-ready.
 
 ## Phasing decision (operator-confirmed 2026-07-19)
@@ -90,8 +90,7 @@ reported symptom; Piece A closes the separate bandwidth/ADR-0009 gap.
 
 ## Sources (🔥 primary / 🌡️ secondary)
 PostgreSQL `pg_replication_slots` + logical-decoding docs; Morling on
-confirmed_flush_lsn vs restart_lsn; PowerSync Protocol + Consistency (write
-checkpoints) + Service Architecture; Replicache How-It-Works (cookie,
+confirmed_flush_lsn vs restart_lsn; Replicache How-It-Works (cookie,
 lastMutationID, pending discard) + Global/Row-Version strategies; CouchDB
 Replication Protocol §2.4.2.3.3 (common-ancestry → full replication); Weidner
 "Server Reconciliation" (2024); Kleppmann/Ink&Switch local-first; Fivetran/Estuary/PeerDB

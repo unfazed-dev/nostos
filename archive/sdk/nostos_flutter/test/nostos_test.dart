@@ -312,7 +312,7 @@ void main() {
           fake.elapse(const Duration(milliseconds: 100));
 
           // After the window closes: exactly ONE query for the whole
-          // burst — PowerSync's throttle coalesce contract (N rapid ticks
+          // burst — the throttle coalesce contract (N rapid ticks
           // → ≤1 re-query).
           expect(engine.queries.length, 1);
           expect(emitted.length, 1);

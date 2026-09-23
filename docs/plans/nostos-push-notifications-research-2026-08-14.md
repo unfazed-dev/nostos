@@ -8,7 +8,7 @@ full agent logs in the session archive.
 ## 1. The territory is unoccupied
 
 No Postgres→SQLite partial-replication engine ships built-in device push:
-PowerSync (docs recipes only), ElectricSQL, Replicache/Zero, Ditto (sitemap-level
+ElectricSQL, Replicache/Zero, Ditto (sitemap-level
 negative — no public push docs at all), RxDB, WatermelonDB, InstantDB, Supabase
 (guides to DIY Edge Function + FCM). Nearest neighbor: Convex's first-party
 Expo-push component — user-targeted visible notifications, not sync-aware wake.

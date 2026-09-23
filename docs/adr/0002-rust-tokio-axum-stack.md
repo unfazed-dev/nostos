@@ -5,7 +5,7 @@
 
 ## Context
 
-The server's job: consume a Postgres logical-replication stream, evaluate each row change against thousands of live authenticated predicates, and fan matching events out to thousands of concurrent WebSocket clients — with bounded backpressure and low tail latency. PowerSync's published ceiling (~2–4k ops/sec) is a Node.js-process ceiling; we need to materially beat it.
+The server's job: consume a Postgres logical-replication stream, evaluate each row change against thousands of live authenticated predicates, and fan matching events out to thousands of concurrent WebSocket clients — with bounded backpressure and low tail latency. A single-threaded Node.js event loop caps this class of workload around 2–4k ops/sec; we need to materially beat that ceiling.
 
 ## Decision
 
@@ -29,5 +29,5 @@ The server's job: consume a Postgres logical-replication stream, evaluate each r
 ## Alternatives considered
 
 - **Go.** Fast enough and simpler, but GC pauses hurt tail latency at 10k connections; weaker ecosystem for PG logical replication; doesn't give the "Rust-fast" marketing wedge.
-- **Node.js / TypeScript** (what PowerSync uses). Explicitly rejected — we'd replicate their ceiling.
+- **Node.js / TypeScript.** Explicitly rejected — a single-threaded event loop reproduces the exact throughput ceiling we're trying to beat.
 - **Elixir/OTP** (what ElectricSQL uses). Excellent for many connections, but no "Rust-fast" story and a smaller pool of contributors.

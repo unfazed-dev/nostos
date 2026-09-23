@@ -23,7 +23,6 @@ Facts only; all sources fetched 2026-08-17. Crate stats from the crates.io API.
 - https://developers.google.com/identity/protocols/oauth2/service-account
 
 ## Competitor behavior
-- **PowerSync**: no push-notification delivery documented; SDK reference documents sync only ("push real-time updates" = sync wording, not device push). https://docs.powersync.com/client-sdks/reference/react-native-and-expo
 - **ElectricSQL**: no push-notification docs found. https://electric-sql.com/docs
 - **Supabase**: no first-party push; official guide is a DIY Edge Functions example calling FCM/APNs via Expo from user code. https://supabase.com/docs/guides/functions/examples/push-notifications
 - **Firebase**: FCM itself is the first-party push layer; app servers still call the v1 API themselves. https://firebase.google.com/docs/cloud-messaging

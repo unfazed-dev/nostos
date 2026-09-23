@@ -16,9 +16,15 @@
 // anyone who learns the URL. `nostos doctor --mode direct` fails if the secret
 // is unset.
 //
-// The payload carries no data — only "there is something for you". The device
+// The doorbell carries no data — only "there is something for you". The device
 // wakes, pulls through `cairn_pull`, and RLS decides what it may see. A
 // doorbell that carried rows would be a second, unauthorized read path.
+//
+// The exception is a table the operator gave a template in
+// `cairn.push_templates` (ADR-0037 §2): iOS never wakes a user-quit app for a
+// silent push, so there the push IS the notification. The trigger posts the
+// template and the changed row; only the filled-in title/body/route leave for
+// Apple/Google, and only to the tokens of the scope the row was logged under.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
@@ -30,7 +36,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response("forbidden", { status: 403 });
   }
 
-  const { scope } = await req.json();
+  const { scope, row, title, body, category, route } = await req.json();
   if (typeof scope !== "string" || scope.length === 0) {
     return new Response("missing scope", { status: 400 });
   }
@@ -53,34 +59,64 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const accessToken = await mintFcmToken();
   const project = JSON.parse(Deno.env.get("FCM_SERVICE_ACCOUNT")!).project_id;
 
-  // Data-only, high priority: the OS wakes the app, the app pulls. A
-  // notification-only message would render a banner and never run code.
+  // No template: data-only, high priority — the OS wakes the app, the app
+  // pulls. A notification-only message would render a banner and never run code.
+  const message = title
+    ? visible(fill(title, row), fill(body, row), category, route && fill(route, row))
+    : {
+      data: { cairn: "ring" },
+      android: { priority: "HIGH" },
+      apns: {
+        headers: { "apns-priority": "5", "apns-push-type": "background" },
+        payload: { aps: { "content-available": 1 } },
+      },
+    };
   const results = await Promise.allSettled(
-    tokens.filter((t) => t.platform === "fcm").map((t) =>
-      fetch(`https://fcm.googleapis.com/v1/projects/${project}/messages:send`, {
+    tokens.filter((t) => t.platform === "fcm").map(async (t) => {
+      const res = await fetch(`https://fcm.googleapis.com/v1/projects/${project}/messages:send`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          message: {
-            token: t.token,
-            data: { cairn: "ring" },
-            android: { priority: "HIGH" },
-            apns: {
-              headers: { "apns-priority": "5", "apns-push-type": "background" },
-              payload: { aps: { "content-available": 1 } },
-            },
-          },
-        }),
-      })
-    ),
+        body: JSON.stringify({ message: { token: t.token, ...message } }),
+      });
+      // fetch resolves on a 4xx too: an UNREGISTERED token is not a send.
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+    }),
   );
 
-  const sent = results.filter((r) => r.status === "fulfilled").length;
-  return Response.json({ scope, sent, of: tokens.length });
+  const errors = results.flatMap((r) => r.status === "rejected" ? [String(r.reason)] : []);
+  return Response.json({ scope, sent: results.length - errors.length, of: tokens.length, errors });
 });
+
+/// `{col}` → that column of the changed row, as server mode's
+/// NOSTOS_PUSH_TABLES templates do.
+function fill(template: string, row: Record<string, unknown> | null): string {
+  return template.replace(/\{(\w+)\}/g, (_, col) => String(row?.[col] ?? ""));
+}
+
+/// The FCM v1 shapes of crates/nostos-infra/src/push/fcm.rs, so a direct-mode
+/// app renders exactly what a server-mode one did.
+function visible(title: string, body: string, category?: string, route?: string) {
+  const data: Record<string, string> = route ? { cairn_route: route } : {};
+  if (category) {
+    // Action push: iOS draws `aps.alert` with the app-registered category's
+    // buttons, killed app included. Android gets no `notification` block, so
+    // the HIGH data message reaches the app, which posts it with the actions.
+    return {
+      data: { ...data, title, body, category },
+      android: { priority: "HIGH", ttl: "3600s" },
+      apns: { payload: { aps: { alert: { title, body }, sound: "default", category } } },
+    };
+  }
+  return {
+    notification: { title, body },
+    data,
+    android: { priority: "HIGH", ttl: "3600s" },
+    apns: { payload: { aps: { sound: "default" } } },
+  };
+}
 
 /// OAuth2 JWT-bearer flow for the FCM HTTP v1 API — the service account signs
 /// an assertion, Google exchanges it for a one-hour access token.

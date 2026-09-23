@@ -4,8 +4,7 @@ The native Rust client for Nostos: connect to a nostos-server `/sync` endpoint,
 apply replicated frames to a durable on-device SQLite store, checkpoint the LSN,
 and reconnect with `resume_lsn` on drop. This is the most mature Nostos client —
 `#![forbid(unsafe_code)]`, fully tested, workspace `make ci`-gated, and proven
-in live-Supabase e2e (`tests/e2e_pg_sync.rs`). For reference, PowerSync's Rust
-SDK is Alpha.
+in live-Supabase e2e (`tests/e2e_pg_sync.rs`).
 
 ## Public API
 
@@ -20,7 +19,7 @@ SDK is Alpha.
 - `checkpoint() -> Result<Lsn>` — flush the apply LSN.
 - `subscribe_changes() -> broadcast::Receiver<ApplyOutcome>` — change-tick feed.
 - `with_storage(f) -> Result<R, ClientError>` — run a closure on the concrete
-  `SqliteStorage` (e.g. `query(sql)` — PowerSync-parity P1).
+  `SqliteStorage` (e.g. `query(sql)` — P1 read surface).
 
 `SqliteStorage` — real `rusqlite` persistence: opaque row bytes per
 `(table, pk)` + a `cairn_meta` checkpoint, applied atomically.

@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod direct;
 pub mod doorbell;
 /// `#[cfg(feature = "iroh")]` — ADR-0041 spike: dial-by-scheme for
 /// `iroh://` sync URLs (WebSocket handshake over an iroh bidirectional
@@ -45,6 +46,7 @@ pub use client::{
     ClientError, SessionOutcome, StreamDecl, StreamHandle, StreamSubscription, SyncClient,
     SyncClientConfig, TableSub, WriteQueueStatus,
 };
+pub use direct::{DirectClient, SyncOutcome};
 pub use doorbell::{listen, DoorbellConfig, DoorbellError, Inbound};
 pub use postgrest::{DrainOutcome, PostgrestError, PostgrestSource, MAX_PAGES_PER_DRAIN};
 pub use sqlite::SqliteStorage;

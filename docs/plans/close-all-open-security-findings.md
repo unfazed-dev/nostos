@@ -358,7 +358,7 @@ Same host (`unfazed-macbook-air.local`, 10 cores), same profile
 plugin (`start.mjs` 1.0.18) were each pegged at ~100% CPU, stealing roughly half
 the box. The recorded baseline was taken on an idle machine. Comparing the two
 would break the same-conditions rule in `docs/BENCHMARK-METHODOLOGY.md` exactly
-the way a cross-stage PowerSync comparison would.
+the way a cross-stage competitor comparison would.
 
 What the run *does* establish, and what contention cannot fake: **100,000,000
 events delivered, 100,000,000 matched, 0.00% dropped.** The three-valued

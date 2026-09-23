@@ -3,8 +3,8 @@
 - **Status:** **Accepted (shipped)** — corrected 2026-07-30. This read "Deferred (Phase 4 —
   design sketch)" long after it shipped, which was the most misleading line in the repo: the
   landing page and `docs/STRATEGY.md` both sell direct write-back as *the* differentiator against
-  PowerSync's `uploadData()`, so a reader who checked here was told the headline feature did not
-  exist. As built: `PgWriteBack` in `nostos-infra`, gated by `NOSTOS_WRITE_TABLES`
+  sync engines that require the developer to implement and host their own upload endpoint, so a
+  reader who checked here was told the headline feature did not exist. As built: `PgWriteBack` in `nostos-infra`, gated by `NOSTOS_WRITE_TABLES`
   (`nostos-server/src/main.rs:112`, empty by default), covered by `e2e_pg_writeback.rs` +
   `e2e_pg_writeback_timestamp.rs` against real Postgres, and exercised as the ECHO half of all 9
   `sdk-e2e` slices. Still deferred: nothing in this ADR's core path.
@@ -12,8 +12,9 @@
 
 ## Context
 
-Front 2 ("Direct Write-Back — no endpoints") removes PowerSync's biggest DX tax:
-the client queues mutations and *you* implement + host `uploadData()`. Nostos
+Front 2 ("Direct Write-Back — no endpoints") removes the biggest DX tax common
+to bucket-based sync engines: the client queues mutations and *you* implement
++ host your own upload endpoint. Nostos
 would apply queued client mutations to Postgres directly. There is **no
 write-back code anywhere** in the current repo — no mutation queue, no write-rule
 engine, no apply path. This is the single largest missing feature after the
@@ -34,8 +35,9 @@ client has a durable apply (ADR-0016) would compound risk on an unproven base.
 2. The client queues mutations; the server applies each to Postgres **inside a
    transaction** that re-checks the version/etag and applies the merge strategy.
    Conflict → ADR-0014's resolution tier.
-3. **Function mode:** for full control, the developer provides a function (like
-   PowerSync's `uploadData`). Power users keep total control.
+3. **Function mode:** for full control, the developer provides a function (the
+   common escape-hatch pattern for custom upload hooks). Power users keep
+   total control.
 
 ## Rationale
 
@@ -53,7 +55,7 @@ client has a durable apply (ADR-0016) would compound risk on an unproven base.
 we handle offline reads AND writes" — the demo that wins.
 
 **Negative:** until Phase 4, Nostos is read-only from the client's perspective;
-clients must host their own write endpoint (exactly PowerSync's tax). The
+clients must host their own write endpoint (exactly the DX tax Front 2 removes). The
 strategy doc must not market write-back as shipped until this ADR is implemented.
 
 ## Alternatives considered
@@ -107,7 +109,7 @@ stored as a numeric epoch). Code doc: `crates/nostos-infra/src/write_back.rs`
 
 The v1 outbox contract above let a permanently-failing write block the queue
 head forever (flagged `ponytail:` in `nostos-client/src/client.rs`). v2 bounds
-it (parity workstream P2, `docs/plans/powersync-sdk-parity-plan.md`):
+it (parity workstream P2):
 
 - `cairn_outbox` gains `attempts` + `dlq` columns (legacy DBs migrated on open
   by probing `PRAGMA table_info`). `pending()` filters `WHERE dlq = 0`.
@@ -119,7 +121,7 @@ it (parity workstream P2, `docs/plans/powersync-sdk-parity-plan.md`):
 - The `Outbox` trait adds `bump_attempts`/`mark_dead_letter` with no-op
   defaults so the `InMemoryStorage` test double stays non-breaking.
 
-Decision: quarantine-not-delete. PowerSync's contract is that the backend
+Decision: quarantine-not-delete. The contract is that the backend
 returns 2xx for validation conflicts and the queue must not silently drop;
 deleting would lose user intent irrecoverably. Replay/inspection is the
 operator surface; auto-retry-from-DLQ is deferred.
@@ -131,5 +133,5 @@ operator surface; auto-retry-from-DLQ is deferred.
 ships in the bundled SQLite). It is deliberately on the **concrete
 `SqliteStorage`**, NOT the `Storage` trait: the trait stays WASM-clean
 (`checkpoint` + `apply_batch` only), so `nostos-ffi-wasm` is unaffected. This
-is the foundation for the Flutter `watchQuery(sql)` reactive query (PowerSync
-parity feature #1). See `docs/plans/powersync-sdk-parity-plan.md` P1.
+is the foundation for the Flutter `watchQuery(sql)` reactive query (parity
+feature #1).

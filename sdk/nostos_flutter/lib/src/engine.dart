@@ -102,8 +102,7 @@ abstract class NostosEngine {
   });
 
   /// Drop a stream by the id [subscribeStream] returned. Unknown id = no-op.
-  /// v1 leaves local rows in place — eviction is separate; PowerSync behaves
-  /// the same.
+  /// v1 leaves local rows in place — eviction is separate.
   Future<void> unsubscribeStream({required String id});
 
   /// Returns the local outbox id.

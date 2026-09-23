@@ -12,7 +12,7 @@ In **September 2024**, MongoDB announced the deprecation of Atlas Device Sync an
 
 Nostos is one possible landing spot, with a clear-eyed caveat up front: **this is the biggest model change of any migration path into Nostos.** Realm is an embedded *object* database with a sync server attached; Nostos is *row-level* Postgres→SQLite sync. You are re-platforming the data model (objects → tables) and the sync engine at once.
 
-Also read the maturity note in [`from-powersync.md`](from-powersync.md): Nostos is a Phase-3 alpha, the client SDKs are not yet on registries, and the shipped `/sync` verifiers are `none` (dev) and `supabase-jwt` (ADR-0010) — if your Realm app authenticated through something other than a Supabase-compatible JWT issuer, verify that path first.
+Maturity note: Nostos is a Phase-3 alpha, the client SDKs are not yet on registries, and the shipped `/sync` verifiers are `none` (dev) and `supabase-jwt` (ADR-0010) — if your Realm app authenticated through something other than a Supabase-compatible JWT issuer, verify that path first.
 
 ---
 
@@ -47,8 +47,6 @@ Also read the maturity note in [`from-powersync.md`](from-powersync.md): Nostos 
 
 ## Server steps
 
-Same spine as the PowerSync guide — see [`from-powersync.md`](from-powersync.md) Steps 1–2 for the long form:
-
 ```bash
 # Local reference stack (Postgres 16, wal_level=logical, port 5433):
 make pg-up            # or: docker compose -f docker/docker-compose.yml up -d postgres
@@ -65,7 +63,7 @@ cargo run -p nostos-cli -- dev
 cargo run -p nostos-cli -- doctor
 ```
 
-The environment you are configuring (full table in [`from-powersync.md`](from-powersync.md) Step 2; canonical list in `.env.example`): `NOSTOS_REPLICATOR=pg`, `NOSTOS_PG_URL`, `NOSTOS_PG_SLOT`/`NOSTOS_PG_PUBLICATION`, `NOSTOS_SYNC_AUTH=supabase-jwt` with `NOSTOS_SUPABASE_JWT_SECRET` or `NOSTOS_SUPABASE_URL`/`NOSTOS_SUPABASE_JWKS_URL`, `NOSTOS_TENANT_COLUMN`, `NOSTOS_WRITE_TABLES`, and the WAL-retention guards (`NOSTOS_SLOT_MAX_LAG`, `NOSTOS_PG_SLOT_WAL_KEEP_SIZE`) a production deploy must set.
+The environment you are configuring (canonical list in `.env.example`): `NOSTOS_REPLICATOR=pg`, `NOSTOS_PG_URL`, `NOSTOS_PG_SLOT`/`NOSTOS_PG_PUBLICATION`, `NOSTOS_SYNC_AUTH=supabase-jwt` with `NOSTOS_SUPABASE_JWT_SECRET` or `NOSTOS_SUPABASE_URL`/`NOSTOS_SUPABASE_JWKS_URL`, `NOSTOS_TENANT_COLUMN`, `NOSTOS_WRITE_TABLES`, and the WAL-retention guards (`NOSTOS_SLOT_MAX_LAG`, `NOSTOS_PG_SLOT_WAL_KEEP_SIZE`) a production deploy must set.
 
 Read rules replace your App Services sync-rule config:
 
@@ -86,7 +84,7 @@ No file on disk = `sync_mode = "all"` (zero-config dev default; tenant scoping s
    { "type": "subscribe", "table": "items", "where_sql": "owner_id = '00000000-0000-0000-0000-000000000001' AND done = false" }
    ```
 
-   There is no parameterized-query object, no JOIN/CTE subscription, and no lazy stream in v1 — if your Realm app leaned on queryable-relationship traversal, plan for per-table subscriptions plus client-side joins (parity tracking: [`docs/plans/powersync-sdk-parity-plan.md`](../plans/powersync-sdk-parity-plan.md)).
+   There is no parameterized-query object, no JOIN/CTE subscription, and no lazy stream in v1 — if your Realm app leaned on queryable-relationship traversal, plan for per-table subscriptions plus client-side joins.
 3. **Local reads: objects → SQL.** The SQLite-backed SDKs expose synced tables as SQLite views you query with SQL (Flutter also has reactive `watch` APIs — see [`docs/api/flutter.md`](../api/flutter.md)); the object-graph access pattern (`realm.objects(…)`, traversing links, live results) has no direct equivalent. This is the bulk of your client rewrite.
 4. **Writes: outbox, not session writes.** A write is durable on disk before any network I/O and flushes on connect/reconnect through the server's allowlisted write-back (ADR-0013). Embedded-object and graph mutations must decompose into row upserts/deletes.
 5. **Auth: Supabase.** Mint the same JWT your app already uses against Supabase; the server resolves it to a principal and scopes every predicate and write (ADR-0010/0011/0018).
@@ -102,4 +100,4 @@ No file on disk = `sync_mode = "all"` (zero-config dev default; tenant scoping s
 - **Conflict model.** Server-authoritative LWW by WAL order today; if you depended on Device Sync's conflict behavior, test your worst concurrent-edit cases during dual-run.
 - **Web (if you had one).** The browser client's durability is best-effort until the OPFS work lands (ADR-0017).
 
-For the cutover sequence itself, follow [`from-powersync.md`](from-powersync.md) Step 4 — dual-run against the same Postgres, drain old pending writes per cohort, flip, then retire the old stack. The one Realm-specific addition: run the data export (above) to completion and cut all writers over to Postgres *before* the first cohort flips, since Postgres is now the source of truth, not Atlas.
+For the cutover sequence itself: dual-run against the same Postgres, drain old pending writes per cohort, flip, then retire the old stack. The one Realm-specific addition: run the data export (above) to completion and cut all writers over to Postgres *before* the first cohort flips, since Postgres is now the source of truth, not Atlas.

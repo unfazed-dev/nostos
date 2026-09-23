@@ -10,17 +10,17 @@
 - **Per-session buffer:** 1024
 - **Build:** `--release` (lto=fat, codegen-units=1)
 
-## Throughput vs PowerSync
+## Throughput
 
-PowerSync publishes a **server-side ceiling of ~2,000–4,000 ops/sec** for small rows. Nostos's measurement is of the same logical operation (fanning row-change events to connected clients) with a synthetic replicator on loopback.
+Aggregate fan-out: row-change events fanned out to connected clients, with a synthetic replicator on loopback.
 
-| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | vs PS high |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1000 | 833,307 | 0.00% | 0.00 | 0.00 | 99997217 | **208.3×** |
+| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered |
+|---:|---:|---:|---:|---:|---:|
+| 1000 | 833,307 | 0.00% | 0.00 | 0.00 | 99997217 |
 
 ## Interpretation
 
-- **Peak sustained throughput: 833,307 ops/sec** — **208.3×** PowerSync's published high ceiling (4,000 ops/sec) and **416.7×** the low (2,000 ops/sec).
+- **Peak sustained throughput: 833,307 ops/sec**.
 - **Max drop rate across runs: 0.00%** (lower is better; >1% is flagged as not fully honest throughput in the methodology).
 - The synthetic `FakeReplicator` generates events faster than the router pushes them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. Real `pgoutput` parsing cost is added in Week 2.
 

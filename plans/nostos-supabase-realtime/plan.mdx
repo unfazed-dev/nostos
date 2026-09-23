@@ -60,9 +60,7 @@ of JWT auth and tenant scoping. See `docs/SECURITY.md`.
   Srv-->>App: replicated row echo over /sync
 `} />
 
-Contrast with PowerSync: writes go through the developer's `uploadData()` → the
-backend → Postgres, gated by Supabase RLS. PowerSync has **no server-side write
-gate**; nostos's allowlist (`NOSTOS_WRITE_TABLES`) is the cost of applying writes
+Nostos's allowlist (`NOSTOS_WRITE_TABLES`) is the cost of applying writes
 server-side. It is a deliberate architectural choice, not a limitation.
 
 ## Enabling writes

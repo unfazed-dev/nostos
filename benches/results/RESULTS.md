@@ -10,13 +10,13 @@
 - **Per-session buffer:** 1024
 - **Build:** `--release` (lto=fat, codegen-units=1)
 
-## Throughput vs PowerSync
+## Throughput
 
-PowerSync publishes no comparable aggregate fan-out figure. Its published rates are 2,000–4,000 ops/sec **replication ingest** (Postgres → PowerSync Service, a different pipeline stage) and 2,000–20,000 ops/sec **per-client sync** (PowerSync Service → Client, not aggregate). Nostos's measurement below is an aggregate fan-out rate (fanning row-change events to connected clients) with a synthetic replicator on loopback — see [Correction](#correction-2026-08-06).
+Nostos's measurement below is an aggregate fan-out rate (fanning row-change events to connected clients) with a synthetic replicator on loopback.
 
-| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered | PS comparator |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1000 | 2,618,601 | 0.00% | 0.006 | 0.034 | 100000000 | **none published** |
+| Clients | ops/sec | drop% | p50 (ms) | p99 (ms) | delivered |
+|---:|---:|---:|---:|---:|---:|
+| 1000 | 2,618,601 | 0.00% | 0.006 | 0.034 | 100000000 |
 
 Median of 3 passes on the fixed fan-out, 2026-09-02 (spread 2,515,049–2,682,508) — see
 [Native re-measure on the fixed fan-out](#native-re-measure-on-the-fixed-fan-out--measured-2026-09-02).
@@ -32,7 +32,7 @@ is preserved in the sections below as the historical baseline.
 > ~42 events/sec floor remains explicitly NOT that number (test-driver-bound,
 > see ADR-0025 caveat below).
 
-- **Peak sustained throughput: 2,618,601 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (median of 3, 2026-09-02, fixed fan-out; was 833,307 on the old fan-out) (eval-only: FakeReplicator on loopback). PowerSync publishes no comparable aggregate fan-out figure — its published rates are 2,000–4,000 ops/sec replication ingest (a different pipeline stage) and 2,000–20,000 ops/sec per-client sync.
+- **Peak sustained throughput: 2,618,601 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops** (median of 3, 2026-09-02, fixed fan-out; was 833,307 on the old fan-out) (eval-only: FakeReplicator on loopback).
 - **Max drop rate across runs: 0.00%** (lower is better; >1% is flagged as not fully honest throughput in the methodology).
 - The synthetic `FakeReplicator` generates events faster than the router pushes them, so the measured ceiling is the **router + WebSocket fan-out path**, not Postgres. Real `pgoutput` parsing cost is added in Week 2.
 
@@ -67,11 +67,11 @@ is preserved in the sections below as the historical baseline.
 
 ## Correction (2026-08-06)
 
-**What was claimed:** this document previously stated nostos's 833,307 ops/sec aggregate fan-out throughput (@ 1,000 clients, 0.00% drops) was "208.3× PowerSync's published high ceiling (4,000 ops/sec) and 416.7× the low (2,000 ops/sec)."
+**What was claimed:** this document previously stated nostos's aggregate fan-out throughput as an N× multiple of another engine's published ops/sec figure.
 
-**Why retired:** the 2,000–4,000 ops/sec figure is PowerSync's **replication-ingest** rate (Postgres → PowerSync Service — a different pipeline stage), not a fan-out or aggregate multi-client figure. PowerSync's fan-out-direction metric (Service → Client) is published as 2,000–20,000 ops/sec **per client**, not an aggregate across clients — PowerSync publishes no aggregate multi-client fan-out ceiling anywhere in its docs, blog, or benchmark repos. Dividing nostos's aggregate fan-out number by PowerSync's per-source ingest number compared two different stages of two different pipelines under the same "ops/sec" label. Verified against docs.powersync.com/resources/performance-and-limits (fetched 2026-08-06). Full verification: [`docs/plans/research-powersync-perf-verification-2026-08-06.md`](../../docs/plans/research-powersync-perf-verification-2026-08-06.md).
+**Why retired:** that figure was a **replication-ingest** rate (Postgres → the other engine's service — a different pipeline stage), not an aggregate multi-client fan-out figure. Dividing nostos's aggregate fan-out number by a per-source ingest number compared two different stages of two different pipelines under the same "ops/sec" label.
 
-**Current framing:** nostos reports 833,307 ops/sec aggregate fan-out @ 1,000 clients, 0.00% drops (eval-only) on its own terms, with PowerSync's ingest and per-client figures cited for context — no cross-stage multiple.
+**Current framing:** nostos reports its aggregate fan-out on its own terms — no cross-stage multiple. Same-stage, same-units comparisons only, per docs/BENCHMARK-METHODOLOGY.md.
 
 ## Push enqueue path (ADR-0037) — MEASURED 2026-08-15
 
@@ -195,8 +195,8 @@ transactions via `unnest`, op-log OFF (mirrors the eval headline's config),
 single client, loopback. PG-side row count == client SQLite count exactly on
 every run; window `matched == delivered` and `dropped == 0`.
 
-Framing per the methodology: this is the same-stage comparator for PowerSync's
-published **per-client sync rate (2–20k ops/sec)** — cite side-by-side, never
+Framing per the methodology: this is a **per-client sync rate** — compare it
+only with another engine's same-stage per-client figure, side-by-side, never
 as a cross-environment multiple. It is NOT comparable to the 833,307 eval-only
 fan-out ceiling (different stage: no decode, no client apply there).
 
@@ -262,8 +262,7 @@ gap is unexplained — soak 2 launched 1 s after soak 1's `process::exit` (the
 probe does no teardown, so 10k sockets were still closing), which is a
 plausible cause but was not verified. Treat the 10k numbers as a regime check
 only; before any 10k figure is updated anywhere, rerun with a ≥60 s cool-down
-between soaks and report both. Same-stage comparator for PowerSync: none
-published at 10k either.
+between soaks and report both.
 
 ## 10k soak on Linux, fan-out fixes A/B — MEASURED 2026-09-02 (container; NOT comparable to the native headline)
 
@@ -370,7 +369,7 @@ reporting). Raw logs `benches/results/raw/2026-09-02-ladder/`, bench JSON
 the largest tier that finished with <1% drops. **Container numbers and native
 numbers are separate tables and are never compared to each other.** This whole
 section is eval-only (FakeReplicator loopback → router → WS fan-out) and is
-**not comparable to any PowerSync figure**; the only honest head-to-head is a
+**not comparable to any other engine's published figure**; the only honest head-to-head is a
 full-path real-PG → client-apply race on one shared harness, tracked in
 `docs/COMPARISON.md`.
 

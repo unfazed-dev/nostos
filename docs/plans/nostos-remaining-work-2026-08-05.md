@@ -161,7 +161,7 @@ published (W6 pending).
 | 14 | **`make bench` not run before `67eecc3`** (see §2.1 residual) and before any future hot-path edit — the project's "measure before optimize" rule (CLAUDE.md) should gate such commits. | 🟡 |
 | 15 | **10k stretch goal failed, table-sharded router OPEN (zero code)** — ~61% drops @10k; dominant cost is the per-event full-store ack/eviction scan (O(N×E)). Non-blocker — 1k/5k moat holds (833k @1k / 0%, 660k @5k). Named follow-up: table-sharded router. | ✅ verified |
 | 16 | **Tenant-scoped OR-set merge clobbers by design** — `write_back.rs:362-368` falls through to clobber when `tenant.is_some()` (`ponytail:` "tenant-scoped merge deferred to fixture"). Phase-4 fixture co-design. | ✅ verified |
-| 17 | **Doc drift (correct the 08-04 audit + 2 ADRs + 1 plan, do not edit without operator sign-off)** — audit lines 10/50/81 (token-refresh), audit §2.9/WS1 (web live-only), audit internal contradiction (ADR-0029 "Proposed" vs file now "Accepted (D1/3/4 shipped; D2 interim)"); ADR-0029 D4 body scope-note; ADR-0017 addendum §1/follow-up #7; `nostos-flutter-powersync-connection-redesign.md` D6 (token refresh shipped `c143e7a`); `sdk/nostos_web/README.md:85,92-93`. | ✅ verified |
+| 17 | **Doc drift (correct the 08-04 audit + 2 ADRs + 1 plan, do not edit without operator sign-off)** — audit lines 10/50/81 (token-refresh), audit §2.9/WS1 (web live-only), audit internal contradiction (ADR-0029 "Proposed" vs file now "Accepted (D1/3/4 shipped; D2 interim)"); ADR-0029 D4 body scope-note; ADR-0017 addendum §1/follow-up #7; `sdk/nostos_web/README.md:85,92-93`. | ✅ verified |
 
 ---
 
@@ -196,13 +196,13 @@ highest-leverage structural fix is a CI build/typecheck gate for swift/kotlin/do
 | 6/9 SDK signOut runtime parity | 🟡 | source-verified; runtime only Flutter/Swift/RN-iOS |
 | JWKS/RS256 works vs real Supabase | ❓ | unit-tested via `FixtureJwks` only |
 
-> **Correction 2026-08-06:** row 185's "833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+> **Correction 2026-08-06:** row 185's "833k/208×" — the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 
 ---
 
 ## 7. What is NOT left (solidly shipped — for calibration)
 
-ADR-0028 PowerSync-style views + partial index; ADR-0024 reactive facade (code, Flutter); ADR-0027
+ADR-0028 declarative SQLite views + partial index; ADR-0024 reactive facade (code, Flutter); ADR-0027
 write-outcome/dead-letter; ADR-0029 D1/D3/D4 (signOut all 9 at source; HS256+JWKS exp; live-socket
 close); instant-local writes + reconcile (redesign slice-2); PG write-back + tenant-DELETE replay
 (ADR-0025/F1, `REPLICA IDENTITY FULL`) + slot-invalidation recovery (P0#1, `8cd67c0`); both

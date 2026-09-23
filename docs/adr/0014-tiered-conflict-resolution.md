@@ -29,7 +29,7 @@ is **no explicit version/etag check, no CRDT engine, and no custom-merge hook**.
 
 ## Rationale
 
-- LWW is the proven PowerSync/Zero/Electric default and needs no engine — it's
+- LWW is the proven Zero/Electric default and needs no engine — it's
   WAL-order replay. Claiming it as "shipped" is honest because it's the actual
   apply behavior.
 - CRDT-per-field is genuinely hard (semantic primitives per type) and only

@@ -10,10 +10,29 @@ import 'package:atlet/adapters/sync_adapter.dart';
 mixin FakeCartOrdersDefaults implements SyncAdapter {
   final List<CartItemRow> fakeCart = [];
   final List<OrderRow> fakeOrders = [];
+  final List<OrderEventRow> fakeOrderEvents = [];
   final StreamController<List<CartItemRow>> _fakeCartCtrl =
       StreamController.broadcast();
   final StreamController<List<OrderRow>> _fakeOrdersCtrl =
       StreamController.broadcast();
+  final StreamController<List<OrderEventRow>> _fakeOrderEventsCtrl =
+      StreamController.broadcast();
+
+  /// Mirrors migration 0007's trigger: every status a fake order reaches
+  /// becomes an event, newest first.
+  void recordOrderEvent(String orderId, String status, {String? previous}) {
+    fakeOrderEvents.insert(
+      0,
+      OrderEventRow(
+        id: '$orderId-$status',
+        orderId: orderId,
+        status: status,
+        previousStatus: previous,
+        createdAt: DateTime.now(),
+      ),
+    );
+    _fakeOrderEventsCtrl.add(List.unmodifiable(fakeOrderEvents));
+  }
 
   @override
   Future<void> updateSession(SessionRow s) async {}
@@ -40,6 +59,7 @@ mixin FakeCartOrdersDefaults implements SyncAdapter {
   @override
   Future<String> placeOrder(OrderRow o) async {
     fakeOrders.insert(0, o);
+    recordOrderEvent(o.id, o.status);
     fakeCart.clear();
     _fakeOrdersCtrl.add(List.unmodifiable(fakeOrders));
     _fakeCartCtrl.add(const []);
@@ -56,5 +76,11 @@ mixin FakeCartOrdersDefaults implements SyncAdapter {
   Stream<List<OrderRow>> watchOrders() async* {
     yield List.unmodifiable(fakeOrders);
     yield* _fakeOrdersCtrl.stream;
+  }
+
+  @override
+  Stream<List<OrderEventRow>> watchOrderEvents() async* {
+    yield List.unmodifiable(fakeOrderEvents);
+    yield* _fakeOrderEventsCtrl.stream;
   }
 }

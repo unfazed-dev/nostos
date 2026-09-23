@@ -62,6 +62,7 @@ pub const RESERVED_TABLES: &[&str] = &[
     "device_presence",
     "push_cooldown",
     "push_config",
+    "push_templates",
     "http_request_queue",
     "_http_response",
 ];
@@ -77,6 +78,109 @@ pub struct PushConfig {
     /// The floor between two pushes to one scope. Also the `pg_net` rate
     /// guard: without it 10,000 write transactions are 10,000 HTTP requests.
     pub cooldown: String,
+    /// `nostos link --visible`: the tables whose changes arrive as the
+    /// notification itself rather than as a silent doorbell.
+    pub templates: Vec<PushTemplate>,
+}
+
+/// One `cairn.push_templates` row — a visible (or, with a category, action)
+/// push per change to `table`, ADR-0037 §2b.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushTemplate {
+    pub table: String,
+    pub title: String,
+    pub body: String,
+    pub category: Option<String>,
+    pub route: Option<String>,
+}
+
+/// Parse one `--visible` spec. The grammar is server mode's
+/// `NOSTOS_PUSH_TABLES` visible/action entries, so one line of config moves
+/// between the modes unchanged: `table:visible[@/route/{id}]:<title>:<body>`
+/// or `table:action[@/route/{id}]:<category>:<title>:<body>`. The body is the
+/// greedy remainder and may contain colons.
+///
+/// ponytail: a second parser of the grammar in nostos-server's
+/// `parse_push_tables`; move both into nostos-infra when a third caller shows.
+///
+/// # Errors
+/// [`anyhow::Error`] naming the spec when it is not one of the two shapes, or
+/// a table, category or route breaks the identifier/route rules.
+pub fn parse_visible(spec: &str) -> Result<PushTemplate> {
+    let shape = "expected table:visible[@/route]:<title>:<body> or \
+                 table:action[@/route]:<category>:<title>:<body>";
+    let Some((table, rest)) = spec.split_once(':') else {
+        bail!("--visible {spec:?}: {shape}");
+    };
+    let Some((mode, rest)) = rest.split_once(':') else {
+        bail!("--visible {spec:?}: {shape}");
+    };
+    let (mode, route) = match mode.split_once('@') {
+        Some((m, r)) => (m, Some(r.trim().to_string())),
+        None => (mode, None),
+    };
+    let (category, rest) = match mode.trim() {
+        "visible" => (None, rest),
+        "action" => match rest.split_once(':') {
+            Some((c, r)) => (Some(c.trim().to_string()), r),
+            None => bail!("--visible {spec:?}: {shape}"),
+        },
+        other => bail!("--visible {spec:?}: mode {other:?} \u{2014} {shape}"),
+    };
+    let Some((title, body)) = rest.split_once(':') else {
+        bail!("--visible {spec:?}: {shape}");
+    };
+    let table = table.trim();
+    if !is_identifier(table) {
+        bail!("--visible {spec:?}: table {table:?} must match ^[a-z_][a-z0-9_]*$");
+    }
+    // The category is the contract with the app's registered notification
+    // categories, so a typo must fail here, not as a button-less banner.
+    if let Some(c) = category.as_deref().filter(|c| !is_identifier(c)) {
+        bail!("--visible {spec:?}: category {c:?} must match ^[a-z_][a-z0-9_]*$");
+    }
+    if let Some(r) = route
+        .as_deref()
+        .filter(|r| !r.starts_with('/') || r.chars().any(char::is_whitespace))
+    {
+        bail!("--visible {spec:?}: route {r:?} must start with '/' and hold no whitespace");
+    }
+    Ok(PushTemplate {
+        table: table.to_string(),
+        title: title.trim().to_string(),
+        body: body.trim().to_string(),
+        category,
+        route,
+    })
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('_' | 'a'..='z'))
+        && chars.all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// The `cairn.push_templates` rows, as the flags say they are: the set is
+/// replaced, not merged, so dropping a `--visible` and re-applying stops that
+/// table's banners.
+#[must_use]
+pub fn templates_sql(templates: &[PushTemplate]) -> String {
+    let lit = |v: &str| format!("'{}'", v.replace('\'', "''"));
+    let opt = |v: &Option<String>| v.as_deref().map_or("null".to_string(), lit);
+    let mut s = String::from("delete from cairn.push_templates;\n");
+    for t in templates {
+        let _ = writeln!(
+            s,
+            "insert into cairn.push_templates (table_name, title, body, category, route) \
+             values ({}, {}, {}, {}, {});",
+            lit(&t.table),
+            lit(&t.title),
+            lit(&t.body),
+            opt(&t.category),
+            opt(&t.route)
+        );
+    }
+    s
 }
 
 impl Default for PushConfig {
@@ -85,6 +189,7 @@ impl Default for PushConfig {
             endpoint: String::new(),
             presence_window: "90 seconds".to_string(),
             cooldown: "30 seconds".to_string(),
+            templates: Vec::new(),
         }
     }
 }
@@ -481,12 +586,30 @@ fn pull_fn(s: &mut String) {
 -- guarantees a full page spans two xids, so the cursor always advances.
 --
 -- security invoker: RLS on cairn.changes applies as the calling device.
+--
+-- Returns ONE jsonb array, not a set of rows, and that is not a style choice.
+-- PostgREST caps a set-returning response at `db-max-rows` (1000 on a stock
+-- Supabase project) and announces the cut with nothing but `content-range:
+-- 0-999/*` on a 200 -- no 206, and `Range`/`offset` are ignored on an RPC, so
+-- there is no paging past it either. A page of 200 transactions can easily
+-- exceed 1000 rows; the tail would be dropped and the device would then store
+-- the horizon PAST rows it never saw. Silent, permanent loss. A scalar result
+-- is one row however big it gets, so the cap cannot reach it, and PostgREST
+-- renders a jsonb scalar as the bare array the client already parses.
+-- (Measured 2026-09-22 against a real project: a 1010-row snapshot came back
+-- as 1000 rows, 200 OK, two whole tables missing.)
+--
+-- Dropped first, not just replaced: `create or replace` refuses to change a
+-- function's return type, so a project still carrying the set-returning
+-- version would fail this file rather than upgrade. The grants below are
+-- re-issued after, which is what a drop costs.
+drop function if exists public.cairn_pull(xid8, int);
 create or replace function public.cairn_pull(since xid8, max_txns int default 200)
-returns table (horizon xid8, seq bigint, xid xid8,
-               table_name text, pk text, op text, "row" jsonb)
+returns jsonb
 language plpgsql stable security invoker set search_path = '' as $fn$
 declare
   v_pruned xid8;
+  v_page   jsonb;
 begin
   -- A device resuming from a horizon that has been pruned away must be TOLD,
   -- not quietly given a shorter answer: the rows in the gap can never arrive
@@ -500,7 +623,6 @@ begin
       hint    = 'reset the stored horizon and re-snapshot the synced tables';
   end if;
 
-  return query
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
   page as (
     select distinct c.xid
@@ -509,11 +631,15 @@ begin
     order by c.xid
     limit greatest(max_txns, 2)
   )
-  select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row"
-  from cairn.changes c
-  join page p on p.xid = c.xid
-  cross join h
-  order by c.xid, c.seq;
+  select coalesce(jsonb_agg(to_jsonb(r) order by r.xid, r.seq), '[]'::jsonb)
+    into v_page
+  from (
+    select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row"
+    from cairn.changes c
+    join page p on p.xid = c.xid
+    cross join h
+  ) r;
+  return v_page;
 end;
 $fn$;
 "#,
@@ -537,8 +663,8 @@ fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
     for t in tables {
         let _ = write!(
             branches,
-            "  union all\n  select h.horizon, '{table}'::text, null::text, null::jsonb from h\n  \
-             union all\n  select h.horizon, '{table}'::text, r.{pk}::text, to_jsonb(r) \
+            "    union all\n    select h.horizon, '{table}'::text, null::text, null::jsonb from h\n    \
+             union all\n    select h.horizon, '{table}'::text, r.{pk}::text, to_jsonb(r) \
              from public.{table} r, h\n",
             table = t.table,
             pk = PK_COLUMN,
@@ -560,12 +686,30 @@ fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
 -- security invoker, so RLS on each base table decides what is in the snapshot.
 -- That is the same authority that decides what a pull returns, which is what
 -- makes the two interchangeable.
+--
+-- One jsonb array rather than a set of rows, for the reason spelled out over
+-- `cairn_pull`: PostgREST silently truncates a set-returning RPC at
+-- `db-max-rows`, and a snapshot is the one call guaranteed to be big.
+--
+-- ponytail: the whole snapshot is materialised in one value, so its ceiling is
+-- what the server and the device can each hold at once. Upgrade path when a
+-- table outgrows that: take a keyset (`p_after_table`, `p_after_pk`) plus a
+-- limit, and have the client resume its pull from the FIRST page's horizon --
+-- anything that changed mid-pagination is then re-delivered by the log, the
+-- same way a base backup is healed by the WAL that follows it.
+--
+-- Dropped first for the same reason as `cairn_pull`: a return type cannot be
+-- replaced in place.
+drop function if exists public.cairn_snapshot();
 create or replace function public.cairn_snapshot()
-returns table (horizon xid8, table_name text, pk text, "row" jsonb)
+returns jsonb
 language sql stable security invoker set search_path = '' as $fn$
-  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
-  select h.horizon, null::text, null::text, null::jsonb from h
-{branches}$fn$;
+  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
+  snap as (
+    select h.horizon, null::text as table_name, null::text as pk, null::jsonb as "row" from h
+{branches}  )
+  select coalesce(jsonb_agg(to_jsonb(snap)), '[]'::jsonb) from snap
+$fn$;
 "#
     );
 }
@@ -766,6 +910,7 @@ fn push_path(s: &mut String, cfg: &PushConfig) {
         endpoint,
         presence_window,
         cooldown,
+        templates,
     } = cfg;
     let _ = write!(
         s,
@@ -808,6 +953,21 @@ create index if not exists device_presence_seen_idx on cairn.device_presence (sc
 create table if not exists cairn.push_cooldown (
   scope        text primary key,
   last_push_at timestamptz not null default now()
+);
+
+-- Visible pushes, per table (ADR-0037 §2 `visible`/`action`, the rows of server
+-- mode's NOSTOS_PUSH_TABLES). iOS never wakes a user-quit app for a silent
+-- doorbell, but it always shows an alert -- so a table the user must hear about
+-- gets a row here, and its changes arrive as the notification itself. `{{col}}`
+-- in title/body/route is filled from the changed row by the Edge Function; a
+-- non-null category makes it an action push. The rows come from `nostos link
+-- --visible`, at the end of this section.
+create table if not exists cairn.push_templates (
+  table_name text primary key,
+  title      text not null,
+  body       text not null,
+  category   text,
+  route      text
 );
 
 -- security definer, and here that IS the authority: the scope comes from the
@@ -867,7 +1027,9 @@ $fn$;
 create or replace function cairn.wake_absent_devices() returns trigger
 language plpgsql security definer set search_path = '' as $fn$
 declare
-  v_cfg cairn.push_config%rowtype;
+  v_cfg  cairn.push_config%rowtype;
+  v_tpl  cairn.push_templates%rowtype;
+  v_body jsonb := jsonb_build_object('scope', new.scope);
 begin
   select * into v_cfg from cairn.push_config where id = 1;
   if v_cfg.endpoint is null or v_cfg.endpoint = '' then
@@ -885,25 +1047,36 @@ begin
   ) then
     return null;
   end if;
-  -- The debounce, and the advisory lock in front of it is not an
-  -- optimization. One shared row per scope means a row lock per scope, held
-  -- until the writing transaction commits -- so a long transaction would block
-  -- EVERY other writer in that scope. A delayed sync is acceptable; a blocked
-  -- write is not. `pg_try_advisory_xact_lock` never waits: a writer that finds
-  -- the scope taken skips, which is exactly what the debounce would have told
-  -- it to do anyway. (Found by the pg e2e, which deadlocked without it.)
-  if not pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope)) then
-    return null;
-  end if;
-  insert into cairn.push_cooldown (scope, last_push_at) values (new.scope, now())
-  on conflict (scope) do update set last_push_at = now()
-   where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown;
-  if not found then
-    return null;
+  select * into v_tpl from cairn.push_templates where table_name = new.table_name;
+  if found and new.op <> 'delete' then
+    -- A visible push is the news itself, so it skips the debounce: a
+    -- debounced banner is a lost banner. The operator chose these tables, and
+    -- one request per row of them is the cost of choosing.
+    v_body := v_body || jsonb_build_object(
+      'row', new.row, 'title', v_tpl.title, 'body', v_tpl.body,
+      'category', v_tpl.category, 'route', v_tpl.route);
+  else
+    -- The debounce, and the advisory lock in front of it is not an
+    -- optimization. One shared row per scope means a row lock per scope, held
+    -- until the writing transaction commits -- so a long transaction would
+    -- block EVERY other writer in that scope. A delayed sync is acceptable; a
+    -- blocked write is not. `pg_try_advisory_xact_lock` never waits: a writer
+    -- that finds the scope taken skips, which is exactly what the debounce
+    -- would have told it to do anyway. (Found by the pg e2e, which deadlocked
+    -- without it.)
+    if not pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope)) then
+      return null;
+    end if;
+    insert into cairn.push_cooldown (scope, last_push_at) values (new.scope, now())
+    on conflict (scope) do update set last_push_at = now()
+     where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown;
+    if not found then
+      return null;
+    end if;
   end if;
   perform net.http_post(
     url     := v_cfg.endpoint,
-    body    := jsonb_build_object('scope', new.scope),
+    body    := v_body,
     headers := jsonb_build_object(
       'Content-Type', 'application/json',
       'Authorization', 'Bearer ' || coalesce(v_cfg.secret, '')
@@ -939,8 +1112,10 @@ grant execute on function public.cairn_push_targets(text) to service_role;
 alter table cairn.push_tokens     enable row level security;
 alter table cairn.device_presence enable row level security;
 alter table cairn.push_cooldown   enable row level security;
+alter table cairn.push_templates  enable row level security;
 "#
     );
+    s.push_str(&templates_sql(templates));
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,20 +1244,47 @@ pub async fn inspect(
         ("cairn_snapshot", ""),
         ("cairn_increment", "text, text, text, numeric"),
     ] {
-        let def: Option<String> = client
+        // `proretset` rather than a grep of the definition: `pg_get_functiondef`
+        // renders the header in UPPERCASE (`RETURNS jsonb`), so matching the
+        // generator's lowercase source text against it never hits — a check
+        // that fails a deploy it just approved. The body greps below match
+        // body text, which comes back verbatim.
+        let def: Option<(String, bool)> = client
             .query_opt(
-                "select pg_get_functiondef(p.oid) from pg_proc p \
+                "select pg_get_functiondef(p.oid), p.proretset from pg_proc p \
                  join pg_namespace n on n.oid = p.pronamespace \
                  where n.nspname = 'public' and p.proname = $1",
                 &[&proname],
             )
             .await?
-            .map(|r| r.get(0));
-        let Some(def) = def else {
+            .map(|r| (r.get(0), r.get(1)));
+        let Some((def, returns_set)) = def else {
             out.push(Check::new(false, format!("public.{proname} exists")));
             continue;
         };
         out.push(Check::new(true, format!("public.{proname} exists")));
+
+        // The other bug no client can detect. PostgREST caps a set-returning
+        // RPC at `db-max-rows` and reports the cut in a header nobody reads,
+        // on a 200 — so a read simply arrives short, and the device then
+        // stores a horizon past rows it never saw. A scalar result is one row
+        // at any size, so the cap cannot reach it.
+        if matches!(proname, "cairn_pull" | "cairn_snapshot") {
+            let scalar = !returns_set;
+            out.push(Check::new(
+                scalar,
+                if scalar {
+                    format!("{proname} returns one jsonb value, so `db-max-rows` cannot cut it")
+                } else {
+                    format!(
+                        "{proname} returns a SET \u{2014} PostgREST truncates it at \
+                         `db-max-rows` (1000 by default) on a 200 with no error, and the \
+                         device stores a horizon past rows it never received. \
+                         Regenerate with `nostos link --mode direct`."
+                    )
+                },
+            ));
+        }
 
         if proname == "cairn_pull" {
             // See the doc comment: this is the one bug no client can detect.
@@ -1607,13 +1809,17 @@ mod tests {
             "function public.cairn_pull(since xid8, max_txns int default 200)",
             "function public.cairn_increment(",
             "p_table text, p_pk text, p_field text, p_delta numeric",
-            // The columns `PullRow` deserializes.
-            r"returns table (horizon xid8, seq bigint, xid xid8,",
-            r#"table_name text, pk text, op text, "row" jsonb)"#,
+            // The keys `PullRow` deserializes, now carried by `to_jsonb` over
+            // the column names rather than by a table signature.
+            r#"select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row""#,
+            // One jsonb value, never a set: PostgREST truncates a set at
+            // `db-max-rows` and says so only in a content-range header.
+            "returns jsonb",
+            "coalesce(jsonb_agg(to_jsonb(r) order by r.xid, r.seq), '[]'::jsonb)",
+            "coalesce(jsonb_agg(to_jsonb(snap)), '[]'::jsonb)",
             // Inclusive lower bound + transaction paging: the livelock fix.
             "where c.xid >= since and c.xid < h.horizon",
             "limit greatest(max_txns, 2)",
-            "order by c.xid, c.seq",
             // The topic `nostos_client::doorbell` joins.
             "'cairn:' || coalesce(new.scope, 'unscoped')",
         ] {
@@ -1688,7 +1894,10 @@ mod tests {
         assert!(sql.contains(
             "revoke all on function public.cairn_pull(xid8, int) from public, anon, authenticated;"
         ));
-        for line in sql.lines().filter(|l| l.starts_with("revoke all on function")) {
+        for line in sql
+            .lines()
+            .filter(|l| l.starts_with("revoke all on function"))
+        {
             let whole = line.trim_end();
             assert!(
                 whole.contains("from public, anon, authenticated") || whole.ends_with(')'),
@@ -1762,6 +1971,47 @@ mod tests {
             1,
             "exactly one synced table is instrumented"
         );
+    }
+
+    #[test]
+    fn visible_specs_parse_like_nostos_push_tables_and_render_quoted() {
+        let action = parse_visible(
+            "order_events:action@/history/{id}:order_status:Atlet: order:Your order's {status}",
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            PushTemplate {
+                table: "order_events".to_string(),
+                title: "Atlet".to_string(),
+                // The body is the greedy remainder, colons and all.
+                body: "order:Your order's {status}".to_string(),
+                category: Some("order_status".to_string()),
+                route: Some("/history/{id}".to_string()),
+            }
+        );
+        let plain = parse_visible("orders:visible:New order:Order {id} placed").unwrap();
+        assert_eq!((&plain.category, &plain.route), (&None, &None));
+
+        for bad in [
+            "orders",
+            "orders:silent",
+            "orders:visible:title only",
+            "orders:action:order_status:title only",
+            "Orders:visible:t:b",
+            "orders:action:Order-Status:t:b",
+            "orders:visible@history:t:b",
+        ] {
+            assert!(parse_visible(bad).is_err(), "{bad:?} must be refused");
+        }
+
+        let sql = templates_sql(&[action]);
+        assert!(
+            sql.starts_with("delete from cairn.push_templates;\n"),
+            "{sql}"
+        );
+        assert!(sql.contains("'order:Your order''s {status}', 'order_status', '/history/{id}'"));
+        assert!(templates_sql(&[plain]).contains(", null, null);"));
     }
 
     #[test]

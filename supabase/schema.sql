@@ -133,8 +133,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     CHECK (line_type IN ('hourly','flat','subscription'))
 );
 
--- Realtime chat: synced table = realtime stream (local-first 2026 best practice
--- — PowerSync/LiveStore pattern). Messages flow through nostos replication like
+-- Realtime chat: synced table = realtime stream (local-first 2026 best
+-- practice). Messages flow through nostos replication like
 -- any other row; the chat view watches this table reactively via watchMapped.
 -- No separate WebSocket needed.
 CREATE TABLE IF NOT EXISTS messages (

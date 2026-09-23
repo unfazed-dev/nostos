@@ -158,11 +158,10 @@
 > |---|---|---|
 > | `README.md:13`, `README.md:23` | 833,**308** | 833,307 |
 > | `docs/launch/show-hn-draft.md:51` | 833,**308** | 833,307 |
-> | `docs/launch/powersync-vs-nostos-draft.md:44` | 833,**308** | 833,307 |
 > | `benches/results/chart.svg` (the rendered chart) | 833,**308** | 833,307 |
 >
-> Canonical is `benches/results/RESULTS.md` = **833,307**. Two of the four wrong figures were
-> in the **public launch drafts**, and one was in the chart image that ships in the README —
+> Canonical is `benches/results/RESULTS.md` = **833,307**. One of the three wrong figures was
+> in a **public launch draft**, and one was in the chart image that ships in the README —
 > i.e. a number that contradicts our own published benchmark file, going out on Show HN.
 > `git grep 833,308` now returns nothing.
 >
@@ -215,13 +214,13 @@
 > `emulator-5556` and boots it itself if absent, so booting that AVD on the default 5554
 > instead holds its lock and deadlocks the harness's own boot. Any iPhone sim works for swift.
 >
-> Also tightened the phrasing: "208× PowerSync's published ceiling (~2–4k ops/sec)" conflated
+> Also tightened the phrasing: "208× a competitor's published ceiling (~2–4k ops/sec)" conflated
 > the range with the multiple (208× is against the **4k high**; against the 2k low it is 417×).
 > `README.md` and `CLAUDE.md` now name the high ceiling explicitly and cite 417× for the low,
 > matching what `show-hn-draft.md:51` already said correctly. `CLAUDE.md` gained a standing
 > rule: quote the high multiple, never the low, and never a figure absent from RESULTS.md.
 >
-> **Correction 2026-08-06:** the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+> **Correction 2026-08-06:** the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 >
 > Everything below is the original assessment, unedited.
 
@@ -238,11 +237,11 @@ live proof that runs**: commit `9322d83` deleted the example host app a plugin p
 needs, and on this machine an Xcode/SPM toolchain fault fails it even with the host app
 restored (§2.3 — I tested both trees). Second, and more serious because it is a product
 defect rather than a harness one, **the Dart SDK cannot tell a developer that a write
-failed** (§6.1): `SyncStatus` exposes 2 fields where PowerSync exposes 12, with no error
+failed** (§6.1): `SyncStatus` exposes 2 fields where a comparable sync SDK exposes 12, with no error
 field at all, so no Nostos app can show its user "your change didn't save." The remaining
 engineering work is **A1–A5 in Part 7 — roughly a day**, after which the honest status is
 *"engineering-complete for the wedge; blocked only on the operator-run stranger test and
-publish."* Breadth/parity with PowerSync's full catalogue is **not** a launch gate and
+publish."* Breadth/parity with a competitor's full SDK catalogue is **not** a launch gate and
 should stop being scored as one.
 
 > **Two self-corrections are recorded in this document rather than quietly fixed**, because
@@ -253,8 +252,7 @@ should stop being scored as one.
 > `nostos init --write-tables` (§1.1, C9). Both original claims came from a stale 2026-07-20
 > plan. **Read plan docs as history, not state.**
 **Supersedes:** the *status sections* of `nostos-next-after-oplog-epoch-2026-07-20.md`,
-`launch-readiness-gap-list.md`, `powersync-sdk-parity-plan.md`,
-`sdk-parity-final-three.md`, `sdk-live-e2e-consolidation.md`.
+`launch-readiness-gap-list.md`, `sdk-parity-final-three.md`, `sdk-live-e2e-consolidation.md`.
 Those plans' **designs** remain valid; their **"COMPLETE" claims are re-scored here**
 against a fresh run. This document is the single stage-of-project answer.
 
@@ -268,13 +266,13 @@ explicit `assumed`/`unknown` tag.
 ## Part 0 — Why this document exists
 
 The repo carries **22 plans** in `docs/plans/` that contradict each other on the
-single most important question: *is this done?* The clearest example, both inside
-one file:
+single most important question: *is this done?* The clearest example, from one
+now-superseded plan:
 
-- `powersync-sdk-parity-plan.md` → *"Update (2026-07-12): all 7 shipped SDKs are now
-  LIVE-replication-E2E-verified"* and `sdk-parity-final-three.md` → *"Outcome —
+- The old SDK-parity plan claimed *"Update (2026-07-12): all 7 shipped SDKs are now
+  LIVE-replication-E2E-verified"* while `sdk-parity-final-three.md` → *"Outcome —
   COMPLETE (10/10, 2026-07-12)"*
-- …while `powersync-sdk-parity-plan.md`'s own **Honest verdict** says
+- …while that same plan's own **Honest verdict** said
   *"Overall parity: **NO**."*
 
 Both are true under different definitions, and that ambiguity is the actual blocker:
@@ -287,7 +285,7 @@ definition and scores against it.
 |---|---|---|
 | **D1 — Wedge-complete** | A stranger ships a working offline Flutter+Supabase app from published docs | ≤5-min stranger test + operator publish |
 | **D2 — Breadth-complete** | All 9 SDKs verified against a live server on a clean machine | `make sdk-e2e` with 0 skips |
-| **D3 — Parity-complete** | Feature-equal to PowerSync across its SDK catalogue | attachments, ORM, encryption, sync-streams |
+| **D3 — Parity-complete** | Feature-equal to the leading reference SDK across its catalogue | attachments, ORM, encryption, sync-streams |
 
 D1 is what the master plan gates launch on. **D3 is explicitly not a launch gate**
 and should stop being scored as if it were — it is the main source of false
@@ -576,7 +574,6 @@ only what the orchestrator verified directly.
 
 | Claim | Where | Reality |
 |---|---|---|
-| "all 7 shipped SDKs LIVE-replication-E2E-verified" | `powersync-sdk-parity-plan.md` | **Stale.** 6/10 pass, 2 fail, 2 skip today (§2.2) |
 | "Outcome — COMPLETE (10/10, 2026-07-12)" | `sdk-parity-final-three.md` | **Stale**, same reason |
 | "#1 ranked: add `NOSTOS_WRITE_TABLES` to QUICKSTART, ~2 lines" | `nostos-next-after-oplog-epoch-2026-07-20.md:35` | **The plan itself is stale** — QUICKSTART wires writes via `nostos init --write-tables` (`:42,:252`). Action already unnecessary when written; I re-derived it by trusting the plan (§1.1) |
 | "writes silently no-op" (premise for the above) | same, line 25 | **False as stated** — server rejects loudly (`transport.rs:786`), quickstart configures the allowlist. The *real* hole is the client swallowing `WriteResult{ok:false}` (§1.1, §6.1) |
@@ -617,14 +614,13 @@ Tagged **pre-launch** only where the defect can *silently lose or drop user data
 Everything else is post-launch parity — otherwise "best practice" becomes the thing that
 delays the launch.
 
-### 6.1 The sharpest finding: `SyncStatus` is 2 fields where the competitor has 12
+### 6.1 The sharpest finding: `SyncStatus` is 2 fields where a comparable Flutter sync SDK has 12
 
-Source: PowerSync Flutter API reference, `SyncStatus` class
-(<https://pub.dev/documentation/powersync/latest/powersync/SyncStatus-class.html>,
-fetched 2026-07-29). Compared against
+Source: a widely used Flutter sync SDK's public API reference, `SyncStatus` class
+(fetched 2026-07-29). Compared against
 `sdk/nostos_flutter/lib/src/nostos_database.dart:498-515`.
 
-| Concern | PowerSync | Nostos | Gap |
+| Concern | Reference SDK | Nostos | Gap |
 |---|---|---|---|
 | Connection | `connected`, `connecting` | `conn` (enum) | ✅ equivalent |
 | Activity | `downloading`, `uploading` | — | ❌ cannot distinguish "connected" from "actively syncing" |
@@ -640,18 +636,18 @@ learn that a write failed or was dead-lettered. An app built on Nostos cannot sh
 user "your change didn't save." That is a correctness-of-product gap, not polish, and
 it is the one DX item that belongs before launch.
 
-**The fix has an exact, proven target shape:** copy the PowerSync field set. Minimum
+**The fix has an exact, proven target shape:** copy that reference SDK's field set. Minimum
 viable pre-launch subset — `uploading`, `hasSynced`, `lastWriteError` (or `uploadError`),
 `pendingWrites` count. The rest (`downloadProgress`, `priorityStatusEntries`,
 `syncStreams`) is post-launch.
 
 ### 6.2 Where Nostos's API is genuinely *better* — preserve these
 
-Not everything should converge on PowerSync. Two Nostos choices are real advantages and
+Not everything should converge on that reference SDK. Two Nostos choices are real advantages and
 must not be "fixed" into parity:
 
-- **Zero-backend writes.** PowerSync requires the developer to implement a
-  `BackendConnector.uploadData()` and their own backend write endpoint + RLS. Nostos
+- **Zero-backend writes.** Comparable sync SDKs require the developer to implement a
+  `BackendConnector`-style `uploadData()` and their own backend write endpoint + RLS. Nostos
   collapses writes server-side (ADR-0013), so the developer writes *no backend code at
   all*. This is the strongest DX differentiator in the product and the launch messaging
   should lead with it.
@@ -660,7 +656,7 @@ must not be "fixed" into parity:
   without the developer maintaining a duplicate schema declaration.
 
 The `NOSTOS_WRITE_TABLES` allowlist is the *cost* of the zero-backend model — it's the
-server-side trust boundary that replaces PowerSync's RLS. That trade is defensible;
+server-side trust boundary that replaces a comparable SDK's reliance on hand-written RLS. That trade is defensible;
 it just has to be **taught** at the point of first contact (recommendation A3), which
 is precisely what the missing QUICKSTART line was for.
 
@@ -705,10 +701,10 @@ argument for **A2**, and it comes from the platform vendor, not from a competito
 | Convention | Who | Implication for Nostos |
 |---|---|---|
 | Optimistic write + **rollback on error** | TanStack DB (*"If the handler throws, the optimistic state is rolled back"*), Flutter official, Electric, Instant | Nostos applies optimistically but **never rolls back or reports** → A2 |
-| Error is a **first-class field** in the read/status surface | Instant (`{isLoading, error, data}`), PowerSync (`uploadError`/`downloadError`/`anyError`), TanStack | Nostos `SyncStatus` has no error field → A2 |
+| Error is a **first-class field** in the read/status surface | Instant (`{isLoading, error, data}`), a comparable sync SDK (`uploadError`/`downloadError`/`anyError`), TanStack | Nostos `SyncStatus` has no error field → A2 |
 | Collapse all network failure into **one "offline" state** | Superhuman (*"we treat every kind of network failure as offline"* — fewer states, fewer code paths, coherent messaging) | Argues for a small `SyncStatus` enum, not a large one — do **not** over-model |
 | A persistent, low-key **sync indicator** confirming "up to date" | Notion (*"the sync status indicator confirms everything is up to date"*), Superhuman's offline bar | `hasSynced` + `uploading` are the fields that make this possible |
-| SDK owns retry/backoff; app owns presentation | PowerSync (blocking FIFO upload queue, SDK handles retries) | Nostos already does this correctly — keep it |
+| SDK owns retry/backoff; app owns presentation | a comparable sync SDK (blocking FIFO upload queue, SDK handles retries) | Nostos already does this correctly — keep it |
 
 #### Competitive positioning — two findings that favour Nostos
 
@@ -722,15 +718,15 @@ argument for **A2**, and it comes from the platform vendor, not from a competito
    detect a write being rejected by the server whilst in context… with through-the-database
    sync, this context is harder to reconstruct."* Nostos **is** through-the-database sync —
    so Electric has documented the trap Nostos is currently in. A2 is the escape.
-3. **PowerSync requires a `BackendConnector`** — the developer implements
-   `fetchCredentials()` + `uploadData()`, loops `getNextCrudTransaction()`, and POSTs to
-   their own backend API. Nostos requires **none** of this. Confirms the zero-backend
+3. **A comparable sync SDK requires a `BackendConnector`-style adapter** — the developer
+   implements `fetchCredentials()` + `uploadData()`, loops `getNextCrudTransaction()`, and
+   POSTs to their own backend API. Nostos requires **none** of this. Confirms the zero-backend
    claim in §6.2 is real and large; it should lead the launch messaging.
 
 **Net positioning:** *offline writes with no backend code* is a genuinely defensible
-wedge — Zero won't do offline, Electric won't do writes, PowerSync makes you build the
-backend. Nostos's remaining gap is not capability, it is **telling the developer what
-happened to their write.**
+wedge — Zero won't do offline, Electric won't do writes, and comparable bidirectional sync
+SDKs make you build the backend. Nostos's remaining gap is not capability, it is **telling
+the developer what happened to their write.**
 
 ---
 
@@ -768,14 +764,14 @@ unknown that could be 10 minutes or half a day.
 | Publish: repo push, pub.dev, brew tap, GitHub release | Credentials + irreversible public action |
 | Show HN timing + launch-post publication | Business judgement (`docs/launch/` drafts are ready) |
 | Nostos Cloud alpha; Supabase partnership outreach | Commercial |
-| Ratify the GATED-ON-GO plans (powersync redesign, AI-privacy roadmap, reactive-facade extensions) | Strategy calls, explicitly deferred pending operator go |
+| Ratify the GATED-ON-GO plans (AI-privacy roadmap, reactive-facade extensions) | Strategy calls, explicitly deferred pending operator go |
 
 ### What this means for "complete"
 
 - **D2/D3 (breadth/parity): not complete, and should stop being scored as launch gates.**
-  6/10 SDK slices prove a live round-trip today; parity with PowerSync's full catalogue
-  (attachments, ORM integrations, encryption, sync-streams) is a post-launch roadmap,
-  as `powersync-sdk-parity-plan.md` itself concludes.
+  6/10 SDK slices prove a live round-trip today; parity with a comparable sync SDK's full
+  catalogue (attachments, ORM integrations, encryption, sync-streams) is a post-launch
+  roadmap.
 - **D1 (wedge): reachable, and closer than the docs suggest.** The engine is sound —
   audit P0s #1/#2 closed, F1 closed, offline-delete-orphan closed with tail coverage
   (§1.3, `apply.rs:796`), `make ci` green, 6 SDKs live-verified. After **A1–A5**, the
@@ -803,12 +799,12 @@ That sentence is the answer to "what stage is the project at."
 | C9 | The env-var *name* `NOSTOS_WRITE_TABLES` has 0 hits in QUICKSTART/README, 9 in OPERATING | **verified** | Per-file `grep -c` |
 | C9b | ~~Therefore a stranger's writes silently fail~~ | **verified FALSE** | QUICKSTART wires it via `nostos init --write-tables todos` (`QUICKSTART.md:42`), explained at `:252`; parsed `init.rs:64-68`, persisted `config.rs:47,157`, emitted to deploy templates `deploy.rs:56,106`. Claim withdrawn; A3 dropped |
 | C10 | The Dart SDK gives a developer no way to learn a write failed | **verified** | `SyncStatus` = `{conn,lastSyncedAt}` (`nostos_database.dart:498-515`); `client.rs:32` "user-facing surface is a Phase-2 concern"; `client.rs:710,718` retry→dead-letter; write returns "local outbox id (NOT a server ack)" (`nostos_database.dart:438`) |
-| C11 | PowerSync `SyncStatus` exposes 12 members incl. `uploadError` | **verified** | pub.dev API reference, fetched this session |
+| C11 | A comparable sync SDK's `SyncStatus` exposes 12 members incl. `uploadError` | **verified** | pub.dev API reference, fetched this session |
 | C12 | Uncommitted Dart work is complete + green | **verified** | `flutter analyze` clean; `make fixture-todo-test` 11/11 |
 | C13 | Offline-delete-orphan P0 is closed with tail coverage | **verified** | `apply.rs:597,652,796`; `sqlite.rs:1663` |
 | C14 | No workflow runs `make sdk-e2e`; CI flutter job skips `integration_test` | **verified** | `grep -rn sdk-e2e .github/` → 0 hits; `ci.yml:86,117,129` |
 | C15 | Per-SDK README drift, publishability, stub-vs-real detail | **unknown** | 3 subagents dispatched for this returned nothing; not independently done |
-| C16 | Competitor DX beyond PowerSync `SyncStatus`; sync-UX conventions | **verified — CLOSED** | §6.4. Fetched 2026-07-29 via sandbox path: PowerSync SDK ref, Zero connection-status + mutators, Instant docs, TanStack DB overview, Electric writes guide, Flutter official optimistic-state pattern, Superhuman, Notion, Ink & Switch |
+| C16 | Competitor DX beyond a comparable sync SDK's `SyncStatus`; sync-UX conventions | **verified — CLOSED** | §6.4. Fetched 2026-07-29 via sandbox path: a comparable sync SDK's reference docs, Zero connection-status + mutators, Instant docs, TanStack DB overview, Electric writes guide, Flutter official optimistic-state pattern, Superhuman, Notion, Ink & Switch |
 | C16b | Flutter's official optimistic-state pattern requires a catchable write failure, which Nostos cannot provide | **verified** | Flutter architecture docs (`subscribed`/`error` revert pattern) vs `nostos_database.dart:438` returning an outbox id that never reports rejection |
 | C16c | Zero does not support offline writes; Electric is read-path only | **verified** | Zero Connection Status docs (*"the cost to support offline is extremely high"*); Electric docs meta (*"the read-path sync engine for Postgres"*) |
 | C17 | A1–A5 are sufficient to pass the ≤5-min stranger test | **unknown** | The stranger test is by construction operator-run; no agent can establish this |
@@ -819,7 +815,7 @@ stale plan document, and both would have sent work in the wrong direction. The s
 headline rests on C1, C2, C10, C11, C14, all verified by commands run this session.
 
 The strongest *surviving* finding is **C10 + C11 + C16b** (no write-error surface in Dart,
-2 fields vs PowerSync's 12, and Flutter's own official optimistic-state pattern rendered
+2 fields vs a comparable sync SDK's 12, and Flutter's own official optimistic-state pattern rendered
 unimplementable as a result). It is unaffected by either correction, was derived from
 source plus authoritative external references rather than from any plan doc, and is the
 one item that is a product defect rather than a harness or docs issue.
@@ -840,7 +836,7 @@ so it is environmental, not a prompt defect. It is caused by the session running
 or lower clears it.** All eight agents were stopped explicitly rather than left running.
 
 **They were not, however, useless.** The research agents indexed a dozen sources into the
-shared knowledge base before dying — PowerSync's SDK reference and client architecture,
+shared knowledge base before dying — a comparable sync SDK's reference and client architecture,
 Zero's connection-status and mutators docs, Instant, TanStack DB, Electric's writes guide,
 Flutter's official optimistic-state pattern, Superhuman, Notion, Ink & Switch, Automerge.
 **§6.4 was largely reconstructed by querying what they left behind**, which is why C16

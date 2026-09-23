@@ -39,7 +39,6 @@ dependencies:
   connectivity_plus: ^6.1.0
   nostos_flutter:
     path: ../../../sdk/nostos_flutter
-  powersync: ^1.16.0
   path_provider: ^2.1.5
   # Push pilot web arm (lib/push/push_pilot_web.dart): browser Push API.
   # Only imported on web via conditional import, mirroring nostos_flutter.

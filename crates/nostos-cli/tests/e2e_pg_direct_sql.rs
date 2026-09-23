@@ -27,7 +27,8 @@
 //! Supabase project aborts instead of dropping its auth schema.
 
 use nostos_cli::direct::{
-    inspect, render_with_push, DirectTable, PushConfig, Scoping, Verdict, DEFAULT_RETENTION,
+    inspect, parse_visible, render_with_push, templates_sql, DirectTable, PushConfig, Scoping,
+    Verdict, DEFAULT_RETENTION,
 };
 
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
@@ -158,6 +159,7 @@ impl Fixture {
                 endpoint: "https://example.test/nostos-push".to_string(),
                 presence_window: "90 seconds".to_string(),
                 cooldown: "30 seconds".to_string(),
+                templates: Vec::new(),
             }),
         );
         client
@@ -193,11 +195,21 @@ impl Fixture {
     }
 
     /// Everything the pull returns, as `(xid, table, pk, op)`.
+    ///
+    /// The RPC hands back ONE jsonb array rather than a set of rows — see the
+    /// comment over `cairn_pull` in the generator for why (PostgREST truncates
+    /// a set at `db-max-rows` and says so only in a header). Over the wire the
+    /// device reads that array directly; here we expand it so the assertions
+    /// below can stay written in rows.
     async fn pull(&self, since: &str, max_txns: i32) -> Vec<(String, String, String, String)> {
         self.client
             .query(
-                "select xid::text, table_name, pk, op from public.cairn_pull($1::text::xid8, $2) \
-                 order by xid, seq",
+                "select t.xid, t.table_name, t.pk, t.op \
+                 from jsonb_array_elements(public.cairn_pull($1::text::xid8, $2)) \
+                      with ordinality as a(e, ord), \
+                 lateral jsonb_to_record(a.e) as t(xid text, table_name text, \
+                                                   pk text, op text) \
+                 order by a.ord",
                 &[&since, &max_txns],
             )
             .await
@@ -363,7 +375,9 @@ async fn rls_scopes_the_log_to_the_callers_claims() {
     let scoped = fx
         .client
         .query(
-            "select pk, op from public.cairn_pull('0'::text::xid8, 200)",
+            "select t.pk, t.op \
+             from jsonb_array_elements(public.cairn_pull('0'::text::xid8, 200)) e, \
+             lateral jsonb_to_record(e) as t(pk text, op text)",
             &[],
         )
         .await
@@ -497,9 +511,12 @@ async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
     );
 
     // Now deploy the bug: same signature, same output columns, row-limited.
+    // Dropped first because the shipped one returns a scalar jsonb and a
+    // return type cannot be replaced in place.
     fx.client
         .batch_execute(
-            r#"create or replace function public.cairn_pull(since xid8, max_txns int default 200)
+            r#"drop function if exists public.cairn_pull(xid8, int);
+               create or replace function public.cairn_pull(since xid8, max_txns int default 200)
                returns table (horizon xid8, seq bigint, xid xid8,
                               table_name text, pk text, op text, "row" jsonb)
                language sql stable security invoker set search_path = '' as $fn$
@@ -591,15 +608,19 @@ async fn a_pruned_device_can_re_snapshot_and_resume() {
     fx.insert("alice", "kept").await;
     fx.insert("bob", "theirs").await;
 
-    let rows = fx
+    // ONE jsonb value, not a set — that is the whole point of the signature
+    // (`db-max-rows` cannot truncate a scalar), so read it as one.
+    let snapshot: serde_json::Value = fx
         .client
-        .query("select horizon::text, table_name, pk, \"row\" from public.cairn_snapshot()", &[])
+        .query_one("select public.cairn_snapshot()", &[])
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .get(0);
+    let rows = snapshot.as_array().expect("the snapshot is a jsonb array");
     assert!(!rows.is_empty(), "a snapshot always carries its horizon");
 
-    let horizons: std::collections::HashSet<String> =
-        rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    let horizons: std::collections::HashSet<&str> =
+        rows.iter().filter_map(|r| r["horizon"].as_str()).collect();
     assert_eq!(
         horizons.len(),
         1,
@@ -608,25 +629,26 @@ async fn a_pruned_device_can_re_snapshot_and_resume() {
 
     // The header row per table is what makes an empty table distinguishable
     // from a table the snapshot forgot.
-    let headers: Vec<String> = rows
+    let headers: Vec<&str> = rows
         .iter()
-        .filter(|r| r.get::<_, Option<String>>(2).is_none())
-        .filter_map(|r| r.get::<_, Option<String>>(1))
+        .filter(|r| r["pk"].is_null())
+        .filter_map(|r| r["table_name"].as_str())
         .collect();
     assert!(
-        headers.contains(&fx.tasks),
+        headers.contains(&fx.tasks.as_str()),
         "the snapshot must announce {}, got {headers:?}",
         fx.tasks
     );
 
-    let bodies = rows
-        .iter()
-        .filter(|r| r.get::<_, Option<String>>(2).is_some())
-        .count();
+    let bodies = rows.iter().filter(|r| !r["pk"].is_null()).count();
     assert_eq!(bodies, 2, "both rows are in the picture (no RLS role set)");
 
     // And the horizon it hands back is a horizon a pull will accept.
-    let horizon = horizons.into_iter().next().expect("one horizon");
+    let horizon = horizons
+        .into_iter()
+        .next()
+        .expect("one horizon")
+        .to_string();
     fx.client
         .query(
             "select * from public.cairn_pull($1::text::xid8, 200)",
@@ -719,5 +741,47 @@ async fn push_skips_awake_devices_and_debounces_the_rest() {
         .batch_execute("select set_config('request.jwt.claims', '', false);")
         .await
         .expect("reset");
+    fx.teardown().await;
+}
+
+/// A table with a visible template pushes EVERY change, not one per cooldown:
+/// iOS shows an alert to a user-quit app but never wakes it for a silent
+/// doorbell, so for these tables the push is the only news the user gets, and
+/// a debounced one is a lost one (atlet, 2026-09-23).
+#[tokio::test]
+async fn a_visible_template_pushes_every_change_with_its_row() {
+    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+        eprintln!("skipping: set {E2E_FLAG}=1");
+        return;
+    }
+    let fx = Fixture::setup().await;
+    // Exactly what `nostos link --visible` writes, so its quoting meets a real
+    // Postgres here.
+    let spec = format!(
+        "{}:action@/tasks/{{id}}:task_status:Task update:Now: {{title}}",
+        fx.tasks
+    );
+    fx.client
+        .batch_execute(&templates_sql(&[parse_visible(&spec).expect("spec")]))
+        .await
+        .expect("template");
+
+    for i in 0..3 {
+        fx.insert("alice", &format!("visible {i}")).await;
+    }
+    assert_eq!(sent(&fx.client).await, 3, "no debounce on a visible table");
+
+    let body: serde_json::Value = fx
+        .client
+        .query_one("select body from net.sent order by id limit 1", &[])
+        .await
+        .expect("read the request")
+        .get(0);
+    assert_eq!(body["scope"], "sub:alice");
+    assert_eq!(body["title"], "Task update");
+    assert_eq!(body["body"], "Now: {title}", "the Edge Function fills it");
+    assert_eq!(body["category"], "task_status");
+    assert_eq!(body["route"], "/tasks/{id}");
+    assert_eq!(body["row"]["title"], "visible 0");
     fx.teardown().await;
 }

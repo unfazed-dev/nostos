@@ -17,21 +17,21 @@ revision: 1 (2026-07-19, same day — primitive re-decided after reading full no
 ## Revision note (2026-07-19)
 
 The original draft (rev 0) chose a **hot ref-counted `ValueListenable<List<T>>` per
-query**, justified by "PowerSync's cold-fresh-stream-per-`watch()` storms at nostos's
+query**, justified by "a cold-fresh-stream-per-`watch()` storm risk at nostos's
 142k ops/sec." **That premise was falsified the same day by reading the full
 `nostos.dart` implementation** (not just the signatures): `Nostos.watch(table)` already
 returns a hot broadcast stream that replays the latest value to each new listener
 (`_replayLatest`, `nostos.dart:144-182`), cached per-table in `_watchCache` so N widgets
 share ONE upstream pump; `Nostos.watchQuery(sql, {triggerOnTables, throttle})` already
-has the PowerSync-parity knobs. **Storms do not occur.** The primitive was re-decided
+has knobs offering that parity. **Storms do not occur.** The primitive was re-decided
 to **Stream-primary + optional `.asValueListenable()` adapter** (operator-approved).
 The facade's value is typed ergonomics + `count()` + `SyncStatus`, not a primitive swap.
 
 ## Context
 
-The 2026-07-13 PowerSync-style redesign locked `NostosDatabase` as the SQL-core sync
+The 2026-07-13 reactive-query redesign locked `NostosDatabase` as the SQL-core sync
 handle. Reading the full impl (2026-07-19) showed the reactive layer is **already
-substantial**: per-table hot-replay-shared broadcast streams, PowerSync-parity
+substantial**: per-table hot-replay-shared broadcast streams, parity-class
 `triggerTables`/`throttle` knobs, and typed `watchMapped<T>`. What is genuinely
 missing — the real gap — is: (a) a typed `Collection<T>` facade so devs don't hand-write
 `SELECT * FROM <table>` + `fromRow` at every call site; (b) a `count()` derived selector;
@@ -42,7 +42,7 @@ writes (`upsert(T)` / `delete(id)`); (e) an optional `ValueListenable` bridge fo
 Research (2026-07-19): ng-elf is **dead** (2026-06-05), eclipsed because it never bridged
 to Angular's native reactive primitive — the lesson is "offer the platform's native
 widget primitive," which the `.asValueListenable()` adapter satisfies without forcing it.
-PowerSync's `watch()` is a cold fresh `Stream` per call; nostos's is already hotter
+A cold-fresh-`Stream`-per-call `watch()` is common elsewhere; nostos's is already hotter
 (replay-shared). rxdart 0.28's `BehaviorSubject`/`ValueStream` is the cached-state
 pattern nostos already hand-rolls in `_replayLatest` (no dep).
 
@@ -68,7 +68,7 @@ pattern nostos already hand-rolls in `_replayLatest` (no dep).
 
 The facade gives the typed, dev-excellent surface the operator asked for **without
 discarding or rewriting the ratified SQL core or its (already-good) reactive plumbing.**
-Stream-primary builds on what works and keeps PowerSync muscle-memory; the
+Stream-primary builds on what works and keeps `watch()` → `Stream` muscle-memory; the
 `.asValueListenable()` adapter honors ng-elf's "offer the native widget primitive"
 lesson without breaking muscle-memory or wrapping working machinery for a marginal
 widget-ergonomics win the demo (which hoists streams to `late final` fields) doesn't
@@ -79,7 +79,7 @@ broken.
 
 - **+** Facade is small (pure Dart over `Nostos.watchMapped`); no Rust changes, no new
   reactive machinery, no ref-counted-cache lifecycle to get wrong.
-- **+** PowerSync muscle-memory preserved (`watch()` → `Stream`); `ValueListenableBuilder`
+- **+** `watch()` → `Stream` muscle-memory preserved; `ValueListenableBuilder`
   users get the adapter.
 - **−** Does NOT dedupe identical `(table, where)` queries across callers (each
   `Collection<T>.watch()` gets its own `watchQuery` pipeline). Acceptable at the demo's
@@ -93,7 +93,6 @@ broken.
 
 ## References
 
-- 2026-07-13 ratified redesign: `docs/plans/nostos-flutter-powersync-connection-redesign.md`
 - Plan (this decision's implementation): `docs/plans/dart-dev-api-reactive-facade-2026-07-19.md`
 - As-built reactive plumbing: `sdk/nostos_flutter/lib/src/nostos.dart:117-182` (`watch`/`_replayLatest`/`_watchCache`), `:216-267` (`watchQuery`/`watchMapped` with `triggerOnTables`/`throttle`)
 - ADR-0014 (per-field LWW — the conflict surface the facade leaves implicit)

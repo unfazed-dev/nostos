@@ -47,7 +47,7 @@
 ## Track C — nostos_flutter: for arxa client apps (when clients need offline-first)
 
 - C1. Pin `nostos_flutter 0.1.0` + `flutter_rust_bridge 2.13.0-beta.5` compatibility; track nostos's v0.1.0 tag.
-- C2. Reuse atlet as the reference: `lib/adapters/nostos_adapter.dart` (side-by-side with `powersync_adapter.dart`) and `lib/push/push_pilot.dart` (FCM mobile + VAPID web, `--dart-define=ATLET_PUSH_PILOT=true`, `nostosDoorbellBackgroundHandler` background isolate).
+- C2. Reuse atlet as the reference: `lib/adapters/nostos_adapter.dart` (built alongside a comparison adapter during the pilot) and `lib/push/push_pilot.dart` (FCM mobile + VAPID web, `--dart-define=ATLET_PUSH_PILOT=true`, `nostosDoorbellBackgroundHandler` background isolate).
 - C3. Note for client work: adapter-conformance pilot ran without a live backend (only checklist item 5 genuinely passed for either adapter) — a live-backend conformance pass is the first task when a client project actually adopts it.
 - C4. Gate: a minimal arxa-branded flutter fixture passes the conformance suite against a live nostos-server, offline→online, with one real push received.
 

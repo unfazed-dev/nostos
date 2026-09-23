@@ -1,6 +1,6 @@
 //! Snapshot-on-subscribe adapter (ADR-0014): read a table's CURRENT rows and
 //! hand them to the transport as `Insert` events so a freshly-subscribing
-//! client receives pre-existing rows BEFORE live fan-out (PowerSync parity).
+//! client receives pre-existing rows BEFORE live fan-out.
 //!
 //! ## Why this exists
 //!

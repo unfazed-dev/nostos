@@ -68,7 +68,7 @@ export interface SyncStatus {
 }
 
 /**
- * PowerSync-style sync client. Reduced-scope: no live WS transport in
+ * Sync client. Reduced-scope: no live WS transport in
  * node — drives the apply engine only.
  */
 export declare class NostosClient {

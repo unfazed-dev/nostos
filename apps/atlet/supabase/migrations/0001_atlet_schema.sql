@@ -26,7 +26,7 @@ create table if not exists public.analytics_runs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users(id),
   sdk text not null,
-  engine text not null check (engine in ('cairn','powersync')),
+  engine text not null check (engine in ('cairn','cairnDirect')),
   profile text not null check (profile in ('local','cloud')),
   run_type text not null,
   spec_version text not null,

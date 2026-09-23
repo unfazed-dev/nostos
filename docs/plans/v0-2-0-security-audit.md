@@ -389,7 +389,7 @@ rejection is a property of `And`, not of the shape of the other conjunct. Twelve
 shapes re-prove what `rules_scope_is_anded_with_tenant_scope` already proves.
 
 The axis that can actually fail is **path**, not shape — which is also the real
-shape of CVE-2026-30870 (PowerSync): rules *not applied* on one path, rather
+shape of a well-known sync-rules CVE (CVE-2026-30870): rules *not applied* on one path, rather
 than misapplied. Enumerating every path that can put a row in front of a client
 found a live bug on the first one.
 
@@ -617,7 +617,7 @@ is atomic and cannot truncate the original on failure. The volume is still at
 ## Recommended next test, not yet written
 
 The highest-value remaining test is the **tenant-isolation matrix**, modelled on
-CVE-2026-30870 (PowerSync): sync rules were silently *not applied* for certain
+a well-known sync-rules CVE (CVE-2026-30870): sync rules were silently *not applied* for certain
 query shapes — authorized-looking config, unauthorized delivery, no error. That
 is a coverage gap, not a missing feature, so review cannot find it.
 

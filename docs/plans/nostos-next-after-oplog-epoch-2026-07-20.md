@@ -47,7 +47,7 @@ Two claims are **unverified post-oplog** and must be measured, not assumed:
 7. W0b live-Supabase stranger run; F5 typed payloads (= WS2 slice-2: instant-local writes + reconcile, per `nostos-ws2-view-storage`).
 
 **Operator-decision gates (surface only — not this plan's call):**
-- `nostos-flutter-powersync-connection-redesign.md`, `dart-dev-api-reactive-facade-2026-07-19.md`, `nostos-ai-privacy-and-runner-roadmap.md` — all GATED-ON-GO.
+- `dart-dev-api-reactive-facade-2026-07-19.md`, `nostos-ai-privacy-and-runner-roadmap.md` — all GATED-ON-GO.
 
 ## 4. Claim list (Gate 4)
 
@@ -60,7 +60,7 @@ Two claims are **unverified post-oplog** and must be measured, not assumed:
 | C4 | Tenant-DELETE replay closed by F1 (`a711df7`) | **assumed** — subagent read code + commit msg; supersedes stale memory |
 | C5 | `NOSTOS_WRITE_TABLES` absent from QUICKSTART | **verified** — grep returned 0 hits |
 | C6 | Late-append race is a real uncovered delete-loss window | **verified-fixed (A+B applied 2026-07-20).** Race was confirmed real + production-reachable, then closed by two fixes: **A** (`main.rs:615`) retains the pg replicator `JoinHandle` + aborts it between axum drain and oplog shutdown (producer stops before consumer drains); **B** (`oplog.rs`) makes `tx: Mutex<Option<Sender>>` and `shutdown()` `.take()`s the sender first → the flush_loop's all-senders-dropped `None` path becomes authoritative (drains everything; no silent buffer-during-final-flush) + `append()` on `None` rejects loudly via `oplog_dropped`. The `#[ignore]`'d probe was un-ignored, renamed `drain_boundary_late_append_is_rejected_not_lost`, and its assertion flipped — it now PASSES (would fail under the old bug). `make ci` green at 431 passed / 0 failed / 0 warnings |
-| C7 | Oplog writes regress the moat | **verified — no regression.** `benches/results/RESULTS.md` already documents the post-oplog fan-out measurement with `NOSTOS_BENCH_OPLOG=1`: 833,305 → 833,307 ops/sec @ 1000 clients, `oplog_dropped=0` (channel-send cost, within ±5% noise). The moat is **833k ops/sec @ 1k clients, 0% drops, 208.3× PowerSync** (RESULTS.md). The remaining OPEN measurement is the real-PG `cairn_oplog` multi-row INSERT write-amp (slice 6, off-loop — needs docker + `NOSTOS_E2E_PG=1` + a real-PG bench harness), not `make bench` |
+| C7 | Oplog writes regress the moat | **verified — no regression.** `benches/results/RESULTS.md` already documents the post-oplog fan-out measurement with `NOSTOS_BENCH_OPLOG=1`: 833,305 → 833,307 ops/sec @ 1000 clients, `oplog_dropped=0` (channel-send cost, within ±5% noise). The moat is **833k ops/sec @ 1k clients, 0% drops, 208.3× a competitor's published ceiling** (RESULTS.md). The remaining OPEN measurement is the real-PG `cairn_oplog` multi-row INSERT write-amp (slice 6, off-loop — needs docker + `NOSTOS_E2E_PG=1` + a real-PG bench harness), not `make bench` |
 | C11 | Moat number is consistent across docs | **verified-fixed** — 142k was stale eval-only drift (same measurement as 833k, pre-optimization; `ROADMAP.md:14` already labeled it the Week-1 historical baseline). `CLAUDE.md:6-7` + `docs/STRATEGY.md:16` updated to 833k/208× with an explicit eval-only-fan-out label; README/ROADMAP/RESULTS were already correct |
 | C12 | W5 integration test loads on the author machine | **blocked — macOS toolchain failure, not a code regression.** `fixtures/flutter/todo` integration test fails at LOAD: `nostos_flutter.NostosFlutterPlugin` symbol missing for arm64 + `CoreAudioTypes`/`SwiftUICore` auto-link warnings (Xcode/SPM/SDK mismatch on this machine). The watch-bug fix is not exercisable until this is resolved. Cheap unblock to try: `flutter clean && flutter pub get` in `fixtures/flutter/todo/`, then re-run; else Xcode/SPM investigation. Operator-owned (env + the W5 gate is fresh-machine by definition) |
 | C8 | `make ci` currently green | **verified** — real exit 0 (read from the log, not the wrapper); **431 passed / 0 failed / 1 ignored** (real-PG self-skip) / 0 clippy or fmt warnings, after fixes A+B + the flipped C6 guard |
@@ -68,7 +68,7 @@ Two claims are **unverified post-oplog** and must be measured, not assumed:
 
 **The `unknown`/`assumed` claims (C6, C7, C8, C9) are load-bearing** — they determine whether Tier 1 is real correctness/moat work or just hygiene, and whether the watch-bug is truly closed. The cheapest next actions (test #4, bench #5, `make ci` #3, and re-running the W5 stranger step) exist specifically to collapse them.
 
-> **Correction 2026-08-06:** rows C7/C11's "208.3×"/"833k/208×" — the N× vs PowerSync framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
+> **Correction 2026-08-06:** rows C7/C11's "208.3×"/"833k/208×" — the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch) — retired; see benches/results/RESULTS.md §Correction.
 
 ## 5. Recommended sequencing
 
@@ -85,7 +85,7 @@ Sequenced:
 4. **#5 moat** — already verified at the fan-out layer (`RESULTS.md`: oplog invisible, 833k @ 1k, 0% drops); the real-PG `cairn_oplog` write-amp (slice 6) remains open and needs a real PG.
 5. Then the stranger test itself; then Tier 2 e2e hardening.
 
-Defer Tier 3 + gated-on-go plans (powersync redesign, reactive facade, AI roadmap) until Path A + B land, and never without operator sign-off.
+Defer Tier 3 + gated-on-go plans (reactive facade, AI roadmap) until Path A + B land, and never without operator sign-off.
 
 > **Confidence note:** the verdict's cheapest resolution is the test in step 2 — run it first; it materially settles C6 regardless of severity opinion. The independent advisor call can be re-run before committing to a fix if the test confirms the race.
 

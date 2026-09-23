@@ -13,7 +13,7 @@
 //! unchanged.
 //!
 //! The buffer half implements [`SnapshotSource`] so a freshly-subscribing
-//! client sees pre-ingest rows (PowerSync parity) — phase-1 sized: approvals
+//! client sees pre-ingest rows — phase-1 sized: approvals
 //! are ephemeral and few, so an in-memory BTreeMap is the whole store.
 //!
 //! LSN discipline: ONE allocator (`next_lsn`) serves BOTH live ingest and

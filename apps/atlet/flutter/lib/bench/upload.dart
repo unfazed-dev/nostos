@@ -4,7 +4,7 @@ import 'runner.dart';
 import 'store.dart';
 
 /// Signature for posting already-shaped `analytics_runs` rows to Supabase.
-/// Injectable so [AnalyticsScreen] (lib/ui/analytics.dart) never needs a
+/// Injectable so [HistoryScreen] (lib/ui/history.dart) never needs a
 /// live [SupabaseClient] in widget tests — mirrors harness.dart's
 /// `insertRemoteRow` injection pattern.
 typedef RunsUploader = Future<void> Function(List<Map<String, dynamic>> rows);

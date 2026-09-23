@@ -1,7 +1,10 @@
-// Tests for lib/ui/analytics.dart (task-15): pure metric-row shaping plus
-// widget tests using injected fakes for store/runSuite/uploadRuns, same
-// pattern as shop_test.dart's fake SyncAdapter — no live Supabase/adapter
+// Tests for lib/ui/bench.dart: pure metric-row shaping plus widget tests of
+// the bench screen using injected fakes for store/runSuite/uploadRuns — same
+// pattern as shop_test.dart's fake SyncAdapter, no live Supabase/adapter
 // needed.
+//
+// Split out of history_test.dart when the bench moved off the History tab
+// (user request 2026-09-23).
 
 import 'dart:io';
 
@@ -10,7 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:atlet/bench/runner.dart';
 import 'package:atlet/bench/store.dart';
-import 'package:atlet/ui/analytics.dart';
+import 'package:atlet/ui/bench.dart';
 
 /// Lets [BenchStore]'s real `dart:io` File operations actually complete,
 /// then pumps a frame to rebuild. `tester.pump(duration)` alone is not
@@ -20,17 +23,20 @@ import 'package:atlet/ui/analytics.dart';
 /// matter how many bounded pumps follow. `tester.runAsync()` is the
 /// documented escape hatch for exactly this (real I/O / real Futures) and is
 /// also why `pumpAndSettle()` is doubly wrong here: on top of that gap, it
-/// additionally never converges while AnalyticsScreen's indeterminate
+/// additionally never converges while BenchScreen's indeterminate
 /// CircularProgressIndicators keep scheduling frames.
+/// 30 rounds, not 10: the budget is real wall-clock time for real file I/O,
+/// and under a full parallel `flutter test` run 200 ms was occasionally not
+/// enough — the run-suite test failed on a missing results-table in one run of
+/// three and passed standalone every time (2026-09-23).
 Future<void> _settle(WidgetTester tester) async {
-  for (var i = 0; i < 10; i++) {
+  for (var i = 0; i < 30; i++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
     await tester.pump();
   }
 }
-
 RunRecord _fixture({
   required String engine,
   required String runType,
@@ -67,7 +73,7 @@ void main() {
     test('cold_sync has no p95 (single sample)', () {
       final row = metricRowFor(
         _fixture(
-          engine: 'powersync',
+          engine: 'cairn-direct',
           runType: 'cold_sync',
           metrics: {'cold_sync_ms': 900},
         ),
@@ -98,7 +104,6 @@ void main() {
       );
     });
   });
-
   group('latestMetricRows', () {
     test(
       'collapses repeated (engine, run_type) runs to the latest by startedAt',
@@ -125,7 +130,7 @@ void main() {
     test('sorts by engine then canonical run-type order', () {
       final rows = latestMetricRows([
         _fixture(
-          engine: 'powersync',
+          engine: 'cairn-direct',
           runType: 'write_ack',
           metrics: {'write_ack_ms_median': 1, 'write_ack_ms_p95': 2},
         ),
@@ -143,17 +148,16 @@ void main() {
       expect(rows.map((r) => '${r.engine}/${r.runType}').toList(), [
         'cairn/cold_sync',
         'cairn/queue_drain',
-        'powersync/write_ack',
+        'cairn-direct/write_ack',
       ]);
     });
   });
-
-  group('AnalyticsScreen', () {
+  group('BenchScreen', () {
     late Directory tempDir;
     late BenchStore store;
 
     setUp(() async {
-      tempDir = await Directory.systemTemp.createTemp('atlet_analytics_test_');
+      tempDir = await Directory.systemTemp.createTemp('atlet_history_test_');
       store = BenchStore(directory: tempDir);
     });
 
@@ -164,7 +168,7 @@ void main() {
     testWidgets('renders the permanent internal-eval banner', (tester) async {
       await tester.pumpWidget(
         MaterialApp(
-          home: AnalyticsScreen(
+          home: BenchScreen(
             store: store,
             uploadRuns: (rows) async {},
             runSuite: () async {},
@@ -172,7 +176,7 @@ void main() {
         ),
       );
       await tester.pump();
-      expect(find.byKey(const Key('analytics-eval-banner')), findsOneWidget);
+      expect(find.byKey(const Key('bench-eval-banner')), findsOneWidget);
       expect(find.text(RunRecord.evaluationLabel), findsOneWidget);
     });
 
@@ -181,7 +185,7 @@ void main() {
     ) async {
       await tester.pumpWidget(
         MaterialApp(
-          home: AnalyticsScreen(
+          home: BenchScreen(
             store: store,
             uploadRuns: (rows) async {},
             runSuite: () async {},
@@ -210,7 +214,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          home: AnalyticsScreen(
+          home: BenchScreen(
             store: store,
             uploadRuns: (rows) async {},
             runSuite: fakeRunSuite,
@@ -251,7 +255,7 @@ void main() {
       List<Map<String, dynamic>>? captured;
       await tester.pumpWidget(
         MaterialApp(
-          home: AnalyticsScreen(
+          home: BenchScreen(
             store: store,
             uploadRuns: (rows) async {
               captured = rows;
@@ -285,7 +289,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          home: AnalyticsScreen(
+          home: BenchScreen(
             store: store,
             uploadRuns: (rows) async {
               throw StateError('network down');
@@ -302,5 +306,4 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.textContaining('Upload failed'), findsOneWidget);
     });
-  });
-}
+  });}

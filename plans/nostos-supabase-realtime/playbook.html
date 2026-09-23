@@ -92,7 +92,7 @@ ul.checklist li .n{color:var(--muted);font-size:12.5px;display:block}
   PG--&gt;&gt;Srv: WAL change on cairn_pub
   Srv--&gt;&gt;App: replicated row echo over /sync
 </pre><p style="text-align:center;color:var(--muted);font-size:13px;margin-top:4px">A toggle: the app sends one write; the server applies it and the row echoes back through nostos&#x27;s own replication.</p>
-<p>Contrast with PowerSync: writes go through the developer's <code>uploadData()</code> → the backend → Postgres, gated by Supabase RLS. PowerSync has <strong>no server-side write gate</strong>; nostos's allowlist (<code>NOSTOS_WRITE_TABLES</code>) is the cost of applying writes server-side. It is a deliberate architectural choice, not a limitation.</p>
+<p>Nostos's allowlist (<code>NOSTOS_WRITE_TABLES</code>) is the cost of applying writes server-side. It is a deliberate architectural choice, not a limitation.</p>
 <h2>Enabling writes</h2>
 <p>Writes are <strong>off by default</strong>. Because the server applies the SQL itself, it must allowlist which tables a client may write — empty default means no table is writable (defense-in-depth at the SQL-injection boundary, ADR-0013).</p>
 <p style="font-size:12px;color:var(--muted);margin:14px 0 2px"><code>terminal — local Docker stack</code></p><p style="font-size:12px;color:var(--muted);margin:2px 0 4px">Local dev: allowlist the demo table when starting the stack.</p><pre><code># Writes are allowlist-gated. Without this, add / check / delete are rejected with

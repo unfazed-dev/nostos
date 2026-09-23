@@ -324,16 +324,20 @@ impl PullCursor {
         let mut checkpoint = engine.checkpoint()?;
         for table in &tables {
             engine.snapshot_boundary(table, true, exempt_pks)?;
-            // `lsn` only has to be monotonic within the batch; the resume point
-            // is the horizon, saved below.
-            let mut lsn = checkpoint.0;
             for r in by_table.get(table).into_iter().flatten() {
                 let (Some(pk), Some(value)) = (r.pk.as_ref(), r.row.as_ref()) else {
                     continue; // the table header row
                 };
-                lsn += 1;
                 if let Some(out) = engine.feed(Frame {
-                    lsn,
+                    // Zero, not a made-up counter: the lsn is stored per row as
+                    // `applied_lsn` and gates every later write to that row. A
+                    // snapshot row is the state AT the horizon, so any log row
+                    // the pull delivers after it is newer and must win — at any
+                    // `seq`. A counter here outran the log's `seq` and silently
+                    // dropped every update to a snapshotted row (atlet,
+                    // 2026-09-23). The snapshot itself still lands, because
+                    // snapshot tables apply unconditionally (design D).
+                    lsn: 0,
                     op: Operation::Insert,
                     table: table.clone(),
                     pk: pk.clone(),
@@ -658,5 +662,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(e.storage().horizon().unwrap().as_deref(), Some("777"));
+    }
+
+    #[test]
+    fn a_log_update_after_the_bootstrap_snapshot_is_not_gated_out() {
+        // Caught live 2026-09-23 (atlet): a 1000-row snapshot stamped its rows
+        // lsn 1..1024, the log's `seq` was ~60, and every status update to a
+        // snapshotted order was dropped by the per-row gate — only brand-new
+        // pks ever landed.
+        let mut e = engine();
+        let mut c = PullCursor::fresh();
+        let snap = r#"[{"horizon":"500","table_name":null,"pk":null,"row":null},
+            {"horizon":"500","table_name":"products","pk":null,"row":null},
+            {"horizon":"500","table_name":"products","pk":"p1","row":{"id":"p1"}},
+            {"horizon":"500","table_name":"products","pk":"p2","row":{"id":"p2"}},
+            {"horizon":"500","table_name":"orders","pk":null,"row":null},
+            {"horizon":"500","table_name":"orders","pk":"o1","row":{"status":"paid"}}]"#;
+        c.apply_snapshot(&mut e, snap, &[]).unwrap();
+
+        // seq 1: lower than any lsn the snapshot could have made up.
+        let upd = r#"[{"horizon":"501","seq":1,"xid":"500","table_name":"orders","pk":"o1","op":"update","row":{"status":"failed"}}]"#;
+        c.apply(&mut e, upd).unwrap();
+        assert_eq!(
+            e.storage().payload("orders", "o1"),
+            Some(br#"{"status":"failed"}"#.as_slice())
+        );
     }
 }

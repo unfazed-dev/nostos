@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nostos + Flutter, explained like you're 15</title>
+<style>
+  :root{
+    --bg:#0b1020; --card:#151b30; --line:#273150; --ink:#e8ecf8; --dim:#94a3c4;
+    --nostos:#f59e0b; --pg:#38bdf8; --phone:#a78bfa; --ok:#34d399; --bad:#f87171;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:radial-gradient(1200px 600px at 50% -10%,#1a2340,#0b1020 60%);
+    color:var(--ink); font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  .wrap{max-width:980px;margin:0 auto;padding:32px 20px 100px}
+  h1{font-size:clamp(28px,5vw,46px);line-height:1.1;margin:.2em 0}
+  h2{font-size:clamp(20px,3vw,28px);margin:2.2em 0 .4em}
+  h3{margin:1.4em 0 .3em;font-size:18px}
+  p{color:#cfd7ee}
+  .lede{font-size:clamp(17px,2.2vw,21px);color:var(--dim)}
+  .tag{display:inline-block;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--nostos);font-weight:700}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .card b{display:block;font-size:17px;margin-bottom:2px}
+  .card .em{font-size:30px;line-height:1}
+  .card small{color:var(--dim)}
+
+  /* ---------- playground ---------- */
+  #stage{position:relative;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;overflow:hidden}
+  #wires{position:absolute;inset:0;pointer-events:none}
+  .row{display:grid;gap:14px;grid-template-columns:1fr 1fr;align-items:stretch;position:relative;z-index:2}
+  .node{background:#101733;border:1px solid var(--line);border-radius:12px;padding:12px;position:relative}
+  .node.pg{border-color:#1e4f6e}
+  .node.rt{border-color:#6b4a13}
+  .node.ph{border-color:#3f3470}
+  .node.pu{border-color:#1f5a45}
+  .row.three{grid-template-columns:1fr 1fr 1fr}
+  .node h4{margin:0 0 6px;font-size:14px;display:flex;align-items:center;gap:7px;justify-content:space-between}
+  .node h4 span.t{display:flex;align-items:center;gap:7px}
+  .pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .pill.on{background:rgba(52,211,153,.14);color:var(--ok);border-color:rgba(52,211,153,.4)}
+  .pill.off{background:rgba(248,113,113,.14);color:var(--bad);border-color:rgba(248,113,113,.4)}
+  .pill.mid{background:rgba(245,158,11,.14);color:var(--nostos);border-color:rgba(245,158,11,.4)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  ul.rows{list-style:none;margin:0;padding:0;min-height:74px;font-size:13px}
+  ul.rows li{display:flex;align-items:center;gap:7px;padding:3px 0;border-bottom:1px dashed #222b47}
+  ul.rows li:last-child{border-bottom:0}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:0 0 auto}
+  .dot.pending{background:var(--nostos);animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.25}}
+  .muted{color:var(--dim);font-size:12px}
+  .outbox{margin-top:8px;font-size:12px;color:var(--dim)}
+  .outbox b{display:inline;color:var(--nostos)}
+  .changelog{margin-top:8px;font-size:12px;color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .changelog .gone{color:#6b7694;text-decoration:line-through}
+  .changelog .live{color:var(--pg)}
+
+  .packet{position:absolute;z-index:5;transform:translate(-50%,-50%);padding:3px 9px;border-radius:999px;
+    font-size:11px;font-weight:700;color:#05122a;white-space:nowrap;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+
+  .controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;align-items:center}
+  input[type=text]{background:#0a1128;border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:9px 12px;min-width:170px;font:inherit}
+  button{font:inherit;font-weight:600;cursor:pointer;border-radius:10px;padding:9px 14px;border:1px solid var(--line);
+    background:#1b2440;color:var(--ink);transition:transform .08s,background .15s}
+  button:hover{background:#243059}
+  button:active{transform:translateY(1px)}
+  button.primary{background:var(--nostos);color:#2a1a02;border-color:transparent}
+  button.ghost{background:transparent}
+  button.danger{border-color:rgba(248,113,113,.45);color:#fecaca}
+
+  #log{margin-top:14px;background:#080d1d;border:1px solid var(--line);border-radius:12px;padding:12px;
+    height:170px;overflow:auto;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:#b9c4e4}
+  #log div{padding:1px 0}
+  #log .hi{color:var(--nostos)}
+  #log .good{color:var(--ok)}
+  #log .warn{color:var(--bad)}
+
+  /* ---------- code ---------- */
+  pre{background:#080d1d;border:1px solid var(--line);border-radius:12px;padding:16px;overflow:auto;
+    font:13.5px/1.75 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .cl{display:block;padding:2px 6px;margin:0 -6px;border-radius:6px;cursor:pointer}
+  .cl:hover{background:#16204a}
+  .cl.sel{background:#1d2a5c;outline:1px solid #35478f}
+  .k{color:#c792ea}.s{color:#a5e8a0}.c{color:#5f6f9c}.f{color:#82d4ff}
+  #explain{margin-top:10px;border-left:3px solid var(--nostos);padding:8px 14px;color:#dbe3ff;background:#141b33;border-radius:0 10px 10px 0}
+
+  .truth{display:grid;gap:12px}
+  .truth div{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:10px;padding:14px}
+  .truth div.no{border-left-color:var(--bad)}
+  table.modes{width:100%;border-collapse:collapse;margin-top:10px;font-size:14px}
+  table.modes th,table.modes td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  table.modes th{color:var(--dim);font-weight:600;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+  footer{margin-top:60px;color:var(--dim);font-size:13px;border-top:1px solid var(--line);padding-top:16px}
+  @media (prefers-reduced-motion: reduce){ .dot.pending{animation:none} }
+  @media (max-width:640px){ .row,.row.three{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <span class="tag">Nostos × Flutter — direct mode</span>
+  <h1>Your app already has the data.<br>Nostos just keeps every copy honest.</h1>
+  <p class="lede">A 5-minute, click-it-yourself explanation of how a Flutter app syncs with Postgres — with <b>no server of yours in the middle</b> — including what happens when the Wi-Fi dies, what happens when a phone stays dead for a week, and how an app that isn't even running still gets woken up.</p>
+
+  <h2>1. The 10-second version</h2>
+  <p>Most apps work like a vending machine: you press a button, it phones a server, you wait, you get data. No signal? No app.</p>
+  <p><b>Nostos flips it.</b> Your phone keeps its <i>own</i> little database (SQLite) right there on the device. Your Flutter UI reads from that — instantly, always, offline or not. Nostos's job is boring and important: <b>keep that local copy and the big database agreeing with each other</b>, and never lose a change.</p>
+  <p>In <b>direct mode</b> — the default when your database is Supabase, or anything else running PostgREST and Realtime — there is <b>nothing for you to run</b>. No Nostos server, no VPS, no Docker. The phone talks to Postgres itself, through the HTTP API the database already has.</p>
+
+  <h2>2. Meet the cast</h2>
+  <div class="grid">
+    <div class="card"><div class="em">🗄️</div><b>Postgres</b><small>The big fridge in the kitchen. The real, permanent data lives here. On Supabase it already speaks HTTP, so a phone can talk to it without anything in between.</small></div>
+    <div class="card"><div class="em">📒</div><b>The change log</b><small>A plain table — <code>cairn.changes</code>. A trigger appends to it inside the <i>same transaction</i> as your write, so a change and the note about it are never out of step.</small></div>
+    <div class="card"><div class="em">🔔</div><b>Realtime</b><small>The doorbell. It rings "something changed for you" — it doesn't carry the data. The phone hears the ring and goes and reads the log itself.</small></div>
+    <div class="card"><div class="em">📨</div><b>Push (optional)</b><small>The doorbell for an app that isn't running. Realtime needs an open app; a silent FCM/APNs push wakes a closed one for a few seconds so it can read the log.</small></div>
+    <div class="card"><div class="em">📱</div><b>SQLite + outbox</b><small>Your snack drawer. Your rows, plus a queue of your own writes that haven't reached the fridge yet.</small></div>
+    <div class="card"><div class="em">🎨</div><b>Flutter</b><small>The face. It never waits on the network. It only ever reads the snack drawer — that's the whole trick.</small></div>
+  </div>
+
+  <h2>3. Play with it 👇</h2>
+  <p>Two phones, one database, no server. Type a to-do, then start breaking things: airplane mode, a broken doorbell, a log that gets pruned while a phone is away, a brand-new phone that has never synced, an app that's been swiped away (try it with push off, then on).</p>
+
+  <div id="stage">
+    <svg id="wires"></svg>
+    <div class="row three" style="margin-bottom:14px">
+      <div class="node rt" id="nRt">
+        <h4><span class="t">🔔 Realtime</span><span class="pill on" id="rtPill">ringing</span></h4>
+        <p class="muted" id="rtMsg">Rings every signed-in device when its own rows change. Carries no data.</p>
+        <div class="controls">
+          <button id="btnRt" class="danger">Break the doorbell</button>
+          <button id="btnPrune">🧹 Prune the log</button>
+        </div>
+      </div>
+      <div class="node pg" id="nPg">
+        <h4><span class="t">🗄️ Postgres</span><span class="pill on">the truth</span></h4>
+        <ul class="rows" id="pgRows"></ul>
+        <div class="changelog" id="logRows">change log: empty</div>
+      </div>
+      <div class="node pu" id="nPush">
+        <h4><span class="t">📨 Push</span><span class="pill off" id="puPill">off</span></h4>
+        <p class="muted" id="puMsg"></p>
+        <div class="controls">
+          <button id="btnPush">📨 Turn push on</button>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="node ph" id="nA">
+        <h4><span class="t">📱 Phone A <span class="muted">(Flutter)</span></span><span class="pill on" id="aPill">online</span></h4>
+        <ul class="rows" id="aRows"></ul>
+        <div class="outbox" id="aOut">outbox: empty</div>
+        <div class="controls">
+          <input type="text" id="aInput" placeholder="buy milk" aria-label="New to-do on Phone A">
+          <button class="primary" id="aAdd">Add</button>
+          <button id="aWifi" class="ghost">✈️ Airplane mode</button>
+          <button id="aSleep" class="ghost">💤 Close app</button>
+          <button id="aWipe" class="ghost">🧼 Fresh install</button>
+        </div>
+      </div>
+      <div class="node ph" id="nB">
+        <h4><span class="t">📱 Phone B <span class="muted">(Flutter)</span></span><span class="pill on" id="bPill">online</span></h4>
+        <ul class="rows" id="bRows"></ul>
+        <div class="outbox" id="bOut">outbox: empty</div>
+        <div class="controls">
+          <input type="text" id="bInput" placeholder="feed the cat" aria-label="New to-do on Phone B">
+          <button class="primary" id="bAdd">Add</button>
+          <button id="bWifi" class="ghost">✈️ Airplane mode</button>
+          <button id="bSleep" class="ghost">💤 Close app</button>
+          <button id="bWipe" class="ghost">🧼 Fresh install</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="btnDb">🗄️ Someone edits Postgres directly</button>
+    <button id="btnReset" class="ghost">↺ Reset</button>
+  </div>
+
+  <div id="log" aria-live="polite"></div>
+
+  <h2>4. So what's the Flutter side look like?</h2>
+  <p>Honestly? About ten lines, and none of them mention a server. Click any line to see what it really does.</p>
+<pre id="code"><code><span class="cl" data-i="0"><span class="k">final</span> nostos = <span class="k">await</span> Nostos.<span class="f">direct</span>(</span>
+<span class="cl" data-i="1">  supabaseUrl: <span class="s">'https://&lt;ref&gt;.supabase.co'</span>, anonKey: <span class="s">'&lt;publishable key&gt;'</span>,</span>
+<span class="cl" data-i="2">  scope: <span class="s">'sub:'</span> + session.user.id, token: session.accessToken);</span>
+<span class="cl" data-i="3">
+<span class="k">await</span> nostos.<span class="f">subscribe</span>(<span class="s">'todos'</span>);</span>
+<span class="cl" data-i="4">
+nostos.<span class="f">watch</span>(<span class="s">'todos'</span>).<span class="f">listen</span>((rows) {</span>
+<span class="cl" data-i="5">  setState(() =&gt; _todos = rows);   <span class="c">// your UI, updated</span></span>
+<span class="cl" data-i="6">});</span>
+<span class="cl" data-i="7">
+<span class="k">await</span> nostos.<span class="f">write</span>(<span class="s">'todos'</span>, op: <span class="s">'upsert'</span>, pk: id, payload: {<span class="s">'title'</span>: <span class="s">'buy milk'</span>});</span>
+</code></pre>
+  <div id="explain">👆 Click a line.</div>
+
+  <h2>5. Three things people get wrong</h2>
+  <div class="truth">
+    <div><b>“I need a server. And Docker.”</b> — Not in direct mode. The phone talks to Postgres through the HTTP API Supabase already gives you. What you deploy is <i>SQL</i>: <code>nostos link --mode direct</code> writes it, you apply it once, and <code>nostos doctor --mode direct</code> tells you whether the deployed schema, the grants and the policies actually match.</div>
+    <div><b>“No internet means no app.”</b> — Wrong, and this is the whole point. Writes land on your phone's disk <i>first</i> and return immediately. The UI never waits for Wi-Fi. The change sits in an outbox until the world comes back, then leaves in order.</div>
+    <div><b>“A phone that's been off for a month silently loses rows.”</b> — No. The log is kept for a retention window and pruned behind it. A phone resuming from a horizon that's been pruned away gets a <b>410 Gone</b> — not a short answer it would mistake for "nothing changed" — and re-reads the whole picture with <code>cairn_snapshot()</code>. Loud, and it heals itself. (Try 🧹 Prune while a phone is in airplane mode.)</div>
+    <div><b>“A closed app is stale until you open it.”</b> — Only with push off. Turn it on and a database trigger calls a tiny Edge Function after each commit, which sends a <i>silent</i> push: <code>{cairn: "ring"}</code>, no rows. The phone wakes for a few seconds, pulls from Postgres like it always does, and goes back to sleep. Your data never travels through Apple or Google — only the ring does. (Try 💤 Close app on B, then add a to-do on A.)</div>
+  </div>
+
+  <h2>6. What you'd actually need to run this</h2>
+  <div class="grid">
+    <div class="card"><b>① A Supabase project</b><small>or anything else serving PostgREST + Realtime over your Postgres. Nothing to install on it.</small></div>
+    <div class="card"><b>② One SQL file, applied once</b><small><code>nostos link --mode direct</code> generates <code>.nostos/direct.sql</code> — the log table, the triggers, the RLS policies, and the <code>cairn_pull</code> / <code>cairn_snapshot</code> functions. Re-runnable.</small></div>
+    <div class="card"><b>③ Your Flutter app</b><small><code>flutter pub add nostos_flutter</code>, then those ten lines. Nothing else runs anywhere.</small></div>
+    <div class="card"><b>④ Push, if you want it</b><small><code>nostos link --mode direct --push &lt;function url&gt;</code> adds the wake trigger; deploy <code>supabase/functions/cairn-push</code> with your FCM key as a secret; call <code>db.registerPushToken('fcm', token)</code> in the app. The key lives in the function — never on the phone.</small></div>
+  </div>
+  <p class="muted">Heads-up: Nostos is <b>alpha</b> right now — great for learning and side projects, not for your bank.</p>
+
+  <h2>7. When you'd still want the server</h2>
+  <p>Direct mode is the default, not the only mode. <code>nostos-server</code> is still there, and there are two honest reasons to reach for it.</p>
+  <table class="modes">
+    <tr><th>Your backend</th><th>Mode</th><th>Why</th></tr>
+    <tr><td>Supabase, or any PostgREST + Realtime</td><td><b>direct</b></td><td>There is no process for you to operate. The anon key plus row-level security is the whole trust story.</td></tr>
+    <tr><td>Plain Postgres you host yourself</td><td><b>server</b></td><td>Direct mode has nothing to talk to — no HTTP API, no doorbell. <code>nostos-server</code> reads Postgres' replication stream and fans changes out over WebSockets itself.</td></tr>
+  </table>
+  <p>The other reason is scale: one Rust process fanning out to many clients does work a per-device HTTP pull cannot. That is a measured claim with rules attached — see <code>docs/BENCHMARK-METHODOLOGY.md</code> — and it is not the claim being made on this page.</p>
+  <p class="muted">One thing that is genuinely different: in server mode the process must stay awake. It holds a Postgres replication slot, and while it sleeps Postgres piles up WAL for it. Direct mode has no slot to hold — the log is an ordinary table with an ordinary retention window, which is why a phone can be away for a week and the failure is a 410 rather than a hole.</p>
+
+  <footer>Built from the Nostos repo's own docs: README · docs/QUICKSTART.md · docs/plans/direct-mode-sync-protocol.md · ADR-0045 · <code>.nostos/direct.sql</code> · <code>crates/nostos-client/src/direct.rs</code> · <code>supabase/functions/cairn-push</code> · docs/plans/direct-mode-push-and-presence.md. Last revised 2026-09-23, when direct-mode push reached the Flutter SDK.</footer>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+let S;
+function fresh(){
+  return {
+    rtUp:true, pushOn:false, nextId:1, nextXid:1, prunedBelow:0,
+    db:[], clog:[],
+    A:{online:true, closed:false, rows:[], outbox:[], horizon:0},
+    B:{online:true, closed:false, rows:[], outbox:[], horizon:0}
+  };
+}
+
+/* ---------- logging ---------- */
+function log(msg, cls=''){
+  const d = document.createElement('div');
+  d.className = cls; d.innerHTML = msg;
+  $('#log').appendChild(d);
+  $('#log').scrollTop = 1e9;
+}
+
+/* ---------- animation ---------- */
+function centerOf(el){
+  const st = $('#stage').getBoundingClientRect(), r = el.getBoundingClientRect();
+  return { x: r.left - st.left + r.width/2, y: r.top - st.top + r.height/2 };
+}
+function packet(from, to, label, color='#7dd3fc', ms=620){
+  if (reduce) return new Promise(r => setTimeout(r, 60));
+  return new Promise(res => {
+    const a = centerOf(from), b = centerOf(to);
+    const d = document.createElement('div');
+    d.className = 'packet'; d.textContent = label;
+    d.style.left = a.x+'px'; d.style.top = a.y+'px'; d.style.background = color;
+    $('#stage').appendChild(d);
+    requestAnimationFrame(() => {
+      d.style.transition = `left ${ms}ms cubic-bezier(.4,0,.2,1), top ${ms}ms cubic-bezier(.4,0,.2,1), opacity 220ms ${ms-220}ms`;
+      d.style.left = b.x+'px'; d.style.top = b.y+'px'; d.style.opacity = '0';
+    });
+    setTimeout(() => { d.remove(); res(); }, ms + 40);
+  });
+}
+
+/* ---------- wires ---------- */
+function drawWires(){
+  const svg = $('#wires'), st = $('#stage').getBoundingClientRect();
+  svg.setAttribute('viewBox', `0 0 ${st.width} ${st.height}`);
+  svg.setAttribute('width', st.width); svg.setAttribute('height', st.height);
+  const seg = (f,t,live,color,dash) => {
+    const a = centerOf(f), b = centerOf(t);
+    return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${live?color:'#4a2330'}"
+            stroke-width="2" stroke-dasharray="${live?(dash?'4 6':'0'):'7 7'}" opacity="${live?.85:.9}"/>`;
+  };
+  // The data path is phone <-> Postgres. The doorbells are separate, dashed
+  // wires: Realtime reaches open apps, push reaches closed ones.
+  const rings = p => S.rtUp && S[p].online && !S[p].closed;
+  const wakes = p => S[p].online && S[p].closed;
+  svg.innerHTML =
+    seg($('#nPg'), $('#nA'), S.A.online, '#35478f') +
+    seg($('#nPg'), $('#nB'), S.B.online, '#35478f') +
+    seg($('#nRt'), $('#nA'), rings('A'), '#6b4a13', true) +
+    seg($('#nRt'), $('#nB'), rings('B'), '#6b4a13', true) +
+    (S.pushOn
+      ? seg($('#nPg'), $('#nPush'), true, '#1f5a45', true) +
+        seg($('#nPush'), $('#nA'), wakes('A'), '#1f5a45', true) +
+        seg($('#nPush'), $('#nB'), wakes('B'), '#1f5a45', true)
+      : '');
+}
+addEventListener('resize', () => drawWires());
+
+/* ---------- render ---------- */
+function rowsHtml(list, showPending){
+  if (!list.length) return '<li class="muted">— empty —</li>';
+  return list.map(r =>
+    `<li><span class="dot ${showPending && r.pending ? 'pending':''}"></span>${r.title}</li>`).join('');
+}
+function render(){
+  $('#pgRows').innerHTML = rowsHtml(S.db, false);
+  $('#logRows').innerHTML = S.clog.length
+    ? 'change log: ' + S.clog.map(e =>
+        `<span class="${e.xid <= S.prunedBelow ? 'gone':'live'}">#${e.xid}</span>`).join(' ')
+      + (S.prunedBelow ? ` <span class="muted">(pruned below #${S.prunedBelow+1})</span>` : '')
+    : 'change log: empty';
+  for (const p of ['A','B']){
+    const ph = S[p], low = p.toLowerCase();
+    $('#'+low+'Rows').innerHTML = rowsHtml(ph.rows, true);
+    $('#'+low+'Out').innerHTML = ph.outbox.length
+      ? `outbox: <b>${ph.outbox.length} waiting</b> — saved on disk, not sent yet`
+      : `outbox: empty · horizon: ${ph.horizon === 0 ? 'never synced' : '#'+ph.horizon}`;
+    const pill = $('#'+low+'Pill');
+    pill.textContent = !ph.online ? 'airplane mode' : ph.closed ? 'app closed' : 'online';
+    pill.className = 'pill ' + (!ph.online ? 'off' : ph.closed ? 'mid' : 'on');
+    $('#'+low+'Wifi').textContent = ph.online ? '✈️ Airplane mode' : '📶 Reconnect';
+    $('#'+low+'Sleep').textContent = ph.closed ? '📲 Open app' : '💤 Close app';
+    $('#'+low+'Add').disabled = $('#'+low+'Input').disabled = ph.closed;
+  }
+  $('#puPill').textContent = S.pushOn ? 'on' : 'off';
+  $('#puPill').className = 'pill ' + (S.pushOn ? 'on' : 'off');
+  $('#btnPush').textContent = S.pushOn ? 'Turn push off' : '📨 Turn push on';
+  $('#puMsg').textContent = S.pushOn
+    ? 'After each commit a trigger calls the cairn-push Edge Function, which sends closed apps a silent {cairn: "ring"}.'
+    : 'Opt-in. Realtime only reaches apps that are open — a closed app waits until it is opened.';
+  $('#rtPill').textContent = S.rtUp ? 'ringing' : 'DOWN';
+  $('#rtPill').className = 'pill ' + (S.rtUp ? 'on' : 'off');
+  $('#btnRt').textContent = S.rtUp ? 'Break the doorbell' : '🔔 Fix the doorbell';
+  $('#rtMsg').textContent = S.rtUp
+    ? 'Rings every signed-in device when its own rows change. Carries no data.'
+    : 'Down. Nobody gets rung — so nobody syncs until they open the app or reconnect.';
+  drawWires();
+}
+
+/* ---------- the actual story ---------- */
+async function writeLocal(p, title){
+  const ph = S[p], row = { id: S.nextId++, title, pending: true };
+  ph.rows.push(row); ph.outbox.push(row); render();
+  log(`📱 <b>${p}</b> wrote "<span class="hi">${title}</span>" → <span class="good">saved on the phone in ~0 ms</span>. UI updates now, not later.`);
+  await sync(p);
+}
+
+/* One sync = push the outbox, then pull. Same order as DirectClient::sync. */
+async function sync(p){
+  const ph = S[p];
+  if (!ph.online){ if (ph.outbox.length) log(`   ✈️ <b>${p}</b> has no signal. ${ph.outbox.length} change(s) wait in the outbox. Nothing is lost.`); return; }
+  if (ph.closed) return; // no app running, nothing to sync until a push or a launch
+  await push(p);
+  await pull(p);
+}
+
+async function push(p){
+  const ph = S[p];
+  const sending = ph.outbox.splice(0); render();
+  for (const row of sending){
+    await packet($('#n'+p), $('#nPg'), row.title, '#a78bfa');
+    S.db.push({ id: row.id, title: row.title });
+    const xid = S.nextXid++;
+    S.clog.push({ xid, id: row.id, title: row.title });
+    row.pending = false; render();
+    log(`   📱 → 🗄️ stored in Postgres, and the trigger appended <span class="hi">#${xid}</span> to the change log in the same transaction.`, 'good');
+    await ringEveryoneElse(p);
+  }
+}
+
+async function pull(p){
+  const ph = S[p];
+
+  // A device that has never synced cannot reach rows older than the log.
+  if (ph.horizon === 0){
+    await packet($('#n'+p), $('#nPg'), 'cairn_snapshot()', '#a78bfa', 420);
+    ph.rows = S.db.map(r => ({ id: r.id, title: r.title }));
+    ph.horizon = S.nextXid - 1;
+    render();
+    log(`   🆕 <b>${p}</b> has never synced, so it bootstraps with <code>cairn_snapshot()</code>: ${ph.rows.length} row(s), then follows the log from #${ph.horizon}. The log only knows what changed since the trigger was installed — everything older arrives this way or not at all.`, 'good');
+    return;
+  }
+
+  // Resuming from a horizon the server has already pruned past.
+  if (ph.horizon < S.prunedBelow){
+    log(`   ⛔ <b>${p}</b> asked for everything after #${ph.horizon}, but the log is pruned below #${S.prunedBelow+1} → <b>410 Gone</b>. Not a short answer it could mistake for "nothing new".`, 'warn');
+    await packet($('#n'+p), $('#nPg'), 'cairn_snapshot()', '#a78bfa', 420);
+    ph.rows = S.db.map(r => ({ id: r.id, title: r.title }));
+    ph.horizon = S.nextXid - 1;
+    render();
+    log(`   ↩️ <b>${p}</b> re-read the whole picture and resumed at #${ph.horizon}. Healed, in the same sync.`, 'good');
+    return;
+  }
+
+  const missing = S.clog.filter(e => e.xid > ph.horizon);
+  if (!missing.length) return;
+  await packet($('#n'+p), $('#nPg'), `cairn_pull(#${ph.horizon})`, '#a78bfa', 420);
+  for (const e of missing){
+    if (!ph.rows.some(r => r.id === e.id)) ph.rows.push({ id: e.id, title: e.title });
+    ph.horizon = e.xid;
+  }
+  render();
+  log(`   🗄️ → 📱 <b>${p}</b> applied ${missing.length} change(s) and is now at #${ph.horizon}. ` +
+    (ph.closed ? `No UI is running — the rows are on disk, waiting for the next launch.`
+               : `Its Flutter <code>watch()</code> just fired and the list redrew.`), 'good');
+}
+
+async function ringEveryoneElse(origin){
+  for (const p of ['A','B']){
+    if (p === origin) continue;
+    if (!S.rtUp){ log(`   🔕 doorbell is down — <b>${p}</b> hears nothing. It will catch up the next time it syncs.`, 'warn'); continue; }
+    if (!S[p].online){ log(`   📴 <b>${p}</b> is offline — it'll pull when it reconnects.`); continue; }
+    if (S[p].closed){ await wake(p); continue; }
+    await packet($('#nRt'), $('#n'+p), '🔔 ring', '#f59e0b', 360);
+    log(`   🔔 <b>${p}</b> got rung. The ring carries no data — it just means "go read the log".`);
+    await pull(p);
+  }
+}
+
+/* A closed app has no Realtime socket. Push is the only way in. */
+async function wake(p){
+  if (!S.pushOn){
+    log(`   💤 <b>${p}</b>'s app is closed, so there's no Realtime socket to ring, and push is off. It catches up the moment it's opened.`, 'warn');
+    return;
+  }
+  await packet($('#nPg'), $('#nPush'), 'pg_net → cairn-push', '#34d399', 420);
+  log(`   ⚡ After the commit, a trigger on the change log posted <code>{scope}</code> to the <code>cairn-push</code> Edge Function. It holds the FCM key; the phone never does. (At most one push per user every 30 s — bursts don't spam.)`);
+  await packet($('#nPush'), $('#n'+p), '📨 {cairn:"ring"}', '#34d399', 460);
+  log(`   📨 <b>${p}</b> got a <i>silent</i> push via FCM/APNs. Like the Realtime ring it carries no rows — Apple and Google never see your data.`);
+  await pull(p);
+  log(`   😴 <b>${p}</b> woke for a few seconds in the background, pulled, and went back to sleep. Open it on the train with no signal: the row is already there.`, 'good');
+}
+
+/* ---------- wiring ---------- */
+function bindPhone(p){
+  const low = p.toLowerCase();
+  const add = () => {
+    const v = $('#'+low+'Input').value.trim();
+    if (!v) return;
+    $('#'+low+'Input').value = '';
+    writeLocal(p, v);
+  };
+  $('#'+low+'Add').onclick = add;
+  $('#'+low+'Input').onkeydown = e => { if (e.key === 'Enter') add(); };
+  $('#'+low+'Wifi').onclick = async () => {
+    S[p].online = !S[p].online; render();
+    if (S[p].closed) log(S[p].online ? `📶 <b>${p}</b> has signal again, but its app is closed — nothing runs until a push or a launch.` : `✈️ <b>${p}</b> lost signal while closed. Not even a push can reach it now.`);
+    else if (S[p].online){ log(`📶 <b>${p}</b> is back online — and syncs on reconnect, ring or no ring.`); await sync(p); }
+    else log(`✈️ <b>${p}</b> went offline. The app keeps working — it's reading its own SQLite.`, 'warn');
+  };
+  $('#'+low+'Sleep').onclick = async () => {
+    S[p].closed = !S[p].closed; render();
+    if (S[p].closed) log(`💤 <b>${p}</b> swiped away. No app running, no Realtime socket. Its SQLite and outbox stay on disk.`);
+    else { log(`📲 <b>${p}</b> opened — every launch syncs, push or no push.`); await sync(p); }
+  };
+  $('#'+low+'Wipe').onclick = async () => {
+    S[p] = { online: S[p].online, closed: S[p].closed, rows: [], outbox: [], horizon: 0 }; render();
+    log(`🧼 <b>${p}</b> wiped — a fresh install, or a sign-out and a new user. No rows, no horizon.`);
+    await sync(p);
+  };
+}
+
+$('#btnRt').onclick = async () => {
+  S.rtUp = !S.rtUp; render();
+  if (S.rtUp){
+    log(`🔔 Doorbell is back. Every device syncs on reconnect, so nobody had to be told twice.`);
+    for (const p of ['A','B']) await sync(p);
+  } else {
+    log(`🔕 Doorbell broken. Writes still land — the phones just don't find out until they sync for another reason.`, 'warn');
+  }
+};
+
+$('#btnPush').onclick = () => {
+  S.pushOn = !S.pushOn; render();
+  if (S.pushOn) log(`📨 Push on. That's opt-in: <code>nostos link --mode direct --push &lt;url&gt;</code> adds the wake trigger, and each phone hands over its token with <code>registerPushToken('fcm', token)</code>. Now try 💤 Close app on one phone and add a to-do on the other.`, 'good');
+  else log(`📨 Push off. Closed apps wait until they're opened again.`, 'warn');
+};
+
+$('#btnPrune').onclick = async () => {
+  if (!S.clog.length){ log(`🧹 Nothing to prune yet.`); return; }
+  S.prunedBelow = S.nextXid - 1;
+  render();
+  log(`🧹 The retention window passed: the log is pruned below <b>#${S.prunedBelow+1}</b>. The rows are still in Postgres — only the notes about how they changed are gone.`, 'warn');
+  for (const p of ['A','B']) await sync(p);
+};
+
+$('#btnDb').onclick = async () => {
+  const names = ['do homework','water plants','call gran','wash bottle','charge scooter'];
+  const title = names[Math.floor(Math.random()*names.length)];
+  const row = { id: S.nextId++, title };
+  S.db.push(row);
+  const xid = S.nextXid++;
+  S.clog.push({ xid, id: row.id, title });
+  render();
+  log(`🗄️ Someone changed Postgres directly (a website, a cron job, anything) — the trigger logged it as <span class="hi">#${xid}</span> all the same.`);
+  await ringEveryoneElse(null);
+};
+
+$('#btnReset').onclick = () => { S = fresh(); $('#log').innerHTML=''; render(); log('↺ Fresh start. Type something into a phone.'); };
+
+/* ---------- code explainer ---------- */
+const EXPLAIN = [
+  "<b>Nostos.direct()</b> — the whole setup. No URL of yours, no process of yours: the phone will talk to Supabase's own HTTP API. There is no <code>connect()</code> handshake to wait on — the first sync is just an HTTP call.",
+  "<b>supabaseUrl + anonKey</b> — the publishable key, the same one your web app ships. It is not a secret and it grants nothing on its own; row-level security on each table is what decides what this device can read.",
+  "<b>scope + token</b> — the signed-in user's JWT, and the name of the doorbell channel for their rows (<code>sub:&lt;user id&gt;</code>). The database checks the token on every single call; the phone is never trusted to filter its own data.",
+  "<b>subscribe()</b> — 'I care about the todos table.' On a device that has never synced this bootstraps from <code>cairn_snapshot()</code> — a full, consistent picture — and then follows the change log from that picture's horizon.",
+  "<b>watch()</b> — a Dart Stream of the whole current table. It fires once immediately from local SQLite (so your UI has data before the network answers), then again after every change lands.",
+  "<b>setState()</b> — plain old Flutter. This is the punchline: your widget code has no idea a network exists. It's just a list that changes.",
+  "That's the whole read path.",
+  "<b>write()</b> — the important one. It returns as soon as the change is <i>on the phone's disk</i>, NOT when the database says OK. Tap a button on a train in a tunnel: it works. The outbox delivers it later, in order, exactly once — and a write the database refuses is dead-lettered with its error rather than blocking every write behind it."
+];
+document.querySelectorAll('.cl').forEach(el => {
+  el.onclick = () => {
+    document.querySelectorAll('.cl').forEach(x => x.classList.remove('sel'));
+    el.classList.add('sel');
+    $('#explain').innerHTML = EXPLAIN[+el.dataset.i];
+  };
+});
+
+/* ---------- go ---------- */
+bindPhone('A'); bindPhone('B');
+S = fresh(); render();
+log('👋 Type a to-do into Phone A and hit Add. Then try airplane mode, 🧹 Prune the log, and 💤 Close app with push off and on.');
+setTimeout(drawWires, 100);
+</script>
+</body>
+</html>

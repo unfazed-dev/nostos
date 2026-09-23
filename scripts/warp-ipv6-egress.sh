@@ -5,8 +5,8 @@
 # full-tunnel VPN (e.g. a corp VPN holding the default route).
 #
 # Why this exists: Supabase free-tier direct connections are IPv6-only, and
-# logical replication CANNOT go through the pooler (Supabase + PowerSync docs
-# both confirm — direct connection required). Many dev networks hand the
+# logical replication CANNOT go through the pooler (Supabase's docs
+# confirm — direct connection required). Many dev networks hand the
 # machine a global IPv6 address but don't actually route it ("no route to
 # host"). This script gives the box real IPv6 egress via Cloudflare WARP,
 # running entirely in userspace.

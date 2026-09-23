@@ -5,7 +5,7 @@
 
 ## Context
 
-PowerSync's most-cited limitation is the **1,000-bucket-per-user hard cap** with static-only sync rules. Buckets are *static and cardinality-bound*: one bucket per unique filter value, so a user with 10k chats or 50k items either can't sync or must manually bucket. Exceeding 1,000 makes the sync connection **fail before any data loads.** Their own proposal #349 admits the model does full-reprocessing rather than incremental.
+Static bucket-based sync rules carry a well-known limitation: a **1,000-bucket-per-user hard cap**. Buckets are *static and cardinality-bound*: one bucket per unique filter value, so a user with 10k chats or 50k items either can't sync or must manually bucket. Exceeding 1,000 makes the sync connection **fail before any data loads.** The model does full-reprocessing rather than incremental.
 
 ## Decision
 
@@ -19,9 +19,9 @@ Nostos does **not use buckets.** Instead:
 
 ## Rationale
 
-- Replaces the #1 PowerSync complaint with a strictly better model.
+- Replaces the #1 complaint about static bucket-based sync rules with a strictly better model.
 - Complexity is **O(changed rows × matching predicates)**, not O(all buckets) — scales with what changes, not what exists.
-- Cursor-based state gives incremental, resumable sync (the thing PowerSync proposal #349 is trying to add).
+- Cursor-based state gives incremental, resumable sync — the thing static bucket-based systems must retrofit.
 - The predicate-evaluation engine is hard IP we build first and benchmark hardest — a real moat.
 
 ## Consequences
@@ -38,5 +38,5 @@ The Week-1 server ships **table + simple-equality** predicates only — enough t
 
 ## Alternatives considered
 
-- **Copy PowerSync's bucket model.** Rejected — we'd inherit the ceiling and the complaint.
+- **Copy a static bucket-based sync-rules model.** Rejected — we'd inherit the ceiling and the complaint.
 - **CRDTs everywhere.** Rejected — CRDTs are for decentralized document collaboration, not server-authoritative relational sync (see ADR-0004).

@@ -353,6 +353,7 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             title,
             body,
             category: Some(category),
+            data,
         } => {
             // Action push (ADR-0037 §2 `action` mode), one message shaped per
             // platform by omission of the top-level `notification` block:
@@ -368,6 +369,7 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             message["data"] = json!({
                 "title": title, "body": body, "category": category,
             });
+            merge_data(&mut message["data"], data);
             message["apns"] = json!({ "payload": { "aps": {
                 "alert": { "title": title, "body": body },
                 "sound": "default",
@@ -375,8 +377,16 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             } } });
             (VISIBLE_TTL_SECS, "HIGH")
         }
-        PushPayload::Visible { title, body, .. } => {
+        PushPayload::Visible {
+            title, body, data, ..
+        } => {
             message["notification"] = json!({ "title": title, "body": body });
+            // `notification` + `data` in one message is the supported shape:
+            // the system renders the banner, the app reads `data` on tap.
+            if !data.is_empty() {
+                message["data"] = json!({});
+                merge_data(&mut message["data"], data);
+            }
             (VISIBLE_TTL_SECS, "HIGH")
         }
     };
@@ -406,6 +416,18 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
     }
     message["android"] = android;
     json!({ "message": message })
+}
+
+/// Fold the payload's routing keys into an FCM `data` object. Values stay
+/// strings: FCM's `data` is a `map<string,string>` on the wire, and a number
+/// sent as a number is a 400.
+fn merge_data(target: &mut Value, data: &std::collections::BTreeMap<String, String>) {
+    let Some(map) = target.as_object_mut() else {
+        return;
+    };
+    for (key, value) in data {
+        map.insert(key.clone(), Value::String(value.clone()));
+    }
 }
 
 /// Parse a Google batch `multipart/mixed` response into per-part
@@ -547,6 +569,7 @@ mod tests {
                     title: "Tasks changed".into(),
                     body: "New items to sync".into(),
                     category: None,
+                    data: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -579,6 +602,7 @@ mod tests {
                     title: "Tasks changed".into(),
                     body: "New items to sync".into(),
                     category: Some("order_status".into()),
+                    data: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -605,6 +629,65 @@ mod tests {
                 "alert": { "title": "Tasks changed", "body": "New items to sync" },
                 "sound": "default",
                 "category": "order_status"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fcm_routing_keys_land_in_data_on_both_visible_modes() {
+        let data: std::collections::BTreeMap<String, String> = [
+            ("cairn_route".to_string(), "/orders/42".to_string()),
+            ("order_id".to_string(), "42".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let (rail, mock) = rail_with_mock(vec![
+            CannedResponse::json(200, r#"{"name":"m5"}"#),
+            CannedResponse::json(200, r#"{"name":"m6"}"#),
+        ])
+        .await;
+
+        // Plain visible: `notification` renders the banner, `data` rides
+        // along for the tap.
+        rail.send(
+            &FcmTarget::Token("tok-1".into()),
+            None,
+            &PushPayload::Visible {
+                title: "Order shipped".into(),
+                body: "On its way".into(),
+                category: None,
+                data: data.clone(),
+            },
+        )
+        .await;
+        let message = &mock.requests()[1].json()["message"];
+        assert_eq!(
+            message["data"],
+            json!({ "cairn_route": "/orders/42", "order_id": "42" })
+        );
+        assert_eq!(
+            message["notification"],
+            json!({ "title": "Order shipped", "body": "On its way" })
+        );
+
+        // Action mode already owns `data` — the routing keys MERGE, they do
+        // not replace the title/body/category the client renders from.
+        rail.send(
+            &FcmTarget::Token("tok-1".into()),
+            None,
+            &PushPayload::Visible {
+                title: "Order shipped".into(),
+                body: "On its way".into(),
+                category: Some("order_status".into()),
+                data,
+            },
+        )
+        .await;
+        assert_eq!(
+            mock.requests()[2].json()["message"]["data"],
+            json!({
+                "title": "Order shipped", "body": "On its way", "category": "order_status",
+                "cairn_route": "/orders/42", "order_id": "42",
             })
         );
     }

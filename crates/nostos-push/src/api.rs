@@ -30,7 +30,7 @@ use axum::response::Json;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use nostos_domain::Lsn;
-use nostos_infra::push::PushPayload;
+use nostos_infra::push::{PushData, PushPayload};
 use tokio::sync::mpsc;
 
 use crate::auth::{auth_middleware, ApiKeys, KeyRole, TenantId};
@@ -242,6 +242,12 @@ struct VisibleBody {
     title: String,
     body: String,
     category: Option<String>,
+    /// Routing keys handed to the app on tap — `{"cairn_route":
+    /// "/orders/42"}` is the shape that makes a notification open the thing
+    /// it is about (ADR-0037 §2 amendment). Absent = an unroutable push,
+    /// which is what every caller sent before this field existed.
+    #[serde(default)]
+    data: PushData,
 }
 
 #[derive(serde::Deserialize)]
@@ -289,6 +295,7 @@ impl SendPayloadDto {
                 title: v.visible.title,
                 body: v.visible.body,
                 category: v.visible.category,
+                data: v.visible.data,
             }),
         }
     }
@@ -302,6 +309,11 @@ impl SendPayloadDto {
             if let Some(category) = &v.visible.category {
                 check_len("payload.visible.category", category, MAX_CATEGORY_LEN)?;
             }
+            // Reserved-key and size discipline lives in the rails crate —
+            // the daemon and nostos-server's own config parser must agree on
+            // what a rail will actually carry.
+            nostos_infra::push::validate_data(&v.visible.data)
+                .map_err(|e| format!("payload.visible.data: {e}"))?;
         }
         Ok(())
     }

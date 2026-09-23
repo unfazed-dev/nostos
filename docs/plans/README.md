@@ -13,10 +13,10 @@ Four classes:
 - **SUPERSEDED** — a later document owns this topic now, or the premise was falsified. The
   superseding document is named. Read the replacement, not this.
 
-**This index is authoritative; the plan files are not.** Only three plans carry an inline
-banner — `HANDOFF.md`, `sdk-live-e2e-consolidation.md`, and the Flutter connection redesign —
-because those three actively misdirect a reader who opens them cold. **Every other plan is
-unmarked, including SUPERSEDED ones.** So an absent banner means nothing: check this table.
+**This index is authoritative; the plan files are not.** Only two plans carry an inline
+banner — `HANDOFF.md` and `sdk-live-e2e-consolidation.md` — because those two actively
+misdirect a reader who opens them cold. **Every other plan is unmarked, including SUPERSEDED
+ones.** So an absent banner means nothing: check this table.
 
 The **Basis** column is deliberate: `verified` means established from the repo or a run this
 session; `inferred` means read off the plan's own header or cross-referenced but not
@@ -35,7 +35,6 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 
 | plan | topic | basis |
 |---|---|---|
-| `nostos-flutter-powersync-connection-redesign.md` | PowerSync-style Dart API (Schema/NostosDatabase). **AS-BUILT RECORD** as of 2026-07-30 — D2–D6 shipped, D1's typed tables rejected (ADR-0028), D7 settled differently, one open P1 (token refresh). **See the caveat below.** | verified |
 | `nostos-ai-privacy-and-runner-roadmap.md` | AI-privacy moat: zero-knowledge E2EE + WYSIWYS egress, decoupled nostos-AI layer. | inferred |
 | `dart-dev-api-reactive-facade-2026-07-19.md` | `Collection<T>` + `SyncStatus` reactive facade (ADR-0024). Header: "Proposed (awaiting go)". | inferred |
 | `nostos-provider-dashboard-multitable.md` | Multi-table offline-first demo; would supersede the single-table Tasks example. Header: "proposed (awaiting operator sign-off)". | inferred |
@@ -50,7 +49,6 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 | `nostos-soundness-audit-2026-07-19.md` | 3 P0s all resolved (slot invalidation, watch bug, the OPERATING.md playbook gap). | verified |
 | `nostos-next-after-oplog-epoch-2026-07-20.md` | Its C-claims are closed: C6/C7/C10/C11 verified-fixed 2026-07-20; the last open one, **C9** (W5 empirical re-verify), is closed by the 10/10 strict run on 2026-07-30. | verified |
 | `sync-strategy-analysis-2026-07-19.md` | Conclusion ratified: ONE strategy, no top-level `SyncStrategy` enum; per-field conflict tier is the seam. | verified |
-| `powersync-sdk-parity-plan.md` | Parity breadth reached (10/10 platforms). | verified |
 | `complete-nostos-fully-wired-operational.md` | v0.1 is code-complete: real-PG default, predicates, snapshot-on-subscribe. | inferred |
 | `nostos-reference-demo-app.md` | Produced `sdk/nostos_flutter/example` (restored by A1; its integration test passes). | inferred |
 | `w4-packaging-fallback.md` | Spike record — proved the Flutter↔Rust packaging path before W4 was built. | inferred |
@@ -66,31 +64,10 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 | `launch-readiness-gap-list.md` | `nostos-completion-assessment-2026-07-29.md` | Both answer "what stands between us and launch"; the 07-29 assessment is 17 days newer and column-splits engineering vs operator work. | inferred |
 | `sdk-live-e2e-consolidation.md` | `sdk-parity-final-three.md`, then the 10/10 strict run | Its bar was **7/7** platforms. There are now ten, and all ten pass. | verified |
 
-### Caveat on the Flutter connection redesign
-
-`nostos-flutter-powersync-connection-redesign.md` is an **AS-BUILT RECORD** (rewritten
-2026-07-30). This entry previously called it GATED-ON-GO, and before that the plan's own header
-said "no implementation without explicit operator go" — **both understated reality: six of the
-seven decisions had already shipped** and were exported from `nostos_flutter`. A doc claiming
-"not implemented" about implemented code misleads exactly as badly as the reverse, so it now
-carries a per-decision ledger verified against `lib/` and `crates/`.
-
-Current state: D2–D6 shipped; **D1's materialized typed tables are rejected**
-([ADR-0028](../adr/0028-client-read-views-over-opaque-payload.md)) — the client read model is
-SQLite VIEWs over the opaque payload, and a slow query gets a partial expression index, not a
-storage rewrite; D7 settled differently (`Nostos` and `NostosDatabase` both exported, only
-`NostosDatabase` taught); and **one open P1** — no token refresh, so a Supabase app stops syncing
-about an hour after login.
-
-The **bug diagnosis that motivated the plan is still dead**: "add does nothing" was a
-`PgWriteBack` TEXT-vs-`TIMESTAMPTZ` bind, and "5 rows → 1 shows" was a config bug
-(`NOSTOS_REPLICATOR != pg`, so the snapshotter was `None`). Both since fixed, neither by the
-redesign. Do not cite its problem statement.
-
 ---
 
 Adding this index rather than stamping 23 individual headers was deliberate: one file to keep
 accurate beats 23 that drift independently, and it avoids editing plans in place — mislabeling
-a GATED-ON-GO plan as SUPERSEDED would destroy live strategy work. Three files did get an
+a GATED-ON-GO plan as SUPERSEDED would destroy live strategy work. Two files did get an
 inline header anyway, because opening them directly (without this index) leads you wrong:
-`HANDOFF.md`, `sdk-live-e2e-consolidation.md`, and the connection redesign.
+`HANDOFF.md` and `sdk-live-e2e-consolidation.md`.

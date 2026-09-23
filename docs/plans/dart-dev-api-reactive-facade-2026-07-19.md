@@ -48,7 +48,7 @@ grounded in (a) the as-built surface, (b) the 2026-07-13 ratified redesign, (c) 
 four-way research fan-out, (d) a consultant pressure-test, (e) a `/grill-with-docs`
 session with the operator.
 
-**Isn't:** a re-litigation of the PowerSync-style redesign (that's ratified), an
+**Isn't:** a re-litigation of the ratified 2026-07-13 API redesign (that's ratified), an
 implementation (scope is plans-only unless the operator says go), or a multi-SDK
 redesign (dotnet/RN get their own plans — the reactive layer is Dart-specific).
 
@@ -58,10 +58,10 @@ redesign (dotnet/RN get their own plans — the reactive layer is Dart-specific)
 
 The 2026-07-13 plan is correct and this plan builds on it, not over it:
 
-- **API shape** — PowerSync DX (`Schema`/`Connector`/`Database`/SQL) + nostos's
+- **API shape** — a declared-schema, connector-based DX (`Schema`/`Connector`/`Database`/SQL) + nostos's
   collapsed-write moat. Right call.
 - **Auto-schema** — `GET /schema` (ADR-0021) zeroes the boilerplate that is
-  PowerSync's biggest SDK tax. The headline DX edge.
+  a comparable sync SDK's biggest tax. The headline DX edge.
 - **Storage pivot** — WS2 JSON-column payload + SQLite `VIEWS` over `cairn_data`
   (`json_extract`), slice-1 shipped. Typed reads without materialized tables.
 - **Conflict model** — per-field LWW (ADR-0014 tier a), implicit, no client surface.
@@ -96,8 +96,8 @@ Pain points, all verified:
    "subscribe once and stay subscribed" workaround.
 3. **No `SyncStatus`** — only a `connectionState` enum stream; no `syncing`/
    `reconciling`/`lastSyncedAt`/errors, and no honest surfacing of the unfixed P0s.
-4. **No query knobs** — PowerSync's `watch(sql, {parameters, triggerTables,
-   throttle})` is table-stakes; nostos's `watch(sql)` has none.
+4. **No query knobs** — a parameterized, trigger-scoped, throttled `watch(sql, {parameters, triggerTables,
+   throttle})` is table-stakes among comparable sync SDKs; nostos's `watch(sql)` has none.
 5. **No derived selector** — a count widget rebuilds on every column change because
    there's no `count()`/`watchCount()`.
 
@@ -109,8 +109,8 @@ This is the design target.
 
 | Source | Grade | Headline take (what we steal) |
 |---|---|---|
-| **PowerSync Dart SDK** v2.3.1 | 🔥 | `watch(sql,{parameters,triggerTables,throttle})`, `watchCount`, `writeTransaction`, `statusStream`. Weaknesses to beat: `uploadData` toll-booth (we already deleted it), stringly-typed 3-type columns, raw `setState` status, 10ms Dart throttle footgun. |
-| **Modern Dart/Flutter reactive (2026)** | 🔥 | Framework-native primitives = `Listenable`/`ValueNotifier`/`ValueListenable` + `Stream` (no native signals). PowerSync `watch()` = fresh cold stream per call. Don't `asBroadcastStream()` per-query (storms). |
+| **A comparable Dart sync SDK** (leading in-market) | 🔥 | `watch(sql,{parameters,triggerTables,throttle})`, `watchCount`, `writeTransaction`, `statusStream`. Weaknesses to beat: `uploadData` toll-booth (we already deleted it), stringly-typed 3-type columns, raw `setState` status, 10ms Dart throttle footgun. |
+| **Modern Dart/Flutter reactive (2026)** | 🔥 | Framework-native primitives = `Listenable`/`ValueNotifier`/`ValueListenable` + `Stream` (no native signals). A comparable SDK's `watch()` = fresh cold stream per call. Don't `asBroadcastStream()` per-query (storms). |
 | **rxdart** 0.28.0 | 🔥 | `BehaviorSubject`/`ValueStream` for cached-state; `distinct`/`switchMap`/`scan`; pitfalls = broadcast loses backpressure, subscription leaks, `switchMap` cancellation errors post-0.28. Publish `ValueStream` interface, not concrete Subject. |
 | **ng-elf** | 🔥 (dead 2026-06-05) | **Cautionary tale, not a template.** Fatal mistake: never bridged to Angular signals → eclipsed by `@ngrx/signals`. Lesson: **ship the platform's native reactive primitive or die.** Also steal: per-key request status, `skipWhileCached` as a transformer, entities-by-id. |
 | **Consultant (GLM-5.2, HIGH)** | — | (a) codegen-now = negative ROI pre-1.0 → hand-write now/codegen P1. (b) cold-per-watch storms at our throughput → hot ref-counted `ValueListenable` per query; no row-diff until measured. (c) `dataTrust` now = permanent stale badge → gate behind P0s. (d) de-risk: measure demo fan-in before lock-in. |
@@ -120,7 +120,7 @@ modern-state brief warned *against* broadcast per-query (storms). Resolution: **
 = hot ref-counted `ValueListenable`** (shares ONE re-execution, distinct, throttle);
 **singleton state (`db.status`) = hot `ValueListenable`** (many widgets, one value). Cold
 `Stream` available via `.asStream()`. This is neither rxdart's broadcast-Subject nor
-PowerSync's cold-per-call; it is the throughput-correct middle.
+a comparable SDK's cold-per-call; it is the throughput-correct middle.
 
 ---
 
@@ -150,7 +150,7 @@ final ValueListenable<List<Todo>> active = todos.watch(
 );
 //   ^ one re-execution fans out to N listeners; ref-counted per (table, where, params).
 
-// Cold Stream escape hatch (PowerSync / StreamBuilder muscle-memory)
+// Cold Stream escape hatch (comparable-SDK / StreamBuilder muscle-memory)
 final Stream<List<Todo>> activeStream = todos.watch(...).asStream();
 
 // Derived selector — a count widget does NOT rebuild on unrelated columns
@@ -183,7 +183,7 @@ final ValueListenable<List<Map<String, Object?>>> raw =
 Internally the store keeps a ref-counted cache keyed by `(table, where, parameters)`:
 
 - **First listener** → run the query, subscribe to the table-invalidation broadcast from the Rust engine.
-- **Invalidation** → coalesce within a **16ms frame-budget window** (NOT PowerSync's 10ms footgun), re-run, apply **distinct** (deep equality on the row list — replace the list each emit so `ValueNotifier` actually fires), set `.value`.
+- **Invalidation** → coalesce within a **16ms frame-budget window** (not the 10ms throttle footgun in comparable SDKs), re-run, apply **distinct** (deep equality on the row list — replace the list each emit so `ValueNotifier` actually fires), set `.value`.
 - **N listeners** → share the same `NostosQuery<T>`; one re-execution fans out.
 - **Last listener detaches** → cancel the upstream subscription, drop the cache entry.
 - `.asStream()` → thin adapter: emits the current value on subscribe, then deltas.
@@ -260,7 +260,7 @@ This spike is cheap (a day) and prevents the most expensive possible mistake
 **P1 (codegen + bridges):**
 - [ ] `@NostosRow('table')` + `nostos_generator` (build_runner) → typed `Collection<T>` with generated `fromRow`/`toRow` from the auto-schema. Deletes the one glue line per type.
 - [ ] Optional `.toSignal()` bridge (`signals_flutter`) for the signals crowd — opt-in, not a dependency.
-- [ ] Migration guide: PowerSync → nostos (`watch()`-returns-`ValueListenable`, no `uploadData`, auto-schema).
+- [ ] Migration guide: comparable sync SDKs → nostos (`watch()`-returns-`ValueListenable`, no `uploadData`, auto-schema).
 
 **P0-fix-gated (lands when the P0s land):**
 - [ ] `DataTrust { fresh, stale, reconciling }` field on `SyncStatus`.
@@ -303,7 +303,7 @@ These inform — not constrain — the other SDK plans.
 | Cold-per-watch at 142k ops/sec → query storms? | Resolved by hot ref-counted `ValueListenable` (consultant). De-risk spike (§7) before lock-in. |
 | Codegen on a churny pre-1.0 facade? | Switched to hand-write-now / codegen-P1 (consultant + operator). |
 | Permanent `stale` badge poisons launch demo? | `DataTrust` gated behind P0 fixes (consultant + operator). |
-| `ValueListenable` breaks PowerSync muscle-memory? | `.asStream()` escape hatch + migration guide. Trade is deliberate (throughput). |
+| `ValueListenable` breaks muscle-memory from comparable SDKs? | `.asStream()` escape hatch + migration guide. Trade is deliberate (throughput). |
 | `Collection<T>` naming collision? | Use `NostosCollection<T>` or `db.collection<T>()` accessor (no bare export collision); matches the existing `NostosTable`/`NostosColumn` aliasing pattern (export-barrel). |
 | Is `batch()` YAGNI? | Justified for offline-first atomic multi-writes (invoice + line items); P0, thin wrapper over collapsed writes. |
 | Ref-counted cache lifecycle bugs? | Real implementation cost; mitigated by keying on `(table, where, parameters)` + dispose-on-last-detach + a test that asserts no upstream leak after widget dispose. |
@@ -316,12 +316,12 @@ These inform — not constrain — the other SDK plans.
 |---|---|---|
 | As-built `NostosDatabase` surface is as described (§3). | verified | `sdk/nostos_flutter/lib/src/nostos_database.dart:61-291` (read this session). |
 | Demo has manual-`listen()` + `StreamBuilder` pain. | verified | `example/lib/views/dashboard_shell.dart:69,184`; `appointments_view.dart:26,69`. |
-| PowerSync `watch()` = cold fresh stream, table-level invalidation, has `triggerTables`/`throttle`/`watchCount`/`writeTransaction`, 10ms Dart throttle. | verified | docs.powersync.com (subagent, 🔥). |
+| A comparable Dart sync SDK's `watch()` = cold fresh stream, table-level invalidation, has `triggerTables`/`throttle`/`watchCount`/`writeTransaction`, 10ms Dart throttle. | verified | that SDK's public API docs (subagent, 🔥). |
 | ng-elf is dead (2026-06-05), eclipsed for not bridging to signals. | verified | ngneat-archive/elf + reddit r/angular (subagent, 🔥 + 🌡️). |
 | Hot-`ValueListenable`-per-query is throughput-correct; cold-per-watch storms at nostos throughput. | assumed | Consultant (GLM-5.2, HIGH) reasoning; NOT yet measured against the demo — that is the §7 spike. |
-| 16ms throttle avoids PowerSync's 10ms footgun. | assumed | Inference from frame-budget + PowerSync-brief's 10ms-self-DOS flag; validate in §7. |
+| 16ms throttle avoids the 10ms footgun in comparable SDKs. | assumed | Inference from frame-budget + the competitive research brief's 10ms-self-DOS flag; validate in §7. |
 | `dataTrust=stale` would show on every app pre-P0-fix. | assumed | Inference from the two P0 memories; not yet observed in a running demo. |
-| Facade preserves the ratified plan's decisions. | verified | Cross-checked against `docs/plans/nostos-flutter-powersync-connection-redesign.md` (read this session). |
+| Facade preserves the ratified plan's decisions. | verified | Cross-checked against the ratified 2026-07-13 connection-redesign plan (read this session). |
 
 **Most load-bearing `assumed`:** the throughput claim (row 5). The §7 spike is what converts
 it to `verified` — and is the gate before implementation.
@@ -346,7 +346,7 @@ it to `verified` — and is the gate before implementation.
 
 1. **Shape:** facade (`Collection<T>` + `NostosStore`) over ratified `NostosDatabase`. SQL = escape hatch.
 2. **Types:** hand-written `fromRow` now; `@NostosRow` codegen = P1 (consultant-override of original "codegen-now").
-3. **Reactive primitive:** hot ref-counted `ValueListenable<List<T>>` per query (consultant; not PowerSync's cold stream).
+3. **Reactive primitive:** hot ref-counted `ValueListenable<List<T>>` per query (consultant; not the cold-stream approach comparable SDKs use).
 4. **`SyncStatus`:** honest now; `DataTrust` gated behind P0 fixes (consultant-override of original "honest/full incl dataTrust now").
 5. **Scope:** Dart-only + principles section.
 6. **De-risk:** measure demo fan-in before locking the primitive (consultant (d)).

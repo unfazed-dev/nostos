@@ -44,7 +44,6 @@ fall back to today's in-memory behavior there.
 
 | Project | Language | Durable browser storage | VFS |
 |---|---|---|---|
-| PowerSync Web SDK | TS in Worker | wa-sqlite (fork) | `OPFSCoopSyncVFS` / `IDBBatchAtomicVFS` |
 | RxDB | TS | IndexedDB (OPFS is premium-only) | pluggable |
 | Dexie.js | TS | IndexedDB | — |
 | ElectricSQL | TS | PGlite (WASM Postgres) | IndexedDB |
@@ -109,9 +108,9 @@ VFS** for the post-launch slice. Explicitly reject options (2) and (3).
 ### Why options (2) and (3) are rejected
 
 - **Option (2) wa-sqlite** — COOP/COEP tax with no compensating advantage over
-  `opfs-sahpool` for nostos's single-writer model. PowerSync uses it because
-  their VFS layer is custom-JS and predates sahpool's maturity; nostos has
-  neither constraint.
+  `opfs-sahpool` for nostos's single-writer model. It's the right choice for a
+  custom-JS VFS layer built before sahpool matured; nostos has neither
+  constraint.
 - **Option (3) raw OPFS** — fails the atomicity contract structurally; the
   performant variant (chunked containers + offset index) is a hand-rolled
   SQLite. No prior art in any named sync client.

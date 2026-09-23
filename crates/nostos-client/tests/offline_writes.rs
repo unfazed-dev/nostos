@@ -125,7 +125,7 @@ impl WriteBack for RecordingWriteBack {
         payload_json: &str,
         _tenant: Option<nostos_domain::TenantScope<'_>>,
     ) -> Result<(), WriteBackError> {
-        // P3 PowerSync PATCH parity: a patch is a column-level UPDATE; record
+        // P3 PATCH: a patch is a column-level UPDATE; record
         // it as an Update carrying the partial tuple image (the columns present
         // in the payload — absent columns are untouched, same as the real
         // PgWriteBack).

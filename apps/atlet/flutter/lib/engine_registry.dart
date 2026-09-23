@@ -1,8 +1,11 @@
 import 'adapters/nostos_adapter.dart';
-import 'adapters/powersync_adapter.dart';
 import 'adapters/sync_adapter.dart';
 
-enum Engine { nostos, powersync }
+/// Which Nostos client is live. `cairnDirect` is the same engine with no
+/// `nostos-server` on the other end — the device syncs with Supabase itself
+/// (ADR-0045) — so it is a second engine here, not a flag on [Engine.cairn]:
+/// the two hold different databases and must never be live at once.
+enum Engine { cairn, cairnDirect }
 
 /// Session/env parameters needed to bring an adapter up from cold — mirrors
 /// [SyncAdapter.init]'s named parameters as one value so callers don't have
@@ -21,43 +24,40 @@ class SyncSession {
   final String dbDir;
 }
 
-/// Owns which sync engine is live and enforces plan decision #4: nostos and
-/// PowerSync must never be live at the same time. Every engine switch runs a
-/// full wipe ([SyncAdapter.signOut]) on the outgoing adapter — and that
-/// signOut() completes — before the incoming adapter is constructed and
-/// init()'d.
+/// Owns which engine is live and enforces plan decision #4: two engines must
+/// never be live at the same time, because they hold two databases. The app
+/// picks its engine once, at startup, and cannot change it (user request
+/// 2026-09-22), so this is [start] and nothing else — decision #4 now holds
+/// because there is no swap to get wrong, and [start] throws rather than
+/// bringing a second adapter up beside a live one.
 ///
-/// Two separate nullable slots (rather than one `SyncAdapter? current`)
-/// make the "only one live" invariant checkable: [_assertInvariant] asserts
-/// they're never both non-null, and every mutation is routed through
-/// [_setSlot]/[_clearSlots] so that invariant holds after every call.
+/// Separate nullable slots per engine (rather than one `SyncAdapter? current`)
+/// keep the "only one live" invariant checkable: [_assertInvariant] asserts
+/// they're never both non-null, and the one mutation point is [_setSlot].
 /// Adapter construction goes through injectable factories so tests can swap
-/// in fakes without touching the real Nostos/PowerSync SDKs.
+/// in fakes without touching the real Nostos SDK.
 class EngineRegistry {
   EngineRegistry({
     SyncAdapter Function()? nostosFactory,
-    SyncAdapter Function()? powerSyncFactory,
+    SyncAdapter Function()? nostosDirectFactory,
+    String supabaseAnonKey = '',
   }) : _nostosFactory = nostosFactory ?? (() => NostosAdapter()),
-       _powerSyncFactory = powerSyncFactory ?? (() => PowerSyncAdapter());
+       _nostosDirectFactory =
+           nostosDirectFactory ??
+           (() => NostosAdapter.direct(anonKey: supabaseAnonKey));
 
   final SyncAdapter Function() _nostosFactory;
-  final SyncAdapter Function() _powerSyncFactory;
+  final SyncAdapter Function() _nostosDirectFactory;
 
   SyncAdapter? _nostosAdapter;
-  SyncAdapter? _powerSyncAdapter;
+  SyncAdapter? _nostosDirectAdapter;
   Engine? _activeEngine;
-
-  // Serializes switchTo() calls: two rapid taps on the settings sheet must
-  // not interleave (the second seeing stale _activeEngine mid-wipe and
-  // double-signing-out or racing start()). Each call waits for any in-flight
-  // switch to finish before running its own.
-  Future<SyncAdapter>? _switchInFlight;
 
   Engine? get activeEngine => _activeEngine;
 
   SyncAdapter? get current => switch (_activeEngine) {
     Engine.cairn => _nostosAdapter,
-    Engine.powersync => _powerSyncAdapter,
+    Engine.cairnDirect => _nostosDirectAdapter,
     null => null,
   };
 
@@ -66,22 +66,23 @@ class EngineRegistry {
   /// this getter just makes that invariant observable from tests.
   List<SyncAdapter> get debugLiveAdapters => [
     ?_nostosAdapter,
-    ?_powerSyncAdapter,
+    ?_nostosDirectAdapter,
   ];
 
-  /// Brings up [engine] cold: no prior adapter is torn down first. Throws
-  /// [StateError] if an adapter is already live — callers that may already
-  /// have one running should use [switchTo] instead, which wipes it first.
+  /// Brings up [engine] cold. Throws [StateError] if an adapter is already
+  /// live: the app starts one engine for the session, and two adapters
+  /// holding two databases at once is exactly what decision #4 forbids.
   Future<SyncAdapter> start(Engine engine, SyncSession session) async {
     if (_activeEngine != null) {
       throw StateError(
         'EngineRegistry.start() called while ${_activeEngine!.name} is '
-        'already live — call switchTo() to wipe and swap instead',
+        'already live — one engine per session, no swapping',
       );
     }
-    final adapter = engine == Engine.cairn
-        ? _nostosFactory()
-        : _powerSyncFactory();
+    final adapter = switch (engine) {
+      Engine.cairn => _nostosFactory(),
+      Engine.cairnDirect => _nostosDirectFactory(),
+    };
     _setSlot(engine, adapter);
     await adapter.init(
       supabaseUrl: session.supabaseUrl,
@@ -92,75 +93,22 @@ class EngineRegistry {
     return adapter;
   }
 
-  /// Switches to [target]. If a different engine is currently live, its
-  /// adapter is fully wiped via [SyncAdapter.signOut] — awaited to
-  /// completion — before [target]'s adapter is constructed and init()'d, so
-  /// the two are never live at once (decision #4). No-op (returns the
-  /// current adapter) if [target] is already active. Concurrent calls are
-  /// serialized — a call made while another is still in flight waits for it
-  /// rather than racing it.
-  Future<SyncAdapter> switchTo(Engine target, SyncSession session) async {
-    while (_switchInFlight != null) {
-      try {
-        await _switchInFlight;
-      } catch (_) {
-        // Another caller's switch failed — irrelevant to ours; proceed to
-        // attempt our own now that it's no longer in flight.
-      }
-    }
-    final future = _switchToLocked(target, session);
-    _switchInFlight = future;
-    try {
-      return await future;
-    } finally {
-      if (identical(_switchInFlight, future)) {
-        _switchInFlight = null;
-      }
-    }
-  }
-
-  Future<SyncAdapter> _switchToLocked(
-    Engine target,
-    SyncSession session,
-  ) async {
-    if (_activeEngine == target) {
-      return current!;
-    }
-    final outgoing = current;
-    if (outgoing != null) {
-      // Relinquish the slot before awaiting the wipe, not after: the "only
-      // one live" invariant should hold for the whole wipe window, not just
-      // the instant after it — once signOut() is called, this adapter is
-      // being torn down, not the active engine.
-      _clearSlots();
-      await outgoing.signOut(); // full wipe — must complete before swap
-    }
-    _assertInvariant();
-    return start(target, session);
-  }
-
   void _setSlot(Engine engine, SyncAdapter adapter) {
     switch (engine) {
       case Engine.cairn:
         _nostosAdapter = adapter;
-      case Engine.powersync:
-        _powerSyncAdapter = adapter;
+      case Engine.cairnDirect:
+        _nostosDirectAdapter = adapter;
     }
     _activeEngine = engine;
     _assertInvariant();
   }
 
-  void _clearSlots() {
-    _nostosAdapter = null;
-    _powerSyncAdapter = null;
-    _activeEngine = null;
-  }
-
   void _assertInvariant() {
     assert(
-      !(_nostosAdapter != null && _powerSyncAdapter != null),
-      'EngineRegistry: nostos and powersync adapters must never both be '
-      'live at once (decision #4)',
+      debugLiveAdapters.length <= 1,
+      'EngineRegistry: at most one adapter may be live at once '
+      '(decision #4) — found ${debugLiveAdapters.length}',
     );
   }
 }

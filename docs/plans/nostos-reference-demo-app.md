@@ -6,7 +6,7 @@ the **same** app implemented across every SDK — starting with **Flutter** (iOS
 Android), then the other iOS/Android-capable SDKs (React Native, Kotlin, Swift,
 Capacitor, .NET). The operator must **visually see** the app running with action
 controls (pause / resume-restart / stop / airplane-mode), and nostos must operate
-as a **local offline-first** engine (PowerSync-equivalent): reads + writes against
+as a **local offline-first** engine: reads + writes against
 the local store while offline, durable queued writes, automatic sync on reconnect.
 
 Per the standing scope rule, every SDK app **lives as a nostos test fixture** under
@@ -20,7 +20,7 @@ port it.
 |---|---|
 | Live replication (server → client) | task list updates as rows arrive over `/sync` |
 | Reactive watch | `watch(table)` / equivalent drives the list `Stream` |
-| Reactive SQL watch (PowerSync parity) | `watchQuery` / equivalent for a filtered view (e.g. open vs done) |
+| Reactive SQL watch | `watchQuery` / equivalent for a filtered view (e.g. open vs done) |
 | Durable offline writes (outbox) | add a task while "offline" → it survives in the local store, flushes on reconnect (ADR-0013) |
 | Auto-reconnect | connection-state badge cycles Disconnected → Reconnecting → Connected |
 | Client → server echo | the writer's own write re-emits via the server's WriteBack and lands locally |
@@ -96,8 +96,8 @@ register a WARP device at `engage.cloudflareclient.com`, then run
 `wireproxy -c nostos-warp.conf` with a `[TCPClientTunnel] BindAddress=127.0.0.1:15433`
 `Target=[<supabase-ipv6>]:5432`. For a production deploy, prefer native host IPv6 or
 the Supabase IPv4 add-on over a WARP relay; the relay is a dev-box workaround for the
-VPN-broken-IPv6 case (it mirrors how PowerSync "just works" — PowerSync's *client* is
-IPv4/443 to a sync service; the Postgres link is server-side, where nostos-server now
+VPN-broken-IPv6 case (it mirrors how comparable hosted sync services "just work" — the
+client is IPv4/443 to a sync service; the Postgres link is server-side, where nostos-server now
 also sits, just tunneled through WARP).
 
 **Verified demo (2026-07-13):** schema applied (`docker/pg-init/01-sources.sql` →
@@ -108,9 +108,9 @@ app on macOS connected to nostos-server, and a row INSERTed into the **Supabase 
 **Known nostos-server gap surfaced by this demo (separate from IPv6):** a *fresh*
 subscriber does **not** receive the table's pre-existing rows — only events that
 arrive *after* subscribe. Rows INSERTed before the app connects are missed; rows
-INSERTed while connected stream live. PowerSync sends the existing snapshot on first
+INSERTed while connected stream live. Comparable sync services send the existing snapshot on first
 sync ("open the app, see your data"); nostos-server's fan-out currently forwards from
-subscribe-time only. This is a real PowerSync-parity gap to address in the
+subscribe-time only. This is a real snapshot-on-subscribe gap to address in the
 `FanOutService`/session path — not blocking the IPv6 fix, but blocking the "fresh
 install sees existing data" UX.
 
@@ -131,8 +131,8 @@ nostos client surface (Flutter as reference; others mirror):
 is the on-device SQLite store (ADR-0013). `close()` aborts the sync loop but the
 SQLite file — including pending writes — persists. Re-subscribe opens the same
 file; pending writes flush to the server on reconnect. So Pause → add tasks →
-Resume visibly shows queued writes syncing. That is the PowerSync-equivalent
-contract.
+Resume visibly shows queued writes syncing. That is the offline-first
+contract that matters here.
 
 ## Per-SDK status (fills as each ships)
 

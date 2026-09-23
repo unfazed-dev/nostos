@@ -18,12 +18,12 @@ demonstrate, end-to-end, that nostos is a genuine local-first sync engine:
 - **A real `disconnect()`/`connect()`** control (WS5 Pause/Resume made real) — a true
   stop/start of the sync loop, not a "simulate", keeping the local store usable.
 
-This is the app that proves nostos vs PowerSync on a real vertical, not a toy.
+This is the app that proves nostos's multi-table offline-first sync on a real vertical, not a toy.
 
 ## Why now / what broke
 
 The Tasks demo's operator buttons (Disconnect / Stop / Airplane) were "all identical"
-(`nostos-flutter-powersync-connection-redesign.md:23`) and the Airplane was theater. Two
+and the Airplane was theater. Two
 hasty rewrites made it worse: one blocked writes on disconnect (anti-offline-first),
 one faked an outage with a dead endpoint ("Simulate outage"). Root cause verified this
 session: **nostos's FFI exposes only `close()`**, which drops the whole `Session`
@@ -37,8 +37,8 @@ nostos-native.
   `appointments`/`availabilities`; `clients` 1→N `appointments`/`invoices`;
   `appointments` N→1 provider+client; `invoices` 1→1 appointment. Sources: Redgate
   appointment data model; Medium booking-system architecture (PostgreSQL).
-- **PowerSync reference** (the competitor): multi-table via YAML Sync Rules (bucketed,
-  parameterized by user) + per-table `watch()` on local SQLite; chat tutorial
+- **Reference sync-rules design** (a comparable engine): multi-table via YAML Sync Rules
+  (bucketed, parameterized by user) + per-table `watch()` on local SQLite; chat tutorial
   (users/channels/messages) is canonical. **nostos differs**: `where_sql` safe-SQL per
   subscription, collapsed server-gated write-back over one `/sync` WS — not sync-rules.
 - **nostos architecture map** (verified across all 5 layers this session): the **data
@@ -56,7 +56,7 @@ nostos-native.
 Industry research (2026-07-15) **overturned the glue-only default**. Among nostos's direct
 architectural peers (PG logical replication → server → on-device SQLite, server-gated
 write-back, safe-SQL partial subscribe) the pattern is **single-multiplexed-stream,
-without exception**: PowerSync (sync rules/buckets over one WS), WatermelonDB ("sync is
+without exception**: a comparable bucket-based sync engine (sync rules/buckets over one WS), WatermelonDB ("sync is
 performed for the entire database at once, not per-collection"), Replicache (one pull/push
 over one store), Triplit (one WS). The glue-only N-clients-per-handle alternative matches
 only ElectricSQL — a weak analog (HTTP long-poll, no native write-back, no cross-table
@@ -66,8 +66,8 @@ Three reasons the single-WS path wins for nostos:
 1. **Cross-table consistency** — a booking write (`appointment` → `provider` + `client`)
    needs all three tables to reach one consistent point. One stream gives a single
    resume/checkpoint spanning all tables; N sockets each carry an independent LSN with no
-   consistent cross-table point (PowerSync's checkpoint-complete frame spans all buckets —
-   only possible on one stream).
+   consistent cross-table point (a comparable engine's checkpoint-complete frame spans all
+   buckets — only possible on one stream).
 2. **Connection/accounting cost** — N tables × M clients = N×M server connections (glue)
    vs M (single-WS). Undercuts nostos's throughput/scalability pitch (142k ops/s).
 3. **One auth / one resume / one write-ack stream** — one TLS+auth handshake, one LSN
@@ -115,7 +115,7 @@ Enforcement points lifted by D1: `transport.rs:213/268/531` (N sessions/socket),
 
 ### D2 — `disconnect()`/`connect()` = WS5 Pause/Resume, made real
 
-Implements the already-designed semantics (`nostos-flutter-powersync-connection-redesign.md:147-159`):
+Implements the already-designed WS5 Pause/Resume semantics:
 
 - `disconnect()` — abort **only** the `run_task`(s) (the `/sync` loop(s)). Keep
   `client` + `pump_task` + `SqliteStorage` alive → reads/writes/UI keep working; writes
@@ -155,12 +155,12 @@ Postgres tables (uuid pk everywhere — nostos write-back binds pk as `$1`):
 - Seed data: a few providers, clients, availabilities; appointments/invoices created at
   runtime via the dashboard.
 
-### D5 — Sharpened generic API (better-than-PowerSync)
+### D5 — Sharpened generic API (zero backend code, no upload connector)
 
 Applies to Flutter (reference impl) and **all SDKs** as a generic contract. Consulted
 (GLM-5.2, HIGH). **Headline differentiator: "Zero backend code."** nostos's collapsed
-read/write (`PgWriteBack`) means **no dev connector / `uploadData`** — the moat PowerSync
-forces every user to build. Making that invisible IS the product. Typed records are a
+read/write (`PgWriteBack`) means **no dev connector / `uploadData`** — the moat competing
+sync SDKs force every user to build. Making that invisible IS the product. Typed records are a
 *reason*; cursor-incremental-resume is *plumbing*; users buy the promise.
 
 **One class: `Nostos`** (unify `Nostos` + `NostosDatabase`; `NostosDatabase` → thin deprecated
@@ -211,11 +211,11 @@ Stream<NostosConnection> get connection;
 Stream<WriteEvent>      get writes;     // acks / conflicts / dead-letters → optimistic UI
 ```
 
-**Why this beats PowerSync:** (1) zero backend code (no connector/`uploadData`);
+**Why this design wins:** (1) zero backend code (no connector/`uploadData`);
 (2) auto-schema (no explicit schema object required); (3) one simple `SyncMode` enum —
-progressive disclosure PowerSync lacks; (4) generic multi-table by default via `where_sql`
+progressive disclosure comparable SDKs lack; (4) generic multi-table by default via `where_sql`
 per table, no server YAML sync-rules; (5) visible conflict policy + `writes` event stream
-(PowerSync is silent last-write-wins); (6) typed reads without codegen (`watchOf<T>`),
+(comparable SDKs are silent last-write-wins); (6) typed reads without codegen (`watchOf<T>`),
 Rust perf, cursor incremental resume, Apache-2.0.
 
 **Generic single + multi table:** a connection holds N tables (schema — auto-fetched or
@@ -279,7 +279,8 @@ facts that make it cheap. Cites this plan + the architecture map.
    Single-tenant (all rows) vs per-provider `where_sql` partitioning for v1?
 2. ~~Phasing — minimal slice vs all-5.~~ **Resolved 2026-07-15: all 5 tables in one pass.**
 3. **Multi-table depth** — ~~glue-only vs deeper~~ **RESOLVED 2026-07-15**: (B) deeper
-   single-multiplexed-WS (industry-standard among PowerSync/WatermelonDB/Replicache/Triplit).
+   single-multiplexed-WS (industry-standard among WatermelonDB/Replicache/Triplit and
+   comparable bucket-based sync engines).
    **Wire-gate question RESOLVED 2026-07-15 (advisor, HIGH, two consults): DROP the gate** —
    ADR-0009 is per-session-sink with one global checkpoint and a per-table LSN does not
    structurally exist. D1 + P2 updated. Operator gave go on all three tracks (dashboard →

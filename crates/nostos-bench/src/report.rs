@@ -1,6 +1,5 @@
 //! Report generation — JSON artifact, human-readable RESULTS.md, and an SVG
-//! chart drawing the Nostos throughput curve against PowerSync's published
-//! ceiling.
+//! chart of the per-tier throughput.
 
 use std::fs;
 use std::path::Path;
@@ -198,8 +197,6 @@ mod tests {
             },
             tiers,
             runs,
-            powersync_ceiling_ops_per_sec_low: 2_000,
-            powersync_ceiling_ops_per_sec_high: 4_000,
         }
     }
 
@@ -444,8 +441,6 @@ struct FullReport {
     environment: Environment,
     runs: Vec<RunResult>,
     tiers: Vec<TierSummary>,
-    powersync_ceiling_ops_per_sec_low: u64,
-    powersync_ceiling_ops_per_sec_high: u64,
 }
 
 /// Write JSON, markdown, and SVG artifacts to `cfg.out_dir`.
@@ -456,10 +451,6 @@ pub fn write_reports(cfg: &BenchConfig, runs: &[RunResult], env: &Environment) -
         environment: env.clone(),
         runs: runs.to_vec(),
         tiers: summarize(runs),
-        // PowerSync's published small-row server ceiling: 2,000–4,000 ops/sec.
-        // Source: https://docs.powersync.com/resources/performance-and-limits
-        powersync_ceiling_ops_per_sec_low: 2_000,
-        powersync_ceiling_ops_per_sec_high: 4_000,
     };
 
     // JSON
@@ -507,17 +498,14 @@ fn render_markdown(r: &FullReport) -> String {
     ));
     s.push_str("- **Build:** `--release` (lto=fat, codegen-units=1)\n\n");
 
-    s.push_str("## Throughput vs PowerSync\n\n");
+    s.push_str("## Throughput\n\n");
     s.push_str(
-        "PowerSync publishes a **server-side ceiling of ~2,000–4,000 ops/sec** for small rows. \
-         Nostos's measurement is of the same logical operation (fanning row-change events to \
-         connected clients) with a synthetic replicator on loopback.\n\n",
+        "Aggregate fan-out: row-change events fanned out to connected clients, with a \
+         synthetic replicator on loopback.\n\n",
     );
 
-    s.push_str(
-        "| Clients | ops/sec | spread (min–max) | drop% | p50 (ms) | p99 (ms) | reps | vs PS high |\n",
-    );
-    s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    s.push_str("| Clients | ops/sec | spread (min–max) | drop% | p50 (ms) | p99 (ms) | reps |\n");
+    s.push_str("|---:|---:|---:|---:|---:|---:|---:|\n");
     for t in &r.tiers {
         let reps = format!("{}/{}", t.reps_valid, t.reps_total);
         // A tier with no usable repetition keeps its row — the delivered count
@@ -527,7 +515,7 @@ fn render_markdown(r: &FullReport) -> String {
         // different fixes.
         if t.reps_valid == 0 {
             s.push_str(&format!(
-                "| {} | {} | — | — | {:.2} | {:.2} | {} | — |\n",
+                "| {} | {} | — | — | {:.2} | {:.2} | {} |\n",
                 t.clients,
                 t.invalid_label(),
                 t.p50_us / 1000.0,
@@ -536,9 +524,8 @@ fn render_markdown(r: &FullReport) -> String {
             ));
             continue;
         }
-        let ratio = t.ops_per_sec / r.powersync_ceiling_ops_per_sec_high as f64;
         s.push_str(&format!(
-            "| {} | {} | {}–{} | {:.2}% | {:.2} | {:.2} | {} | **{:.1}×** |\n",
+            "| {} | {} | {}–{} | {:.2}% | {:.2} | {:.2} | {} |\n",
             t.clients,
             grouped(t.ops_per_sec),
             grouped(t.ops_min),
@@ -547,7 +534,6 @@ fn render_markdown(r: &FullReport) -> String {
             t.p50_us / 1000.0,
             t.p99_us / 1000.0,
             reps,
-            ratio,
         ));
     }
 
@@ -631,13 +617,9 @@ fn render_markdown(r: &FullReport) -> String {
         );
     } else {
         let best = valid.iter().map(|x| x.ops_per_sec).fold(0.0_f64, f64::max);
-        let ratio = best / r.powersync_ceiling_ops_per_sec_high as f64;
         s.push_str(&format!(
-            "- **Peak sustained throughput: {} ops/sec** — **{:.1}×** PowerSync's published \
-             high ceiling (4,000 ops/sec) and **{:.1}×** the low (2,000 ops/sec).\n",
+            "- **Peak sustained throughput: {} ops/sec** (best tier mean).\n",
             grouped(best),
-            ratio,
-            best / r.powersync_ceiling_ops_per_sec_low as f64,
         ));
         let max_drop = valid.iter().map(|x| x.drop_rate).fold(0.0_f64, f64::max);
         s.push_str(&format!(
@@ -673,8 +655,8 @@ fn render_svg(r: &FullReport) -> String {
     // Chart the tier means, not the repetitions: one bar per tier is the claim.
     let bars: Vec<&TierSummary> = r.tiers.iter().filter(|t| t.reps_valid > 0).collect();
     let best = bars.iter().map(|x| x.ops_per_sec).fold(1.0_f64, f64::max);
-    // Y axis goes a bit above the best to leave headroom; include PS ceiling.
-    let y_max = best.max(r.powersync_ceiling_ops_per_sec_high as f64) * 1.15;
+    // Y axis goes a bit above the best to leave headroom.
+    let y_max = best * 1.15;
     let bar_count = bars.len();
     let group_w = plot_w / bar_count.max(1);
     let bar_w = (group_w * 3 / 5).max(8);
@@ -686,7 +668,7 @@ fn render_svg(r: &FullReport) -> String {
     ));
     svg.push_str("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n");
     svg.push_str(&format!(
-        "<text x=\"{}\" y=\"20\" font-size=\"16\" font-weight=\"bold\">Nostos throughput vs PowerSync ceiling (ops/sec)</text>\n",
+        "<text x=\"{}\" y=\"20\" font-size=\"16\" font-weight=\"bold\">Nostos aggregate fan-out throughput (ops/sec)</text>\n",
         pad_l
     ));
 
@@ -728,20 +710,6 @@ fn render_svg(r: &FullReport) -> String {
             run.clients
         ));
     }
-
-    // PowerSync ceiling reference line.
-    let ps_y = pad_t
-        + ((1.0 - r.powersync_ceiling_ops_per_sec_high as f64 / y_max) * plot_h as f64) as usize;
-    svg.push_str(&format!(
-        "<line x1=\"{pad_l}\" y1=\"{ps_y}\" x2=\"{}\" y2=\"{ps_y}\" stroke=\"#dc2626\" stroke-width=\"2\" stroke-dasharray=\"6,4\"/>\n",
-        width - pad_r
-    ));
-    svg.push_str(&format!(
-        "<text x=\"{}\" y=\"{}\" fill=\"#dc2626\" font-weight=\"bold\">PowerSync ceiling ~{} ops/sec</text>\n",
-        width - pad_r - 4,
-        ps_y - 6,
-        r.powersync_ceiling_ops_per_sec_high
-    ));
 
     svg.push_str("</svg>\n");
     svg

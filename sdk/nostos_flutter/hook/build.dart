@@ -117,7 +117,35 @@ void main(List<String> args) async {
       routing: const ToAppBundle(),
     );
     output.dependencies.add(targetFile.uri);
+    // And what it was built FROM. The hooks runner re-runs this hook only when
+    // a declared dependency changes; with the dylib alone declared, editing any
+    // Rust source left the cached artifact in place and the app silently
+    // shipped the PREVIOUS native code — a green `flutter build` that changed
+    // nothing (caught 2026-09-23: a fix to nostos-client's sync loop never
+    // reached the simulator).
+    output.dependencies.addAll(_rustSources(input.packageRoot));
   });
+}
+
+/// Every source file the bundled dylib is built from: this package's bridge
+/// crate plus the workspace crates it path-depends on.
+///
+/// ponytail: a directory walk, not a parsed dependency graph. The workspace is
+/// a few hundred files and the walk costs milliseconds; a stale native library
+/// costs an afternoon. The `crates/` half is absent from a published package —
+/// hence the existence check, not an assert.
+Iterable<Uri> _rustSources(Uri packageRoot) sync* {
+  for (final root in const ['rust/', '../../crates/']) {
+    final dir = Directory.fromUri(packageRoot.resolve(root));
+    if (!dir.existsSync()) continue;
+    for (final entry in dir.listSync(recursive: true, followLinks: false)) {
+      if (entry is! File) continue;
+      if (entry.path.contains('/target/')) continue;
+      if (entry.path.endsWith('.rs') || entry.path.endsWith('Cargo.toml')) {
+        yield entry.uri;
+      }
+    }
+  }
 }
 
 /// Maps the build's target (OS + architecture, and for iOS, device vs.

@@ -317,12 +317,9 @@ async fn dropped_slot_is_detected_and_recovered() {
     // The pre-drop row reached the client via the initial snapshot (or live
     // stream before the drop). The post-recovery row is the load-bearing
     // assertion — the pre-fix code would have lost it.
-    let saw_post_recovery = frames.iter().any(|f| {
-        let hex = f.get("payload").and_then(|v| v.as_str()).unwrap_or("");
-        common::decode_payload_hex(hex)
-            .windows(post_recovery_title.len())
-            .any(|w| w == post_recovery_title.as_bytes())
-    });
+    let saw_post_recovery = frames
+        .iter()
+        .any(|f| common::frame_payload_contains(f, &post_recovery_title));
     assert!(
         saw_post_recovery,
         "POST-RECOVERY DELIVERY FAILED: live insert after slot recreate did not reach the \

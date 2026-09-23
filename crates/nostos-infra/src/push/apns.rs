@@ -175,6 +175,7 @@ impl ApnsRail {
                 title,
                 body,
                 category,
+                data,
             } => {
                 let mut aps = json!({ "alert": { "title": title, "body": body } });
                 // Direct-APNs parity with the FCM rail's action pushes:
@@ -182,11 +183,20 @@ impl ApnsRail {
                 if let Some(category) = category {
                     aps["category"] = json!(category);
                 }
+                let mut payload = json!({ "aps": aps });
+                // Routing keys go NEXT TO `aps`, not inside it: the whole
+                // top-level dictionary is what UNNotificationContent hands
+                // the app back as `userInfo` when the banner is tapped
+                // (Apple, "Generating a remote notification"). `validate_data`
+                // has already refused `aps` itself.
+                for (key, value) in data {
+                    payload[key.as_str()] = json!(value);
+                }
                 (
                     "alert",
                     "10",
                     jsonwebtoken::get_current_timestamp() + u64::from(VISIBLE_TTL_SECS),
-                    json!({ "aps": aps }),
+                    payload,
                 )
             }
         };
@@ -414,6 +424,7 @@ mod tests {
                     title: "Tasks changed".into(),
                     body: "New items to sync".into(),
                     category: None,
+                    data: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -435,6 +446,42 @@ mod tests {
         assert_eq!(
             req.json(),
             json!({ "aps": { "alert": { "title": "Tasks changed", "body": "New items to sync" } } })
+        );
+    }
+
+    #[tokio::test]
+    async fn apns_routing_keys_ride_next_to_aps() {
+        let (rail, mock) = rail_with(vec![CannedResponse::json(200, "")]).await;
+        let outcome = rail
+            .send(
+                TOKEN,
+                None,
+                &PushPayload::Visible {
+                    title: "Order shipped".into(),
+                    body: "Order 983979e8 is on its way".into(),
+                    category: Some("order_status".into()),
+                    data: [
+                        ("cairn_route".to_string(), "/orders/983979e8".to_string()),
+                        ("order_id".to_string(), "983979e8".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )
+            .await;
+        assert_eq!(outcome, RailOutcome::Delivered);
+        // Siblings of `aps`, not inside it: this whole object is the
+        // `userInfo` the app reads when the banner is tapped.
+        assert_eq!(
+            mock.requests()[0].json(),
+            json!({
+                "aps": {
+                    "alert": { "title": "Order shipped", "body": "Order 983979e8 is on its way" },
+                    "category": "order_status",
+                },
+                "cairn_route": "/orders/983979e8",
+                "order_id": "983979e8",
+            })
         );
     }
 

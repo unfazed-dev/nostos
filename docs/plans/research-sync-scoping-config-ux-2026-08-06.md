@@ -11,43 +11,6 @@ cited source is marked **[unverified]**.
 
 ## 1. Survey findings
 
-### 1.1 PowerSync — Sync Rules (legacy) and Sync Streams (current)
-
-Sync Rules are a YAML file of `bucket_definitions`. Each bucket has an optional **Parameter
-Query** (SQL-like, selects the bucket's parameters, e.g. `SELECT request.user_id() AS user_id`)
-and one or more **Data Queries** (SQL-like, `SELECT * FROM lists WHERE owner_id = bucket.user_id`)
-that reference those parameters. `request.user_id()` and friends pull from the authenticated
-JWT. If a bucket has no Parameter Query it's a global (unscoped) bucket.
-[Sync Rules docs](https://docs.powersync.com/usage/sync-rules)
-
-Sync Rules are edited/deployed in the **PowerSync Dashboard** for PowerSync Cloud (org → project →
-instance hierarchy), or as part of self-hosted instance config for self-hosting.
-[PowerSync Dashboard docs](https://docs.powersync.com/tools/powersync-dashboard)
-
-**Sync Streams** is the now-recommended successor: SQL-like queries define named streams, clients
-subscribe to individual streams on-demand (or `auto_subscribe: true` for offline-first apps that
-want everything up front). It adds JOIN support, on-demand syncing, and React hooks that manage
-subscriptions automatically. Migration path: click "Migrate to Sync Streams" in the dashboard, or
-run `powersync migrate sync-rules` in the CLI to generate a draft from the existing YAML config.
-[Sync Streams overview, indexed as "powersync-sync-streams"]
-
-**Rule-change deploy semantics (question D):** deploying a Sync Rules change causes PowerSync to
-**recreate the sync buckets from scratch** — new installs sync less history (reset), but existing
-clients see a spike in re-sync operations as affected buckets rebuild. The client SQLite core
-incrementally maintains bucket **checksums**; any server-side checksum change (including from a
-rule change) is what triggers the client to re-download the affected bucket, not a full-DB wipe —
-scoped to buckets whose definition changed, not the whole dataset. A recent improvement includes
-the Sync Rules **version** in generated bucket IDs so clients sync more efficiently across rule
-updates, and PowerSync has an open plan for *incremental* sync-rule reprocessing (only reprocess
-changed bucket definitions, not all of them) — not yet shipped as of the fetched docs.
-[Sync Rules from First Principles](https://www.powersync.com/blog/sync-rules-from-first-principles-partial-replication-to-sqlite),
-[PowerSync Service release notes](https://releases.powersync.com/announcements/powersync-service)
-
-Buckets are append-only operation logs (`PUT`/`REMOVE`/`MOVE`/`CLEAR`) and are periodically
-**compacted** (daily on Cloud, cron job self-hosted) to bound history size for new-client
-first-sync time.
-[Compacting Buckets docs](https://docs.powersync.com/usage/lifecycle-maintenance/compacting-buckets)
-
 ### 1.2 Hasura — table tracking + row-permission builder
 
 Two distinct steps, both introspection-driven:
@@ -160,9 +123,10 @@ reload has fully propagated. [PgBouncer config docs](https://www.pgbouncer.org/c
 **Hasura** `hasura metadata apply` is a declarative reconcile — safe to rerun, hot-applies without
 restarting the engine.
 
-**PowerSync** deploy = bucket-checksum invalidation (§1.1) — the closest analog to "a predicate
-tightened live" and the most relevant precedent for Nostos, since Nostos's predicates are also a
-live, per-session filter tree rather than a connection-pool config.
+**Bucket-based sync engines'** deploy semantics = server-side checksum invalidation of only the
+affected bucket — the closest analog to "a predicate tightened live" and the most relevant
+precedent for Nostos, since Nostos's predicates are also a live, per-session filter tree rather
+than a connection-pool config.
 
 ---
 
@@ -179,13 +143,13 @@ committed rules file) end-to-end. The two closest pieces, combined, are the prec
   (`hasura metadata apply`). Hasura is the best precedent for "toggle in a UI → structured file on
   disk, not raw SQL, not opaque dashboard-only state."
 Granularity ceiling nobody fully automates via UI: column masking and cross-table JOINs are
-either hand-written (Hasura column permissions, Electric `columns` clause) or don't exist
-(PowerSync Sync Rules had no JOINs; Sync Streams added them, still hand-written SQL-like text).
+either hand-written (Hasura column permissions, Electric `columns` clause) or added only in a
+later product revision, still as hand-written SQL-like text.
 
 **B. What rule-language shape won, and what it enables.**
 Three shapes recur, each buying a different editor:
-1. **SQL-like text with bound parameters from claims** (PowerSync Data/Parameter Queries, Ditto
-   DQL, Electric `where`) — maximal expressiveness, but the editor affordance is a syntax-checked
+1. **SQL-like text with bound parameters from claims** (Ditto DQL, Electric `where`) — maximal
+   expressiveness, but the editor affordance is a syntax-checked
    text box, not toggles; a generated UI can pre-fill it but can't safely reverse-engineer
    arbitrary SQL back into toggles.
 2. **Structured boolean-expression tree over claim/session variables** (Hasura row permissions,
@@ -211,8 +175,8 @@ an empty DB should print "no tables found — apply your schema first, or run `n
 --template <name>`" rather than block/poll.
 
 **D. Rule-change deploy semantics for live clients.**
-Industry norm, confirmed via PowerSync (the only system in this survey with primary-doc detail on
-this): **tighten a rule → the affected bucket's server-side checksum changes → already-connected
+Industry norm, confirmed via primary docs for one bucket-based sync system (the only system in
+this survey with primary-doc detail on this): **tighten a rule → the affected bucket's server-side checksum changes → already-connected
 clients detect the checksum mismatch on their next checkpoint and re-download that bucket's full
 current contents** (not a diff, not a silent local-only filter change) — scoped to the bucket(s)
 whose definition changed, not a global wipe. This is exactly "versioned rules + checksum-triggered
@@ -223,7 +187,8 @@ client could keep reading rows a tightened rule should have revoked). Nostos's p
 already happens live per WAL event (ADR-0012), so the correct precedent to copy is: **on rules
 reload, re-validate every live session's compiled predicate against the new config and, for any
 session whose effective predicate changed, force a resnapshot of that session** (not the whole
-server) — this matches PowerSync's per-bucket invalidation, adapted to Nostos's per-session model.
+server) — this mirrors the per-bucket invalidation pattern described above, adapted to Nostos's
+per-session model.
 
 **E. Recommendation for Nostos v1.**
 
@@ -265,8 +230,8 @@ scope = "true"                  # explicit match-all, not a bare omission
   The `scope` string is **not raw SQL** — it's a restricted grammar (`column <op> claims.<field>`,
   ANDable, no OR/NOT at v1) that compiles 1:1 onto the existing `PredicateExpr` leaves/And, which a
   toggle UI can fully round-trip (pick column → pick op → pick claim), mirroring Hasura's
-  structured-tree precedent (§2.A) rather than PowerSync's/Electric's free-text SQL. This is the
-  "terser than PowerSync, no SELECT ceremony" requirement: no Parameter Query / Data Query split,
+  structured-tree precedent (§2.A) rather than Electric's free-text SQL. This is the
+  "no SELECT ceremony" requirement: no Parameter Query / Data Query split,
   no bucket naming — one line per table.
 
 - **Toggle UI contract** (future dashboard, not v1 scope): reads/writes this TOML 1:1 — `sync`
@@ -275,7 +240,7 @@ scope = "true"                  # explicit match-all, not a bare omission
   in the UI even though the file format is human-editable text.
 
 - **Explicitly deferred for v1** (name each, per the ask):
-  - **JOINs / cross-table scope** — Electric and PowerSync legacy both punt on this too; single-
+  - **JOINs / cross-table scope** — Electric punts on this too; single-
     table matches Nostos's existing `PredicateExpr` exactly.
   - **Column masking** — Hasura and Electric both support it but it's a second axis of complexity;
     the `[tables.X.columns]` block above is a placeholder key reserved in the format, unimplemented.
@@ -290,24 +255,16 @@ scope = "true"                  # explicit match-all, not a bare omission
   `PredicateExpr` from the new file; if a session's resolved tree changed, force that session
   through the existing resnapshot path (already needed for reconnect/backfill per
   `docs/adr/0025-persisted-oplog-backfill-for-reconnect-resume.md`) rather than a global restart —
-  this is the Nostos-shaped version of PowerSync's per-bucket checksum invalidation (§2.D), and it's
-  free: Nostos doesn't have PowerSync's bucket-log/compaction machinery to rebuild, so the "cost" of
-  a rule change is bounded to "the sessions actually affected," which is cheaper than PowerSync's
-  bucket rebuild story, not more expensive. This should be called out as a competitive point, not
+  this is the Nostos-shaped version of the checksum-invalidation pattern described in §2.D, and
+  it's free: Nostos has no bucket-log/compaction machinery to rebuild, so the "cost" of
+  a rule change is bounded to "the sessions actually affected" — cheaper than a bucket-rebuild-
+  based design, not more expensive. This should be called out as a competitive point, not
   just an implementation detail.
 
 ---
 
 ## Sources
 
-- [PowerSync Sync Rules (legacy)](https://docs.powersync.com/usage/sync-rules)
-- PowerSync Sync Streams overview (fetched, indexed as `powersync-sync-streams`; canonical URL
-  `docs.powersync.com/sync/streams/overview` — direct fetch 404'd on the guessed path, content
-  retrieved via indexed search result)
-- [PowerSync Dashboard](https://docs.powersync.com/tools/powersync-dashboard)
-- [PowerSync Compacting Buckets](https://docs.powersync.com/usage/lifecycle-maintenance/compacting-buckets)
-- [PowerSync: Sync Rules From First Principles](https://www.powersync.com/blog/sync-rules-from-first-principles-partial-replication-to-sqlite)
-- [PowerSync Service release notes](https://releases.powersync.com/announcements/powersync-service)
 - [Hasura: Configuring Permission Rules](https://hasura.io/docs/2.0/auth/authorization/permissions/)
 - [Hasura: Set Up a GraphQL Schema Using an Existing Postgres Database](https://hasura.io/docs/2.0/schema/postgres/using-existing-database/)
 - [Supabase: Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)

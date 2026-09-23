@@ -12,7 +12,8 @@
 The Flutter SDK (`sdk/nostos_flutter`) shipped single-table-per-`Nostos` first. The
 Provider Dashboard launch needs **N tables on one connection** (providers, clients,
 availabilities, appointments, invoices) plus the ability to **pause and resume
-syncing** while the app stays fully usable offline — PowerSync's headline contract.
+syncing** while the app stays fully usable offline — the headline offline-first
+contract this class of app needs.
 
 Three constraints shaped the design:
 
@@ -136,7 +137,8 @@ the call sites, not a rebuild.
   to `connected`). A real ack/conflict stream is part of the proposed D5 surface.
 - **Risk:** `resume` (not `connect`) diverges from the dashboard plan's literal
   API names. Documented so a D5 ratification can alias `connect` → `resume` if
-  parity with PowerSync's `connect`/`disconnect` naming is later required.
+  parity with the common `connect`/`disconnect` naming convention is later
+  required.
 
 ## Alternatives considered
 

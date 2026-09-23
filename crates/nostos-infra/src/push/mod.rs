@@ -65,8 +65,27 @@ pub enum PushPayload {
         title: String,
         body: String,
         category: Option<String>,
+        /// Routing keys handed to the app on tap — the deep-link seam
+        /// (ADR-0037 §2 amendment). String→string because that is the
+        /// smallest shape all three rails carry losslessly: FCM's `data` is
+        /// a `map<string,string>` on the wire, so a number or a nested
+        /// object would have to be stringified anyway.
+        ///
+        /// Where it lands: APNs top-level siblings of `aps` (which is what
+        /// `userInfo` hands the app), FCM `message.data`, Web Push a `data`
+        /// object inside the encrypted payload.
+        ///
+        /// Still not a data channel. Apple's guidance is the rule nostos
+        /// adopts: an identifier the app can resolve locally is fine, the
+        /// row itself is not — the payload is unencrypted at the vendor.
+        /// [`validate_data`] enforces the key and size discipline.
+        data: PushData,
     },
 }
+
+/// Routing keys for a visible push. `BTreeMap` for a deterministic wire —
+/// the rails' JSON and their tests both depend on a stable key order.
+pub type PushData = std::collections::BTreeMap<String, String>;
 
 impl PushPayload {
     /// Seconds this payload stays valuable. A silent ping older than a minute
@@ -80,6 +99,65 @@ impl PushPayload {
             Self::Visible { .. } => VISIBLE_TTL_SECS,
         }
     }
+}
+
+/// Serialized cap for [`PushPayload::Visible::data`]. APNs and FCM both
+/// refuse a payload over 4096 bytes; title (256) + body (1024) + the rails'
+/// own envelopes leave this much room with slack to spare, and a routing key
+/// that needs more than a kilobyte is row data wearing a hat.
+pub const MAX_DATA_BYTES: usize = 1024;
+
+/// Keys a rail would eat. Rejected rather than silently dropped — a deep
+/// link that vanishes at the vendor is the bug this whole field exists to
+/// remove.
+///
+/// - `aps` — APNs' own dictionary; our keys are its siblings.
+/// - `from`, `message_type`, `notification`, `google.*`, `gcm.*` — reserved
+///   by FCM for `data` maps.
+/// - `title`, `body`, `category`, `table`, `lsn` — nostos's own: the FCM
+///   action-mode message and the silent doorbell put these in `data`.
+pub fn reserved_data_key(key: &str) -> bool {
+    matches!(
+        key,
+        "aps"
+            | "from"
+            | "message_type"
+            | "notification"
+            | "title"
+            | "body"
+            | "category"
+            | "table"
+            | "lsn"
+    ) || key.starts_with("google.")
+        || key.starts_with("gcm.")
+}
+
+/// Key and size discipline for a visible push's routing keys. One home for
+/// it: the pushd HTTP API (`nostos-push`) and the server's `NOSTOS_PUSH_TABLES`
+/// parser both validate at their own edge, and two spellings of "reserved"
+/// would mean one of them shipping a push no client can read.
+///
+/// # Errors
+/// An empty key, a reserved key, or a map whose JSON exceeds
+/// [`MAX_DATA_BYTES`].
+pub fn validate_data(data: &PushData) -> Result<(), String> {
+    for key in data.keys() {
+        if key.is_empty() {
+            return Err("payload data key must not be empty".into());
+        }
+        if reserved_data_key(key) {
+            return Err(format!(
+                "payload data key {key:?} is reserved by APNs/FCM or by nostos"
+            ));
+        }
+    }
+    let bytes = serde_json::to_vec(data).map_or(usize::MAX, |v| v.len());
+    if bytes > MAX_DATA_BYTES {
+        return Err(format!(
+            "payload data is {bytes} bytes serialized, max {MAX_DATA_BYTES}"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) const SILENT_TTL_SECS: u32 = 60;
@@ -342,5 +420,57 @@ pub(crate) mod test_support {
             body.push('\n');
         }
         format!("-----BEGIN PRIVATE KEY-----\n{body}-----END PRIVATE KEY-----\n")
+    }
+}
+
+#[cfg(test)]
+mod data_tests {
+    use super::{validate_data, PushData, MAX_DATA_BYTES};
+
+    fn data(pairs: &[(&str, &str)]) -> PushData {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn ordinary_routing_keys_pass() {
+        assert!(
+            validate_data(&data(&[("cairn_route", "/orders/42"), ("order_id", "42"),])).is_ok()
+        );
+        assert!(validate_data(&PushData::new()).is_ok());
+    }
+
+    #[test]
+    fn keys_a_rail_would_eat_are_refused() {
+        // Rejected, not silently dropped: a deep link that vanishes at the
+        // vendor is the failure this field exists to remove.
+        for key in [
+            "aps",
+            "from",
+            "message_type",
+            "notification",
+            "google.foo",
+            "gcm.bar",
+            "title",
+            "body",
+            "category",
+            "table",
+            "lsn",
+            "",
+        ] {
+            assert!(
+                validate_data(&data(&[(key, "x")])).is_err(),
+                "{key:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn oversize_map_is_refused() {
+        let big = "x".repeat(MAX_DATA_BYTES);
+        let err = validate_data(&data(&[("k", &big)])).expect_err("over the cap");
+        assert!(err.contains("max 1024"), "{err}");
     }
 }

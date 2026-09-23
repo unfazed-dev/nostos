@@ -172,12 +172,12 @@ and the function needs exactly one credential instead of two, with no HTTP/2
 APNs client to get right inside Deno. Firebase requires the APNs key upload
 before FCM works on iOS anyway.
 
-This is *not* the `powersync_role` problem wearing a hat. The distinction is
+This is *not* the shared-replication-role problem wearing a hat. The distinction is
 where the secret sits, not whether one exists:
 
 | | holder | reachable by an attacker with an APK? |
 |---|---|---|
-| `powersync_role` (`replication bypassrls`) | would have to be the device | **yes** — and it reads every row regardless of policy |
+| a shared replication role (`replication bypassrls`) | would have to be the device | **yes** — and it reads every row regardless of policy |
 | FCM service account | Supabase secret, inside the function | **no** |
 | `service_role` (function reads `cairn.push_tokens`) | Supabase secret, inside the function | **no** |
 

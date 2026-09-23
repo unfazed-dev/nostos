@@ -7,8 +7,7 @@ Both share one Worker design (`nostos.worker.js` + `sqlite_wasm_glue.js`, duplic
 in `sdk/nostos_web/worker/` and `sdk/nostos_flutter/web/nostos/`), so every item below
 applies to both unless marked.
 
-Sources read (official only): sqlite.org/wasm persistence doc; docs.powersync.com
-JavaScript Web SDK; docs.flutter.dev Wasm page; vite.dev Features; MDN Storage
+Sources read (official only): sqlite.org/wasm persistence doc; docs.flutter.dev Wasm page; vite.dev Features; MDN Storage
 quotas & eviction; web.dev OPFS guide; dart.dev/tools/hooks; pub.dev frb versions.
 
 ## What Nostos already gets right (keep)
@@ -20,7 +19,7 @@ quotas & eviction; web.dev OPFS guide; dart.dev/tools/hooks; pub.dev frb version
 - **Engine + socket + storage in one Worker**, main thread is a postMessage proxy.
   Required: `createSyncAccessHandle` is Worker-only.
 - **Memory fallback with a surfaced `storage: "memory"` mode** for Safari Private
-  Browsing / old browsers. PowerSync does the same with its in-memory VFS.
+  Browsing / old browsers.
 
 ## Gaps, ranked by blast radius
 
@@ -32,9 +31,9 @@ tab's `installOpfsSAHPoolVfs()` throws, the glue catches it, and the tab runs
 **in-memory with its own live socket**. Two tabs now hold different local state and
 tab 2's writes are non-durable, with no signal beyond `storage: "memory"`.
 
-PowerSync's answer: a `SharedWorker` named `shared-powersync-[dbFileName]` owns the
+Prior-art answer: a `SharedWorker` named per DB file owns the
 DB + sync on behalf of all tabs; credentials come from the most recently opened tab;
-`enableMultiTabs` flag; without shared workers only one tab syncs and state is
+an opt-in multi-tab flag; without shared workers only one tab syncs and state is
 mirrored over `BroadcastChannel`.
 
 Recommended, in ponytail order:
@@ -51,7 +50,7 @@ Recommended, in ponytail order:
    (responses by id, pushes mirrored, `reason:"follower"`), and queues on the Web
    Lock so it is promoted (opens OPFS, replays its own `connect`) when the leader
    closes. `allowSecondaryTab: true` keeps the standalone memory engine.
-3. **Escape hatch:** document PowerSync's recipe — a per-tab unique DB name when
+3. **Escape hatch:** document the recipe — a per-tab unique DB name when
    multi-tab sharing is not wanted.
 
 ### 2. Storage is best-effort until the app asks otherwise (P1)
@@ -68,7 +67,7 @@ consumer's quota UI.
 
 ### 3. Pending writes on tab close (P1, memory mode P0)
 
-PowerSync recipe: watch the CRUD queue and on `beforeunload` call `preventDefault()`
+Prior-art recipe: watch the CRUD queue and on `beforeunload` call `preventDefault()`
 when local mutations are outstanding. Nostos already exposes `pending` via
 `deadLetters()`. Recommended: opt-in `guardUnload: true` on the facade that
 installs the handler when `pending > 0`, default on when `storage === "memory"`.
@@ -112,9 +111,7 @@ comments. One source under `sdk/nostos_web/worker/`, copied into
 - **First-table-only checkpoint** (`crates/nostos-ffi-wasm/src/lib.rs:1320`): LSN is
   stream-global, so a single resume point is correct for all tables on one socket.
   Document; do not rewire.
-- **WebSocket vs HTTP streaming:** PowerSync defaults to HTTP streaming on web and
-  says there is "no compelling reason" for WebSockets there. Nostos's JSON-over-WS is
-  fine; revisit only if a consumer sits behind a WS-hostile proxy.
+- **WebSocket vs HTTP streaming:** Nostos's JSON-over-WS is fine; revisit only if a consumer sits behind a WS-hostile proxy.
 - **COOP/COEP:** not required by sahpool. Do not add them for Nostos's sake.
 
 ## Version drift noticed on the way
