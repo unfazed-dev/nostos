@@ -79,3 +79,4 @@ apps/atlet/flutter/ios/Runner/GoogleService-Info.plist
 # Python bytecode from packaging/release tooling
 __pycache__/
 *.pyc
+.nostos/local/

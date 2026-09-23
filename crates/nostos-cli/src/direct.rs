@@ -481,12 +481,30 @@ fn pull_fn(s: &mut String) {
 -- guarantees a full page spans two xids, so the cursor always advances.
 --
 -- security invoker: RLS on cairn.changes applies as the calling device.
+--
+-- Returns ONE jsonb array, not a set of rows, and that is not a style choice.
+-- PostgREST caps a set-returning response at `db-max-rows` (1000 on a stock
+-- Supabase project) and announces the cut with nothing but `content-range:
+-- 0-999/*` on a 200 -- no 206, and `Range`/`offset` are ignored on an RPC, so
+-- there is no paging past it either. A page of 200 transactions can easily
+-- exceed 1000 rows; the tail would be dropped and the device would then store
+-- the horizon PAST rows it never saw. Silent, permanent loss. A scalar result
+-- is one row however big it gets, so the cap cannot reach it, and PostgREST
+-- renders a jsonb scalar as the bare array the client already parses.
+-- (Measured 2026-09-22 against a real project: a 1010-row snapshot came back
+-- as 1000 rows, 200 OK, two whole tables missing.)
+--
+-- Dropped first, not just replaced: `create or replace` refuses to change a
+-- function's return type, so a project still carrying the set-returning
+-- version would fail this file rather than upgrade. The grants below are
+-- re-issued after, which is what a drop costs.
+drop function if exists public.cairn_pull(xid8, int);
 create or replace function public.cairn_pull(since xid8, max_txns int default 200)
-returns table (horizon xid8, seq bigint, xid xid8,
-               table_name text, pk text, op text, "row" jsonb)
+returns jsonb
 language plpgsql stable security invoker set search_path = '' as $fn$
 declare
   v_pruned xid8;
+  v_page   jsonb;
 begin
   -- A device resuming from a horizon that has been pruned away must be TOLD,
   -- not quietly given a shorter answer: the rows in the gap can never arrive
@@ -500,7 +518,6 @@ begin
       hint    = 'reset the stored horizon and re-snapshot the synced tables';
   end if;
 
-  return query
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
   page as (
     select distinct c.xid
@@ -509,11 +526,15 @@ begin
     order by c.xid
     limit greatest(max_txns, 2)
   )
-  select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row"
-  from cairn.changes c
-  join page p on p.xid = c.xid
-  cross join h
-  order by c.xid, c.seq;
+  select coalesce(jsonb_agg(to_jsonb(r) order by r.xid, r.seq), '[]'::jsonb)
+    into v_page
+  from (
+    select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row"
+    from cairn.changes c
+    join page p on p.xid = c.xid
+    cross join h
+  ) r;
+  return v_page;
 end;
 $fn$;
 "#,
@@ -537,8 +558,8 @@ fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
     for t in tables {
         let _ = write!(
             branches,
-            "  union all\n  select h.horizon, '{table}'::text, null::text, null::jsonb from h\n  \
-             union all\n  select h.horizon, '{table}'::text, r.{pk}::text, to_jsonb(r) \
+            "    union all\n    select h.horizon, '{table}'::text, null::text, null::jsonb from h\n    \
+             union all\n    select h.horizon, '{table}'::text, r.{pk}::text, to_jsonb(r) \
              from public.{table} r, h\n",
             table = t.table,
             pk = PK_COLUMN,
@@ -560,12 +581,30 @@ fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
 -- security invoker, so RLS on each base table decides what is in the snapshot.
 -- That is the same authority that decides what a pull returns, which is what
 -- makes the two interchangeable.
+--
+-- One jsonb array rather than a set of rows, for the reason spelled out over
+-- `cairn_pull`: PostgREST silently truncates a set-returning RPC at
+-- `db-max-rows`, and a snapshot is the one call guaranteed to be big.
+--
+-- ponytail: the whole snapshot is materialised in one value, so its ceiling is
+-- what the server and the device can each hold at once. Upgrade path when a
+-- table outgrows that: take a keyset (`p_after_table`, `p_after_pk`) plus a
+-- limit, and have the client resume its pull from the FIRST page's horizon --
+-- anything that changed mid-pagination is then re-delivered by the log, the
+-- same way a base backup is healed by the WAL that follows it.
+--
+-- Dropped first for the same reason as `cairn_pull`: a return type cannot be
+-- replaced in place.
+drop function if exists public.cairn_snapshot();
 create or replace function public.cairn_snapshot()
-returns table (horizon xid8, table_name text, pk text, "row" jsonb)
+returns jsonb
 language sql stable security invoker set search_path = '' as $fn$
-  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
-  select h.horizon, null::text, null::text, null::jsonb from h
-{branches}$fn$;
+  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
+  snap as (
+    select h.horizon, null::text as table_name, null::text as pk, null::jsonb as "row" from h
+{branches}  )
+  select coalesce(jsonb_agg(to_jsonb(snap)), '[]'::jsonb) from snap
+$fn$;
 "#
     );
 }
@@ -1069,20 +1108,47 @@ pub async fn inspect(
         ("cairn_snapshot", ""),
         ("cairn_increment", "text, text, text, numeric"),
     ] {
-        let def: Option<String> = client
+        // `proretset` rather than a grep of the definition: `pg_get_functiondef`
+        // renders the header in UPPERCASE (`RETURNS jsonb`), so matching the
+        // generator's lowercase source text against it never hits — a check
+        // that fails a deploy it just approved. The body greps below match
+        // body text, which comes back verbatim.
+        let def: Option<(String, bool)> = client
             .query_opt(
-                "select pg_get_functiondef(p.oid) from pg_proc p \
+                "select pg_get_functiondef(p.oid), p.proretset from pg_proc p \
                  join pg_namespace n on n.oid = p.pronamespace \
                  where n.nspname = 'public' and p.proname = $1",
                 &[&proname],
             )
             .await?
-            .map(|r| r.get(0));
-        let Some(def) = def else {
+            .map(|r| (r.get(0), r.get(1)));
+        let Some((def, returns_set)) = def else {
             out.push(Check::new(false, format!("public.{proname} exists")));
             continue;
         };
         out.push(Check::new(true, format!("public.{proname} exists")));
+
+        // The other bug no client can detect. PostgREST caps a set-returning
+        // RPC at `db-max-rows` and reports the cut in a header nobody reads,
+        // on a 200 — so a read simply arrives short, and the device then
+        // stores a horizon past rows it never saw. A scalar result is one row
+        // at any size, so the cap cannot reach it.
+        if matches!(proname, "cairn_pull" | "cairn_snapshot") {
+            let scalar = !returns_set;
+            out.push(Check::new(
+                scalar,
+                if scalar {
+                    format!("{proname} returns one jsonb value, so `db-max-rows` cannot cut it")
+                } else {
+                    format!(
+                        "{proname} returns a SET \u{2014} PostgREST truncates it at \
+                         `db-max-rows` (1000 by default) on a 200 with no error, and the \
+                         device stores a horizon past rows it never received. \
+                         Regenerate with `nostos link --mode direct`."
+                    )
+                },
+            ));
+        }
 
         if proname == "cairn_pull" {
             // See the doc comment: this is the one bug no client can detect.
@@ -1607,13 +1673,17 @@ mod tests {
             "function public.cairn_pull(since xid8, max_txns int default 200)",
             "function public.cairn_increment(",
             "p_table text, p_pk text, p_field text, p_delta numeric",
-            // The columns `PullRow` deserializes.
-            r"returns table (horizon xid8, seq bigint, xid xid8,",
-            r#"table_name text, pk text, op text, "row" jsonb)"#,
+            // The keys `PullRow` deserializes, now carried by `to_jsonb` over
+            // the column names rather than by a table signature.
+            r#"select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row""#,
+            // One jsonb value, never a set: PostgREST truncates a set at
+            // `db-max-rows` and says so only in a content-range header.
+            "returns jsonb",
+            "coalesce(jsonb_agg(to_jsonb(r) order by r.xid, r.seq), '[]'::jsonb)",
+            "coalesce(jsonb_agg(to_jsonb(snap)), '[]'::jsonb)",
             // Inclusive lower bound + transaction paging: the livelock fix.
             "where c.xid >= since and c.xid < h.horizon",
             "limit greatest(max_txns, 2)",
-            "order by c.xid, c.seq",
             // The topic `nostos_client::doorbell` joins.
             "'cairn:' || coalesce(new.scope, 'unscoped')",
         ] {
@@ -1688,7 +1758,10 @@ mod tests {
         assert!(sql.contains(
             "revoke all on function public.cairn_pull(xid8, int) from public, anon, authenticated;"
         ));
-        for line in sql.lines().filter(|l| l.starts_with("revoke all on function")) {
+        for line in sql
+            .lines()
+            .filter(|l| l.starts_with("revoke all on function"))
+        {
             let whole = line.trim_end();
             assert!(
                 whole.contains("from public, anon, authenticated") || whole.ends_with(')'),

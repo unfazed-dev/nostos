@@ -193,11 +193,21 @@ impl Fixture {
     }
 
     /// Everything the pull returns, as `(xid, table, pk, op)`.
+    ///
+    /// The RPC hands back ONE jsonb array rather than a set of rows — see the
+    /// comment over `cairn_pull` in the generator for why (PostgREST truncates
+    /// a set at `db-max-rows` and says so only in a header). Over the wire the
+    /// device reads that array directly; here we expand it so the assertions
+    /// below can stay written in rows.
     async fn pull(&self, since: &str, max_txns: i32) -> Vec<(String, String, String, String)> {
         self.client
             .query(
-                "select xid::text, table_name, pk, op from public.cairn_pull($1::text::xid8, $2) \
-                 order by xid, seq",
+                "select t.xid, t.table_name, t.pk, t.op \
+                 from jsonb_array_elements(public.cairn_pull($1::text::xid8, $2)) \
+                      with ordinality as a(e, ord), \
+                 lateral jsonb_to_record(a.e) as t(xid text, table_name text, \
+                                                   pk text, op text) \
+                 order by a.ord",
                 &[&since, &max_txns],
             )
             .await
@@ -363,7 +373,9 @@ async fn rls_scopes_the_log_to_the_callers_claims() {
     let scoped = fx
         .client
         .query(
-            "select pk, op from public.cairn_pull('0'::text::xid8, 200)",
+            "select t.pk, t.op \
+             from jsonb_array_elements(public.cairn_pull('0'::text::xid8, 200)) e, \
+             lateral jsonb_to_record(e) as t(pk text, op text)",
             &[],
         )
         .await
@@ -497,9 +509,12 @@ async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
     );
 
     // Now deploy the bug: same signature, same output columns, row-limited.
+    // Dropped first because the shipped one returns a scalar jsonb and a
+    // return type cannot be replaced in place.
     fx.client
         .batch_execute(
-            r#"create or replace function public.cairn_pull(since xid8, max_txns int default 200)
+            r#"drop function if exists public.cairn_pull(xid8, int);
+               create or replace function public.cairn_pull(since xid8, max_txns int default 200)
                returns table (horizon xid8, seq bigint, xid xid8,
                               table_name text, pk text, op text, "row" jsonb)
                language sql stable security invoker set search_path = '' as $fn$
@@ -591,15 +606,19 @@ async fn a_pruned_device_can_re_snapshot_and_resume() {
     fx.insert("alice", "kept").await;
     fx.insert("bob", "theirs").await;
 
-    let rows = fx
+    // ONE jsonb value, not a set — that is the whole point of the signature
+    // (`db-max-rows` cannot truncate a scalar), so read it as one.
+    let snapshot: serde_json::Value = fx
         .client
-        .query("select horizon::text, table_name, pk, \"row\" from public.cairn_snapshot()", &[])
+        .query_one("select public.cairn_snapshot()", &[])
         .await
-        .expect("snapshot");
+        .expect("snapshot")
+        .get(0);
+    let rows = snapshot.as_array().expect("the snapshot is a jsonb array");
     assert!(!rows.is_empty(), "a snapshot always carries its horizon");
 
-    let horizons: std::collections::HashSet<String> =
-        rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    let horizons: std::collections::HashSet<&str> =
+        rows.iter().filter_map(|r| r["horizon"].as_str()).collect();
     assert_eq!(
         horizons.len(),
         1,
@@ -608,25 +627,26 @@ async fn a_pruned_device_can_re_snapshot_and_resume() {
 
     // The header row per table is what makes an empty table distinguishable
     // from a table the snapshot forgot.
-    let headers: Vec<String> = rows
+    let headers: Vec<&str> = rows
         .iter()
-        .filter(|r| r.get::<_, Option<String>>(2).is_none())
-        .filter_map(|r| r.get::<_, Option<String>>(1))
+        .filter(|r| r["pk"].is_null())
+        .filter_map(|r| r["table_name"].as_str())
         .collect();
     assert!(
-        headers.contains(&fx.tasks),
+        headers.contains(&fx.tasks.as_str()),
         "the snapshot must announce {}, got {headers:?}",
         fx.tasks
     );
 
-    let bodies = rows
-        .iter()
-        .filter(|r| r.get::<_, Option<String>>(2).is_some())
-        .count();
+    let bodies = rows.iter().filter(|r| !r["pk"].is_null()).count();
     assert_eq!(bodies, 2, "both rows are in the picture (no RLS role set)");
 
     // And the horizon it hands back is a horizon a pull will accept.
-    let horizon = horizons.into_iter().next().expect("one horizon");
+    let horizon = horizons
+        .into_iter()
+        .next()
+        .expect("one horizon")
+        .to_string();
     fx.client
         .query(
             "select * from public.cairn_pull($1::text::xid8, 200)",

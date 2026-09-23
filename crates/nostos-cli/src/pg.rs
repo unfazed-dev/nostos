@@ -20,12 +20,12 @@ pub struct PgControl {
 }
 
 impl PgControl {
-    /// Connect, choosing TLS or plain based on the URL (see [`wants_tls`]).
+    /// Connect, choosing TLS or plain based on the URL (see [`ssl_mode`]).
     pub async fn connect(url: &str) -> Result<Self> {
-        let client = if wants_tls(url) {
-            connect_tls(url).await?
-        } else {
-            connect_plain(url).await?
+        let client = match ssl_mode(url) {
+            SslMode::Disable => connect_plain(url).await?,
+            SslMode::Encrypt => connect_tls(url, false).await?,
+            SslMode::Verify => connect_tls(url, true).await?,
         };
         Ok(Self { client })
     }
@@ -224,7 +224,33 @@ pub struct SlotStatus {
     pub lag_bytes: Option<i64>,
 }
 
+/// Restate the URL in the only `sslmode` values tokio-postgres parses.
+///
+/// Its connection-string parser accepts `disable`/`prefer`/`require` and
+/// rejects everything else outright — a libpq URL carrying `verify-full` (or
+/// `allow`, or an `sslrootcert=`) never reaches this module at all, it dies as
+/// "invalid value for option `sslmode`". So the mode is read here and the
+/// driver is told only what it decides: whether to attempt TLS. Who the peer is
+/// allowed to be is decided by the verifier in [`connect_tls`].
+///
+/// Note `prefer` becomes `require`: the driver would otherwise fall back to
+/// plaintext on a server that refuses TLS, and failing closed is the better
+/// default for a control-plane connection carrying a superuser password.
+fn driver_url(url: &str, mode: SslMode) -> String {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let mut params: Vec<&str> = query
+        .split('&')
+        .filter(|p| !p.is_empty() && !p.starts_with("sslmode=") && !p.starts_with("sslrootcert="))
+        .collect();
+    params.push(match mode {
+        SslMode::Disable => "sslmode=disable",
+        SslMode::Encrypt | SslMode::Verify => "sslmode=require",
+    });
+    format!("{base}?{}", params.join("&"))
+}
+
 async fn connect_plain(url: &str) -> Result<tokio_postgres::Client> {
+    let url = &driver_url(url, SslMode::Disable);
     let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
         .await
         .with_context(|| format!("connecting to {}", redact(url)))?;
@@ -236,23 +262,111 @@ async fn connect_plain(url: &str) -> Result<tokio_postgres::Client> {
     Ok(client)
 }
 
-/// ponytail: TLS is unverified against a real Supabase project (W0b —
-/// Supabase empirical verification — is operator-blocked pending real
-/// credentials). This path compiles and follows the standard
-/// `tokio-postgres-rustls` recipe (webpki CA roots, no client auth), but the
-/// only e2e coverage in this crate exercises `connect_plain` against local
-/// Docker Postgres. Upgrade path once W0b unblocks: add a TLS-gated e2e test
-/// against a real Supabase direct connection and delete this comment.
-async fn connect_tls(url: &str) -> Result<tokio_postgres::Client> {
+/// The trust store for a verifying connection: `sslrootcert=<pem>` when the URL
+/// names one, otherwise the webpki bundle.
+///
+/// Managed Postgres usually issues from a private CA — Supabase's pooler cert
+/// chains to "Supabase Intermediate 2021 CA", which is in no public root store
+/// — so `verify-full` against one of those is only reachable with the CA the
+/// provider publishes. Without this the strict modes are unusable exactly where
+/// they matter most.
+fn root_store(url: &str) -> Result<rustls::RootCertStore> {
+    use rustls::pki_types::pem::PemObject;
+
     let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let Some(path) = query_param(url, "sslrootcert") else {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        return Ok(roots);
+    };
+    for cert in rustls::pki_types::CertificateDer::pem_file_iter(&path)
+        .with_context(|| format!("reading sslrootcert {path}"))?
+    {
+        roots
+            .add(cert.with_context(|| format!("parsing sslrootcert {path}"))?)
+            .with_context(|| format!("trusting sslrootcert {path}"))?;
+    }
+    Ok(roots)
+}
+
+/// A verifier that checks the signature but not who signed it — libpq's
+/// `require`, which encrypts and says nothing about the peer's identity.
+///
+/// Not a shortcut: it is the documented meaning of the mode, and the only
+/// way to reach a managed Postgres whose CA the caller has not downloaded.
+/// It is reached only when the URL asks for it by name.
+#[derive(Debug)]
+struct EncryptOnly(std::sync::Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for EncryptOnly {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// ponytail: no e2e coverage against a real managed project — the local Docker
+/// Postgres this crate tests against speaks plain. Upgrade path: a TLS-gated
+/// e2e against a real Supabase connection, one run per mode.
+async fn connect_tls(url: &str, verify: bool) -> Result<tokio_postgres::Client> {
     let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let tls_config = rustls::ClientConfig::builder_with_provider(provider)
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
-        .context("configuring TLS protocol versions")?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        .context("configuring TLS protocol versions")?;
+    let tls_config = if verify {
+        builder
+            .with_root_certificates(root_store(url)?)
+            .with_no_client_auth()
+    } else {
+        warn!(
+            "sslmode is `require`/`prefer`/`allow`: the connection is encrypted but the \
+             server is NOT authenticated. Use sslmode=verify-full (with sslrootcert=<ca.pem> \
+             for a managed provider) to check who answers."
+        );
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(EncryptOnly(provider)))
+            .with_no_client_auth()
+    };
     let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+    let url = &driver_url(url, SslMode::Encrypt);
     let (client, connection) = tokio_postgres::connect(url, tls)
         .await
         .with_context(|| format!("connecting (TLS) to {}", redact(url)))?;
@@ -264,18 +378,44 @@ async fn connect_tls(url: &str) -> Result<tokio_postgres::Client> {
     Ok(client)
 }
 
-/// Decide plain vs. TLS for the control-plane connection. An explicit
-/// `sslmode` query param always wins; absent that, default to TLS unless the
-/// host is an obvious local-dev target (`localhost`/`127.0.0.1`/`::1`) — the
-/// same convention `psql` effectively follows, and the one that keeps
-/// `docker compose up` + `nostos init` working with zero flags while still
-/// doing the right thing against a managed host like Supabase.
+/// How much of the server's identity the control-plane connection checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SslMode {
+    /// No TLS.
+    Disable,
+    /// Encrypted, peer unauthenticated — libpq's `allow`/`prefer`/`require`.
+    Encrypt,
+    /// Encrypted and the chain verified — libpq's `verify-ca`/`verify-full`.
+    Verify,
+}
+
+/// Read libpq's `sslmode` out of the URL.
+///
+/// `require` really does mean "encrypt, don't look" in libpq — it is
+/// `verify-ca`/`verify-full` that authenticate the server — and a tool that
+/// takes libpq URLs has to mean the same thing by the same word, or it rejects
+/// the connection string its own docs told you to paste.
+///
+/// The no-`sslmode` default is deliberately NOT libpq's (`prefer`): losing
+/// verification is not something to do on a caller's behalf, so it stays on
+/// unless the URL asks for less. Absent any `sslmode`, a local-dev host
+/// (`localhost`/`127.0.0.1`/`::1`) gets plain and everything else gets
+/// verification — which keeps `docker compose up` + `nostos init` working with
+/// zero flags. An unrecognised value falls back to the strict path.
+///
+/// ponytail: `verify-ca` is treated as `verify-full`. rustls checks the name
+/// along with the chain, and prising them apart means hand-rolling a verifier
+/// around `WebPkiServerVerifier`; this is stricter than asked and fails closed.
+/// Upgrade path if a real deployment needs the looser one: wrap that verifier
+/// and swallow `InvalidCertificate(NotValidForName)`.
 #[must_use]
-pub fn wants_tls(url: &str) -> bool {
-    if let Some(mode) = query_param(url, "sslmode") {
-        return mode != "disable";
+pub fn ssl_mode(url: &str) -> SslMode {
+    match query_param(url, "sslmode").as_deref() {
+        Some("disable") => SslMode::Disable,
+        Some("allow" | "prefer" | "require") => SslMode::Encrypt,
+        None if is_local_host(url) => SslMode::Disable,
+        _ => SslMode::Verify,
     }
-    !is_local_host(url)
 }
 
 fn is_local_host(url: &str) -> bool {
@@ -333,27 +473,80 @@ mod tests {
 
     #[test]
     fn tls_defaults_on_for_remote_hosts() {
-        assert!(wants_tls("postgresql://u:p@db.supabase.co:5432/postgres"));
+        assert_eq!(
+            ssl_mode("postgresql://u:p@db.supabase.co:5432/postgres"),
+            SslMode::Verify
+        );
     }
 
     #[test]
     fn tls_defaults_off_for_localhost() {
-        assert!(!wants_tls("postgresql://cairn:cairn@localhost:5433/cairn"));
-        assert!(!wants_tls("postgresql://cairn:cairn@127.0.0.1:5433/cairn"));
+        for url in [
+            "postgresql://cairn:cairn@localhost:5433/cairn",
+            "postgresql://cairn:cairn@127.0.0.1:5433/cairn",
+        ] {
+            assert_eq!(ssl_mode(url), SslMode::Disable, "{url}");
+        }
     }
 
     #[test]
     fn explicit_sslmode_disable_wins_even_for_remote_hosts() {
-        assert!(!wants_tls(
-            "postgresql://u:p@db.supabase.co:5432/postgres?sslmode=disable"
-        ));
+        assert_eq!(
+            ssl_mode("postgresql://u:p@db.supabase.co:5432/postgres?sslmode=disable"),
+            SslMode::Disable
+        );
     }
 
     #[test]
     fn explicit_sslmode_require_wins_even_for_localhost() {
-        assert!(wants_tls(
-            "postgresql://cairn:cairn@localhost:5433/cairn?sslmode=require"
-        ));
+        assert_eq!(
+            ssl_mode("postgresql://cairn:cairn@localhost:5433/cairn?sslmode=require"),
+            SslMode::Encrypt
+        );
+    }
+
+    /// The driver parses three `sslmode` values and rejects the rest, so the
+    /// libpq spellings have to be translated out — including the one that made
+    /// `nostos doctor --mode direct` unusable against Supabase.
+    #[test]
+    fn the_driver_only_ever_sees_an_sslmode_it_parses() {
+        let base = "postgresql://u:p@host:5432/postgres";
+        assert_eq!(
+            driver_url(
+                &format!("{base}?sslmode=verify-full&sslrootcert=/tmp/ca.pem&application_name=x"),
+                SslMode::Verify
+            ),
+            format!("{base}?application_name=x&sslmode=require"),
+            "verify-* and sslrootcert are ours, not the driver's"
+        );
+        assert_eq!(
+            driver_url(base, SslMode::Disable),
+            format!("{base}?sslmode=disable")
+        );
+        assert_eq!(
+            driver_url(&format!("{base}?sslmode=prefer"), SslMode::Encrypt),
+            format!("{base}?sslmode=require"),
+            "prefer fails closed rather than falling back to plaintext"
+        );
+    }
+
+    /// The bug this enum exists for: libpq's `require` encrypts and does NOT
+    /// authenticate the server, so a managed provider whose CA is private (a
+    /// Supabase pooler) answers it fine — and only `verify-*` may refuse.
+    #[test]
+    fn require_encrypts_without_verifying_and_verify_star_verifies() {
+        let base = "postgresql://u:p@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres";
+        for (mode, want) in [
+            ("allow", SslMode::Encrypt),
+            ("prefer", SslMode::Encrypt),
+            ("require", SslMode::Encrypt),
+            ("verify-ca", SslMode::Verify),
+            ("verify-full", SslMode::Verify),
+            // Unrecognised falls back to the strict path, never the loose one.
+            ("requrie", SslMode::Verify),
+        ] {
+            assert_eq!(ssl_mode(&format!("{base}?sslmode={mode}")), want, "{mode}");
+        }
     }
 
     #[test]
