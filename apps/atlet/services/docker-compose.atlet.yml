@@ -1,6 +1,5 @@
-# Local-profile services for the Atlet nostos-vs-PowerSync comparison (Task 5
-# of docs/plans/atlet-nostos-vs-powersync-app-suite.md). Both services point
-# at the SAME hosted Supabase Postgres — no local Postgres container here,
+# Local-profile nostos-server for the Atlet suite's server-mode engine. It
+# points at the hosted Supabase Postgres — no local Postgres container here,
 # unlike docker/docker-compose*.yml at the repo root (those are cairn's own
 # e2e stack against a throwaway local Postgres; different project name and
 # ports, so this stack can run alongside them without colliding).
@@ -20,11 +19,11 @@ services:
       NOSTOS_BIND: "0.0.0.0:8080"   # must match the ports mapping below; default is 8800
       NOSTOS_REPLICATOR: pg
       NOSTOS_PG_URL: ${ATLET_PG_URL}
-      # Reuse the publication migration 0002_powersync_replication.sql already
-      # scoped to sessions+products, instead of the default cairn_pub (which
-      # nostos would auto-create as CREATE PUBLICATION ... FOR ALL TABLES --
-      # too broad for a shared Supabase project).
-      NOSTOS_PG_PUBLICATION: powersync
+      # The scoped publication from migration 0002_replication_publication.sql,
+      # instead of the default cairn_pub (which nostos would auto-create as
+      # CREATE PUBLICATION ... FOR ALL TABLES -- too broad for a shared
+      # Supabase project).
+      NOSTOS_PG_PUBLICATION: atlet_pub
       NOSTOS_PG_SLOT: atlet_cairn_slot
       NOSTOS_WRITE_TABLES: ${NOSTOS_WRITE_TABLES}
       # Supabase-JWT auth (ADR-0010/0011): tenant_id == JWT sub == auth.uid().
@@ -34,18 +33,3 @@ services:
       NOSTOS_SUPABASE_URL: ${SUPABASE_URL}
       NOSTOS_SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
     ports: ["8080:8080"]
-
-  powersync:
-    image: journeyapps/powersync-service:latest
-    command: ["start", "-r", "unified"]
-    environment:
-      POWERSYNC_CONFIG_PATH: /config/config.yaml
-      # journeyapps/powersync-service only substitutes !env tags for
-      # container env vars prefixed PS_ (confirmed against
-      # powersync-ja/self-host-demo's services/powersync.yaml) -- alias the
-      # human-readable .env names into that prefix here rather than renaming
-      # the shared .env.example vars.
-      PS_DATA_SOURCE_URI: ${POWERSYNC_PG_URL}
-      PS_SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
-    volumes: ["./powersync:/config:ro"]
-    ports: ["8081:80"]

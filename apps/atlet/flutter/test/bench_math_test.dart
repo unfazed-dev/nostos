@@ -100,7 +100,7 @@ void main() {
     test('toJson always stamps the evaluation-only label', () {
       final record = RunRecord(
         sdk: 'flutter',
-        engine: 'powersync',
+        engine: 'cairn-direct',
         profile: 'cloud',
         runType: 'cold_sync',
         specVersion: 'v0',

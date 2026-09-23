@@ -13,7 +13,7 @@ import 'store.dart';
 /// using the signed-in user's REST session — NOT through either engine).
 /// Omits `id`/`user_id`: 0001_atlet_schema.sql defaults both
 /// (`gen_random_uuid()` / `auth.uid()`) server-side. Mirrors the shape of
-/// nostos_adapter.dart/powersync_adapter.dart's own `sessionWritePayload`,
+/// nostos_adapter.dart's own `sessionWritePayload`,
 /// minus the client-generated `id` those need for local-first upserts —
 /// this path lets Postgres assign it and reads it back instead.
 Map<String, dynamic> sessionInsertPayload(SessionRow s) => {
@@ -175,8 +175,8 @@ class BenchHarness {
 /// to enforce "only one live" for the app's runtime UX (decision #4), but a
 /// bench run needs a signOut() after EVERY suite (not just before the next
 /// start()) and two independent dbDirs, neither of which
-/// `EngineRegistry.switchTo`/`start`'s contract provides.
-Future<Map<Engine, List<RunRecord>>> runFullSuiteForBothEngines({
+/// `EngineRegistry.start`'s contract provides.
+Future<Map<Engine, List<RunRecord>>> runFullSuiteForEngines({
   required String sdk,
   required String specVersion,
   required int seedSize,

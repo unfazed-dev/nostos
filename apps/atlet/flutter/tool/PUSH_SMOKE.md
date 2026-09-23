@@ -196,3 +196,131 @@ file (delta applies from the durable LSN checkpoint — the
 `nostosDoorbellBackgroundHandler` doc comment names its token-staleness
 ceiling). Without the flag the module is inert: no Firebase init, no
 registration, builds/analyze/tests unaffected.
+
+## The order banner has nothing to do with FCM
+
+`_wireOrderBanner` in `lib/main.dart` watches `watchOrders()` and posts a
+LOCAL notification through the `atlet/notify` MethodChannel whenever a row's
+`status` changes under it. No Firebase, no APNs, no server push — which is why
+it is the only notification leg that works on an iOS simulator, where
+`getToken()` cannot succeed at all (above). It used to sit behind
+`ATLET_PUSH_PILOT`, so a default build showed the user nothing when their
+order shipped; it is unconditional now.
+
+Three things had to be true before a banner actually appeared, and none of
+them announce themselves when false (2026-09-23):
+
+1. **Authorization.** Nothing in a default build ever called
+   `requestAuthorization` — the only `requestPermission()` lived inside the
+   opt-in pilot. Without the grant iOS drops the notification silently and
+   even `xcrun simctl push` refuses with `UNErrorDomain 2003: Source is not
+   authorized`. `AppDelegate.didFinishLaunching` asks for it now.
+2. **The delegate.** A foreground notification is suppressed unless a
+   `UNUserNotificationCenterDelegate` asks for it — and FlutterFire's
+   messaging plugin claims that delegate during `GeneratedPluginRegistrant`
+   whether or not the pilot is on, so "claim it only if nobody else has it"
+   never fired. `ForegroundBanner` now takes the delegate and FORWARDS to the
+   previous one, which is what the old "do not steal the delegate" note was
+   actually protecting.
+3. **A sync that happens at all.** See below.
+
+### The doorbell is dead on this Supabase project
+
+`realtime.messages` is partitioned by `inserted_at` and this project has ZERO
+partitions, so every insert fails `23514 no partition of relation "messages"
+found for row` — and `realtime.send` swallows that by design. The trigger
+fires, the ring is never delivered, and nothing anywhere reports an error.
+Creating the partitions needs `supabase_admin` (`42501: permission denied for
+schema realtime` from the MCP role), so it is a dashboard/platform action.
+
+`DirectClient::run` now syncs at least once per `SYNC_FLOOR` (60s) regardless,
+so a silent doorbell costs latency instead of correctness. Before the floor,
+the only sync a device ever did was the one at startup.
+
+### Watching a run
+
+```sh
+bash tool/atlet_watch.sh [udid] [bundle-id]
+```
+
+Polls the device's own SQLite every 2s and prints one line per CHANGE — cart
+count, order status transitions, dead-lettered writes with the server's error,
+plus `order banner:` lines lifted from the app log. Reads the live db (WAL
+admits concurrent readers) and re-resolves the data-container path every poll:
+`simctl install` can hand the app a new container, and a path captured at
+startup then points somewhere nothing writes, which looks exactly like "quiet".
+
+Round trip proven 2026-09-23 on the simulator: `update public.orders set
+status = 'shipped'` → `ORDER 983979e8… delivered -> shipped` on the device 15s
+later → `order banner:` in the log → the OS banner on screen.
+
+## The History tab is the receipt
+
+A banner is gone the moment it is dismissed, so "did the push fire?" used to be
+answerable only from a log. Migration 0007 makes every status an order reaches a
+row in `public.order_events` (written by a trigger on `public.orders`, synced
+with the same `cairn.log_change('user_id','sub')` stamp as everything else), and
+the History tab stacks them newest-first.
+
+Round trip proven 2026-09-23:
+
+```sh
+# server
+update public.orders set status = 'delivered' where id = '983979e8-…';
+# device, within SYNC_FLOOR (60s)
+sqlite3 "$(xcrun simctl get_app_container "$UDID" internal.atlet.atlet data)/Documents/cairn_direct.sqlite" \
+  "select previous_status||'->'||status from order_events order by created_at desc limit 1"
+# -> shipped->delivered
+```
+
+…and at the same moment the app logs `order banner: 983979e8 shipped -> delivered`,
+iOS shows the banner, and History grows a `983979e8 · shipped → delivered` row.
+The row is the durable half: it survives a dismissed banner, an app restart, and
+a reinstall.
+
+## The tap: notification → the event it came from
+
+Every banner now carries the routing keys in its payload's `data` map (never in
+the visible text — `data` is the only half FCM delivers in all three app states,
+per Firebase's "receive messages" guide), and a tap lands on the detail view for
+exactly that event:
+
+```
+{"title": "Atlet order update",
+ "body": "Order 983979e8 is shipped",
+ "category": "order_status",
+ "data": {"cairn_route": "/history/<event-id>",
+          "deep_link": "atlet://history/<event-id>",
+          "event_id": …, "order_id": …, "status": …,
+          "previous_status": …, "occurred_at": …}}
+```
+
+Where it lives: `lib/push/order_push.dart` builds it, `lib/main.dart`
+(`openHistoryEvent`) is the single destination, and both platforms forward taps
+over the same `atlet/notify` channel — iOS sets `content.userInfo` and returns
+it from `didReceive`, Android puts the keys in the `PendingIntent` extras. A tap
+that arrives before Dart is listening (cold start) is buffered natively and
+drained by Dart's one `take_pending_tap` call.
+
+Three ways to trigger it:
+
+```sh
+# 1. the real thing: flip a status, wait <=60s, tap the banner
+update public.orders set status = 'shipped' where id = '983979e8-…';
+
+# 2. the URL (iOS asks "Open in Atlet?" first — that prompt is simctl's, not ours)
+xcrun simctl openurl "$UDID" "atlet://history/<event-id>"
+
+# 3. a real APNs push, payload shaped like the `data` map above
+xcrun simctl push "$UDID" internal.atlet.atlet payload.json
+```
+
+The app logs `notification tap: /history/<event-id>` on arrival, and the detail
+view shows the payload verbatim (copy button) plus every delivery attempt this
+session — which is the difference between "no banner was asked for" and "the OS
+refused it".
+
+Verified 2026-09-23: banner posted with `route=/history/d0b2b75d-…` in the log.
+The tap itself is still a human step on this machine — Xcode 27 ships no
+Simulator.app for AppleScript and `idb ui tap` needs the SimulatorKit framework
+Xcode 27 no longer installs, so nothing here can press a button on the device.

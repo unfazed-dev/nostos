@@ -58,7 +58,7 @@ class CartItemRow {
 
 class OrderRow {
   final String id;
-  final String status; // 'pending' | 'paid' | 'failed'
+  final String status; // 'pending' | 'paid' | 'failed' | 'shipped' | 'delivered'
   final int subtotalCents;
   final int taxCents;
   final int shippingCents;
@@ -76,6 +76,32 @@ class OrderRow {
     required this.totalCents,
     this.paymentRef,
     this.itemsJson,
+    required this.createdAt,
+  });
+}
+
+/// One entry in the shop's history: an order reached a status at a time.
+///
+/// An [OrderRow] only carries its CURRENT status, so the sequence that led
+/// there — and any notification the user missed along the way — lived nowhere.
+/// Server-written (a trigger on `public.orders`, migration 0007), read-only on
+/// the device.
+class OrderEventRow {
+  final String id;
+  final String orderId;
+  final String status;
+
+  /// Null on the row that records the order's creation.
+  final String? previousStatus;
+  final String? note;
+  final DateTime createdAt;
+
+  const OrderEventRow({
+    required this.id,
+    required this.orderId,
+    required this.status,
+    this.previousStatus,
+    this.note,
     required this.createdAt,
   });
 }
@@ -119,7 +145,7 @@ Stream<T> replayLatest<T>(Stream<T> tail, T? Function() latest) =>
     });
 
 abstract interface class SyncAdapter {
-  String get engine; // 'cairn' | 'powersync'
+  String get engine; // 'cairn' | 'cairn-direct'
   Future<void> init({
     required String supabaseUrl,
     required String accessToken,
@@ -140,6 +166,9 @@ abstract interface class SyncAdapter {
   Future<String> placeOrder(OrderRow o);
   Stream<List<CartItemRow>> watchCart();
   Stream<List<OrderRow>> watchOrders();
+
+  /// Newest first. Server-written and read-only — there is no `addOrderEvent`.
+  Stream<List<OrderEventRow>> watchOrderEvents();
   Stream<bool> get connected;
   Future<void> setConnected(bool up);
   Stream<SyncMark> get marks; // derived ONLY from watchSessions output

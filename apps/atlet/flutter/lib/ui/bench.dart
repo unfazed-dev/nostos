@@ -1,10 +1,20 @@
+// The bench half of what used to be the Analytics tab: run launcher, results
+// table, and the permanent internal-eval banner.
+//
+// Moved off the History tab (user request 2026-09-23) — history is the shop's
+// order history, and a Run-suite button sitting on top of it is noise for
+// everyone who is not benchmarking. Still one tap away, from History's app bar,
+// because this is the only way to run the suite on a device.
+//
+// Bench data never flows through the sync engine under test (decision #5):
+// [store]/[uploadRuns]/[runSuite] are all injected, so this screen needs
+// neither a live SyncAdapter nor a live SupabaseClient to be testable.
 import 'package:flutter/material.dart';
 
 import '../bench/runner.dart';
 import '../bench/store.dart';
 import '../bench/upload.dart';
 import '../design/tokens.dart';
-import 'connectivity_led.dart';
 
 /// Canonical Core-4 + storage run order (spec/metrics.md) — used to sort
 /// [latestMetricRows] so the table reads top-to-bottom the same way
@@ -118,15 +128,8 @@ List<MetricRow> latestMetricRows(List<RunRecord> records) {
   return rows;
 }
 
-/// Tab 2 (task-15 brief): run launcher + results table + upload. Analytics
-/// data never flows through either sync engine under test (decision #5) —
-/// [store]/[uploadRuns]/[runSuite] are all injected so this screen never
-/// needs a live [SyncAdapter] or [SupabaseClient] to be testable, mirroring
-/// shop.dart/detail.dart's adapter-injection pattern. Reached via the
-/// Analytics tab of main.dart's bottom nav (I-1 fix), which supplies the
-/// production store/uploadRuns/runSuite wiring.
-class AnalyticsScreen extends StatefulWidget {
-  const AnalyticsScreen({
+class BenchScreen extends StatefulWidget {
+  const BenchScreen({
     super.key,
     required this.store,
     required this.uploadRuns,
@@ -142,10 +145,10 @@ class AnalyticsScreen extends StatefulWidget {
   final Future<void> Function() runSuite;
 
   @override
-  State<AnalyticsScreen> createState() => _AnalyticsScreenState();
+  State<BenchScreen> createState() => _BenchScreenState();
 }
 
-class _AnalyticsScreenState extends State<AnalyticsScreen> {
+class _BenchScreenState extends State<BenchScreen> {
   List<RunRecord>? _records;
   bool _running = false;
   bool _uploading = false;
@@ -206,12 +209,11 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   Widget build(BuildContext context) {
     final records = _records;
     return Scaffold(
-      key: const Key('analytics-screen'),
+      key: const Key('bench-screen'),
       backgroundColor: AtletTokens.paper,
       appBar: AppBar(
-        title: const Text('Analytics'),
+        title: const Text('Bench'),
         backgroundColor: AtletTokens.bone,
-        actions: const [ConnectivityLed()],
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -252,7 +254,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Text(
                 _statusMessage!,
-                key: const Key('analytics-status'),
+                key: const Key('bench-status'),
                 style: const TextStyle(color: AtletTokens.ink3),
               ),
             ),
@@ -279,7 +281,7 @@ class _EvaluationBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      key: const Key('analytics-eval-banner'),
+      key: const Key('bench-eval-banner'),
       width: double.infinity,
       color: AtletTokens.warn,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),

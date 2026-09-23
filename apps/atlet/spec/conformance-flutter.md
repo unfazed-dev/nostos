@@ -3,28 +3,28 @@
 **Date:** 2026-08-06
 **Spec version tested against:** `spec/adapter.md` v0 → frozen to v1 by this sign-off (see Freeze, below)
 **App:** `apps/atlet/flutter`
-**Versions:** Flutter 3.44.0 (stable) · Dart 3.12.0 · `nostos_flutter` — path dependency on `../../../sdk/nostos_flutter` (pubspec version `0.1.0`, built from nostos repo HEAD `93b980d` — no fixed pub.dev release, it tracks the workspace) · `powersync` 1.18.0 · `powersync_core` 1.8.0 · `supabase_flutter` 2.17.1
+**Versions:** Flutter 3.44.0 (stable) · Dart 3.12.0 · `nostos_flutter` — path dependency on `../../../sdk/nostos_flutter` (pubspec version `0.1.0`, built from nostos repo HEAD `93b980d` — no fixed pub.dev release, it tracks the workspace) · `supabase_flutter` 2.17.1
 
 ## Environment gate (checked live this session, not assumed from prior reports)
 
-- `docker ps`: only `nostos-postgres` running (cairn's own e2e Postgres, port 5433 — unrelated to Atlet). No `atlet-services` containers (`nostos-server` on 8080, `powersync` on 8081) are up.
+- `docker ps`: only `nostos-postgres` running (cairn's own e2e Postgres, port 5433 — unrelated to Atlet). No `atlet-services` containers (`nostos-server` on 8080) are up.
 - `apps/atlet/services/.env`: absent. Only `.env.example` ships, by design — no real Supabase credentials are checked into this tree.
-- `docker compose -f apps/atlet/services/docker-compose.atlet.yml config -q`: exits 0 syntactically, but every required variable (`SUPABASE_URL`, `SUPABASE_JWT_SECRET`, `POWERSYNC_PG_URL`, `NOSTOS_WRITE_TABLES`) resolves blank.
+- `docker compose -f apps/atlet/services/docker-compose.atlet.yml config -q`: exits 0 syntactically, but every required variable (`SUPABASE_URL`, `SUPABASE_JWT_SECRET`, `NOSTOS_WRITE_TABLES`) resolves blank.
 - No Android/iOS simulator or physical device was booted this session.
 
 This is the same wall every implementation task in this suite hit — T6, T9, T10, T12, T14, T15 each independently disclosed no live Supabase project, no atlet-services stack, no device. Standing one up (real Supabase project, filled `.env`, `docker compose up`, a signed-in test session) is an operator-gated integration step that has never been performed in any Claude session for this pilot. Task 16 does not change that, and this report does not fabricate results that step would produce.
 
 ## Conformance checklist results
 
-Per-item status for both adapters, against `spec/adapter.md` §Conformance checklist:
+Per-item status for both adapters, against `spec/adapter.md` §Conformance checklist. (The pilot's second adapter was removed 2026-09-22; its column is dropped below.)
 
-| # | Item | NostosAdapter | PowerSyncAdapter |
-|---|---|---|---|
-| 1 | `init→signIn→addSession→serverAcked` mark fires <60s | NOT RUN (live). Scoped to T9's brief, but no live backend was ever available. Statically consistent: `addSession` populates `MarkDeriver.localIds` before the underlying write resolves (independently confirmed in T9's review). | NOT RUN (live). Scoped to T10's brief, same environment gap. Statically consistent: `_deriver.localIds.add` precedes the `execute()` INSERT (independently confirmed in T10's review). |
-| 2 | Row inserted via PostgREST → `remoteVisible` <60s | **Never scoped to any task.** T9's brief pinned NostosAdapter's live-run requirement to items 1, 4, 5 only (`task-9-brief.md:33`) — item 2 was never assigned to this adapter, by anyone, at any point. NOT RUN. | NOT RUN (live). Scoped to T10's brief (`task-10-brief.md:39`), but no live backend was ever available. |
-| 3 | `setConnected(false)` → 25 writes → `setConnected(true)` → all 25 `serverAcked` | **Never scoped to any task, either adapter.** T9's brief: items 1,4,5. T10's brief: items 1,2,4,5. Item 3 is absent from both. NOT RUN, and — unlike items 1/2/4 — no task in this pilot was ever asked to run it. | Same — never scoped to any task. |
-| 4 | `signOut` wipes local DB files; re-init cold-syncs from zero | NOT RUN (live, filesystem-observed). Statically verified: `NostosAdapter.signOut()` → `NostosDatabase.signOut()` performs a full wipe per ADR-0029 — confirmed by direct code read, not by watching files disappear on disk. | NOT RUN (live, filesystem-observed). Statically verified: `PowerSyncAdapter.signOut()` explicitly deletes the `.db`/`-wal`/`-shm`/`-journal` sidecar files (each guarded by `existsSync()`), because `disconnectAndClear()` alone leaves the sqlite file on disk per the SDK's own doc comment. |
-| 5 | No adapter API leaks engine types into the app/bench layer | **PASS — statically verified.** `sync_adapter.dart` (frozen, Task 7) contains no `nostos_flutter` symbol; independently confirmed by two separate reviewers across T9's and T10's verdicts. | **PASS — statically verified.** Same file, no `powersync`/`powersync_core` symbol; same independent-reviewer confirmation. |
+| # | Item | NostosAdapter |
+|---|---|---|
+| 1 | `init→signIn→addSession→serverAcked` mark fires <60s | NOT RUN (live). Scoped to T9's brief, but no live backend was ever available. Statically consistent: `addSession` populates `MarkDeriver.localIds` before the underlying write resolves (independently confirmed in T9's review). |
+| 2 | Row inserted via PostgREST → `remoteVisible` <60s | **Never scoped to any task.** T9's brief pinned NostosAdapter's live-run requirement to items 1, 4, 5 only (`task-9-brief.md:33`) — item 2 was never assigned to this adapter, by anyone, at any point. NOT RUN. |
+| 3 | `setConnected(false)` → 25 writes → `setConnected(true)` → all 25 `serverAcked` | **Never scoped to any task, either adapter.** T9's brief: items 1,4,5. T10's brief: items 1,2,4,5. Item 3 is absent from both. NOT RUN, and — unlike items 1/2/4 — no task in this pilot was ever asked to run it. |
+| 4 | `signOut` wipes local DB files; re-init cold-syncs from zero | NOT RUN (live, filesystem-observed). Statically verified: `NostosAdapter.signOut()` → `NostosDatabase.signOut()` performs a full wipe per ADR-0029 — confirmed by direct code read, not by watching files disappear on disk. |
+| 5 | No adapter API leaks engine types into the app/bench layer | **PASS — statically verified.** `sync_adapter.dart` (frozen, Task 7) contains no `nostos_flutter` symbol; independently confirmed by two separate reviewers across T9's and T10's verdicts. |
 
 **Net result: item 5 is the only checklist item with a genuine PASS, for either adapter, at any point in this pilot.** Items 1–4 remain unexecuted against a live backend for both adapters. This sign-off does not upgrade that status — it confirms and formalizes it as the pilot's actual exit condition, because upgrading it here would mean fabricating results this session has no way to produce honestly.
 
@@ -38,7 +38,7 @@ Per-item status for both adapters, against `spec/adapter.md` §Conformance check
 ## Recommended live run (operator-gated — unchanged in substance from T9's/T10's asks, corrected for the gaps found in this sign-off)
 
 1. Provision a real Supabase project; fill `apps/atlet/services/.env` from `.env.example`.
-2. `docker compose -f apps/atlet/services/docker-compose.atlet.yml up -d` (`nostos-server` :8080, `powersync` :8081), with `NOSTOS_WRITE_TABLES=sessions`.
+2. `docker compose -f apps/atlet/services/docker-compose.atlet.yml up -d` (`nostos-server` :8080), with `NOSTOS_WRITE_TABLES=sessions`.
 3. Run `create_sdk_users.sh`; sign in as `flutter@atlet.dev`.
 4. Drive **all five** items against **both** adapters. In particular: item 2 has no prior coverage for NostosAdapter, and item 3 has no prior coverage for either adapter — do not treat those as "already done elsewhere."
 5. Record results in a dated addendum appended to this file; do not overwrite the "not run" entries recorded above — they are accurate for 2026-08-06 and should stay legible as history.
@@ -56,7 +56,7 @@ Per-item status for both adapters, against `spec/adapter.md` §Conformance check
 
 ### Fix round 1 addendum (2026-08-06)
 
-Review of this sign-off found a fifth defect of the same class as retro item 1: `spec/adapter.md`'s Operations list still named `updateSession` as a frozen operation, but it was never implemented in `SyncAdapter`, `NostosAdapter`, or `PowerSyncAdapter` at any point in the pilot — confirmed by grepping `apps/atlet/` for `updateSession` (excluding generated `.g.dart`), which returned exactly the one spec line and nothing else. The retro's own audit method (spec text vs. shipped interface) should have caught this alongside the `syncStatus()`/`connected` mismatch; it didn't, because the audit checked the operation whose *shape* had visibly changed but didn't independently verify every other line in the same list against the interface. Re-audited the full Operations list this round — `init`, `signOut`, `addSession`, `deleteSession`, `watchSessions`, `watchProducts`, `connected`, `setConnected` all confirmed present in `sync_adapter.dart` with the stated shape; `engine` and `marks` also confirmed present (documented under Instrumentation marks, not Operations, and correctly so — they aren't part of the operation surface the checklist drives). `updateSession` dropped from `spec/adapter.md`, which is now **v1.1**. No cross-reference to `updateSession` existed in this file's checklist table — items 1 and 3 reference `addSession`/`setConnected` only, both real — so no correction was needed here beyond this addendum.
+Review of this sign-off found a fifth defect of the same class as retro item 1: `spec/adapter.md`'s Operations list still named `updateSession` as a frozen operation, but it was never implemented in `SyncAdapter` or `NostosAdapter` at any point in the pilot — confirmed by grepping `apps/atlet/` for `updateSession` (excluding generated `.g.dart`), which returned exactly the one spec line and nothing else. The retro's own audit method (spec text vs. shipped interface) should have caught this alongside the `syncStatus()`/`connected` mismatch; it didn't, because the audit checked the operation whose *shape* had visibly changed but didn't independently verify every other line in the same list against the interface. Re-audited the full Operations list this round — `init`, `signOut`, `addSession`, `deleteSession`, `watchSessions`, `watchProducts`, `connected`, `setConnected` all confirmed present in `sync_adapter.dart` with the stated shape; `engine` and `marks` also confirmed present (documented under Instrumentation marks, not Operations, and correctly so — they aren't part of the operation surface the checklist drives). `updateSession` dropped from `spec/adapter.md`, which is now **v1.1**. No cross-reference to `updateSession` existed in this file's checklist table — items 1 and 3 reference `addSession`/`setConnected` only, both real — so no correction was needed here beyond this addendum.
 
 ### REPLICA IDENTITY caveat (final review, 2026-08-06)
 

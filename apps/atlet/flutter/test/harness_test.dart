@@ -345,26 +345,24 @@ void main() {
     );
   });
 
-  group('runFullSuiteForBothEngines', () {
+  group('runFullSuiteForEngines', () {
     late Directory tempDir;
     late BenchStore store;
     late _FakeAdapter nostosAdapter;
-    late _FakeAdapter powerSyncAdapter;
+    late _FakeAdapter directAdapter;
 
     setUp(() async {
-      tempDir = await Directory.systemTemp.createTemp(
-        'atlet-both-engines-test',
-      );
+      tempDir = await Directory.systemTemp.createTemp('atlet-engines-test');
       store = BenchStore(directory: tempDir, fileName: 'runs.jsonl');
       nostosAdapter = _FakeAdapter(engine: 'cairn')
         ..ackDelay = const Duration(milliseconds: 1);
-      powerSyncAdapter = _FakeAdapter(engine: 'powersync')
+      directAdapter = _FakeAdapter(engine: 'cairn-direct')
         ..ackDelay = const Duration(milliseconds: 1);
     });
 
     tearDown(() async {
       await nostosAdapter.dispose();
-      await powerSyncAdapter.dispose();
+      await directAdapter.dispose();
       if (await tempDir.exists()) await tempDir.delete(recursive: true);
     });
 
@@ -375,9 +373,9 @@ void main() {
       // used regardless of which engine is currently under test), so the
       // fake must satisfy whichever engine's propagation run is currently
       // subscribed to `.marks`.
-      final fake = _fakeInsertRemoteRowFanOut([nostosAdapter, powerSyncAdapter]);
+      final fake = _fakeInsertRemoteRowFanOut([nostosAdapter, directAdapter]);
 
-      final results = await runFullSuiteForBothEngines(
+      final results = await runFullSuiteForEngines(
         sdk: 'flutter',
         specVersion: 'v0',
         seedSize: 0,
@@ -392,28 +390,28 @@ void main() {
         buildSession: _buildSession,
         adapterFactories: {
           Engine.cairn: () => nostosAdapter,
-          Engine.powersync: () => powerSyncAdapter,
+          Engine.cairnDirect: () => directAdapter,
         },
         n: 1,
         timeout: const Duration(seconds: 5),
       );
 
-      expect(results.keys.toSet(), {Engine.cairn, Engine.powersync});
+      expect(results.keys.toSet(), {Engine.cairn, Engine.cairnDirect});
       expect(results[Engine.cairn], hasLength(5));
-      expect(results[Engine.powersync], hasLength(5));
+      expect(results[Engine.cairnDirect], hasLength(5));
 
       expect(nostosAdapter.signedOut, isTrue);
-      expect(powerSyncAdapter.signedOut, isTrue);
+      expect(directAdapter.signedOut, isTrue);
 
       expect(nostosAdapter.lastDbDir, '${tempDir.path}/cairn');
-      expect(powerSyncAdapter.lastDbDir, '${tempDir.path}/powersync');
+      expect(directAdapter.lastDbDir, '${tempDir.path}/cairnDirect');
       expect(await Directory('${tempDir.path}/cairn').exists(), isTrue);
-      expect(await Directory('${tempDir.path}/powersync').exists(), isTrue);
+      expect(await Directory('${tempDir.path}/cairnDirect').exists(), isTrue);
 
       final persisted = await store.readAll();
       expect(persisted, hasLength(10));
       expect(persisted.where((r) => r.engine == 'cairn'), hasLength(5));
-      expect(persisted.where((r) => r.engine == 'powersync'), hasLength(5));
+      expect(persisted.where((r) => r.engine == 'cairnDirect'), hasLength(5));
     });
   });
 

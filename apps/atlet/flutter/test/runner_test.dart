@@ -281,9 +281,9 @@ void main() {
     });
 
     test('records wal journal mode when a -wal sidecar is present', () async {
-      await File('${tempDir.path}/powersync.db')
+      await File('${tempDir.path}/cairn_direct.sqlite')
           .writeAsBytes(List.filled(10, 0));
-      await File('${tempDir.path}/powersync.db-wal')
+      await File('${tempDir.path}/cairn_direct.sqlite-wal')
           .writeAsBytes(List.filled(5, 0));
 
       final record = await runner.dbBytes(tempDir.path);

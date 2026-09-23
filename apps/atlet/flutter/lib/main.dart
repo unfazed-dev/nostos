@@ -11,15 +11,16 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'adapters/nostos_adapter.dart';
 import 'connectivity_guard.dart';
-import 'adapters/powersync_adapter.dart';
 import 'adapters/sync_adapter.dart';
 import 'bench/harness.dart';
 import 'bench/store.dart';
 import 'bench/upload.dart';
 import 'design/tokens.dart';
 import 'engine_registry.dart';
+import 'push/order_push.dart';
 import 'push/push_pilot.dart';
-import 'ui/analytics.dart';
+import 'ui/history.dart';
+import 'ui/history_detail.dart';
 import 'ui/connectivity_led.dart';
 import 'ui/home.dart';
 import 'ui/shop.dart';
@@ -62,19 +63,130 @@ Future<void> main() async {
     // throws here when absent, which is the point of the opt-in flag.
     await Firebase.initializeApp();
     FirebaseMessaging.onBackgroundMessage(nostosDoorbellBackgroundHandler);
+    _wireFcmTaps();
   }
+  // Local banners exist with or without the FCM pilot, so their tap path does
+  // too. Web has no MethodChannel — its banner is a snackbar, already on-screen.
+  if (!kIsWeb) _wireNotificationTaps();
   runApp(const AtletApp());
 }
 
-/// Foreground order-banner bridge: MainActivity posts a local heads-up on
-/// the same 'cairn' channel as the FCM pushes (see push pilot, ADR-0037).
+/// Foreground order-banner bridge: MainActivity/AppDelegate post a local
+/// heads-up on the same 'cairn' channel as the FCM pushes (see push pilot,
+/// ADR-0037), and hand the tap back over the same channel.
 const _orderBannerChannel = MethodChannel('atlet/notify');
 
+/// The navigator a notification tap pushes onto. A tap arrives from the
+/// platform, not from a widget, so there is no BuildContext to route with.
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
+/// A tap that landed before the navigator existed (cold start: the OS reports
+/// the tap while Dart is still booting). Flushed on HomeScreen's first frame.
+String? _pendingEventId;
+
+/// Route currently open, so the same event cannot be pushed twice — a
+/// terminated-state launch is reported by BOTH the platform tap buffer and
+/// FirebaseMessaging.getInitialMessage().
+String? _openEventRoute;
+
+/// An empty history that more than one widget can listen to. `Stream.value`
+/// is single-subscription: the feed listens first, and the detail screen's
+/// listen on the same object throws. The engine's own streams are already
+/// `Stream.multi` with replay (replayLatest), so this only covers the
+/// no-engine case.
+Stream<List<OrderEventRow>> _noOrderEvents() =>
+    Stream<List<OrderEventRow>>.multi((c) => c.add(const []));
+
+/// The one destination of every deep link, whatever carried it: the History
+/// detail for one order event.
+void openHistoryEvent(String eventId) {
+  final route = historyRoute(eventId);
+  final nav = navigatorKey.currentState;
+  if (nav == null) {
+    _pendingEventId = eventId;
+    return;
+  }
+  if (_openEventRoute == route) return;
+  _openEventRoute = route;
+  debugPrint('notification tap: $route'); // tool/atlet_watch.sh greps this
+  nav
+      .push(
+        MaterialPageRoute<void>(
+          settings: RouteSettings(name: route),
+          builder: (_) => HistoryDetailScreen(
+            eventId: eventId,
+            events:
+                engineRegistry.current?.watchOrderEvents() ?? _noOrderEvents(),
+          ),
+        ),
+      )
+      .whenComplete(() {
+        if (_openEventRoute == route) _openEventRoute = null;
+      });
+}
+
+/// Taps that come through the platform: a local banner opened, or an
+/// `atlet://history/<id>` URL (AppDelegate forwards both as `notification_tap`).
+void _wireNotificationTaps() {
+  _orderBannerChannel.setMethodCallHandler((call) async {
+    if (call.method != 'notification_tap') return null;
+    final args = call.arguments;
+    if (args is Map) {
+      final id = tappedEventId(args);
+      if (id != null) openHistoryEvent(id);
+    }
+    return null;
+  });
+  // Cold start: the platform may have delivered the tap before Dart had a
+  // handler to receive it, so ask rather than wait to be told.
+  unawaited(
+    _orderBannerChannel
+        .invokeMapMethod<Object?, Object?>('take_pending_tap')
+        .then((tap) {
+          if (tap == null) return;
+          final id = tappedEventId(tap);
+          if (id != null) openHistoryEvent(id);
+        })
+        // No platform side (web, tests) means no buffered tap — not an error.
+        .catchError((Object _) {}),
+  );
+}
+
+/// Taps on a REAL push. `message.data` is where the routing keys live —
+/// see orderPushPayload, and Firebase's own "handle interaction" guidance:
+/// https://firebase.google.com/docs/cloud-messaging/flutter/receive-messages
+void _wireFcmTaps() {
+  void open(RemoteMessage message) {
+    final id = tappedEventId(message.data);
+    if (id == null) return; // someone else's push
+    recordPushAttempt(
+      PushAttempt(
+        eventId: id,
+        at: DateTime.now(),
+        channel: 'fcm-open',
+        payload: message.data,
+      ),
+    );
+    openHistoryEvent(id);
+  }
+
+  // Terminated (the push launched the app) and background, respectively —
+  // both are needed; neither covers the other.
+  unawaited(
+    FirebaseMessaging.instance.getInitialMessage().then((m) {
+      if (m != null) open(m);
+    }),
+  );
+  FirebaseMessaging.onMessageOpenedApp.listen(open);
+}
+
 /// Single registry for the app's lifetime. Owns which sync engine is live
-/// and enforces plan decision #4 (never both engines live at once) — see
+/// and enforces plan decision #4 (never two engines live at once) — see
 /// lib/engine_registry.dart. Module-level so it survives HomeScreen
 /// rebuilds/route pushes without needing an InheritedWidget for this pilot.
-final EngineRegistry engineRegistry = EngineRegistry();
+final EngineRegistry engineRegistry = EngineRegistry(
+  supabaseAnonKey: _supabaseAnonKey,
+);
 
 class AtletApp extends StatelessWidget {
   const AtletApp({super.key});
@@ -83,6 +195,7 @@ class AtletApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Atlet',
+      navigatorKey: navigatorKey,
       theme: ThemeData(
         useMaterial3: true,
         scaffoldBackgroundColor: AtletTokens.paper,
@@ -103,17 +216,16 @@ class AtletApp extends StatelessWidget {
   }
 }
 
-/// Home shell: bottom-nav host for Home / Shop / Analytics (I-1 fix —
-/// final-review-verdict.md). Home hosts the training UI (T12) and the
-/// settings-sheet entry point for the engine toggle (T11); Shop and
-/// Analytics are the other two tabs, built lazily so this screen stays
+/// Home shell: bottom-nav host for Home / Shop / History (I-1 fix —
+/// final-review-verdict.md). Home hosts the training UI (T12); Shop and
+/// History are the other two tabs, built lazily so this screen stays
 /// constructible with no live Supabase session (see widget_test.dart).
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, this.benchStoreOpener});
 
   /// Injectable so widget tests never need a live path_provider platform
-  /// channel to reach the Analytics tab — mirrors [AnalyticsScreen]'s own
-  /// store/runSuite/uploadRuns injection (ui/analytics.dart). Defaults to
+  /// channel to reach the History tab — mirrors [HistoryScreen]'s own
+  /// store/runSuite/uploadRuns injection (ui/history.dart). Defaults to
   /// the real app-documents JSONL store in production.
   final Future<BenchStore> Function()? benchStoreOpener;
 
@@ -130,8 +242,17 @@ class _HomeScreenState extends State<HomeScreen> {
   // push story. While the app is connected, the vendor's status UPDATE
   // arrives over the live sync socket (a push is suppressed by the offline
   // gate by design), so the in-app banner IS the foreground notification.
-  StreamSubscription<List<OrderRow>>? _orderBannerSub;
-  final Map<String, String> _lastOrderStatuses = {};
+  StreamSubscription<List<OrderEventRow>>? _orderBannerSub;
+
+  /// Every event id this run has already seen. The first emission only seeds
+  /// it — the history a fresh device pulls is not news.
+  final Set<String> _seenEventIds = {};
+  bool _eventsSeeded = false;
+
+  /// Forwards rotated Supabase JWTs into the live engine. Without it the
+  /// engine keeps the token it was opened with until it expires — see
+  /// NostosAdapter.setToken for what that costs.
+  StreamSubscription<AuthState>? _authSub;
 
   /// Drives the offline banner. Sourced from platform connectivity (the
   /// guard), not the engine's `connected` stream: the banner must show even
@@ -144,16 +265,22 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Nostos is the default engine: bring it up automatically on entering
-    // Home so the user never has to open Settings to start syncing —
-    // Settings is only for *switching* engines. Post-frame so nothing
-    // touches `Supabase.instance` during initState (widget_test.dart).
+    // Direct-mode Nostos is the only engine: bring it up on entering Home so
+    // syncing is live the moment the app is. Post-frame so nothing touches
+    // `Supabase.instance` during initState (widget_test.dart).
     // The connectivity guard also starts post-frame: platform channels are
     // unavailable during widget-test initState, and start() is what opens
     // the connectivity_plus stream.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _autoStartDefaultEngine();
+      _startEngine();
       _startConnectivityGuard();
+      // A notification tapped from a cold start reaches openHistoryEvent
+      // before any navigator exists; this is the first frame that has one.
+      final pending = _pendingEventId;
+      if (pending != null) {
+        _pendingEventId = null;
+        openHistoryEvent(pending);
+      }
     });
   }
 
@@ -185,66 +312,99 @@ class _HomeScreenState extends State<HomeScreen> {
     _connectivityGuard = null;
     _orderBannerSub?.cancel();
     _orderBannerSub = null;
+    _authSub?.cancel();
+    _authSub = null;
     super.dispose();
   }
 
-  /// Foreground half of the push pilot: snackbar on any order-status change
-  /// seen through the live `watchOrders()` stream. The first emission only
-  /// primes `_lastOrderStatuses` (no banner for rows the snapshot brings in,
-  /// including the user's own checkout).
+  /// Foreground half of the push pilot: a banner per order event seen on the
+  /// live `watchOrderEvents()` stream (migration 0007), which is also the row
+  /// the History tab shows and the id the notification deep-links to — one
+  /// source, so a tapped banner and a tapped row cannot disagree.
+  ///
+  /// The first emission only seeds `_seenEventIds`: the backfilled history a
+  /// device pulls on open is not news, and neither is the user's own checkout.
   void _wireOrderBanner(NostosAdapter adapter) {
     _orderBannerSub?.cancel();
-    _lastOrderStatuses.clear();
-    _orderBannerSub = adapter.watchOrders().listen((orders) {
-      for (final o in orders) {
-        final prev = _lastOrderStatuses[o.id];
-        if (prev != null && prev != o.status) {
-          // Local heads-up on the same 'cairn' channel as the FCM pushes —
-          // MainActivity's MethodChannel handler posts it; same-body posts
-          // share an id, so the stream's replayed emissions just replace.
-          // Web has no MethodChannel: the snackbar IS the foreground banner.
-          if (kIsWeb) {
-            _notify('Order ${o.id.substring(0, 8)} is ${o.status}');
-          } else {
-            unawaited(
-              _orderBannerChannel.invokeMethod('order_update', {
-                'body': 'Order ${o.id.substring(0, 8)} is ${o.status}',
-              }),
-            );
-          }
-        }
-        _lastOrderStatuses[o.id] = o.status;
+    _seenEventIds.clear();
+    _eventsSeeded = false;
+    _orderBannerSub = adapter.watchOrderEvents().listen((events) {
+      final fresh = events.where((e) => !_seenEventIds.contains(e.id)).toList();
+      _seenEventIds.addAll(events.map((e) => e.id));
+      if (!_eventsSeeded) {
+        _eventsSeeded = true;
+        return;
+      }
+      // The stream is newest-first; post oldest-first so a burst reads in the
+      // order it happened.
+      for (final e in fresh.reversed) {
+        unawaited(_postOrderBanner(e));
       }
     });
   }
 
-  /// Starts [Engine.cairn] if no engine is live yet and a Supabase session
-  /// exists. Silently a no-op in widget tests (no `Supabase.initialize()`)
-  /// and when an engine is already live (hot reload, route re-push).
-  Future<void> _autoStartDefaultEngine() async {
-    if (engineRegistry.activeEngine != null) return;
+  /// Posts one order event to the user and records what the platform did with
+  /// it. Logged, not just posted: a banner that never appears and a banner
+  /// never asked for look identical from outside the app, and
+  /// tool/atlet_watch.sh greps for exactly this line.
+  Future<void> _postOrderBanner(OrderEventRow e) async {
+    final payload = orderPushPayload(e);
+    debugPrint(
+      'order banner: ${e.orderId.substring(0, 8)} '
+      '${e.previousStatus} -> ${e.status} route=${historyRoute(e.id)}',
+    );
+    // Web has no MethodChannel: the snackbar IS the foreground banner.
+    if (kIsWeb) {
+      _notify(payload['body']! as String);
+      recordPushAttempt(
+        PushAttempt(
+          eventId: e.id,
+          at: DateTime.now(),
+          channel: 'snackbar',
+          payload: payload,
+        ),
+      );
+      return;
+    }
+    String? error;
     try {
-      if (Supabase.instance.client.auth.currentSession == null) return;
+      await _orderBannerChannel.invokeMethod('order_update', payload);
+    } catch (err) {
+      error = '$err';
+      debugPrint('order banner failed: $err');
+    }
+    recordPushAttempt(
+      PushAttempt(
+        eventId: e.id,
+        at: DateTime.now(),
+        channel: 'local-banner',
+        payload: payload,
+        error: error,
+      ),
+    );
+  }
+
+  /// Brings the sync engine up. There is one engine and no way to change it
+  /// (user request 2026-09-22): direct-mode Nostos, the device syncing with
+  /// Supabase itself with no `nostos-server` on the other end (ADR-0045).
+  /// It starts on its own when Home opens, and says nothing while doing it —
+  /// the connectivity LED and the write-status UI are what report a sync
+  /// that isn't working.
+  ///
+  /// Reads the Supabase session lazily, post-frame, so this never touches
+  /// `Supabase.instance` during build/initState — that keeps HomeScreen
+  /// constructible in widget tests that don't call `Supabase.initialize()`
+  /// (see widget_test.dart). No-op when an engine is already live (hot
+  /// reload, route re-push) or when there is no session.
+  Future<void> _startEngine() async {
+    if (engineRegistry.activeEngine != null) return;
+    Session? session;
+    try {
+      session = Supabase.instance.client.auth.currentSession;
     } catch (_) {
       return; // Supabase not initialized (widget tests) — stay engine-less.
     }
-    await _switchEngine(Engine.cairn);
-  }
-
-  /// Switches the live sync engine to [target] via [engineRegistry], which
-  /// wipes the outgoing adapter (if any) before bringing the new one up
-  /// (decision #4). Reads the current Supabase session lazily, on tap, so
-  /// this never touches `Supabase.instance` during build/initState — that
-  /// keeps HomeScreen constructible in widget tests that don't call
-  /// `Supabase.initialize()` (see widget_test.dart).
-  Future<void> _switchEngine(Engine target) async {
-    if (engineRegistry.activeEngine == target) return;
-    final session = Supabase.instance.client.auth.currentSession;
-    if (session == null) {
-      _notify('No active session — sign in again.');
-      return;
-    }
-    _notify('Switching to ${target.name}…');
+    if (session == null) return; // signed out — sign-in re-enters Home
     try {
       // path_provider has no web impl; the web engine's storage is
       // OPFS-backed and ignores sqlitePath (ADR-0036), so dbDir is an
@@ -252,8 +412,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final dbDir = kIsWeb
           ? ''
           : (await getApplicationDocumentsDirectory()).path;
-      final adapter = await engineRegistry.switchTo(
-        target,
+      final adapter = await engineRegistry.start(
+        Engine.cairnDirect,
         SyncSession(
           supabaseUrl: _supabaseUrl,
           accessToken: session.accessToken,
@@ -261,46 +421,41 @@ class _HomeScreenState extends State<HomeScreen> {
           dbDir: dbDir,
         ),
       );
-      // PILOT (ADR-0037): doorbell registration follows the nostos engine —
-      // push is a nostos feature, PowerSync has no rail. detach() on switch-
-      // away only unwires handlers; the SDK's sign-out hook (run inside the
-      // registry's wipe, above) deregisters the tokens.
-      if (_pushPilotEnabled) {
-        if (target == Engine.cairn) {
-          final nostos = adapter as NostosAdapter;
-          unawaited(pushPilot.attach(nostos));
-          _wireOrderBanner(nostos);
-        } else {
-          unawaited(pushPilot.detach());
-          _orderBannerSub?.cancel();
-          _orderBannerSub = null;
-          _lastOrderStatuses.clear();
+      final nostos = adapter as NostosAdapter;
+      // The order banner is pure sync — it reads watchOrders() and posts a
+      // local notification. It was gated behind the FCM pilot, which meant a
+      // default build showed the user nothing when their order shipped.
+      _wireOrderBanner(nostos);
+      // Supabase rotates the access token about hourly. The engine was opened
+      // with one token and has no way to learn the next, so forward it.
+      await _authSub?.cancel();
+      _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((s) {
+        final token = s.session?.accessToken;
+        if (token == null) return;
+        if (s.event == AuthChangeEvent.tokenRefreshed ||
+            s.event == AuthChangeEvent.signedIn) {
+          // Best-effort: a refused swap leaves the previous token in place and
+          // the next rotation tries again.
+          unawaited(nostos.setToken(token).catchError((Object _) {}));
         }
+      });
+      // PILOT (ADR-0037): doorbell registration follows the nostos engine —
+      // push is a nostos feature, and direct mode is still a NostosAdapter.
+      if (_pushPilotEnabled) {
+        unawaited(pushPilot.attach(nostos));
       }
-      _notify('Now syncing with ${target.name}.');
     } catch (e) {
-      _notify('Engine switch failed: $e');
+      // Deliberately not a snackbar: the engine is not a thing the user
+      // chose, so its lifecycle is not news to them.
+      debugPrint('engine start failed: $e');
     }
-    if (mounted) setState(() {}); // refresh the settings sheet's selection
+    if (mounted) setState(() {}); // hand the live adapter to the tabs
   }
 
   void _notify(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  void _openSettings() {
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (_) => _EngineSettingsSheet(
-        activeEngine: engineRegistry.activeEngine,
-        onSelect: (engine) {
-          Navigator.of(context).pop();
-          unawaited(_switchEngine(engine));
-        },
-      ),
-    );
   }
 
   /// Builds the Nth synthetic bench session — mirrors test/harness_test.dart's
@@ -318,9 +473,9 @@ class _HomeScreenState extends State<HomeScreen> {
     occurredOn: DateTime.now().toUtc(),
   );
 
-  /// Production wiring for [AnalyticsScreen.runSuite]: runs the plan's
-  /// two-engine comparison (bench/harness.dart's `runFullSuiteForBothEngines`)
-  /// against fresh Nostos/PowerSync adapters. Deliberately bypasses
+  /// Production wiring for [HistoryScreen.runSuite]: runs the two-engine
+  /// comparison (bench/harness.dart's `runFullSuiteForEngines`) against fresh
+  /// server-mode and direct-mode Nostos adapters. Deliberately bypasses
   /// [engineRegistry] — see that function's own doc comment on why a bench
   /// run's needs (signOut after every suite, two live dbDirs) don't fit the
   /// registry's single-slot contract (decision #4).
@@ -334,7 +489,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // coldSync gates completion on `rows.length == seedSize` (runner.dart) —
     // has to be the real current row count, not a guess.
     final existingSessions = await client.from('sessions').select('id');
-    await runFullSuiteForBothEngines(
+    await runFullSuiteForEngines(
       sdk: 'flutter',
       specVersion: 'v0',
       seedSize: existingSessions.length,
@@ -352,7 +507,8 @@ class _HomeScreenState extends State<HomeScreen> {
       buildSession: _benchSessionRow,
       adapterFactories: {
         Engine.cairn: () => NostosAdapter(),
-        Engine.powersync: () => PowerSyncAdapter(),
+        Engine.cairnDirect: () =>
+            NostosAdapter.direct(anonKey: _supabaseAnonKey),
       },
     );
   }
@@ -364,21 +520,13 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: AtletTokens.bone,
         elevation: 0,
         title: Text('Home', style: TextStyle(color: AtletTokens.ink)),
-        actions: [
-          const ConnectivityLed(),
-          IconButton(
-            key: const Key('settings-button'),
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: 'Settings',
-            onPressed: _openSettings,
-          ),
-        ],
+        actions: const [ConnectivityLed()],
       ),
       body: TrainingHome(adapter: engineRegistry.current),
     );
   }
 
-  Widget _buildAnalyticsTab(BuildContext context) {
+  Widget _buildHistoryTab(BuildContext context) {
     return FutureBuilder<BenchStore>(
       future: _benchStore(),
       builder: (context, snapshot) {
@@ -391,7 +539,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           );
         }
-        return AnalyticsScreen(
+        return HistoryScreen(
           store: store,
           // Lazy: Supabase.instance.client is touched only when Upload is
           // actually tapped, not merely when this tab is built — keeps the
@@ -399,6 +547,12 @@ class _HomeScreenState extends State<HomeScreen> {
           uploadRuns: (rows) =>
               supabasePostgrestUpload(Supabase.instance.client)(rows),
           runSuite: () => _runBenchSuite(store),
+          // The one thing on this tab that does come from the engine: the
+          // order history the server writes (migration 0007).
+          // No engine yet means no history rather than a spinner that never
+          // resolves — same shape ShopScreen uses for a null adapter.
+          events:
+              engineRegistry.current?.watchOrderEvents() ?? _noOrderEvents(),
         );
       },
     );
@@ -416,7 +570,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: switch (_tabIndex) {
               0 => _buildHomeTab(context),
               1 => ShopScreen(adapter: engineRegistry.current),
-              _ => _buildAnalyticsTab(context),
+              _ => _buildHistoryTab(context),
             },
           ),
         ],
@@ -440,67 +594,12 @@ class _HomeScreenState extends State<HomeScreen> {
             label: 'Shop',
           ),
           NavigationDestination(
-            key: Key('nav-tab-analytics'),
-            icon: Icon(Icons.analytics_outlined),
-            selectedIcon: Icon(Icons.analytics),
-            label: 'Analytics',
+            key: Key('nav-tab-history'),
+            icon: Icon(Icons.history_outlined),
+            selectedIcon: Icon(Icons.history),
+            label: 'History',
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// Settings-sheet content: the sync-engine toggle. Selecting an engine that
-/// isn't already active runs [EngineRegistry.switchTo] via [onSelect] — a
-/// full wipe of the outgoing adapter (if any) before the incoming one is
-/// constructed and init()'d (decision #4: never both engines live at once).
-class _EngineSettingsSheet extends StatelessWidget {
-  const _EngineSettingsSheet({
-    required this.activeEngine,
-    required this.onSelect,
-  });
-
-  final Engine? activeEngine;
-  final ValueChanged<Engine> onSelect;
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'SYNC ENGINE',
-              style: TextStyle(
-                fontSize: AtletTokens.footnote,
-                letterSpacing: 1.5,
-                color: AtletTokens.ink3,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 16),
-            RadioGroup<Engine>(
-              groupValue: activeEngine,
-              onChanged: (value) {
-                if (value != null) onSelect(value);
-              },
-              child: Column(
-                children: [
-                  for (final engine in Engine.values)
-                    RadioListTile<Engine>(
-                      key: Key('engine-option-${engine.name}'),
-                      title: Text(engine.name),
-                      value: engine,
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

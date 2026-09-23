@@ -23,7 +23,7 @@ class BenchStore {
        _memory = null;
 
   /// Web: path_provider has no browser implementation (the open future never
-  /// resolves — the Analytics tab spun forever) and dart:io File throws there,
+  /// resolves — the History tab spun forever) and dart:io File throws there,
   /// so runs persist to localStorage as one JSONL string. ponytail: ~5MB
   /// localStorage cap and string-join-per-append; OPFS/IndexedDB if run
   /// history ever outgrows that.
