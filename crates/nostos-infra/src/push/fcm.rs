@@ -932,14 +932,14 @@ mod tests {
     /// `NOSTOS_E2E_FCM_TOKEN`.
     #[tokio::test]
     async fn e2e_fcm_smoke() {
-        if std::env::var("NOSTOS_E2E_FCM").is_err() {
+        if crate::env::var("NOSTOS_E2E_FCM").is_err() {
             eprintln!("skipping (set NOSTOS_E2E_FCM=1 with NOSTOS_FCM_CREDENTIALS_JSON and NOSTOS_E2E_FCM_TOKEN to run)");
             return;
         }
         let rail = FcmRail::from_env()
             .expect("credentials parse")
             .expect("rail configured");
-        let token = std::env::var("NOSTOS_E2E_FCM_TOKEN").expect("NOSTOS_E2E_FCM_TOKEN");
+        let token = crate::env::var("NOSTOS_E2E_FCM_TOKEN").expect("NOSTOS_E2E_FCM_TOKEN");
         let outcome = rail
             .send(
                 &FcmTarget::Token(token),

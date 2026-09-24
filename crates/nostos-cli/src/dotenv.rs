@@ -16,7 +16,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// Parse a `.env` file into a key→value map. Missing file = empty map (not
-/// an error — `.env` is optional until `init` writes one).
+/// an error — `.env` is optional until `init` writes one). Pre-rename keys
+/// also answer to their current names (ADR-0046).
 #[must_use]
 pub fn read(path: &Path) -> BTreeMap<String, String> {
     let mut vars = BTreeMap::new();
@@ -32,6 +33,7 @@ pub fn read(path: &Path) -> BTreeMap<String, String> {
             vars.insert(key.trim().to_string(), value.trim().to_string());
         }
     }
+    nostos_infra::env::fold_legacy(&mut vars);
     vars
 }
 

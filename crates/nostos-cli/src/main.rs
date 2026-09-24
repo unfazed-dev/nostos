@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 
-    let cli = Cli::parse();
+    let cli = nostos_infra::env::parse::<Cli>();
     let cwd = std::env::current_dir().context("reading current directory")?;
 
     match cli.command {

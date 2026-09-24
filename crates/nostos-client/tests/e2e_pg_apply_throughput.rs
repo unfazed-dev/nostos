@@ -65,14 +65,14 @@ const BATCH: i64 = 500;
 /// override via NOSTOS_APPLY_TP_BUF (e.g. 32768) to absorb the startup burst
 /// and measure the zero-drop sustained path.
 fn session_buffer() -> usize {
-    std::env::var("NOSTOS_APPLY_TP_BUF")
+    nostos_infra::env::var("NOSTOS_APPLY_TP_BUF")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1024)
 }
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -195,7 +195,7 @@ async fn teardown_bench_table() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_pg_to_client_apply_sustained_throughput() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with docker compose up -d to run)");
         return;
     }
@@ -204,7 +204,7 @@ async fn real_pg_to_client_apply_sustained_throughput() {
         .with_test_writer()
         .try_init();
 
-    let n: i64 = std::env::var("NOSTOS_APPLY_TP_N")
+    let n: i64 = nostos_infra::env::var("NOSTOS_APPLY_TP_N")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_N);
@@ -446,7 +446,7 @@ async fn real_pg_to_client_apply_sustained_throughput() {
 ///
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with docker compose up -d to run)");
         return;
     }
@@ -455,7 +455,7 @@ async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
         .with_test_writer()
         .try_init();
 
-    let n: i64 = std::env::var("NOSTOS_APPLY_TP_N")
+    let n: i64 = nostos_infra::env::var("NOSTOS_APPLY_TP_N")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_N);

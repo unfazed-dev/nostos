@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::config::{
-    NostosConfig, DbSection, ServerSection, SupabaseSection, SyncSection, DEFAULT_FILE_NAME,
+    config_path, NostosConfig, DbSection, ServerSection, SupabaseSection, SyncSection,
 };
 use crate::pg::{PgControl, PublicationAction};
 use crate::{dotenv, prompt};
@@ -150,7 +150,7 @@ pub async fn run(args: InitArgs, cwd: &Path) -> Result<()> {
             ..ServerSection::default()
         },
     };
-    let cfg_path = cwd.join(DEFAULT_FILE_NAME);
+    let cfg_path = config_path(cwd);
     cfg.save(&cfg_path)?;
     println!("\u{2713} wrote {}", cfg_path.display());
 

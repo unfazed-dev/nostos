@@ -246,7 +246,7 @@ struct Measured {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
-    let cfg = Config::parse();
+    let cfg = nostos_infra::env::parse::<Config>();
     info!(?cfg, "starting nostos-bench-pg-ingest");
 
     // Modest client counts by default, but keep FD headroom parity with the

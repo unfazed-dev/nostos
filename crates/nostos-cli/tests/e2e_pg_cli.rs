@@ -19,7 +19,7 @@ use nostos_cli::pg::{PgControl, PublicationAction};
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -44,7 +44,7 @@ fn unique_table(label: &str) -> String {
 /// drive it, without needing a live terminal for stdin prompts.
 #[tokio::test]
 async fn init_and_doctor_flow_against_real_postgres() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -136,7 +136,7 @@ async fn init_and_doctor_flow_against_real_postgres() {
 /// rather than a raw driver error.
 #[tokio::test]
 async fn publication_for_a_nonexistent_table_errors_clearly() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }

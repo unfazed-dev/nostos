@@ -49,7 +49,7 @@ use nostos_infra::{AllowAnonymous, PgWriteBack};
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -301,7 +301,7 @@ async fn subscribe_and_collect(addr: SocketAddr, timeout: Duration) -> Vec<serde
 /// idempotent apply is a no-op — assert the row appears exactly once to A).
 #[tokio::test]
 async fn client_write_round_trips_through_replication() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -428,7 +428,7 @@ fn frame_contains_title(frame: &serde_json::Value, title: &str) -> bool {
 /// surface an error to the client.)
 #[tokio::test]
 async fn delete_of_missing_row_is_success() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -489,7 +489,7 @@ async fn delete_of_missing_row_is_success() {
 /// the trust-boundary proof against a real database.
 #[tokio::test]
 async fn injection_column_name_is_rejected() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -569,7 +569,7 @@ fn tenant_test_slot(name: &str) -> String {
 /// force-stamp: the client's value is never trusted).
 #[tokio::test]
 async fn cross_tenant_insert_is_stamped_to_callers_tenant() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -624,7 +624,7 @@ async fn cross_tenant_insert_is_stamped_to_callers_tenant() {
 /// not silently change the row's tenant ownership.
 #[tokio::test]
 async fn cross_tenant_upsert_conflict_is_rejected() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -695,7 +695,7 @@ async fn cross_tenant_upsert_conflict_is_rejected() {
 /// `cross_tenant_delete_of_absent_row_is_idempotent_success` below).
 #[tokio::test]
 async fn cross_tenant_delete_is_rejected_row_survives() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -752,7 +752,7 @@ async fn cross_tenant_delete_is_rejected_row_survives() {
 /// existed" (success) via a single round trip, without an extra query.
 #[tokio::test]
 async fn cross_tenant_delete_of_absent_row_is_idempotent_success() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -793,7 +793,7 @@ async fn cross_tenant_delete_of_absent_row_is_idempotent_success() {
 /// matching the caller's tenant).
 #[tokio::test]
 async fn own_tenant_writes_flow_normally() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -885,7 +885,7 @@ fn patch_frame(id: uuid::Uuid, title: &str, client_write_id: &str) -> String {
 /// untouched (P3 column-level PATCH).
 #[tokio::test]
 async fn patch_updates_only_specified_columns() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -942,7 +942,7 @@ async fn patch_updates_only_specified_columns() {
 /// gone must not surface an error to the client.
 #[tokio::test]
 async fn patch_on_absent_row_is_ok() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -977,7 +977,7 @@ async fn patch_on_absent_row_is_ok() {
 /// mutate another tenant's row (ADR-0018).
 #[tokio::test]
 async fn cross_tenant_patch_is_rejected_row_unchanged() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -1051,7 +1051,7 @@ async fn cross_tenant_patch_is_rejected_row_unchanged() {
 /// payload-validation branches.
 #[tokio::test]
 async fn increment_serializes_concurrent_deltas_server_side() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -1119,7 +1119,7 @@ async fn increment_serializes_concurrent_deltas_server_side() {
 /// survive the second write (a clobber would leave only the second).
 #[tokio::test]
 async fn or_set_writeback_merges_concurrent_client_adds_server_side() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -1200,7 +1200,7 @@ async fn or_set_writeback_merges_concurrent_client_adds_server_side() {
 /// `or_set_writeback_merges_concurrent_client_adds_server_side`.
 #[tokio::test]
 async fn or_set_writeback_tenant_scoped_merge_converges_and_isolates() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -1333,7 +1333,7 @@ async fn or_set_writeback_tenant_scoped_merge_converges_and_isolates() {
 /// user ids are v5 UUIDs on text tenant columns).
 #[tokio::test]
 async fn counter_writeback_tenant_scoped_merge_sums_and_isolates() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }

@@ -206,7 +206,7 @@ async fn wait_for_sessions(store: &Arc<dyn SessionStore>, want: usize) {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string()))
+        .with_env_filter(nostos_infra::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string()))
         .try_init();
 
     println!("=== nostos sync_streams demo — P5 lazy parameterized streams (ADR-0039) ===");

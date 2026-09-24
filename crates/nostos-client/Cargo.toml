@@ -56,7 +56,7 @@ nostos-core = { workspace = true, features = ["conformance"] }
 # (its Cargo.toml dev-deps nostos-application): dev-deps do not change the
 # lib's dependency direction — [dependencies] above stays core/domain/infra.
 nostos-application = { workspace = true }
-nostos-infra = { workspace = true }
+nostos-infra = { workspace = true, features = ["clap"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }

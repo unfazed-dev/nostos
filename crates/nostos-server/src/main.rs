@@ -253,7 +253,8 @@ pub struct Config {
     counter_columns: String,
 
     /// Path to the sync-rules file (ADR-0031). Missing file = `all` mode.
-    #[arg(long, env = "NOSTOS_RULES_FILE", default_value = "nostos_rules.toml")]
+    /// The default falls back to the pre-rename file name (ADR-0046).
+    #[arg(long, env = "NOSTOS_RULES_FILE", default_value = nostos_infra::rules_file::RULES_FILE_NAME)]
     rules_file: String,
 
     /// Coalesce the per-event ack-progress (slot-advance) scan: recompute the
@@ -469,7 +470,13 @@ pub struct Config {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = Config::parse();
+    let mut cfg = nostos_infra::env::parse::<Config>();
+    // ADR-0046: resolve the default once, so boot load, the reload poll and
+    // PUT /rules all use the same (possibly pre-rename) file.
+    if cfg.rules_file == nostos_infra::rules_file::RULES_FILE_NAME {
+        let resolved = nostos_infra::rules_file::path_in(std::path::Path::new(""));
+        cfg.rules_file = resolved.display().to_string();
+    }
     init_tracing(&cfg.log);
 
     // ---- admin auth (Task 21, ADR-0031 addendum): NOSTOS_ADMIN_TOKEN gates
@@ -513,7 +520,7 @@ async fn main() -> anyhow::Result<()> {
     };
     // NOSTOS_LICENSE_SECRET is env-only by design (NOT a clap flag): it signs
     // every license a cloud deploy mints, so it must never land on argv / `ps`.
-    let license_secret = std::env::var("NOSTOS_LICENSE_SECRET").unwrap_or_default();
+    let license_secret = nostos_infra::env::var("NOSTOS_LICENSE_SECRET").unwrap_or_default();
     let entitlement =
         nostos_license::resolve_entitlement(&cfg.license, license_secret.as_bytes(), fallback_tier)
             .context("NOSTOS_LICENSE verification failed — refusing to start")?;
@@ -1348,7 +1355,9 @@ async fn main() -> anyhow::Result<()> {
         // main.rs reads the env, infra stays env-free. Some(url) =
         // self-hosted relay replaces the n0 default fleet.
         let relay_url = nostos_infra::iroh_sync::parse_relay_url(
-            std::env::var("NOSTOS_IROH_RELAY_URL").ok().as_deref(),
+            nostos_infra::env::var("NOSTOS_IROH_RELAY_URL")
+                .ok()
+                .as_deref(),
         )
         .map_err(anyhow::Error::msg)?;
         if let Some(url) = &relay_url {
@@ -1458,6 +1467,9 @@ async fn watch_rules(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     rules_tx: tokio::sync::watch::Sender<u64>,
 ) {
+    // Warn on the present -> missing transition only: a zero-config deploy
+    // (no file, `all` mode) must not log every poll.
+    let mut present = path.exists();
     loop {
         tokio::select! {
             () = tokio::time::sleep(poll_interval) => {}
@@ -1470,12 +1482,18 @@ async fn watch_rules(
             }
         }
         let loaded = match nostos_infra::rules_file::load(&path) {
-            Ok(Some(raw)) => raw,
+            Ok(Some(raw)) => {
+                present = true;
+                raw
+            }
             Ok(None) => {
-                warn!(path = %path.display(), "nostos_rules.toml missing on reload poll; keeping previous ruleset");
+                if std::mem::take(&mut present) {
+                    warn!(path = %path.display(), "nostos_rules.toml missing on reload poll; keeping previous ruleset");
+                }
                 continue;
             }
             Err(e) => {
+                present = true;
                 warn!(error = %e, path = %path.display(), "nostos_rules.toml reload failed to load; keeping previous ruleset");
                 continue;
             }
@@ -2825,6 +2843,64 @@ mod watch_rules_tests {
             after_checksum,
             "a real reload must swap the shared ruleset to the newly compiled rules"
         );
+    }
+
+    /// Zero-config (no file ever) polls silently; a file deleted mid-run
+    /// warns once, not every tick. Current-thread runtime, so the
+    /// thread-local subscriber sees the spawned task's events.
+    #[tokio::test]
+    async fn missing_file_warns_only_on_the_present_to_missing_transition() {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let writer = buf.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        let warns = || {
+            String::from_utf8_lossy(&buf.0.lock().unwrap())
+                .matches("missing on reload poll")
+                .count()
+        };
+
+        let rules = toggles_rules(Vec::new());
+        let shared = Arc::new(RwLock::new(ActiveRuleset::compile(&rules).unwrap()));
+        let (tx, _rx) = watch::channel(0);
+
+        run_a_few_ticks(temp_rules_path("absent"), Arc::clone(&shared), tx.clone()).await;
+        assert_eq!(
+            warns(),
+            0,
+            "a never-present file is zero-config, not an error"
+        );
+
+        let path = temp_rules_path("deleted");
+        nostos_infra::rules_file::save(&path, &rules).unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(watch_rules(
+            path.clone(),
+            shared,
+            Duration::from_millis(5),
+            shutdown_rx,
+            tx,
+        ));
+        tokio::task::yield_now().await; // let it see the file at start
+        std::fs::remove_file(&path).unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+        assert_eq!(warns(), 1, "present -> missing warns exactly once");
     }
 }
 

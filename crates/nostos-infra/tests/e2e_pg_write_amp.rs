@@ -42,7 +42,7 @@ const TENANT_COL: &str = "org_id";
 const N: i64 = 200;
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -107,7 +107,7 @@ async fn oplog_count(tenant: &str) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::cast_precision_loss)] // row counts (≤~10³) cast to f64 for the amp ratio
 async fn oplog_write_amplification_is_one_to_one_no_drops() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `docker compose up -d` to run)");
         return;
     }

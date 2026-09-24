@@ -50,7 +50,7 @@ use common::subscribe_and_collect;
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -104,7 +104,7 @@ async fn slot_exists(slot: &str) -> bool {
 /// exact scenario the pre-fix code silently mishandled.
 #[tokio::test]
 async fn dropped_slot_is_detected_and_recovered() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `docker compose up -d` to run)");
         return;
     }

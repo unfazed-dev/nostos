@@ -40,7 +40,7 @@ use tokio_tungstenite::tungstenite::Message;
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -309,7 +309,7 @@ fn titled_rules(extra: &[StreamRule]) -> SyncRules {
 /// matching INSERT arrives and a non-matching one never does.
 #[tokio::test]
 async fn lazy_stream_snapshot_then_live_delta() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -424,7 +424,7 @@ async fn lazy_stream_snapshot_then_live_delta() {
 /// matching BOTH streams arrives exactly once (shared sink dedup ring).
 #[tokio::test]
 async fn unsubscribe_stops_flow_and_two_streams_dedup() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -527,7 +527,7 @@ async fn unsubscribe_stops_flow_and_two_streams_dedup() {
 /// empty snapshot (the fail-closed AND-wrap), never an interpolation error.
 #[tokio::test]
 async fn cross_tenant_param_abuse_never_leaks() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -676,7 +676,7 @@ async fn cross_tenant_param_abuse_never_leaks() {
 /// checkpoint + idempotent apply own dedup, asserted at that layer).
 #[tokio::test]
 async fn reconnect_resubscribes_and_resnapshots() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -730,7 +730,7 @@ async fn reconnect_resubscribes_and_resnapshots() {
 /// keeps flowing.
 #[tokio::test]
 async fn stream_on_rules_denied_table_errors_non_fatally() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }

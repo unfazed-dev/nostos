@@ -19,6 +19,11 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+/// Config file/dir names with the pre-rename fallback (ADR-0046).
+pub mod config_path;
+/// `NOSTOS_*` env reads with the pre-rename fallback (ADR-0046) — the only
+/// sanctioned `std::env` reader (`clippy.toml`).
+pub mod env;
 /// Shared strict identifier validation (ADR-0013 discipline) — lifted here
 /// when the mirror ingest adapter became the third caller; `pub` because the
 /// server's `/ingest` route validates the same client-controlled table names.

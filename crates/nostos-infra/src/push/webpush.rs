@@ -641,14 +641,14 @@ mod tests {
     /// (the pushSubscription JSON).
     #[tokio::test]
     async fn e2e_webpush_smoke() {
-        if std::env::var("NOSTOS_E2E_WEBPUSH").is_err() {
+        if crate::env::var("NOSTOS_E2E_WEBPUSH").is_err() {
             eprintln!("skipping (set NOSTOS_E2E_WEBPUSH=1 with NOSTOS_WEBPUSH_VAPID_* and NOSTOS_E2E_WEBPUSH_SUBSCRIPTION to run)");
             return;
         }
         let rail = WebPushRail::from_env()
             .expect("config parses")
             .expect("rail configured");
-        let sub = std::env::var("NOSTOS_E2E_WEBPUSH_SUBSCRIPTION").expect("subscription");
+        let sub = crate::env::var("NOSTOS_E2E_WEBPUSH_SUBSCRIPTION").expect("subscription");
         let outcome = rail
             .send(
                 &sub,

@@ -61,7 +61,7 @@ pg = ["dep:tokio-postgres", "dep:uuid", "dep:chrono", "nostos-infra/pg"]
 [dependencies]
 nostos-domain = { workspace = true }
 nostos-application = { workspace = true }
-nostos-infra = { workspace = true }
+nostos-infra = { workspace = true, features = ["clap"] }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }

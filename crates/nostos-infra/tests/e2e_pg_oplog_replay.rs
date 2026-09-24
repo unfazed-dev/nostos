@@ -54,7 +54,7 @@ const SECRET: &[u8] = b"e2e-oplog-replay-secret";
 const TENANT_COL: &str = "org_id";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -330,7 +330,7 @@ fn frame_pk(v: &serde_json::Value) -> Option<&str> {
 /// snapshot boundary control frames.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oplog_replay_delivers_offline_gap_including_deletes() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `docker compose up -d` to run)");
         return;
     }
@@ -493,7 +493,7 @@ async fn oplog_replay_delivers_offline_gap_including_deletes() {
 /// out / the op-log is empty) falls back to SNAPSHOT-RECONCILE (slice 1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aged_out_checkpoint_falls_back_to_snapshot() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `docker compose up -d` to run)");
         return;
     }

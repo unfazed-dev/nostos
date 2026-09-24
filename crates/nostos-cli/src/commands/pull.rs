@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 use serde_json::Value;
 
-use crate::config::{ProjectConfig, DOT_NOSTOS_DIR, SCHEMA_JSON};
+use crate::config::{dot_dir, ProjectConfig, SCHEMA_JSON};
 
 /// Env var `--token` falls back to. Named here so the 401 message and the
 /// clap attribute can never drift apart.
@@ -150,7 +150,7 @@ pub async fn run(args: PullArgs, cwd: &Path) -> Result<()> {
     };
 
     let pretty = serde_json::to_string_pretty(&value).context("pretty-printing schema JSON")?;
-    let nostos_dir = cwd.join(DOT_NOSTOS_DIR);
+    let nostos_dir = dot_dir(cwd);
     std::fs::create_dir_all(&nostos_dir)
         .with_context(|| format!("creating {}", nostos_dir.display()))?;
     let out_path = nostos_dir.join(SCHEMA_JSON);

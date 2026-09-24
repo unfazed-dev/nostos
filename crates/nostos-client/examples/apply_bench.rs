@@ -399,7 +399,7 @@ fn write_artifacts(out_dir: &str, artifacts: &Artifacts) {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    let cfg = BenchConfig::parse();
+    let cfg = nostos_infra::env::parse::<BenchConfig>();
     let storage_mode = if cfg.on_disk {
         "on-disk tempdir"
     } else {

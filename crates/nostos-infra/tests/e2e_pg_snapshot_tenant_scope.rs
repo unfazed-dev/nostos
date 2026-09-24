@@ -28,7 +28,7 @@ use nostos_infra::PgSnapshotter;
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -56,7 +56,7 @@ fn pk_org(ev: &nostos_domain::ReplicationEvent) -> (String, String) {
 
 #[tokio::test]
 async fn scoped_snapshot_returns_only_the_principals_tenant_rows() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set NOSTOS_E2E_PG=1)");
         return;
     }

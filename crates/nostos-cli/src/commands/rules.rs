@@ -14,7 +14,7 @@ use clap::{Args, Subcommand};
 use nostos_domain::{ScopeExpr, SyncMode, SyncRules, TableRule, RULES_VERSION};
 use nostos_infra::rules_file;
 
-use crate::config::{NostosConfig, DEFAULT_FILE_NAME};
+use crate::config::{config_path, NostosConfig};
 use crate::dotenv;
 use crate::pg::PgControl;
 use crate::prompt;
@@ -245,7 +245,7 @@ async fn run_init(args: InitRulesArgs, cwd: &Path) -> Result<()> {
         anyhow::anyhow!("unknown --mode {:?} (expected all|toggles|hand)", args.mode)
     })?;
 
-    let rules_path = cwd.join(rules_file::RULES_FILE_NAME);
+    let rules_path = rules_file::path_in(cwd);
     if rules_path.exists() && !args.force {
         anyhow::bail!(
             "{} already exists — refusing to overwrite. Use `nostos rules edit` to change it, \
@@ -254,7 +254,7 @@ async fn run_init(args: InitRulesArgs, cwd: &Path) -> Result<()> {
         );
     }
 
-    let cfg = NostosConfig::load(&cwd.join(DEFAULT_FILE_NAME))?;
+    let cfg = NostosConfig::load(&config_path(cwd))?;
     let env_path = cwd.join(".env");
     let pg_url = dotenv::read(&env_path)
         .get(&cfg.db.url_env)
@@ -446,7 +446,7 @@ pub fn check_report(rules: &SyncRules) -> Result<String, String> {
 }
 
 fn run_check(cwd: &Path) -> Result<()> {
-    let rules_path = cwd.join(rules_file::RULES_FILE_NAME);
+    let rules_path = rules_file::path_in(cwd);
     match rules_file::load(&rules_path)? {
         None => println!(
             "no {} at {} — sync_mode defaults to `all` (zero-config).",
@@ -466,7 +466,7 @@ fn run_check(cwd: &Path) -> Result<()> {
 /// loads the existing file and drives [`apply_edit`] off stdin lines until
 /// `q`/`w` (or EOF, which `prompt::prompt_default` turns into `q`).
 fn run_edit(args: EditRulesArgs, cwd: &Path) -> Result<()> {
-    let rules_path = cwd.join(rules_file::RULES_FILE_NAME);
+    let rules_path = rules_file::path_in(cwd);
 
     if let Some(mode_str) = args.mode {
         let mode = SyncMode::parse(&mode_str).ok_or_else(|| {
