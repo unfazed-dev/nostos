@@ -81,6 +81,9 @@ __pycache__/
 *.pyc
 # nostos link output: config.json carries the project anon key
 .nostos/
+# The pre-rename project dir is still read as a fallback (ADR-0046), so it
+# must stay ignored after the rename; the [a] keeps the rename rules off it.
+.c[a]irn/
 
 # arxa worktree law: one task = one worktree at .worktrees/<name>
 .worktrees/
