@@ -14,6 +14,7 @@ mod admin_auth;
 mod config;
 mod ingest;
 mod push_api;
+mod telemetry;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,27 +31,10 @@ use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 use tower_http::trace::TraceLayer;
+use tracing::{info, warn};
 
 use crate::config::{eviction_policy, exposes_anonymous_sync, Config};
-
-/// Request span that records the URI **path only**, never the query string.
-///
-/// Browsers cannot set an `Authorization` header on a WebSocket handshake, so
-/// `/sync` also accepts the bearer token as `?token=<jwt>` (see `AuthQuery` in
-/// nostos-infra's transport). tower-http's `DefaultMakeSpan` records the whole
-/// URI, which writes that live credential into every request span — and from
-/// there into stdout, any log aggregator, and anything tailing the container.
-/// Reverse proxies keep their own access logs, so this does not fix the whole
-/// class; it stops Nostos from being the one that leaks it.
-fn redacted_request_span(req: &axum::http::Request<axum::body::Body>) -> tracing::Span {
-    tracing::info_span!(
-        "request",
-        method = %req.method(),
-        path = %req.uri().path(),
-        version = ?req.version(),
-    )
-}
-use tracing::{info, warn};
+use crate::telemetry::{init_tracing, redacted_request_span};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -1444,13 +1428,6 @@ fn build_cors_layer(cors_origins: &str) -> anyhow::Result<tower_http::cors::Cors
             axum::http::header::CONTENT_TYPE,
         ])
         .allow_credentials(true))
-}
-
-fn init_tracing(filter: &str) {
-    use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info")))
-        .try_init();
 }
 
 // ---- `all`-mode startup warning (ADR-0031, Task 13) ----
