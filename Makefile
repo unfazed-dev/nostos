@@ -103,6 +103,13 @@ lint: fmt-check clippy ## fmt-check + clippy (what CI runs).
 ci: lint test ## Local mirror of CI: lint + test.
 	@echo "✓ CI clean locally"
 
+# check: the one root check (docs/ci/setup.md). Every CI job has a same-named
+# area in scripts/check.sh; AREA=lint-test is `make ci`.
+AREA ?= all
+.PHONY: check
+check: ## Local green = CI green: every CI job's area, or one with AREA=<job>.
+	@./scripts/check.sh $(AREA)
+
 .PHONY: sdk-e2e
 sdk-e2e: ## Run all 10 SDK live-replication E2E slices (9 PUSH+ECHO + flutter PUSH-only, macOS). (flutter restored 2026-08-05)
 	@./scripts/sdk-e2e.sh

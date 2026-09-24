@@ -1,5 +1,9 @@
 name: CI
 
+# Every job has a same-named area in scripts/check.sh that runs its steps
+# locally (local green = CI green). Change a job and its area together, and
+# re-run the branch-protection PUT in docs/ci/setup.md after renaming a job.
+
 on:
   push:
     branches: [main]
@@ -13,6 +17,11 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# Least privilege (docs/ci/decisions.md row 7): nothing here writes to the
+# repo. release.yml grants its own per-job writes.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,6 +48,20 @@ jobs:
 
       - name: test
         run: cargo test --workspace -- --include-ignored
+
+  # Conventional commit subjects, required (docs/ci/decisions.md row 6). The
+  # range is origin/main..HEAD without merges: a PR's own commits (not GitHub's
+  # synthetic merge commit), and nothing on a push to main. fetch-depth 0 so
+  # origin/main and the whole branch are there.
+  commits:
+    name: conventional commit subjects
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: scripts/check.sh commits
 
   e2e-pg:
     name: real-Postgres logical-replication e2e
