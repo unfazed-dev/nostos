@@ -4,8 +4,9 @@
 Counts every `cairn` token (case-insensitive) left in the renamed tree and
 explains each one by the rule that kept it: a held path, a `rename:hold`
 line, a binary blob, or a hold class from rules.HOLDS. Exits 1 if any token
-is unexplained, or if a committed wasm-bindgen glue file no longer matches
-its .wasm. Also lists pre-existing `nostos` tokens in the source: the spots
+is unexplained, if a committed wasm-bindgen glue file no longer matches
+its .wasm, or if a name held in an applied migration is renamed in some
+other file. Also lists pre-existing `nostos` tokens in the source: the spots
 where the rename cannot be inverted.
 """
 
@@ -113,9 +114,30 @@ def wasm_gate(dest, files):
     return problems
 
 
+_IDENT = re.compile(r"\w*(?:cairn|Cairn|CAIRN)\w*")
+_BARE = {"cairn", "Cairn", "CAIRN"}
+
+
+def renamed_idents(path, text):
+    """Identifiers the rules rename in `text` (marker lines left out)."""
+    text = "".join(ln for ln in text.splitlines(keepends=True) if MARKER not in ln)
+    out = set()
+    for a, b, cls, _ in scan(path, text):
+        if cls is None:
+            while a and (text[a - 1].isalnum() or text[a - 1] == "_"):
+                a -= 1
+            while b < len(text) and (text[b].isalnum() or text[b] == "_"):
+                b += 1
+            out.add(text[a:b])
+    return out - _BARE
+
+
 def main(src, dest):
     kept = collections.Counter()
     unexplained, nostos, files = [], [], []
+    # a name held verbatim in a held code file must not rename anywhere else:
+    # the two sides would stop matching (a PG object, a shared env var)
+    held_ids, renamed = collections.defaultdict(set), collections.defaultdict(set)
     for mode, path, data in tracked(src):
         new = rename_path(path)
         files.append(new)
@@ -129,6 +151,15 @@ def main(src, dest):
             nostos.append(path)
         if mode == "120000":
             continue
+        if not is_binary(data):
+            text = data.decode("utf-8", "surrogateescape")
+            if held_path(path) == "held-path:migrations":
+                code = re.sub(r"--[^\n]*", "", text)  # comments name no object
+                for ident in set(_IDENT.findall(code)) - _BARE:
+                    held_ids[ident].add(path)
+            elif not held_path(path):
+                for ident in renamed_idents(path, text):
+                    renamed[ident].add(path)
         with open(os.path.join(dest, new), "rb") as f:
             out = f.read()
         found = len(_TOKEN.findall(out.decode("utf-8", "surrogateescape")))
@@ -160,8 +191,11 @@ def main(src, dest):
         print(f"WASM GLUE MISMATCH {x}")
     for x in unexplained:
         print(f"UNEXPLAINED {x}")
-    print(f"unexplained: {len(unexplained)}, wasm mismatches: {len(bad)}")
-    return 1 if unexplained or bad else 0
+    split = sorted(held_ids.keys() & renamed.keys())
+    for x in split:
+        print(f"SPLIT {x}: held in {sorted(held_ids[x])[0]}, renamed in {sorted(renamed[x])[:3]}")
+    print(f"unexplained: {len(unexplained)}, wasm mismatches: {len(bad)}, split names: {len(split)}")
+    return 1 if unexplained or bad or split else 0
 
 
 if __name__ == "__main__":

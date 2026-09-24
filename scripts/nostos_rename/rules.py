@@ -66,6 +66,7 @@ HOLDS = [
                 r"|\s*\n\s*ref:\s*)[0-9a-f]{7,40}\b)"),
     ("brand-metaphor", r"\b[Aa] cairn is\b|\b[Tt]he cairn (?:is\b|=)|(?<![\w-])[Cc]airns\b"),
     ("legal-entity", r"Cairn Sync, Inc\."),
+    ("atlet-engine-id", r"\bEngine\.cairn(?:Direct)?\b"),  # atlet's enum, also cited in docs/
 ]
 
 # Holds that apply only under some ORIGINAL paths: (class, path regex, regex).
@@ -74,7 +75,7 @@ SCOPED_HOLDS = [
     # constraint in held migration 0001, on-device db dirs) and the adapter
     # engine strings derived from it.
     ("atlet-engine-id", r"^apps/atlet/",
-     r"\bEngine\.cairn(?:Direct)?\b|\benum Engine \{ cairn, cairnDirect \}"
+     r"\benum Engine \{ cairn, cairnDirect \}"
      r"|(?<![\w.$])cairn(?:Direct|-direct)?(?=['\"])|(?<=`)cairnDirect(?=`)|(?<=['\"])cairn(?:-direct)?(?=/\w+['\"])"
      r"|(?<=['\"])cairn(?=\.init['\"])|result-row-cairn(?=-)"),
     # the plugin config key under "plugins" (Tauri resolves it by plugin id)

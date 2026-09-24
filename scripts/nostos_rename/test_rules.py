@@ -87,7 +87,7 @@ class Holds(unittest.TestCase):
                 self.assertIn(cls, classes(text, path))
 
     def test_scoped_holds_stay_scoped(self):
-        self.assertEqual(rc("Engine.cairn 'cairn'", "sdk/x.dart"), "Engine.nostos 'cairn'")
+        self.assertEqual(rc("Engine.cairn 'cairnDirect'", "sdk/x.dart"), "Engine.cairn 'nostosDirect'")
         self.assertEqual(rc("wasm.cairnsocket_new", "sdk/x.js"), "wasm.nostossocket_new")
 
     def test_holds_do_not_stop_neighbours(self):
@@ -159,6 +159,11 @@ class Facts(unittest.TestCase):
         a = [rename_content(p, t.encode()) for p, t in self.SAMPLES]
         rename_content("x", b"cairn")  # unrelated call in between
         self.assertEqual([rename_content(p, t.encode()) for p, t in self.SAMPLES], a)
+
+    def test_census_sees_renamed_idents(self):
+        from census import renamed_idents
+        self.assertEqual(renamed_idents("x.rs", "use cairn_core; cairn_pull(); Cairn\nlet a = CAIRN_X; // rename:hold\n"),
+                         {"cairn_core"})
 
     def test_rename_text(self):
         self.assertEqual(rename_text("chore: bump Cairn, keep cairn_pull"), "chore: bump Nostos, keep cairn_pull")

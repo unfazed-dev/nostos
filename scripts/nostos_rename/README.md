@@ -37,7 +37,7 @@ decision 2b in `docs/ci/decisions.md`).
 | `cloud-cookie` | `cairn_session` |
 | `tauri-plugin` | crate `tauri-plugin-cairn`, plugin id, ACL ids, `plugins.cairn`. Tauri derives the ACL namespace from the crate name. |
 | `edge-function` | the deployed Supabase function `cairn-push` and its `supabase/functions/cairn-push/` dir. Its source renames like any other file. |
-| `atlet-engine-id` | atlet's persisted `Engine.cairn`/`cairnDirect` (under `apps/atlet/` only) |
+| `atlet-engine-id` | atlet's persisted `Engine.cairn`/`cairnDirect`: the enum anywhere, the string ids under `apps/atlet/` only |
 | `wasm-bindgen-symbol` | symbols baked into the committed `.wasm`, in its glue JS only |
 | `archive`, `git-pin`, `brand-metaphor`, `legal-entity` | `cairn-archive`, SHA-pinned git URLs, the word cairn as a noun, `Cairn Sync, Inc.` |
 | `held-path:*` | files kept byte-for-byte: `supabase/migrations/`, the rename docs, this directory |
@@ -49,7 +49,8 @@ decision 2b in `docs/ci/decisions.md`).
 cd scripts/nostos_rename
 python3 -m unittest
 python3 apply.py HEAD /tmp/renamed       # or a working-tree dir instead of a ref
-python3 census.py HEAD /tmp/renamed      # exits 1 on any unexplained survivor
+python3 census.py HEAD /tmp/renamed      # exits 1 on any unexplained survivor, or a migration-held
+                                         # name that is renamed elsewhere
 ```
 
 History. Run this on a fresh clone, never on the working clone. `R` must be
