@@ -149,16 +149,9 @@ Environment variables, from `crates/nostos-server/src/main.rs` +
 
 Nostos's server holds a privileged Postgres connection: **logical replication and write-back both
 bypass Row Level Security by construction.** Nostos's own predicates and tenant enforcement stand
-in for RLS on sync traffic. Two docs, and you want both before a multi-tenant deploy — their
-titles both read as "Security Model", so it is easy to read one and think you are done:
-
-- [`../SECURITY-MODEL.md`](../SECURITY-MODEL.md) — *conceptual*: why RLS cannot reach sync traffic
-  and what Nostos substitutes for it.
-- [`../SECURITY.md`](../SECURITY.md) — *operational*: the collapsed-write model, the least-privilege
-  `BYPASSRLS` role (**not** superuser), Supabase setup, and the RLS trade-off. This is the one with
-  the role setup you actually have to perform.
-
-(A third file, `SECURITY.md` at the repo root, is the vulnerability-reporting policy — unrelated.)
+in for RLS on sync traffic. Read [`SECURITY.md`](../../SECURITY.md) before a multi-tenant
+deploy: why RLS cannot reach sync traffic, the collapsed-write model, the least-privilege
+`BYPASSRLS` role (**not** superuser) you have to create, Supabase setup, and the RLS trade-off.
 
 ## CLI
 

@@ -549,7 +549,7 @@ treats any relay URL in the peer's address as dialable). iroh's built-in
 
 - Setup / install: [QUICKSTART.md](QUICKSTART.md).
 - Architecture / dependency rule: [ARCHITECTURE.md](ARCHITECTURE.md).
-- Security model: [SECURITY-MODEL.md](SECURITY-MODEL.md), [SECURITY.md](SECURITY.md).
+- Security model + vulnerability reporting: [SECURITY.md](../SECURITY.md).
 - Throughput claims / how to verify them: [BENCHMARK-METHODOLOGY.md](BENCHMARK-METHODOLOGY.md).
 - ADRs cited above: 0006 (license trust boundary), 0009 (ack-driven LSN
   resume), 0010 (sync auth), 0011 (server-enforced tenant predicates), 0013

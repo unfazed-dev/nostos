@@ -6,11 +6,11 @@
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)]() &nbsp;
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue) &nbsp;
 ![Rust](https://img.shields.io/badge/rust-1.98-orange) &nbsp;
-![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20Phase%203%2C%20v0.1%20prepared%2C%20launch%20gated-orange)
+![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20Phase%203%2C%20v0.2.0%20tagged%2C%20launch%20gated-orange)
 
 Nostos is a from-scratch, **Rust-native** sync engine that keeps an on-device SQLite database in sync with a server-side Postgres, **even when the device is offline.** It targets the empty market cell that no incumbent occupies today — *Apache-2.0 + Postgres-logical-replication + 2-way offline + first-class Flutter/RN/Web SDKs + Rust-fast + free self-host.*
 
-> **Status:** alpha — Phase 3 🚧, v0.1 prepared, launch gated on the operator (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). Not production-ready. The server fan-out moat is proven (2,618,601 ops/sec aggregate fan-out @ 1k clients, 0.00% drops — median of 3 passes, 2026-09-02, eval-only: FakeReplicator on loopback — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator, native client, and write-back v1 are shipped. Public launch is now gated on the Flutter+Supabase plug-and-play bar — see [`docs/plans/flutter-supabase-plug-and-play-launch.md`](docs/plans/flutter-supabase-plug-and-play-launch.md).
+> **Status:** alpha — Phase 3 🚧, v0.2.0 tagged, public launch gated on the operator (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). Not production-ready. The server fan-out moat is proven (2,618,601 ops/sec aggregate fan-out @ 1k clients, 0.00% drops — median of 3 passes, 2026-09-02, eval-only: FakeReplicator on loopback — see [`benches/results/RESULTS.md`](benches/results/RESULTS.md)), the real Postgres replicator, native client, write-back with tenant enforcement, and the Flutter / Swift / Kotlin / RN / .NET / Tauri / Capacitor / Node / web SDKs under [`sdk/`](sdk/) are shipped. Public launch is now gated on the Flutter+Supabase plug-and-play bar — see [`docs/plans/flutter-supabase-plug-and-play-launch.md`](docs/plans/flutter-supabase-plug-and-play-launch.md).
 
 ---
 
@@ -41,65 +41,65 @@ Full strategic brief: [`docs/STRATEGY.md`](docs/STRATEGY.md).
    Postgres / Supabase ──logical replication──▶ ┌────────────────────────────────────┐
                                                 │        nostos-server  (Rust)         │
                                                 │  replicator · predicate engine ·    │
-                                                │  fan-out router · metrics           │
+                                                │  fan-out router · write-back        │
                                                 └───────────┬─────────────────────────┘
-                                                  WebSocket │  (SSE read-path option)
+                                                  WebSocket │  (or iroh QUIC, ADR-0041)
                                                             ▼
         ┌────────────────────────────────────────────────────────────────┐
-        │                    nostos-core  (Rust crate)                     │
-        │  sync state machine · LWW + CRDT-field merge · cursors (LSN)    │
-        │            dynamic predicates · conflict resolution              │
-        │                  ┌──────────────────────┐                       │
-        │                  │   Storage trait       │                       │
-        │                  └──────────────────────┘                       │
-        └─────┬────────────────┬──────────────────┬──────────────────┬─────┘
+        │   nostos-core (apply engine · LSN checkpoint · outbox ·        │
+        │   Storage trait)  ◄── nostos-client (rusqlite + tokio)         │
+        └─────┬────────────────┬──────────────────┬──────────────────┬───┘
               │ FRB            │ UniFFI           │ wasm-bindgen     │ napi-rs
-          Flutter          iOS/Android/RN         Web/WASM          Node/Electron
-        (sqlite3_         (op-sqlite on RN,      (sqlite-wasm      (better-sqlite3)
-         flutter_libs)      native SQLite)        + OPFS)
+          Flutter        Swift / Kotlin /      Web / WASM         Node / Electron
+                          RN / .NET         (nostos-ffi-wasm,
+                                             sqlite-wasm + OPFS)
 ```
 
-**The repo you're looking at implements the server, the native client, the WASM bridge, and the benchmark harness.**
+Every native SDK wraps `nostos-client`'s `SyncClient<SqliteStorage>`; the web
+SDK wraps `nostos-ffi-wasm`. The Tauri plugin rides the native client; the
+Capacitor plugin runs the web SDK in its webview.
+
+**This repo holds the server, the native client, the WASM bridge, the SDKs, the push daemon, the `nostos` CLI, the Cloud control plane, and the benchmark harness.**
 
 ---
 
 ## Repository layout — Ports & Adapters (hexagonal) + DDD
 
-| Crate | Role | Depends on |
+| Crate | Role | May depend on |
 |---|---|---|
 | `nostos-domain` | pure types + invariants (Predicate, Lsn, events). Zero I/O, zero async | — |
 | `nostos-application` | use-cases + port traits (FanOutService, SessionStore, ReplicatorStream, SyncAuth) | domain |
-| `nostos-infra` | adapters: PgReplicator (feature `pg`), FakeReplicator, WS transport, wire codec, auth | application, domain |
-| `nostos-server` | composition root — the axum binary | all above |
+| `nostos-infra` | adapters: PgReplicator (feature `pg`), FakeReplicator, WS transport, wire codec, auth, write-back, push senders | application, domain |
+| `nostos-server` | composition root — the axum binary | domain, application, infra, license |
 | `nostos-core` | client apply engine + Storage trait. WASM-clean: no tokio, no SQLite | domain |
 | `nostos-client` | native client: SqliteStorage (rusqlite) + tokio SyncClient | core, domain, infra |
-| `nostos-ffi-wasm` | wasm-bindgen bridge over nostos-core | core |
+| `nostos-ffi-wasm` | wasm-bindgen bridge over nostos-core | core, domain |
 | `nostos-bench` | throughput harness — honest numbers (drops reported, env recorded) | domain, application, infra |
-| `nostos-cloud` | control plane: auth / Stripe / licensing (separate binary) | domain |
+| `nostos-license` | HMAC-signed offline license claims | domain |
+| `nostos-push` | standalone push daemon `nostos-pushd` (ADR-0038) | domain, infra |
+| `nostos-cli` | the `nostos` CLI — init, dev, doctor, deploy, rules, push | domain, infra |
+| `nostos-cloud` | control plane: accounts, API keys, Stripe billing, license minting (separate binary) | domain, infra, license |
 
 ```
 nostos/
-├── crates/
-│   ├── nostos-domain/         # PURE: types + invariants. Zero I/O, zero async, zero framework.
-│   ├── nostos-application/    # Use-cases + PORT TRAITS (interfaces). Depends only on domain.
-│   ├── nostos-infra/          # ADAPTERS: pg logical replication, tokio router, ws transport.
-│   ├── nostos-server/         # Composition root (binary). Wires adapters → ports.
-│   ├── nostos-core/           # Client apply engine + Storage trait (WASM-clean).
-│   ├── nostos-client/         # Native client: rusqlite Storage + tokio SyncClient.
-│   ├── nostos-ffi-wasm/       # wasm-bindgen bridge over nostos-core (web/Worker).
-│   ├── nostos-bench/          # Throughput benchmark harness.
-│   └── nostos-cloud/          # Control plane: auth / Stripe / licensing (separate binary).
-├── docs/                     # Architecture, ADRs, roadmap, strategy.
+├── crates/                   # The twelve Rust crates above.
+├── sdk/                      # Flutter, Swift, Kotlin, React Native, .NET, Tauri, Capacitor, Node, web.
+├── web/                      # SvelteKit landing + admin (static export).
+├── apps/atlet/               # Atlet — benchmark-first app exercising every SDK against Supabase.
+├── supabase/                 # schema.sql + the `cairn-push` Edge Function (held name).
+├── docs/                     # Architecture, ADRs, roadmap, strategy, API reference.
 ├── docker/                   # Postgres for the real replicator.
+├── deploy/ · packaging/      # Deploy guide; Homebrew + release packaging.
+├── scripts/                  # CI checks (scripts/check.sh) and helpers.
 ├── benches/results/          # Benchmark output (RESULTS.md + chart).
-└── Makefile                  # Founder's control panel.
+└── Makefile                  # Founder's control panel (`make help`).
 ```
 
 **Dependency rule (enforced by structure + clippy):**
 
 ```
-   bootstrap ─► application ─► domain ◄─ infrastructure
-                              (adapters implement ports)
+   composition roots ─► infrastructure ─► application ─► domain
+                        (adapters implement the application's ports)
 ```
 
 The domain layer knows nothing about tokio, postgres, or axum. The application layer defines *ports* (`ReplicatorStream`, `EventSink`, `SessionStore`) — the infrastructure layer provides *adapters* that implement those ports. This is what lets the benchmark swap a `FakeReplicator` in for the real `PgReplicator` without touching a line of domain or use-case code.
@@ -125,7 +125,7 @@ make setup
 # 2. Run the test suite
 make test
 
-# 3. Run the Week-1 benchmark — the headline chart (no Postgres needed)
+# 3. Run the fan-out benchmark — the headline chart (no Postgres needed)
 make bench            # → benches/results/RESULTS.md
 ```
 
@@ -151,7 +151,7 @@ make dev-stack
 ```
 
 This is the **real** path: `docker compose up` brings up Postgres 16 with
-`wal_level=logical` (host port `5433`, db/user/pass `nostos`, publication
+`wal_level=logical` (host port `5433`, db/user/pass `cairn` — pre-rename names, held; publication
 `cairn_pub` + `tasks` table from `docker/pg-init`), the target waits for the
 publication to exist, then runs `nostos-server` with
 `NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn`.
@@ -186,13 +186,13 @@ Vite WS proxy is wired. Ctrl-C stops the dev server.
 > Postgres logical replication; `reactive_scroll` is the fastest way to see the
 > native client + reconnect/resume in action.
 
-> **The Week-1 benchmark needs no Postgres.** `make bench` drives a synthetic
+> **The fan-out benchmark needs no Postgres.** `make bench` drives a synthetic
 > `FakeReplicator` through the *real* fan-out pipeline to isolate the server's
 > throughput ceiling.
 
 ---
 
-## The Week-1 deliverable
+## The fan-out benchmark
 
 A benchmark that answers: ***"How fast can Nostos's server fan Postgres-style replication events out to thousands of concurrent WebSocket clients?"*** (See [`benches/results/RESULTS.md`](benches/results/RESULTS.md).)
 
@@ -200,7 +200,7 @@ The harness:
 1. Spawns **N** in-process WebSocket client tasks (1k / 5k / 10k).
 2. Each client subscribes with a `Predicate`.
 3. A `FakeReplicator` generates synthetic `RowOp` events into the real router.
-4. The router evaluates each event against live predicates and pushes to matching sessions through **bounded per-client channels with explicit backpressure** (slow clients are dropped, never silently OOM the server).
+4. The router evaluates each event against live predicates and pushes to matching sessions through **bounded per-client channels with explicit backpressure** (a slow client's events are conflated, then shed and counted — never a silent OOM).
 5. We measure **sustained ops/sec, drop rate, p99 client latency.**
 
 Output: `benches/results/RESULTS.md` + a JSON artifact + an SVG chart. See [`docs/BENCHMARK-METHODOLOGY.md`](docs/BENCHMARK-METHODOLOGY.md).
@@ -229,12 +229,12 @@ titled `waitlist` to get in line for the design-partner beta.
 
 ## Security
 
-See [`SECURITY.md`](SECURITY.md) for vulnerability reporting, and [`docs/SECURITY-MODEL.md`](docs/SECURITY-MODEL.md) for why Nostos's server-enforced predicates — not Postgres RLS — are the authorization layer for sync traffic.
+See [`SECURITY.md`](SECURITY.md) for vulnerability reporting and the security model: why Nostos's server-enforced predicates — not Postgres RLS — are the authorization layer for sync traffic.
 
 ---
 
 ## Contributing
 
-Pre-1.0. The architecture and strategy are pinned; the code is alpha (Phase 3 🚧 — v0.1 prepared, launch gated on the operator). If you want to follow along, watch [`docs/ROADMAP.md`](docs/ROADMAP.md). Once v0.1 ships, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Pre-1.0. The architecture and strategy are pinned; the code is alpha (Phase 3 🚧 — v0.2.0 tagged, launch gated on the operator). If you want to follow along, watch [`docs/ROADMAP.md`](docs/ROADMAP.md); to contribute, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-> *A cairn is a pile of stones that marks a trail. When you're offline and lost, it's how you find your way home. **Sync checkpoints (LSNs) are our cairns** — durable markers that mean your data always finds its way back to the source of truth, across devices, through outages, around the world.*
+> *Nostos (formerly Cairn) is the Greek word for the homecoming. **Sync checkpoints (LSNs) are how your data gets home** — durable markers that mean it always finds its way back to the source of truth, across devices, through outages, around the world.*

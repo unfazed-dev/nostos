@@ -47,7 +47,7 @@ nostos's headline DX edge is **zero-backend-write**: the server's `PgWriteBack`
 applies client writes *directly* to the source Postgres. The app never talks to
 Postgres and never implements `uploadData`. The server itself runs the SQL, so it
 owns the trust boundary (table allowlist → column regex → bind parameters) on top
-of JWT auth and tenant scoping. See `docs/SECURITY.md`.
+of JWT auth and tenant scoping. See `SECURITY.md`.
 
 <Mermaid id="write-flow" caption="A toggle: the app sends one write; the server applies it and the row echoes back through nostos's own replication." source={`sequenceDiagram
   participant App as Flutter app
@@ -86,7 +86,7 @@ NOSTOS_WRITE_TABLES=tasks \\
 Connect as a **least-privilege role**, never the `postgres` superuser. The demo
 role (`docker/pg-init/02-nostos-role.sql`) is `REPLICATION + BYPASSRLS + GRANT` on
 synced tables only — it can INSERT/UPDATE/DELETE but cannot `DROP TABLE`. Full
-role + Supabase migration SQL: `docs/SECURITY.md`. nostos writes **bypass Supabase
+role + Supabase migration SQL: `SECURITY.md`. nostos writes **bypass Supabase
 RLS** because it connects as `BYPASSRLS` and applies its own authz; read the RLS
 trade-off in `docs/STRATEGY.md` before adopting on an RLS-heavy project.
 
@@ -163,7 +163,7 @@ worker) needs the push.
 
 <Checklist id="adopter-checklist" items={[
   { id: "pub", label: "CREATE PUBLICATION cairn_pub FOR TABLE <synced tables>" },
-  { id: "role", label: "CREATE ROLE cairn_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser", note: "See docs/SECURITY.md for the Supabase SQL." },
+  { id: "role", label: "CREATE ROLE cairn_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser", note: "See SECURITY.md for the Supabase SQL." },
   { id: "writetables", label: "Set NOSTOS_WRITE_TABLES to every table clients may write (empty default = none)" },
   { id: "connect", label: "Point nostos-server at Supabase (direct IPv6, or WARP relay for IPv4-only egress)", note: "The pooler cannot carry logical replication — use the direct connection." },
   { id: "verify", label: "Verify writes with a DIRECT psql/libpq read, never the dashboard", note: "Refresh the Table Editor manually; it does not live-update." },

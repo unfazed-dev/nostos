@@ -16,15 +16,16 @@ docs/BENCHMARK-METHODOLOGY.md. (Week-1 baseline was 142k, preserved as historica
 |---|---|---|
 | nostos-domain | pure types + invariants (Predicate, Lsn, events). Zero I/O, zero async | nothing |
 | nostos-application | use-cases + port traits (FanOutService, SessionStore, ReplicatorStream, SyncAuth) | domain |
-| nostos-infra | adapters: PgReplicator (feature `pg`), FakeReplicator, WS transport, wire codec, auth | application, domain |
-| nostos-server | composition root — the axum binary | all above |
+| nostos-infra | adapters: PgReplicator (feature `pg`), FakeReplicator, WS transport, wire codec, auth, write-back, oplog, push senders | application, domain |
+| nostos-server | composition root — the axum binary | domain, application, infra, license |
 | nostos-core | client apply engine + Storage trait. WASM-clean: no tokio, no SQLite | domain |
 | nostos-client | native client: SqliteStorage (rusqlite) + tokio SyncClient | core, domain, infra |
-| nostos-ffi-wasm | wasm-bindgen bridge over nostos-core | core |
+| nostos-ffi-wasm | wasm-bindgen bridge over nostos-core | core, domain |
 | nostos-bench | throughput harness — honest numbers (drops reported, env recorded) | domain, application, infra |
 | nostos-license | HMAC-signed offline license claims — minted by nostos-cloud, verified by nostos-server; keeps crypto deps out of domain | domain |
 | nostos-push | standalone push daemon nostos-pushd (composition root, ADR-0038) | domain, infra |
-| nostos-cli | the `nostos` CLI — rules init/edit/check, dev/doctor/deploy for a sync backend | domain, infra |
+| nostos-cli | the `nostos` CLI — init, dev, doctor, deploy, link, pull, gen, rules init/edit/check, push | domain, infra |
+| nostos-cloud | control plane (bin `nostos-cloud`): accounts, projects, API keys, Stripe billing, license minting | domain, infra, license |
 
 `unsafe` is forbidden workspace-wide (all Cargo workspace members). The one
 exception is machine-generated FFI glue in the non-member crate

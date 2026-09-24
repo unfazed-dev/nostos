@@ -30,12 +30,11 @@ is pending.
 
 ## Local dev (works today)
 
-Prerequisites: a Rust toolchain (`rustup show` in this repo), Flutter ≥3.44
+Prerequisites: a Rust toolchain (`rustup show` in this repo), Flutter ≥3.47
 with native assets enabled (`flutter config --enable-native-assets`, one-time
 per machine), and a Postgres with `wal_level = logical` (the repo's `docker
 compose -f docker/docker-compose.yml up -d postgres` gives you one
-pre-configured — see `fixtures/flutter/todo/tool/nostos_live_up.sh` for the
-scripted version of everything below).
+pre-configured; its db/user/password are the held pre-rename name `cairn`).
 
 | Step | Command | Time budget |
 |---|---|---|
@@ -43,7 +42,7 @@ scripted version of everything below).
 | 2. Create your table | `CREATE TABLE todos (id text primary key, user_id text not null, title text not null, done boolean not null default false, created_at timestamptz not null default now());` — `nostos init` creates the **publication**, not your tables | 0:15–0:45 |
 | 3. `nostos init` | `cargo run -p nostos-cli -- init --db-url postgresql://cairn:cairn@localhost:5433/cairn --tables todos --write-tables todos --tenant-column user_id` | 0:45–1:15 |
 | 4. `nostos dev` | `cargo run -p nostos-cli -- dev` — prints the `ws://` URL + a copy-paste Dart snippet | 1:15–1:45 (plus first-run Rust compile — see the timing note) |
-| 5. Add the SDK | `flutter pub add nostos_flutter` (pub.dev, once W6 publishes it — today: a `path:` dependency on `sdk/nostos_flutter`, see `fixtures/flutter/todo/pubspec.yaml`) | 1:45–2:15 |
+| 5. Add the SDK | `flutter pub add nostos_flutter` (pub.dev, once W6 publishes it — today: a `path:` dependency on `sdk/nostos_flutter`, see `sdk/nostos_flutter/example/pubspec.yaml`) | 1:45–2:15 |
 | 6. ~10 lines of Dart | see below | 2:15–3:00 |
 
 With no `nostos_rules.toml` present, step 4's `nostos dev` runs `sync_mode =
@@ -79,10 +78,9 @@ wiring active until a JWT secret exists), `token` is ignored and every
 client sees every row — fine for solo local dev, wrong for anything shared.
 To exercise real per-user tenant isolation locally (what the Supabase track
 gets for free from RLS-adjacent enforcement — see
-`docs/SECURITY-MODEL.md`), mint an HS256 JWT against the dev secret `nostos
-dev` picked up from `.env`'s `NOSTOS_SUPABASE_JWT_SECRET` — see
-`fixtures/flutter/todo/tool/mint_jwt.sh` for a working example (`sub` becomes
-both account id and tenant id).
+[`SECURITY.md`](../SECURITY.md)), mint an HS256 JWT against the dev secret `nostos
+dev` picked up from `.env`'s `NOSTOS_SUPABASE_JWT_SECRET` (`sub` becomes
+both account id and tenant id; a client-supplied `tenant_id` claim is ignored).
 
 **Wire types** (ADR-0019): `watch()` rows carry native JSON types — a
 Postgres `boolean` is a Dart `bool`, `int2`/`int4` are `int`, and so on. Two
@@ -94,99 +92,25 @@ decode with `base64Decode`). Timestamps arrive as RFC 3339 UTC strings
 
 ### The full working example
 
-`fixtures/flutter/todo` is a real Flutter app with three interchangeable
-backends selected purely by env — mock (default, no setup), Supabase-direct
-(`SUPABASE_URL`/`SUPABASE_ANON_KEY`), and Nostos "local live"
-(`NOSTOS_WS_URL`/`NOSTOS_TOKEN`, see `lib/env.dart`). The Nostos-backed
-repository is `lib/infra/nostos_todo_repository.dart` — read it as the
-canonical ~80-line example of wiring `nostos_flutter` into a real app
-(subscribe once, map rows to a domain model, write without a `user_id` in
-the payload — the server force-stamps it, ADR-0018).
+[`sdk/nostos_flutter/example`](../sdk/nostos_flutter/example/README.md) is a
+real offline-first, multi-table Flutter app (a provider dashboard: rates,
+invoices, appointments, chat) wired to `nostos-server` over `make dev-stack` or
+a Supabase/cloud Postgres — its README has both run paths. Its
+`integration_test/nostos_server_test.dart` is the W4 acceptance test: connect →
+subscribe → fan-out → `watch()` against a real `nostos-server` binary.
 
-Run the whole thing yourself:
+### History: the 2026-07-12 live proof
 
-```sh
-fixtures/flutter/todo/tool/nostos_live_up.sh    # docker PG + nostos init + nostos dev, idempotent
-cd fixtures/flutter/todo
-flutter test integration_test/nostos_live_test.dart -d macos   # the W5 proof — see below
-fixtures/flutter/todo/tool/nostos_live_down.sh
-```
-
-### What the proof actually showed (2026-07-12) — a launch-blocking finding
-
-> **Update (2026-07-20): the root causes documented below were addressed in
-> code after this section was written.** The three cited causes are all
-> resolved at the code level: (1) the missed-commit window — `subscribe_changes()`
-> now precedes `emit_snapshot()` at `sdk/nostos_flutter/rust/src/api/nostos.rs:307-322`
-> (invariant `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
-> `client.rs:1097`), and the watch pump re-snapshots on every applied batch
-> (self-healing on lag); (2) the "no idle/time-based fallback in `feed()`" gap —
-> `ApplyEngine::feed` now has a time-bounded flush seam (`has_pending()` +
-> `flush_quiesce`, 50 ms default) in `crates/nostos-core/src/apply.rs:194-219`;
-> (3) `idle_timeout` is now a surfaced `SyncClientConfig` knob
-> (`crates/nostos-client/src/client.rs:90-200`), not a hard-baked `None` — the
-> old `nostos.rs:145` citation is stale. The 2026-07-12 `nostos_live_test.dart`
-> run that follows is preserved as the historical repro record. **Empirical
-> re-verification (re-running `nostos_live_test.dart` as the W5 stranger step)
-> is still pending** and remains the actual launch gate — code-level evidence
-> is not a substitute for the integration run.
-
-`integration_test/nostos_live_test.dart` set out to drive two real `Nostos`
-instances (user-a / user-b, distinct HS256 JWTs) through
-`NostosTodoRepository` against a real `nostos-server` + real docker Postgres.
-While building it, **this uncovered a real, previously-untested bug in
-`nostos_flutter`/`nostos-client`** — not a fixture bug, and not something this
-page can fix (out of scope: `crates/`, `sdk/`). Full detail, source
-citations, and reproduction are in that test file's header comment; summary:
-
-- **The bug:** `nostos_flutter`'s `watch()` can permanently fail to reflect a
-  write to a real-Postgres-backed table if nothing else happens on that
-  connection afterward — the single most common shape for a todo app (one
-  user, one action, then quiet). Root cause:
-  `crates/nostos-core/src/apply.rs`'s `ApplyEngine::feed` buffers frames
-  sharing a transaction id and only flushes (which is what feeds `watch()`)
-  when a SUBSEQUENT frame with a different/absent txn id arrives — there's
-  no idle/time-based fallback in `feed()` itself. The one safety net that
-  exists, `SyncClientConfig::idle_timeout`, is explicitly set to `None` in
-  `sdk/nostos_flutter/rust/src/api/nostos.rs:145`. A second, sharper symptom
-  reproduced twice: an isolated FIRST connection's write may never even
-  reach Postgres at all (not just fail to reflect via `watch()`) — consistent
-  with the outbox-flush trigger also being gated on incoming traffic on that
-  same connection.
-- **Why it was invisible until now:** `nostos_flutter`'s own passing example
-  test uses a continuous synthetic `FakeReplicator` stream (always more
-  frames coming, so batches close instantly) with no auth. `nostos-client`'s
-  own test suite never exercises the real `PgReplicator` at all. The
-  `nostos-infra` e2e suite that DOES prove the real-PG write→replicate→deliver
-  round trip (`NOSTOS_E2E_PG=1 cargo test -p nostos-infra --features pg --test
-  e2e_pg_writeback`, 8/8 passing) drives a raw WebSocket client, never
-  `SyncClient`. This exact combination — `SyncClient` + real `PgReplicator`
-  + a realistic single-user usage pattern — had never been exercised
-  anywhere in this repo before this fixture.
-- **What's still proven, independent of the bug** (verified with a raw
-  `dart:io` WebSocket client and direct Postgres queries, both channels this
-  bug doesn't touch):
-  - The server, real Postgres replication, and HS256 auth are all healthy —
-    a raw client receives a replicated frame within ~3s of a direct SQL
-    insert.
-  - **Read isolation (ADR-0011):** subscribing to `todos` with no `where`
-    clause, a raw client authenticated as user-a never receives user-b's row
-    and vice versa.
-  - **Write isolation (ADR-0018):** user-a's attempted upsert onto user-b's
-    existing `todos` row id does not change the row in Postgres — verified
-    by direct `SELECT`, which is also the ONLY way to observe this: the SDK
-    has no client-visible signal for a server-rejected write at all
-    (`WriteResult{ok:false}` just retries forever, silently — a second,
-    separate SDK gap, see below).
-  - `nostos.write()` returns in low double-digit milliseconds regardless (the
-    local-outbox durability contract holds) — it's whether the write ever
-    reaches the server, and whether the client ever reflects a synced row
-    back, that's broken.
-
-Run `flutter test integration_test/nostos_live_test.dart -d macos` yourself
-for current pass/fail — this page is not a substitute for running the suite,
-and the scenarios that depend on the broken path are marked `skip:` with the
-reason inline rather than silently omitted.
+The original todo fixture (`fixtures/flutter/todo`, removed in `2489ffb`; see
+git history) drove two real `Nostos` instances with distinct HS256 JWTs
+against a real `nostos-server` + docker Postgres. It proved read isolation
+(ADR-0011) and write isolation (ADR-0018), and it found a launch-blocking
+`watch()` write-miss: `ApplyEngine::feed` only flushed a transaction batch
+when a later frame arrived. The root causes were fixed in code 2026-07-20 —
+`subscribe_changes()` now precedes `emit_snapshot()`, `ApplyEngine` gained
+`has_pending()`/`flush()` driven by `SyncClientConfig::flush_quiesce` (50 ms
+default), and `idle_timeout` is a `SyncClientConfig` knob. Empirical re-verification is the W5 stranger test
+below.
 
 ### Timing dry-run (author's machine, NOT the stranger test)
 
@@ -249,7 +173,7 @@ author present), which stays a launch-blocking TODO.
    against a genuine Supabase-issued token end-to-end.
 7. RLS does **not** apply to Nostos's replication or write-back traffic —
    Nostos's server-side tenant predicates ARE the authorization layer for sync
-   traffic. Read `docs/SECURITY-MODEL.md` before treating your existing RLS
+   traffic. Read [`SECURITY.md`](../SECURITY.md) before treating your existing RLS
    policies as sufficient.
 
 ## Known gaps (read before you build on this)
@@ -257,9 +181,10 @@ author present), which stays a launch-blocking TODO.
 - **`watch()` write-miss / first-write-non-reach (originally flagged
   LAUNCH-BLOCKING 2026-07-12): root causes addressed in code 2026-07-20**
   (subscribe-before-emit + `flush_quiesce` + `idle_timeout` knob — see the
-  dated update under "What the proof actually showed" above). **Status pending
-  empirical re-verification via the W5 stranger test** (`nostos_live_test.dart`),
-  which is the real launch gate — not yet re-run. The `nostos init
+  "History: the 2026-07-12 live proof" above). **Status pending empirical
+  re-verification via the W5 stranger test**, which is the real launch gate —
+  not yet run (the todo fixture's `nostos_live_test.dart` went with the
+  fixture). The `nostos init
   --write-tables <tables>` flag at step 3 is what enables writes (the server
   allowlist defaults empty, ADR-0013); omitting it makes writes silently
   no-op, so always pass it.

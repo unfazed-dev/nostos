@@ -39,20 +39,25 @@ setup, and `src/lib.rs` for the crate-level docs.
 ## Where this fits
 
 `nostos-client` is the **native** client (tokio + `rusqlite` — not WASM-portable).
-The cross-platform FFI SDKs bind the WASM-clean `nostos-core` apply engine, or
-this crate directly:
+Every native SDK wraps this crate's `SyncClient<SqliteStorage>`; the web SDK
+binds the WASM-clean `nostos-core` apply engine instead:
 
-| Platform | SDK | Bridge | Status |
-|---|---|---|---|
-| Rust (this crate) | `nostos-client` | native | shipped |
-| Flutter | `sdk/nostos_flutter` | flutter_rust_bridge | shipped |
-| Node | `sdk/nostos_node` | napi-rs | scaffold (loads, offline-only) |
-| Web/WASM | `crates/nostos-ffi-wasm` | wasm-bindgen | shipped |
+| Platform | SDK | Bridge |
+|---|---|---|
+| Rust (this crate) | `nostos-client` | native |
+| Flutter | `sdk/nostos_flutter` | flutter_rust_bridge |
+| Swift / Kotlin / .NET | `sdk/nostos_swift`, `sdk/nostos_kotlin`, `sdk/nostos_dotnet` | UniFFI |
+| React Native | `sdk/nostos_react_native` | TurboModule over the Swift/Kotlin UniFFI bindings (ADR-0020) |
+| Tauri | `sdk/nostos_tauri` | Tauri 2 plugin |
+| Node | `sdk/nostos_node` | napi-rs |
+| Web/WASM, Capacitor | `sdk/nostos_web` over `crates/nostos-ffi-wasm`; `sdk/nostos_capacitor` runs the web SDK in the webview | wasm-bindgen |
+
+Per-SDK status lives in each SDK's README.
 
 `nostos-core` (the apply engine + `Storage` / `Outbox` traits) is the shared seam;
 adding a platform SDK is a thin FFI bridge over it (ADR-0015).
 
 ## Status
 
-Shipped + verified. Not yet on crates.io — consume via git/path dep until the
-v0.2 publish. License: Apache-2.0.
+Shipped + verified. Not yet on crates.io — consume via git/path dep.
+License: Apache-2.0.
