@@ -14,7 +14,8 @@
 //! **Why not a real Postgres for Week 1?** A real PG at ~60 txn/sec would
 //! *itself* be the bottleneck — we'd be benchmarking PG, not Nostos. The fake
 //! generates faster than the router can push, so the measured ceiling is the
-//! router's. See `WEEK-01-PLAN.md`.
+//! router's. See `docs/WEEK-01-PLAN.md` (removed in cleanup; see git
+//! history).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

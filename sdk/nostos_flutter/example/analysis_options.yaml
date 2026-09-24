@@ -1,4 +1,5 @@
-# Reference-only archive — excluded from analysis. See archive/README.md.
+# Reference-only archive — excluded from analysis. See archive/README.md
+# (removed in cleanup; see git history).
 #
 # Nothing in archive/ is built, tested, linted, or run. This example was moved
 # out of sdk/nostos_flutter/ on 2026-07-30, severing its `nostos_flutter: ../`

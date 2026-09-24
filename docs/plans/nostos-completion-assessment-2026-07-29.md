@@ -251,7 +251,7 @@ should stop being scored as one.
 > reported `NOSTOS_WRITE_TABLES` as missing from the quickstart; it is wired there via
 > `nostos init --write-tables` (§1.1, C9). Both original claims came from a stale 2026-07-20
 > plan. **Read plan docs as history, not state.**
-**Supersedes:** the *status sections* of `nostos-next-after-oplog-epoch-2026-07-20.md`,
+**Supersedes:** the *status sections* of `nostos-next-after-oplog-epoch-2026-07-20.md` (removed in cleanup; see git history),
 `launch-readiness-gap-list.md`, `sdk-parity-final-three.md`, `sdk-live-e2e-consolidation.md`.
 Those plans' **designs** remain valid; their **"COMPLETE" claims are re-scored here**
 against a fresh run. This document is the single stage-of-project answer.
@@ -575,7 +575,7 @@ only what the orchestrator verified directly.
 | Claim | Where | Reality |
 |---|---|---|
 | "Outcome — COMPLETE (10/10, 2026-07-12)" | `sdk-parity-final-three.md` | **Stale**, same reason |
-| "#1 ranked: add `NOSTOS_WRITE_TABLES` to QUICKSTART, ~2 lines" | `nostos-next-after-oplog-epoch-2026-07-20.md:35` | **The plan itself is stale** — QUICKSTART wires writes via `nostos init --write-tables` (`:42,:252`). Action already unnecessary when written; I re-derived it by trusting the plan (§1.1) |
+| "#1 ranked: add `NOSTOS_WRITE_TABLES` to QUICKSTART, ~2 lines" | `nostos-next-after-oplog-epoch-2026-07-20.md:35` (removed in cleanup; see git history) | **The plan itself is stale** — QUICKSTART wires writes via `nostos init --write-tables` (`:42,:252`). Action already unnecessary when written; I re-derived it by trusting the plan (§1.1) |
 | "writes silently no-op" (premise for the above) | same, line 25 | **False as stated** — server rejects loudly (`transport.rs:786`), quickstart configures the allowlist. The *real* hole is the client swallowing `WriteResult{ok:false}` (§1.1, §6.1) |
 | Moat numbers | `CLAUDE.md` vs `RESULTS.md` | Known drift, carried from 2026-07-20; docs-only fix (A7) |
 
