@@ -60,7 +60,7 @@ class Holds(unittest.TestCase):
         ("push-payload", None, "{cairn: 'ring'} data['cairn'] == 'ring' cairn_route"),
         ("push-channel", None, 'CHANNEL_ID = "cairn"'),
         ("pg-sql-literal", None, "'cairn' || 'cairn:'"),
-        ("pg-credential", None, "POSTGRES_USER: cairn\npsql -U cairn -d cairn\ncreate ROLE cairn"),
+        ("pg-credential", None, "POSTGRES_USER: cairn\npsql -U cairn -d cairn\ncreate ROLE cairn\nthe `cairn` superuser, `cairn:cairn` creds (cairn/cairn)"),
         ("pg-dsn", None, "postgres://cairn:cairn@localhost/cairn"),
         ("client-storage", None, "cairn_outbox cairn.db cairn_direct.sqlite cairn-pushd.db "
                                  "cairn:opfs-sahpool cairn:checkpoint:t cairn:experimental:x"),

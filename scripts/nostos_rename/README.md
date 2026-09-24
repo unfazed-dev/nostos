@@ -30,7 +30,7 @@ decision 2b in `docs/ci/decisions.md`).
 |---|---|
 | `metric` | Prometheus names `cairn_*_total`, … |
 | `pg-object`, `pg-schema`, `pg-sql-literal` | Postgres functions, tables, triggers, publication/slot, schema `cairn.*`, SQL literals `'cairn'`/`'cairn:…'` |
-| `pg-credential`, `pg-dsn` | db, user and password `cairn` (in env vars, `-U`/`-d`, roles, and the user/password/db parts of `postgres://` URLs) |
+| `pg-credential`, `pg-dsn` | db, user and password `cairn` (in env vars, `-U`/`-d`, roles, the user/password/db parts of `postgres://` URLs, and prose naming the `cairn` superuser) |
 | `client-storage` | on-device SQLite files and tables, OPFS pool, checkpoint and localStorage keys |
 | `wire` | the Realtime topic `realtime:cairn:`, ALPN `cairn/sync/1`, `cairn:multitab`, `X-Cairn-Source` |
 | `push-payload`, `push-channel` | the `{cairn:'ring'}` payload, `cairn_route`, the Android channel id |

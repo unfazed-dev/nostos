@@ -47,6 +47,7 @@ HOLDS = [
     ("pg-credential", r"(?:\b(?:POSTGRES_(?:USER|PASSWORD|DB)|PG(?:USER|PASSWORD|DATABASE)"
                       r"|user|password|dbname|database)\b|(?<!\w)-[Ud])[\s:=,\"']{1,4}cairn(?![\w-])"),
     ("pg-credential", r"(?i:\bROLE\s+)cairn(?![\w-])"),
+    ("pg-credential", r"(?<=`)cairn(?=`(?:/`postgres`)? superuser)|`cairn:cairn`|\(cairn/cairn\)"),  # prose
     ("client-storage", _NB + r"cairn_(?:data|meta|outbox)(?:_\w+)?(?![A-Za-z0-9])"),
     ("client-storage", r"(?<![\w-])cairn\.(?:db|sqlite)\b|" + _NB + r"cairn_direct\.sqlite\b|cairn-pushd\.db\b"),
     ("client-storage", r"cairn:(?:opfs-sahpool|checkpoint:|experimental:)"),
