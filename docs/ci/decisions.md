@@ -35,3 +35,27 @@ question; change any of them and the generated files follow.
 | 12 | retro summaries | a small Python generator in git-cliff's grouping (commit type → section) instead of git-cliff | git-cliff isn't installed; one script, no new tool |
 | 13 | branching | worktrees (the arxa default) | skill default; the pre-push hook enforces it |
 | 14 | retro base | the retro `main` starts at an empty root commit dated just before the first real commit, so every real commit lands through a PR | otherwise the first commit would sit on `main` outside any PR |
+
+## Tag map (SSOT)
+
+The one list of PR-title stage tags. A title starts with one or more tags,
+the first being the primary stage: `[arxa-cicd][arxa-builder] <what changed>`.
+Row 3b says which tag the files touched call for. `scripts/check.sh pr-title`
+reads its allowlist from this table. `.github/pull_request_template.md`
+carries an identical copy, and the same check warns when the two drift.
+
+| tag | skill | stage |
+|---|---|---|
+| `[arxa-orchestrator]` | arxa-orchestrator | Ø: front door, project init, stage dispatch |
+| `[arxa-intake]` | arxa-intake | 1: client requirements into validated intake answers |
+| `[arxa-story-mapper]` | arxa-story-mapper | 0: Epic → Feature → Story map, the brief |
+| `[arxa-moodboarder]` | arxa-moodboarder | 0: reference-app moodboard |
+| `[arxa-designer]` | arxa-designer | 2: design; here ADRs, plans, research, ARCHITECTURE/ROADMAP |
+| `[arxa-scaffolder]` | arxa-scaffolder | 3: frozen design into the per-surface file set |
+| `[arxa-builder]` | arxa-builder | 4: implementation; here everything row 3b maps nowhere else |
+| `[arxa-tester]` | arxa-tester | 5: tests, benches, e2e, conformance |
+| `[arxa-reviewer]` | arxa-reviewer | 6: pre-release QC gate |
+| `[arxa-deployer]` | arxa-deployer | 9: releases and deploys; here Docker, fly, deploy/, packaging/ |
+| `[arxa-lens]` | arxa-lens | 8: screenshots and visual evidence |
+| `[arxa-lint]` | arxa-lint | 7: docs-vs-code consistency |
+| `[arxa-cicd]` | arxa-cicd | 10: CI/CD; here .github/, scripts/check.sh, Makefile, deny.toml |
