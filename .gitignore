@@ -81,3 +81,6 @@ __pycache__/
 *.pyc
 # nostos link output: config.json carries the project anon key
 .nostos/
+
+# arxa worktree law: one task = one worktree at .worktrees/<name>
+.worktrees/
