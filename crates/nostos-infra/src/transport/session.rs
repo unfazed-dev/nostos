@@ -162,7 +162,7 @@ pub(crate) async fn run_session<S, E>(
     let exp_for_writer = Arc::clone(&exp_fired);
 
     // ADR-0031 D3: live-session re-scoping on a rules reload. `rules_rx` only
-    // wakes when the watcher (crates/nostos-server/src/main.rs::watch_rules)
+    // wakes when the watcher (crates/nostos-server/src/rules.rs::watch_rules)
     // observes an actual checksum change on the rules file — a
     // `watch::Receiver` that has already seen the current value never fires,
     // so this arm costs nothing on the per-event delivery path below until an
