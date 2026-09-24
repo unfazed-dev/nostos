@@ -205,7 +205,7 @@ pub async fn run(args: PushArgs, cwd: &Path) -> Result<()> {
 /// (the upsert replaces the digest), restart the daemon (keys load at
 /// boot), distribute the new secret, done.
 async fn run_key(cmd: KeyCommand) -> Result<()> {
-    use nostos_push::store::{SqliteStore, Store, StoredApiKey};
+    use nostos_infra::push::store::{SqliteStore, Store, StoredApiKey};
     use rand::RngCore;
     use sha2::{Digest, Sha256};
 

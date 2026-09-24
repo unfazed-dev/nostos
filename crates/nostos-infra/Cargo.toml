@@ -26,6 +26,12 @@ webpush = ["dep:web-push"]
 pg = ["dep:tokio-postgres", "dep:pgoutput", "dep:pgwire-replication", "dep:chrono"]
 # `env::parse` / `env::with_legacy_env` (ADR-0046) for the clap binaries.
 clap = ["dep:clap"]
+# nostos-pushd's registry store (`push::store`, ADR-0038 §4) — SQLite. OFF by
+# default: only the daemon (nostos-push) and the CLI's `push key` open it.
+push-store = ["dep:rusqlite", "dep:time", "dep:anyhow"]
+# Its v1.1 Postgres twin, `PgStore` — nostos-push's `pg` feature. Just the
+# tokio-postgres client, none of the replication crates `pg` pulls.
+push-store-pg = ["push-store", "dep:tokio-postgres"]
 
 [dependencies]
 nostos-domain = { workspace = true }
@@ -78,6 +84,12 @@ clap = { workspace = true, optional = true, features = ["string"] }
 # OPTIONAL (`webpush` feature, default-on): ece's only backend is OpenSSL,
 # which cannot cross-compile to iOS — client crates must not pull this.
 web-push = { workspace = true, optional = true }
+# push-store-only (optional — enabled by the `push-store` feature): the
+# pushd registry's SQLite file, RFC3339 stamps (the nostos-cloud pattern),
+# and the anyhow errors of its `Store` trait.
+rusqlite = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

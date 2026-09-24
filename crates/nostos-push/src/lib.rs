@@ -7,7 +7,7 @@
 //! |---|---|
 //! | [`config`] | 1.1 — clap + `NOSTOS_PUSHD_*` env (server pattern) |
 //! | [`auth`] | 1.3 — API-key middleware, constant-time compare, tenant stamping |
-//! | [`store`] | 1.2 — token registry + receipt log (SQLite, pin 0.3 schema; PgStore behind `pg`, v1.1) |
+//! | [`store`] | 1.2 — token registry + receipt log (SQLite, pin 0.3 schema; PgStore behind `pg`, v1.1) — lives in `nostos_infra::push::store`, shared with the `nostos push key` CLI |
 //! | [`api`] | 1.4 — token routes; 1.5 — send route (contract-exact) |
 //! | [`coalescer`] | 1.6 — per-(tenant, token) debounce, receipts, prune |
 //! | [`rail`] | 1.7 — the rails' env contract via from_env(); 1.5 dispatch seam |
@@ -25,7 +25,7 @@ pub mod coalescer;
 pub mod config;
 pub mod limit;
 pub mod rail;
-pub mod store;
+pub use nostos_infra::push::store;
 
 pub use api::{build_router, AppState};
 pub use auth::ApiKeys;

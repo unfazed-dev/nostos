@@ -6,7 +6,7 @@
 //! a migrate() that is idempotent CREATE IF NOT EXISTS. The [Store] trait
 //! exists so the storage engine is a seam, not a fait accompli.
 //!
-//! The v1.1 Postgres registry ([`PgStore`], behind the `pg` feature —
+//! The v1.1 Postgres registry ([`PgStore`], behind `push-store-pg` —
 //! ADR-0038 §4 addendum) is the pool-of-one PgTokenStore pattern: same
 //! trait, same semantics, selected at runtime by NOSTOS_PUSHD_DATABASE_URL
 //! while AppState keeps holding Arc<dyn Store>.
@@ -25,8 +25,8 @@
 
 use std::sync::Arc;
 
+use crate::push::RailOutcome;
 use async_trait::async_trait;
-use nostos_infra::push::RailOutcome;
 use rusqlite::{Connection, OptionalExtension};
 use time::format_description::FormatItem;
 use time::OffsetDateTime;
@@ -475,7 +475,7 @@ impl Store for SqliteStore {
                 push_id,
                 token,
                 // Unparseable outcome = corruption; fatal is the honest floor.
-                outcome: crate::store::Outcome::parse(&outcome).unwrap_or(Outcome::Fatal),
+                outcome: Outcome::parse(&outcome).unwrap_or(Outcome::Fatal),
                 detail,
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
                 provider_ts,
@@ -558,16 +558,16 @@ impl Store for SqliteStore {
 }
 
 // ===========================================================================
-// PgStore — the v1.1 Postgres registry (feature "pg", ADR-0038 §4).
+// PgStore — the v1.1 Postgres registry (feature "push-store-pg", ADR-0038 §4).
 // ===========================================================================
 
 /// The v1.1 Postgres registry (ADR-0038 §4 addendum): same trait, same
 /// semantics as [`SqliteStore`], selected at runtime by
-/// `NOSTOS_PUSHD_DATABASE_URL`. Only present under the `pg` feature.
-#[cfg(feature = "pg")]
+/// `NOSTOS_PUSHD_DATABASE_URL`. Only present under the `push-store-pg` feature.
+#[cfg(feature = "push-store-pg")]
 pub use self::pg::PgStore;
 
-#[cfg(feature = "pg")]
+#[cfg(feature = "push-store-pg")]
 mod pg {
     use super::{
         now_rfc3339, DeleteOutcome, NewReceipt, Outcome, Platform, Store, StoredReceipt,

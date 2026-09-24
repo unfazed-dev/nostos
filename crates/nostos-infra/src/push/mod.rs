@@ -187,6 +187,13 @@ pub mod apns;
 pub mod fcm;
 pub mod remote;
 pub mod router;
+/// nostos-pushd's registry store (ADR-0038 §4): tokens, receipts and the
+/// hashed-at-rest API keys. Here rather than in nostos-push because the
+/// `nostos push key` CLI opens the same registry, and one composition root
+/// must not depend on another. Behind `push-store`; `PgStore` behind
+/// `push-store-pg`.
+#[cfg(feature = "push-store")]
+pub mod store;
 // OpenSSL-backed (ece): behind the `webpush` feature so client builds
 // (iOS staticlib) don't cross-compile openssl-sys. Default-on for servers.
 #[cfg(feature = "webpush")]

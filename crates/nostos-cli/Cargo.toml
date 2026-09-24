@@ -15,11 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 nostos-domain = { workspace = true }
-nostos-infra = { workspace = true, features = ["clap"] }
-# `nostos push key add/list/revoke` — the hashed-at-rest key store in the
-# nostos-pushd SQLite registry (B2, arxa integration plan). default-features
-# off: the CLI never runs the daemon or its Postgres backend.
-nostos-push = { workspace = true }
+# `push-store`: `nostos push key add/list/revoke` — the hashed-at-rest key
+# store in the nostos-pushd SQLite registry (B2, arxa integration plan). Not
+# `push-store-pg`: the CLI never runs the daemon or its Postgres backend.
+nostos-infra = { workspace = true, features = ["clap", "push-store"] }
 sha2 = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
