@@ -1511,7 +1511,9 @@ async fn unregister_stream(id: &str, subs: &Arc<Mutex<SocketSubs>>, manager: &Ar
 /// `snapshot_source.rs` (resuming-client ponytail) applies here unchanged —
 /// this is exactly the resuming-client shape.
 fn snapshot_base_lsn(subs_cursor: u64, sink: &TokioEventSink) -> u64 {
-    let acked = sink.last_acked_lsn().map_or(0, nostos_application::Lsn::raw);
+    let acked = sink
+        .last_acked_lsn()
+        .map_or(0, nostos_application::Lsn::raw);
     let delivered = sink
         .last_delivered_lsn()
         .map_or(0, nostos_application::Lsn::raw);
@@ -2781,7 +2783,10 @@ mod tests {
         let manager = Arc::new(SessionManager::new(store, nostos_domain::Tier::Enterprise));
         let auth: Arc<dyn SyncAuth> = Arc::new(crate::auth::AllowAnonymous::new());
         let state = SyncRouterState::new(manager, auth);
-        assert_eq!(state.rules.read().await.mode(), nostos_domain::SyncMode::All);
+        assert_eq!(
+            state.rules.read().await.mode(),
+            nostos_domain::SyncMode::All
+        );
     }
 
     fn toggles_rules(table: &str, sync: bool, scope: Option<&str>) -> nostos_domain::SyncRules {

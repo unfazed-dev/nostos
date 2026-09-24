@@ -4,8 +4,8 @@
 //! config. See `docs/plans/flutter-supabase-plug-and-play-launch.md` (W3).
 
 use anyhow::{Context, Result};
-use nostos_cli::commands;
 use clap::{Parser, Subcommand};
+use nostos_cli::commands;
 
 #[derive(Debug, Parser)]
 #[command(

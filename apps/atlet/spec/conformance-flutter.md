@@ -3,7 +3,7 @@
 **Date:** 2026-08-06
 **Spec version tested against:** `spec/adapter.md` v0 → frozen to v1 by this sign-off (see Freeze, below)
 **App:** `apps/atlet/flutter`
-**Versions:** Flutter 3.44.0 (stable) · Dart 3.12.0 · `nostos_flutter` — path dependency on `../../../sdk/nostos_flutter` (pubspec version `0.1.0`, built from nostos repo HEAD `93b980d` — no fixed pub.dev release, it tracks the workspace) · `supabase_flutter` 2.17.1
+**Versions:** Flutter 3.44.0 (stable) · Dart 3.12.0 · `nostos_flutter` — path dependency on `../../../sdk/nostos_flutter` (pubspec version `0.1.0`, built from nostos repo HEAD `27cf352` — no fixed pub.dev release, it tracks the workspace) · `supabase_flutter` 2.17.1
 
 ## Environment gate (checked live this session, not assumed from prior reports)
 
@@ -60,7 +60,7 @@ Review of this sign-off found a fifth defect of the same class as retro item 1: 
 
 ### REPLICA IDENTITY caveat (final review, 2026-08-06)
 
-The three Supabase tables this pilot syncs against (per `apps/atlet/spec/adapter.md` / `0001_atlet_schema.sql`) are provisioned with Postgres's default `REPLICA IDENTITY DEFAULT`, not `REPLICA IDENTITY FULL`. Under `DEFAULT`, a `DELETE`'s logical-replication event carries only the primary key, not the row's other pre-delete column values. Nostos's DELETE-replay path has already hit exactly this gap once in the core engine (ADR-0025 finding F1, fixed in `a711df7` by requiring `REPLICA IDENTITY FULL`) — that fix lives in cairn's own e2e schema setup, not in Atlet's, so it does not automatically cover these three tables.
+The three Supabase tables this pilot syncs against (per `apps/atlet/spec/adapter.md` / `0001_atlet_schema.sql`) are provisioned with Postgres's default `REPLICA IDENTITY DEFAULT`, not `REPLICA IDENTITY FULL`. Under `DEFAULT`, a `DELETE`'s logical-replication event carries only the primary key, not the row's other pre-delete column values. Nostos's DELETE-replay path has already hit exactly this gap once in the core engine (ADR-0025 finding F1, fixed in `3974460` by requiring `REPLICA IDENTITY FULL`) — that fix lives in cairn's own e2e schema setup, not in Atlet's, so it does not automatically cover these three tables.
 
 Practical effect for a live conformance run against this pilot: DELETE propagation may appear to silently drop rows on the NostosAdapter side (checklist items 1–4, live) until the operator applies, per table:
 

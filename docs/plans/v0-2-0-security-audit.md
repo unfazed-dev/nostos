@@ -48,7 +48,7 @@ Two things I suspected and was **wrong** about, recorded so the guess isn't inhe
 
 ## Fixed this pass
 
-### 1. Remote process abort via `where_sql` — CRITICAL (`3b23b04`)
+### 1. Remote process abort via `where_sql` — CRITICAL (`814b8e2`)
 
 `crates/nostos-domain/src/predicate_compile.rs` is recursive descent with **no
 depth bound**. Confirmed by running it, not by reading it:
@@ -90,7 +90,7 @@ bounds can't be tightened into a functional regression. Note the failure mode:
 if this regresses the test binary does not fail, it *dies*, and the harness
 reports a signal instead of an assertion.
 
-### 2. JWKS refetch storm during an outage — HIGH (`bcb4b38`)
+### 2. JWKS refetch storm during an outage — HIGH (`0e221cd`)
 
 The `MIN_REFETCH_INTERVAL` guard sat **inside** `if is_fresh` (`jwks.rs:135`).
 `fetched_at` only advances on a *successful* fetch, so during a JWKS outage the
@@ -118,7 +118,7 @@ on the test fixture — which previously could not simulate an outage at all, wh
 is precisely why the gap survived. The pre-existing rate-limit test used a
 10-minute TTL, so it only ever exercised the fresh-cache branch.
 
-### 3. Unbounded WebSocket message size — MEDIUM (`6239e1e`)
+### 3. Unbounded WebSocket message size — MEDIUM (`fe53ec3`)
 
 `ws.on_upgrade()` was called on the bare `WebSocketUpgrade`, so axum 0.7 defaults
 applied: **64 MiB message / 16 MiB frame**, per connection. At a 1k-client device
@@ -138,7 +138,7 @@ running on this machine. The predicate bound touches compilation exercised by
 drives. CI's `real-Postgres logical-replication e2e` job is the gate for both —
 do not treat these fixes as verified until that job is green.
 
-### 4. Bearer token written into request spans — MEDIUM (`7c1ce44`)
+### 4. Bearer token written into request spans — MEDIUM (`8f03405`)
 
 `/sync` accepts `?token=<jwt>` because browsers cannot set `Authorization` on a
 WS handshake — a legitimate need. But all three `TraceLayer::new_for_http()`
@@ -148,7 +148,7 @@ aggregator. Replaced with `redacted_request_span`, which records the path only.
 Reverse proxies keep their own access logs, so this does not close the whole
 class — it stops Nostos from being the component that leaks it.
 
-### 5. `StaticBearerAuth` compare — LOW (`7c1ce44`)
+### 5. `StaticBearerAuth` compare — LOW (`8f03405`)
 
 `got != self.digest` early-exits on the first differing byte. Genuinely low risk
 (SHA-256 digests, not invertible, so a prefix oracle yields no token bytes) but
@@ -157,7 +157,7 @@ the doc comment above it promised timing carried no information. Now
 
 ## Open — needs a decision, not a patch
 
-### The fail-open default pair — DECIDED AND FIXED (`fef1c53`)
+### The fail-open default pair — DECIDED AND FIXED (`52f1561`)
 
 `NOSTOS_BIND` defaults to `0.0.0.0:8800` (`main.rs:44`). `NOSTOS_SYNC_AUTH`
 defaults to `none` → `AllowAnonymous`, which injects **no tenant filter**. Out of
@@ -231,13 +231,13 @@ silently read as `true`).
 > half-closed** — `nbf`/`iss` are enforced on the JWKS path but not on the
 > HS256 path (`auth.rs:262`), and neither path has a test. Per-finding table:
 > "Verification 2026-09-02" under §3 of "Left deliberately". **Closed the
-> same day in `338e3f6`** (HS256 `nbf`/`iss` enforced; JWKS now also requires
+> same day in `899530e`** (HS256 `nbf`/`iss` enforced; JWKS now also requires
 > `iss` when the allowlist is set; tests on both paths) — the heading above
 > is accurate again.
 
 > **Update 2026-09-02 — "fix all" pass COMPLETE. All ten findings in this
 > section are fixed** (1–11 less the numbers already closed above), across
-> commits `10ebc93`, `2095d16`, `1f960a7`, `2bf9be9` and the Batch A commits.
+> commits `ac78ae5`, `0abeee0`, `b8b3d14`, `a69014f` and the Batch A commits.
 > See `docs/plans/close-all-open-security-findings.md` for the batch plan and
 > the design decisions read off the source.
 >
@@ -253,7 +253,7 @@ silently read as `true`).
 > - **`nostos pull` cannot send a token.** `ProjectConfig` has no field for one,
 >   and adding a credential store is a feature, not a security fix. Against a
 >   server with `NOSTOS_PROTECT_METADATA=1` the CLI now fails with an error
->   naming the knob instead of a bare 401. **Follow-up — done in `9e2313c`:**
+>   naming the knob instead of a bare 401. **Follow-up — done in `b56fffe`:**
 >   `nostos pull --token <TOKEN>` (env fallback `NOSTOS_TOKEN`) sends
 >   `Authorization: Bearer <token>` on `GET /schema`; the 401 message names the
 >   flag and the env var. Still no token field in `.nostos/config.json`.
@@ -288,7 +288,7 @@ silently read as `true`).
 Ordered by exploitability.
 
 1. ~~**`ack` is unvalidated**~~ — **PARTLY WRONG AS ORIGINALLY WRITTEN, now
-   fixed (`a20671d`).** Correcting the record, because an audit that overstates
+   fixed (`c856129`).** Correcting the record, because an audit that overstates
    a finding costs the next reader real time:
    - *"No monotonicity check found"* was **false**. `TokioEventSink::record_ack`
      (`router.rs:157`) has always been monotonic via a `compare_exchange_weak`
@@ -315,7 +315,7 @@ Ordered by exploitability.
      calling `record_ack(500)` — a state no real client can reach. It now uses
      `seed_acked_lsn`, which sets both cursors.
 
-   **Closed (ADR-0043, commits `10ebc93` + `60b0865`):** `NOSTOS_SLOT_MAX_LAG`
+   **Closed (ADR-0043, commits `ac78ae5` + `be853dd`):** `NOSTOS_SLOT_MAX_LAG`
    now defaults to `1073741824` (1 GiB); `0` still means unbounded but the server
    logs a startup `warn!` naming the knob and the risk. Safe to default because
    enforcement only removes the slowest *session* (`fanout.rs` →
@@ -450,7 +450,7 @@ distinguishes a real fix from a table-name-only fix: under a ruleset scoped to
 `status = 'open'`, a `status='closed'` row must not arrive while the `open` row
 still does.
 
-### 7. Stream snapshot skips the rules scope — HIGH (fixed, `4b5dcb5`)
+### 7. Stream snapshot skips the rules scope — HIGH (fixed, `4ae4259`)
 
 Same class, second path. `register_stream` builds the session predicate with
 `build_stream_predicate` (rules scope AND bound template AND tenant), but then
@@ -542,17 +542,17 @@ twice in this session for runs that had actually failed or not run at all.
 and `fresh_slot_yields_snapshot_rows_then_live_stream`.
 
 Attribution was measured against a TRUE baseline, not just the pre-fix file.
-`git checkout 75ba8f8 -- transport.rs` was the first check, but `75ba8f8` is
+`git checkout 1a0a792 -- transport.rs` was the first check, but `1a0a792` is
 itself this session's HEAD and already carries the earlier fixes (predicate
-bound `3b23b04`, WS caps `6239e1e`) — reproducing there does not prove
+bound `814b8e2`, WS caps `fe53ec3`) — reproducing there does not prove
 "pre-existing". The decisive run reverts **all** of `crates/` to the
-pre-session commit `071fe96` (8 files, 510 deletions): both tests still fail.
+pre-session commit `73b5793` (8 files, 510 deletions): both tests still fail.
 
 They also fail 2/2 on re-run, so they are deterministic in the current DB
 state, not flaky. Neither test uses `resume_lsn`, so the replay branch this
 work touches is never entered.
 
-**ROOT CAUSE FOUND 2026-09-01 (`eb82648`). Not a product bug — a cross-suite
+**ROOT CAUSE FOUND 2026-09-01 (`e27bc2e`). Not a product bug — a cross-suite
 test-isolation leak.**
 
 `crates/nostos-client/tests/e2e_pg_apply_throughput.rs:141` runs
@@ -670,9 +670,9 @@ small change plus test-fixture updates.
 ### 2. `NOSTOS_SLOT_MAX_LAG` defaults to `0` (WAL-bloat eviction OFF) — RESOLVED
 
 **Decision (ADR-0043, 2026-09-02):** default is now **1 GiB**
-(`1073741824`), shipped in `10ebc93`; `0` = unbounded with a startup warning,
+(`1073741824`), shipped in `ac78ae5`; `0` = unbounded with a startup warning,
 `nostos doctor` `max_slot_wal_keep_size` check, docs and pinning tests in
-`60b0865`. Original reasoning kept below for the record.
+`be853dd`. Original reasoning kept below for the record.
 
 This — not the ack frame — is the genuine disk-exhaustion exposure on the
 Postgres primary. A client that simply never acks holds `restart_lsn` back and
@@ -704,26 +704,26 @@ each needs a policy call (what limit, what window, whose deploy breaks) rather
 than a patch. None is a silent-authorization-bypass of the class fixed above:
 findings 6 and 7 were, which is why they were done first.
 
-#### Verification 2026-09-02 — doc claims cross-checked against HEAD `afe485a`
+#### Verification 2026-09-02 — doc claims cross-checked against HEAD `4a5a9fa`
 
-Read-only pass pinned to commit `afe485a`: each finding's claimed fix commit
+Read-only pass pinned to commit `4a5a9fa`: each finding's claimed fix commit
 was located with `git log -S<symbol>`, every cited line was re-read from
-`git show afe485a:<path>` (the working tree of `main.rs` had drifted under
-concurrent edits; all `main.rs` lines below are the `afe485a` numbers), and the
+`git show 4a5a9fa:<path>` (the working tree of `main.rs` had drifted under
+concurrent edits; all `main.rs` lines below are the `4a5a9fa` numbers), and the
 covering test named. Rule applied: CLOSED-VERIFIED only where a test that would
 fail on regression is named; code-only would be CLOSED-BUT-UNTESTED. Nothing
 was run (host CPU-contended). Verdicts:
 
 | # | Finding (one line) | Fix commit | Code at HEAD | Test | Verdict |
 |---|---|---|---|---|---|
-| 2 | No per-principal connection cap | `d893f86` | `store.rs:116` `PrincipalCapExceeded`; `session.rs:100` `with_per_principal_cap`; `main.rs:193` `NOSTOS_PER_PRINCIPAL_SESSION_CAP` | `store.rs::per_principal_cap_tests` (3: `one_account_cannot_consume_every_global_slot`, `a_refused_connect_does_not_burn_a_global_slot`, `presence_index_is_not_double_counted_by_the_capped_path`) | CLOSED-VERIFIED |
-| 3 | Unbounded snapshot | `d893f86` | `snapshot_source.rs:123` `limit_clause` (`LIMIT cap+1`), `:128` `reject_if_over_cap`, called on both `snapshot` (`:287`) and `snapshot_stream` (`:360`); `transport.rs:1284,1448` map `TooLarge` to a refusal | `limit_fetches_one_row_past_the_cap_so_a_breach_is_detectable`, `at_or_under_the_cap_is_accepted_and_over_it_is_refused`, `the_default_cap_clears_the_apply_throughput_bench` (`snapshot_source.rs:973-1010`). Transport-level `TooLarge` frame path is untested. | CLOSED-VERIFIED |
-| 4 | `nbf`, `aud`, `iss` not validated **on either verifier path** | `10ebc93` | JWKS path only: `jwks.rs:153` `validate_nbf = true`, `:154-155` opt-in `set_issuer`; `main.rs:143` `NOSTOS_JWT_ISSUERS`. **HS256 path `auth.rs:262` `verify_supabase_hs256` still checks only `exp` — no `nbf`, no `iss`; `NOSTOS_JWT_ISSUERS` is never applied to it.** | None. No test anywhere exercises a future-`nbf` token or a wrong-`iss` token (grep `nbf`/`with_issuers` in tests: zero hits). | **NOT-ACTUALLY-CLOSED** (half: JWKS done, HS256 untouched; both halves untested) |
-| 6 | Rotated keys stay valid through an outage | `10ebc93` | `jwks.rs:82` `DEFAULT_JWKS_MAX_STALE` 30 min, `:96` `with_max_stale`, `:236-247` refuses to serve past ceiling; `main.rs:151` `NOSTOS_JWKS_MAX_STALE_SECS` → `:570` `with_jwks_max_stale` | `a_cache_past_its_staleness_ceiling_stops_serving_during_an_outage` (`jwks.rs:832`) | CLOSED-VERIFIED |
-| 8 | No admin-token rate limiting | `1f960a7` | `admin_auth.rs:84` `failure_delay` (linear, capped), `:115` `check` sleeps on failure only, resets counter on success; `main.rs:469` refuses to start on token < `MIN_ADMIN_TOKEN_LEN` | `failure_delay_escalates_then_stops_at_the_cap`, `check_rejects_missing_and_malformed_headers`, `check_accepts_correct_bearer_token` (`admin_auth.rs:191-227`). Startup short-token bail at `main.rs:469` has no test. | CLOSED-VERIFIED |
-| 9 | Cross-tenant existence oracle | `a504bae` | `write_back.rs:249` `CROSS_TENANT_REJECTION`; all six `Forbidden(` sites (`:483,632,855,987,1155,1294`) return that one string | `e2e_pg_writeback.rs`: `cross_tenant_upsert_conflict_is_rejected`, `cross_tenant_delete_is_rejected_row_survives`, `cross_tenant_patch_is_rejected_row_unchanged`, `cross_tenant_insert_is_stamped_to_callers_tenant` (pg-gated, `NOSTOS_E2E_PG=1`) | CLOSED-VERIFIED |
-| 10 | No `Origin` check on WS upgrade | `1f960a7` | `transport.rs:450` `origin_allowed` (empty list = off, absent header = native client, exact match, non-UTF-8 refused); `main.rs:425` `NOSTOS_WS_ORIGINS` → `:984` `with_allowed_origins` | `empty_allowlist_is_off_and_admits_everything`, `configured_allowlist_admits_listed_and_refuses_unlisted`, `a_native_client_sending_no_origin_still_connects`, `match_is_exact_not_a_prefix_or_suffix` (`transport.rs:2053-2091`); `main.rs:2549-2569` origin-list parsing | CLOSED-VERIFIED |
-| 11 | `Not` over an absent column over-delivers | `2095d16` | `predicate.rs:256-312` three-valued eval; Unknown survives `Not`, Kleene `And`/`Or`, collapses to no-deliver at the top | `not_of_missing_eq_is_unknown_and_does_not_deliver` (`:766`), `unknown_survives_negation_at_every_depth` (`:794`) | CLOSED-VERIFIED |
+| 2 | No per-principal connection cap | `4b7386d` | `store.rs:116` `PrincipalCapExceeded`; `session.rs:100` `with_per_principal_cap`; `main.rs:193` `NOSTOS_PER_PRINCIPAL_SESSION_CAP` | `store.rs::per_principal_cap_tests` (3: `one_account_cannot_consume_every_global_slot`, `a_refused_connect_does_not_burn_a_global_slot`, `presence_index_is_not_double_counted_by_the_capped_path`) | CLOSED-VERIFIED |
+| 3 | Unbounded snapshot | `4b7386d` | `snapshot_source.rs:123` `limit_clause` (`LIMIT cap+1`), `:128` `reject_if_over_cap`, called on both `snapshot` (`:287`) and `snapshot_stream` (`:360`); `transport.rs:1284,1448` map `TooLarge` to a refusal | `limit_fetches_one_row_past_the_cap_so_a_breach_is_detectable`, `at_or_under_the_cap_is_accepted_and_over_it_is_refused`, `the_default_cap_clears_the_apply_throughput_bench` (`snapshot_source.rs:973-1010`). Transport-level `TooLarge` frame path is untested. | CLOSED-VERIFIED |
+| 4 | `nbf`, `aud`, `iss` not validated **on either verifier path** | `ac78ae5` | JWKS path only: `jwks.rs:153` `validate_nbf = true`, `:154-155` opt-in `set_issuer`; `main.rs:143` `NOSTOS_JWT_ISSUERS`. **HS256 path `auth.rs:262` `verify_supabase_hs256` still checks only `exp` — no `nbf`, no `iss`; `NOSTOS_JWT_ISSUERS` is never applied to it.** | None. No test anywhere exercises a future-`nbf` token or a wrong-`iss` token (grep `nbf`/`with_issuers` in tests: zero hits). | **NOT-ACTUALLY-CLOSED** (half: JWKS done, HS256 untouched; both halves untested) |
+| 6 | Rotated keys stay valid through an outage | `ac78ae5` | `jwks.rs:82` `DEFAULT_JWKS_MAX_STALE` 30 min, `:96` `with_max_stale`, `:236-247` refuses to serve past ceiling; `main.rs:151` `NOSTOS_JWKS_MAX_STALE_SECS` → `:570` `with_jwks_max_stale` | `a_cache_past_its_staleness_ceiling_stops_serving_during_an_outage` (`jwks.rs:832`) | CLOSED-VERIFIED |
+| 8 | No admin-token rate limiting | `b8b3d14` | `admin_auth.rs:84` `failure_delay` (linear, capped), `:115` `check` sleeps on failure only, resets counter on success; `main.rs:469` refuses to start on token < `MIN_ADMIN_TOKEN_LEN` | `failure_delay_escalates_then_stops_at_the_cap`, `check_rejects_missing_and_malformed_headers`, `check_accepts_correct_bearer_token` (`admin_auth.rs:191-227`). Startup short-token bail at `main.rs:469` has no test. | CLOSED-VERIFIED |
+| 9 | Cross-tenant existence oracle | `c930997` | `write_back.rs:249` `CROSS_TENANT_REJECTION`; all six `Forbidden(` sites (`:483,632,855,987,1155,1294`) return that one string | `e2e_pg_writeback.rs`: `cross_tenant_upsert_conflict_is_rejected`, `cross_tenant_delete_is_rejected_row_survives`, `cross_tenant_patch_is_rejected_row_unchanged`, `cross_tenant_insert_is_stamped_to_callers_tenant` (pg-gated, `NOSTOS_E2E_PG=1`) | CLOSED-VERIFIED |
+| 10 | No `Origin` check on WS upgrade | `b8b3d14` | `transport.rs:450` `origin_allowed` (empty list = off, absent header = native client, exact match, non-UTF-8 refused); `main.rs:425` `NOSTOS_WS_ORIGINS` → `:984` `with_allowed_origins` | `empty_allowlist_is_off_and_admits_everything`, `configured_allowlist_admits_listed_and_refuses_unlisted`, `a_native_client_sending_no_origin_still_connects`, `match_is_exact_not_a_prefix_or_suffix` (`transport.rs:2053-2091`); `main.rs:2549-2569` origin-list parsing | CLOSED-VERIFIED |
+| 11 | `Not` over an absent column over-delivers | `0abeee0` | `predicate.rs:256-312` three-valued eval; Unknown survives `Not`, Kleene `And`/`Or`, collapses to no-deliver at the top | `not_of_missing_eq_is_unknown_and_does_not_deliver` (`:766`), `unknown_survives_negation_at_every_depth` (`:794`) | CLOSED-VERIFIED |
 
 **Gap to dispatch — finding 4, HS256 half.** `crates/nostos-infra/src/auth.rs:262`
 `verify_supabase_hs256` decodes claims and checks `exp` only. It needs `nbf`
@@ -733,10 +733,10 @@ token rejected, a wrong-`iss` token rejected when the allowlist is set, any
 `iss` accepted when it is unset. The close-all plan's own table (row 4) says
 "both verifier paths", so this is a doc/code mismatch, not a scoping choice.
 
-> Re-verified 2026-09-02: `10ebc93` covered the JWKS path only — HS256 ignored
+> Re-verified 2026-09-02: `ac78ae5` covered the JWKS path only — HS256 ignored
 > `nbf`/`iss`, and JWKS accepted a *missing* `iss` even with an allowlist
 > (`jsonwebtoken` 10.4 `set_issuer` compares only when the claim is present);
-> both closed in `338e3f6` with tests on both paths (`auth::tests::hs256_*`,
+> both closed in `899530e` with tests on both paths (`auth::tests::hs256_*`,
 > `jwks::tests::jwks_*`). Finding 4 → CLOSED-VERIFIED.
 
 ---

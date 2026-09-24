@@ -5,14 +5,14 @@ below was checked against a live registry or the working tree on this date.
 
 ## Done this session
 
-- `make ci` green (exit 0) on `0da3c8f`.
-- `main` pushed: `edc2380..0da3c8f`, 38 commits. `origin/main` now matches local.
+- `make ci` green (exit 0) on `783fd4d`.
+- `main` pushed: `444c432..783fd4d`, 38 commits. `origin/main` now matches local.
 - React Native SDK verified: `tsc --noEmit` clean, jest 33/33 across
   `NostosClient` / `push` / `signout` / `watch`. It is healthy — only unpublished.
 - All shipping package versions aligned to the `0.2.0` release train (they had
   drifted to `0.1.0`, with capacitor at `0.2.0-beta.1`).
 - Bench container toolchain bumped `1.95 -> 1.98`: the workspace moved to
-  rustc 1.98 in `b40bc65` and the bench image could no longer build it.
+  rustc 1.98 in `81f4d21` and the bench image could no longer build it.
 
 ## BLOCKER 1 — crates.io name collisions
 
@@ -171,10 +171,10 @@ domain and a real mailbox. This is the decision that gates the most.
 
 ## BLOCKER 5 — the `v0.2.0` tag is 112 commits stale
 
-`v0.2.0` sat at `8e7b548` — 119 commits behind `HEAD` by the end of
+`v0.2.0` sat at `05bb0d1` — 119 commits behind `HEAD` by the end of
 2026-09-21, and the tag predates the whole tauri / web-multi-tab /
 toolchain-bump run. **Re-cut locally on 2026-09-21** (see the closing note);
-the old object is recoverable with `git tag -a v0.2.0 8e7b548`. It was never
+the old object is recoverable with `git tag -a v0.2.0 05bb0d1`. It was never
 pushed, so nothing downstream saw it.
 
 `.github/workflows/release.yml` fires on `push: tags: v*`, so pushing that tag
@@ -184,7 +184,7 @@ behind and publish a prebuilt manifest to match. The release handoff's step 1
 written**.
 
 Fix before releasing: delete the local tag and re-cut it on the pushed `main`
-(`git tag -d v0.2.0 && git tag -a v0.2.0 -m ... 0da3c8f`). The handoff's own
+(`git tag -d v0.2.0 && git tag -a v0.2.0 -m ... 783fd4d`). The handoff's own
 2026-09-01 CORRECTION about the manifest PR landing after the tag still applies
 on top of that.
 
@@ -222,7 +222,7 @@ Done after the audit above was written:
 - **BLOCKER 4 partly defused** — `io.github.<github-username>` is auto-verified
   by a GitHub signup, so Maven no longer waits on a domain.
 - **BLOCKER 5 closed locally** — `v0.2.0` re-cut on the current `main`. Old
-  object was `8e7b548` (`git tag -a v0.2.0 8e7b548` restores it). **Deliberately
+  object was `05bb0d1` (`git tag -a v0.2.0 05bb0d1` restores it). **Deliberately
   not pushed.** Pushing the tag is the release trigger and that is your call.
 - `openjdk@21` was installed via Homebrew during the first pass, then made
   unnecessary by the Gradle 9.7.1 bump (the second pass builds on the default

@@ -105,7 +105,8 @@ void main() {
     () async {
       final adapter = SupabaseStorageAdapter(bucket: bucket);
       // Unique path so concurrent/repeated runs don't collide; cleaned up below.
-      final path = 'nostos-real-rt/${DateTime.now().microsecondsSinceEpoch}.bin';
+      final path =
+          'nostos-real-rt/${DateTime.now().microsecondsSinceEpoch}.bin';
       final payload = Uint8List.fromList(
         List<int>.generate(256, (i) => i % 256),
       );

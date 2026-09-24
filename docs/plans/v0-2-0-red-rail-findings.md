@@ -1,6 +1,6 @@
 # v0.2.0 release — red-rail findings (2026-09-01)
 
-Blocks the tag push. `main` was pushed (`c4f0071..071fe96`); the tag was NOT.
+Blocks the tag push. `main` was pushed (`0a322af..73b5793`); the tag was NOT.
 
 ## What the handoff assumed vs what CI shows
 
@@ -325,7 +325,7 @@ minute. Worth pinning to a digest; not changed here.
 
 ## Why the tag was held
 
-`v0.2.0` is cut at `8e7b548` and has never been pushed, so re-cutting it costs
+`v0.2.0` is cut at `05bb0d1` and has never been pushed, so re-cutting it costs
 nothing right now. Pushing it would publish a server binary carrying a known
 DoS advisory. The cheap ordering is: fix -> green -> move the tag -> push.
 
@@ -338,7 +338,7 @@ manifest (verify with `grep -c '"url": "https' sdk/nostos_flutter/hook/prebuilt.
 
 Step 4 flips arxa's `kit/nostos/pubspec.yaml` to `ref: v0.2.0`, a **git** ref.
 That tag's tree carries the placeholder manifest (verified: 0 of 7 urls filled
-at `8e7b548`), so a git-ref consumer takes the cargo-build fallback and the
+at `05bb0d1`), so a git-ref consumer takes the cargo-build fallback and the
 zero-Rust-toolchain promise — the headline of this release — does not hold.
 Point arxa at the **pub.dev** version instead, or move the tag to include the
 merged manifest commit.

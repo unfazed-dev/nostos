@@ -10,9 +10,9 @@
 
 ## Why this is the last ADR-0041 gate
 
-D6 (native run_session refactor, `da772aa`), D7 (Flutter SDK iroh feature,
-`4c7de71`+`599cbf1`), D8 (relay guidance + privacy note, `c060bee`) are closed;
-ws/iroh conformance parity re-ran green at `680852f`. What no rig has proven yet
+D6 (native run_session refactor, `43441c0`), D7 (Flutter SDK iroh feature,
+`31ad2de`+`9b5937c`), D8 (relay guidance + privacy note, `1f9fcdb`) are closed;
+ws/iroh conformance parity re-ran green at `22bc108`. What no rig has proven yet
 is the phone on a **cellular** network — no LAN shortcut, relay or nothing.
 
 ## Part 1 — desktop bring-up (automated: `bash tool/d5_field_leg.sh`)

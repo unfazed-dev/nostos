@@ -61,13 +61,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::{Sink, SinkExt, StreamExt};
 use nostos_core::{ApplyEngine, ApplyOutcome, Frame, Outbox, PendingWrite};
 use nostos_domain::Lsn;
 use nostos_infra::wire::{
     decode_frames, decode_resume_info, decode_resync_required, decode_snapshot_boundary,
     decode_stream_error, ClientMessage,
 };
-use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
@@ -2439,7 +2439,9 @@ mod tests {
             nostos_core::InMemoryStorage::new(),
             SyncClientConfig::default(),
         );
-        let row_count = c.with_storage(nostos_core::InMemoryStorage::row_count).await;
+        let row_count = c
+            .with_storage(nostos_core::InMemoryStorage::row_count)
+            .await;
         assert_eq!(row_count.unwrap(), 0);
     }
 

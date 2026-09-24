@@ -1,7 +1,7 @@
 # ADR-0043: `NOSTOS_SLOT_MAX_LAG` defaults to 1 GiB; abandoned slots are a separate failure mode
 
 **Status:** Accepted (2026-09-02). Records a decision that shipped in commit
-`10ebc93` (v0.2.0 audit, finding 1) without its own ADR, and adds the guard
+`ac78ae5` (v0.2.0 audit, finding 1) without its own ADR, and adds the guard
 rails around it. Supersedes the "OFF by default" clause of ADR-0016.
 
 ## Context
@@ -31,7 +31,7 @@ Two things had to be true before a non-zero default was safe:
    is one reconnect + resync for the one client that fell a gigabyte behind —
    never data loss, never a dropped slot under a legitimate backlog.
 2. **The real-PG e2e must not change.** The e2e clients ack promptly and
-   move kilobytes, not gigabytes; the suite ran green on `10ebc93`.
+   move kilobytes, not gigabytes; the suite ran green on `ac78ae5`.
 
 Both hold, so **Option 1** (non-zero default) is the safer of the two the
 audit offered — Option 2 (keep `0`, warn) leaves the exposure in place for

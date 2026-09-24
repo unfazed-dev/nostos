@@ -1,21 +1,21 @@
 # ADR-0041 Decision Memo — accept/reject packet for `spike/iroh-transport`
 
 - **Date:** 2026-08-29 (evidence updated in a second pass the same day: spike suite re-run, merge rehearsed, mobile build viability verified — see §1 and §6)
-- **Decision requested:** accept or reject ADR-0041 (transport abstraction — `ws` | `iroh` as a first-class option), currently **Proposed**. Spike branch `spike/iroh-transport` (single commit `680852f`) is green and waiting.
+- **Decision requested:** accept or reject ADR-0041 (transport abstraction — `ws` | `iroh` as a first-class option), currently **Proposed**. Spike branch `spike/iroh-transport` (single commit `22bc108`) is green and waiting.
 - **Recommendation:** **Accept, with conditions** (§4). The spike passes the ADR's own conformance bar over both transports; every unfinished item is already enumerated as accept-gated in the spike ADR itself.
 
 ## 1. What the spike proves
 
 | # | Claim | Status | Evidence |
 |---|---|---|---|
-| 1 | Same fixture + assertions pass over `ws://` and `iroh://` — snapshot rows arrive, checkpoint advances, reconnect idempotent | **verified 2026-08-29 (re-run)** | `cargo test -p nostos-client --features iroh --test iroh_ws_conformance` at `680852f` in a detached worktree: **both legs green in 1.74 s** — one shared `conformance_leg(url)` driven by `conformance_over_ws` / `conformance_over_iroh` |
+| 1 | Same fixture + assertions pass over `ws://` and `iroh://` — snapshot rows arrive, checkpoint advances, reconnect idempotent | **verified 2026-08-29 (re-run)** | `cargo test -p nostos-client --features iroh --test iroh_ws_conformance` at `22bc108` in a detached worktree: **both legs green in 1.74 s** — one shared `conformance_leg(url)` driven by `conformance_over_ws` / `conformance_over_iroh` |
 | 2 | iroh fully OFF-default; default builds gain zero dependency weight | verified 2026-08-29 | `nostos-infra`: `default = ["webpush"]`, `iroh = ["dep:iroh", "dep:iroh-tickets"]`; `nostos-server`: `default = ["pg"]`, `iroh = ["nostos-infra/iroh"]`; `nostos-client`: no default features; workspace pin `iroh = "1.1"` |
 | 3 | Shipped on iroh **1.1.0** — the proposal's 0.91.2 doc citations predate the 1.x line (`NodeAddr`→`EndpointAddr`, tickets → `iroh-tickets`) | verified 2026-08-29 | spike `Cargo.lock`: `iroh` / `iroh-base` / `iroh-dns` all `1.1.0` |
 | 4 | Server shape under `NOSTOS_TRANSPORT=iroh`: HTTP surface binds loopback-only, iroh accept loop bridges bi-streams, boot prints QR-native `dial_url=iroh://…/sync?ticket=…` | verified 2026-08-29 (diff inspection) | `nostos-server/src/main.rs`: `--transport`/`NOSTOS_TRANSPORT` default `"ws"`; `TcpListener::bind("127.0.0.1:0")`; bridge ponytail recorded in code comments |
 | 5 | Client shape: dial-by-scheme; the iroh leg runs the standard WS handshake over the QUIC stream — session loop untouched (`SyncWs` enum unifies stream types) | verified 2026-08-29 (diff inspection) | `nostos-client/src/client.rs` ±35, new `iroh_dial.rs` +302 |
 | 6 | Merge cost onto today's main: **one hunk, rehearsed and green** | **verified 2026-08-29 (rehearsed)** | Trial merge in a detached worktree: the only conflict is `reset_subscribed` in `client.rs` (spike's older closure vs main's clippy-fixed `std::mem::take` — resolved to main's form). Merged tree: conformance green (1.75 s), `clippy -p nostos-client --features iroh --all-targets -- -D warnings` clean, `cargo check -p nostos-server --features iroh` clean. Rehearsal discarded; the resolution is now known and mechanical |
 
-**True spike footprint** (merge-base `9a8cfc6`): 14 files, +2909/−113 — of which +2206 is `Cargo.lock` (iroh + quinn tree, off-default). Main has moved **9** commits since the fork (tenant-CRDT trio, ADR-0040 tests, fmt/clippy, FRB regen, status addendum). The raw `main..spike` two-dot diff overstates the spike with reverse-applied main changes — ignore it.
+**True spike footprint** (merge-base `dcbff99`): 14 files, +2909/−113 — of which +2206 is `Cargo.lock` (iroh + quinn tree, off-default). Main has moved **9** commits since the fork (tenant-CRDT trio, ADR-0040 tests, fmt/clippy, FRB regen, status addendum). The raw `main..spike` two-dot diff overstates the spike with reverse-applied main changes — ignore it.
 
 ## 2. What accepting means
 

@@ -4,7 +4,7 @@
 
 ## Context
 
-ADR-0025 slice-6 (commit `e395dea`, `feat(sync): graceful oplog writer shutdown drains in-flight batch`) added `PgOpLogWriter::shutdown()` so a SIGTERM drains the in-flight batch instead of dropping the last `≤ BATCH_MAX` entries mid-INSERT. A regression test written against that drain then **confirmed a residual P1**: during the shutdown final-flush, a late `try_send` from the still-running `PgReplicator` returned `Ok(())` (the channel accepted the entry) → the DELETE was buffered in the mpsc receiver queue → the flush loop had already drained once and was mid-final-INSERT → the buffered entry was lost on task exit. On a matching-epoch reconnect (ADR-0025 F2 `resume_info{epoch}` → `Storage::save_epoch`), the server **skips the snapshot**, so slice-1 reconcile (`nostos-core/src/apply.rs:597`, snapshot-only) never runs → the client never sees the DELETE → **ghost row**. The pre-fix probe lived at `oplog.rs:985` as `drain_boundary_late_append_during_final_flush_is_lost` and demonstrated the race via `late_result.is_ok()`.
+ADR-0025 slice-6 (commit `c84f948`, `feat(sync): graceful oplog writer shutdown drains in-flight batch`) added `PgOpLogWriter::shutdown()` so a SIGTERM drains the in-flight batch instead of dropping the last `≤ BATCH_MAX` entries mid-INSERT. A regression test written against that drain then **confirmed a residual P1**: during the shutdown final-flush, a late `try_send` from the still-running `PgReplicator` returned `Ok(())` (the channel accepted the entry) → the DELETE was buffered in the mpsc receiver queue → the flush loop had already drained once and was mid-final-INSERT → the buffered entry was lost on task exit. On a matching-epoch reconnect (ADR-0025 F2 `resume_info{epoch}` → `Storage::save_epoch`), the server **skips the snapshot**, so slice-1 reconcile (`nostos-core/src/apply.rs:597`, snapshot-only) never runs → the client never sees the DELETE → **ghost row**. The pre-fix probe lived at `oplog.rs:985` as `drain_boundary_late_append_during_final_flush_is_lost` and demonstrated the race via `late_result.is_ok()`.
 
 This is the **same silent-data-loss category as the original slot-invalidation P0** (`nostos-soundness-audit-2026-07-19`, issue #1): the system reports success (`try_send` returned `Ok(())`, the writer task "shut down cleanly") while a DELETE disappears. Invisible in the single-writer demo; data-loss in multi-user (the launch target). The slot P0 dropped deletes by failing to invalidate a stale slot lineage; this race drops deletes by accepting them into a channel whose consumer is already draining. Either way the matching-epoch replay path is the amplifier — F2's snapshot-skip turns a missed DELETE into a permanent ghost row.
 
@@ -41,7 +41,7 @@ A alone is **production ordering** — it narrows the race window to zero on the
 
 ## Relationship to ADR-0025
 
-Extends slice-6 (`e395dea`). Slice-6 added the shutdown drain; this ADR closes the late-append race the drain exposed. The "reconcile covers it" assumption carried over from slice-1 is **falsified for the matching-epoch path**: slice-1 reconcile (`nostos-core/src/apply.rs:597`, `snapshot_reconcile_removes_orphans_absent_from_snapshot`) is snapshot-only, and ADR-0025 F2's `resume_info{epoch}` skips the snapshot on epoch-match — so a silently-dropped DELETE on that path has no reconcile backstop. F2's snapshot-skip is correct only if every DELETE in the offline gap is durably persisted to `cairn_oplog` and replayed; this ADR is what makes that true under SIGTERM.
+Extends slice-6 (`c84f948`). Slice-6 added the shutdown drain; this ADR closes the late-append race the drain exposed. The "reconcile covers it" assumption carried over from slice-1 is **falsified for the matching-epoch path**: slice-1 reconcile (`nostos-core/src/apply.rs:597`, `snapshot_reconcile_removes_orphans_absent_from_snapshot`) is snapshot-only, and ADR-0025 F2's `resume_info{epoch}` skips the snapshot on epoch-match — so a silently-dropped DELETE on that path has no reconcile backstop. F2's snapshot-skip is correct only if every DELETE in the offline gap is durably persisted to `cairn_oplog` and replayed; this ADR is what makes that true under SIGTERM.
 
 ## Open follow-ups
 
@@ -52,7 +52,7 @@ Extends slice-6 (`e395dea`). Slice-6 added the shutdown drain; this ADR closes t
 
 - ADR-0025 (persisted operation-log backfill — slice-6 drain + F2 epoch-skip are the immediate priors).
 - `nostos-soundness-audit-2026-07-19` (slot-invalidation P0 — same silent-data-loss category; report at `docs/plans/nostos-soundness-audit-2026-07-19.md`).
-- Slice-6 baseline commit: `e395dea` (`feat(sync): graceful oplog writer shutdown drains in-flight batch`).
+- Slice-6 baseline commit: `c84f948` (`feat(sync): graceful oplog writer shutdown drains in-flight batch`).
 - Fix A: `crates/nostos-server/src/main.rs:352,412,609,615` (working tree, 2026-07-20).
 - Fix B: `crates/nostos-infra/src/oplog.rs:303,354,385,391` (working tree, 2026-07-20).
 - Guard tests: `crates/nostos-infra/src/oplog.rs:918` (`post_shutdown_append_is_rejected_as_closed`), `:1014` (`drain_boundary_late_append_is_rejected_not_lost`).

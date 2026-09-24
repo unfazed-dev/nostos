@@ -426,7 +426,8 @@ mod pg {
                 }
             };
             let existing_bytes = existing.as_deref().map_or(&b""[..], str::as_bytes);
-            let merged = nostos_domain::merge_or_set_or_lww(existing_bytes, payload_json.as_bytes());
+            let merged =
+                nostos_domain::merge_or_set_or_lww(existing_bytes, payload_json.as_bytes());
             // Bind merged JSON as jsonb (parse → Value → SqlValue::Json, matching
             // the clobber path's object/array binding).
             let merged_value: serde_json::Value =

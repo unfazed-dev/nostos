@@ -538,7 +538,7 @@ The design **falsified the workstream's premise**, verified against source (see 
 
 ### Also outstanding
 
-- **`fixtures/` is empty by design** (D0); the 228 deletions are committed (`f0f3986`).
+- **`fixtures/` is empty by design** (D0); the 228 deletions are committed (`2489ffb`).
 - **The sweep boundary** — "take it all" covered Flutter's example+tests only; the other 8 SDKs'
   test/e2e dirs and `crates/*/examples/` were left alone (wired into the 9 surviving slices).
 

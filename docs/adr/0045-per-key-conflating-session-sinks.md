@@ -313,7 +313,7 @@ Non-regression at the headline shape (1k × 100,000, default buffer, `--distinct
 
 Interleaved, alternating arms, 3 runs each, one session, `--distinct-keys 0`:
 
-| run | attempt 2 (parent, `81e747b`) | attempt 3 (`Superseded`) |
+| run | attempt 2 (parent, `aad729e`) | attempt 3 (`Superseded`) |
 |---|---|---|
 | 1 | 2,046,799 | 2,031,996 |
 | 2 | 1,645,329 | 1,715,366 |

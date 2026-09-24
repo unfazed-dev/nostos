@@ -30,10 +30,10 @@
 //! across the HS256 and JWKS paths.
 
 use async_trait::async_trait;
-use nostos_application::ports::SyncAuth;
-use nostos_domain::Principal;
 use hmac::{Hmac, Mac};
 use jsonwebtoken::Algorithm;
+use nostos_application::ports::SyncAuth;
+use nostos_domain::Principal;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -750,7 +750,7 @@ mod tests {
 
     // ---- audit finding 4 on the HS256 path: nbf + iss allowlist ----
     //
-    // The first fix (10ebc93) only covered the JWKS verifier; these prove the
+    // The first fix (ac78ae5) only covered the JWKS verifier; these prove the
     // HS256 path now rejects the same tokens. Payloads carry their own `exp`
     // via `hs256_token_from_payload`'s far-future injection.
 

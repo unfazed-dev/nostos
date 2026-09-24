@@ -6,18 +6,18 @@
 
 ## TL;DR
 
-ADR-0025 closed the two **code** P0s from the 2026-07-19 soundness audit (slot-invalidation, watch bug) and, via F1 (`a711df7`), the tenant-scoped DELETE replay hole. The engine is sound. **What remains is not more engine work — it is (a) the operator-doc blocker that fails the launch stranger-test cold, and (b) two unverified integrity claims (a latent delete-loss race + a stale moat number) that must be measured before declaring launch-ready.** Two independent critical paths, runnable in parallel.
+ADR-0025 closed the two **code** P0s from the 2026-07-19 soundness audit (slot-invalidation, watch bug) and, via F1 (`3974460`), the tenant-scoped DELETE replay hole. The engine is sound. **What remains is not more engine work — it is (a) the operator-doc blocker that fails the launch stranger-test cold, and (b) two unverified integrity claims (a latent delete-loss race + a stale moat number) that must be measured before declaring launch-ready.** Two independent critical paths, runnable in parallel.
 
 ## 1. What ADR-0025 actually closed (P0 tracker)
 
 | Audit P0 | Status | Evidence |
 |---|---|---|
-| #1 Slot-invalidation silent data-loss | **RESOLVED** | `8cd67c0` — `SlotProbe` trichotomy at `crates/nostos-infra/src/replicator/pg.rs:82-96` (used `:565-576`); SQLSTATE 55000 handler `pg.rs:1223`; regression `crates/nostos-infra/tests/e2e_pg_slot_invalidation.rs:107` drops slot mid-stream, asserts recreate + epoch bump |
-| #2 Watch bug (Dart + Rust) | **RESOLVED at code level (pending W5 empirical re-verify)** | Dart `5661083` — `_replayLatest`; Rust `nostos.rs:307-322` — `subscribe_changes()` before `emit_snapshot()`; PLUS the deeper root causes from the 2026-07-12 QUICKSTART finding are addressed: `feed()` time-bounded flush (`apply.rs:194-219`, `flush_quiesce` 50 ms) + `idle_timeout` now a `SyncClientConfig` knob (`client.rs:90-200`). **C9:** the QUICKSTART's `nostos.rs:145` citation is stale; the integration repro (`nostos_live_test.dart` = W5 stranger step) has not been re-run post-fix |
+| #1 Slot-invalidation silent data-loss | **RESOLVED** | `911e340` — `SlotProbe` trichotomy at `crates/nostos-infra/src/replicator/pg.rs:82-96` (used `:565-576`); SQLSTATE 55000 handler `pg.rs:1223`; regression `crates/nostos-infra/tests/e2e_pg_slot_invalidation.rs:107` drops slot mid-stream, asserts recreate + epoch bump |
+| #2 Watch bug (Dart + Rust) | **RESOLVED at code level (pending W5 empirical re-verify)** | Dart `63658c9` — `_replayLatest`; Rust `nostos.rs:307-322` — `subscribe_changes()` before `emit_snapshot()`; PLUS the deeper root causes from the 2026-07-12 QUICKSTART finding are addressed: `feed()` time-bounded flush (`apply.rs:194-219`, `flush_quiesce` 50 ms) + `idle_timeout` now a `SyncClientConfig` knob (`client.rs:90-200`). **C9:** the QUICKSTART's `nostos.rs:145` citation is stale; the integration repro (`nostos_live_test.dart` = W5 stranger step) has not been re-run post-fix |
 | #3 Playbook gap | **RESOLVED (drafted + spot-verified 2026-07-20)** | `docs/OPERATING.md` written — 377 lines, 7 sections (env + 5 startup-failure modes, slot lifecycle + manual recreate, "connected but lists empty" 5-line triage, CLI reference, make targets, docker, refs), every env var cited file:line. Subagent corrected two stale audit pointers against primary sources: `example/README.md:194-239` (slot recipe) does not exist; the audit's "`main.rs:437` bail" is actually a `warn!` at `main.rs:517-519` (confirmed — see C10) |
-| (new) Tenant-DELETE replay (NULL tenant) | **CLOSED 2026-07-20** | `a711df7` (ADR-0025 F1) — `RowOp::Delete` carries `old_payload` via `REPLICA IDENTITY FULL`; `lift_tenant` in `crates/nostos-infra/src/oplog.rs`; real-PG e2e asserts `saw_delete=TRUE` in `tests/e2e_pg_oplog_replay.rs` |
+| (new) Tenant-DELETE replay (NULL tenant) | **CLOSED 2026-07-20** | `3974460` (ADR-0025 F1) — `RowOp::Delete` carries `old_payload` via `REPLICA IDENTITY FULL`; `lift_tenant` in `crates/nostos-infra/src/oplog.rs`; real-PG e2e asserts `saw_delete=TRUE` in `tests/e2e_pg_oplog_replay.rs` |
 
-**Correction to prior memory:** the tenant-DELETE gap was *not* "covered by slice-1 reconcile." Slice-1 reconcile (`crates/nostos-core/src/apply.rs:597`) covers the **snapshot path only**. F1 (`a711df7`) closed the **replay path**. The gap is genuinely closed now, not papered over.
+**Correction to prior memory:** the tenant-DELETE gap was *not* "covered by slice-1 reconcile." Slice-1 reconcile (`crates/nostos-core/src/apply.rs:597`) covers the **snapshot path only**. F1 (`3974460`) closed the **replay path**. The gap is genuinely closed now, not papered over.
 
 ## 2. What's actually blocking launch — two paths
 
@@ -26,7 +26,7 @@ The master plan gates launch on: *W0–W8 done + stranger test ≤5 min + operat
 
 ### Path B — Soundness-integrity (moat + no silent loss)
 Two claims are **unverified post-oplog** and must be measured, not assumed:
-- **Late-append race on the replay path.** `crates/nostos-infra/src/oplog.rs:357` admits late appends "may be lost"; the stated mitigation (slice-1 reconcile) covers the **snapshot path only**. `e395dea` (graceful-shutdown drain) fixed the *detached-flush* case (the last ≤BATCH_MAX batch no longer dropped on SIGTERM), but a residual **append-after-drain-started** window remains — a matching-epoch reconnect with no snapshot trigger could miss a delete. No regression test covers it. Same "silent data-loss" category as P0 #1.
+- **Late-append race on the replay path.** `crates/nostos-infra/src/oplog.rs:357` admits late appends "may be lost"; the stated mitigation (slice-1 reconcile) covers the **snapshot path only**. `c84f948` (graceful-shutdown drain) fixed the *detached-flush* case (the last ≤BATCH_MAX batch no longer dropped on SIGTERM), but a residual **append-after-drain-started** window remains — a matching-epoch reconnect with no snapshot trigger could miss a delete. No regression test covers it. Same "silent data-loss" category as P0 #1.
 - **Moat re-verification (already done at the fan-out layer).** `benches/results/RESULTS.md` already records the post-oplog fan-out number with `NOSTOS_BENCH_OPLOG=1`: oplog is statistically invisible — **833,305 → 833,307 ops/sec @ 1000 clients, `oplog_dropped=0`** (channel-send cost, within ±5% noise). The genuinely OPEN measurement is the real-PG `cairn_oplog` multi-row INSERT write-amp (slice 6, off the fan-out loop) — needs docker PG + a real-PG bench harness, not `make bench`.
 
 ## 3. Ranked next actions
@@ -53,11 +53,11 @@ Two claims are **unverified post-oplog** and must be measured, not assumed:
 
 | # | Claim | Status |
 |---|---|---|
-| C1 | P0 #1 slot-invalidation resolved (`8cd67c0` + regression test) | **assumed** — subagent-cited; not personally re-verified this session |
-| C2 | P0 #2 watch bug resolved both layers (`5661083` + Rust swap) | **assumed** — subagent-cited |
+| C1 | P0 #1 slot-invalidation resolved (`911e340` + regression test) | **assumed** — subagent-cited; not personally re-verified this session |
+| C2 | P0 #2 watch bug resolved both layers (`63658c9` + Rust swap) | **assumed** — subagent-cited |
 | C3 | `docs/OPERATING.md` missing / P0 #3 open | **verified-resolved** — file now exists, 377 lines, 7 audit-required sections, env vars cited 29×, `main.rs:517-519` `warn!` spot-checked |
 | C10 | `NOSTOS_PG_URL` set + `NOSTOS_REPLICATOR != pg` should "fail loudly" per its own comment | **verified-fixed** — promoted `warn!`→`anyhow::bail!` (`main.rs` C10, 2026-07-20); the server now REFUSES to start on the misconfiguration instead of degrading silently. `OPERATING.md §1.1(a)` rewritten for the new behavior. `make ci` green at 431 (no test sets PG_URL + non-pg replicator, so nothing broke) |
-| C4 | Tenant-DELETE replay closed by F1 (`a711df7`) | **assumed** — subagent read code + commit msg; supersedes stale memory |
+| C4 | Tenant-DELETE replay closed by F1 (`3974460`) | **assumed** — subagent read code + commit msg; supersedes stale memory |
 | C5 | `NOSTOS_WRITE_TABLES` absent from QUICKSTART | **verified** — grep returned 0 hits |
 | C6 | Late-append race is a real uncovered delete-loss window | **verified-fixed (A+B applied 2026-07-20).** Race was confirmed real + production-reachable, then closed by two fixes: **A** (`main.rs:615`) retains the pg replicator `JoinHandle` + aborts it between axum drain and oplog shutdown (producer stops before consumer drains); **B** (`oplog.rs`) makes `tx: Mutex<Option<Sender>>` and `shutdown()` `.take()`s the sender first → the flush_loop's all-senders-dropped `None` path becomes authoritative (drains everything; no silent buffer-during-final-flush) + `append()` on `None` rejects loudly via `oplog_dropped`. The `#[ignore]`'d probe was un-ignored, renamed `drain_boundary_late_append_is_rejected_not_lost`, and its assertion flipped — it now PASSES (would fail under the old bug). `make ci` green at 431 passed / 0 failed / 0 warnings |
 | C7 | Oplog writes regress the moat | **verified — no regression.** `benches/results/RESULTS.md` already documents the post-oplog fan-out measurement with `NOSTOS_BENCH_OPLOG=1`: 833,305 → 833,307 ops/sec @ 1000 clients, `oplog_dropped=0` (channel-send cost, within ±5% noise). The moat is **833k ops/sec @ 1k clients, 0% drops, 208.3× a competitor's published ceiling** (RESULTS.md). The remaining OPEN measurement is the real-PG `cairn_oplog` multi-row INSERT write-amp (slice 6, off-loop — needs docker + `NOSTOS_E2E_PG=1` + a real-PG bench harness), not `make bench` |

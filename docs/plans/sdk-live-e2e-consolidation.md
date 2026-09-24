@@ -97,22 +97,22 @@ round-trip → capture proof.
 
 ## Sequencing — COMPLETE (7/7, 2026-07-12)
 
-1. ✅ **Spine binary** (`a03e992`) — `[spine] PUSH_OK`/`ECHO_OK`, both directions.
-2. ✅ **Rust SDK live-E2E** (`dc19595`) — reference template, green in 0.98s.
+1. ✅ **Spine binary** (`d82e565`) — `[spine] PUSH_OK`/`ECHO_OK`, both directions.
+2. ✅ **Rust SDK live-E2E** (`792a6c8`) — reference template, green in 0.98s.
 3. ✅ **Flutter** — already live (`nostos_live_test.dart`, docker PG, W5 proof).
-4. ✅ **Node SDK** (`ca30455`) — `subscribe()` was already wired; `smoke_live.cjs`
+4. ✅ **Node SDK** (`eb3913d`) — `subscribe()` was already wired; `smoke_live.cjs`
    PUSH_OK/ECHO_OK.
-5. ✅ **Tauri SDK** (`8813fc0`) — returned the owned runtime + `subscribe`;
+5. ✅ **Tauri SDK** (`6bb1897`) — returned the owned runtime + `subscribe`;
    `Option<Runtime>` + custom `Drop` dodges the tokio drop-panic; PUSH_OK/ECHO_OK.
-6. ✅ **Swift SDK** (`b2aaeba`) — UniFFI poll pattern (`subscribe` + `query()` poll)
+6. ✅ **Swift SDK** (`121a8d8`) — UniFFI poll pattern (`subscribe` + `query()` poll)
    on the iPhone sim; `build.sh` spawns the spine + injects the port via
    `SIMCTL_CHILD_NOSTOS_E2E_PORT`. PUSH_OK/ECHO_OK/SUCCESS.
-7. ✅ **Kotlin SDK** (`9850d0f`) — mirrors Swift's poll on the API-34 emulator
+7. ✅ **Kotlin SDK** (`f4f38ad`) — mirrors Swift's poll on the API-34 emulator
    (`emulator-5556`, host via `10.0.2.2`, port via `-PnostosPort` instrumentation
    arg). **Re-push poll fix:** the cold-start subscribe race flaked on
    independent re-run; re-pushing (idempotent by pk) until the row lands made it
    deterministic. PUSH_OK/ECHO_OK, `tests=2 failures=0`.
-8. ✅ **Web SDK** (`65aa4ef`) — `web-sys` WS into the apply path + Playwright
+8. ✅ **Web SDK** (`609cf05`) — `web-sys` WS into the apply path + Playwright
    headless-browser E2E. **Found + fixed a latent flush bug:** the WASM onmessage
    pump never flushed standalone frames (the U3 risk); an unconditional
    `engine.flush()` mirrors the native client's per-batch commit. PUSH_OK/ECHO_OK.

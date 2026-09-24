@@ -191,7 +191,7 @@ ride. It was apply-engine-only (13/16 typed verbs absent; the typed verbs live o
 Flutter Rust crate to wasm and strands Flutter-web without Wave-2 opfs-sahpool
 durability. So Wave 4 became two slices:*
 
-- **Wave 4a (shipped `7d40f8b`, ADR-0035):** extend `nostos-ffi-wasm` from
+- **Wave 4a (shipped `34cc5a0`, ADR-0035):** extend `nostos-ffi-wasm` from
   apply-engine-only to the full typed Tier-1 surface — a PORT (not a wiring of
   `SyncClient`, which stays untouched) reusing `nostos-domain` CRDT, plus the 3
   `SqliteWasmStorage` overrides (transactional `enqueue_batch`, dead-letter cols,

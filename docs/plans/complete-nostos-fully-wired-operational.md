@@ -34,7 +34,7 @@
 | Client SDK core | `nostos-core` apply engine + atomic checkpoint `Storage` trait; `nostos-client` SqliteStorage + reconnect/resume; chaos-tested | ADR-0016, `crates/nostos-client/tests/chaos_resume.rs` |
 | WASM bridge | wasm-bindgen apply engine, 17 KB gzipped — **in-memory only, cannot connect** (no WS transport, no OPFS) | ADR-0015, `crates/nostos-ffi-wasm` |
 | Control plane | `nostos-cloud` real: auth (session + Supabase JWT), Stripe checkout/webhook, HMAC licensing, waitlist | `crates/nostos-cloud/src/*` |
-| Demo | `cargo run -p nostos-client --example reactive_scroll` — end-to-end native path with mid-stream restart, zero loss | Tier-6 commit `37b658d` |
+| Demo | `cargo run -p nostos-client --example reactive_scroll` — end-to-end native path with mid-stream restart, zero loss | Tier-6 commit `2dc32a4` |
 | Guardrails | CI (fmt/clippy -D warnings/test/smoke-bench), Makefile verbs, pinned toolchain, 16 ADRs, ~188 tests | `.github/workflows/ci.yml`, `Makefile` |
 
 ### Not done (the gaps this plan closes)
@@ -907,7 +907,7 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 ### Task F2: Release v0.1.0
 
 - [x] **Step 1:** Final sweeps: docs-curator persona sweep (A3's checklist); bench-runner re-runs the headline benchmark with fixed env capture (A6 step 6) and refreshes `benches/results/RESULTS.md`.
-  - A6 step 6 env capture shipped in `ccbe262`. The 1k headline was **not** re-run — the 142k result is valid and the founder's call whether to regenerate the marquee number; **APPEND-only** v0.1 section added with the C3 1k/5k/10k picture (1k unchanged, 10k drop ceiling honestly diagnosed). Per the L4 escalation: rewriting the 35.6× headline is a founder-facing marketing decision, not an implementation task — append, don't rewrite.
+  - A6 step 6 env capture shipped in `358536f`. The 1k headline was **not** re-run — the 142k result is valid and the founder's call whether to regenerate the marquee number; **APPEND-only** v0.1 section added with the C3 1k/5k/10k picture (1k unchanged, 10k drop ceiling honestly diagnosed). Per the L4 escalation: rewriting the 35.6× headline is a founder-facing marketing decision, not an implementation task — append, don't rewrite.
 - [x] **Step 2:** `git tag v0.1.0`; draft the launch post (Show HN + a competitor-comparison piece with same-denominator tables and the honest 10k-client story) into `docs/launch/` for operator review. **Do not publish anything — operator's call.**
   - Local `v0.1.0` tag created (in-repo metadata; **NOT** pushed — no remote configured, and the handoff scopes "tagging beyond a local v0.1.0" as operator's call). Draft at `docs/launch/show-hn-draft.md` — foregrounds the honest 10k story, uses same-denominator tables only, and explicitly retires the stale "static buckets" / "1k cap" attack lines (a comparable engine's dynamic-sync GA, May 2026). **Nothing published.**
 - [x] **Step 3:** Update `docs/ROADMAP.md` footer to Phase 3 posture.

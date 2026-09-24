@@ -44,7 +44,7 @@ Use the personas created in Phase A (`pg-integrator` for B, `bench-runner` for C
 ## State at handoff
 
 - Branch `main`, clean tree except untracked root `CLAUDE.md` (handled by Task A1).
-- Last planning commits: `4d2799b` (master plan) → `a4e4686` (advisor amendments) → `7312677` (fixtures plan) → `145ee7e` (todo fixture Part II).
+- Last planning commits: `598fff0` (master plan) → `7ba06e1` (advisor amendments) → `97fd09e` (fixtures plan) → `0b6be48` (todo fixture Part II).
 - Nothing from any plan has been implemented yet. Zero fixture code exists; `fixtures/` does not exist yet.
 - Tech-lead assessment of the codebase (what's real vs missing, with evidence) is Part I of the master plan — read it before touching code.
 

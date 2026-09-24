@@ -9,7 +9,7 @@
 - The pilot app (`apps/atlet/flutter`) hand-writes SQL for every read
   (`db.watch('SELECT * FROM sessions …')`, nostos_adapter.dart:107–132) even though
   `Collection<T>` exists — because docs/api/flutter.md presents SQL first.
-- The docs are NOT stale: all 9 authored 2026-07-30 (`3a115fc`), flutter.md signature-checked
+- The docs are NOT stale: all 9 authored 2026-07-30 (`fd6ff68`), flutter.md signature-checked
   (`check-doc-signatures.py`, exit 0 on 2026-08-07). The gap is *contract*, not rot:
   8 SDKs have no typed layer at all, and even `Collection<T>` leaks SQL fragments in
   `where:`/`orderBy:` with parameter binding an unshipped P1 (injection foot-gun).
@@ -69,7 +69,7 @@ Names below are canonical; each SDK uses its language casing (`waitForFirstSync`
 | `delete(pk)` | delete by pk | ✅ Flutter |
 | `writeBatch([...])` | **NEW** — *all-or-nothing delivery*: the group enters/leaves the outbox atomically and uploads together. **Explicitly NOT a server transaction** — server applies rows individually with per-field LWW; no cross-row rollback. Docs must say this verbatim (advisor: HIGH risk if it merely *looks* transactional). Verify outbox same-field collapse within one batch before shipping | ❌ |
 
-### T4 — CRDT typed surface (engine shipped in WS3 @317b4d1; unexposed)
+### T4 — CRDT typed surface (engine shipped in WS3 @41eadff; unexposed)
 | Verb | Semantics |
 |---|---|
 | `counter(pk, column).increment(n)` / `.decrement(n)` | commutative counter — the no-conflict alternative to `patch` for tallies |

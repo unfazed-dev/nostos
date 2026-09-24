@@ -1,9 +1,9 @@
 # P5 — Sync Streams design (DRAFT)
 
 - **Status:** IMPLEMENTED 2026-08-18 (ADR-0039). Slices landed on `main`: 1 domain
-  (`2b282b3`), 2 rules (`0a500b8`), 3 wire (`9328047`), 4 snapshot port+adapter
-  (`fd30612`), 5 transport (`d717beb`), 6 server (`628feb7`), 7 client (`5d3f898`),
-  8 Flutter (`7dbb687`), 9 e2e (`5b43ff7` — compiled, self-skips; live-PG run
+  (`551da4c`), 2 rules (`e9b1e4c`), 3 wire (`4eb6807`), 4 snapshot port+adapter
+  (`4895788`), 5 transport (`0e1f6ee`), 6 server (`f91d076`), 7 client (`89a02ae`),
+  8 Flutter (`922871a`), 9 e2e (`94f5e7f` — compiled, self-skips; live-PG run
   blocked by Docker Desktop VM corruption on the dev machine). Closes the biggest remaining feature gap
   in the now-superseded SDK-parity plan.
 - **Goal:** named, per-client-parameterized sync streams with lazy

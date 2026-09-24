@@ -6,7 +6,7 @@ not cite any number from this directory as a throughput figure.** The 833,307 op
 
 ## What was run
 
-- Commit `5c7ca8b` (working tree: 1 dirty file, docs only).
+- Commit `f18607e` (working tree: 1 dirty file, docs only).
 - Config byte-identical to the baseline: `clients=1000 events=100000
   profile=small buffer=1024`, `--release` (lto=fat, codegen-units=1),
   `rustc 1.95.0 (59807616e 2026-04-14)`, Mac16,13, 10 cores, macOS 26.6.2.

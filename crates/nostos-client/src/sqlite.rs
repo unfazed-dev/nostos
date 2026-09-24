@@ -753,7 +753,8 @@ impl Storage for SqliteStorage {
                             if admit {
                                 let existing: &[u8] =
                                     row.as_ref().map_or(&[], |(p, _)| p.as_slice());
-                                let merged = nostos_domain::merge_counter_or_lww(existing, incoming);
+                                let merged =
+                                    nostos_domain::merge_counter_or_lww(existing, incoming);
                                 upsert_uncond
                                     .execute(rusqlite::params![table, pk, merged, lsn_i64])
                                     .map_err(rusqlite_err)?;

@@ -1,6 +1,6 @@
 # v0.2.0 release handoff — everything after `git tag` is operator
 
-- **State (2026-09-01):** tag `v0.2.0` cut locally at `8e7b548`
+- **State (2026-09-01):** tag `v0.2.0` cut locally at `05bb0d1`
   (changelog final, pubspec + hook/prebuilt.json aligned). Nothing pushed —
   pushing is the release act.
 - **Why this tag matters:** the first tag ever carrying `sdk/nostos_flutter`,
@@ -39,7 +39,7 @@
    > + it sets the uploader), so it wants a real terminal.
 
 4. **Flip the arxa kit pin** (arxa repo, `kit/nostos/pubspec.yaml`): the
-   `nostos_flutter` git `ref:` moves from the `fa1c5840…` full SHA to
+   `nostos_flutter` git `ref:` moves from the `580796e1…` full SHA to
    `v0.2.0` — the one-line bump kit plan D1 reserved for exactly this
    moment. Do this ONLY after step 1 (the tag must resolve on GitHub) or
    arxa CI clones fail.

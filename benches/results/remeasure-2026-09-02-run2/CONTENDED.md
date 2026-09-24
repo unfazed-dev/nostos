@@ -7,7 +7,7 @@ first is recorded in `../remeasure-2026-09-02/CONTENDED.md`.
 
 ## What was run
 
-- Commit `aa6626e` (working tree: 1 dirty file, docs only).
+- Commit `cc00d04` (working tree: 1 dirty file, docs only).
 - Config byte-identical to the baseline: `clients=1000 events=100000
   profile=small buffer=1024`, `--release`, `rustc 1.95.0 (59807616e 2026-04-14)`,
   Mac16,13, 10 cores, macOS 26.6.2.

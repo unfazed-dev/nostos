@@ -12,7 +12,7 @@ workspace clippy `-D warnings` clean.
 
 ## The gap (verified)
 
-A live `/sync` WebSocket does **not** outlive its JWT today — it outlives it indefinitely. Server auth runs exactly once at the HTTP→WS upgrade (`sync_handler`, `transport.rs:224-238`); the `exp` check from `04360f6` lives in `verify_supabase_hs256` (`auth.rs:142`), reachable **only** through `authenticate()` at handshake. `run_session` (`transport.rs:260`) moves a **fixed** `Principal` in and never re-checks `exp`. A revoked user keeps syncing until the socket drops for any other reason. Not a v0.1 blocker (OSS default `sync_auth: none`), but a real compliance gap for the managed multi-tenant path. `token_exp`/`exp` is **discarded** after handshake — `Principal` (domain) carries only `sub`.
+A live `/sync` WebSocket does **not** outlive its JWT today — it outlives it indefinitely. Server auth runs exactly once at the HTTP→WS upgrade (`sync_handler`, `transport.rs:224-238`); the `exp` check from `d65dc87` lives in `verify_supabase_hs256` (`auth.rs:142`), reachable **only** through `authenticate()` at handshake. `run_session` (`transport.rs:260`) moves a **fixed** `Principal` in and never re-checks `exp`. A revoked user keeps syncing until the socket drops for any other reason. Not a v0.1 blocker (OSS default `sync_auth: none`), but a real compliance gap for the managed multi-tenant path. `token_exp`/`exp` is **discarded** after handshake — `Principal` (domain) carries only `sub`.
 
 ## The fix (3 changes, ~25 lines)
 

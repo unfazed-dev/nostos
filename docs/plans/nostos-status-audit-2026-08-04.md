@@ -9,11 +9,11 @@
 > - **`make ci` → ✅ GREEN @ 468 passed / 0 failed / 1 ignored** (clippy `-D warnings` clean, fmt clean). Resolves the contradictory 188/250/273/431 doc counts.
 
 > **CORRECTIONS (2026-08-05 fix pass — see `docs/plans/nostos-remaining-work-2026-08-05.md`):** three
-> premises in this audit's body are STALE vs HEAD `67eecc3` and should be read with these corrections:
-> - **Token-refresh close-on-exp is now CLOSED** (`67eecc3`: writer `select!` sends `CloseFrame 4401` at
+> premises in this audit's body are STALE vs HEAD `969ec36` and should be read with these corrections:
+> - **Token-refresh close-on-exp is now CLOSED** (`969ec36`: writer `select!` sends `CloseFrame 4401` at
 >   JWT `exp`, alg-agnostic; tests `auth_sync.rs`). The audit's "packaged, NOT applied" (lines 10/50/81)
 >   and the ADR-0029 D4 "future hardening" caveat are superseded — ADR-0029 D4 body corrected in place.
-> - **Web is NOT "live-only / no outbox"** — `9004b3c` shipped an in-session outbox + optimistic row +
+> - **Web is NOT "live-only / no outbox"** — `f338188` shipped an in-session outbox + optimistic row +
 >   flush-on-reconnect (`ffi-wasm/lib.rs:547-565`); only reload-durability is absent (deferred, ADR-0017).
 >   The audit's WS1 premise (§2.9) and `sdk/nostos_web/README.md` understate the shipped capability.
 > - **ADR-0029 is `Accepted`** (its Status line reads "D1/3/4 shipped; D2 interim"), NOT "Proposed / the
@@ -49,7 +49,7 @@ v0.2 launch plan (`flutter-supabase-plug-and-play-launch.md`): W0a–W8 **all im
 
 ### Tier A — blocks a credible launch claim
 1. **Cold-cache stranger test ≤5:00 vs a real fresh Supabase project** — never run. 🟡 JWKS fetch + TLS heuristic are code-complete but **unverified against real Supabase**. This is the single hardest engineering-adjacent gate standing. *(launch plan :174–188, :196–197)*
-2. **🟡 Client-side offline-delete orphan / WAL backfill — UNKNOWN.** Two subagents disagreed: the server-side oplog backfill is ✅ resolved (ADR-0025, all slices + F1 `a711df7`, `nostos-infra/oplog.rs`, `chaos_resume` 5/5), but the **client apply-engine** offline-delete reconciliation (`nostos-core`) was NOT opened this session. Memory records it as unsound (per-session sink doesn't survive reconnect; present-rows-only snapshot orphans hard-deletes in multi-user). **Resolve this before quoting "no data loss."** It also gates WS2's DataTrust P0.
+2. **🟡 Client-side offline-delete orphan / WAL backfill — UNKNOWN.** Two subagents disagreed: the server-side oplog backfill is ✅ resolved (ADR-0025, all slices + F1 `3974460`, `nostos-infra/oplog.rs`, `chaos_resume` 5/5), but the **client apply-engine** offline-delete reconciliation (`nostos-core`) was NOT opened this session. Memory records it as unsound (per-session sink doesn't survive reconnect; present-rows-only snapshot orphans hard-deletes in multi-user). **Resolve this before quoting "no data loss."** It also gates WS2's DataTrust P0.
 3. **Operator publication steps (non-engineering):** fresh Supabase project; push `main` → `unfazed-dev/nostos`; pub.dev; `homebrew-tap` tap; tag `v0.2.0` (fires `release.yml`); launch-day benchmark; Show HN. *(launch plan :200–219)*
 
 ### Tier B — must be decided/closed before tag, but small
@@ -58,7 +58,7 @@ v0.2 launch plan (`flutter-supabase-plug-and-play-launch.md`): W0a–W8 **all im
 6. **Test-count truth.** Docs contradict: most-recent documented = **431 (2026-07-29)**, but others cite ~188 / ~250 / ~273. ❓ Run `make ci` for a ground-truth number before quoting one publicly.
 
 ### Tier C — honesty / hardening, not blockers
-7. **Real-PG write-amp re-measurement (ADR-0025-mandated) — OPEN.** RESULTS.md unchanged since slice-2 (`4c892ad`). 833k/0% is honest *as the in-memory fan-out ceiling* (oplog attach is opt-in via `NOSTOS_BENCH_OPLOG=1`, channel-send cost invisible, `main.rs:161–168`); it is **not** end-to-end (FakeReplicator, loopback, no client apply). Never compare eval-only vs end-to-end numbers.
+7. **Real-PG write-amp re-measurement (ADR-0025-mandated) — OPEN.** RESULTS.md unchanged since slice-2 (`1f1544b`). 833k/0% is honest *as the in-memory fan-out ceiling* (oplog attach is opt-in via `NOSTOS_BENCH_OPLOG=1`, channel-send cost invisible, `main.rs:161–168`); it is **not** end-to-end (FakeReplicator, loopback, no client apply). Never compare eval-only vs end-to-end numbers.
    > **Correction 2026-08-06:** this item's closing directive ("quote the 208× high multiple only") is retired — the N× competitor-comparison framing compared fan-out to replication-ingest (unit mismatch); see benches/results/RESULTS.md §Correction.
 8. **Token-refresh hardening gap (disclosed):** P1 *fixed* via the `setToken` swap contract, auto-wired in `NostosDatabase.supabase` (`nostos.dart:486–495`) off `onAuthStateChange`. But a **live socket is NOT torn down mid-flight on token expiry** — refresh takes effect next reconnect. Raw `Nostos` users must wire refresh themselves.
 9. **WS1 web durability — deferred past v0.1 by design** (ADR-0017 addendum, IndexedDB mirror rejected). Web is **live-only**, not just non-durable (`NostosSocket::write`, `ffi-wasm/lib.rs:496`). Open: a Worker landing Storage + Outbox together.
@@ -71,8 +71,8 @@ v0.2 launch plan (`flutter-supabase-plug-and-play-launch.md`): W0a–W8 **all im
 
 - **WS1 (web durability):** deferred (§2.9).
 - **WS2 (reactive facade):** ✅ Flutter (ADR-0024) + ported to Swift/Kotlin/RN-iOS. DataTrust P0 gated on §2.2.
-- **WS3 (CRDT, ADR-0030):** ✅ engine complete — counter, HLC+OR-set merge (`75e65bd`), storage apply-merge (`28df948`), **server WriteBack element-merge SHIPPED `317b4d1`** (real-PG e2e green), client HLC+optimistic (`45fdc70`), D7 bench gate (`7835af3`, `WireFrame` byte-unchanged → moat intact). *Corrects memory, which said slice-3 was deferred-to-fixture.*
-- **WS4 (signOut, ADR-0029):** D1 ✅ (`b92222c`), D3 ✅ all 9 SDKs, D4 ✅ HS256 exp (`04360f6`), **D2 OPEN**.
+- **WS3 (CRDT, ADR-0030):** ✅ engine complete — counter, HLC+OR-set merge (`c1818bf`), storage apply-merge (`c6b00c7`), **server WriteBack element-merge SHIPPED `41eadff`** (real-PG e2e green), client HLC+optimistic (`9aca794`), D7 bench gate (`96f837c`, `WireFrame` byte-unchanged → moat intact). *Corrects memory, which said slice-3 was deferred-to-fixture.*
+- **WS4 (signOut, ADR-0029):** D1 ✅ (`ac452fa`), D3 ✅ all 9 SDKs, D4 ✅ HS256 exp (`d65dc87`), **D2 OPEN**.
 - **9-SDK capability matrix:** all 9 (flutter, react_native, swift, kotlin, web, tauri, node, dotnet, capacitor) expose **signOut + setToken + watch/subscribe** at source level. Runtime parity: Flutter (2/2), Swift (8/8 host tests), RN-iOS (TurboModule smoke) verified; **others = source-presence only (🟡)**.
 
 ---
@@ -83,16 +83,16 @@ v0.2 launch plan (`flutter-supabase-plug-and-play-launch.md`): W0a–W8 **all im
 |---|---|---|
 | Code-complete; P3 gated on operator, not engineering | ✅ | ROADMAP:113; launch plan :168–171 |
 | Cold stranger test ≤5:00 never run vs real Supabase | ✅ | launch plan :181–183 |
-| Server-side oplog backfill resolved (ADR-0025) | ✅ | `nostos-infra/oplog.rs`, `a711df7`, chaos_resume 5/5 |
+| Server-side oplog backfill resolved (ADR-0025) | ✅ | `nostos-infra/oplog.rs`, `3974460`, chaos_resume 5/5 |
 | Client-side offline-delete orphan resolved | ❓ | not opened; subagents conflicted; memory says unsound |
 | All 9 SDKs have signOut+setToken+watch (source) | ✅ | grep + WS4-D3 commit trail |
 | All 9 SDKs runtime-correct | 🟡 | only 3 of 9 have runnable tests cited |
 | 833k@1k / 0% drops valid as fan-out ceiling | ✅ | RESULTS.md:21–24, :33–43 caveat |
 | 833k is end-to-end | ✅ **false** | FakeReplicator/loopback/no-client-apply (RESULTS.md caveat) |
-| Real-PG write-amp re-measure published | ✅ **OPEN/not done** | ADR-0025 mandate; RESULTS.md unchanged since `4c892ad` |
-| Token-refresh P1 fixed | ✅ | `setToken` contract; `nostos.dart:486–495`; `04360f6` |
+| Real-PG write-amp re-measure published | ✅ **OPEN/not done** | ADR-0025 mandate; RESULTS.md unchanged since `1f1544b` |
+| Token-refresh P1 fixed | ✅ | `setToken` contract; `nostos.dart:486–495`; `d65dc87` |
 | Live-socket mid-flight expiry drop implemented | ✅ **not done (disclosed)** | open hardening |
-| WS3 server element-merge shipped | ✅ | `317b4d1` + real-PG e2e test |
+| WS3 server element-merge shipped | ✅ | `41eadff` + real-PG e2e test |
 | ADR-0029 D2 (per-principal outbox) decided | ❓ | OPEN; keeps ADR-0029 Proposed |
 | `make ci` currently green @ N tests | ❓ | not run this session; docs cite 431 (2026-07-29) 🟡stale |
 

@@ -1172,7 +1172,10 @@ async fn or_set_writeback_merges_concurrent_client_adds_server_side() {
     // A merge converges to {alice, bob}; a clobber would leave only {bob}.
     let id = "community-1".to_string();
     let row = sql
-        .query_one("SELECT members::text FROM nostosorset WHERE id = $1", &[&id])
+        .query_one(
+            "SELECT members::text FROM nostosorset WHERE id = $1",
+            &[&id],
+        )
         .await
         .expect("community row exists after both adds");
     let members_text: String = row
@@ -1352,7 +1355,8 @@ async fn counter_writeback_tenant_scoped_merge_sums_and_isolates() {
     let wb = PgWriteBack::new(&pg_url(), allowlist).with_counter_columns(counter_columns);
 
     let acme = nostos_domain::TenantScope::new("tenant_id", "11111111-1111-1111-1111-111111111111");
-    let other = nostos_domain::TenantScope::new("tenant_id", "22222222-2222-2222-2222-222222222222");
+    let other =
+        nostos_domain::TenantScope::new("tenant_id", "22222222-2222-2222-2222-222222222222");
     let counts = |r: &str, p: u64, n: u64| {
         serde_json::to_string(&nostos_domain::PnCounterPayload {
             entries: vec![nostos_domain::PnEntry {

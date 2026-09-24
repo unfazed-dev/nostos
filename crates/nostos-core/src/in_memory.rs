@@ -752,7 +752,8 @@ mod tests {
             .unwrap();
         s.apply_batch(&[(ins("tags", "s1", y), 2)], Lsn::new(2), &empty_snap())
             .unwrap();
-        let mut present = nostos_domain::present_elements(s.payload("tags", "s1").unwrap()).unwrap();
+        let mut present =
+            nostos_domain::present_elements(s.payload("tags", "s1").unwrap()).unwrap();
         present.sort();
         assert_eq!(present, vec!["x".to_string(), "y".to_string()]);
     }
@@ -773,7 +774,8 @@ mod tests {
             payload_json: Some(r#"{"elements":[{"v":"y","h":{"wall_ms":10,"ctr":1}}]}"#.into()),
         })
         .unwrap();
-        let mut present = nostos_domain::present_elements(s.payload("tags", "s1").unwrap()).unwrap();
+        let mut present =
+            nostos_domain::present_elements(s.payload("tags", "s1").unwrap()).unwrap();
         present.sort();
         assert_eq!(present, vec!["x".to_string(), "y".to_string()]);
     }

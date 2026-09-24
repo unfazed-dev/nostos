@@ -94,7 +94,7 @@ if want dotnet; then
 fi
 
 # Flutter — macOS desktop live integration test (sdk/nostos_flutter/example).
-# Restored 2026-08-05 (commit 209ec36) after the 2026-07-30 archive. Unlike the
+# Restored 2026-08-05 (commit e749c27) after the 2026-07-30 archive. Unlike the
 # shared-spine slices it spawns its OWN `cargo run -p nostos-server` at
 # 127.0.0.1:8801 and drives connect/subscribe/watch inside a genuine macOS app
 # bundle. PUSH-only — asserts the server fans out rows that watch() emits; no

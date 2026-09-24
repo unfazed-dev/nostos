@@ -87,7 +87,8 @@ impl nostos_application::ports::SnapshotSource for EmptySnapshotter {
         _table: &str,
         _base_lsn: nostos_domain::Lsn,
         _tenant: Option<nostos_domain::TenantScope<'_>>,
-    ) -> Result<Vec<nostos_domain::ReplicationEvent>, nostos_application::ports::SnapshotError> {
+    ) -> Result<Vec<nostos_domain::ReplicationEvent>, nostos_application::ports::SnapshotError>
+    {
         Ok(Vec::new())
     }
 
@@ -97,7 +98,8 @@ impl nostos_application::ports::SnapshotSource for EmptySnapshotter {
         _predicate: &nostos_domain::PredicateExpr,
         _base_lsn: nostos_domain::Lsn,
         _tenant: Option<nostos_domain::TenantScope<'_>>,
-    ) -> Result<Vec<nostos_domain::ReplicationEvent>, nostos_application::ports::SnapshotError> {
+    ) -> Result<Vec<nostos_domain::ReplicationEvent>, nostos_application::ports::SnapshotError>
+    {
         Ok(Vec::new())
     }
 }

@@ -37,13 +37,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::routing::get;
+use clap::Parser;
+use futures_util::{SinkExt, StreamExt};
 use nostos_application::{FanOutOutcome, FanOutService, SessionManager};
 use nostos_domain::ColumnValue;
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
-use clap::Parser;
-use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};

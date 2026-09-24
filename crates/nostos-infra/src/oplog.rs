@@ -903,7 +903,7 @@ mod pg {
 
         /// ADR-0025 slice-6 RESIDUAL drain-race — POST-CHANNEL-CLOSE sub-case.
         ///
-        /// Context: `e395dea` shipped `OpLogWriter::shutdown` /
+        /// Context: `c84f948` shipped `OpLogWriter::shutdown` /
         /// `PgOpLogWriter::shutdown` — a `Notify` the `flush_loop` `select!`s
         /// on → drain channel + final flush. That closed the DETACHED-flush
         /// case (SIGTERM no longer drops the last ≤`BATCH_MAX` in-flight batch;

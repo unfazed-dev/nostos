@@ -290,8 +290,10 @@ class NostosDatabase {
   /// the schema/apply/subscribe/pause ordering and the local-mode guards
   /// without the native library. See `test/local_database_test.dart`.
   @visibleForTesting
-  static Future<NostosDatabase> localForTest(Nostos nostos, NostosSchema schema) =>
-      _openLocal(nostos, schema);
+  static Future<NostosDatabase> localForTest(
+    Nostos nostos,
+    NostosSchema schema,
+  ) => _openLocal(nostos, schema);
 
   /// Shared local-open path behind [local] and [localForTest]: apply the
   /// declared schema, subscribe every declared table (so `watch` / `getAll` /
@@ -310,7 +312,14 @@ class NostosDatabase {
       );
     }
     nostos.applySchema(schema.toClientTables());
-    final db = NostosDatabase._(nostos, schema, '', null, false, localOnly: true);
+    final db = NostosDatabase._(
+      nostos,
+      schema,
+      '',
+      null,
+      false,
+      localOnly: true,
+    );
     await db.subscribeTables([
       for (final table in schema.tables) NostosTableSub(name: table.name),
     ]);
@@ -1519,8 +1528,9 @@ class Collection<T> {
   /// Remove [element] from the OR-set column in row [pk] — a tombstone at a
   /// fresh HLC. Add-wins: a concurrent or later re-add revives the element.
   /// Returns the local outbox id.
-  Future<int> orSetRemove({required Object pk, required String element}) =>
-      _db._nostos.orSetRemove(table: table, pk: pk.toString(), element: element);
+  Future<int> orSetRemove({required Object pk, required String element}) => _db
+      ._nostos
+      .orSetRemove(table: table, pk: pk.toString(), element: element);
 
   /// Increment the PN-Counter in row [pk] of this table by [delta] (ADR-0030
   /// addendum). Read-modify-write: reads the current counter payload, applies

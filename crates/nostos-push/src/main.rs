@@ -29,7 +29,8 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = nostos_infra::env::parse::<Config>();
     // ADR-0046: a default-path deployment keeps its pre-rename registry.
     if cfg.db == DEFAULT_DB {
-        let db = nostos_infra::config_path::resolve(std::path::Path::new(""), DEFAULT_DB, LEGACY_DB);
+        let db =
+            nostos_infra::config_path::resolve(std::path::Path::new(""), DEFAULT_DB, LEGACY_DB);
         cfg.db = db.display().to_string();
     }
     init_tracing();

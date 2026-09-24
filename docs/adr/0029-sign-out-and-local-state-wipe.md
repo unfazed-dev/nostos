@@ -69,11 +69,11 @@ B sees A's rows and A's unsynced writes replay under B's token.
    gains an optional `exp` (`nostos-infra/src/auth.rs`, `nostos-cloud/src/auth.rs`); a token with no `exp`
    never expires (JWT convention — preserves Phase-0 behavior), a present+past `exp` is rejected at auth
    with a 60s skew leeway. **Scope note:** enforcement is at (re)connect; an already-open socket is ALSO
-   dropped mid-flight when its token expires — `commit 67eecc3` arms a one-shot `exp` deadline in the
+   dropped mid-flight when its token expires — `commit 969ec36` arms a one-shot `exp` deadline in the
    `/sync` writer `select!` (close code `4401 "nostos: token expired"`), alg-agnostic via `token_exp()`, so
    the live socket is torn down at expiry and the SDK's `setToken` + reconnect re-establishes with the
    refreshed token (test `auth_sync.rs: live_socket_is_closed_after_token_exp`). The "future hardening"
-   caveat that previously appeared here is superseded by `67eecc3`.
+   caveat that previously appeared here is superseded by `969ec36`.
 
 ## Consequences
 

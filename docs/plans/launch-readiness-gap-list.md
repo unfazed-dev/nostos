@@ -31,7 +31,7 @@ customer.
 
 | # | Item | Evidence |
 |---|------|----------|
-| B1 | README.md stale: headlines 142k/35.6× (current: 833k/208×), says "write-back v1 under way" (shipped), banner says "Phases 0–1 proven" (ROADMAP says Phase 3 🚧) | README.md:13,23,209 vs RESULTS.md:1-6; commit 96cbf2b missed README |
+| B1 | README.md stale: headlines 142k/35.6× (current: 833k/208×), says "write-back v1 under way" (shipped), banner says "Phases 0–1 proven" (ROADMAP says Phase 3 🚧) | README.md:13,23,209 vs RESULTS.md:1-6; commit 06481e4 missed README |
 | B2 | Documented pg-e2e command omits `NOSTOS_E2E_PG=1` → e2e tests silently self-skip and report a **false-positive pass** | CLAUDE.md verbs section; e2e_pg_*.rs self-gate; CI sets the flag (ci.yml e2e-pg job) |
 | B3 | `.env.example` missing `NOSTOS_TIER` (used at nostos-server/src/main.rs:88); no env example at all for nostos-cloud's 10 vars | main.rs:7-14 doc-comment only |
 | B4 | Add SECURITY.md (sync engine + write-back trust boundary; HN audience) | none exists |

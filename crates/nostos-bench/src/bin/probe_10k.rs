@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::routing::get;
+use futures_util::{SinkExt, StreamExt};
 use nostos_application::ports::Metrics;
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::ColumnValue;
@@ -37,7 +38,6 @@ use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 use nostos_infra::wire;
-use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// CLI: `nostos-bench-10k <clients> <events> <window_secs> [ack_interval] [listeners]`.

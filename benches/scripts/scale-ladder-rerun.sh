@@ -1,7 +1,7 @@
 #!/bin/sh
 # Re-run of the Linux 30k–100k tiers only, after the probe's quorum wait became
 # progress-based (docs/plans/scale-ladder-20k-100k.md § Follow-up). The first
-# ladder (2026-09-02, commit 4bf9a0d) hit the old max(30s, 1s/1k) quorum cap at
+# ladder (2026-09-02, commit 1dc27b2) hit the old max(30s, 1s/1k) quorum cap at
 # every tier ≥30k and booked late subscribers' early events as drops. 20k was
 # clean twice and is not repeated; Phase A (macOS) is not repeated.
 #

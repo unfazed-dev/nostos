@@ -94,15 +94,15 @@ op-sqlite / react-native-quick-sqlite).
 
 All three shipped + independently verified (each agent's green report reproduced):
 
-- **Capacitor** (`631ab1d`) — web-only v8 plugin over `@nostos-sync/web`'s browser path;
+- **Capacitor** (`1d63046`) — web-only v8 plugin over `@nostos-sync/web`'s browser path;
   Playwright PUSH+ECHO E2E (re-run: `[cap-e2e] PUSH_OK`/`ECHO_OK`, 1 passed).
-- **.NET** (`5658515`; C# runtime E2E added 2026-07-13) — UniFFI-CS Nord
+- **.NET** (`261de97`; C# runtime E2E added 2026-07-13) — UniFFI-CS Nord
   `v0.9.2+v0.28.3` over the nostos-client UniFFI surface; fresh host build + 5/5 tests
   + clippy `-D warnings` clean; iOS/iOS-sim/Android cross-compile artifacts confirmed
   (iOS-sim freshly re-cross-compiled); generated `nostos.cs` (1629 lines) committed.
   **C# runtime E2E now live** — `dotnet/smoke` PUSH+ECHO over the host `.dylib` vs the
   spine (re-run: `PUSH_OK`/`ECHO_OK`; `dotnet PASS` through the runner).
-- **React Native** (`029eba7` Wave A + `e5b796e` Wave B) — Turbo Native Module over
+- **React Native** (`90ffb2a` Wave A + `77d6fb9` Wave B) — Turbo Native Module over
   UniFFI (ADR-0020; Hermes has no WASM); reuses `nostos_kotlin` wholesale (untouched).
   Jest 7/7 + Android emu live PUSH+ECHO E2E re-run: `VERDICT: PUSH_OK=1 ECHO_OK=1
   xml_failures=0`. iOS TurboModule = fast-follow.

@@ -17,10 +17,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use hmac::{Hmac, Mac};
 use nostos_application::ports::SyncAuth;
 use nostos_application::FanOutService;
 use nostos_domain::{ColumnValue, Lsn, Principal, ReplicationEvent, RowOp};
-use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use common::spawn_fake_server_with;

@@ -13,7 +13,7 @@
 > | **A2** | **DONE.** `WriteQueueStatus` on a `watch` channel in `nostos-client` → FFI `watchWriteStatus()` → `SyncStatus.{pendingWrites, deadLetteredWrites, lastWriteError}` + 4 derived getters. ADR-0027. |
 > | ~~A3~~ | Stays withdrawn (already wired via `nostos init --write-tables`). |
 > | **A4** | **DONE.** Swift guard now requires a *booted* simulator, matching the Android guards. |
-> | **A5** | **DONE** (committed first, `fade479`). |
+> | **A5** | **DONE** (committed first, `2e5d7bc`). |
 > | **A6** | **DONE.** New `sdk-e2e` CI job runs `rust node tauri` under a new `SDK_E2E_STRICT=1`. |
 >
 > ### Correction: there was never an Xcode/SPM machine fault
@@ -24,7 +24,7 @@
 > `example/`. The SPM error came from that invalid invocation.
 >
 > Run correctly, the true failure at HEAD is `No macOS desktop project configured`, and
-> there is exactly **one** fault: `9322d83` moved the test into a package that cannot host
+> there is exactly **one** fault: `5042928` moved the test into a package that cannot host
 > it. The move was botched rather than a tradeoff — the moved file was byte-identical
 > except its docstring, and it still computes `repoRoot` as `Directory.current.path/../../..`,
 > which is right from `example/` and points *above* the repo from the plugin dir.
@@ -233,7 +233,7 @@
 The **engine is sound and CI is green (431 tests, exit 0)**. Six SDKs plus the Rust spine
 prove a live replication round-trip today — a genuinely strong, under-sold result. Two
 things block the Flutter+Supabase wedge. First, **the flagship `nostos_flutter` SDK has no
-live proof that runs**: commit `9322d83` deleted the example host app a plugin package
+live proof that runs**: commit `5042928` deleted the example host app a plugin package
 needs, and on this machine an Xcode/SPM toolchain fault fails it even with the host app
 restored (§2.3 — I tested both trees). Second, and more serious because it is a product
 defect rather than a harness one, **the Dart SDK cannot tell a developer that a write
@@ -473,13 +473,13 @@ hypothesis and it is false.** Both trees were run; both fail, for *different* re
 | Tree | Failure |
 |---|---|
 | **HEAD** | `Failed to load …/integration_test/nostos_server_test.dart: No macOS desktop project configured.` |
-| **`bcac59b`** (pre-`9322d83`, `example/` + old script restored) | `An error occurred when adding Swift Package Manager integration: Xcode failed to resolve Swift Package Manager dependencies` |
+| **`96f4a30`** (pre-`5042928`, `example/` + old script restored) | `An error occurred when adding Swift Package Manager integration: Xcode failed to resolve Swift Package Manager dependencies` |
 
-*Experiment:* `git checkout bcac59b -- sdk/nostos_flutter/example scripts/sdk-e2e.sh`,
+*Experiment:* `git checkout 96f4a30 -- sdk/nostos_flutter/example scripts/sdk-e2e.sh`,
 ran the flutter slice, then restored the tree exactly (verified: `git status` identical
 to baseline; the uncommitted fixture work was never touched).
 
-**Fault 1 — structural, real, HEAD-only.** Commit `9322d83` *("remove redundant example
+**Fault 1 — structural, real, HEAD-only.** Commit `5042928` *("remove redundant example
 app")* deleted `sdk/nostos_flutter/example/**` and repointed the slice at the SDK's own
 `integration_test/`. The example app was **not** redundant: a Flutter *plugin* package is
 not runnable, and `example/` is by convention the host app that
@@ -547,7 +547,7 @@ grepping for `todo!()`. Vocabulary: **VERIFIED** = live round-trip passed today;
 | `nostos_capacitor` | **VERIFIED** | `PUSH_OK` + `ECHO_OK`, 3s |
 | `nostos_dotnet` | **VERIFIED** | `PUSH_OK=1 ECHO_OK=1` via UniFFI-CS, 9s |
 | *(rust spine)* | **VERIFIED** | `ECHO_OK`, 33s — `nostos-client` e2e |
-| **`nostos_flutter`** | **UNPROVEN (2 faults)** | No host app since `9322d83` **and** a machine-local Xcode/SPM fault (§2.3). **Flagship, launch-gating.** Not shown to be broken — shown to be unverifiable here |
+| **`nostos_flutter`** | **UNPROVEN (2 faults)** | No host app since `5042928` **and** a machine-local Xcode/SPM fault (§2.3). **Flagship, launch-gating.** Not shown to be broken — shown to be unverifiable here |
 | `nostos_swift` | **UNPROVEN** | Builds + installs; sim not booted. Harness guard bug (§2.4) |
 | `nostos_kotlin` | **UNPROVEN** | Honest SKIP — no booted Android emulator |
 | `nostos_react_native` | **UNPROVEN** | Honest SKIP — no booted Android emulator |
@@ -789,9 +789,9 @@ That sentence is the answer to "what stage is the project at."
 | C1 | `make ci` green: 431 passed, 1 ignored, exit 0 | **verified** | Run this session; log at `scratchpad/make-ci.log` |
 | C2 | `make sdk-e2e` = 6 pass / 2 fail / 2 skip, exit 2 | **verified** | Run this session; full per-slice table §2.2 |
 | C3 | At HEAD the flutter slice fails: "No macOS desktop project configured" | **verified** | `/tmp/sdk-e2e-flutter.log` |
-| C4 | `9322d83` deleted `sdk/nostos_flutter/example/`, leaving a plugin with an integration test and no host app | **verified** | `git show --stat 9322d83`; `ls sdk/nostos_flutter` → no `example/`; `macos/` holds only plugin code |
-| C5 | ~~Restoring `example/` makes the flutter slice pass~~ | **verified FALSE** | **Tested.** Restored `example/` + old script from `bcac59b`, ran the slice: still FAILS, on `Xcode failed to resolve Swift Package Manager dependencies`. My regression attribution was wrong and is withdrawn (§2.3). Tree restored exactly; `git status` matches baseline |
-| C5b | The flutter failure on this machine is environmental (Xcode/SPM), pre-dating `9322d83` | **verified** | Pre-regression tree fails on SPM resolution; matches a toolchain fault recorded on this machine 2026-07-20 |
+| C4 | `5042928` deleted `sdk/nostos_flutter/example/`, leaving a plugin with an integration test and no host app | **verified** | `git show --stat 5042928`; `ls sdk/nostos_flutter` → no `example/`; `macos/` holds only plugin code |
+| C5 | ~~Restoring `example/` makes the flutter slice pass~~ | **verified FALSE** | **Tested.** Restored `example/` + old script from `96f4a30`, ran the slice: still FAILS, on `Xcode failed to resolve Swift Package Manager dependencies`. My regression attribution was wrong and is withdrawn (§2.3). Tree restored exactly; `git status` matches baseline |
+| C5b | The flutter failure on this machine is environmental (Xcode/SPM), pre-dating `5042928` | **verified** | Pre-regression tree fails on SPM resolution; matches a toolchain fault recorded on this machine 2026-07-20 |
 | C5c | Whether `nostos_flutter` sync actually works today | **unknown** | Cannot be established on this machine — needs a working Xcode/SPM toolchain or a device-free test path |
 | C6 | Swift slice fails only because the sim is not booted | **verified** | Log shows xcodegen→xcodebuild→app built; failure is `simctl install … state: Shutdown` |
 | C7 | Swift slice would PASS with a booted sim | ~~assumed~~ → **verified, but the reason was wrong** | It PASSES (2026-07-30) — yet booting a sim was *not sufficient*: `build.sh` targeted a hardcoded UDID, so the slice only ever ran on one machine's one device. C6's diagnosis was right about the symptom and incomplete about the cause |
