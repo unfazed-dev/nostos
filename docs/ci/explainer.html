@@ -225,7 +225,7 @@ read-only token. &ldquo;required&rdquo; = listed in the protection PUT prepared 
 <div class="flow-step"><b>worktree</b><code>make worktree NAME=&lt;task&gt;</code> from <code>origin/main</code>; the main clone stays on <code>main</code></div><div class="flow-arrow">&rarr;</div>
 <div class="flow-step"><b>check</b><code>scripts/check.sh &lt;area&gt;</code>: local green = CI green</div><div class="flow-arrow">&rarr;</div>
 <div class="flow-step"><b>PR</b><code>[arxa-&lt;skill&gt;]</code> title tag, stage field, &ldquo;What is now true&rdquo;</div><div class="flow-arrow">&rarr;</div>
-<div class="flow-step"><b>merge</b>on GitHub only; strict, no force-push, pre-push refuses <code>main</code></div><div class="flow-arrow">&rarr;</div>
+<div class="flow-step"><b>merge</b>on GitHub only; required checks, no force-push, pre-push refuses <code>main</code></div><div class="flow-arrow">&rarr;</div>
 <div class="flow-step halt"><b>release</b><code>v*</code> tag &rarr; <code>release.yml</code>; no deploy on merge, fly deploys stay manual</div>
 </div>
 </section>
