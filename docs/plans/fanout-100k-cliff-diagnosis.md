@@ -115,7 +115,7 @@ Headroom rule (agreed with the coordinator 2026-09-02):
 
 | run | tier | host load1 start → end | s/event | events fanned | peak RSS | verdict |
 |---|---|---|---|---|---|---|
-| ladder-rerun linux-100k.log (11:17, commit 1d9de36) | 100k×5000, 1200 s, 2L | not recorded (ladder env.txt: 3.41 at ladder start) | 1.22 | 982 | 3,887 MiB | the finding under test |
+| ladder-rerun linux-100k.log (11:17, commit d67e573) | 100k×5000, 1200 s, 2L | not recorded (ladder env.txt: 3.41 at ladder start) | 1.22 | 982 | 3,887 MiB | the finding under test |
 | ladder-rerun linux-50k.log (11:06) | 50k×5000, 600 s, 1L | not recorded | 0.12 | 4,971 | 2,044 MiB | control |
 | fanout-100k-diag, first attempt (12:10) — `linux-fanout-diag.INVALID-host-load51.log` | 100k×500, 300 s, 2L | 51 → killed in connect phase | — | — | — | **INVALID** (host load 51; killed before any fan-out numbers) |
 | fanout-100k-diag run 1 (22:13–22:19) — `linux-fanout-diag.log` tier 100000 | 100k×500, 300 s, 2L | 5.88 → 3.00 (gate waited 120 s) | ~0.19 | 500 (all, by t≈95 s) | 3,906 MiB | **VALID** — no cliff in 500 events; see Run 1 |
@@ -260,7 +260,7 @@ quiet host (100k started at load1 7.02 after a 60 s wait, 50k at 7.12). Both
 tiers VALID. Raw: `benches/results/raw/2026-09-21-fanout-100k-run2/`.
 
 **Env delta, stated up front:** this run is built with **rustc 1.98**, not the
-1.95 of every earlier row. The workspace moved to 1.98 in `b40bc65` and the
+1.95 of every earlier row. The workspace moved to 1.98 in `81f4d21` and the
 bench container could no longer build it. The 50k control ran in the same
 session on the same toolchain, so the 50k-vs-100k contrast — which is the whole
 discriminator — is internally valid; only cross-date absolute comparisons carry

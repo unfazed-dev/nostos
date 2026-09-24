@@ -207,7 +207,7 @@ REST wire shape (POST/DELETE, Bearer, percent-encoded token, non-204 rejects).
 require a live socket. `NostosSocket.write` captures the frame into an in-memory
 `Outbox` (`enqueue`) and renders the local row at once (`apply_local`), so a write
 while disconnected **queues** instead of throwing and flushes on reconnect — the
-synchronous "socket not OPEN" throw is gone (shipped `9004b3c`, "WS1 slice 2"; see
+synchronous "socket not OPEN" throw is gone (shipped `f338188`, "WS1 slice 2"; see
 the [ADR-0017 addendum](../../docs/adr/0017-web-persistence.md)). One limit remains,
 by design:
 

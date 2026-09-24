@@ -1,7 +1,7 @@
 # RN-iOS TurboModule — implementation plan (ADR-0029 WS4, the 10th platform)
 
 **Date:** 2026-08-03 · **Branch:** `feat/multi-sdk-fixture-matrix` · **Status:** ✅ COMPLETE — TurboModule builds + full JSI round-trip verified on iPhone 17 sim. All four "honest scope notes" from the first pass are now CLOSED (file-backed cross-reopen wipe, watchChanges push to JS, self-contained podspec, fat staticlib).
-**Predecessor:** [WS4-D3 sign-out audit](nostos-ws4-d3-signout-audit-2026-08-03.md). RN has TS + Android (commit 38d76ad); iOS has **no `ios/` dir at all** — this builds the missing platform so `signOut`/`setToken` (and the full `NativeNostos` surface) reach iOS.
+**Predecessor:** [WS4-D3 sign-out audit](nostos-ws4-d3-signout-audit-2026-08-03.md). RN has TS + Android (commit 5956c84); iOS has **no `ios/` dir at all** — this builds the missing platform so `signOut`/`setToken` (and the full `NativeNostos` surface) reach iOS.
 
 ## Scope-note closure (2026-08-03, second pass — all verified on iPhone 17 sim)
 

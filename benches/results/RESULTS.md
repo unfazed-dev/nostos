@@ -101,7 +101,7 @@ exercised by this bench. Coalescing factor is E2E-pinned, not benched:
 ## Push delegation code in-tree (ADR-0038 wave 4.2) — RE-VERIFIED 2026-08-17
 
 Same-stage pair re-run with the nostos-pushd daemon + RemoteNotifier delegation
-code landed (commits fd6fbcf / 6baae31 / c40ee72): same harness, profile and
+code landed (commits 72b5397 / 192ee3c / 0c606ce): same harness, profile and
 window discipline as the 2026-08-15 pair above — 1,000 clients × 100,000
 events, release lto=fat, Apple M4 (Darwin 25.6.0 arm64), quiet machine
 (self-load only; docker build deliberately killed to keep the window clean):
@@ -219,7 +219,7 @@ Run 3 (`benches/results/remeasure-2026-09-02-run3/`, raw logs under
 `nostos-bench --clients 1000 --events 100000`, profile `small`, buffer 1024 —
 three passes back-to-back, then two `nostos-bench-10k 10000 5000 60` soaks.
 
-Environment (`raw/2026-09-02-run3/env.txt`): commit `edc2380`, rustc 1.95.0,
+Environment (`raw/2026-09-02-run3/env.txt`): commit `444c432`, rustc 1.95.0,
 Mac16,13 / 10 cores / macOS 26.6.2, `ulimit -n` 1048576, load at launch
 10.38 (1-min) — the bench itself is most of that.
 
@@ -268,7 +268,7 @@ between soaks and report both.
 
 Root cause of the 10k shortfall above: `docs/plans/soak-10k-root-cause-2026-09-02.md`
 (the fan-out loop spawned one tokio task per session per event; nothing was
-being shed). Two fixes: sequential fan-out loop (`e33b4c3`) and one shared
+being shed). Two fixes: sequential fan-out loop (`4bba0fb`) and one shared
 `Arc<ReplicationEvent>` per event instead of a per-session clone (this commit).
 macOS cannot host the 10k probe on the fixed build — it now connects fast enough
 to hit `ENOBUFS` at ~9.2k loopback sockets (mbuf-cluster exhaustion, not nostos
@@ -280,12 +280,12 @@ rustc 1.95.0, `nofile=1048576`, `ip_local_port_range=1024-65535`, image
 `rust:1.95-bookworm`. Mac host load 8–9 (1-min) during the runs. **Different
 environment from the 833,307 native figure — compare only within this table.**
 
-`nostos-bench-10k 10000 5000 60`, baseline = `e33b4c3` (sequential loop, per-session
+`nostos-bench-10k 10000 5000 60`, baseline = `4bba0fb` (sequential loop, per-session
 clone), fixed = `Arc` event sharing:
 
 | Build | events fanned out (of 5000) | delivered / attempted (50M) | router dropped | undelivered at 60 s | ops/sec | elapsed |
 |---|---|---|---|---|---|---|
-| baseline `e33b4c3` | 3,596 | 35,953,345 | 0 | 28.09% | 599,219 | 60.00 s (window) |
+| baseline `4bba0fb` | 3,596 | 35,953,345 | 0 | 28.09% | 599,219 | 60.00 s (window) |
 | **fixed (Arc)** | **5,000** | **50,000,000** | **0** | **0.00%** | **854,631** | **58.50 s** |
 
 **The fixed build delivers the entire 10k × 5000 budget inside the 60 s window
@@ -314,7 +314,7 @@ The macOS-native 3-pass headline on the fixed build is in the next section.
 
 Same harness, same config as the 833,307 baseline (`make bench`: 1,000
 clients, 100,000 events, per-session buffer 1024, `--release`), same host,
-run on commit `d3a49f0` (Arc-shared event + sequential deliver, both landed
+run on commit `a7bcd91` (Arc-shared event + sequential deliver, both landed
 above). Recipe: `benches/scripts/remeasure.sh`; raw logs
 `benches/results/raw/2026-09-02-fixed/`, per-pass JSON
 `benches/results/remeasure-2026-09-02-fixed/pass{1,2,3}/`.
@@ -354,7 +354,7 @@ failures). Soak 1, started at load 10.74 immediately after bench pass 3, shed
 later at load 4.47, delivered everything in 23 s. **The macOS 10k soak is
 therefore inconsistent (1 of 2 clean) and is NOT claimed as met on macOS.**
 The authoritative <1%-drop 10k result stays the Linux-container run above
-(50M/50M, 0.00%, 854,631 ops/sec, commit `d3a49f0`); the macOS 10k regime
+(50M/50M, 0.00%, 854,631 ops/sec, commit `a7bcd91`); the macOS 10k regime
 remains flagged for the ~9.2k-socket ENOBUFS limit and this cold-start
 sensitivity (`docs/plans/close-soak-10k-open-items.md` item 2).
 
@@ -363,7 +363,7 @@ The 833,307 figure is preserved above as the old-fan-out historical baseline.
 ## Scale ladder 20k–100k — MEASURED 2026-09-02 (Linux container)
 
 Plan: `docs/plans/scale-ladder-20k-100k.md`. Recipe: `benches/scripts/scale-ladder.sh`
-on commit `4bf9a0d` (probe gained a `listeners` arg, `completed=` and peak-RSS
+on commit `1dc27b2` (probe gained a `listeners` arg, `completed=` and peak-RSS
 reporting). Raw logs `benches/results/raw/2026-09-02-ladder/`, bench JSON
 `benches/results/ladder-2026-09-02/`. One pass per tier, then a second pass at
 the largest tier that finished with <1% drops. **Container numbers and native
@@ -449,7 +449,7 @@ with the 2,618,601 median above. 20k+ was not attempted natively — the sysctl
 walls (~9.2k ENOBUFS, 16,384 ports, `maxfilesperproc=61440`) are recorded in the
 plan.
 
-### Re-run with progress-based quorum (commit `1d9de36`) — MEASURED 2026-09-02
+### Re-run with progress-based quorum (commit `d67e573`) — MEASURED 2026-09-02
 
 Same container recipe (`benches/scripts/scale-ladder-rerun.sh`, `rust:1.95-bookworm`,
 Linux 7.0.12-linuxkit aarch64, 10 vCPU / 8 GiB, `nofile=1048576`, `somaxconn=4096`),
@@ -471,7 +471,7 @@ on the delivery/drop axis: every event the router matched was delivered
 subscribed by window end), and the shortfall is exactly the late subscribers'
 pre-subscribe events (40k: 13,920 = 120 late × ~116 each; 50k: 1,411,815 =
 3,692 late × ~382 each — i.e. `subscribed × events − matched`). *Correction
-(`198bafb`): the `not_reached_in_window` figures this paragraph first quoted
+(`22aa28a`): the `not_reached_in_window` figures this paragraph first quoted
 (40,000 and 1,450,000) came from the probe's breakdown line, which divided
 `matched ÷ subscribed` as an integer before multiplying back and so printed one
 lost event per client; the delivered/attempted counts in the table were never
@@ -504,7 +504,7 @@ no ≥30k tier can reach while `attempted` counts late subscribers' events. Two
 harness follow-ups: (1) record the fan-out finish time so ops/sec at ≥30k is a
 measurement; (2) key the pass-2 criterion on drop% <1% rather than `completed`.
 
-**Both follow-ups landed in `31a49ff`** (2026-09-02): the probe stops the window
+**Both follow-ups landed in `de99ec1`** (2026-09-02): the probe stops the window
 when `delivered == matched − dropped − faulted` with the replicator drained and
 prints `elapsed_to_finish` + `ops/sec (finish)`; the ladder script keys pass 2 on
 `drop% < 1`. Validation run, same container recipe via `benches/scripts/linux-soak.sh`,
@@ -540,7 +540,7 @@ a 60 s wait. Container VM: Linux 7.0.12-linuxkit aarch64, 10 vCPU, 8,124,516 kB
 RAM, 1,048,572 kB swap, nofile 1,048,576.
 
 **Toolchain changed: rustc 1.98, not the 1.95 of every earlier row here.** The
-workspace MSRV moved in `b40bc65` and the bench image could no longer build it.
+workspace MSRV moved in `81f4d21` and the bench image could no longer build it.
 Both tiers ran in the same session on the same compiler, so the 50k-vs-100k
 contrast is internally valid; cross-date absolute comparisons carry the change.
 

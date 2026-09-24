@@ -1,4 +1,4 @@
-BUILD start 08:35:49 tag=base-e33b4c3
+BUILD start 08:35:49 tag=base-4bba0fb
    Compiling nostos-infra v0.2.0 (/src/crates/nostos-infra)
    Compiling nostos-bench v0.2.0 (/src/crates/nostos-bench)
     Finished `release` profile [optimized] target(s) in 49.69s

@@ -1,7 +1,7 @@
 # Measuring conflation honestly — why ADR-0045's gate is the wrong instrument
 
 **Date:** 2026-09-22. **Status:** all five harness defects built (2026-09-22);
-the convergence-lag instrument landed as a router test (`47c178c`); the gate
+the convergence-lag instrument landed as a router test (`d1a545b`); the gate
 replacement below is still an open operator decision.
 **Prompted by:** ADR-0045 attempt 3 shipping a correct metric fix and still failing to
 demonstrate a benefit, with the blame placed on the harness's single host.
@@ -82,7 +82,7 @@ found" at the end. These are real and independent of ADR-0045.
 by reading the standard load-testing literature; none were found by the figures
 themselves, which is the point of the closing section.
 
-1. ~~**"Pedal to the metal" is not a benchmark.**~~ **BUILT 2026-09-22 (`0d9a7c1`).**
+1. ~~**"Pedal to the metal" is not a benchmark.**~~ **BUILT 2026-09-22 (`035c306`).**
    `FakeReplicator` flooded as fast as the consumer would take it, so the drop rate measured
    where the system falls over, not whether it meets a rate. `--rate` now holds a **constant
    arrival rate, open-loop**: event `i` is due at `start + i/R` regardless of what the router did
@@ -96,7 +96,7 @@ themselves, which is the point of the closing section.
    The default stays `0` (flood), so every historical figure keeps its meaning. With a rate set,
    the <1% bar reads "at rate R, drops < 1%" and the ladder becomes a search for the largest R
    that holds.
-2. ~~**A run that hit its timeout must not report a number.**~~ **BUILT 2026-09-22 (`1449664`).**
+2. ~~**A run that hit its timeout must not report a number.**~~ **BUILT 2026-09-22 (`49eff57`).**
    The 10k rung's `elapsed_secs: 120.00` is the `--timeout-secs` default, i.e. window expiry, and
    the JSON looked like a measurement. `RunResult` now carries `throughput_valid`; an invalid run
    is withheld from the printed table and from **every aggregate** in RESULTS.md, and all tiers
@@ -104,14 +104,14 @@ themselves, which is the point of the closing section.
    `0.0` and reads as a measured collapse). Latency is still reported — a truncated window does
    not bias the frames that did land. Predicted here for the 10k rung; found corrupting the
    **1k** rung on a 4-core host.
-3. ~~**Repetition policy instead of ad-hoc run counts.**~~ **BUILT 2026-09-22 (`0d9a7c1`).**
+3. ~~**Repetition policy instead of ad-hoc run counts.**~~ **BUILT 2026-09-22 (`035c306`).**
    `--reps` (default 5) fixes N *before* the run, MLPerf-style: fastest and slowest dropped, mean
    of the rest, with the min-max **spread** printed beside it as part of the figure rather than a
    footnote to it. `--warmup-reps` (default 1) runs and discards a warm-up per tier. RESULTS.md
    now tables one row per **tier**, not per run, and the headline is a max over tier means —
    never over raw repetitions, which reports the luckiest run of the session. An ad-hoc run count
    is an invitation to choose N after seeing the numbers; a fixed policy removes the choice.
-4. ~~**Randomise arm order within a session.**~~ **BUILT 2026-09-22 (`0d9a7c1`).** Attempt 3's
+4. ~~**Randomise arm order within a session.**~~ **BUILT 2026-09-22 (`035c306`).** Attempt 3's
    A/B ran a fixed `A,B,A,B,A,B`, so the parent always took the cold-cache slot — and the bench's
    own `1k,5k,10k` had the same shape, handing the first tier every cold cache and every
    unsettled thermal state, run after run. That bias is systematic, not noise: it never averages
@@ -120,13 +120,13 @@ themselves, which is the point of the closing section.
    randomised and still reproducible. Random interleaving is reported to cut run-to-run variance
    by up to 40%.
 
-   The series plot landed with it (`3456abd`): `series.svg` draws every repetition at its
+   The series plot landed with it (`7ec41bc`): `series.svg` draws every repetition at its
    **execution** position, so a step — every tier changing level at the same x — separates "the
    machine changed mid-session" from "this system is noisy". A mean hides that, a median hides
    it, and a min-max spread reports it as variance without saying it was monotone. Plotting the
    *table* order instead would draw a tidy line through a lie, which is what the regression test
    holds.
-5. ~~**The wait loop could not finish a lossy run.**~~ **BUILT 2026-09-22 (`59af8b7`).** It waited
+5. ~~**The wait loop could not finish a lossy run.**~~ **BUILT 2026-09-22 (`6151a68`).** It waited
    for `sum_received() >= events × clients` — the count a *loss-free* run receives. The router is
    allowed to shed on a full session channel and a shed event never reaches a client, so a single
    shed made the target unreachable and the loop spun to the deadline. Runs now end on

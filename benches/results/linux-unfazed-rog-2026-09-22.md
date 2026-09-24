@@ -20,7 +20,7 @@ to *each other*.
 | governor | `performance` (set for this run; box ships `powersave`) |
 | turbo | enabled (`intel_pstate/no_turbo = 0`) |
 | power | AC |
-| commit | Arm A `59af8b7`, Arm B `7fbae7f`, both `--release` |
+| commit | Arm A `6151a68`, Arm B `107f937`, both `--release` |
 
 ## Arm A — contended (2026-09-22)
 
@@ -114,7 +114,7 @@ a **±3% spread**. That is the first real 10k number from this host.
 A fixed event count charges the widest tier twice — more sessions per event
 *and* more events — so the ladder varies work and width together. Holding
 frames constant leaves width as the only variable, which is the whole reason
-`--deliveries` exists (`7fbae7f`).
+`--deliveries` exists (`107f937`).
 
 ### 3. Equal-work comparison refutes the O(N)-scan hypothesis
 
@@ -195,14 +195,14 @@ lower fan-out factor.
 
 Neither reproduces on Apple Silicon, and that is exactly why they survived.
 
-**1. A timed-out run reported a number** (fixed, `1449664`). `elapsed_secs`
+**1. A timed-out run reported a number** (fixed, `49eff57`). `elapsed_secs`
 came back as `120.002` — the `--timeout-secs` default — and the JSON still
 rendered `824,882 ops/sec` and `1.01% drops` as measurements. Predicted for the
 10k rung in `docs/plans/measuring-conflation-honestly.md`; found corrupting the
 **1k** rung. Runs now carry `throughput_valid`, and an invalid run is withheld
 from the table and from every aggregate in `RESULTS.md`.
 
-**2. The wait loop could not finish a lossy run** (fixed, `59af8b7`). It waited
+**2. The wait loop could not finish a lossy run** (fixed, `6151a68`). It waited
 for `sum_received() >= events × clients` — the count a *loss-free* run receives.
 The router may shed on a full session channel, and a shed event never reaches a
 client, so one shed made the target unreachable and the loop spun to the

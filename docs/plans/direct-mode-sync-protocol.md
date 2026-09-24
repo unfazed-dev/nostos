@@ -484,13 +484,13 @@ row is still there to read. The migration stays for server mode.
 
 `fixture-test`, `fixture-e2e`, `fixture-todo-test`, `fixture-todo-smoke`,
 `fixture-todo-smoke-live` and `fixture-todo-nostos-live-{up,down,proof}` all `cd`
-into `fixtures/flutter/…`, which **`f0f3986` deleted** ("remove superseded
+into `fixtures/flutter/…`, which **`2489ffb` deleted** ("remove superseded
 Flutter fixtures (greenfield per plan D0)"). Stripped from the Makefile;
 `docs/plans/multi-sdk-pomodoro-fixture-matrix.md` §1 had already flagged all
 eight. The todo fixture was the Supabase-live Flutter harness —
 `supabase/schema.sql`, `env.example.json`, `cairn_live_{up,down}.sh`,
 `integration_test/nostos_live_test.dart` — so its wiring is recoverable from
-`f0f3986^` if atlet turns out not to cover a case.
+`2489ffb^` if atlet turns out not to cover a case.
 
 ## Worth an ADR
 

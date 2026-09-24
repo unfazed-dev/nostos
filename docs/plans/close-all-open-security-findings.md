@@ -198,7 +198,7 @@ Boot-verified as required: `NOSTOS_SNAPSHOT_MAX_ROWS=lots` exits 2 with
   defaults to EMPTY = unchecked — a non-empty default would reject every
   existing deployment's tokens on upgrade. `validate_aud` stays false; it is
   load-bearing for Supabase's `aud:"authenticated"`.
-  - **Gap found on re-verification:** `10ebc93` only fixed the JWKS path.
+  - **Gap found on re-verification:** `ac78ae5` only fixed the JWKS path.
     `verify_supabase_hs256` still checked `exp` alone, and
     `SupabaseJwtAuth::with_issuers` forwarded the allowlist only into
     `JwksVerifier` — so `NOSTOS_JWT_ISSUERS` never applied to HS256 tokens and
@@ -319,7 +319,7 @@ reconnected. The decrement at `store.rs:238` funnels *every* removal path
 underflow, and is gated on `if let Some(stored) = removed` so a double-remove
 cannot double-decrement — read first, then confirmed empirically here.
 
-**Superseded 2026-09-02 (fixed fan-out, commit `d3a49f0`).** After the
+**Superseded 2026-09-02 (fixed fan-out, commit `a7bcd91`).** After the
 sequential + Arc-shared fan-out landed, the same 3-pass native recipe measured
 **2,682,508 / 2,618,601 / 2,515,049 ops/sec, 0.00% drops, 100M/100M delivered
 in 37–40 s** — median 2,618,601, 3.14× the run-3 median below; headline updated
@@ -393,7 +393,7 @@ Docker was available for it.
   That is a feature, not a security fix, and inventing it under "fix all" is the
   scope creep the instructions warn against. Instead `nostos pull` now fails with
   an error naming `NOSTOS_PROTECT_METADATA` and the workaround, rather than a
-  bare 401. **Follow-up, done in `9e2313c`:** `nostos pull --token <TOKEN>`
+  bare 401. **Follow-up, done in `b56fffe`:** `nostos pull --token <TOKEN>`
   with env fallback `NOSTOS_TOKEN` sends `Authorization: Bearer <token>` on
   `GET /schema`. The token is a flag/env value only — still no field in
   `.nostos/config.json`, which is committed — and is never printed. Hardening

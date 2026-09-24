@@ -583,7 +583,7 @@ mod tests {
 
     // ---- audit finding 4: nbf + iss allowlist on the JWKS path ----
     //
-    // The fix landed in 10ebc93 with no tests; these pin the behaviour.
+    // The fix landed in ac78ae5 with no tests; these pin the behaviour.
     // `jsonwebtoken`'s default leeway is 60s, the same as
     // `crate::auth::JWT_LEEWAY_SECS`, so the HS256 tests in `auth.rs` and
     // these draw the boundary at the same place.

@@ -18,7 +18,7 @@ allocates one `Arc` per event and hands out refcount bumps. `SinkMsg::Event` car
 the `Arc`; the writer task's batch is `Vec<Arc<ReplicationEvent>>` and encodes through
 `&*arc` — the wire codec is untouched (no wire change).
 
-**Measure.** `nostos-bench-10k` A/B, baseline = `e33b4c3`, candidate = this change:
+**Measure.** `nostos-bench-10k` A/B, baseline = `4bba0fb`, candidate = this change:
 - macOS native: 1k and 5k (10k hits the macOS ENOBUFS limit — item 2).
 - Linux (Docker): 10k.
 Ship if 10k improves materially and 1k does not regress.
@@ -67,7 +67,7 @@ headline (docs/BENCHMARK-METHODOLOGY.md same-env rule).
 4. Headline (README / CLAUDE.md) changes only if the 1k native median moves outside the
    3-pass spread of the 2026-09-02 re-measure.
 
-**Result (macOS native, commit `d3a49f0`, `benches/results/raw/2026-09-02-fixed/`).**
+**Result (macOS native, commit `a7bcd91`, `benches/results/raw/2026-09-02-fixed/`).**
 - 3 × `make bench`: **2,682,508 / 2,618,601 / 2,515,049 ops/sec, 0.00% drops,
   100M/100M delivered, 37–40 s** (old build: 833,305 median, window-bound at 120 s).
   Median 2,618,601, spread 6.4% — far outside the old 5 ops/sec spread, so the

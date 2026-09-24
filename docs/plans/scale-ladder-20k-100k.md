@@ -62,7 +62,7 @@ unstable at this socket count and stays not-claimed.
 4. RESULTS.md new section (native and container in separate tables, never compared),
    ROADMAP 10k line, this plan's Results section, commit.
 
-## Results — run 2026-09-02 19:21–20:26, commit `4bf9a0d`, `LADDER_EXIT=0`
+## Results — run 2026-09-02 19:21–20:26, commit `1dc27b2`, `LADDER_EXIT=0`
 
 Full tables in `benches/results/RESULTS.md` § "Scale ladder 20k–100k"; raw logs
 `benches/results/raw/2026-09-02-ladder/`.
@@ -85,7 +85,7 @@ Full tables in `benches/results/RESULTS.md` § "Scale ladder 20k–100k"; raw lo
   router shed at the bounded buffers) with idle 2 failing 90 s after a clean idle run.
   macOS 10k stays not-claimed. 1k bench pass in the same run: 2,687,461 ops/sec, 0%.
 
-**Follow-up (done, 2026-09-02, commit `1d9de36`):** quorum wait made progress-based
+**Follow-up (done, 2026-09-02, commit `d67e573`):** quorum wait made progress-based
 (waits while subscribers keep arriving; 5 s stall or per-tier ceiling releases it;
 reports `late_subscribers`). Re-ran 30k–100k via `benches/scripts/scale-ladder-rerun.sh`;
 raw logs `benches/results/raw/2026-09-02-ladder-rerun/`, table in RESULTS.md
@@ -107,7 +107,7 @@ so no second pass ran. Next: (1) record fan-out finish time in the probe,
 (2) key pass 2 on drop% <1%, (3) investigate the 100k fan-out collapse
 (memory pressure vs 2-listener split vs sequential loop over 100k writers).
 
-**(1) and (2) done — `31a49ff`** (2026-09-02). The probe now stops the window the
+**(1) and (2) done — `de99ec1`** (2026-09-02). The probe now stops the window the
 instant `delivered == matched − dropped − faulted` with the replicator drained
 (the last *reachable* delivery; late subscribers' pre-subscribe events are
 excluded), prints `[diag] finish: ... elapsed_to_finish=` plus `ops/sec (finish)`,
@@ -119,7 +119,7 @@ connected), `matched = delivered = 5,976,330`, router dropped 0, **drop% 0.39,
 `elapsed_to_finish` 6.84 s, 873,470 ops/sec (finish)** — the probe exited at 6.84 s
 of the 120 s window. A first attempt at 20k/1000 on a host at load1 35–48 ran to
 the window at 111k ops/sec; that was host load, not the change (same recipe, same
-binary line, idle host → ~873k). Follow-up `198bafb`: the
+binary line, idle host → ~873k). Follow-up `22aa28a`: the
 `[diag] undelivered breakdown` line was computing `subscribed × (events −
 matched ÷ subscribed)` with integer division, so it printed one lost event per
 client (19,954) instead of the real 9,870; it now splits `attempted − delivered`

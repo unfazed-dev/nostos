@@ -1,12 +1,12 @@
 # Persona-driven E2E baseline for Flutter fixtures
 
 > **Status 2026-09-22: this convention has no live implementation.** Its
-> reference app, `fixtures/flutter/pomodoro/`, was deleted in `f0f3986`
+> reference app, `fixtures/flutter/pomodoro/`, was deleted in `2489ffb`
 > ("remove superseded Flutter fixtures (greenfield per plan D0)") along with
 > `fixtures/flutter/todo/`; `docs/personas/` does not exist, and neither
 > `apps/atlet/flutter` nor `sdk/nostos_flutter/example` carries an
 > `integration_test/journeys/` directory or a `persona_mapping_test.dart`. Read
-> the reference implementation at `git show f0f3986^:fixtures/flutter/pomodoro/…`.
+> the reference implementation at `git show 2489ffb^:fixtures/flutter/pomodoro/…`.
 > The convention below is intact and adoptable; nothing currently adopts it.
 
 To adopt the convention in any Flutter app (fixture or SDK example):

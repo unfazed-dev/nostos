@@ -125,7 +125,7 @@ PUSH_OK=0; ECHO_OK=0
 # NOT `echo "$LOGCAT_DUMP" | grep -q …` — under `set -o pipefail` that reports
 # failure on a SUCCESSFUL match once the dump is big: `grep -q` exits at the
 # first hit, `echo` dies of SIGPIPE (141), pipefail propagates it, and
-# `&& PUSH_OK=1` never runs. It cost the kotlin slice a red FAIL at 558868b
+# `&& PUSH_OK=1` never runs. It cost the kotlin slice a red FAIL at 50f87aa
 # with `[kt-e2e] PUSH_OK` sitting in the captured dump; this file had the
 # identical shape and was passing only on dump-size luck.
 [[ "$LOGCAT_DUMP" == *'[rn-e2e] PUSH_OK'* ]] && PUSH_OK=1

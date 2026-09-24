@@ -12,7 +12,7 @@
 
 ADR-0015 shipped the WASM bridge with an in-memory apply engine and a
 deliberate deferral: browser-durable row storage (OPFS or otherwise) was left
-for a verified follow-up. Task E1 (commit `559b311`) has now shipped the WASM
+for a verified follow-up. Task E1 (commit `a5260a2`) has now shipped the WASM
 WebSocket transport, which closes the *transport* gap but leaves the *durability*
 gap: on a page reload, the in-memory rows are lost and the client replays from
 the `resume_lsn` persisted in `localStorage` (`cairn:checkpoint:<table>`).
@@ -79,7 +79,7 @@ VFS** for the post-launch slice. Explicitly reject options (2) and (3).
    written.
 3. **The v0.1 ceiling is honest, not a data-loss bug.** The server holds
    canonical state; the snapshot is re-delivered on reconnect (commit
-   `f55c491`); correctness is unaffected. The cost of deferral is one
+   `7d631c5`); correctness is unaffected. The cost of deferral is one
    cold-reload re-fetch, not data loss. The Show HN / Phase-3 demo audience
    judges the replication-throughput moat, not whether rows survive a refresh.
 4. **No prior art in Rust→wasm for this shape** de-risks the plumbing. Every
@@ -161,7 +161,7 @@ not merely a current-state observation.
 ## Addendum: IndexedDB rejected; the browser is *live-only*, not merely non-durable (2026-07-30)
 
 > **⚠️ CORRECTION (2026-08-05): the "live-only" headline and §1 below are
-> SUPERSEDED by `9004b3c` (2026-07-31, "WS1 slice 2").** That commit shipped an
+> SUPERSEDED by `f338188` (2026-07-31, "WS1 slice 2").** That commit shipped an
 > in-memory `Outbox` + optimistic local row on the browser write path
 > (`crates/nostos-ffi-wasm/src/lib.rs:496-566`: `enqueue` → `apply_local` →
 > send-if-open → `mark_done`), so a write while disconnected **queues and flushes
@@ -211,7 +211,7 @@ rows that vanish on reload. This is *not* silent data loss — the caller gets a
 offline-capable.
 
 This ADR predates the browser write surface (ADR-0017: 2026-07-04;
-`NostosSocket::write`: `65aa4ef`, 2026-07-12), which is why its Consequences
+`NostosSocket::write`: `609cf05`, 2026-07-12), which is why its Consequences
 section reasons only about rows and concludes the cost is "one cold-reload
 re-fetch, not data loss". True of rows; silent about writes.
 
