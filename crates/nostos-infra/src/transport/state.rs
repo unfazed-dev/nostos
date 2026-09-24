@@ -1,6 +1,6 @@
-use super::DEFAULT_SESSION_BUFFER;
 #[cfg(doc)]
-use super::{handshake::sync_handler, session::run_session};
+use super::handshake::sync_handler;
+use super::DEFAULT_SESSION_BUFFER;
 use nostos_application::ports::{
     Metrics, OpLogSource, SchemaSource, SnapshotSource, SyncAuth, WriteBack,
 };
@@ -102,7 +102,7 @@ pub struct SyncRouterState {
     /// on the internet can no longer open a socket.
     ///
     /// **Scope: the axum `/sync` route only.** The iroh transport
-    /// (`crate::iroh_sync`) calls [`run_session`] directly and never passes
+    /// (`crate::iroh_sync`) calls `run_session` directly and never passes
     /// through [`sync_handler`], so this list does not apply there. That is
     /// correct rather than a hole — iroh is P2P QUIC, there is no browser and
     /// no `Origin` header to check — but do not read this field as "every
