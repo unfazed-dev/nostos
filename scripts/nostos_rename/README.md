@@ -87,4 +87,9 @@ for the same commit.
 
 After the rename, run `cargo fmt --all` and `dart format`. Renamed identifiers
 are one character longer and sort differently, so the formatters rewrap
-lines and reorder imports. Commit that as a separate commit.
+lines and reorder imports. Commit that as a separate commit. Then regenerate
+`sdk/nostos_dotnet/dotnet/generated/nostos.cs` (its README, "Build"): the
+uniffi checksums hash the renamed symbols, and only those lines change.
+`Cargo.lock` files are re-sorted here; `package-lock.json` keys are not, so
+the next `npm install` moves `@nostos-sync/*` entries (`npm ci` accepts the
+file as is).
