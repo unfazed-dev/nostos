@@ -372,12 +372,12 @@ fn active_scope_text(scope: Option<&str>) -> Option<&str> {
 /// `println!` — so the shape is unit-testable. `Err` carries the same text
 /// `SyncRules::validate()` produced, so the caller can print it and exit
 /// non-zero without duplicating the validation logic.
-pub fn check_report(rules: &SyncRules) -> Result<String, String> {
+pub fn check_report(rules: &SyncRules, file_name: &str) -> Result<String, String> {
     use std::fmt::Write as _;
 
     rules.validate().map_err(|e| e.to_string())?;
 
-    let mut out = String::from("nostos_rules.toml — valid\n");
+    let mut out = format!("{file_name} — valid\n");
 
     let note = inactive_note(rules)
         .map(|name| format!("  ({name} section present but inactive)"))
@@ -453,7 +453,11 @@ fn run_check(cwd: &Path) -> Result<()> {
             rules_file::RULES_FILE_NAME,
             rules_path.display()
         ),
-        Some(rules) => match check_report(&rules) {
+        // The file actually read: the pre-rename name when only it exists (ADR-0046).
+        Some(rules) => match check_report(
+            &rules,
+            &rules_path.file_name().unwrap_or_default().to_string_lossy(),
+        ) {
             Ok(report) => println!("{report}"),
             Err(message) => anyhow::bail!("{message}"),
         },
@@ -746,7 +750,8 @@ mod tests {
             streams: vec![],
         };
 
-        let report = check_report(&rules).expect("well-formed rules must report Ok");
+        let report = check_report(&rules, rules_file::RULES_FILE_NAME)
+            .expect("well-formed rules must report Ok");
 
         assert!(report.starts_with("nostos_rules.toml — valid"));
         assert!(report.contains("sync_mode: toggles"), "got:\n{report}");
@@ -783,7 +788,8 @@ mod tests {
             streams: vec![],
         };
 
-        let err = check_report(&rules).expect_err("an unparseable scope must fail the check");
+        let err = check_report(&rules, rules_file::RULES_FILE_NAME)
+            .expect_err("an unparseable scope must fail the check");
 
         assert_eq!(
             err,
@@ -813,7 +819,8 @@ mod tests {
 
             streams: vec![],
         };
-        let report = check_report(&with_hand).expect("well-formed rules must report Ok");
+        let report = check_report(&with_hand, rules_file::RULES_FILE_NAME)
+            .expect("well-formed rules must report Ok");
         assert!(
             report.contains("(hand section present but inactive)"),
             "got:\n{report}"
@@ -823,7 +830,8 @@ mod tests {
             hand: vec![],
             ..with_hand
         };
-        let report = check_report(&without_hand).expect("well-formed rules must report Ok");
+        let report = check_report(&without_hand, rules_file::RULES_FILE_NAME)
+            .expect("well-formed rules must report Ok");
         assert!(
             !report.contains("section present but inactive"),
             "an empty hand section must not be noted, got:\n{report}"
@@ -844,7 +852,8 @@ mod tests {
             streams: vec![],
         };
 
-        let report = check_report(&rules).expect("well-formed rules must report Ok");
+        let report = check_report(&rules, rules_file::RULES_FILE_NAME)
+            .expect("well-formed rules must report Ok");
 
         assert!(report.contains("sync_mode: all"), "got:\n{report}");
         assert!(
@@ -888,7 +897,8 @@ mod tests {
             streams: vec![],
         };
 
-        let report = check_report(&rules).expect("well-formed rules must report Ok");
+        let report = check_report(&rules, rules_file::RULES_FILE_NAME)
+            .expect("well-formed rules must report Ok");
 
         assert!(report.contains("sync_mode: hand"), "got:\n{report}");
         assert!(
@@ -927,7 +937,8 @@ mod tests {
             streams: vec![],
         };
 
-        let report = check_report(&rules).expect("well-formed rules must report Ok");
+        let report = check_report(&rules, rules_file::RULES_FILE_NAME)
+            .expect("well-formed rules must report Ok");
 
         assert!(
             report.contains("claims referenced: org_id, sub"),
