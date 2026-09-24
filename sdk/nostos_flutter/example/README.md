@@ -14,7 +14,7 @@ and clients — all local-first and reactive via nostos sync.
 
 Tables (tabs): **Providers · Clients · Availabilities · Appointments ·
 Invoices · Chat**. Schema + seed live in
-[`supabase/schema.sql`](../../supabase/schema.sql) (4 providers with mixed
+[`supabase/schema.sql`](../../../supabase/schema.sql) (4 providers with mixed
 rate types, 4 clients, 7 availabilities, 5 appointments, 3 auto-calculated
 invoices, 6 chat messages).
 
@@ -22,7 +22,7 @@ invoices, 6 chat messages).
 > is the source of truth; nostos mirrors it to on-device SQLite via logical
 > replication, so the tables must already exist upstream. For local dev,
 > `docker/pg-init/` seeds the Docker Postgres on boot; for Supabase, paste
-> [`supabase/schema.sql`](../../supabase/schema.sql) into the SQL editor (see
+> [`supabase/schema.sql`](../../../supabase/schema.sql) into the SQL editor (see
 > "Run it (Supabase)" below). No sync tool provisions
 > your source schema.
 
@@ -58,7 +58,7 @@ empty by default = none — defense-in-depth at the SQL-injection boundary). If
 you skip the `NOSTOS_WRITE_TABLES=…` prefix, create/edit/delete are rejected with
 `table not writable: '<table>' — add it to NOSTOS_WRITE_TABLES …` (the error
 names the exact fix). Full security model (least-privilege role, the RLS
-trade-off): [`../../docs/SECURITY.md`](../../docs/SECURITY.md).
+trade-off): [`SECURITY.md`](../../../SECURITY.md).
 
 ## Features
 
@@ -157,7 +157,7 @@ Writes flow the same path in reverse: app → local SQLite outbox → nostos-ser
 through logical replication as a normal RowOp → live echo through `watch()`.
 
 **1. Create the schema in Supabase (bring your own schema).** Paste
-[`supabase/schema.sql`](../../supabase/schema.sql) into the Supabase Dashboard
+[`supabase/schema.sql`](../../../supabase/schema.sql) into the Supabase Dashboard
 → SQL Editor → Run. It creates the 6 tables + the `cairn_pub` publication + the
 demo seed (idempotent — `CREATE IF NOT EXISTS` / `ON CONFLICT DO NOTHING`).
 
@@ -189,7 +189,7 @@ from your Supabase schema, and `flutter run -d macos` syncs from Supabase.
 Verified 2026-07-12 against a real project: full snapshot + live + LSN-resume
 e2e green through this relay. (`scripts/warp-ipv6-egress.sh down` stops it. For
 least-privilege, create a dedicated `REPLICATION` role instead of `postgres` —
-see `docker/pg-init/02-nostos-role.sql` + `docs/SECURITY.md`.)
+see `docker/pg-init/02-nostos-role.sql` + `SECURITY.md`.)
 
 ## Troubleshooting — "snapshot works but live edits never arrive"
 

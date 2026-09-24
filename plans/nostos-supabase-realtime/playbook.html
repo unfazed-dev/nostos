@@ -81,7 +81,7 @@ ul.checklist li .n{color:var(--muted);font-size:12.5px;display:block}
 </pre><p style="text-align:center;color:var(--muted);font-size:13px;margin-top:4px">One Postgres WAL, two independent consumers. A nostos app listens to cairn_pub, NOT supabase_realtime.</p>
 <p>Implication: toggling a table on in <strong>Dashboard → Database → Publications → <code>supabase_realtime</code></strong> adds it to the Realtime broadcast. It has <strong>zero effect on a nostos app</strong>, because the nostos app subscribes to <code>cairn_pub</code> over <code>/sync</code>, not to the Realtime websocket. This is why "I enabled Realtime and nothing changed" is the expected result, not a failure.</p>
 <h2>The collapsed-write model (why there is no uploadData)</h2>
-<p>nostos's headline DX edge is <strong>zero-backend-write</strong>: the server's <code>PgWriteBack</code> applies client writes <em>directly</em> to the source Postgres. The app never talks to Postgres and never implements <code>uploadData</code>. The server itself runs the SQL, so it owns the trust boundary (table allowlist → column regex → bind parameters) on top of JWT auth and tenant scoping. See <code>docs/SECURITY.md</code>.</p>
+<p>nostos's headline DX edge is <strong>zero-backend-write</strong>: the server's <code>PgWriteBack</code> applies client writes <em>directly</em> to the source Postgres. The app never talks to Postgres and never implements <code>uploadData</code>. The server itself runs the SQL, so it owns the trust boundary (table allowlist → column regex → bind parameters) on top of JWT auth and tenant scoping. See <code>SECURITY.md</code>.</p>
 <pre class="mermaid">sequenceDiagram
   participant App as Flutter app
   participant Srv as nostos-server (PgWriteBack)
@@ -107,7 +107,7 @@ NOSTOS_WRITE_TABLES=tasks \\
 ./target/debug/nostos-server
 </code></pre>
 
-<div class="callout "><p>Connect as a <strong>least-privilege role</strong>, never the <code>postgres</code> superuser. The demo role (<code>docker/pg-init/02-nostos-role.sql</code>) is <code>REPLICATION + BYPASSRLS + GRANT</code> on synced tables only — it can INSERT/UPDATE/DELETE but cannot <code>DROP TABLE</code>. Full role + Supabase migration SQL: <code>docs/SECURITY.md</code>. nostos writes <strong>bypass Supabase RLS</strong> because it connects as <code>BYPASSRLS</code> and applies its own authz; read the RLS trade-off in <code>docs/STRATEGY.md</code> before adopting on an RLS-heavy project.</p></div>
+<div class="callout "><p>Connect as a <strong>least-privilege role</strong>, never the <code>postgres</code> superuser. The demo role (<code>docker/pg-init/02-nostos-role.sql</code>) is <code>REPLICATION + BYPASSRLS + GRANT</code> on synced tables only — it can INSERT/UPDATE/DELETE but cannot <code>DROP TABLE</code>. Full role + Supabase migration SQL: <code>SECURITY.md</code>. nostos writes <strong>bypass Supabase RLS</strong> because it connects as <code>BYPASSRLS</code> and applies its own authz; read the RLS trade-off in <code>docs/STRATEGY.md</code> before adopting on an RLS-heavy project.</p></div>
 <h2>Why the dashboard looks stale (the actual evidence)</h2>
 <p>The Supabase <strong>Table Editor is a static admin page</strong> — it runs one query on load and on manual refresh, and it does <strong>not</strong> subscribe to Realtime. Realtime cannot make it live-update. This is the source of "the row stays static".</p>
 <p>This was caught live on 2026-07-14. The app had <strong>two</strong> rows; the dashboard showed <strong>one</strong> (and a stale <code>completed</code> value) — frozen several minutes behind:</p>
@@ -131,7 +131,7 @@ PGCONNECT_TIMEOUT=8 PGPASSWORD=&quot;$PW&quot; psql \\
 <h2>Adopter checklist</h2>
 <ul class="checklist">
 <li>CREATE PUBLICATION cairn_pub FOR TABLE <synced tables></li>
-<li>CREATE ROLE cairn_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser<span class="n">See docs/SECURITY.md for the Supabase SQL.</span></li>
+<li>CREATE ROLE cairn_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser<span class="n">See SECURITY.md for the Supabase SQL.</span></li>
 <li>Set NOSTOS_WRITE_TABLES to every table clients may write (empty default = none)</li>
 <li>Point nostos-server at Supabase (direct IPv6, or WARP relay for IPv4-only egress)<span class="n">The pooler cannot carry logical replication — use the direct connection.</span></li>
 <li>Verify writes with a DIRECT psql/libpq read, never the dashboard<span class="n">Refresh the Table Editor manually; it does not live-update.</span></li>
