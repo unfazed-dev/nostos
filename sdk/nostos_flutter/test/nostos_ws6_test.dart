@@ -75,7 +75,7 @@ void main() {
     // affinity derived via oid_to_sqlite_affinity (ADR-0019): bool(16)→INTEGER,
     // int4(23)→INTEGER, float4(700)→REAL, text(25)→TEXT.
     final schema = NostosSchema.fromSchemaDescriptor({
-      'publication': 'cairn_pub',
+      'publication': 'nostos_pub',
       'tables': [
         {
           'name': 'tasks',

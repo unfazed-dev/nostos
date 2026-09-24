@@ -36,7 +36,7 @@ import Nostos
 let nostos = try NostosClient(
     url: "ws://127.0.0.1:8080/sync",   // the iOS sim shares the host's localhost
     token: nil,
-    dbPath: NSTemporaryDirectory() + "cairn.db"
+    dbPath: NSTemporaryDirectory() + "nostos.db"
 )
 try nostos.connect()
 try nostos.subscribe(table: "tasks")

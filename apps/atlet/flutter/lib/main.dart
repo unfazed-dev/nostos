@@ -72,7 +72,7 @@ Future<void> main() async {
 }
 
 /// Foreground order-banner bridge: MainActivity/AppDelegate post a local
-/// heads-up on the same 'cairn' channel as the FCM pushes (see push pilot,
+/// heads-up on the same 'nostos' channel as the FCM pushes (see push pilot,
 /// ADR-0037), and hand the tap back over the same channel.
 const _orderBannerChannel = MethodChannel('atlet/notify');
 
@@ -414,7 +414,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ? ''
           : (await getApplicationDocumentsDirectory()).path;
       final adapter = await engineRegistry.start(
-        Engine.cairnDirect,
+        Engine.nostosDirect,
         SyncSession(
           supabaseUrl: _supabaseUrl,
           accessToken: session.accessToken,
@@ -507,8 +507,8 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       buildSession: _benchSessionRow,
       adapterFactories: {
-        Engine.cairn: () => NostosAdapter(),
-        Engine.cairnDirect: () =>
+        Engine.nostos: () => NostosAdapter(),
+        Engine.nostosDirect: () =>
             NostosAdapter.direct(anonKey: _supabaseAnonKey),
       },
     );

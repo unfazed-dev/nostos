@@ -19,7 +19,7 @@
 //! ## Running
 //! ```sh
 //! docker compose -f docker/docker-compose.yml up -d
-//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn \
+//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos \
 //!   cargo test -p nostos-infra --features pg --test e2e_pg_oplog_replay \
 //!   -- --nocapture --test-threads=1
 //! ```
@@ -55,7 +55,7 @@ const TENANT_COL: &str = "org_id";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -108,7 +108,7 @@ async fn oplog_max_lsn(tenant: &str) -> i64 {
     let c = sql_client().await;
     let row: i64 = c
         .query_one(
-            "SELECT COALESCE(MAX(lsn), 0)::bigint FROM cairn_oplog WHERE tenant_id = $1",
+            "SELECT COALESCE(MAX(lsn), 0)::bigint FROM nostos_oplog WHERE tenant_id = $1",
             &[&tenant],
         )
         .await
@@ -161,7 +161,7 @@ struct Harness {
 }
 
 /// Bring up the production-shaped stack against real PG in TENANT MODE: a
-/// `FanOutService` with the `PgOpLogWriter` attached (so `cairn_oplog` is
+/// `FanOutService` with the `PgOpLogWriter` attached (so `nostos_oplog` is
 /// seeded) + a `PgReplicator` driver + an axum WS server whose
 /// `SyncRouterState` wires snapshotter + oplog_reader + metrics + tenant
 /// enforcement. The same `metrics`/`store`/`manager` are shared between the
@@ -182,9 +182,9 @@ async fn harness(tenant: &str, slot: &str) -> Harness {
     // `query_one`) so an EMPTY-but-existing table returns Ok([]) instead of a
     // RowCount error — the table is empty at fresh setup before any event lands.
     let _ = sql
-        .query("SELECT 1 FROM cairn_oplog LIMIT 1", &[])
+        .query("SELECT 1 FROM nostos_oplog LIMIT 1", &[])
         .await
-        .expect("cairn_oplog table exists (run docker compose up -d)");
+        .expect("nostos_oplog table exists (run docker compose up -d)");
 
     let metrics = Arc::new(Metrics::new());
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
@@ -203,8 +203,8 @@ async fn harness(tenant: &str, slot: &str) -> Harness {
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)).with_op_log(oplog));
 
     // Replicator driver. The slot-creation snapshot seeds the op-log with the
-    // table's existing rows (each fanned-out event is written to cairn_oplog).
-    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), slot, "cairn_pub").expect("valid PG url");
+    // table's existing rows (each fanned-out event is written to nostos_oplog).
+    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), slot, "nostos_pub").expect("valid PG url");
     let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
     let fanout_drv = Arc::clone(&fanout);
     let driver = tokio::spawn(async move {
@@ -335,7 +335,7 @@ async fn oplog_replay_delivers_offline_gap_including_deletes() {
         return;
     }
     // Init tracing so the op-log writer's flush warns + the replicator's
-    // snapshot/read logs surface under --nocapture (diagnoses why cairn_oplog
+    // snapshot/read logs surface under --nocapture (diagnoses why nostos_oplog
     // stays empty: writer INSERT failure vs snapshot-read gap vs no events).
     let _ = tracing_subscriber::fmt()
         .with_env_filter("nostos=debug,info")
@@ -405,7 +405,7 @@ async fn oplog_replay_delivers_offline_gap_including_deletes() {
             let c = sql_client().await;
             let n: i64 = c
                 .query_one(
-                    "SELECT count(*) FROM cairn_oplog WHERE pk = $1 AND op = 'delete'",
+                    "SELECT count(*) FROM nostos_oplog WHERE pk = $1 AND op = 'delete'",
                     &[&pk],
                 )
                 .await
@@ -414,7 +414,7 @@ async fn oplog_replay_delivers_offline_gap_including_deletes() {
         }
     })
     .await;
-    assert!(gap_landed, "offline-gap ops never landed in cairn_oplog");
+    assert!(gap_landed, "offline-gap ops never landed in nostos_oplog");
 
     // Reconnect: epoch matches + resume in-window ⇒ REPLAY (no snapshot).
     let replay = collect_frames(
@@ -498,7 +498,7 @@ async fn aged_out_checkpoint_falls_back_to_snapshot() {
         return;
     }
     // Init tracing so the op-log writer's flush warns + the replicator's
-    // snapshot/read logs surface under --nocapture (diagnoses why cairn_oplog
+    // snapshot/read logs surface under --nocapture (diagnoses why nostos_oplog
     // stays empty: writer INSERT failure vs snapshot-read gap vs no events).
     let _ = tracing_subscriber::fmt()
         .with_env_filter("nostos=debug,info")
@@ -536,7 +536,7 @@ async fn aged_out_checkpoint_falls_back_to_snapshot() {
     // the server falls back to snapshot-reconcile (slice 1, the safety net).
     {
         let c = sql_client().await;
-        c.execute("DELETE FROM cairn_oplog WHERE tenant_id = $1", &[&tenant])
+        c.execute("DELETE FROM nostos_oplog WHERE tenant_id = $1", &[&tenant])
             .await
             .expect("age out op-log");
     }

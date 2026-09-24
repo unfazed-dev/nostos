@@ -1,4 +1,4 @@
-# Bench gate: cairn → nostos rename + transport.rs split — 2026-09-24
+# Bench gate: nostos → nostos rename + transport.rs split — 2026-09-24
 
 Scope: **eval-only** aggregate fan-out (FakeReplicator loopback → real axum/WS server → 1,000 tokio-tungstenite clients).
 Not comparable to any full-path (real-PG → client-apply) figure, and not to the 2026-09-02 headline (see Finding 1).
@@ -7,7 +7,7 @@ Not comparable to any full-path (real-PG → client-apply) figure, and not to th
 
 | tree | repo @ commit | binary sha256 (first 16) | `__text` bytes |
 |---|---|---|---:|
-| A cairn | `cairn` @ `074c60f` (detached scratch worktree) | `67d8e04de5b15e6c` | 2,395,400 |
+| A nostos | `nostos` @ `074c60f` (detached scratch worktree) | `67d8e04de5b15e6c` | 2,395,400 |
 | B nostos main | `nostos/.worktrees/gates` @ `3469b4a` (clean before and after build) | `438455cf5dceddae` | 2,398,080 |
 | C transport split | `nostos` @ `785ca68` (detached scratch worktree, see note) | `86d4bacc77caf05e` | 2,398,080 |
 
@@ -15,7 +15,7 @@ Note: `nostos/.worktrees/transport-split` had moved on to `8c7af03` (a one-line 
 To build the exact requested commit without touching that worktree, C was built from a detached worktree at `785ca68`.
 The two differ by that one comment line, so C is the branch's code.
 
-Build: `CARGO_BUILD_BUILD_DIR=.nostos-scratch/bench-build-<T> cargo build --release -p <cairn|nostos>-bench --bin <…>-bench`,
+Build: `CARGO_BUILD_BUILD_DIR=.nostos-scratch/bench-build-<T> cargo build --release -p <nostos|nostos>-bench --bin <…>-bench`,
 profile `opt-level=3, lto="fat", codegen-units=1, panic="abort"` (identical in all three `Cargo.toml`s). Binaries copied out to `bench/bin/`
 immediately after build and run from there, so later builds in the live worktrees could not clobber them.
 
@@ -45,7 +45,7 @@ Gates per run (scripts `run.sh`, `run-extra.sh`):
 - **fd limit:** `ulimit -n` 1,048,576 (kern.maxfilesperproc 61,440)
 - **Load at session start:** load1 8.68 while building, 4.46 at the first run. Start load1 per run was 4.5–13.0, mostly decay from the previous run (see Finding 3).
 - **Other load (left alone):**
-  - Docker Desktop VM running `cairn-postgres` plus 10 `supabase_*_stack` containers
+  - Docker Desktop VM running `nostos-postgres` plus 10 `supabase_*_stack` containers
   - VS Code with 3 Dart language servers and tooling daemons
   - Brave, WindowServer
   - Headroom proxy (python, ~35–42%)
@@ -86,7 +86,7 @@ No run timed out and all `throughput_valid=true`. **No drops anywhere.**
 
 | tree | valid runs | run figures (ops/s) | **median** | min–max spread (% of median) | drop % | p99 max (ms) |
 |---|---|---|---:|---|---:|---:|
-| A cairn | A1 A3 A6 | 1,524,704 · 1,502,353 · 1,688,636 | **1,524,704** | 1,502,353–1,688,636 (12.2%) | 0.00 | 0.057 |
+| A nostos | A1 A3 A6 | 1,524,704 · 1,502,353 · 1,688,636 | **1,524,704** | 1,502,353–1,688,636 (12.2%) | 0.00 | 0.057 |
 | B nostos | B1 B2 B3 B5 B6 | 1,453,368 · 1,580,272 · 1,390,793 · 1,703,318 · 1,598,845 | **1,580,272** | 1,390,793–1,703,318 (19.8%) | 0.00 | 0.078 |
 | C split | C3 C5 C6 | 1,544,695 · 1,706,963 · 1,726,213 | **1,706,963** | 1,544,695–1,726,213 (10.6%) | 0.00 | 0.061 |
 
@@ -129,7 +129,7 @@ So the headline covers the split code's hot path, and no separate WS bench was r
 
 ## Findings
 
-1. **The 2026-09-02 headline (2,618,601 ops/s) does not reproduce under today's conditions.** A (cairn itself, same host) gives a valid median of 1.52M (−42%).
+1. **The 2026-09-02 headline (2,618,601 ops/s) does not reproduce under today's conditions.** A (nostos itself, same host) gives a valid median of 1.52M (−42%).
    - This is not a rename or split effect: A, B and C all show it.
    - Rep-position means across all 18 runs:
      - warm-up 1.80M

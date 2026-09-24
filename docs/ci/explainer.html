@@ -191,7 +191,7 @@ checked, and the trade-offs chosen on purpose.</p>
 <code>cargo fmt --check</code>, <code>cargo clippy --workspace --all-targets -D warnings</code>, <code>cargo test --workspace --include-ignored</code>; locally <code>make ci</code></div>
 <div class="job-card"><div class="job-name"><span>e2e-pg</span><span class="job-req">required</span></div>
 <div class="job-meta">ci.yml · ubuntu-latest · 30 min · <code>real-Postgres logical-replication e2e</code></div>
-compose Postgres, ready once <code>cairn_pub</code> answers 5&times; in a row, then <code>NOSTOS_E2E_PG=1 cargo test -p nostos-infra --features pg -- --test-threads=1</code>; locally <code>make pg-e2e</code></div>
+compose Postgres, ready once <code>nostos_pub</code> answers 5&times; in a row, then <code>NOSTOS_E2E_PG=1 cargo test -p nostos-infra --features pg -- --test-threads=1</code>; locally <code>make pg-e2e</code></div>
 <div class="job-card"><div class="job-name"><span>deny</span><span class="job-req">required</span></div>
 <div class="job-meta">ci.yml · ubuntu-latest · 20 min · <code>cargo-deny (licenses, advisories, bans)</code></div>
 <code>cargo deny check licenses advisories bans</code></div>

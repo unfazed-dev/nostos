@@ -55,7 +55,7 @@ New messages:
 - `{type:"storage", mode:"durable"|"memory"}` — the Worker pushes the backend mode
   after init so the main thread can surface it on `SyncStatus`.
 - The existing `signOut` command now wipes OPFS (via `db.clear()` / file removal) +
-  `localStorage["cairn:checkpoint:<table>"]` + the token.
+  `localStorage["nostos:checkpoint:<table>"]` + the token.
 
 ### serde-JSON vs transferable `ArrayBuffer` — justification
 
@@ -75,7 +75,7 @@ New messages:
 ### Schema + transaction shape
 
 `SqliteWasmStorage` mirrors `SqliteStorage`'s schema verbatim
-(`cairn_data`, `cairn_meta`, `cairn_outbox` — including `applied_lsn` per-row LSN
+(`nostos_data`, `nostos_meta`, `nostos_outbox` — including `applied_lsn` per-row LSN
 gating and `attempts`/`dlq` dead-letter columns). The `apply_batch` transaction
 (BEGIN → per-row gated upsert/delete → checkpoint UPDATE → COMMIT) runs in JS as one
 atomic unit, exactly as `SqliteStorage::apply_batch` does in rusqlite. The per-row LSN
@@ -84,8 +84,8 @@ itself, mirroring the reference impl.
 
 ### Durable checkpoint
 
-Resume reads the checkpoint from SQLite (`cairn_meta` key `checkpoint`), NOT from
-`localStorage`. The `localStorage["cairn:checkpoint:<table>"]` key is retained ONLY as
+Resume reads the checkpoint from SQLite (`nostos_meta` key `checkpoint`), NOT from
+`localStorage`. The `localStorage["nostos:checkpoint:<table>"]` key is retained ONLY as
 a sign-out wipe target (clearing it prevents a stale-LSN resume after OPFS is wiped).
 The transport's `connect` reads `engine.checkpoint()` (which delegates to
 `Storage::checkpoint()`) instead of `read_checkpoint_ls`.
@@ -100,9 +100,9 @@ NOT a crash. The Playwright harness exercises this by testing with OPFS blocked.
 ### Sign-out (ADR-0029)
 
 `signOut()` wipes:
-1. OPFS DB file: `Storage::clear()` on `SqliteWasmStorage` (`DELETE FROM cairn_data;
-   DELETE FROM cairn_outbox; UPDATE cairn_meta SET value='0' WHERE key='checkpoint'`).
-2. `localStorage["cairn:checkpoint:<table>"]` — removed so the next principal does not
+1. OPFS DB file: `Storage::clear()` on `SqliteWasmStorage` (`DELETE FROM nostos_data;
+   DELETE FROM nostos_outbox; UPDATE nostos_meta SET value='0' WHERE key='checkpoint'`).
+2. `localStorage["nostos:checkpoint:<table>"]` — removed so the next principal does not
    resume from a stale LSN (closes the e2 stale-LSN gap).
 3. The cached token — dropped so the next `connect` requires re-auth.
 

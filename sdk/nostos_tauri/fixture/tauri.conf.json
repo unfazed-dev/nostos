@@ -14,7 +14,7 @@
     "security": { "csp": null }
   },
   "plugins": {
-    "cairn": {
+    "nostos": {
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "tables": ["tasks", "notes"],
       "dbPath": "nostos-fixture.db"

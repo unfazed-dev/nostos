@@ -234,12 +234,12 @@ void main() {
 
     setUp(() async {
       tempDir = await Directory.systemTemp.createTemp('atlet-harness-test');
-      adapter = _FakeAdapter(engine: 'cairn', seedSize: 2);
+      adapter = _FakeAdapter(engine: 'nostos', seedSize: 2);
       adapter.ackDelay = const Duration(milliseconds: 2);
       store = BenchStore(directory: tempDir, fileName: 'runs.jsonl');
       runner = Runner(
         sdk: 'flutter',
-        engine: 'cairn',
+        engine: 'nostos',
         profile: 'local',
         specVersion: 'v0',
         seedSize: 2,
@@ -262,7 +262,7 @@ void main() {
         await Directory(dbDir).create(recursive: true);
         // Sanity payload for db_bytes: confirms the harness passes `dbDir`
         // through to Runner.dbBytes rather than measuring some other path.
-        await File('$dbDir/cairn.sqlite').writeAsBytes(List.filled(42, 0));
+        await File('$dbDir/nostos.sqlite').writeAsBytes(List.filled(42, 0));
 
         final harness = BenchHarness(
           runner: runner,
@@ -298,7 +298,7 @@ void main() {
           'queue_drain',
           'db_bytes',
         ]);
-        expect(persisted.every((r) => r.engine == 'cairn'), isTrue);
+        expect(persisted.every((r) => r.engine == 'nostos'), isTrue);
 
         final dbBytesRecord = persisted.last;
         expect(dbBytesRecord.metrics['db_bytes'], 42);
@@ -354,9 +354,9 @@ void main() {
     setUp(() async {
       tempDir = await Directory.systemTemp.createTemp('atlet-engines-test');
       store = BenchStore(directory: tempDir, fileName: 'runs.jsonl');
-      nostosAdapter = _FakeAdapter(engine: 'cairn')
+      nostosAdapter = _FakeAdapter(engine: 'nostos')
         ..ackDelay = const Duration(milliseconds: 1);
-      directAdapter = _FakeAdapter(engine: 'cairn-direct')
+      directAdapter = _FakeAdapter(engine: 'nostos-direct')
         ..ackDelay = const Duration(milliseconds: 1);
     });
 
@@ -389,29 +389,29 @@ void main() {
         insertRemoteRow: fake.insertRemoteRow,
         buildSession: _buildSession,
         adapterFactories: {
-          Engine.cairn: () => nostosAdapter,
-          Engine.cairnDirect: () => directAdapter,
+          Engine.nostos: () => nostosAdapter,
+          Engine.nostosDirect: () => directAdapter,
         },
         n: 1,
         timeout: const Duration(seconds: 5),
       );
 
-      expect(results.keys.toSet(), {Engine.cairn, Engine.cairnDirect});
-      expect(results[Engine.cairn], hasLength(5));
-      expect(results[Engine.cairnDirect], hasLength(5));
+      expect(results.keys.toSet(), {Engine.nostos, Engine.nostosDirect});
+      expect(results[Engine.nostos], hasLength(5));
+      expect(results[Engine.nostosDirect], hasLength(5));
 
       expect(nostosAdapter.signedOut, isTrue);
       expect(directAdapter.signedOut, isTrue);
 
-      expect(nostosAdapter.lastDbDir, '${tempDir.path}/cairn');
-      expect(directAdapter.lastDbDir, '${tempDir.path}/cairnDirect');
-      expect(await Directory('${tempDir.path}/cairn').exists(), isTrue);
-      expect(await Directory('${tempDir.path}/cairnDirect').exists(), isTrue);
+      expect(nostosAdapter.lastDbDir, '${tempDir.path}/nostos');
+      expect(directAdapter.lastDbDir, '${tempDir.path}/nostosDirect');
+      expect(await Directory('${tempDir.path}/nostos').exists(), isTrue);
+      expect(await Directory('${tempDir.path}/nostosDirect').exists(), isTrue);
 
       final persisted = await store.readAll();
       expect(persisted, hasLength(10));
-      expect(persisted.where((r) => r.engine == 'cairn'), hasLength(5));
-      expect(persisted.where((r) => r.engine == 'cairnDirect'), hasLength(5));
+      expect(persisted.where((r) => r.engine == 'nostos'), hasLength(5));
+      expect(persisted.where((r) => r.engine == 'nostosDirect'), hasLength(5));
     });
   });
 

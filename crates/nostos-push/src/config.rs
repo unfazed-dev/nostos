@@ -10,7 +10,7 @@
 use clap::Parser;
 
 /// Default [`Config::db`].
-pub const DEFAULT_DB: &str = "./cairn-pushd.db";
+pub const DEFAULT_DB: &str = "./nostos-pushd.db";
 /// Pre-rename [`DEFAULT_DB`], kept when only it exists (ADR-0046).
 pub const LEGACY_DB: &str = "./cairn-pushd.db"; // rename:hold — pre-rename registry file, read as fallback until 1.0 (decision 10, ADR-0046)
 
@@ -122,7 +122,7 @@ mod tests {
         // rejected at boot by ApiKeys::parse, the fail-fast authority (pin 0.2).
         let cfg = Config::parse_from(["nostos-pushd", "--api-keys", "acme:s3cr3t"]);
         assert_eq!(cfg.bind, "127.0.0.1:8090");
-        assert_eq!(cfg.db, "./cairn-pushd.db");
+        assert_eq!(cfg.db, "./nostos-pushd.db");
         assert_eq!(cfg.database_url, None, "SQLite stays the default registry");
         assert_eq!(cfg.api_keys, "acme:s3cr3t");
         assert_eq!(cfg.debounce_ms, 2000);

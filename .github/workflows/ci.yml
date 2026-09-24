@@ -79,7 +79,7 @@ jobs:
           #
           # The official entrypoint runs a TEMPORARY server to apply
           # /docker-entrypoint-initdb.d, then stops it and starts the real one.
-          # pg-init/01-sources.sql creates `cairn_pub` ON THAT TEMPORARY SERVER,
+          # pg-init/01-sources.sql creates `nostos_pub` ON THAT TEMPORARY SERVER,
           # so "the publication exists" does NOT prove the real server is up —
           # the previous version of this gate broke out of the poll during init
           # and the next psql landed in the restart gap. Observed 2026-09-01
@@ -94,12 +94,12 @@ jobs:
           ok=0
           for i in $(seq 1 180); do
             if docker compose -f docker/docker-compose.yml exec -T postgres \
-                 psql -U cairn -d cairn -tAc \
-                 "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" \
+                 psql -U nostos -d nostos -tAc \
+                 "SELECT 1 FROM pg_publication WHERE pubname='nostos_pub'" \
                  2>/dev/null | grep -q 1; then
               ok=$((ok + 1))
               if [ "$ok" -ge "$STREAK" ]; then
-                echo "Postgres ready (cairn_pub present ${STREAK}x consecutively) after ${i}s"
+                echo "Postgres ready (nostos_pub present ${STREAK}x consecutively) after ${i}s"
                 break
               fi
             else
@@ -112,7 +112,7 @@ jobs:
       - name: Run feature-gated e2e
         run: |
           NOSTOS_E2E_PG=1 \
-          NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn \
+          NOSTOS_PG_URL=postgresql://nostos:nostos@localhost:5433/nostos \
           cargo test -p nostos-infra --features pg -- --nocapture --test-threads=1
       - name: Tear down Postgres
         if: always()

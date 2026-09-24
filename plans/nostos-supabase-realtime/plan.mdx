@@ -23,9 +23,9 @@ Both nostos and Supabase Realtime read the **same Postgres write-ahead log**. Th
 are independent consumers with **different publications and different slots** —
 neither knows the other exists.
 
-<Mermaid id="two-publications" caption="One Postgres WAL, two independent consumers. A nostos app listens to cairn_pub, NOT supabase_realtime." source={`flowchart LR
+<Mermaid id="two-publications" caption="One Postgres WAL, two independent consumers. A nostos app listens to nostos_pub, NOT supabase_realtime." source={`flowchart LR
   PG[("Postgres\nSupabase db.postgres\n+ WAL")]
-  PUBC["cairn_pub\n+ slot cairn_slot"]
+  PUBC["nostos_pub\n+ slot nostos_slot"]
   PUBR["supabase_realtime\n+ Realtime slot"]
   NOSTOS["nostos-server\nlogical replication\nRust"]
   APP["Flutter app\nlocal SQLite\noffline-first + writes"]
@@ -37,7 +37,7 @@ neither knows the other exists.
 
 Implication: toggling a table on in **Dashboard → Database → Publications →
 `supabase_realtime`** adds it to the Realtime broadcast. It has **zero effect on a
-nostos app**, because the nostos app subscribes to `cairn_pub` over `/sync`, not to
+nostos app**, because the nostos app subscribes to `nostos_pub` over `/sync`, not to
 the Realtime websocket. This is why "I enabled Realtime and nothing changed" is
 the expected result, not a failure.
 
@@ -56,7 +56,7 @@ of JWT auth and tenant scoping. See `SECURITY.md`.
   App->>Srv: write(table, op, pk, payload) over /sync
   Srv->>Srv: allowlist + column regex + bind params + tenant stamp
   Srv->>PG: INSERT / UPDATE / DELETE (auto-applied)
-  PG-->>Srv: WAL change on cairn_pub
+  PG-->>Srv: WAL change on nostos_pub
   Srv-->>App: replicated row echo over /sync
 `} />
 
@@ -75,8 +75,8 @@ NOSTOS_WRITE_TABLES=tasks make dev-stack
 `} />
 
 <Code id="enable-writes-cloud" filename="terminal — nostos-server against Supabase" language="sh" caption="Cloud: same env var; connect over the WARP relay or direct IPv6." code={`NOSTOS_REPLICATOR=pg \\
-NOSTOS_PG_URL='postgresql://cairn_writer:<secret>@127.0.0.1:15433/postgres' \\
-NOSTOS_PG_SLOT=cairn_slot NOSTOS_PG_PUBLICATION=cairn_pub \\
+NOSTOS_PG_URL='postgresql://nostos_writer:<secret>@127.0.0.1:15433/postgres' \\
+NOSTOS_PG_SLOT=nostos_slot NOSTOS_PG_PUBLICATION=nostos_pub \\
 NOSTOS_WRITE_TABLES=tasks \\
 ./target/debug/nostos-server
 `} />
@@ -162,8 +162,8 @@ worker) needs the push.
 ## Adopter checklist
 
 <Checklist id="adopter-checklist" items={[
-  { id: "pub", label: "CREATE PUBLICATION cairn_pub FOR TABLE <synced tables>" },
-  { id: "role", label: "CREATE ROLE cairn_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser", note: "See SECURITY.md for the Supabase SQL." },
+  { id: "pub", label: "CREATE PUBLICATION nostos_pub FOR TABLE <synced tables>" },
+  { id: "role", label: "CREATE ROLE nostos_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser", note: "See SECURITY.md for the Supabase SQL." },
   { id: "writetables", label: "Set NOSTOS_WRITE_TABLES to every table clients may write (empty default = none)" },
   { id: "connect", label: "Point nostos-server at Supabase (direct IPv6, or WARP relay for IPv4-only egress)", note: "The pooler cannot carry logical replication — use the direct connection." },
   { id: "verify", label: "Verify writes with a DIRECT psql/libpq read, never the dashboard", note: "Refresh the Table Editor manually; it does not live-update." },

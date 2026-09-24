@@ -334,7 +334,7 @@ fn outcome_for(status: u16, body: &Value) -> RailOutcome {
 /// Android notification channel nostos's visible pushes target. The client
 /// app must create it at IMPORTANCE_HIGH or Android posts silently on the
 /// DEFAULT fallback channel (no heads-up banner). See ADR-0037 §2.
-const ANDROID_CHANNEL_ID: &str = "cairn";
+const ANDROID_CHANNEL_ID: &str = "nostos";
 
 /// Build the `messages:send` JSON. Doorbell = data-only; visible =
 /// `notification`. The `android` block carries collapse/ttl/priority (the
@@ -677,7 +677,7 @@ mod tests {
                     "token": "tok-1",
                     "notification": { "title": "Tasks changed", "body": "New items to sync" },
                     "android": { "collapse_key": "sync-tasks", "priority": "HIGH", "ttl": "3600s",
-                                 "notification": { "channel_id": "cairn", "default_sound": true,
+                                 "notification": { "channel_id": "nostos", "default_sound": true,
                                                    "vibrate_timings": ["0s", "0.3s", "0.2s", "0.3s"] } },
                     "apns": { "payload": { "aps": { "sound": "default" } } }
                 }
@@ -798,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn fcm_routing_keys_land_in_data_on_both_visible_modes() {
         let data: std::collections::BTreeMap<String, String> = [
-            ("cairn_route".to_string(), "/orders/42".to_string()),
+            ("nostos_route".to_string(), "/orders/42".to_string()),
             ("order_id".to_string(), "42".to_string()),
         ]
         .into_iter()
@@ -826,7 +826,7 @@ mod tests {
         let message = &mock.requests()[1].json()["message"];
         assert_eq!(
             message["data"],
-            json!({ "cairn_route": "/orders/42", "order_id": "42" })
+            json!({ "nostos_route": "/orders/42", "order_id": "42" })
         );
         assert_eq!(
             message["notification"],
@@ -851,7 +851,7 @@ mod tests {
             mock.requests()[2].json()["message"]["data"],
             json!({
                 "title": "Order shipped", "body": "On its way", "category": "order_status",
-                "cairn_route": "/orders/42", "order_id": "42",
+                "nostos_route": "/orders/42", "order_id": "42",
             })
         );
     }

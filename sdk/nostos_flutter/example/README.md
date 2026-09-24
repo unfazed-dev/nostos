@@ -35,7 +35,7 @@ Two terminals:
 
 ```sh
 # Terminal 1 — start nostos-server against a real Postgres (Docker).
-# `make dev-stack` composes PG, waits for the `cairn_pub` publication, then runs
+# `make dev-stack` composes PG, waits for the `nostos_pub` publication, then runs
 # nostos-server with NOSTOS_REPLICATOR=pg + NOSTOS_PG_URL set.
 #
 # Writes are allowlist-gated (ADR-0013): nostos AUTO-APPLIES writes server-side
@@ -119,8 +119,8 @@ logical replication. Three steps.
    Supabase cloud Postgres                         your machine
    ┌──────────────────────────┐
    │ db.<ref>.supabase.co     │  IPv6-only direct host (free tier has
-   │   tables + cairn_pub +   │  no IPv4 A record; pooler can't carry
-   │   cairn_slot (logical    │  logical replication — must be the
+   │   tables + nostos_pub +   │  no IPv4 A record; pooler can't carry
+   │   nostos_slot (logical    │  logical replication — must be the
    │   replication slot)      │  direct host)
    └─────────────┬────────────┘
                  │ TCP 5432, IPv6 only
@@ -135,7 +135,7 @@ logical replication. Three steps.
    ┌─────────────▼──────────────────┐
    │  nostos-server  (Rust binary)   │  `NOSTOS_REPLICATOR=pg
    │  • logical-replication consumer│   NOSTOS_PG_URL=…@127.0.0.1:15433/…`
-   │    (slot cairn_slot → WAL)     │  Reads the WAL stream + pushes RowOps.
+   │    (slot nostos_slot → WAL)     │  Reads the WAL stream + pushes RowOps.
    │  • snapshot-on-subscribe       │  Auto-applies writes server-side
    │    (initial rows on connect)   │  (collapsed-write; gated by
    │  • GET /schema (table catalog) │  NOSTOS_WRITE_TABLES).
@@ -145,7 +145,7 @@ logical replication. Three steps.
                  │
    ┌─────────────▼──────────────────┐
    │  nostos_flutter app (this app)  │  `flutter run -d macos`
-   │  • SqliteStorage (cairn_data + │  One /sync socket, N subscribed tables
+   │  • SqliteStorage (nostos_data + │  One /sync socket, N subscribed tables
    │    per-table read views)       │  demuxed by WireFrame.table.
    │  • reactive watch() streams →  │  Durable outbox (offline writes flush
    │    IndexedStack pages          │  on reconnect).
@@ -158,7 +158,7 @@ through logical replication as a normal RowOp → live echo through `watch()`.
 
 **1. Create the schema in Supabase (bring your own schema).** Paste
 [`supabase/schema.sql`](../../../supabase/schema.sql) into the Supabase Dashboard
-→ SQL Editor → Run. It creates the 6 tables + the `cairn_pub` publication + the
+→ SQL Editor → Run. It creates the 6 tables + the `nostos_pub` publication + the
 demo seed (idempotent — `CREATE IF NOT EXISTS` / `ON CONFLICT DO NOTHING`).
 
 **2. Reach the direct host — it's IPv6-only on Supabase.** `db.<project>.supabase.co`
@@ -199,7 +199,7 @@ nostos-server log loops on:
 
 ```
 ERROR nostos_infra::replicator::pg: replication recv error; will attempt reconnect
-  error=server error: can no longer get changes from replication slot "cairn_slot" (SQLSTATE 55000)
+  error=server error: can no longer get changes from replication slot "nostos_slot" (SQLSTATE 55000)
 ```
 
 **Root cause:** the logical replication slot has been *invalidated*. Postgres
@@ -216,15 +216,15 @@ Confirm + recover (drop & recreate — an invalidated slot **cannot** resume):
 ```sh
 # 1. confirm: wal_status should be 'lost'
 PGPASSWORD=<pw> psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -c \
-  "SELECT slot_name, active, wal_status FROM pg_replication_slots WHERE slot_name='cairn_slot';"
+  "SELECT slot_name, active, wal_status FROM pg_replication_slots WHERE slot_name='nostos_slot';"
 
 # 2. STOP nostos-server first (a slot can't be dropped while a consumer holds it)
 
 # 3. drop + recreate (must use the 'pgoutput' plugin the server expects)
 PGPASSWORD=<pw> psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -c \
-  "SELECT pg_drop_replication_slot('cairn_slot');"
+  "SELECT pg_drop_replication_slot('nostos_slot');"
 PGPASSWORD=<pw> psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -c \
-  "SELECT pg_create_logical_replication_slot('cairn_slot', 'pgoutput');"
+  "SELECT pg_create_logical_replication_slot('nostos_slot', 'pgoutput');"
 
 # 4. relaunch nostos-server (the Step 3 command above) — it reconnects to the
 #    fresh slot and live replication resumes. wal_status should now be 'reserved'.

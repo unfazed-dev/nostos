@@ -59,7 +59,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 /// Connect a control-plane SQL client (tokio-postgres) for setup/teardown and
@@ -206,7 +206,7 @@ async fn single_external_write_on_idle_table_applies_and_advances_checkpoint() {
         return;
     }
     let slot = format!("e2e_client_sync_{}_solo", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     drop_stale_slot(&slot).await;
 
     let (addr, shutdown, server, driver) = spawn_server(&slot, publication, false).await;
@@ -300,7 +300,7 @@ async fn write_enqueued_mid_session_reaches_postgres_without_reconnect() {
         return;
     }
     let slot = format!("e2e_client_sync_{}_midwrite", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     drop_stale_slot(&slot).await;
 
     let (addr, shutdown, server, driver) = spawn_server(&slot, publication, true).await;

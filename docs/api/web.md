@@ -104,7 +104,7 @@ This is the same contract as the native SDKs (durable intent before any network 
 
 `signOut()` wipes:
 1. **OPFS SQLite DB** — `dbHandle.clearAll()` (DELETE rows + outbox + checkpoint reset to '0').
-2. **`localStorage["cairn:checkpoint:*"]`** — cleared from the main thread (Workers cannot access
+2. **`localStorage["nostos:checkpoint:*"]`** — cleared from the main thread (Workers cannot access
    `localStorage`; belt-and-suspenders for any future main-thread checkpoint path).
 3. **The cached token** — dropped so the next `connect` requires re-auth.
 4. **The engine rows + outbox** — `sock.clearLocalState()` (the Rust `Storage::clear` +
@@ -112,7 +112,7 @@ This is the same contract as the native SDKs (durable intent before any network 
 
 ### Durable checkpoint
 
-In durable mode, the checkpoint is read from SQLite (`cairn_meta` key `'checkpoint'`), NOT from
+In durable mode, the checkpoint is read from SQLite (`nostos_meta` key `'checkpoint'`), NOT from
 `localStorage`. The `localStorage` key is retained ONLY as a sign-out wipe target (clearing it
 prevents a stale-LSN resume after OPFS is wiped). In memory mode, the checkpoint lives only in the
 engine's `InMemoryStorage` and is lost on reload.

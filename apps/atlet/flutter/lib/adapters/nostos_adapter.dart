@@ -13,7 +13,7 @@ import 'sync_adapter.dart';
 /// nostos_adapter_test.dart.
 class NostosAdapter implements SyncAdapter {
   /// Server mode: sync through a `nostos-server` `/sync` socket.
-  NostosAdapter() : engine = 'cairn', _open = _openServer;
+  NostosAdapter() : engine = 'nostos', _open = _openServer;
 
   /// Direct mode: sync straight with Supabase, no `nostos-server` anywhere
   /// (ADR-0045). Everything past `init()` is the same code — the mode only
@@ -23,7 +23,7 @@ class NostosAdapter implements SyncAdapter {
   /// [anonKey] is the project's publishable key, the only credential the app
   /// ships; RLS on the deployed schema is what actually gates the rows.
   NostosAdapter.direct({required String anonKey})
-    : engine = 'cairn-direct',
+    : engine = 'nostos-direct',
       _open =
           (({
             required String supabaseUrl,
@@ -68,7 +68,7 @@ class NostosAdapter implements SyncAdapter {
     url: _nostosUrl,
     token: accessToken,
     schema: _schema,
-    sqlitePath: '$dbDir/cairn.sqlite',
+    sqlitePath: '$dbDir/nostos.sqlite',
   );
 
   // Created once, never recreated: the conformance test's `marks` listener
@@ -403,7 +403,7 @@ class NostosAdapter implements SyncAdapter {
 
   /// PILOT (ADR-0037): register this device's push token against the live
   /// engine — `POST /push-tokens` in server mode, the
-  /// `cairn_register_push_token` RPC in direct mode (ADR-0045), same JWT as
+  /// `nostos_register_push_token` RPC in direct mode (ADR-0045), same JWT as
   /// the sync either way. Passthrough so callers never hold the SDK directly;
   /// the SDK's sign-out hook deregisters session-registered tokens
   /// automatically.
@@ -465,11 +465,11 @@ Future<NostosDatabase> openNostosDirect({
   anonKey: anonKey,
   // The scope the change-log trigger stamps, and the private Realtime
   // channel this device may join — see .nostos/direct.sql's
-  // `cairn.current_scopes()`.
+  // `nostos.current_scopes()`.
   scope: 'sub:$userId',
   token: accessToken,
   schema: _schema,
-  sqlitePath: '$dbDir/cairn_direct.sqlite',
+  sqlitePath: '$dbDir/nostos_direct.sqlite',
 );
 
 final NostosSchema _schema = NostosSchema(

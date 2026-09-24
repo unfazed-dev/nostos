@@ -21,17 +21,17 @@ export interface NostosSnapshot {
   } & Record<string, unknown>>;
 }
 
-/** Options for {@link NostosRaw.connect}: all optional when the plugins.cairn
+/** Options for {@link NostosRaw.connect}: all optional when the plugins.nostos
  *  config block in tauri.conf.json supplies defaults. */
 export interface ConnectOptions {
   /** Sync endpoint, e.g. "ws://127.0.0.1:8080/sync". Falls back to
-   *  plugins.cairn.syncUrl. */
+   *  plugins.nostos.syncUrl. */
   url?: string;
   /** Bearer JWT for the sync connection + push-token REST. Falls back to
-   *  plugins.cairn.token. */
+   *  plugins.nostos.token. */
   token?: string | null;
   /** On-device SQLite path (absolute recommended). Falls back to
-   *  plugins.cairn.dbPath, then "cairn.db". */
+   *  plugins.nostos.dbPath, then "nostos.db". */
   dbPath?: string;
 }
 

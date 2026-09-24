@@ -11,7 +11,7 @@
 # Then:
 #   Landing + admin:  http://localhost:9090        (cloud)
 #   Sync WebSocket:   ws://localhost:8800/sync     (server)
-#   Postgres:         localhost:5433 (cairn/cairn)
+#   Postgres:         localhost:5433 (nostos/nostos)
 #
 # First-run: visit http://localhost:9090/admin and sign up — the first account
 # becomes the Founder. Stripe is optional (endpoints 503 without keys).
@@ -21,9 +21,9 @@ services:
     image: postgres:16-alpine
     container_name: nostos-stack-postgres
     environment:
-      POSTGRES_USER: cairn
-      POSTGRES_PASSWORD: cairn
-      POSTGRES_DB: cairn
+      POSTGRES_USER: nostos
+      POSTGRES_PASSWORD: nostos
+      POSTGRES_DB: nostos
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     command:
       - "postgres"
@@ -43,7 +43,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./pg-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
+      test: ["CMD-SHELL", "pg_isready -U nostos -d nostos"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -65,9 +65,9 @@ services:
       # A real deploy sets NOSTOS_SYNC_AUTH=supabase-jwt and drops this line.
       NOSTOS_INSECURE_ANONYMOUS: "1"
       NOSTOS_REPLICATOR: pg
-      NOSTOS_PG_URL: "postgresql://cairn:cairn@postgres:5432/cairn"
-      NOSTOS_PG_SLOT: cairn_slot
-      NOSTOS_PG_PUBLICATION: cairn_pub
+      NOSTOS_PG_URL: "postgresql://nostos:nostos@postgres:5432/nostos"
+      NOSTOS_PG_SLOT: nostos_slot
+      NOSTOS_PG_PUBLICATION: nostos_pub
       NOSTOS_LOG: "info,nostos=debug"
       RUST_LOG: "info,nostos=debug"
     command: ["nostos-server"]
@@ -107,11 +107,11 @@ services:
     container_name: nostos-stack-pushd
     environment:
       NOSTOS_PUSHD_BIND: "0.0.0.0:8090"
-      NOSTOS_PUSHD_DB: "/data/cairn-pushd.db"
+      NOSTOS_PUSHD_DB: "/data/nostos-pushd.db"
       # Optional (v1.1) — Postgres registry instead of the SQLite default
       # above; the image builds nostos-pushd with --features pg, so setting
       # this URL switches the registry (NOSTOS_PUSHD_DB is then ignored):
-      # NOSTOS_PUSHD_DATABASE_URL: "postgres://cairn:cairn@postgres:5432/cairn"
+      # NOSTOS_PUSHD_DATABASE_URL: "postgres://nostos:nostos@postgres:5432/nostos"
       # Required — tenant:secret API-key pairs, comma-separated:
       # Keys nostos-server delegates with (NOSTOS_PUSH_REMOTE_KEY) MUST carry
       # the ":rail" role suffix, e.g. "hq:delegator-key:rail".

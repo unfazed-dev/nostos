@@ -269,7 +269,7 @@ test("browser-durable storage: write survives reload + signOut wipes (ADR-0033)"
     // ===== RELOAD: the Worker is recreated, OPFS persists =====
     //
     // In durable mode, the new Worker reads the checkpoint from SQLite
-    // (cairn_meta) and resumes from it. The row persists in cairn_data. In
+    // (nostos_meta) and resumes from it. The row persists in nostos_data. In
     // memory mode, everything is lost (the documented degrade ceiling).
 
     await page.reload({ waitUntil: "domcontentloaded" });

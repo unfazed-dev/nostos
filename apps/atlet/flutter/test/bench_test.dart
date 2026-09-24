@@ -61,7 +61,7 @@ void main() {
     test('propagation carries both median and p95', () {
       final row = metricRowFor(
         _fixture(
-          engine: 'cairn',
+          engine: 'nostos',
           runType: 'propagation',
           metrics: {'propagation_ms_median': 12.5, 'propagation_ms_p95': 40.0},
         ),
@@ -74,7 +74,7 @@ void main() {
     test('cold_sync has no p95 (single sample)', () {
       final row = metricRowFor(
         _fixture(
-          engine: 'cairn-direct',
+          engine: 'nostos-direct',
           runType: 'cold_sync',
           metrics: {'cold_sync_ms': 900},
         ),
@@ -86,7 +86,7 @@ void main() {
     test('db_bytes reports bytes with no p95', () {
       final row = metricRowFor(
         _fixture(
-          engine: 'cairn',
+          engine: 'nostos',
           runType: 'db_bytes',
           metrics: {'db_bytes': 204800, 'journal_mode': 'wal'},
         ),
@@ -99,7 +99,7 @@ void main() {
     test('unknown run type throws rather than guessing a metric key', () {
       expect(
         () => metricRowFor(
-          _fixture(engine: 'cairn', runType: 'mystery', metrics: {}),
+          _fixture(engine: 'nostos', runType: 'mystery', metrics: {}),
         ),
         throwsArgumentError,
       );
@@ -111,13 +111,13 @@ void main() {
       () {
         final rows = latestMetricRows([
           _fixture(
-            engine: 'cairn',
+            engine: 'nostos',
             runType: 'cold_sync',
             metrics: {'cold_sync_ms': 100},
             startedAt: DateTime.utc(2026, 1, 1),
           ),
           _fixture(
-            engine: 'cairn',
+            engine: 'nostos',
             runType: 'cold_sync',
             metrics: {'cold_sync_ms': 50},
             startedAt: DateTime.utc(2026, 1, 2),
@@ -131,25 +131,25 @@ void main() {
     test('sorts by engine then canonical run-type order', () {
       final rows = latestMetricRows([
         _fixture(
-          engine: 'cairn-direct',
+          engine: 'nostos-direct',
           runType: 'write_ack',
           metrics: {'write_ack_ms_median': 1, 'write_ack_ms_p95': 2},
         ),
         _fixture(
-          engine: 'cairn',
+          engine: 'nostos',
           runType: 'queue_drain',
           metrics: {'queue_drain_ms': 5},
         ),
         _fixture(
-          engine: 'cairn',
+          engine: 'nostos',
           runType: 'cold_sync',
           metrics: {'cold_sync_ms': 5},
         ),
       ]);
       expect(rows.map((r) => '${r.engine}/${r.runType}').toList(), [
-        'cairn/cold_sync',
-        'cairn/queue_drain',
-        'cairn-direct/write_ack',
+        'nostos/cold_sync',
+        'nostos/queue_drain',
+        'nostos-direct/write_ack',
       ]);
     });
   });
@@ -206,7 +206,7 @@ void main() {
         runCount++;
         await store.append(
           _fixture(
-            engine: 'cairn',
+            engine: 'nostos',
             runType: 'cold_sync',
             metrics: {'cold_sync_ms': 77},
           ),
@@ -230,7 +230,7 @@ void main() {
       expect(runCount, 1);
       expect(find.byKey(const Key('results-table')), findsOneWidget);
       expect(
-        find.byKey(const Key('result-row-cairn-cold_sync')),
+        find.byKey(const Key('result-row-nostos-cold_sync')),
         findsOneWidget,
       );
     });
@@ -246,7 +246,7 @@ void main() {
       await tester.runAsync(
         () => store.append(
           _fixture(
-            engine: 'cairn',
+            engine: 'nostos',
             runType: 'cold_sync',
             metrics: {'cold_sync_ms': 10},
           ),
@@ -281,7 +281,7 @@ void main() {
       await tester.runAsync(
         () => store.append(
           _fixture(
-            engine: 'cairn',
+            engine: 'nostos',
             runType: 'cold_sync',
             metrics: {'cold_sync_ms': 10},
           ),

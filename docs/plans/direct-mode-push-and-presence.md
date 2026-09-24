@@ -125,7 +125,7 @@ builds it twice.
 
 ```
 write txn
-  ├─ cairn.changes insert (trigger)
+  ├─ nostos.changes insert (trigger)
   ├─ realtime.send(...)        → WAL → Realtime → online devices   [instant]
   └─ net.http_post(...)        → queued, NOT SENT until COMMIT
                                     ↓ (post-commit, background worker)
@@ -179,7 +179,7 @@ where the secret sits, not whether one exists:
 |---|---|---|
 | a shared replication role (`replication bypassrls`) | would have to be the device | **yes** — and it reads every row regardless of policy |
 | FCM service account | Supabase secret, inside the function | **no** |
-| `service_role` (function reads `cairn.push_tokens`) | Supabase secret, inside the function | **no** |
+| `service_role` (function reads `nostos.push_tokens`) | Supabase secret, inside the function | **no** |
 
 The function using `service_role` to read tokens bypasses RLS, which is correct
 and safe: it is server-side code the developer deploys, and the key never leaves
@@ -237,7 +237,7 @@ Chunk at 500 with jittered backoff; 429 → honour `retry-after` (default 60s);
 **One forward-looking note:** FCM has deprecated `token` in favour of Firebase
 Installation IDs (`fid`/`fids`, `FidMessage`, `FidMulticastMessage`); `tokens`
 still accepts FIDs during migration, and if both are given tokens go first.
-`crates/nostos-push/src/rail.rs:56` already knows this. `cairn.push_tokens`
+`crates/nostos-push/src/rail.rs:56` already knows this. `nostos.push_tokens`
 should carry the target as an opaque string with a `kind` discriminator so the
 migration is a data change, not a schema change.
 
@@ -290,15 +290,15 @@ mirroring into Postgres.
 So mirror into Postgres, and make it cost nothing:
 
 ```sql
--- excluded from the change-log triggers: it must never feed cairn.changes
-create table cairn.device_presence (
+-- excluded from the change-log triggers: it must never feed nostos.changes
+create table nostos.device_presence (
   device_id   text primary key,
   scope       text not null,
   last_seen   timestamptz not null default now()
 );
 ```
 
-**`cairn.pull()` stamps `last_seen` as a side effect.** It is already `volatile`
+**`nostos.pull()` stamps `last_seen` as a side effect.** It is already `volatile`
 and already called via POST on every doorbell and every reconnect, so an
 actively-syncing device has a fresh `last_seen` **for zero extra round trips**.
 Idle-but-connected devices need one cheap `nostos.heartbeat()` on a 60s timer
@@ -316,8 +316,8 @@ cross-app background budget, so it is the only platform where a wasted send has
 a real cost. Android sends are effectively free and web sends are visible
 anyway. Measure before extending — the project rule.
 
-⚠️ **`cairn.device_presence` must be excluded from the change-log triggers.**
-A heartbeat that writes to `cairn.changes` is a write-amplification feedback
+⚠️ **`nostos.device_presence` must be excluded from the change-log triggers.**
+A heartbeat that writes to `nostos.changes` is a write-amplification feedback
 loop that doorbells every device once a minute forever. `nostos link` should
 refuse to instrument it, and `nostos doctor` should assert it is not instrumented.
 

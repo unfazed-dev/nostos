@@ -40,7 +40,7 @@ pub(crate) fn resolve_tenant_col<'a>(sync_auth: &str, tenant_column: &'a str) ->
 /// ponytail: one key, not a map, because `NOSTOS_PUSH_TABLES` is a
 /// colon/semicolon string — a map means JSON-in-env. Promote it when a
 /// second key is actually asked for.
-const PUSH_ROUTE_KEY: &str = "cairn_route";
+const PUSH_ROUTE_KEY: &str = "nostos_route";
 
 fn push_route_data(
     route: Option<&str>,
@@ -392,7 +392,7 @@ mod parse_push_tables_tests {
         assert_eq!(title, "{icon} Update");
         assert_eq!(category.as_deref(), Some("order_status"));
         assert_eq!(
-            data.get("cairn_route").map(String::as_str),
+            data.get("nostos_route").map(String::as_str),
             Some("/history/{id}")
         );
         assert_eq!(
@@ -432,7 +432,7 @@ mod parse_push_tables_tests {
                 category: None,
                 // `{id}` stays a placeholder here — the router interpolates
                 // it against the row that actually committed.
-                data: [("cairn_route".to_string(), "/orders/{id}".to_string())]
+                data: [("nostos_route".to_string(), "/orders/{id}".to_string())]
                     .into_iter()
                     .collect(),
                 options: std::collections::BTreeMap::new(),
@@ -440,7 +440,7 @@ mod parse_push_tables_tests {
         );
         assert_eq!(
             cfg.tables.get("deliveries").and_then(|t| match t {
-                PushTemplate::Visible { data, .. } => data.get("cairn_route"),
+                PushTemplate::Visible { data, .. } => data.get("nostos_route"),
                 PushTemplate::Silent => None,
             }),
             Some(&"/deliveries/{id}".to_string()),

@@ -98,7 +98,7 @@ pub enum KeyCommand {
 #[derive(Debug, Args)]
 pub struct KeyAddArgs {
     /// The registry database (the daemon's NOSTOS_PUSHD_DB).
-    #[arg(long, default_value = "./cairn-pushd.db")]
+    #[arg(long, default_value = "./nostos-pushd.db")]
     pub db: PathBuf,
     /// Tenant this key authenticates (one key per tenant).
     #[arg(long)]
@@ -118,14 +118,14 @@ pub struct KeyAddArgs {
 #[derive(Debug, Args)]
 pub struct KeyListArgs {
     /// The registry database.
-    #[arg(long, default_value = "./cairn-pushd.db")]
+    #[arg(long, default_value = "./nostos-pushd.db")]
     pub db: PathBuf,
 }
 
 #[derive(Debug, Args)]
 pub struct KeyRevokeArgs {
     /// The registry database.
-    #[arg(long, default_value = "./cairn-pushd.db")]
+    #[arg(long, default_value = "./nostos-pushd.db")]
     pub db: PathBuf,
     /// The tenant whose key is revoked.
     #[arg(long)]

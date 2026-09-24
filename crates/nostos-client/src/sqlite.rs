@@ -6,7 +6,7 @@
 //! zero external deps to run). Both surfaces share ONE SQLite file so a crash
 //! can't strand one without the other (ADR-0013). Rows are stored as opaque
 //! payload bytes keyed by `(table, pk)`; the LSN checkpoint lives in a
-//! `cairn_meta` row; the pending write-queue lives in `cairn_outbox`.
+//! `nostos_meta` row; the pending write-queue lives in `nostos_outbox`.
 //!
 //! ## Why opaque bytes
 //!
@@ -37,11 +37,11 @@ use nostos_domain::{Lsn, RowOp};
 use rusqlite::Connection;
 
 /// The opaque-bytes row table + the meta table + the durable write outbox.
-/// One row per `(table, pk)` in `cairn_data`; the LSN checkpoint is the single
-/// `checkpoint` row in `cairn_meta`; `cairn_outbox` holds client writes that
+/// One row per `(table, pk)` in `nostos_data`; the LSN checkpoint is the single
+/// `checkpoint` row in `nostos_meta`; `nostos_outbox` holds client writes that
 /// have not yet been ack'd by the server (ADR-0013).
 ///
-/// `cairn_outbox` carries two dead-letter-policy columns (ADR-0013 v2):
+/// `nostos_outbox` carries two dead-letter-policy columns (ADR-0013 v2):
 /// - `attempts` — bumped on every `WriteResult{ok:false}`; when it reaches the
 ///   configured `dead_letter_max_attempts`, the flush loop quarantines the row.
 /// - `dlq` — 1 once the row has been dead-lettered; `pending()` excludes
@@ -50,19 +50,19 @@ use rusqlite::Connection;
 ///   [`SqliteStorage::dead_letter_entries`]); `mark_done` is the only path that
 ///   deletes, and it only fires on `ok:true`.
 const SCHEMA: &str = "\
-CREATE TABLE IF NOT EXISTS cairn_data (\
+CREATE TABLE IF NOT EXISTS nostos_data (\
     table_name TEXT NOT NULL,\
     pk TEXT NOT NULL,\
     payload BLOB NOT NULL,\
     applied_lsn INTEGER NOT NULL DEFAULT 0,\
     PRIMARY KEY (table_name, pk)\
 );\
-CREATE TABLE IF NOT EXISTS cairn_meta (\
+CREATE TABLE IF NOT EXISTS nostos_meta (\
     key TEXT PRIMARY KEY,\
     value TEXT NOT NULL\
 );\
-INSERT OR IGNORE INTO cairn_meta (key, value) VALUES ('checkpoint', '0');\
-CREATE TABLE IF NOT EXISTS cairn_outbox (\
+INSERT OR IGNORE INTO nostos_meta (key, value) VALUES ('checkpoint', '0');\
+CREATE TABLE IF NOT EXISTS nostos_outbox (\
     id INTEGER PRIMARY KEY AUTOINCREMENT,\
     table_name TEXT NOT NULL,\
     op TEXT NOT NULL,\
@@ -101,7 +101,7 @@ const HORIZON_KEY: &str = "horizon";
 /// fetch wiring (WS3) lands — a view over `json_extract` only needs names.
 #[derive(Debug, Clone)]
 pub struct ClientTable {
-    /// Canonical table id — matches the wire `table` field / `cairn_data.table_name`.
+    /// Canonical table id — matches the wire `table` field / `nostos_data.table_name`.
     pub name: String,
     /// Primary-key column names. Informational for the view (the PK value is
     /// extracted from the JSON payload like any other column); carried for the
@@ -135,6 +135,7 @@ impl SqliteStorage {
     /// # Errors
     /// Returns [`StorageError::Backend`] if SQLite can't open or migrate the file.
     pub fn open(path: &str) -> Result<Self, StorageError> {
+        adopt_legacy_file(path)?;
         let conn = Connection::open(path).map_err(rusqlite_err)?;
         Self::init(conn)
     }
@@ -171,6 +172,7 @@ impl SqliteStorage {
     }
 
     fn init(conn: Connection) -> Result<Self, StorageError> {
+        Self::migrate_legacy_tables(&conn)?;
         conn.execute_batch(SCHEMA).map_err(rusqlite_err)?;
         Self::migrate_outbox_dlq(&conn)?;
         Self::migrate_outbox_error_cols(&conn)?;
@@ -182,8 +184,30 @@ impl SqliteStorage {
         })
     }
 
+    /// ADR-0048: a store written before the rename keeps its rows, checkpoint
+    /// and unsent writes in `cairn_*` tables. Renamed in place before
+    /// [`SCHEMA`] runs, so its `CREATE TABLE IF NOT EXISTS` finds them. SQLite
+    /// carries the rows, indexes and the AUTOINCREMENT counter across.
+    fn migrate_legacy_tables(conn: &Connection) -> Result<(), StorageError> {
+        for t in ["data", "meta", "outbox"] {
+            let legacy = format!("cairn_{t}"); // rename:hold — pre-rename table, migrated on open (ADR-0048)
+            let present: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [&legacy],
+                    |r| r.get(0),
+                )
+                .map_err(rusqlite_err)?;
+            if present {
+                conn.execute(&format!("ALTER TABLE {legacy} RENAME TO nostos_{t}"), [])
+                    .map_err(rusqlite_err)?;
+            }
+        }
+        Ok(())
+    }
+
     /// v1 migration: add the dead-letter columns (`attempts`, `dlq`) to
-    /// `cairn_outbox` for databases created by a pre-DLQ binary (ADR-0013 v2).
+    /// `nostos_outbox` for databases created by a pre-DLQ binary (ADR-0013 v2).
     ///
     /// Why a column probe and not `PRAGMA user_version`: the `CREATE TABLE IF
     /// NOT EXISTS` in [`SCHEMA`] always emits the new columns on a fresh file,
@@ -209,12 +233,12 @@ impl SqliteStorage {
         // checks `dlq` specifically because it's the second column added —
         // its presence implies both landed.
         conn.execute(
-            "ALTER TABLE cairn_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE nostos_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             [],
         )
         .map_err(rusqlite_err)?;
         conn.execute(
-            "ALTER TABLE cairn_outbox ADD COLUMN dlq INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE nostos_outbox ADD COLUMN dlq INTEGER NOT NULL DEFAULT 0",
             [],
         )
         .map_err(rusqlite_err)?;
@@ -222,7 +246,7 @@ impl SqliteStorage {
     }
 
     /// v3 migration: add `last_error TEXT` and `dead_lettered_at INTEGER` to
-    /// `cairn_outbox` for databases created by a pre-T5 binary (ADR-0032 T5 /
+    /// `nostos_outbox` for databases created by a pre-T5 binary (ADR-0032 T5 /
     /// ADR-0027). These columns persist the server's error message and a Unix
     /// epoch-millisecond timestamp when a write is dead-lettered, so
     /// `deadLetters()` can surface WHY and WHEN a write permanently failed.
@@ -234,30 +258,30 @@ impl SqliteStorage {
         if outbox_has_column(conn, "last_error")? {
             return Ok(());
         }
-        conn.execute("ALTER TABLE cairn_outbox ADD COLUMN last_error TEXT", [])
+        conn.execute("ALTER TABLE nostos_outbox ADD COLUMN last_error TEXT", [])
             .map_err(rusqlite_err)?;
         conn.execute(
-            "ALTER TABLE cairn_outbox ADD COLUMN dead_lettered_at INTEGER",
+            "ALTER TABLE nostos_outbox ADD COLUMN dead_lettered_at INTEGER",
             [],
         )
         .map_err(rusqlite_err)?;
         Ok(())
     }
 
-    /// v2 migration: add the per-row `applied_lsn` column to `cairn_data` for
+    /// v2 migration: add the per-row `applied_lsn` column to `nostos_data` for
     /// databases created by a pre-slice-4a binary (ADR-0025 slice 4a). The
     /// column drives per-row LSN gating (a stale replay/live op must not
     /// overwrite a newer row). Same probe-then-ALTER pattern as
     /// [`Self::migrate_outbox_dlq`]: `CREATE TABLE IF NOT EXISTS` in [`SCHEMA`]
     /// emits the column on a fresh file, so this only fires on an existing DB
     /// from an older binary. `ADD COLUMN … DEFAULT 0` is constant-time on SQLite
-    /// (no row rewrite), so this is cheap even on a large `cairn_data`.
+    /// (no row rewrite), so this is cheap even on a large `nostos_data`.
     fn migrate_applied_lsn(conn: &Connection) -> Result<(), StorageError> {
-        if cairn_data_has_column(conn, "applied_lsn")? {
+        if nostos_data_has_column(conn, "applied_lsn")? {
             return Ok(());
         }
         conn.execute(
-            "ALTER TABLE cairn_data ADD COLUMN applied_lsn INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE nostos_data ADD COLUMN applied_lsn INTEGER NOT NULL DEFAULT 0",
             [],
         )
         .map_err(rusqlite_err)?;
@@ -270,13 +294,13 @@ impl SqliteStorage {
     pub fn row_count_for_test(&self) -> usize {
         let conn = self.conn.lock().expect("row_count: storage mutex poisoned");
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .expect("count query is infallible on a valid schema");
         usize::try_from(count).expect("row count is non-negative")
     }
 
     /// Borrow the underlying connection under the mutex (test-only). Lets an
-    /// integration test read rows out of `cairn_data` / `cairn_outbox` directly
+    /// integration test read rows out of `nostos_data` / `nostos_outbox` directly
     /// for assertions that aren't worth a public accessor (e.g. a round-trip
     /// payload check). The guard releases on drop, matching the internal usage.
     #[doc(hidden)]
@@ -301,7 +325,7 @@ impl SqliteStorage {
     pub fn rows_for(&self, table: &str) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
         let conn = self.conn.lock().expect("rows_for: storage mutex poisoned");
         let mut stmt = conn
-            .prepare("SELECT pk, payload FROM cairn_data WHERE table_name = ?1 ORDER BY pk ASC")
+            .prepare("SELECT pk, payload FROM nostos_data WHERE table_name = ?1 ORDER BY pk ASC")
             .map_err(rusqlite_err)?;
         let rows = stmt
             .query_map(rusqlite::params![table], |row| {
@@ -321,7 +345,7 @@ impl SqliteStorage {
     /// first. Each entry is `(id, write)` mirroring [`Outbox::pending`]'s
     /// shape, but restricted to `dlq = 1` rows. These are writes the flush loop
     /// gave up on after `dead_letter_max_attempts` rejections — they are NOT
-    /// deleted (the row stays in `cairn_outbox` for operator inspection and
+    /// deleted (the row stays in `nostos_outbox` for operator inspection and
     /// potential replay), they just don't block the queue head anymore.
     ///
     /// A read-only diagnostic accessor — NOT part of the [`nostos_core::Outbox`]
@@ -337,7 +361,7 @@ impl SqliteStorage {
             .lock()
             .expect("dead_letter_entries: storage mutex poisoned");
         let mut stmt = conn
-            .prepare("SELECT id, table_name, op, pk, payload FROM cairn_outbox WHERE dlq = 1 ORDER BY id ASC")
+            .prepare("SELECT id, table_name, op, pk, payload FROM nostos_outbox WHERE dlq = 1 ORDER BY id ASC")
             .map_err(rusqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
@@ -374,7 +398,7 @@ impl SqliteStorage {
     /// Run an arbitrary read-only SQL query against the durable store and
     /// return each row as a `serde_json::Map<String, Value>` keyed by column
     /// name. This is the P1-Rust read surface: a Flutter
-    /// `watch(sql)` call can run any `SELECT` against `cairn_data` and render
+    /// `watch(sql)` call can run any `SELECT` against `nostos_data` and render
     /// the result set directly, without a parallel query engine or a
     /// column-level decoder (ADR-0012 is still future work).
     ///
@@ -382,13 +406,13 @@ impl SqliteStorage {
     ///
     /// The dev writes `json_extract(payload, '$.col')` directly in their SQL
     /// — the bundled SQLite ships JSON1 (the workspace `rusqlite` `bundled`
-    /// feature compiles it in), and `cairn_data.payload` stores the
+    /// feature compiles it in), and `nostos_data.payload` stores the
     /// logical-replication tuple image as opaque bytes that, for a JSON-backed
     /// source, ARE valid JSON text. Example:
     ///
     /// ```text
     /// storage.query("SELECT pk, json_extract(payload, '$.title') AS title \
-    ///                FROM cairn_data WHERE table_name = 'tasks'")
+    ///                FROM nostos_data WHERE table_name = 'tasks'")
     /// ```
     ///
     /// returns a `Vec<Map>` where each map is `{"pk": "...", "title": "..."}`.
@@ -456,14 +480,14 @@ impl SqliteStorage {
     }
 
     /// Materialize one SQLite `VIEW` per synced table, projected over the opaque
-    /// `cairn_data` BLOB via JSON1 (WS2 read foundation). After this, the dev
+    /// `nostos_data` BLOB via JSON1 (WS2 read foundation). After this, the dev
     /// writes plain SQL over the synced table — `SELECT title FROM tasks` — and it
     /// resolves against the view, which `json_extract`s each column out of the
     /// replication payload. The Pg path emits a column-named JSON object (see
     /// `tuple_to_json_payload` in nostos-infra), so column identity is IN the
     /// payload — no decoder, no inference, no apply-path change.
     ///
-    /// `cairn_data` stays the single source of truth; the apply path is
+    /// `nostos_data` stays the single source of truth; the apply path is
     /// UNCHANGED. This is the lazy cousin of "materialized typed tables": zero
     /// new storage, zero migration, reversible (`DROP VIEW`). Ceiling: no non-PK
     /// column indexes (a view computes `json_extract` per row → full scan on
@@ -474,7 +498,7 @@ impl SqliteStorage {
     /// Each view is `DROP VIEW IF EXISTS` + `CREATE VIEW`, so re-applying a
     /// *changed* schema refreshes the projection in place — bumping the
     /// declared schema IS the client migration (the synced
-    /// `cairn_data` rows are schemaless; views are cheap, data is untouched).
+    /// `nostos_data` rows are schemaless; views are cheap, data is untouched).
     /// Runs at connect time, before any watch() statement is armed, so no
     /// cursor is open over the view mid-DDL.
     ///
@@ -512,7 +536,7 @@ impl SqliteStorage {
                 .map_err(rusqlite_err)?;
             let ddl = format!(
                 "CREATE VIEW {view} AS SELECT {cols} \
-                 FROM cairn_data WHERE table_name = {tbl}",
+                 FROM nostos_data WHERE table_name = {tbl}",
                 cols = cols.join(", "),
                 tbl = quote_string(&t.name),
             );
@@ -530,7 +554,7 @@ impl Storage for SqliteStorage {
             .expect("checkpoint: storage mutex poisoned");
         let raw: String = conn
             .query_row(
-                "SELECT value FROM cairn_meta WHERE key = ?1",
+                "SELECT value FROM nostos_meta WHERE key = ?1",
                 rusqlite::params![CHECKPOINT_KEY],
                 |row| row.get(0),
             )
@@ -547,7 +571,7 @@ impl Storage for SqliteStorage {
         // (client sends epoch: None → server treats as mismatch → snapshot).
         let raw: Option<String> = conn
             .query_row(
-                "SELECT value FROM cairn_meta WHERE key = ?1",
+                "SELECT value FROM nostos_meta WHERE key = ?1",
                 rusqlite::params![EPOCH_KEY],
                 |row| row.get(0),
             )
@@ -575,7 +599,7 @@ impl Storage for SqliteStorage {
         // epoch is the server's latest advertised value, not monotonic from
         // the client's view (the server may bump it on slot recreate).
         conn.execute(
-            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO nostos_meta (key, value) VALUES (?1, ?2)",
             rusqlite::params![EPOCH_KEY, epoch.to_string()],
         )
         .map_err(rusqlite_err)?;
@@ -592,7 +616,7 @@ impl Storage for SqliteStorage {
         // uses the composed-epoch fallback, ADR-0031 D2).
         let raw: Option<String> = conn
             .query_row(
-                "SELECT value FROM cairn_meta WHERE key = ?1",
+                "SELECT value FROM nostos_meta WHERE key = ?1",
                 rusqlite::params![RULES_CHECKSUM_KEY],
                 |row| row.get(0),
             )
@@ -616,7 +640,7 @@ impl Storage for SqliteStorage {
             .lock()
             .expect("save_rules_checksum: storage mutex poisoned");
         conn.execute(
-            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO nostos_meta (key, value) VALUES (?1, ?2)",
             rusqlite::params![RULES_CHECKSUM_KEY, checksum.to_string()],
         )
         .map_err(rusqlite_err)?;
@@ -628,7 +652,7 @@ impl Storage for SqliteStorage {
         // No row = fresh DB, or a store that has only ever synced in server
         // mode. Either way the caller starts from `Horizon::fresh()`.
         conn.query_row(
-            "SELECT value FROM cairn_meta WHERE key = ?1",
+            "SELECT value FROM nostos_meta WHERE key = ?1",
             rusqlite::params![HORIZON_KEY],
             |row| row.get(0),
         )
@@ -646,7 +670,7 @@ impl Storage for SqliteStorage {
             .lock()
             .expect("save_horizon: storage mutex poisoned");
         conn.execute(
-            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO nostos_meta (key, value) VALUES (?1, ?2)",
             rusqlite::params![HORIZON_KEY, horizon],
         )
         .map_err(rusqlite_err)?;
@@ -683,27 +707,27 @@ impl Storage for SqliteStorage {
             let to_i64 = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
             let mut upsert_gated = tx
                 .prepare_cached(
-                    "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                    "INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) \
                      VALUES (?1, ?2, ?3, ?4) \
                      ON CONFLICT(table_name, pk) DO UPDATE SET \
                      payload = excluded.payload, applied_lsn = excluded.applied_lsn \
-                     WHERE cairn_data.applied_lsn <= excluded.applied_lsn",
+                     WHERE nostos_data.applied_lsn <= excluded.applied_lsn",
                 )
                 .map_err(rusqlite_err)?;
             let mut upsert_uncond = tx
                 .prepare_cached(
-                    "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                    "INSERT OR REPLACE INTO nostos_data (table_name, pk, payload, applied_lsn) \
                      VALUES (?1, ?2, ?3, ?4)",
                 )
                 .map_err(rusqlite_err)?;
             let mut delete_gated = tx
                 .prepare_cached(
-                    "DELETE FROM cairn_data \
+                    "DELETE FROM nostos_data \
                      WHERE table_name = ?1 AND pk = ?2 AND applied_lsn <= ?3",
                 )
                 .map_err(rusqlite_err)?;
             let mut delete_uncond = tx
-                .prepare_cached("DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2")
+                .prepare_cached("DELETE FROM nostos_data WHERE table_name = ?1 AND pk = ?2")
                 .map_err(rusqlite_err)?;
 
             for (op, lsn) in ops {
@@ -720,7 +744,7 @@ impl Storage for SqliteStorage {
                             let incoming = payload.as_ref();
                             let row: Option<(Vec<u8>, i64)> = tx
                                 .query_row(
-                                    "SELECT payload, applied_lsn FROM cairn_data \
+                                    "SELECT payload, applied_lsn FROM nostos_data \
                                      WHERE table_name = ?1 AND pk = ?2",
                                     rusqlite::params![table, pk],
                                     |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
@@ -743,7 +767,7 @@ impl Storage for SqliteStorage {
                             let incoming = payload.as_ref();
                             let row: Option<(Vec<u8>, i64)> = tx
                                 .query_row(
-                                    "SELECT payload, applied_lsn FROM cairn_data \
+                                    "SELECT payload, applied_lsn FROM nostos_data \
                                      WHERE table_name = ?1 AND pk = ?2",
                                     rusqlite::params![table, pk],
                                     |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
@@ -808,7 +832,7 @@ impl Storage for SqliteStorage {
                             if self.or_set_tables.contains(write.table.as_str()) {
                                 let existing: Vec<u8> = tx
                                     .query_row(
-                                        "SELECT payload FROM cairn_data \
+                                        "SELECT payload FROM nostos_data \
                                          WHERE table_name = ?1 AND pk = ?2",
                                         rusqlite::params![write.table, write.pk],
                                         |r| r.get::<_, Vec<u8>>(0),
@@ -821,7 +845,7 @@ impl Storage for SqliteStorage {
                                 // offline increment survives a server frame.
                                 let existing: Vec<u8> = tx
                                     .query_row(
-                                        "SELECT payload FROM cairn_data \
+                                        "SELECT payload FROM nostos_data \
                                          WHERE table_name = ?1 AND pk = ?2",
                                         rusqlite::params![write.table, write.pk],
                                         |r| r.get::<_, Vec<u8>>(0),
@@ -845,7 +869,7 @@ impl Storage for SqliteStorage {
                         let patch_json = write.payload_json.as_deref().unwrap_or("{}");
                         let existing: Vec<u8> = tx
                             .query_row(
-                                "SELECT payload FROM cairn_data \
+                                "SELECT payload FROM nostos_data \
                                  WHERE table_name = ?1 AND pk = ?2",
                                 rusqlite::params![write.table, write.pk],
                                 |r| r.get::<_, Vec<u8>>(0),
@@ -877,7 +901,7 @@ impl Storage for SqliteStorage {
         // must not drag the cursor backward).
         let stored: i64 = tx
             .query_row(
-                "SELECT CAST(value AS INTEGER) FROM cairn_meta WHERE key = ?1",
+                "SELECT CAST(value AS INTEGER) FROM nostos_meta WHERE key = ?1",
                 rusqlite::params![CHECKPOINT_KEY],
                 |row| row.get(0),
             )
@@ -890,7 +914,7 @@ impl Storage for SqliteStorage {
         let stored_u64 = stored.max(0).cast_unsigned();
         let new_raw = checkpoint.raw().max(stored_u64);
         tx.execute(
-            "UPDATE cairn_meta SET value = ?1 WHERE key = ?2",
+            "UPDATE nostos_meta SET value = ?1 WHERE key = ?2",
             rusqlite::params![new_raw.to_string(), CHECKPOINT_KEY],
         )
         .map_err(rusqlite_err)?;
@@ -909,7 +933,7 @@ impl Storage for SqliteStorage {
             .lock()
             .expect("pks_for_table: storage mutex poisoned");
         let mut stmt = conn
-            .prepare("SELECT pk FROM cairn_data WHERE table_name = ?1 ORDER BY pk ASC")
+            .prepare("SELECT pk FROM nostos_data WHERE table_name = ?1 ORDER BY pk ASC")
             .map_err(rusqlite_err)?;
         let rows = stmt
             .query_map(rusqlite::params![table], |row| {
@@ -930,7 +954,7 @@ impl Storage for SqliteStorage {
             .lock()
             .expect("read_payload: storage mutex poisoned");
         match conn.query_row(
-            "SELECT payload FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+            "SELECT payload FROM nostos_data WHERE table_name = ?1 AND pk = ?2",
             rusqlite::params![table, pk],
             |row| row.get::<_, Vec<u8>>(0),
         ) {
@@ -955,7 +979,7 @@ impl Storage for SqliteStorage {
         let tx = conn.transaction().map_err(rusqlite_err)?;
         {
             let mut delete = tx
-                .prepare_cached("DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2")
+                .prepare_cached("DELETE FROM nostos_data WHERE table_name = ?1 AND pk = ?2")
                 .map_err(rusqlite_err)?;
             for pk in pks {
                 delete
@@ -978,7 +1002,7 @@ impl Storage for SqliteStorage {
         let tx = conn.transaction().map_err(rusqlite_err)?;
 
         // 1. Rows: wipe the opaque data store.
-        tx.execute("DELETE FROM cairn_data", [])
+        tx.execute("DELETE FROM nostos_data", [])
             .map_err(rusqlite_err)?;
 
         // 2. Checkpoint → 0. ADR-0029: this is the load-bearing reset — a stale
@@ -987,7 +1011,7 @@ impl Storage for SqliteStorage {
         //    snapshot unsoundness class). The 'checkpoint' row always exists
         //    (the schema seeds it on open), so UPDATE is correct here.
         tx.execute(
-            "UPDATE cairn_meta SET value = '0' WHERE key = ?1",
+            "UPDATE nostos_meta SET value = '0' WHERE key = ?1",
             rusqlite::params![CHECKPOINT_KEY],
         )
         .map_err(rusqlite_err)?;
@@ -998,7 +1022,7 @@ impl Storage for SqliteStorage {
         //    REPLACE matches `save_epoch` and covers the fresh-DB case where the
         //    epoch row was never written.
         tx.execute(
-            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, '0')",
+            "INSERT OR REPLACE INTO nostos_meta (key, value) VALUES (?1, '0')",
             rusqlite::params![EPOCH_KEY],
         )
         .map_err(rusqlite_err)?;
@@ -1008,7 +1032,7 @@ impl Storage for SqliteStorage {
         //     suppress the snapshot that principal needs — same unsoundness
         //     class as a stale epoch, just gated on a different field.
         tx.execute(
-            "INSERT OR REPLACE INTO cairn_meta (key, value) VALUES (?1, '0')",
+            "INSERT OR REPLACE INTO nostos_meta (key, value) VALUES (?1, '0')",
             rusqlite::params![RULES_CHECKSUM_KEY],
         )
         .map_err(rusqlite_err)?;
@@ -1019,17 +1043,17 @@ impl Storage for SqliteStorage {
         //     "fresh" to `Horizon::fresh()`, and `'0'` would mean the same
         //     thing less obviously.
         tx.execute(
-            "DELETE FROM cairn_meta WHERE key = ?1",
+            "DELETE FROM nostos_meta WHERE key = ?1",
             rusqlite::params![HORIZON_KEY],
         )
         .map_err(rusqlite_err)?;
 
         // 4. Outbox: pending writes AND dead-letter rows (ADR-0027) both live in
-        //    `cairn_outbox` (a dead-lettered row is `dlq = 1`, same table), so
+        //    `nostos_outbox` (a dead-lettered row is `dlq = 1`, same table), so
         //    one DELETE covers both. Bundling this into the storage transaction
         //    makes the sign-out wipe truly atomic on the single-file backend;
         //    `Outbox::clear` is the standalone outbox-only surface.
-        tx.execute("DELETE FROM cairn_outbox", [])
+        tx.execute("DELETE FROM nostos_outbox", [])
             .map_err(rusqlite_err)?;
 
         tx.commit().map_err(rusqlite_err)?;
@@ -1046,7 +1070,7 @@ impl Outbox for SqliteStorage {
         let tx = conn.transaction().map_err(rusqlite_err)?;
         let op_wire = write.op.as_wire_str();
         tx.execute(
-            "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO nostos_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![write.table, op_wire, write.pk, write.payload_json],
         )
         .map_err(rusqlite_err)?;
@@ -1074,7 +1098,7 @@ impl Outbox for SqliteStorage {
         for w in &writes {
             let op_wire = w.op.as_wire_str();
             tx.execute(
-                "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO nostos_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![w.table, op_wire, w.pk, w.payload_json],
             )
             .map_err(rusqlite_err)?;
@@ -1094,7 +1118,7 @@ impl Outbox for SqliteStorage {
         // [`SqliteStorage::dead_letter_entries`]) but is no longer "pending,"
         // so the flush loop's queue head can advance past it.
         let mut stmt = conn
-            .prepare("SELECT id, table_name, op, pk, payload FROM cairn_outbox WHERE dlq = 0 ORDER BY id ASC")
+            .prepare("SELECT id, table_name, op, pk, payload FROM nostos_outbox WHERE dlq = 0 ORDER BY id ASC")
             .map_err(rusqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
@@ -1135,7 +1159,7 @@ impl Outbox for SqliteStorage {
         let mut conn = self.conn.lock().expect("mark_done: storage mutex poisoned");
         let tx = conn.transaction().map_err(rusqlite_err)?;
         tx.execute(
-            "DELETE FROM cairn_outbox WHERE id = ?1",
+            "DELETE FROM nostos_outbox WHERE id = ?1",
             rusqlite::params![id],
         )
         .map_err(rusqlite_err)?;
@@ -1164,7 +1188,7 @@ impl Outbox for SqliteStorage {
         let tx = conn.transaction().map_err(rusqlite_err)?;
         let updated = tx
             .execute(
-                "UPDATE cairn_outbox SET attempts = attempts + 1 WHERE id = ?1",
+                "UPDATE nostos_outbox SET attempts = attempts + 1 WHERE id = ?1",
                 rusqlite::params![id],
             )
             .map_err(rusqlite_err)?;
@@ -1180,7 +1204,7 @@ impl Outbox for SqliteStorage {
         }
         let attempts: i64 = tx
             .query_row(
-                "SELECT attempts FROM cairn_outbox WHERE id = ?1",
+                "SELECT attempts FROM nostos_outbox WHERE id = ?1",
                 rusqlite::params![id],
                 |row| row.get(0),
             )
@@ -1201,7 +1225,7 @@ impl Outbox for SqliteStorage {
         // The row leaves the flush loop's view via `pending()`'s `WHERE dlq = 0`.
         let tx = conn.transaction().map_err(rusqlite_err)?;
         tx.execute(
-            "UPDATE cairn_outbox SET dlq = 1 WHERE id = ?1",
+            "UPDATE nostos_outbox SET dlq = 1 WHERE id = ?1",
             rusqlite::params![id],
         )
         .map_err(rusqlite_err)?;
@@ -1225,7 +1249,7 @@ impl Outbox for SqliteStorage {
             Err(_) => 0,
         };
         tx.execute(
-            "UPDATE cairn_outbox SET dlq = 1, last_error = ?2, dead_lettered_at = ?3 WHERE id = ?1",
+            "UPDATE nostos_outbox SET dlq = 1, last_error = ?2, dead_lettered_at = ?3 WHERE id = ?1",
             rusqlite::params![id, error, now_ms],
         )
         .map_err(rusqlite_err)?;
@@ -1233,7 +1257,7 @@ impl Outbox for SqliteStorage {
         Ok(())
     }
 
-    /// Instant-local write (WS2 slice-2): render the row into `cairn_data` NOW
+    /// Instant-local write (WS2 slice-2): render the row into `nostos_data` NOW
     /// so the view reflects the user's write before any server round-trip,
     /// WITHOUT advancing the checkpoint (the row isn't server-confirmed). The
     /// server's echo later UPSERTs the authoritative image (reconcile).
@@ -1253,7 +1277,7 @@ impl Outbox for SqliteStorage {
                 let bytes = if self.or_set_tables.contains(write.table.as_str()) {
                     let existing: Vec<u8> = conn
                         .query_row(
-                            "SELECT payload FROM cairn_data \
+                            "SELECT payload FROM nostos_data \
                              WHERE table_name = ?1 AND pk = ?2",
                             rusqlite::params![write.table, write.pk],
                             |r| r.get::<_, Vec<u8>>(0),
@@ -1265,7 +1289,7 @@ impl Outbox for SqliteStorage {
                     // per-replica max instead of clobbering the existing row.
                     let existing: Vec<u8> = conn
                         .query_row(
-                            "SELECT payload FROM cairn_data \
+                            "SELECT payload FROM nostos_data \
                              WHERE table_name = ?1 AND pk = ?2",
                             rusqlite::params![write.table, write.pk],
                             |r| r.get::<_, Vec<u8>>(0),
@@ -1276,7 +1300,7 @@ impl Outbox for SqliteStorage {
                     incoming.to_vec()
                 };
                 conn.execute(
-                    "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload) \
+                    "INSERT OR REPLACE INTO nostos_data (table_name, pk, payload) \
                      VALUES (?1, ?2, ?3)",
                     rusqlite::params![write.table, write.pk, bytes],
                 )
@@ -1284,7 +1308,7 @@ impl Outbox for SqliteStorage {
             }
             WriteOp::Delete => {
                 conn.execute(
-                    "DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+                    "DELETE FROM nostos_data WHERE table_name = ?1 AND pk = ?2",
                     rusqlite::params![write.table, write.pk],
                 )
                 .map_err(rusqlite_err)?;
@@ -1297,11 +1321,11 @@ impl Outbox for SqliteStorage {
                 // regression — providers/invoices/appointments status edits).
                 // The server PATCH path (P3) remains source of truth; this only
                 // renders the change immediately. Patching a row not yet in
-                // `cairn_data` seeds it from the patch fields alone.
+                // `nostos_data` seeds it from the patch fields alone.
                 let patch_json = write.payload_json.as_deref().unwrap_or("{}");
                 let existing: Vec<u8> = conn
                     .query_row(
-                        "SELECT payload FROM cairn_data \
+                        "SELECT payload FROM nostos_data \
                          WHERE table_name = ?1 AND pk = ?2",
                         rusqlite::params![write.table, write.pk],
                         |r| r.get::<_, Vec<u8>>(0),
@@ -1309,7 +1333,7 @@ impl Outbox for SqliteStorage {
                     .unwrap_or_default();
                 let merged = merge_payload(&existing, patch_json.as_bytes());
                 conn.execute(
-                    "INSERT OR REPLACE INTO cairn_data (table_name, pk, payload) \
+                    "INSERT OR REPLACE INTO nostos_data (table_name, pk, payload) \
                      VALUES (?1, ?2, ?3)",
                     rusqlite::params![write.table, write.pk, merged],
                 )
@@ -1338,12 +1362,12 @@ impl Outbox for SqliteStorage {
         // each row with a principal id and refuse-on-mismatch instead of
         // deleting, layered OUTBOX-INTERNALLY (no trait change). A single
         // DELETE covers pending writes AND dead-letter rows (ADR-0027) — both
-        // live in `cairn_outbox`, a dead-lettered row being `dlq = 1`.
+        // live in `nostos_outbox`, a dead-lettered row being `dlq = 1`.
         let conn = self
             .conn
             .lock()
             .expect("clear(outbox): storage mutex poisoned");
-        conn.execute("DELETE FROM cairn_outbox", [])
+        conn.execute("DELETE FROM nostos_outbox", [])
             .map_err(rusqlite_err)?;
         Ok(())
     }
@@ -1380,6 +1404,41 @@ fn rusqlite_err(e: rusqlite::Error) -> StorageError {
     StorageError::Backend(e.to_string())
 }
 
+/// ADR-0048: the SDKs' default file names were `cairn.sqlite`,
+/// `cairn_direct.sqlite` and `cairn.db`. When the asked-for `nostos*` file is
+/// absent and its `cairn*` twin sits next to it, the twin moves over before
+/// open, so the rows and any unsent writes come along instead of a fresh store
+/// starting beside them. The WAL moves first: a crash between the moves leaves
+/// the main file behind, and the next open finishes the job.
+fn adopt_legacy_file(path: &str) -> Result<(), StorageError> {
+    let p = std::path::Path::new(path);
+    let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+        return Ok(());
+    };
+    if !name.starts_with("nostos") || p.exists() {
+        return Ok(());
+    }
+    let legacy = p.with_file_name(name.replacen("nostos", "cairn", 1)); // rename:hold — pre-rename file name (ADR-0048)
+    if !legacy.exists() {
+        return Ok(());
+    }
+    for ext in ["-wal", "-shm", ""] {
+        let (mut from, mut to) = (legacy.clone().into_os_string(), p.as_os_str().to_owned());
+        from.push(ext);
+        to.push(ext);
+        match std::fs::rename(&from, &to) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(StorageError::Backend(format!(
+                    "adopting {}: {e}",
+                    legacy.display()
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Map a wire table name to a safe SQLite view name. Bare `public` names pass
 /// through; schema-qualified names (`myschema.tasks`) collapse to
 /// `myschema_tasks` (SQLite has no schema-qualified local table here). ponytail:
@@ -1404,7 +1463,7 @@ fn quote_string(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Does `cairn_outbox` currently have a column named `needle`? Used by the v1
+/// Does `nostos_outbox` currently have a column named `needle`? Used by the v1
 /// DLQ migration to decide whether `ALTER TABLE ADD COLUMN` is needed without
 /// tracking `user_version` (which is ambiguous between a fresh new-schema DB
 /// and an old-schema DB — see [`SqliteStorage::migrate_outbox_dlq`]).
@@ -1414,7 +1473,7 @@ fn quote_string(s: &str) -> String {
 /// handful of columns) and runs once per open.
 fn outbox_has_column(conn: &Connection, needle: &str) -> Result<bool, StorageError> {
     let mut stmt = conn
-        .prepare("PRAGMA table_info(cairn_outbox)")
+        .prepare("PRAGMA table_info(nostos_outbox)")
         .map_err(rusqlite_err)?;
     let names: Vec<String> = stmt
         .query_map([], |row| {
@@ -1427,11 +1486,11 @@ fn outbox_has_column(conn: &Connection, needle: &str) -> Result<bool, StorageErr
     Ok(names.iter().any(|n| n == needle))
 }
 
-/// Like [`outbox_has_column`] but for `cairn_data` (ADR-0025 slice 4a
+/// Like [`outbox_has_column`] but for `nostos_data` (ADR-0025 slice 4a
 /// `applied_lsn` migration probe).
-fn cairn_data_has_column(conn: &Connection, needle: &str) -> Result<bool, StorageError> {
+fn nostos_data_has_column(conn: &Connection, needle: &str) -> Result<bool, StorageError> {
     let mut stmt = conn
-        .prepare("PRAGMA table_info(cairn_data)")
+        .prepare("PRAGMA table_info(nostos_data)")
         .map_err(rusqlite_err)?;
     let names: Vec<String> = stmt
         .query_map([], |row| {
@@ -1518,7 +1577,7 @@ mod tests {
         // Row count via the same SQLite path.
         let conn = s.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
     }
@@ -1542,7 +1601,7 @@ mod tests {
 
         let conn = s.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "idempotent re-apply did not duplicate");
     }
@@ -1572,7 +1631,7 @@ mod tests {
 
         let conn = s.conn.lock().unwrap();
         let payload: Vec<u8> = conn
-            .query_row("SELECT payload FROM cairn_data WHERE pk = '1'", [], |r| {
+            .query_row("SELECT payload FROM nostos_data WHERE pk = '1'", [], |r| {
                 r.get::<_, Vec<u8>>(0)
             })
             .unwrap();
@@ -1604,7 +1663,7 @@ mod tests {
 
         let conn = s.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -1728,7 +1787,7 @@ mod tests {
         assert_eq!(s2.checkpoint().unwrap(), Lsn::new(777));
         let conn = s2.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -1839,7 +1898,7 @@ mod tests {
         {
             let conn = s.conn.lock().unwrap();
             conn.execute_batch(
-                "CREATE TRIGGER reject_bad_pk BEFORE INSERT ON cairn_outbox \
+                "CREATE TRIGGER reject_bad_pk BEFORE INSERT ON nostos_outbox \
                  BEGIN \
                    SELECT CASE WHEN NEW.pk = 'BADPK' \
                      THEN RAISE(ABORT, 'rejected') END; \
@@ -1940,7 +1999,7 @@ mod tests {
         let conn = s.conn.lock().unwrap();
         let (last_error, dead_lettered_at): (Option<String>, Option<i64>) = conn
             .query_row(
-                "SELECT last_error, dead_lettered_at FROM cairn_outbox WHERE id = ?1",
+                "SELECT last_error, dead_lettered_at FROM nostos_outbox WHERE id = ?1",
                 rusqlite::params![id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -1955,7 +2014,7 @@ mod tests {
         );
     }
 
-    /// Re-opening a pre-DLQ database (the old `cairn_outbox` schema without the
+    /// Re-opening a pre-DLQ database (the old `nostos_outbox` schema without the
     /// `attempts` / `dlq` columns) MUST migrate it forward idempotently without
     /// losing legacy rows. This is the upgrade path for existing deployments —
     /// a user's device has an old SQLite file the day they install the new
@@ -1970,7 +2029,7 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
-                "CREATE TABLE cairn_outbox (\
+                "CREATE TABLE nostos_outbox (\
                     id INTEGER PRIMARY KEY AUTOINCREMENT,\
                     table_name TEXT NOT NULL,\
                     op TEXT NOT NULL,\
@@ -1980,7 +2039,7 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES ('t', 'upsert', '1', '{}')",
+                "INSERT INTO nostos_outbox (table_name, op, pk, payload) VALUES ('t', 'upsert', '1', '{}')",
                 [],
             )
             .unwrap();
@@ -2005,12 +2064,44 @@ mod tests {
             .expect("re-opening an already-migrated DB is a no-op (idempotent)");
     }
 
+    /// ADR-0048: a store written before the rename, under the old default
+    /// file name and table names, opens under the new ones with its checkpoint
+    /// and its unsent write intact.
+    #[test]
+    fn pre_rename_store_is_adopted_with_its_outbox() {
+        let dir = tempfile_dir();
+        let legacy = format!("{dir}/cairn.sqlite"); // rename:hold — the pre-rename default
+        {
+            let conn = Connection::open(&legacy).unwrap();
+            conn.execute_batch(&SCHEMA.replace("nostos_", "cairn_")) // rename:hold
+                .unwrap();
+            for sql in [
+                "UPDATE cairn_meta SET value = '42' WHERE key = 'checkpoint'", // rename:hold
+                "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES ('t', 'upsert', '1', '{}')", // rename:hold
+            ] {
+                conn.execute(sql, []).unwrap();
+            }
+        }
+
+        let s = SqliteStorage::open(&format!("{dir}/nostos.sqlite")).unwrap();
+        assert_eq!(
+            s.checkpoint().unwrap(),
+            Lsn::new(42),
+            "checkpoint came along"
+        );
+        assert_eq!(s.pending().unwrap().len(), 1, "the unsent write came along");
+        assert!(
+            !std::path::Path::new(&legacy).exists(),
+            "the file moved, not copied"
+        );
+    }
+
     // ---- QUERY SURFACE (P1-Rust) ----
     //
     // Prove the bundled SQLite ships JSON1 and that an arbitrary SELECT against
-    // `cairn_data` returns correctly-typed, column-keyed JSON maps.
+    // `nostos_data` returns correctly-typed, column-keyed JSON maps.
 
-    /// `query()` runs an arbitrary SELECT against `cairn_data`, and the bundled
+    /// `query()` runs an arbitrary SELECT against `nostos_data`, and the bundled
     /// SQLite's JSON1 lets the dev `json_extract` straight out of the opaque
     /// payload BLOB. This is the same read surface a Flutter `watch(sql)` call
     /// uses: it can run any SELECT and render the result set directly,
@@ -2040,7 +2131,7 @@ mod tests {
                 "SELECT pk, \
                  json_extract(payload, '$.title') AS title, \
                  json_extract(payload, '$.n') AS n \
-                 FROM cairn_data WHERE table_name = 't1'",
+                 FROM nostos_data WHERE table_name = 't1'",
             )
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -2055,7 +2146,7 @@ mod tests {
     }
 
     /// WS2 read foundation: `apply_schema` materializes a `VIEW` per table over
-    /// the opaque `cairn_data` BLOB, so `SELECT col FROM <table>` returns typed
+    /// the opaque `nostos_data` BLOB, so `SELECT col FROM <table>` returns typed
     /// values — a plain-SQL read DX WITHOUT materialized typed tables. This
     /// is the load-bearing claim of slice-1, asserted end-to-end.
     #[test]
@@ -2086,7 +2177,7 @@ mod tests {
         .unwrap();
 
         // The dev's natural SQL resolves against the `tasks` VIEW, not the raw
-        // `cairn_data` BLOB — and the values come back typed (str/bool), not as
+        // `nostos_data` BLOB — and the values come back typed (str/bool), not as
         // opaque bytes.
         let rows = s.query("SELECT id, title, completed FROM tasks").unwrap();
         assert_eq!(rows.len(), 1);
@@ -2131,7 +2222,7 @@ mod tests {
             Some("buy milk")
         );
 
-        // A DELETE on cairn_data propagates through the view (the view is live,
+        // A DELETE on nostos_data propagates through the view (the view is live,
         // not a snapshot).
         s.apply_batch(
             &[(
@@ -2437,7 +2528,7 @@ mod tests {
     /// checkpoint-reset test is the guard against the empty-DB-forever
     /// (resume-without-snapshot) bug.
     #[test]
-    fn clear_empties_cairn_data() {
+    fn clear_empties_nostos_data() {
         let mut s = SqliteStorage::open_in_memory().unwrap();
         s.apply_batch(
             &[(ins("tasks", "1", b"alice"), 100)],
@@ -2448,16 +2539,16 @@ mod tests {
         {
             let conn = s.conn.lock().unwrap();
             let count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+                .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(count, 1, "precondition: row landed");
         }
         Storage::clear(&mut s).unwrap();
         let conn = s.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 0, "clear() emptied cairn_data");
+        assert_eq!(count, 0, "clear() emptied nostos_data");
     }
 
     #[test]
@@ -2533,7 +2624,7 @@ mod tests {
     #[test]
     fn clear_empties_outbox_and_dead_letter() {
         // Storage::clear is the full sign-out wipe: pending writes AND
-        // dead-lettered rows (ADR-0027) both drain. Both live in cairn_outbox
+        // dead-lettered rows (ADR-0027) both drain. Both live in nostos_outbox
         // (a dead-lettered row is dlq=1), so the single DELETE covers them.
         let mut s = SqliteStorage::open_in_memory().unwrap();
         s.enqueue(PendingWrite {
@@ -2581,7 +2672,7 @@ mod tests {
     #[test]
     fn outbox_clear_drains_queue_but_leaves_rows_and_checkpoint() {
         // Outbox::clear is the standalone outbox surface: it drains the queue
-        // but MUST NOT touch cairn_data or the checkpoint (those belong to the
+        // but MUST NOT touch nostos_data or the checkpoint (those belong to the
         // Storage surface). This keeps the two trait surfaces separable.
         let mut s = SqliteStorage::open_in_memory().unwrap();
         s.apply_batch(
@@ -2602,13 +2693,13 @@ mod tests {
         Outbox::clear(&mut s).unwrap();
 
         assert!(s.pending().unwrap().is_empty(), "outbox drained");
-        // cairn_data + checkpoint are the Storage surface's responsibility —
+        // nostos_data + checkpoint are the Storage surface's responsibility —
         // Outbox::clear leaves them untouched.
         let conn = s.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cairn_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 1, "Outbox::clear did not touch cairn_data");
+        assert_eq!(count, 1, "Outbox::clear did not touch nostos_data");
         drop(conn);
         assert_eq!(
             s.checkpoint().unwrap(),

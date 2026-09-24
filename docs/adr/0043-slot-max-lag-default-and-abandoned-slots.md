@@ -53,7 +53,7 @@ every operator who doesn't read the log.
    running*. A slot left behind by a server that is gone (crash, decommission,
    renamed `NOSTOS_PG_SLOT`) has no sessions to evict and pins WAL forever —
    the four abandoned slots the audit found on the dev database
-   (`cairn_slot`, `cairn_slot_arxa_kit`, `atlet_rt_sim_slot`,
+   (`nostos_slot`, `nostos_slot_arxa_kit`, `atlet_rt_sim_slot`,
    `atlet_demo_slot`, ~120 MB each) are exactly this case, and no
    `NOSTOS_SLOT_MAX_LAG` value would have helped. The only bound for that is
    Postgres `max_slot_wal_keep_size` (`NOSTOS_PG_SLOT_WAL_KEEP_SIZE` sets it
@@ -70,7 +70,7 @@ every operator who doesn't read the log.
    `FanOutService` in benchmarks and unit tests never evicts.
 6. **Threshold is chosen, not measured.** 1 GiB is a conservative guess; no
    lag data from a real tenant exists yet. Revisit trigger: p99 session lag
-   from `cairn_slot_lag_bytes` over ≥1 week of a real tenant (that metric is
+   from `nostos_slot_lag_bytes` over ≥1 week of a real tenant (that metric is
    not emitted yet — adding it is the prerequisite for the revisit).
 
 ## Consequences

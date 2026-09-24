@@ -14,7 +14,7 @@
 //!   may read is decided by RLS in Postgres, from the JWT it presents.
 //! - **`subscribe_stream`** — a stream is a server-held predicate template.
 //! - **OR-sets** — add-wins merge is the server's job; direct mode's one
-//!   serialized op is `cairn_increment`, exposed as
+//!   serialized op is `nostos_increment`, exposed as
 //!   [`NostosDirectHandle::increment`].
 //!
 //! The rest — storage, apply, watch, the durable outbox — is byte-for-byte the
@@ -270,7 +270,7 @@ impl NostosDirectHandle {
         Ok(ids)
     }
 
-    /// Add `delta` to `field` through the generated `cairn_increment` — the one
+    /// Add `delta` to `field` through the generated `nostos_increment` — the one
     /// write Postgres serializes for us, so two devices incrementing the same
     /// row sum instead of clobbering (ADR-0030, direct-mode plan step 5).
     ///
@@ -400,7 +400,7 @@ impl NostosDirectHandle {
             });
         }
         // Queue AND render: `write_batch` applies each write optimistically in
-        // the same storage transaction, because `watch()` reads `cairn_data`
+        // the same storage transaction, because `watch()` reads `nostos_data`
         // and never the outbox — enqueueing alone leaves the user's own write
         // invisible until the server echoes it, and invisible forever if the
         // server refuses it.
@@ -492,7 +492,7 @@ fn emit_status(client: &DirectClient<SqliteStorage>, sink: &StreamSink<WriteQueu
     // failed. One SELECT beats widening the trait for a single string.
     let last_error = storage
         .query(
-            "SELECT last_error FROM cairn_outbox \
+            "SELECT last_error FROM nostos_outbox \
              WHERE dlq = 1 AND last_error IS NOT NULL \
              ORDER BY id DESC LIMIT 1",
         )

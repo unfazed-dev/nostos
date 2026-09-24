@@ -2568,7 +2568,7 @@ class NostosDirectHandleImpl extends RustOpaque implements NostosDirectHandle {
   Future<void> disconnect() => RustLib.instance.api
       .crateApiDirectNostosDirectHandleDisconnect(that: this);
 
-  /// Add `delta` to `field` through the generated `cairn_increment` — the one
+  /// Add `delta` to `field` through the generated `nostos_increment` — the one
   /// write Postgres serializes for us, so two devices incrementing the same
   /// row sum instead of clobbering (ADR-0030, direct-mode plan step 5).
   ///
@@ -2725,7 +2725,7 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
 
   /// Materialize the WS2 read-views for `tables` in the on-device SQLite
   /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...) AS
-  /// col, ... FROM cairn_data WHERE table_name = '<table>'` — see
+  /// col, ... FROM nostos_data WHERE table_name = '<table>'` — see
   /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema; the
   /// views persist in the SQLite file, so this is called ONCE after `connect`
   /// (and before the first `query()` / Dart `db.execute(SELECT ...)` that
@@ -2835,13 +2835,13 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   );
 
   /// Run an arbitrary `SELECT` against the on-device SQLite (the synced
-  /// `cairn_data` table). Returns a JSON-array-of-objects STRING — one
+  /// `nostos_data` table). Returns a JSON-array-of-objects STRING — one
   /// object per row, keyed by column name — which is the SAME shape the
   /// `rows` tick stream emits, so Dart decodes it identically with
   /// `jsonDecode`. The SQL typically uses
   /// `json_extract(payload, '$.col')` to project the opaque payload (JSON1
   /// ships in the bundled SQLite; ADR-0019) — e.g.
-  /// `SELECT json_extract(payload, '$.title') AS title FROM cairn_data`.
+  /// `SELECT json_extract(payload, '$.title') AS title FROM nostos_data`.
   ///
   /// Requires an active subscription: the [`Session`] owns the
   /// [`SqliteStorage`] the client binds at `subscribe()` time, and

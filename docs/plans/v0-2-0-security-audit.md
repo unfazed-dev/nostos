@@ -437,7 +437,7 @@ Three details worth keeping:
    goes away — the stale-row bug ADR-0014's reconcile boundary exists to
    prevent. That is a worse outcome than leaking a pk inside the client's own
    tenant and own subscribed table. Ceiling and upgrade path (log the scope
-   columns into `cairn_oplog` at write time) are in the `ponytail:` comment.
+   columns into `nostos_oplog` at write time) are in the `ponytail:` comment.
 2. **The `!events.is_empty()` guard was now wrong.** A non-empty replay can
    filter to zero. The old arm returned `Ok(())` and skipped the snapshot, so a
    fully-filtered replay would leave the client with neither replay nor
@@ -556,8 +556,8 @@ work touches is never entered.
 test-isolation leak.**
 
 `crates/nostos-client/tests/e2e_pg_apply_throughput.rs:141` runs
-`ALTER PUBLICATION cairn_pub ADD TABLE public.bench_apply` and **never removes
-it**. The bench leaves ~40,000 rows behind. `cairn_pub` is shared, so every
+`ALTER PUBLICATION nostos_pub ADD TABLE public.bench_apply` and **never removes
+it**. The bench leaves ~40,000 rows behind. `nostos_pub` is shared, so every
 later test that opens a *fresh* replication slot snapshots those 40k rows too.
 Both failing tests collect into a fixed budget — `collect_events(&mut repl, 8,
 ..)` and `.., 32, ..` — so the budget fills with bench rows before the test's
@@ -572,11 +572,11 @@ This explains every property that made it look mysterious: deterministic
 (40k rows are stably there), reproduces on the pre-session baseline (it is
 database state, not code), and unrelated to `resume_lsn` (neither test uses it).
 
-**Confirmed by experiment, not inference:** `ALTER PUBLICATION cairn_pub DROP
+**Confirmed by experiment, not inference:** `ALTER PUBLICATION nostos_pub DROP
 TABLE bench_apply;` then re-run → `2 passed; 0 failed` immediately.
 
 The earlier "27 rows across all six published tables" measurement is what sent
-the first investigation down a blind alley — it counted six tables. `cairn_pub`
+the first investigation down a blind alley — it counted six tables. `nostos_pub`
 had **eight**; `bench_apply` was the one that mattered and was never in the
 `pg-init` fixture to begin with. A count that excludes the pathological case
 is worse than no count, because it retires the hypothesis it should have raised.
@@ -688,7 +688,7 @@ resync for a client a gigabyte behind is a far smaller blast radius than a full
 primary disk for everyone.
 
 Observed on the dev database while investigating: four abandoned slots
-(`cairn_slot`, `cairn_slot_arxa_kit`, `atlet_rt_sim_slot`, `atlet_demo_slot`)
+(`nostos_slot`, `nostos_slot_arxa_kit`, `atlet_rt_sim_slot`, `atlet_demo_slot`)
 each retaining **117–120 MB** of WAL, plus six leftover `e2e_snap_*` slots.
 That is the mechanism working exactly as described, on a laptop, with nobody
 attacking anything. **Note:** no `NOSTOS_SLOT_MAX_LAG` value fixes those —
@@ -761,7 +761,7 @@ for them. Dropping the orphaned slots made all five pass.
 Antidote, worth running before any pg suite:
 
 ```sh
-docker exec nostos-postgres psql -U cairn -d cairn -t -c \
+docker exec nostos-postgres psql -U nostos -d nostos -t -c \
   "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots \
    WHERE NOT active AND slot_name LIKE 'e2e_%';"
 ```

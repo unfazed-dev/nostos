@@ -106,13 +106,13 @@ and `NOSTOS_TENANT_COLUMN`.
 
 `nostos-server` connects to Postgres as a dedicated least-privilege role —
 **never the `postgres` superuser**. The role, publication and slot keep their
-pre-rename `cairn_*` names (Nostos was formerly Cairn; these are held
+pre-rename `nostos_*` names (Nostos was formerly Nostos; these are held
 identifiers). The demo role (`docker/pg-init/02-nostos-role.sql`):
 
 ```sql
-CREATE ROLE cairn_writer WITH LOGIN REPLICATION BYPASSRLS PASSWORD '<secret>';
-GRANT USAGE ON SCHEMA public TO cairn_writer;
-GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO cairn_writer;
+CREATE ROLE nostos_writer WITH LOGIN REPLICATION BYPASSRLS PASSWORD '<secret>';
+GRANT USAGE ON SCHEMA public TO nostos_writer;
+GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO nostos_writer;
 ```
 
 - `REPLICATION` — consume the logical-replication slot + the initial snapshot.
@@ -121,7 +121,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO cairn_writer;
 - `GRANT` on **only** the synced tables — the database-level gate. Combined with
   the runtime `NOSTOS_WRITE_TABLES` allowlist, this is defense-in-depth.
 
-**Blast radius (verified):** a server connected as `cairn_writer` can
+**Blast radius (verified):** a server connected as `nostos_writer` can
 INSERT/UPDATE/DELETE on granted tables but **cannot** `DROP TABLE`, read
 `auth.tokens`, or touch anything outside its GRANT (`DROP TABLE tasks` →
 `ERROR: must be owner of table tasks`).
@@ -132,21 +132,21 @@ Run once in the Supabase SQL editor as `postgres`, then point `nostos-server`
 at the role (direct connection — the pooler can't carry logical replication):
 
 ```sql
-CREATE PUBLICATION cairn_pub FOR TABLE tasks;                       -- replication source
-CREATE ROLE cairn_writer WITH LOGIN REPLICATION BYPASSRLS PASSWORD '<strong-secret>';
-GRANT USAGE ON SCHEMA public TO cairn_writer;
-GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO cairn_writer;      -- repeat per NOSTOS_WRITE_TABLES entry
+CREATE PUBLICATION nostos_pub FOR TABLE tasks;                       -- replication source
+CREATE ROLE nostos_writer WITH LOGIN REPLICATION BYPASSRLS PASSWORD '<strong-secret>';
+GRANT USAGE ON SCHEMA public TO nostos_writer;
+GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO nostos_writer;      -- repeat per NOSTOS_WRITE_TABLES entry
 ```
 
 ```sh
 NOSTOS_REPLICATOR=pg \
-NOSTOS_PG_URL='postgresql://cairn_writer:<strong-secret>@db.<ref>.supabase.co:5432/postgres' \
-NOSTOS_PG_SLOT=cairn_slot NOSTOS_PG_PUBLICATION=cairn_pub \
+NOSTOS_PG_URL='postgresql://nostos_writer:<strong-secret>@db.<ref>.supabase.co:5432/postgres' \
+NOSTOS_PG_SLOT=nostos_slot NOSTOS_PG_PUBLICATION=nostos_pub \
 NOSTOS_WRITE_TABLES=tasks NOSTOS_SYNC_AUTH=supabase-jwt \
 ./target/debug/nostos-server
 ```
 
-Use a generated secret; never commit it (the demo's `cairn_writer_dev_pw` is a
+Use a generated secret; never commit it (the demo's `nostos_writer_dev_pw` is a
 throwaway local-Docker credential, not a real secret).
 
 ### The RLS trade-off — read before adopting on Supabase

@@ -51,7 +51,7 @@ rail):
   → empty string; no expression language),
 - `table:visible@<route>:<title>:<body>` — the same, plus the in-app
   destination a tap should open. `<route>` takes `{col}` too and must start
-  with `/`; it ships as the payload key `cairn_route` (ADR-0037 §2a). `@`
+  with `/`; it ships as the payload key `nostos_route` (ADR-0037 §2a). `@`
   rather than one more `:` because the body is the greedy remainder. Works
   on `action` entries as well
   (`table:action@<route>:<category>:<title>:<body>`); a silent doorbell
@@ -78,7 +78,7 @@ a liveactivity JSON template).
 A visible push carries an optional string→string `data` map that reaches the
 app on tap: APNs puts it next to `aps` (which is what `userInfo` returns),
 FCM in `message.data`, Web Push in a `data` object inside the encrypted
-payload. `NOSTOS_PUSH_TABLES` sets the one key `cairn_route` via `@route`
+payload. `NOSTOS_PUSH_TABLES` sets the one key `nostos_route` via `@route`
 above; `nostos-pushd`'s `POST /v1/send` takes the whole map:
 
 ```json
@@ -86,14 +86,14 @@ above; `nostos-pushd`'s `POST /v1/send` takes the whole map:
   "title": "Order shipped",
   "body": "Order 983979e8 is on its way",
   "category": "order_status",
-  "data": {"cairn_route": "/orders/983979e8", "order_id": "983979e8"}
+  "data": {"nostos_route": "/orders/983979e8", "order_id": "983979e8"}
 }}}
 ```
 
 Refused with a 400 (and at startup, for the config path): keys a rail would
 eat — `aps`, FCM's `from` / `message_type` / `notification` / `google.*` /
 `gcm.*`, and nostos's own `title`, `body`, `category`, `table`, `lsn`,
-`nostos_*` — or a
+`nostos_*` other than the `nostos_route` tap route — or a
 map over 1024 serialized bytes (APNs and FCM cap the whole payload at 4096).
 
 Silent doorbells carry no `data`: the payload stays `{table, lsn}`. And the
@@ -118,7 +118,7 @@ key to every vendor's own field (ADR-0047):
 | `level` | `passive` `active` `time-sensitive` `critical` | `interruption-level` | `notification_priority` LOW/DEFAULT/HIGH/MAX | — |
 | `relevance` | 0–1 | `relevance-score` — summary ranking | — | — |
 | `sound` | `default` `none` or a bundled file | `sound` | `sound` / `default_sound` | `silent` (none) |
-| `channel` | channel id | — | `notification.channel_id` (default `cairn`) | — |
+| `channel` | channel id | — | `notification.channel_id` (default `nostos`) | — |
 | `sender` | text | Communication Notification, via the NSE ↓ | `nostos_sender` data key | — |
 | `avatar` | `https://` URL (needs `sender`) | the sender's picture, via the NSE ↓ | `nostos_avatar` data key | `icon` |
 

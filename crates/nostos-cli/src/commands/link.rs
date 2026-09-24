@@ -31,7 +31,7 @@ pub struct LinkArgs {
     /// infer that an unscoped table is public.
     #[arg(long = "public")]
     pub public: Vec<String>,
-    /// Direct mode: how long `cairn.prune()` keeps change rows.
+    /// Direct mode: how long `nostos.prune()` keeps change rows.
     #[arg(long, default_value = direct::DEFAULT_RETENTION)]
     pub retention: String,
     /// Direct mode: also generate the push path, posting to this Edge Function
@@ -52,7 +52,7 @@ pub struct LinkArgs {
     pub visible: Vec<String>,
     /// Direct mode, with `--push`: also roll it out through the `supabase` CLI
     /// (`supabase login` first) — apply `.nostos/direct.sql` with `pg_net`, mint
-    /// the shared secret on both sides, deploy the `cairn-push` Edge Function.
+    /// the shared secret on both sides, deploy the `nostos-push` Edge Function.
     #[arg(long, requires_all = ["push", "fcm_service_account"])]
     pub deploy: bool,
     /// The Firebase service-account JSON `--deploy` hands the Edge Function as
@@ -179,7 +179,7 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
     {
         bail!(
             "--visible names `{}`, which is not a synced table: its changes never \
-             reach cairn.changes, so it could never push",
+             reach nostos.changes, so it could never push",
             t.table
         );
     }
@@ -223,7 +223,7 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
     if let (true, Some(service_account)) = (args.deploy, &args.fcm_service_account) {
         deploy("supabase", cwd, &project_ref(url)?, &sql, service_account)?;
         println!(
-            "\u{2713} applied `.nostos/{}`, set the push secret, deployed cairn-push",
+            "\u{2713} applied `.nostos/{}`, set the push secret, deployed nostos-push",
             direct::OUTPUT_FILE
         );
         println!("next: turn OFF \"Allow public access\" in the project's Realtime settings,");
@@ -237,7 +237,7 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
             println!(
                 "      push is included \u{2014} rerun with `--deploy --fcm-service-account \
                  <json>` to roll it out, or by hand: `create extension if not exists \
-                 pg_net;`, set `cairn.push_config.secret`, deploy {PUSH_FN_DIR}."
+                 pg_net;`, set `nostos.push_config.secret`, deploy {PUSH_FN_DIR}."
             );
         }
     }
@@ -247,11 +247,11 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
 
 /// Where `--push` writes the Edge Function, the layout `supabase functions
 /// deploy` reads.
-const PUSH_FN_DIR: &str = "supabase/functions/cairn-push";
+const PUSH_FN_DIR: &str = "supabase/functions/nostos-push";
 
 /// The Edge Function source, compiled in so an app repo gets the version its
 /// SQL was generated against — the trigger's request body is their contract.
-const PUSH_FN: &str = include_str!("../../../../supabase/functions/cairn-push/index.ts");
+const PUSH_FN: &str = include_str!("../../../../supabase/functions/nostos-push/index.ts");
 
 /// `https://<ref>.supabase.co` -> `<ref>`. `--deploy` drives a hosted project
 /// through the Management API, so a local or self-hosted URL is refused rather
@@ -313,7 +313,7 @@ fn deploy(
             &sql_file,
             &format!(
                 "create extension if not exists pg_net;\n{sql}\n\
-                 update cairn.push_config set secret = '{secret}' where id = 1;\n"
+                 update nostos.push_config set secret = '{secret}' where id = 1;\n"
             ),
         )?;
         // Single-quoted: the dotenv parser keeps the key's `\n` escapes as-is.
@@ -344,7 +344,7 @@ fn deploy(
             &[
                 "functions",
                 "deploy",
-                "cairn-push",
+                "nostos-push",
                 "--project-ref",
                 project_ref,
                 "--no-verify-jwt",
@@ -495,7 +495,7 @@ mod tests {
         assert!(argv[1].starts_with("ARGS secrets set --project-ref abc --env-file "));
         assert_eq!(
             argv[2],
-            "ARGS functions deploy cairn-push --project-ref abc --no-verify-jwt --use-api"
+            "ARGS functions deploy nostos-push --project-ref abc --no-verify-jwt --use-api"
         );
         assert!(
             argv.iter().all(|l| !l.contains(secret)),

@@ -143,7 +143,7 @@ pub(super) async fn register_subscribe(
     // ── Op-log replay-on-reconnect (ADR-0025 slice 4b). When the client's
     //    epoch matches the server's current slot epoch AND its resume_lsn is
     //    within the retained op-log window, replay the offline gap from
-    //    `cairn_oplog` to the fresh sink and SKIP the snapshot. The client
+    //    `nostos_oplog` to the fresh sink and SKIP the snapshot. The client
     //    dedups per-row by lsn (slice 4a), so the concurrent live fan-out +
     //    replay overlap is safe. Live fan-out started at `manager.connect`
     //    above. Any decline (epoch mismatch, aged-out resume, empty/failed
@@ -178,7 +178,7 @@ pub(super) async fn register_subscribe(
                         let total = events.len();
                         let mut count = 0_usize;
                         for ev in events {
-                            // AUTHORIZATION, not an optimization: `cairn_oplog`
+                            // AUTHORIZATION, not an optimization: `nostos_oplog`
                             // is keyed by tenant ALONE, so without this gate a
                             // resume widens scope past the ruleset that the
                             // live path enforces (see `replay_admits`).
@@ -565,7 +565,7 @@ mod tests {
         }
     }
 
-    /// Payload must be decodable JSON: `cairn_oplog` stores the row image as
+    /// Payload must be decodable JSON: `nostos_oplog` stores the row image as
     /// JSONB, and `replay_admits` fails an undecodable payload CLOSED, so a
     /// non-JSON fixture would silently exercise the reject path.
     fn ev(lsn: u64) -> ReplicationEvent {
@@ -673,7 +673,7 @@ mod tests {
     /// The live path filters every event through the session predicate
     /// (`FanOutService::fan_out` -> `predicate.matches`), which carries the
     /// ruleset scope AND the tenant clause. The replay path reads
-    /// `cairn_oplog` keyed by tenant alone (`replay_after(tenant, lsn)`) and
+    /// `nostos_oplog` keyed by tenant alone (`replay_after(tenant, lsn)`) and
     /// hands rows straight to the socket sink, whose `admit` gate checks only
     /// open/acked/dedup — never the predicate, never the table. So a reconnect
     /// can hand a client rows from a table its own ruleset refuses to sync: a

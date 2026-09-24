@@ -21,7 +21,7 @@ void main() {
     final payload = orderPushPayload(_event());
     expect(payload['body'], 'Order 983979e8 is shipped');
     final data = payload['data']! as Map<String, Object?>;
-    expect(data['cairn_route'], '/history/ev-1');
+    expect(data['nostos_route'], '/history/ev-1');
     expect(data['deep_link'], 'atlet://history/ev-1');
     expect(data['event_id'], 'ev-1');
     expect(data['status'], 'shipped');
@@ -37,9 +37,9 @@ void main() {
   });
 
   test('a route alone names the event — a URL carries nothing else', () {
-    expect(tappedEventId({'cairn_route': '/history/ev-9'}), 'ev-9');
-    expect(tappedEventId({'cairn_route': '/history/'}), isNull);
-    expect(tappedEventId({'cairn_route': '/somewhere/else'}), isNull);
+    expect(tappedEventId({'nostos_route': '/history/ev-9'}), 'ev-9');
+    expect(tappedEventId({'nostos_route': '/history/'}), isNull);
+    expect(tappedEventId({'nostos_route': '/somewhere/else'}), isNull);
     expect(tappedEventId(const {}), isNull); // someone else's push
   });
 
@@ -68,7 +68,7 @@ void main() {
       // push and the app's own banner, app open or not.
       expect(postsOwnBanner(pushPilot: true, web: false), isFalse);
       expect(postsOwnBanner(pushPilot: false, web: false), isTrue);
-      // Direct mode's cairn-push sends to FCM tokens only; web keeps its snackbar.
+      // Direct mode's nostos-push sends to FCM tokens only; web keeps its snackbar.
       expect(postsOwnBanner(pushPilot: true, web: true), isTrue);
     },
   );

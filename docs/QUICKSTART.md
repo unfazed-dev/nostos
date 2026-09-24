@@ -34,13 +34,13 @@ Prerequisites: a Rust toolchain (`rustup show` in this repo), Flutter ≥3.47
 with native assets enabled (`flutter config --enable-native-assets`, one-time
 per machine), and a Postgres with `wal_level = logical` (the repo's `docker
 compose -f docker/docker-compose.yml up -d postgres` gives you one
-pre-configured; its db/user/password are the held pre-rename name `cairn`).
+pre-configured; its db/user/password are the held pre-rename name `nostos`).
 
 | Step | Command | Time budget |
 |---|---|---|
 | 1. Start Postgres | `docker compose -f docker/docker-compose.yml up -d postgres` (or point at your own `wal_level=logical` Postgres) | 0:00–0:15 |
 | 2. Create your table | `CREATE TABLE todos (id text primary key, user_id text not null, title text not null, done boolean not null default false, created_at timestamptz not null default now());` — `nostos init` creates the **publication**, not your tables | 0:15–0:45 |
-| 3. `nostos init` | `cargo run -p nostos-cli -- init --db-url postgresql://cairn:cairn@localhost:5433/cairn --tables todos --write-tables todos --tenant-column user_id` | 0:45–1:15 |
+| 3. `nostos init` | `cargo run -p nostos-cli -- init --db-url postgresql://nostos:nostos@localhost:5433/nostos --tables todos --write-tables todos --tenant-column user_id` | 0:45–1:15 |
 | 4. `nostos dev` | `cargo run -p nostos-cli -- dev` — prints the `ws://` URL + a copy-paste Dart snippet | 1:15–1:45 (plus first-run Rust compile — see the timing note) |
 | 5. Add the SDK | `flutter pub add nostos_flutter` (pub.dev, once W6 publishes it — today: a `path:` dependency on `sdk/nostos_flutter`, see `sdk/nostos_flutter/example/pubspec.yaml`) | 1:45–2:15 |
 | 6. ~10 lines of Dart | see below | 2:15–3:00 |

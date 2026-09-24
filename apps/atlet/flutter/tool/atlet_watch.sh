@@ -35,9 +35,9 @@ db_path() {
   local c
   c=$(xcrun simctl get_app_container "$UDID" "$BUNDLE" data 2>/dev/null) || return 1
   [ -n "$c" ] || return 1
-  echo "$c/Documents/cairn_direct.sqlite"
+  echo "$c/Documents/nostos_direct.sqlite"
 }
-echo "WATCH-UP polling cairn_direct.sqlite every ${POLL}s + push log"
+echo "WATCH-UP polling nostos_direct.sqlite every ${POLL}s + push log"
 
 work=$(mktemp -d)
 # By PID, never `kill 0`: this script is meant to be run from another shell,
@@ -76,8 +76,8 @@ snap() {
 select 'count','cart',count(*) from cart_items;
 select 'count','orders',count(*) from orders;
 select 'order',id,status from orders;
-select 'dlq',id,table_name||'/'||pk||' '||coalesce(substr(last_error,1,160),'?') from cairn_outbox where dlq=1;
-select 'queued','n',count(*) from cairn_outbox where dlq=0;
+select 'dlq',id,table_name||'/'||pk||' '||coalesce(substr(last_error,1,160),'?') from nostos_outbox where dlq=1;
+select 'queued','n',count(*) from nostos_outbox where dlq=0;
 SQL
 }
 

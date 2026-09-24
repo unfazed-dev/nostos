@@ -10,7 +10,7 @@ discover the publication's typed schema (tables, columns, SQLite affinities) to
 auto-build its typed read surface — the headline DX win: no hand-written
 `Schema` to maintain. (This originally read "auto-build its typed **tables**",
 which the client never did and now never will: the descriptor drives one SQLite
-**VIEW** per table over the opaque `cairn_data` payload, and materialized typed
+**VIEW** per table over the opaque `nostos_data` payload, and materialized typed
 tables are rejected — [ADR-0028](0028-client-read-views-over-opaque-payload.md).
 Nothing about *this* decision changes; only the consumer's shape.) nostos-server already bootstraps this metadata from the Postgres
 catalog (`PgReplicator::catalog_relations` → `RelationMeta`, ADR-0019), but it

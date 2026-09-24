@@ -15,7 +15,7 @@
 //   - how PostgREST renders `xid8` (the horizon is a cursor; if it arrives as a
 //     JS number it silently loses precision past 2^53),
 //   - whether `raise sqlstate 'PT410'` really surfaces as HTTP 410,
-//   - whether `auth.jwt()` inside `cairn.current_scopes()` sees the same claims
+//   - whether `auth.jwt()` inside `nostos.current_scopes()` sees the same claims
 //     under real GoTrue tokens,
 //   - whether a private Realtime channel authorized by the generated policy on
 //     `realtime.messages` actually delivers — and refuses the wrong tenant,
@@ -31,7 +31,7 @@ import { execFileSync } from "node:child_process";
 const URL_BASE = process.env.NOSTOS_SB_URL ?? "http://127.0.0.1:54321";
 const ANON = process.env.NOSTOS_SB_ANON_KEY;
 const SERVICE = process.env.NOSTOS_SB_SERVICE_KEY;
-// The generated objects live in the `cairn` schema, which is deliberately NOT
+// The generated objects live in the `nostos` schema, which is deliberately NOT
 // exposed to the API — so the fixture steps that touch it need SQL. Default is
 // the local stack's container; override for a hosted project.
 const PSQL = (process.env.NOSTOS_SB_PSQL ??
@@ -40,7 +40,7 @@ const PSQL = (process.env.NOSTOS_SB_PSQL ??
 // What pg_net (inside the database container) must dial to reach the function.
 // Not the same host the test client uses: `127.0.0.1` there is the database.
 const PUSH_ENDPOINT = process.env.NOSTOS_SB_PUSH_ENDPOINT ??
-  "http://host.docker.internal:54321/functions/v1/cairn-push";
+  "http://host.docker.internal:54321/functions/v1/nostos-push";
 
 if (!ANON || !SERVICE) {
   console.error("set NOSTOS_SB_ANON_KEY and NOSTOS_SB_SERVICE_KEY (supabase status -o json)");
@@ -102,7 +102,7 @@ async function rest(path, { token, method = "POST", body, prefer } = {}) {
 }
 
 const pull = (token, since = "0", maxTxns = 200) =>
-  rest("/rpc/cairn_pull", { token, body: { since, max_txns: maxTxns } });
+  rest("/rpc/nostos_pull", { token, body: { since, max_txns: maxTxns } });
 
 // Pull until `want` is satisfied, or give up. This is not test flake padding —
 // it is the protocol. The horizon is `pg_snapshot_xmin`, so a just-committed
@@ -184,7 +184,7 @@ function doorbell(topic, token, { private: isPrivate = true, after, waitMs = 150
         if (!out.joined) return done();
         if (after) await after();
       }
-      if (f.event === "broadcast" && f.payload?.event === "cairn_ring") {
+      if (f.event === "broadcast" && f.payload?.event === "nostos_ring") {
         out.rings += 1;
         if (after) done();
       }
@@ -208,11 +208,11 @@ const alice = await signUp(`alice-${Date.now()}@nostos.test`);
 const bob = await signUp(`bob-${Date.now()}@nostos.test`);
 
 // A clean log, and a retention row that cannot refuse anything yet.
-sql("truncate cairn.changes; update cairn.retention set pruned_below = '0'::xid8 where id = 1;");
+sql("truncate nostos.changes; update nostos.retention set pruned_below = '0'::xid8 where id = 1;");
 
 await section("pull", async () => {
   const { status, body } = await pull(alice.token);
-  check("cairn_pull answers an authenticated device", status === 200, `HTTP ${status}`);
+  check("nostos_pull answers an authenticated device", status === 200, `HTTP ${status}`);
   check(
     "the anon key alone cannot pull",
     (await pull(null)).status >= 400,
@@ -271,7 +271,7 @@ await section("rls", async () => {
 });
 
 await section("transactions", async () => {
-  const before = Number(sql("select coalesce(max(seq), 0) from cairn.changes;"));
+  const before = Number(sql("select coalesce(max(seq), 0) from nostos.changes;"));
   // One statement, two rows: one transaction, so one xid. The client applies a
   // whole xid or none of it, which is the entire point of logging xid at all.
   must(
@@ -303,7 +303,7 @@ await section("increment", async () => {
     }),
   )[0].id;
   for (let i = 0; i < 3; i += 1) {
-    const r = await rest("/rpc/cairn_increment", {
+    const r = await rest("/rpc/nostos_increment", {
       token: alice.token,
       body: { p_table: "nostos_e2e_notes", p_pk: id, p_field: "hits", p_delta: 1 },
     });
@@ -315,7 +315,7 @@ await section("increment", async () => {
   })).body[0];
   check("three increments land as three", row.hits === 3, `hits=${row.hits}`);
 
-  const refused = await rest("/rpc/cairn_increment", {
+  const refused = await rest("/rpc/nostos_increment", {
     token: alice.token,
     body: { p_table: "auth.users", p_pk: id, p_field: "hits", p_delta: 1 },
   });
@@ -325,7 +325,7 @@ await section("increment", async () => {
     `HTTP ${refused.status}`,
   );
 
-  const notMine = await rest("/rpc/cairn_increment", {
+  const notMine = await rest("/rpc/nostos_increment", {
     token: bob.token,
     body: { p_table: "nostos_e2e_notes", p_pk: id, p_field: "hits", p_delta: 100 },
   });
@@ -341,7 +341,7 @@ await section("increment", async () => {
 });
 
 await section("scope change", async () => {
-  const before = Number(sql("select coalesce(max(seq), 0) from cairn.changes;"));
+  const before = Number(sql("select coalesce(max(seq), 0) from nostos.changes;"));
   const id = must(
     "moving-row insert",
     await rest("/nostos_e2e_notes", {
@@ -371,7 +371,7 @@ await section("scope change", async () => {
 
 await section("retention", async () => {
   const head = sql("select pg_snapshot_xmin(pg_current_snapshot())::text;");
-  sql(`update cairn.retention set pruned_below = '${head}'::xid8 where id = 1;`);
+  sql(`update nostos.retention set pruned_below = '${head}'::xid8 where id = 1;`);
   const { status, body } = await pull(alice.token, "3");
   // A short page is indistinguishable from "nothing happened", so the window
   // has to be an error. PostgREST maps a PTxyz sqlstate to HTTP xyz.
@@ -382,7 +382,7 @@ await section("retention", async () => {
   );
   // A 410 the device cannot act on is a device bricked by a long holiday, so
   // the recovery path is part of the retention story, not a follow-up.
-  const snap = await rest("/rpc/cairn_snapshot", { token: alice.token, body: {} });
+  const snap = await rest("/rpc/nostos_snapshot", { token: alice.token, body: {} });
   check(
     "a pruned device can still re-snapshot",
     snap.status === 200 && Array.isArray(snap.body) && snap.body.length > 0,
@@ -410,13 +410,13 @@ await section("retention", async () => {
       .every((r) => r.row.owner_id === alice.sub),
     `${snap.body.filter((r) => r.row).length} row(s)`,
   );
-  const otherSnap = await rest("/rpc/cairn_snapshot", { token: null, body: {} });
+  const otherSnap = await rest("/rpc/nostos_snapshot", { token: null, body: {} });
   check(
     "the anon key cannot snapshot",
     otherSnap.status >= 400,
     `HTTP ${otherSnap.status}`,
   );
-  sql("update cairn.retention set pruned_below = '0'::xid8 where id = 1;");
+  sql("update nostos.retention set pruned_below = '0'::xid8 where id = 1;");
   const resumed = await pull(alice.token, snap.body[0].horizon);
   check(
     "and the snapshot's horizon is a valid resume point",
@@ -429,9 +429,9 @@ await section("doorbell", async () => {
   // Warm the tenant up: the first join pays Realtime's connection setup, and
   // charging that to the first assertion is how a working doorbell reads as
   // broken.
-  await doorbell(`cairn:sub:${alice.sub}`, alice.token, { waitMs: 8000 });
+  await doorbell(`nostos:sub:${alice.sub}`, alice.token, { waitMs: 8000 });
 
-  const mine = await doorbell(`cairn:sub:${alice.sub}`, alice.token, {
+  const mine = await doorbell(`nostos:sub:${alice.sub}`, alice.token, {
     after: () =>
       rest("/nostos_e2e_notes", {
         token: alice.token,
@@ -441,7 +441,7 @@ await section("doorbell", async () => {
   check("a device joins its own private channel", mine.joined === true, mine.reason ?? "");
   check("and the write rings it", mine.rings > 0, `${mine.rings} ring(s)`);
 
-  const theirs = await doorbell(`cairn:sub:${alice.sub}`, bob.token, { waitMs: 8000 });
+  const theirs = await doorbell(`nostos:sub:${alice.sub}`, bob.token, { waitMs: 8000 });
   check(
     "another tenant cannot join that channel",
     theirs.joined === false,
@@ -453,7 +453,7 @@ await section("doorbell", async () => {
   // left on, the same wrong tenant joins the same topic by simply not asking
   // for a private one, and no policy is ever consulted. A local stack ships
   // with it on, so this is a note there and a check against a hosted project.
-  const loophole = await doorbell(`cairn:sub:${alice.sub}`, bob.token, {
+  const loophole = await doorbell(`nostos:sub:${alice.sub}`, bob.token, {
     private: false,
     waitMs: 8000,
   });
@@ -469,15 +469,15 @@ await section("doorbell", async () => {
 
 await section("push", async () => {
   sql(
-    `update cairn.push_config set endpoint = '${PUSH_ENDPOINT}', secret = 'e2e-secret' where id = 1;`,
+    `update nostos.push_config set endpoint = '${PUSH_ENDPOINT}', secret = 'e2e-secret' where id = 1;`,
   );
-  const reg = await rest("/rpc/cairn_register_push_token", {
+  const reg = await rest("/rpc/nostos_register_push_token", {
     token: alice.token,
     body: { p_platform: "fcm", p_token: "e2e-device-token" },
   });
   check("a device registers its push token", reg.status < 300, `HTTP ${reg.status}`);
   const stamped = sql(
-    `select scope from cairn.push_tokens where token = 'e2e-device-token' order by scope;`,
+    `select scope from nostos.push_tokens where token = 'e2e-device-token' order by scope;`,
   ).split("\n");
   check(
     "the token is stamped with the caller's own scope, never an argument",
@@ -498,7 +498,7 @@ await section("push", async () => {
 
   // Nobody is awake, so the change must reach for the doorbell of last resort.
   resetNet();
-  sql("delete from cairn.device_presence; delete from cairn.push_cooldown;");
+  sql("delete from nostos.device_presence; delete from nostos.push_cooldown;");
   must(
     "asleep-scope insert",
     await rest("/nostos_e2e_notes", {
@@ -521,18 +521,18 @@ await section("push", async () => {
     posted.slice(0, 90),
   );
   // The check this whole section exists for. `nostos` is not an exposed schema,
-  // so a function that selects `cairn.push_tokens` through the Data API gets
-  // `Invalid schema: cairn` and drops every notification with no error anywhere
-  // the operator will look. It has to go through `public.cairn_push_targets`.
+  // so a function that selects `nostos.push_tokens` through the Data API gets
+  // `Invalid schema: nostos` and drops every notification with no error anywhere
+  // the operator will look. It has to go through `public.nostos_push_targets`.
   check(
-    "the wake path is not broken by the unexposed cairn schema",
+    "the wake path is not broken by the unexposed nostos schema",
     posted !== "" && !/invalid schema|PGRST106|not exposed/i.test(posted),
     posted.slice(0, 90),
   );
   // Asserted directly rather than inferred from the function's status code: a
   // 500 from any later step (minting an FCM token, say) would otherwise read
   // as a healthy registry.
-  const targets = await rest("/rpc/cairn_push_targets", {
+  const targets = await rest("/rpc/nostos_push_targets", {
     token: SERVICE,
     body: { p_scope: `sub:${alice.sub}` },
   });
@@ -547,7 +547,7 @@ await section("push", async () => {
   // by name, and `revoke … from public` does not take that away.
   for (const token of [alice.token, null]) {
     const who = token ? "an authenticated device" : "the anon key";
-    const leaked = await rest("/rpc/cairn_push_targets", {
+    const leaked = await rest("/rpc/nostos_push_targets", {
       token,
       body: { p_scope: `sub:${alice.sub}` },
     });
@@ -557,7 +557,7 @@ await section("push", async () => {
       `HTTP ${leaked.status} ${JSON.stringify(leaked.body).slice(0, 80)}`,
     );
   }
-  const anonRegister = await rest("/rpc/cairn_register_push_token", {
+  const anonRegister = await rest("/rpc/nostos_register_push_token", {
     token: null,
     body: { p_platform: "fcm", p_token: "anon-smuggled" },
   });
@@ -575,7 +575,7 @@ await section("push", async () => {
   resetNet();
   must(
     "heartbeat",
-    await rest("/rpc/cairn_heartbeat", { token: alice.token, body: { p_device_id: "e2e-dev" } }),
+    await rest("/rpc/nostos_heartbeat", { token: alice.token, body: { p_device_id: "e2e-dev" } }),
     204,
   );
   must(
@@ -591,7 +591,7 @@ await section("push", async () => {
   // And the debounce: five writes into one sleeping scope are one request, not
   // five. This is also the answer to "does pg_net get hammered".
   resetNet();
-  sql("delete from cairn.device_presence; delete from cairn.push_cooldown;");
+  sql("delete from nostos.device_presence; delete from nostos.push_cooldown;");
   for (let i = 0; i < 5; i += 1) {
     must(
       `burst insert ${i}`,

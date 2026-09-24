@@ -1,5 +1,5 @@
 // atlet push pilot — service worker for the raw Web Push rail (ADR-0037 §1).
-// No Firebase on the web: the browser's own push service delivers, cairn's
+// No Firebase on the web: the browser's own push service delivers, nostos's
 // WebPushRail (crates/nostos-infra/src/push/webpush.rs) signs with VAPID.
 //
 // Payload contract (webpush.rs): visible pushes are {title, body, category?};
@@ -42,7 +42,7 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     self.registration.showNotification(title, {
       body,
-      tag: 'cairn',
+      tag: 'nostos',
       renotify: true,
       icon: '/icons/Icon-192.png',
       badge: '/icons/Icon-192.png',

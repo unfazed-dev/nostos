@@ -1,6 +1,6 @@
 -- Least-privilege role for nostos-server (ADR-0013/0018 security model).
 --
--- nostos-server connects as THIS role, NOT the `cairn`/`postgres` superuser, so
+-- nostos-server connects as THIS role, NOT the `nostos`/`postgres` superuser, so
 -- a compromised nostos-server can only touch the synced table(s) — it can't
 -- `DROP TABLE`, read `auth.tokens`, or touch anything outside its GRANT. The
 -- role carries exactly what nostos needs and nothing more:
@@ -19,21 +19,21 @@
 -- GRANTs are the DATABASE-level gate. Defense-in-depth: a write must clear both.
 --
 -- ponytail: the password is a throwaway local-Docker dev secret (mirrors the
--- `cairn:cairn` dev creds in docker-compose.yml). Production / Supabase uses a
+-- `nostos:nostos` dev creds in docker-compose.yml). Production / Supabase uses a
 -- real generated secret — see the Security Model docs + the Supabase migration
 -- script (never commit a production password).
-CREATE ROLE cairn_writer WITH LOGIN REPLICATION BYPASSRLS PASSWORD 'cairn_writer_dev_pw';
+CREATE ROLE nostos_writer WITH LOGIN REPLICATION BYPASSRLS PASSWORD 'nostos_writer_dev_pw';
 
-GRANT USAGE ON SCHEMA public TO cairn_writer;
-GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO cairn_writer;
+GRANT USAGE ON SCHEMA public TO nostos_writer;
+GRANT SELECT, INSERT, UPDATE, DELETE ON tasks TO nostos_writer;
 -- Provider-dashboard tables (D4) — same least-privilege grant as `tasks`.
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON providers, clients, availabilities, appointments, invoices
-    TO cairn_writer;
--- cairn_oplog (ADR-0025 slice 2 + slice 5) — nostos-server writes the op-log
+    TO nostos_writer;
+-- nostos_oplog (ADR-0025 slice 2 + slice 5) — nostos-server writes the op-log
 -- at the fan-out chokepoint (INSERT), reads it back on reconnect replay
 -- (SELECT), and compacts it to bound growth (DELETE — slice 5). Never UPDATE
 -- (compaction is collapse-via-delete, not in-place rewrite). Not part of the
 -- synced-table allowlist — this is nostos's internal resume table, not a
 -- client-writable table.
-GRANT SELECT, INSERT, DELETE ON cairn_oplog TO cairn_writer;
+GRANT SELECT, INSERT, DELETE ON nostos_oplog TO nostos_writer;

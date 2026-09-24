@@ -7,7 +7,7 @@
 
 ## Environment gate (checked live this session, not assumed from prior reports)
 
-- `docker ps`: only `nostos-postgres` running (cairn's own e2e Postgres, port 5433 — unrelated to Atlet). No `atlet-services` containers (`nostos-server` on 8080) are up.
+- `docker ps`: only `nostos-postgres` running (nostos's own e2e Postgres, port 5433 — unrelated to Atlet). No `atlet-services` containers (`nostos-server` on 8080) are up.
 - `apps/atlet/services/.env`: absent. Only `.env.example` ships, by design — no real Supabase credentials are checked into this tree.
 - `docker compose -f apps/atlet/services/docker-compose.atlet.yml config -q`: exits 0 syntactically, but every required variable (`SUPABASE_URL`, `SUPABASE_JWT_SECRET`, `NOSTOS_WRITE_TABLES`) resolves blank.
 - No Android/iOS simulator or physical device was booted this session.
@@ -60,7 +60,7 @@ Review of this sign-off found a fifth defect of the same class as retro item 1: 
 
 ### REPLICA IDENTITY caveat (final review, 2026-08-06)
 
-The three Supabase tables this pilot syncs against (per `apps/atlet/spec/adapter.md` / `0001_atlet_schema.sql`) are provisioned with Postgres's default `REPLICA IDENTITY DEFAULT`, not `REPLICA IDENTITY FULL`. Under `DEFAULT`, a `DELETE`'s logical-replication event carries only the primary key, not the row's other pre-delete column values. Nostos's DELETE-replay path has already hit exactly this gap once in the core engine (ADR-0025 finding F1, fixed in `3974460` by requiring `REPLICA IDENTITY FULL`) — that fix lives in cairn's own e2e schema setup, not in Atlet's, so it does not automatically cover these three tables.
+The three Supabase tables this pilot syncs against (per `apps/atlet/spec/adapter.md` / `0001_atlet_schema.sql`) are provisioned with Postgres's default `REPLICA IDENTITY DEFAULT`, not `REPLICA IDENTITY FULL`. Under `DEFAULT`, a `DELETE`'s logical-replication event carries only the primary key, not the row's other pre-delete column values. Nostos's DELETE-replay path has already hit exactly this gap once in the core engine (ADR-0025 finding F1, fixed in `3974460` by requiring `REPLICA IDENTITY FULL`) — that fix lives in nostos's own e2e schema setup, not in Atlet's, so it does not automatically cover these three tables.
 
 Practical effect for a live conformance run against this pilot: DELETE propagation may appear to silently drop rows on the NostosAdapter side (checklist items 1–4, live) until the operator applies, per table:
 

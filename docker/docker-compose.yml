@@ -6,9 +6,9 @@ services:
     image: postgres:16-alpine
     container_name: nostos-postgres
     environment:
-      POSTGRES_USER: cairn
-      POSTGRES_PASSWORD: cairn
-      POSTGRES_DB: cairn
+      POSTGRES_USER: nostos
+      POSTGRES_PASSWORD: nostos
+      POSTGRES_DB: nostos
       # Logical replication requires WAL level = logical.
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     command:
@@ -33,7 +33,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./pg-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
+      test: ["CMD-SHELL", "pg_isready -U nostos -d nostos"]
       interval: 5s
       timeout: 3s
       retries: 10

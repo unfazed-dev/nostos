@@ -230,7 +230,7 @@ pub(super) fn build_stream_predicate(
 ///
 /// The live path evaluates EVERY event against the session predicate
 /// (`FanOutService::fan_out`), which carries the rules scope and the tenant
-/// clause. The replay path reads `cairn_oplog` keyed by tenant ALONE
+/// clause. The replay path reads `nostos_oplog` keyed by tenant ALONE
 /// (`OpLogSource::replay_after(tenant, lsn)`) and the socket sink's `admit`
 /// gate checks only open/acked/dedup — never a predicate, never a table. So
 /// without this function a reconnect delivers every row the TENANT wrote,
@@ -260,7 +260,7 @@ pub(super) fn replay_admits(pred: &nostos_domain::Predicate, ev: &ReplicationEve
         // exists to prevent, and a worse trade than leaking a pk inside the
         // client's own tenant. Replay-only: live deletes still go through
         // fan-out's predicate. Upgrade path: write the scope columns into
-        // `cairn_oplog` at log time so replay can evaluate the predicate
+        // `nostos_oplog` at log time so replay can evaluate the predicate
         // exactly like the live path.
         nostos_domain::RowOp::Delete { .. } => true,
     }

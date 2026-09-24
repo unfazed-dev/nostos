@@ -50,7 +50,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 /// Connect a control-plane SQL client (tokio-postgres) for setup/teardown.
@@ -306,7 +306,7 @@ async fn client_write_round_trips_through_replication() {
         return;
     }
     let slot = format!("e2e_wb_{}", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     // Clean slate: drop a leftover slot + the rows we might have written.
     let _ = sql
@@ -433,7 +433,7 @@ async fn delete_of_missing_row_is_success() {
         return;
     }
     let slot = format!("e2e_wb_del_{}", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -494,7 +494,7 @@ async fn injection_column_name_is_rejected() {
         return;
     }
     let slot = format!("e2e_wb_inj_{}", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -574,7 +574,7 @@ async fn cross_tenant_insert_is_stamped_to_callers_tenant() {
         return;
     }
     let slot = tenant_test_slot("insert");
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -629,7 +629,7 @@ async fn cross_tenant_upsert_conflict_is_rejected() {
         return;
     }
     let slot = tenant_test_slot("conflict");
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -700,7 +700,7 @@ async fn cross_tenant_delete_is_rejected_row_survives() {
         return;
     }
     let slot = tenant_test_slot("delete");
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -757,7 +757,7 @@ async fn cross_tenant_delete_of_absent_row_is_idempotent_success() {
         return;
     }
     let slot = tenant_test_slot("delabsent");
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -798,7 +798,7 @@ async fn own_tenant_writes_flow_normally() {
         return;
     }
     let slot = tenant_test_slot("owntenant");
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -890,7 +890,7 @@ async fn patch_updates_only_specified_columns() {
         return;
     }
     let slot = format!("e2e_wb_patch_{}", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -947,7 +947,7 @@ async fn patch_on_absent_row_is_ok() {
         return;
     }
     let slot = format!("e2e_wb_patch_absent_{}", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
@@ -982,7 +982,7 @@ async fn cross_tenant_patch_is_rejected_row_unchanged() {
         return;
     }
     let slot = tenant_test_slot("patch");
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     let _ = sql
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))

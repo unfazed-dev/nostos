@@ -27,10 +27,10 @@ flag is absent; flag wins when present.
 | `NOSTOS_FAKE_EPS` | `20` | Fake-replicator emission rate, events/sec. `0` = unbounded firehose. `fake` only; the benchmark builds its own config, so this never touches the moat numbers (A10). |
 | `NOSTOS_FAKE_KEYS` | `50` | Fake-replicator distinct primary keys; `0` = monotonic (table grows forever). Client apply is an upsert on `(table, pk)`, so this bounds the *table* — which is what keeps a full-table watch snapshot O(1) in session length. `fake` only (A10). |
 | `NOSTOS_WRITE_TABLES` | _empty_ | **Critical.** Comma-separated tables clients may write over `/sync` (ADR-0013). Empty = no tables writable — writes are rejected with `"table not writable: '<t>' — add it to NOSTOS_WRITE_TABLES"` (`crates/nostos-infra/src/transport.rs:792`). Demo needs `NOSTOS_WRITE_TABLES=tasks`. |
-| `NOSTOS_PG_SLOT` | `cairn_slot` | Logical-replication slot name. Server creates it lazily on first connect if missing (see §2). |
-| `NOSTOS_PG_PUBLICATION` | `cairn_pub` | Publication name. Must exist before `nostos dev` connects — `nostos init` creates it. |
+| `NOSTOS_PG_SLOT` | `nostos_slot` | Logical-replication slot name. Server creates it lazily on first connect if missing (see §2). |
+| `NOSTOS_PG_PUBLICATION` | `nostos_pub` | Publication name. Must exist before `nostos dev` connects — `nostos init` creates it. |
 | `NOSTOS_LOG` | `info,nostos=debug` | `RUST_LOG`-style filter. |
-| `NOSTOS_OPLOG_BUFFER` | `4096` | Op-log writer's internal channel depth (ADR-0025 slice 2). Raise if `cairn_oplog_dropped_total > 0`. `pg` only. |
+| `NOSTOS_OPLOG_BUFFER` | `4096` | Op-log writer's internal channel depth (ADR-0025 slice 2). Raise if `nostos_oplog_dropped_total > 0`. `pg` only. |
 | `NOSTOS_OPLOG_RETENTION_SECS` | `3600` | Op-log row retention window (ADR-0025 slice 5). Offline gaps beyond this fall back to snapshot-reconcile. |
 | `NOSTOS_OPLOG_COMPACT_INTERVAL_SECS` | `300` | Op-log compaction tick (ADR-0025 slice 5). |
 | `NOSTOS_SLOT_MAX_LAG` | `1073741824` (1 GiB) | WAL-bloat eviction threshold (bytes). A live client lagging further than this is disconnected and resyncs; the slot is never dropped. `0` = eviction OFF (server warns at startup). Only protects the primary while nostos-server is running (ADR-0043). |
@@ -88,7 +88,7 @@ both with actionable messages:
 > `main.rs` gains a line. **Grep the quoted error string**, which is stable.
 
 Fix: `docker compose -f docker/docker-compose.yml up -d` then
-`NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn`.
+`NOSTOS_PG_URL=postgresql://nostos:nostos@localhost:5433/nostos`.
 
 **(d) `NOSTOS_SYNC_AUTH=supabase-jwt` with neither secret nor JWKS.** Bails at
 `main.rs:277`: `"NOSTOS_SYNC_AUTH=supabase-jwt requires at least one of
@@ -109,9 +109,13 @@ token itself. Fix: generate a longer token (see §7).
 ## 2. Logical-replication slot
 
 Nostos consumes Postgres logical replication via a single slot (default
-`cairn_slot`, `NOSTOS_PG_SLOT`). A publication (default `cairn_pub`,
+`nostos_slot`, `NOSTOS_PG_SLOT`). A publication (default `nostos_pub`,
 `NOSTOS_PG_PUBLICATION`) must already exist — `nostos init` creates it. The slot
 itself is created lazily by `nostos-server` on first connect.
+
+A database set up before the rename still has `cairn_slot`, `cairn_pub` and
+the `cairn_oplog`/`cairn_push_tokens` tables. Rename the tables and keep or
+retire the slot per the ADR-0048 runbook before starting the new server.
 
 ### 2.1 Auto-recovery: the `SlotProbe` trichotomy
 
@@ -151,11 +155,11 @@ From a `psql` session on the source DB:
 
 ```sql
 -- 1. drop the existing slot (idempotent — OK if missing)
-SELECT pg_drop_replication_slot('cairn_slot')
-  WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'cairn_slot');
+SELECT pg_drop_replication_slot('nostos_slot')
+  WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'nostos_slot');
 
 -- 2. recreate it against the publication
-SELECT pg_create_logical_replication_slot('cairn_slot', 'pgoutput');
+SELECT pg_create_logical_replication_slot('nostos_slot', 'pgoutput');
 ```
 
 (This is the SQL fallback documented in
@@ -170,8 +174,8 @@ Pre-flight checks before recreate:
 
 ```sql
 SELECT slot_name, wal_status, restart_lsn, confirmed_flush_lsn
-  FROM pg_replication_slots WHERE slot_name = 'cairn_slot';
-SELECT pubname FROM pg_publication WHERE pubname = 'cairn_pub';
+  FROM pg_replication_slots WHERE slot_name = 'nostos_slot';
+SELECT pubname FROM pg_publication WHERE pubname = 'nostos_pub';
 ```
 
 If `wal_level` is not `logical`, the recreate will fail — fix with
@@ -224,7 +228,7 @@ Run this in order. Each line is **symptom → check → fix**.
    fresh full snapshot every time instead of LSN resume.
    Check: `nostos doctor` (slot-status line), or directly:
    `SELECT slot_name, wal_status, restart_lsn, confirmed_flush_lsn FROM
-   pg_replication_slots WHERE slot_name='cairn_slot';`.
+   pg_replication_slots WHERE slot_name='nostos_slot';`.
    Fix: nothing — auto-recreate per §2.1 handles it. If it keeps recurring,
    check `NOSTOS_SLOT_MAX_LAG` is not `0` (default 1 GiB, ADR-0043) so lagging
    clients are evicted before Postgres evicts the WAL, and set
@@ -235,7 +239,7 @@ Run this in order. Each line is **symptom → check → fix**.
    Check: server log for `snapshot-on-subscribe: PgSnapshotter (real source)`
    at startup (`main.rs:526`) — if absent, snapshotter is `None` (back to
    line 1). Under `pg`, also confirm the publication actually contains the
-   table: `SELECT * FROM pg_publication_tables WHERE pubname='cairn_pub';`.
+   table: `SELECT * FROM pg_publication_tables WHERE pubname='nostos_pub';`.
    Fix: re-run `nostos init` (it reconciles the publication's table set).
 
 If all five pass and clients are still empty, capture: server log at
@@ -277,8 +281,8 @@ re-running reconciles the publication without erroring on what exists:
 | `--write-tables <csv>` | _empty_ | Must be a subset of `--tables`. Empty = read-only sync. |
 | `--tenant-column <col>` | `org_id` | Enforced on every predicate under `supabase-jwt` (ADR-0011). |
 | `--supabase-url <URL>` | _none_ | Derives the JWKS URL for `doctor` + auth. |
-| `--publication <name>` | `cairn_pub` | |
-| `--slot <name>` | `cairn_slot` | Records the name only — `nostos-server` creates the slot lazily. |
+| `--publication <name>` | `nostos_pub` | |
+| `--slot <name>` | `nostos_slot` | Records the name only — `nostos-server` creates the slot lazily. |
 | `--bind <addr>` | `0.0.0.0:8800` | Written to `nostos.toml`. |
 
 `nostos doctor` — read-only health checks. Runs: Postgres reachable,
@@ -322,8 +326,8 @@ OPTIONS (most-commonly-tuned; see §1 for the full table):
   --fake-distinct-keys <N>              0 = grows forever         [env: NOSTOS_FAKE_KEYS, default: 50]
   --pg-url <URL>                                                  [env: NOSTOS_PG_URL, default: -]
   --write-tables <CSV>                                            [env: NOSTOS_WRITE_TABLES, default: -]
-  --pg-slot <NAME>                                               [env: NOSTOS_PG_SLOT, default: cairn_slot]
-  --pg-publication <NAME>                                        [env: NOSTOS_PG_PUBLICATION, default: cairn_pub]
+  --pg-slot <NAME>                                               [env: NOSTOS_PG_SLOT, default: nostos_slot]
+  --pg-publication <NAME>                                        [env: NOSTOS_PG_PUBLICATION, default: nostos_pub]
   --sync-auth <none|supabase-jwt>                                [env: NOSTOS_SYNC_AUTH, default: none]
   --log <FILTER>                                                 [env: NOSTOS_LOG, default: info,nostos=debug]
   --session-buffer <N>                                           [env: NOSTOS_SESSION_BUFFER, default: 1024]
@@ -344,9 +348,9 @@ Defined in `Makefile`. The four you'll actually use triaging a deploy:
 - **`make ci`** — `fmt-check + clippy (-D warnings) + full test suite`.
   The gate for every change.
 - **`make dev-stack`** — real-Postgres quickstart: `docker compose up -d`,
-  poll for the `cairn_pub` publication (not just `pg_isready` — the entrypoint
+  poll for the `nostos_pub` publication (not just `pg_isready` — the entrypoint
   restarts mid-init), then run `nostos-server` with `PgReplicator` against
-  `NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn`. Ctrl-C stops
+  `NOSTOS_PG_URL=postgresql://nostos:nostos@localhost:5433/nostos`. Ctrl-C stops
   the server.
 - **`make pg-down`** — tear down the compose stack.
 - **`make bench`** — the throughput benchmark. Record env, report drop rates;
@@ -358,7 +362,7 @@ Real-Postgres e2e (when you suspect a regression at the PG boundary):
 ```
 docker compose -f docker/docker-compose.yml up -d
 NOSTOS_E2E_PG=1 \
-NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn \
+NOSTOS_PG_URL=postgresql://nostos:nostos@localhost:5433/nostos \
   cargo test -p nostos-infra --features pg
 ```
 
@@ -375,14 +379,14 @@ a real run; a green result without it proves nothing.
 - user / db / pass = **`nostos` / `nostos` / `nostos`**,
 - `wal_level=logical`, `max_wal_senders=10`, `max_replication_slots=10`,
   `max_connections=200`,
-- healthcheck on `pg_isready -U cairn -d cairn` (note: `make dev-stack` does
-  NOT rely on this healthcheck — it polls for the `cairn_pub` publication
+- healthcheck on `pg_isready -U nostos -d nostos` (note: `make dev-stack` does
+  NOT rely on this healthcheck — it polls for the `nostos_pub` publication
   directly, because the entrypoint runs a temporary server to apply
   pg-init scripts and then restarts, flipping accepting → rejecting →
   accepting),
 - init scripts in `docker/pg-init/` — apply `01-sources.sql` (creates the
-  source tables + `cairn_pub` publication) and `02-nostos-role.sql` (the
-  least-privilege `cairn_writer` role the server connects as — ADR-0013/0018).
+  source tables + `nostos_pub` publication) and `02-nostos-role.sql` (the
+  least-privilege `nostos_writer` role the server connects as — ADR-0013/0018).
 
 The bundled stack is for local dev only. Production points `NOSTOS_PG_URL` at
 Supabase direct (see §3 line 3) or a self-hosted Postgres with the same

@@ -37,7 +37,7 @@ UniFFI bindings. `await` them normally.
 ```js
 const { NostosClient } = require("@nostos-sync/node");
 
-const c = new NostosClient("ws://127.0.0.1:8800/sync", null, "./cairn.db");
+const c = new NostosClient("ws://127.0.0.1:8800/sync", null, "./nostos.db");
 await c.connect();                       // local store only
 await c.subscribe("tasks");              // ← socket opens here
 await c.write("tasks", "upsert", "1", JSON.stringify({ title: "buy milk" }));

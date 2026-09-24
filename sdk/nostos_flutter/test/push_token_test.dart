@@ -339,10 +339,10 @@ void main() {
     expect(requests, hasLength(2));
     final (reg, dereg) = (requests.first, requests.last);
     expect(reg.method, 'POST');
-    expect(reg.path, '/rest/v1/rpc/cairn_register_push_token');
+    expect(reg.path, '/rest/v1/rpc/nostos_register_push_token');
     expect(reg.body, '{"p_platform":"fcm","p_token":"tok-123"}');
     expect(dereg.method, 'POST');
-    expect(dereg.path, '/rest/v1/rpc/cairn_deregister_push_token');
+    expect(dereg.path, '/rest/v1/rpc/nostos_deregister_push_token');
     expect(dereg.body, '{"p_token":"tok-123"}');
     for (final r in requests) {
       expect(r.headers['apikey'], 'anon-key');

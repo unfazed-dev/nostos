@@ -520,7 +520,7 @@ mod tests {
                     body: "Order 983979e8 is on its way".into(),
                     category: Some("order_status".into()),
                     data: [
-                        ("cairn_route".to_string(), "/orders/983979e8".to_string()),
+                        ("nostos_route".to_string(), "/orders/983979e8".to_string()),
                         ("order_id".to_string(), "983979e8".to_string()),
                     ]
                     .into_iter()
@@ -540,7 +540,7 @@ mod tests {
                     "category": "order_status",
                     "sound": "default",
                 },
-                "cairn_route": "/orders/983979e8",
+                "nostos_route": "/orders/983979e8",
                 "order_id": "983979e8",
             })
         );

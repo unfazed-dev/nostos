@@ -791,7 +791,7 @@ pub enum SnapshotError {
 // ---------------------------------------------------------------------------
 
 /// Why an [`OpLogSource`] call failed. The op-log read is a single tenant-scoped
-/// SELECT on the server-internal `cairn_oplog` table, so there is no
+/// SELECT on the server-internal `nostos_oplog` table, so there is no
 /// invalid-table category (mirror of [`SnapshotError`] minus `InvalidTable`).
 #[derive(Debug, thiserror::Error)]
 pub enum OpLogError {

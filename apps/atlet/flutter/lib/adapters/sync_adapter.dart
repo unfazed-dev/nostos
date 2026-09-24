@@ -146,7 +146,7 @@ Stream<T> replayLatest<T>(Stream<T> tail, T? Function() latest) =>
     });
 
 abstract interface class SyncAdapter {
-  String get engine; // 'cairn' | 'cairn-direct'
+  String get engine; // 'nostos' | 'nostos-direct'
   Future<void> init({
     required String supabaseUrl,
     required String accessToken,

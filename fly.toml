@@ -63,5 +63,5 @@ kill_timeout = 30                  # let in-flight batches flush + ack LSN
   cpus = 1
   # Scale up per project tier (NOSTOS_TIER). The 142k ops/sec @ 1k clients
   # headroom (benches/results/RESULTS.md) means a single shared CPU serves a
-  # lot of clients; bump cpus/memory only when cairn_live_sessions or
-  # cairn_replication_lag_bytes (the new slot-health metrics) warrant it.
+  # lot of clients; bump cpus/memory only when nostos_live_sessions or
+  # nostos_replication_lag_bytes (the new slot-health metrics) warrant it.

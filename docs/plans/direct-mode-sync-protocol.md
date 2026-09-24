@@ -6,7 +6,7 @@ PostgREST, Realtime, GoTrue and the Edge Runtime, not stubs. Grounded in
 fetched docs throughout.
 
 Shipped: `nostos_core::pull` (`PullCursor`, `Horizon`, the xid8 checkpoint on
-`Storage`), `nostos_client::postgrest` (`rpc/cairn_pull` + the four write ops),
+`Storage`), `nostos_client::postgrest` (`rpc/nostos_pull` + the four write ops),
 `nostos_client::doorbell` (Realtime private channel, `vsn=1.0.0`), and
 `nostos_cli::direct` — the generator behind `nostos link --mode direct` and the
 verifier behind `nostos doctor --mode direct` — plus `nostos_core::conformance`
@@ -16,7 +16,7 @@ verifier behind `nostos doctor --mode direct` — plus `nostos_core::conformance
 applies the generated file to a real Postgres and asserts the properties that
 cannot be tested in Rust: an in-flight transaction hides every later commit,
 a page never splits a transaction, RLS scopes the log to the caller's claims,
-`cairn_increment` is atomic, and a row that changes owner is logged as a delete
+`nostos_increment` is atomic, and a row that changes owner is logged as a delete
 under the old scope. It runs under `make pg-e2e`.
 
 **And the Supabase-specific half is no longer theory either.**
@@ -24,7 +24,7 @@ under the old scope. It runs under `make pg-e2e`.
 Supabase stack (`supabase start`) — 30 checks, green — and settles the W0 list:
 PostgREST emits `xid8` as a JSON **string** (a `number` would round the cursor
 past 2^53), `raise sqlstate 'PT410'` really does arrive as HTTP 410 with
-`code: "PT410"`, `auth.jwt()` inside `cairn.current_scopes()` sees real GoTrue
+`code: "PT410"`, `auth.jwt()` inside `nostos.current_scopes()` sees real GoTrue
 claims, and the generated policy on `realtime.messages` both delivers the ring
 to its own tenant and refuses another one by name. It found four bugs no amount
 of reasoning had — see "What the live stack found" below.
@@ -40,13 +40,13 @@ device.
 
 ## The design: a change log in the client's own database
 
-One append-only table in a `cairn` schema. A trigger on each synced table
+One append-only table in a `nostos` schema. A trigger on each synced table
 appends to it **inside the writing transaction** — the transactional outbox
 pattern, whose entire purpose is to make the data change and the change
 notification atomic without two-phase commit.
 
 ```sql
-create table cairn.changes (
+create table nostos.changes (
   seq        bigserial primary key,
   xid        xid8        not null default pg_current_xact_id(),
   table_name text        not null,
@@ -55,7 +55,7 @@ create table cairn.changes (
   row        jsonb,                          -- full row image; null on delete
   scope      text                            -- tenant/owner, stamped by trigger
 );
-create index on cairn.changes (xid, seq);
+create index on nostos.changes (xid, seq);
 ```
 
 Everything below follows from two properties of that table: **one sequence
@@ -102,19 +102,19 @@ aborted (so its log rows never existed). Nothing new can ever appear below it.
 stores one `xid8`, not a timestamp per table:
 
 ```sql
-create function public.cairn_pull(since xid8, max_txns int default 200)
+create function public.nostos_pull(since xid8, max_txns int default 200)
 returns jsonb   -- ONE value, not a set: see "Why a scalar" below
 language sql stable security invoker as $$
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
   page as (
     select distinct c.xid
-    from cairn.changes c, h
+    from nostos.changes c, h
     where c.xid >= since and c.xid < h.horizon
     order by c.xid
     limit greatest(max_txns, 2)
   )
   select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c.row
-  from cairn.changes c
+  from nostos.changes c
   join page p on p.xid = c.xid
   cross join h
   order by c.xid, c.seq;
@@ -158,12 +158,12 @@ Three things fall out of this being **one function call**:
    can't. A single Postgres function does not need the fallback.
 2. **`security invoker`** means RLS applies as the calling user. Scoping stays
    in Postgres, i.e. still server-authoritative.
-3. **It lives in `public` under a `nostos_` prefix, not in the `cairn` schema.**
+3. **It lives in `public` under a `nostos_` prefix, not in the `nostos` schema.**
    Supabase exposes `public, graphql_public` by default; a third schema needs a
    `Content-Profile` header on every request *and* an operator ticking it into
    "Exposed schemas". Prefixing deletes both steps — and keeps the log table
    off the REST API entirely, so there is no `GET /rest/v1/changes` whose
-   grants could be got wrong. The device posts to `/rest/v1/rpc/cairn_pull`.
+   grants could be got wrong. The device posts to `/rest/v1/rpc/nostos_pull`.
 
 ## What this dissolves from the first draft
 
@@ -186,7 +186,7 @@ that sequence, consistent across all collections by construction.
 ## What survives
 
 **The realtime stream is a doorbell, and every reconnect pulls.** A second
-trigger on `cairn.changes` calls `realtime.broadcast_changes()` on a
+trigger on `nostos.changes` calls `realtime.broadcast_changes()` on a
 scope-keyed private channel. A message means "call `pull`", nothing more. RxDB
 states the rule: "when the client goes offline and online again, it might happen
 that `pullStream$` has missed out some events. Therefore `pullStream$` should
@@ -208,7 +208,7 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    the price of the outbox pattern and it is the main reason to prefer logical
    replication when you *can* run a server.
 2. **RLS has to be expressible on one table.** The log holds row images from
-   many tables, so one policy on `cairn.changes` must say what N table policies
+   many tables, so one policy on `nostos.changes` must say what N table policies
    say. The `scope` column stamped by the trigger covers the common
    tenant/owner case. A client whose RLS involves joins across tables is real
    work, and `nostos link` should refuse rather than guess.
@@ -231,7 +231,7 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    `nostos-client` — see "Every SDK gets this" below for why. `nostos-client`
    and `nostos-ffi-wasm` each supply the I/O; `iroh_dial.rs` is the precedent
    for dial-by-scheme at the native edge.
-2. ✅ `xid8` horizon in `cairn_meta` beside the existing LSN checkpoint, carried
+2. ✅ `xid8` horizon in `nostos_meta` beside the existing LSN checkpoint, carried
    as an opaque string.
 3. ✅ `PostgrestChangeSource`: `rpc/pull` → group by `xid` → `RowOp` batches
    handed to the existing `ApplyEngine` at transaction boundaries.
@@ -241,16 +241,16 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    second generated function** — see "The write path needs one more function"
    below.
 6. ✅ `nostos link --mode direct` generates the schema, the per-table triggers,
-   `cairn_pull`, `cairn_increment`, the broadcast trigger, the RLS policies and
+   `nostos_pull`, `nostos_increment`, the broadcast trigger, the RLS policies and
    the grants — and refuses any table whose RLS it cannot express as a `scope`.
    `crates/nostos-cli/src/direct.rs`; applied to real Postgres by
    `crates/nostos-cli/tests/e2e_pg_direct_sql.rs`. See "What the generator
    refuses" below.
 7. ✅ `nostos doctor --mode direct`: the objects, the grants (including that
-   `anon` may NOT execute `cairn_pull`), read-only policies, the per-table
+   `anon` may NOT execute `nostos_pull`), read-only policies, the per-table
    triggers, the Realtime policy, log growth and horizon lag —
    `nostos_cli::direct::inspect`, all `select`s, safe against production.
-   **Its load-bearing check is that the deployed `cairn_pull` pages by
+   **Its load-bearing check is that the deployed `nostos_pull` pages by
    transaction**: a row-limited one still returns rows and still advances a
    horizon, so it looks healthy from the device while handing out half a
    transaction. No client-side test can see that, so doctor reads the deployed
@@ -263,8 +263,8 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    `crates/nostos-client/tests/conformance_sqlite.rs` runs it on rusqlite.
    **The browser-Worker leg is not wired up** — `nostos-ffi-wasm` has to export
    `run_all` first, and the Dart harness has to call it through the bridge.
-   Retention is now a real case end to end: `cairn.prune()` records how far it
-   pruned, `cairn_pull` raises `PT410` for a horizon below that (PostgREST →
+   Retention is now a real case end to end: `nostos.prune()` records how far it
+   pruned, `nostos_pull` raises `PT410` for a horizon below that (PostgREST →
    HTTP 410), and the client surfaces `PostgrestError::Gone` rather than an
    empty page. The original text: —
    `apps/atlet/flutter/test/adapter_conformance_test.dart` is the existing
@@ -274,13 +274,13 @@ access' setting** in Realtime Settings". `nostos doctor` checks the setting.
    first-class cases. The first of those has to hold inside the browser
    Worker as well as on rusqlite.
 9. ✅ Push, opt-in behind `nostos link --mode direct --push <url>`:
-   `cairn.push_tokens` + `cairn.device_presence` + `cairn.push_cooldown`,
-   `cairn_register_push_token` / `cairn_deregister_push_token` /
-   `cairn_heartbeat` (all `security definer`, all taking the scope from the
+   `nostos.push_tokens` + `nostos.device_presence` + `nostos.push_cooldown`,
+   `nostos_register_push_token` / `nostos_deregister_push_token` /
+   `nostos_heartbeat` (all `security definer`, all taking the scope from the
    caller's own JWT so a device cannot register against another tenant), the
-   `cairn.wake_absent_devices()` trigger → `pg_net` → Edge Function, and the
+   `nostos.wake_absent_devices()` trigger → `pg_net` → Edge Function, and the
    matching `PostgrestSource` methods. The reference function is
-   `supabase/functions/cairn-push/index.ts` (data-only FCM v1, shared-secret
+   `supabase/functions/nostos-push/index.ts` (data-only FCM v1, shared-secret
    bearer, `--no-verify-jwt`). `--push` writes the function into the app repo,
    `--visible` adds templated alert pushes (ADR-0037 §2b), and `--deploy
    --fcm-service-account <json>` rolls all of it out through the `supabase`
@@ -312,7 +312,7 @@ Three of the four outbox ops are plain PostgREST:
 **Postgres** serializes concurrent increments (`SET x = x + ?`), which is what
 removes the client read-modify-write and therefore the lost update. A PATCH body
 carries literals, so expressing an increment through one puts the read back on
-the device. Direct mode therefore needs `cairn_increment(p_table, p_pk, p_field,
+the device. Direct mode therefore needs `nostos_increment(p_table, p_pk, p_field,
 p_delta)` alongside `pull` — two generated functions, not one.
 
 The echo needs no handling. A write fires the change-log trigger, the device
@@ -345,7 +345,7 @@ Two decisions the generator had to make, neither of which the plan had settled:
 
 1. **Scope values are namespaced `<claim>:<value>`.** One shared column holds
    scopes derived from different claims, so `sub` and `org_id` values must not
-   be able to collide. `cairn.current_scopes()` returns the caller's namespaced
+   be able to collide. `nostos.current_scopes()` returns the caller's namespaced
    set and the policy is one `= any(...)`.
 2. **A row that changes scope logs two records** — a delete under the old scope
    and the update under the new. Without it the losing tenant keeps the row on
@@ -446,7 +446,7 @@ shape direct mode needs:
 - **`lib/engine_registry.dart`** — an `enum Engine` with a comparison-engine slot
   alongside `nostos`, plus an `EngineRegistry` that hot-swaps them with a
   mutual-exclusion guard (only one adapter may be live at a time). Add
-  `Engine.cairnDirect` and the app compares three engines behind one UI.
+  `Engine.nostosDirect` and the app compares three engines behind one UI.
 - **`test/adapter_conformance_test.dart`** (282 lines) — "SyncAdapter
   conformance", already the one-suite-many-engines harness that this plan's step
   8 asks for. It runs against a `FakeAdapter`, so a direct-mode adapter inherits
@@ -488,7 +488,7 @@ into `fixtures/flutter/…`, which **`2489ffb` deleted** ("remove superseded
 Flutter fixtures (greenfield per plan D0)"). Stripped from the Makefile;
 `docs/plans/multi-sdk-pomodoro-fixture-matrix.md` §1 had already flagged all
 eight. The todo fixture was the Supabase-live Flutter harness —
-`supabase/schema.sql`, `env.example.json`, `cairn_live_{up,down}.sh`,
+`supabase/schema.sql`, `env.example.json`, `nostos_live_{up,down}.sh`,
 `integration_test/nostos_live_test.dart` — so its wiring is recoverable from
 `2489ffb^` if atlet turns out not to cover a case.
 
@@ -538,8 +538,8 @@ Three things nostos-server does for push today. Each needs a direct-mode answer:
 | what the server does | where it lives now | direct-mode replacement |
 |---|---|---|
 | holds the APNs `.p8` / FCM service-account JSON | `Rails::from_env()`, `crates/nostos-push/src/rail.rs:122` | a Supabase Edge Function secret — **never the device** |
-| decides *whom* to doorbell | `FanOutService::fan_out` enqueues one `PushHint` per matched **offline** account, `crates/nostos-application/src/fanout.rs:396` and `:450` | trigger on `cairn.changes` reads `scope`, selects the token rows for that scope |
-| receives the device token | `adapter.registerPushToken('fcm', token)` → `POST /push-tokens`, `apps/atlet/flutter/lib/push/push_pilot.dart:179` | an ordinary PostgREST insert into `cairn.push_tokens`, under RLS |
+| decides *whom* to doorbell | `FanOutService::fan_out` enqueues one `PushHint` per matched **offline** account, `crates/nostos-application/src/fanout.rs:396` and `:450` | trigger on `nostos.changes` reads `scope`, selects the token rows for that scope |
+| receives the device token | `adapter.registerPushToken('fcm', token)` → `POST /push-tokens`, `apps/atlet/flutter/lib/push/push_pilot.dart:179` | an ordinary PostgREST insert into `nostos.push_tokens`, under RLS |
 
 ### The one thing that cannot be argued away
 
@@ -581,7 +581,7 @@ to end and assert on both sides (server metric up, device receives the data
 message). `web/atlet-push-sw.js` and `lib/push/push_pilot_web.dart` cover the Web
 Push leg. Repointing the harness at the trigger-plus-function path reuses the
 device-side assertion verbatim — only the "server" assertion changes, from
-`cairn_push_sent_total` to the function's own log.
+`nostos_push_sent_total` to the function's own log.
 
 ### Researched in full: `direct-mode-push-and-presence.md`
 
@@ -599,7 +599,7 @@ The third is still open (**Edge Function cold-start latency**), joined by two
 new ones and by the hard platform ceilings: iOS silent push is best-effort and
 impossible after a force-quit, and Chrome forbids silent web push. Presence
 splits into two jobs — Realtime Presence for the user-visible kind, a
-`last_seen` column stamped free by `cairn.pull()` for push suppression.
+`last_seen` column stamped free by `nostos.pull()` for push suppression.
 
 See `docs/plans/direct-mode-push-and-presence.md` for the ladder, the limits,
 and the verification plan.
@@ -620,16 +620,16 @@ grant made to a named role standing. Every generated function came out with
 table grants still refused the anon key — but the push RPCs are `security
 definer`, so it was an anonymous caller registering a push token under the
 `public` scope. The revokes now name the roles. `nostos doctor --mode direct`
-already asserted "anon may NOT execute public.cairn_pull"; it had simply never
+already asserted "anon may NOT execute public.nostos_pull"; it had simply never
 been pointed at a project where default privileges apply.
 
 **2. The Edge Function could never read the token registry.** It used
-`createClient(..., { db: { schema: "cairn" } })`, and `nostos` is deliberately
-not an exposed schema — the same decision that moved `cairn_pull` into
-`public`. Every call returned `500 Invalid schema: cairn`, which reaches
+`createClient(..., { db: { schema: "nostos" } })`, and `nostos` is deliberately
+not an exposed schema — the same decision that moved `nostos_pull` into
+`public`. Every call returned `500 Invalid schema: nostos`, which reaches
 nobody: the push is dropped, `pg_net` records the response in a table the
 operator never looks at, and the device just never wakes. Fixed with
-`public.cairn_push_targets(p_scope)`, `security definer`, granted to
+`public.nostos_push_targets(p_scope)`, `security definer`, granted to
 `service_role` only, with a doctor check for its absence.
 
 **3. `SqliteWasmStorage` never persisted the direct-mode horizon.**
@@ -649,12 +649,12 @@ reports the same thing as "horizon lag".
 ## The way back from a 410
 
 Making retention a hard 410 left a hole the plan had marked `ponytail:` — the
-device is told to re-snapshot and has nothing to call. `cairn_pull` refusing is
+device is told to re-snapshot and has nothing to call. `nostos_pull` refusing is
 correct; a refusal the device cannot act on is a device bricked by a long
 holiday. So the generator now also emits:
 
 ```sql
-create or replace function public.cairn_snapshot()
+create or replace function public.nostos_snapshot()
 returns jsonb   -- one value, for the same reason as the pull
 language sql stable security invoker as $$
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)

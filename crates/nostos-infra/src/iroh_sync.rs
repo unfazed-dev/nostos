@@ -41,7 +41,7 @@ use tracing::{debug, warn};
 use crate::transport::{bearer_token, run_session, AuthQuery, SyncRouterState};
 
 /// The ALPN every nostos sync participant registers/dials (ADR-0041 §2).
-pub const NOSTOS_SYNC_ALPN: &[u8] = b"cairn/sync/1";
+pub const NOSTOS_SYNC_ALPN: &[u8] = b"nostos/sync/1";
 
 /// Parse the optional `NOSTOS_IROH_RELAY_URL` value (ADR-0041 D8): the URL of
 /// a self-hosted iroh relay that REPLACES the n0 default relay fleet for the

@@ -195,7 +195,7 @@ of SHA-256(token) — enough to distinguish two operators in the log, not
 reversible back to the token. No claim values or row data are ever logged.
 `source` is always `api` as shipped: nothing on the request distinguishes the
 web panel from a direct `curl`/API caller, so the field does not yet do the
-distinguishing work its name implies. `ponytail:` add an `X-Cairn-Source`
+distinguishing work its name implies. `ponytail:` add an `X-Nostos-Source`
 header from the panel if that distinction is ever needed for audit triage
 (`crates/nostos-server/src/main.rs`) — a smaller, uncounted shortcut alongside
 the two below.

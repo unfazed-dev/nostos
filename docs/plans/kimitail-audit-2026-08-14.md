@@ -31,7 +31,7 @@ Over-engineering and complexity only — correctness/security/perf out of scope.
 24. `yagni:` Tauri `NostosState.rt: Option<Runtime>` + Drop thread-offload exists only for `#[tokio::test]`. [sdk/nostos_tauri/src/lib.rs:93,587-605] (~15 lines)
 25. `shrink:` flutter slice in sdk-e2e.sh re-implements `run_slice` bookkeeping — optional skip-pattern arg. [scripts/sdk-e2e.sh:104-126] (~13 lines)
 26. `delete:` `Lsn::advance` — no callers outside its own test. [crates/nostos-domain/src/lsn.rs:40-52] (~13 lines)
-27. `shrink:` `outbox_has_column`/`cairn_data_has_column` identical except table name — one `has_column(conn, table, needle)`. [crates/nostos-client/src/sqlite.rs:1366] (~12 lines)
+27. `shrink:` `outbox_has_column`/`nostos_data_has_column` identical except table name — one `has_column(conn, table, needle)`. [crates/nostos-client/src/sqlite.rs:1366] (~12 lines)
 28. `delete:` dangling Dart doc comments describing classes that don't exist in the file. [sdk/nostos_flutter/lib/src/schema.dart:164-171] (~8 lines)
 29. `delete:` dead `themeObs` MutationObserver with empty callback, unread `stage` var, never-sent `'pulse'` bus variant. [web/src/lib/components/NostosField.svelte:332-347,39,363,48-52] (~8 lines)
 30. `shrink:` `_Pending` pure-delegation wrapper over `Completer` — use `Completer` directly. [sdk/nostos_flutter/lib/src/engine_web.dart:376-431] (~7 lines)

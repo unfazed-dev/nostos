@@ -46,7 +46,7 @@ Historical — no binaries. A notes-only release recreated for the tag created o
 - snapshot-on-subscribe adapter (ADR-0014) (`e92fc8d`)
 - enhance settings.json with additional hooks and permissions (`ae5ab85`)
 - nostos-server GET /schema endpoint + SQLite-affinity helper (WS1, ADR-0021) (`c08ba0e`)
-- WS2 typed storage — read views over cairn_data + instant-local writes (`65678e9`)
+- WS2 typed storage — read views over nostos_data + instant-local writes (`65678e9`)
 - WS3-5 NostosDatabase Dart API + apply_schema _pk (schema-fetch, supabase, demo) (`8757dd1`)
 - *(scripts)* add render-playbook.py mirror + make playbook target (`457c9c3`)
 - add dashboard shell with responsive navigation and connection handling (`f2e38c6`)
@@ -147,7 +147,7 @@ Historical — no binaries. A notes-only release recreated for the tag created o
 - close Flutter-web CRDT + atomic writeBatch gap (Wave 4c) via NostosSocket delegates that reuse NostosEngine + ship-if-open; Playwright browser smoke 2/2 green (`206dece`)
 - complete @nostos-sync/web typed surface + attachments live-Worker gateway with browser tests (`e3bccb0`)
 - add session presence index, PushNotifier port, typed column extraction (`32e5426`)
-- add PgTokenStore with cairn_push_tokens schema (`80dab4f`)
+- add PgTokenStore with nostos_push_tokens schema (`80dab4f`)
 - add SyncClient disconnect/resume with UniFFI exposure (`cec078b`)
 - add off-hot-loop push enqueue with bench toggle and drop counters (`aad9c56`)
 - add FCM, APNs, and Web Push provider rails (`1041cbc`)
@@ -215,7 +215,7 @@ Historical — no binaries. A notes-only release recreated for the tag created o
 - *(bench)* record fan-out finish time in probe_10k and key ladder pass-2 on drop% < 1 (`de99ec1`)
 - *(web)* Web Locks leader guard for OPFS multi-tab — secondary tab refuses connect unless opted in (`3faea07`)
 - *(tauri)* tauri::test IPC fixture app, multi-table subscribe lift, conformance suite, readiness decisions (`958edb9`)
-- *(tauri)* per-table where_sql via plugins.cairn.whereSql; resume_lsn stays stream-global; WebDriver rail deliberately skipped (`ae0630f`)
+- *(tauri)* per-table where_sql via plugins.nostos.whereSql; resume_lsn stays stream-global; WebDriver rail deliberately skipped (`ae0630f`)
 - *(web)* multi-tab follower proxy — losing tab forwards to the leader over BroadcastChannel, promoted on leader close; SharedWorker ruled out (`0028472`)
 
 ### Bug Fixes

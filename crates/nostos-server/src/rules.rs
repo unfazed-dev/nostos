@@ -252,7 +252,7 @@ pub(crate) async fn put_rules_handler(
     // on any error). `actor` is a non-secret fingerprint, never the token;
     // `source` is always "api" for now: there is no header distinguishing
     // the web panel from a direct API caller, so both are indistinguishable
-    // here (ponytail: add `X-Cairn-Source` if the panel needs separating).
+    // here (ponytail: add `X-Nostos-Source` if the panel needs separating).
     let mode_after = state.rules.read().await.mode().as_str().to_string();
     let checksum_after = state.rules.read().await.checksum();
     let tables_changed = count_changed_tables(&old_tables, &new_tables);

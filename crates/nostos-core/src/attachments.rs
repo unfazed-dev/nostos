@@ -47,7 +47,7 @@ pub const ATTACHMENTS_TABLE: &str = "attachments";
 ///
 /// These are the column names the SDK drivers read/write; the app's declared
 /// schema for the table MUST use exactly these names (the read-view projection
-/// over `cairn_data` relies on `json_extract` hitting these keys — ADR-0028).
+/// over `nostos_data` relies on `json_extract` hitting these keys — ADR-0028).
 pub mod cols {
     /// Primary key (string). The same value is the blob's storage path/key.
     pub const ID: &str = "id";

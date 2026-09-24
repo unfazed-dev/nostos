@@ -1,15 +1,15 @@
 {
-  // Example plugins.cairn block for an app consuming the nostos plugin.
-  // Copy the "cairn" object into your app's tauri.conf.json "plugins".
+  // Example plugins.nostos block for an app consuming the nostos plugin.
+  // Copy the "nostos" object into your app's tauri.conf.json "plugins".
   // Every field is optional; a populated block lets connect() run argless.
   "plugins": {
-    "cairn": {
+    "nostos": {
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "token": null,
       "tables": ["tasks", "notes"],
       // Optional ADR-0012 safe-SQL predicate per table; keys must be in "tables".
       "whereSql": { "notes": "owner_id = 'u1'" },
-      "dbPath": "cairn.db",
+      "dbPath": "nostos.db",
       "orSetTables": ["tasks"],
       "counterTables": ["tasks"]
     }

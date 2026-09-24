@@ -23,7 +23,7 @@ import 'package:nostos_flutter/nostos_flutter.dart';
 // `SELECT * FROM tasks` works immediately — no hand-written Schema.
 final db = await NostosDatabase.connect(
   url: 'ws://127.0.0.1:8800/sync',
-  sqlitePath: '$dir/cairn.db', // e.g. from path_provider; any writable path works
+  sqlitePath: '$dir/nostos.db', // e.g. from path_provider; any writable path works
 );
 await db.subscribe('tasks'); // optional: where: "status = 'open'"
 
@@ -89,7 +89,7 @@ background connection and watch pumps). `watch(table)` throws a `StateError` if
 // StateError naming the fix if there is no live session.
 final db = await NostosDatabase.supabase(
   nostosUrl: 'ws://127.0.0.1:8800/sync', // your `nostos dev` URL
-  sqlitePath: '$dir/cairn.db', // e.g. from path_provider; any writable path works
+  sqlitePath: '$dir/nostos.db', // e.g. from path_provider; any writable path works
 );
 ```
 
@@ -155,7 +155,7 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // engine resumes from its on-disk LSN checkpoint and applies only the delta.
   final db = await NostosDatabase.connect(
     url: 'ws://127.0.0.1:8800/sync',
-    sqlitePath: '$dir/cairn.db', // SAME file as the foreground session
+    sqlitePath: '$dir/nostos.db', // SAME file as the foreground session
   );
   await db.subscribe('tasks'); // re-declare tables; delta applies, not a resync
   // Keep the isolate alive until the delta lands, then close():

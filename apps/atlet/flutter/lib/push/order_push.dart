@@ -39,7 +39,7 @@ Map<String, Object?> orderPushPayload(OrderEventRow e) {
     // AppDelegate.swift as `order_status` (ADR-0037 §2 `action` mode).
     'category': 'order_status',
     'data': {
-      'cairn_route': historyRoute(e.id),
+      'nostos_route': historyRoute(e.id),
       'deep_link': deepLinkFor(e.id),
       'event_id': e.id,
       'order_id': e.orderId,
@@ -88,7 +88,7 @@ void recordPushAttempt(PushAttempt attempt) {
 }
 
 /// Whether the app posts its own banner for an order event, or leaves it to
-/// the server's templated push (`cairn.push_templates`, ADR-0037 §2b).
+/// the server's templated push (`nostos.push_templates`, ADR-0037 §2b).
 ///
 /// The push reaches a phone in every app state, open included: direct mode
 /// sends no presence heartbeat (see `NostosDatabase.direct`), so the trigger
@@ -116,7 +116,7 @@ String? tappedEventId(Map<Object?, Object?> data) {
   final id = map['event_id'];
   if (id is String && id.isNotEmpty) return id;
   // A route without an id still names one: /history/<id>.
-  final route = map['cairn_route'];
+  final route = map['nostos_route'];
   if (route is String && route.startsWith('/history/')) {
     final tail = route.substring('/history/'.length);
     if (tail.isNotEmpty) return tail;

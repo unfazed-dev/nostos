@@ -86,7 +86,7 @@ import { NostosClient } from "@nostos-sync/react-native";
 const client = new NostosClient({
   url: "ws://your.nostos.server/sync",
   token: "bearer-jwt",
-  dbPath: "cairn.db", // ":memory:" for ephemeral
+  dbPath: "nostos.db", // ":memory:" for ephemeral
 });
 
 await client.connect();

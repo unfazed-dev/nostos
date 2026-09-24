@@ -12,9 +12,9 @@ void main() {
       );
     });
 
-    test('accepts the direct-mode ring {cairn: ring} (ADR-0045)', () {
-      expect(isNostosDoorbell({'cairn': 'ring'}), isTrue);
-      expect(isNostosDoorbell({'cairn': 'other'}), isFalse);
+    test('accepts the direct-mode ring {nostos: ring} (ADR-0045)', () {
+      expect(isNostosDoorbell({'nostos': 'ring'}), isTrue);
+      expect(isNostosDoorbell({'nostos': 'other'}), isFalse);
     });
 
     test('rejects payloads missing either key', () {

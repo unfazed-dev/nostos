@@ -22,7 +22,7 @@ in live-Supabase e2e (`tests/e2e_pg_sync.rs`).
   `SqliteStorage` (e.g. `query(sql)` — P1 read surface).
 
 `SqliteStorage` — real `rusqlite` persistence: opaque row bytes per
-`(table, pk)` + a `cairn_meta` checkpoint, applied atomically.
+`(table, pk)` + a `nostos_meta` checkpoint, applied atomically.
 
 `SyncClientConfig` — incl. `dead_letter_max_attempts` (P2 outbox DLQ).
 

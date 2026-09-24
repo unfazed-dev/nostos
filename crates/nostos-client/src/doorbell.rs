@@ -119,7 +119,7 @@ impl DoorbellConfig {
     ///
     /// `scope` is the same tenant/owner value the change-log trigger stamps, so
     /// the channel a device listens on is the set of rows it can pull. The
-    /// `cairn:` prefix keeps Nostos's topics from colliding with the app's own.
+    /// `nostos:` prefix keeps Nostos's topics from colliding with the app's own.
     pub fn new(
         base_url: &str,
         apikey: &str,
@@ -138,7 +138,7 @@ impl DoorbellConfig {
             // default, but relying on a default to stay put is how a wire
             // format changes under you.
             url: format!("{ws_base}/realtime/v1/websocket?apikey={apikey}&vsn=1.0.0"),
-            topic: format!("realtime:cairn:{scope}"),
+            topic: format!("realtime:nostos:{scope}"),
             token: token.into(),
         })
     }
@@ -390,7 +390,7 @@ mod tests {
             c.url,
             "wss://ref.supabase.co/realtime/v1/websocket?apikey=anon-key&vsn=1.0.0"
         );
-        assert_eq!(c.topic(), "realtime:cairn:tenant-7");
+        assert_eq!(c.topic(), "realtime:nostos:tenant-7");
         assert!(matches!(
             DoorbellConfig::new("ftp://nope", "k", "s", "t"),
             Err(DoorbellError::BadUrl(_))
@@ -401,7 +401,7 @@ mod tests {
     fn the_join_frame_is_private_with_presence_off() {
         let v: serde_json::Value = serde_json::from_str(&cfg().join_frame()).unwrap();
         assert_eq!(v["event"], "phx_join");
-        assert_eq!(v["topic"], "realtime:cairn:tenant-7");
+        assert_eq!(v["topic"], "realtime:nostos:tenant-7");
         // Without `private: true` the RLS policies are never consulted.
         assert_eq!(v["payload"]["config"]["private"], true);
         assert_eq!(v["payload"]["config"]["presence"]["enabled"], false);
@@ -435,8 +435,8 @@ mod tests {
     fn any_broadcast_is_a_ring_whatever_it_carries() {
         // The channel is contentless by design, so the payload must not matter.
         for body in [
-            r#"{"topic":"realtime:cairn:t","event":"broadcast","payload":{"event":"nostos","type":"broadcast","payload":{}}}"#,
-            r#"{"topic":"realtime:cairn:t","event":"broadcast","payload":{"event":"whatever","type":"broadcast","payload":{"table":"orders"}}}"#,
+            r#"{"topic":"realtime:nostos:t","event":"broadcast","payload":{"event":"nostos","type":"broadcast","payload":{}}}"#,
+            r#"{"topic":"realtime:nostos:t","event":"broadcast","payload":{"event":"whatever","type":"broadcast","payload":{"table":"orders"}}}"#,
         ] {
             assert_eq!(classify(body), Inbound::Ring);
         }
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn a_successful_join_reply_is_ok() {
-        let body = r#"{"topic":"realtime:cairn:t","event":"phx_reply","payload":{"status":"ok","response":{}},"ref":"1"}"#;
+        let body = r#"{"topic":"realtime:nostos:t","event":"phx_reply","payload":{"status":"ok","response":{}},"ref":"1"}"#;
         assert_eq!(classify(body), Inbound::Ok);
     }
 
@@ -487,7 +487,7 @@ mod tests {
         let expired = serde_json::json!({
             "event": "system",
             "payload": { "status": "error", "extension": "system",
-                         "message": "Token has expired", "channel": "realtime:cairn:t" }
+                         "message": "Token has expired", "channel": "realtime:nostos:t" }
         })
         .to_string();
         assert_eq!(

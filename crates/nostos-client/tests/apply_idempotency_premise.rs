@@ -52,12 +52,12 @@ fn echo_upsert() -> RowOp {
 /// so the checkpoint argument is identical across deliveries.
 const ECHO_LSN: u64 = 1234;
 
-/// Read the payload stored for `(table, pk)` straight out of `cairn_data`.
+/// Read the payload stored for `(table, pk)` straight out of `nostos_data`.
 /// Mirrors the round-trip check in `offline_writes.rs`.
 fn stored_payload(storage: &SqliteStorage, table: &str, pk: &str) -> Vec<u8> {
     let conn = storage.conn_for_test();
     conn.query_row(
-        "SELECT payload FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+        "SELECT payload FROM nostos_data WHERE table_name = ?1 AND pk = ?2",
         rusqlite::params![table, pk],
         |r| r.get::<_, Vec<u8>>(0),
     )

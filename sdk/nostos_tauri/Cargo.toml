@@ -1,14 +1,14 @@
 [package]
 # `tauri-plugin-<name>`: tauri-plugin's build script strips the prefix to get
 # the ACL namespace, and Tauri resolves capabilities by the runtime plugin
-# name (`Builder::new("cairn")`). Crate `nostos-tauri` produced namespace
-# `nostos-tauri:*` → every `invoke("plugin:cairn|…")` failed "Plugin not found"
+# name (`Builder::new("nostos")`). Crate `nostos-tauri` produced namespace
+# `nostos-tauri:*` → every `invoke("plugin:nostos|…")` failed "Plugin not found"
 # (caught by fixture/tests/ipc.rs, 2026-09-21). The directory stays
 # sdk/nostos_tauri.
-name = "tauri-plugin-cairn"
+name = "tauri-plugin-nostos"
 # tauri-plugin 2.6+ requires `links` == package.name so its build script can
 # associate the generated permission artifacts with this crate.
-links = "tauri-plugin-cairn"
+links = "tauri-plugin-nostos"
 version = "0.1.0"
 edition = "2021"
 publish = false

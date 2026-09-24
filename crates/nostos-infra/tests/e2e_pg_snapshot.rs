@@ -44,7 +44,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 /// Connect a control-plane SQL client (tokio-postgres) for setup/inserts.
@@ -121,12 +121,12 @@ async fn fresh_slot_yields_snapshot_rows_then_live_stream() {
 
     // 2. Start PgReplicator with a FRESH slot.
     let mut repl =
-        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").unwrap());
+        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").unwrap());
     repl.ensure_connected().await.unwrap();
 
     // 3a. Collect the snapshot events. They should be exactly the 3 seeded
     //     rows, all at the SAME LSN (the snapshot's consistent point).
-    // The publication (`cairn_pub`) now carries 5 dashboard tables alongside
+    // The publication (`nostos_pub`) now carries 5 dashboard tables alongside
     // `tasks` (ADR-0022 / P1), so a fresh-slot snapshot emits ALL member tables'
     // rows. Collect enough to capture the full snapshot, then filter to the
     // `tasks` rows this test seeds and asserts on.
@@ -209,7 +209,7 @@ async fn fresh_slot_yields_snapshot_rows_then_live_stream() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let mut repl2 =
-        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").unwrap());
+        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").unwrap());
     repl2.ensure_connected().await.unwrap();
     let restart_events = collect_events(&mut repl2, 4, Duration::from_secs(2)).await;
     drop(repl2);
@@ -270,7 +270,7 @@ async fn concurrent_writes_during_snapshot_appear_exactly_once() {
     //    writers fire INSERTs continuously for ~2s, straddling the
     //    snapshot-vs-stream boundary.
     let mut repl =
-        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").unwrap());
+        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").unwrap());
     repl.ensure_connected().await.unwrap();
 
     let concurrent_titles: std::sync::Arc<std::sync::Mutex<Vec<String>>> =

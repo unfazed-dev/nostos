@@ -62,7 +62,7 @@ The 2026-07-13 plan is correct and this plan builds on it, not over it:
   collapsed-write moat. Right call.
 - **Auto-schema** — `GET /schema` (ADR-0021) zeroes the boilerplate that is
   a comparable sync SDK's biggest tax. The headline DX edge.
-- **Storage pivot** — WS2 JSON-column payload + SQLite `VIEWS` over `cairn_data`
+- **Storage pivot** — WS2 JSON-column payload + SQLite `VIEWS` over `nostos_data`
   (`json_extract`), slice-1 shipped. Typed reads without materialized tables.
 - **Conflict model** — per-field LWW (ADR-0014 tier a), implicit, no client surface.
   Matches the no-enum strategy (ADR-0004/0014; `docs/plans/sync-strategy-analysis-2026-07-19.md`).

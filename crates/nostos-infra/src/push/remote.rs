@@ -1034,7 +1034,7 @@ mod tests {
                 title: "t".to_string(),
                 body: "b".to_string(),
                 category: None,
-                data: [("cairn_route".to_string(), "/orders/42".to_string())]
+                data: [("nostos_route".to_string(), "/orders/42".to_string())]
                     .into_iter()
                     .collect(),
                 options: std::collections::BTreeMap::new(),
@@ -1042,7 +1042,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             routed["visible"]["data"],
-            serde_json::json!({"cairn_route": "/orders/42"}),
+            serde_json::json!({"nostos_route": "/orders/42"}),
             "routing keys survive the delegation hop (ADR-0038 §3)"
         );
     }

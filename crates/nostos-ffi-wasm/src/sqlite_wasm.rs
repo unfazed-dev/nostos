@@ -2,7 +2,7 @@
 //!
 //! Implements [`nostos_core::Storage`] AND [`nostos_core::Outbox`] over official
 //! SQLite-WASM with the `opfs-sahpool` VFS, mirroring `SqliteStorage`'s schema
-//! (`cairn_data`, `cairn_meta`, `cairn_outbox`) and transaction shape exactly.
+//! (`nostos_data`, `nostos_meta`, `nostos_outbox`) and transaction shape exactly.
 //!
 //! ## Architecture
 //!
@@ -38,29 +38,29 @@ use wasm_bindgen::JsValue;
 
 /// The schema — verbatim mirror of `SqliteStorage::SCHEMA`
 /// (`crates/nostos-client/src/sqlite.rs`). Three tables:
-/// - `cairn_data` — opaque row payloads keyed by `(table_name, pk)`, with
+/// - `nostos_data` — opaque row payloads keyed by `(table_name, pk)`, with
 ///   per-row `applied_lsn` for LSN gating (ADR-0025 slice 4a).
-/// - `cairn_meta` — key/value (the `checkpoint`, `epoch`).
-/// - `cairn_outbox` — durable write queue (ADR-0013) with `attempts`/`dlq`
+/// - `nostos_meta` — key/value (the `checkpoint`, `epoch`).
+/// - `nostos_outbox` — durable write queue (ADR-0013) with `attempts`/`dlq`
 ///   dead-letter columns (ADR-0013 v2 / ADR-0027).
 ///
 /// Used by the JS glue (`sqlite_wasm_glue.js`) — the Rust side delegates via
 /// `call_void`. Kept here as the authoritative schema reference.
 #[allow(dead_code)]
 const SCHEMA_SQL: &str = "\
-CREATE TABLE IF NOT EXISTS cairn_data (\
+CREATE TABLE IF NOT EXISTS nostos_data (\
     table_name TEXT NOT NULL,\
     pk TEXT NOT NULL,\
     payload BLOB NOT NULL,\
     applied_lsn INTEGER NOT NULL DEFAULT 0,\
     PRIMARY KEY (table_name, pk)\
 );\
-CREATE TABLE IF NOT EXISTS cairn_meta (\
+CREATE TABLE IF NOT EXISTS nostos_meta (\
     key TEXT PRIMARY KEY,\
     value TEXT NOT NULL\
 );\
-INSERT OR IGNORE INTO cairn_meta (key, value) VALUES ('checkpoint', '0');\
-CREATE TABLE IF NOT EXISTS cairn_outbox (\
+INSERT OR IGNORE INTO nostos_meta (key, value) VALUES ('checkpoint', '0');\
+CREATE TABLE IF NOT EXISTS nostos_outbox (\
     id INTEGER PRIMARY KEY AUTOINCREMENT,\
     table_name TEXT NOT NULL,\
     op TEXT NOT NULL,\
@@ -78,27 +78,27 @@ CREATE TABLE IF NOT EXISTS cairn_outbox (\
 /// the auditable reference mirroring `SqliteStorage`.
 #[allow(dead_code)]
 const SQL_UPSERT_GATED: &str = "\
-INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) \
 VALUES (?1, ?2, ?3, ?4) \
 ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload, applied_lsn = excluded.applied_lsn \
-WHERE cairn_data.applied_lsn <= ?4";
+WHERE nostos_data.applied_lsn <= ?4";
 
 /// Upsert unconditional (snapshot-table path — authoritative current-state).
 #[allow(dead_code)]
 const SQL_UPSERT_UNCOND: &str = "\
-INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) \
 VALUES (?1, ?2, ?3, ?4) \
 ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload, applied_lsn = excluded.applied_lsn";
 
 /// Delete with per-row LSN gate.
 #[allow(dead_code)]
 const SQL_DELETE_GATED: &str = "\
-DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2 AND applied_lsn <= ?3";
+DELETE FROM nostos_data WHERE table_name = ?1 AND pk = ?2 AND applied_lsn <= ?3";
 
 /// Delete unconditional (snapshot-table path).
 #[allow(dead_code)]
 const SQL_DELETE_UNCOND: &str = "\
-DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2";
+DELETE FROM nostos_data WHERE table_name = ?1 AND pk = ?2";
 
 /// The browser-durable storage backend (ADR-0033). Holds a handle to a JS
 /// wrapper object around the sqlite-wasm `db` instance (initialized by the
@@ -240,20 +240,20 @@ impl SqliteWasmStorage {
         Ok(js_sys::Array::from(&result))
     }
 
-    /// Read the durable checkpoint from `cairn_meta`. Returns 0 on a fresh DB.
+    /// Read the durable checkpoint from `nostos_meta`. Returns 0 on a fresh DB.
     fn read_checkpoint(&self) -> Lsn {
         self.select_value_str(
-            "SELECT value FROM cairn_meta WHERE key = 'checkpoint'",
+            "SELECT value FROM nostos_meta WHERE key = 'checkpoint'",
             None,
         )
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map_or(Lsn::ZERO, Lsn::new)
     }
 
-    /// Count rows in `cairn_data` (diagnostics — mirrors `SqliteStorage::row_count_for_test`).
+    /// Count rows in `nostos_data` (diagnostics — mirrors `SqliteStorage::row_count_for_test`).
     #[allow(dead_code)] // surfaced via WebStorage::row_count
     pub fn row_count(&self) -> usize {
-        self.select_value_str("SELECT COUNT(*) FROM cairn_data", None)
+        self.select_value_str("SELECT COUNT(*) FROM nostos_data", None)
             .and_then(|s| s.trim().parse::<usize>().ok())
             .unwrap_or(0)
     }
@@ -262,7 +262,7 @@ impl SqliteWasmStorage {
     /// `SqliteStorage::rows_for` — the readback the FFI surfaces to JS).
     #[allow(dead_code)] // surfaced via WebStorage::rows_for
     pub fn rows_for(&self, table: &str) -> Vec<(String, Vec<u8>)> {
-        let sql = "SELECT pk, payload FROM cairn_data WHERE table_name = ?1 ORDER BY pk ASC";
+        let sql = "SELECT pk, payload FROM nostos_data WHERE table_name = ?1 ORDER BY pk ASC";
         let bind = js_sys::Array::new();
         bind.push(&JsValue::from_str(table));
         let Ok(rows) = self.select_rows(sql, Some(&bind)) else {
@@ -292,12 +292,12 @@ impl SqliteWasmStorage {
 
     // ---- ADR-0027 v3: dead-letter columns migration + read/engine primitives ----
 
-    /// Check whether `cairn_outbox` has a column named `col`. Mirrors native
+    /// Check whether `nostos_outbox` has a column named `col`. Mirrors native
     /// `outbox_has_column` (sqlite.rs L201): `PRAGMA table_info` → scan names.
     fn outbox_has_column(&self, col: &str) -> bool {
         // PRAGMA table_info returns rows of (cid, name, type, notnull, dflt, pk).
         // We only need the `name` column (index 1). `selectRows` in array mode.
-        self.select_rows("PRAGMA table_info(cairn_outbox)", None)
+        self.select_rows("PRAGMA table_info(nostos_outbox)", None)
             .is_ok_and(|rows| {
                 (0..rows.length()).any(|i| {
                     let row = js_sys::Array::from(&rows.get(i));
@@ -307,16 +307,16 @@ impl SqliteWasmStorage {
     }
 
     /// v3 migration: add `last_error TEXT` and `dead_lettered_at INTEGER` to
-    /// `cairn_outbox` (ADR-0027 / ADR-0032 T5). Idempotent — checks
+    /// `nostos_outbox` (ADR-0027 / ADR-0032 T5). Idempotent — checks
     /// `PRAGMA table_info` first, ALTERs only if missing. Mirrors native
     /// `SqliteStorage::migrate_outbox_dlq` (sqlite.rs L217-233).
     fn migrate_outbox_dlq(&self) -> Result<(), StorageError> {
         if !self.outbox_has_column("last_error") {
-            self.exec("ALTER TABLE cairn_outbox ADD COLUMN last_error TEXT", None)?;
+            self.exec("ALTER TABLE nostos_outbox ADD COLUMN last_error TEXT", None)?;
         }
         if !self.outbox_has_column("dead_lettered_at") {
             self.exec(
-                "ALTER TABLE cairn_outbox ADD COLUMN dead_lettered_at INTEGER",
+                "ALTER TABLE nostos_outbox ADD COLUMN dead_lettered_at INTEGER",
                 None,
             )?;
         }
@@ -332,7 +332,7 @@ impl SqliteWasmStorage {
         bind.push(&JsValue::from_str(table));
         bind.push(&JsValue::from_str(pk));
         match self.select_rows(
-            "SELECT payload FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+            "SELECT payload FROM nostos_data WHERE table_name = ?1 AND pk = ?2",
             Some(&bind),
         ) {
             Ok(rows) if rows.length() > 0 => {
@@ -379,7 +379,7 @@ impl SqliteWasmStorage {
     }
 
     /// Materialize one SQLite `VIEW` per synced table, projected over the
-    /// opaque `cairn_data` BLOB via JSON1 (WS2 read foundation). Mirrors
+    /// opaque `nostos_data` BLOB via JSON1 (WS2 read foundation). Mirrors
     /// native `SqliteStorage::apply_schema` (sqlite.rs L479-514).
     pub fn apply_schema(&self, tables: &[(String, Vec<String>)]) -> Result<(), StorageError> {
         for (name, columns) in tables {
@@ -394,7 +394,7 @@ impl SqliteWasmStorage {
             self.exec(
                 &format!(
                     "CREATE VIEW {name} AS SELECT {} \
-                     FROM cairn_data WHERE table_name = '{}'",
+                     FROM nostos_data WHERE table_name = '{}'",
                     cols.join(", "),
                     name.replace('\'', "''")
                 ),
@@ -406,14 +406,14 @@ impl SqliteWasmStorage {
 
     /// Count pending (non-dead-lettered) writes. Used by `watchWriteStatus`.
     pub fn pending_count(&self) -> u64 {
-        self.select_value_str("SELECT COUNT(*) FROM cairn_outbox WHERE dlq = 0", None)
+        self.select_value_str("SELECT COUNT(*) FROM nostos_outbox WHERE dlq = 0", None)
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0)
     }
 
     /// Count dead-lettered writes. Used by `watchWriteStatus`.
     pub fn dead_letter_count(&self) -> u64 {
-        self.select_value_str("SELECT COUNT(*) FROM cairn_outbox WHERE dlq = 1", None)
+        self.select_value_str("SELECT COUNT(*) FROM nostos_outbox WHERE dlq = 1", None)
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0)
     }
@@ -423,7 +423,7 @@ impl SqliteWasmStorage {
     /// `last_error` column is absent.
     pub fn last_dead_letter_error(&self) -> Option<String> {
         self.select_value_str(
-            "SELECT last_error FROM cairn_outbox WHERE dlq = 1 \
+            "SELECT last_error FROM nostos_outbox WHERE dlq = 1 \
              ORDER BY dead_lettered_at DESC LIMIT 1",
             None,
         )
@@ -440,13 +440,13 @@ impl Storage for SqliteWasmStorage {
 
     fn epoch(&self) -> nostos_core::Result<u64> {
         Ok(self
-            .select_value_str("SELECT value FROM cairn_meta WHERE key = 'epoch'", None)
+            .select_value_str("SELECT value FROM nostos_meta WHERE key = 'epoch'", None)
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0))
     }
 
     /// The direct-mode `xid8` horizon, mirroring native `SqliteStorage`
-    /// (sqlite.rs L626) down to the `cairn_meta` key.
+    /// (sqlite.rs L626) down to the `nostos_meta` key.
     ///
     /// Overriding this is NOT optional even though the trait has a default:
     /// `Ok(None)` means "fresh database", so a browser client would re-pull
@@ -455,7 +455,7 @@ impl Storage for SqliteWasmStorage {
     /// durable store; this one does. (Caught by the browser leg of
     /// `nostos_core::conformance` — the Rust legs could not see it.)
     fn horizon(&self) -> nostos_core::Result<Option<String>> {
-        Ok(self.select_value_str("SELECT value FROM cairn_meta WHERE key = 'horizon'", None))
+        Ok(self.select_value_str("SELECT value FROM nostos_meta WHERE key = 'horizon'", None))
     }
 
     /// Persist the horizon. Called after the batch it covers has committed, so
@@ -466,7 +466,7 @@ impl Storage for SqliteWasmStorage {
         bind.push(&JsValue::from_str(horizon));
         bind.push(&JsValue::from_str(horizon));
         self.exec(
-            "INSERT INTO cairn_meta (key, value) VALUES ('horizon', ?1) \
+            "INSERT INTO nostos_meta (key, value) VALUES ('horizon', ?1) \
              ON CONFLICT(key) DO UPDATE SET value = ?2",
             Some(&bind),
         )?;
@@ -479,7 +479,7 @@ impl Storage for SqliteWasmStorage {
         bind.push(&JsValue::from_str(&epoch.to_string()));
         bind.push(&JsValue::from_str("epoch"));
         self.exec(
-            "INSERT INTO cairn_meta (key, value) VALUES ('epoch', '0') ON CONFLICT(key) DO UPDATE SET value = ?1",
+            "INSERT INTO nostos_meta (key, value) VALUES ('epoch', '0') ON CONFLICT(key) DO UPDATE SET value = ?1",
             Some(&bind),
         )?;
         Ok(())
@@ -539,7 +539,7 @@ impl Storage for SqliteWasmStorage {
         let bind = js_sys::Array::new();
         bind.push(&JsValue::from_str(table));
         let rows = self.select_rows(
-            "SELECT pk FROM cairn_data WHERE table_name = ?1 ORDER BY pk ASC",
+            "SELECT pk FROM nostos_data WHERE table_name = ?1 ORDER BY pk ASC",
             Some(&bind),
         )?;
         let mut pks = Vec::new();
@@ -560,7 +560,7 @@ impl Storage for SqliteWasmStorage {
             bind.push(&JsValue::from_str(table));
             bind.push(&JsValue::from_str(pk));
             self.exec(
-                "DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+                "DELETE FROM nostos_data WHERE table_name = ?1 AND pk = ?2",
                 Some(&bind),
             )?;
         }
@@ -569,18 +569,18 @@ impl Storage for SqliteWasmStorage {
 
     fn clear(&mut self) -> nostos_core::Result<()> {
         // ADR-0029: reset to fresh-database state. `clearAll()` runs:
-        //   DELETE FROM cairn_data; DELETE FROM cairn_outbox;
-        //   UPDATE cairn_meta SET value='0' WHERE key='checkpoint';
+        //   DELETE FROM nostos_data; DELETE FROM nostos_outbox;
+        //   UPDATE nostos_meta SET value='0' WHERE key='checkpoint';
         // The checkpoint → 0 is load-bearing (resume-without-snapshot guard).
         self.call_void("clearAll", &[])?;
         // ...and so is dropping the horizon: `clearAll` predates direct mode
         // and only knows about the LSN checkpoint. A surviving horizon would
         // make the next principal resume a log they have no rows from.
-        self.exec("DELETE FROM cairn_meta WHERE key = 'horizon'", None)?;
+        self.exec("DELETE FROM nostos_meta WHERE key = 'horizon'", None)?;
         Ok(())
     }
 
-    /// Override to read the raw payload bytes from `cairn_data` (ADR-0030
+    /// Override to read the raw payload bytes from `nostos_data` (ADR-0030
     /// addendum). Mirrors native `SqliteStorage::read_payload` (sqlite.rs
     /// L889-903). Used by the PN-Counter CRDT's client-side RMW so
     /// `counter_apply_delta` can read the current value before applying.
@@ -606,7 +606,7 @@ impl Outbox for SqliteWasmStorage {
             }
         }
         self.exec(
-            "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO nostos_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
             Some(&bind),
         )?;
         // Read the AUTOINCREMENT id. `selectValue` returns the last rowid.
@@ -646,7 +646,7 @@ impl Outbox for SqliteWasmStorage {
                     }
                 }
                 self.exec(
-                    "INSERT INTO cairn_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO nostos_outbox (table_name, op, pk, payload) VALUES (?1, ?2, ?3, ?4)",
                     Some(&bind),
                 )?;
                 let id = self
@@ -673,7 +673,7 @@ impl Outbox for SqliteWasmStorage {
 
     fn pending(&self) -> nostos_core::Result<Vec<(u64, PendingWrite)>> {
         let rows = self.select_rows(
-            "SELECT id, table_name, op, pk, payload FROM cairn_outbox WHERE dlq = 0 ORDER BY id ASC",
+            "SELECT id, table_name, op, pk, payload FROM nostos_outbox WHERE dlq = 0 ORDER BY id ASC",
             None,
         )?;
         let mut out = Vec::new();
@@ -710,7 +710,7 @@ impl Outbox for SqliteWasmStorage {
     fn mark_done(&mut self, id: u64) -> nostos_core::Result<()> {
         let bind = js_sys::Array::new();
         bind.push(&JsValue::from_f64(id as f64));
-        self.exec("DELETE FROM cairn_outbox WHERE id = ?1", Some(&bind))?;
+        self.exec("DELETE FROM nostos_outbox WHERE id = ?1", Some(&bind))?;
         Ok(())
     }
 
@@ -718,14 +718,14 @@ impl Outbox for SqliteWasmStorage {
         let bind = js_sys::Array::new();
         bind.push(&JsValue::from_f64(id as f64));
         self.exec(
-            "UPDATE cairn_outbox SET attempts = attempts + 1 WHERE id = ?1 AND dlq = 0",
+            "UPDATE nostos_outbox SET attempts = attempts + 1 WHERE id = ?1 AND dlq = 0",
             Some(&bind),
         )?;
         let bind2 = js_sys::Array::new();
         bind2.push(&JsValue::from_f64(id as f64));
         Ok(self
             .select_value_str(
-                "SELECT attempts FROM cairn_outbox WHERE id = ?1",
+                "SELECT attempts FROM nostos_outbox WHERE id = ?1",
                 Some(&bind2),
             )
             .and_then(|s| s.trim().parse::<u32>().ok())
@@ -735,7 +735,10 @@ impl Outbox for SqliteWasmStorage {
     fn mark_dead_letter(&self, id: u64) -> nostos_core::Result<()> {
         let bind = js_sys::Array::new();
         bind.push(&JsValue::from_f64(id as f64));
-        self.exec("UPDATE cairn_outbox SET dlq = 1 WHERE id = ?1", Some(&bind))?;
+        self.exec(
+            "UPDATE nostos_outbox SET dlq = 1 WHERE id = ?1",
+            Some(&bind),
+        )?;
         Ok(())
     }
 
@@ -758,7 +761,7 @@ impl Outbox for SqliteWasmStorage {
         // If the v3 columns don't exist (pre-migration DB), this UPDATE fails;
         // fall back to the dlq-only path.
         let result = self.exec(
-            "UPDATE cairn_outbox SET dlq = 1, last_error = ?2, dead_lettered_at = ?3 WHERE id = ?1",
+            "UPDATE nostos_outbox SET dlq = 1, last_error = ?2, dead_lettered_at = ?3 WHERE id = ?1",
             Some(&bind),
         );
         if result.is_ok() {
@@ -768,7 +771,7 @@ impl Outbox for SqliteWasmStorage {
             let bind2 = js_sys::Array::new();
             bind2.push(&JsValue::from_f64(id as f64));
             self.exec(
-                "UPDATE cairn_outbox SET dlq = 1 WHERE id = ?1",
+                "UPDATE nostos_outbox SET dlq = 1 WHERE id = ?1",
                 Some(&bind2),
             )
         }
@@ -804,7 +807,7 @@ impl Outbox for SqliteWasmStorage {
                 bind.push(&JsValue::from_str(&write.pk));
                 bind.push(&Uint8Array::from(&bytes[..]).into());
                 self.exec(
-                    "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                    "INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) \
                      VALUES (?1, ?2, ?3, 0) \
                      ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload",
                     Some(&bind),
@@ -815,7 +818,7 @@ impl Outbox for SqliteWasmStorage {
                 bind.push(&JsValue::from_str(&write.table));
                 bind.push(&JsValue::from_str(&write.pk));
                 self.exec(
-                    "DELETE FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+                    "DELETE FROM nostos_data WHERE table_name = ?1 AND pk = ?2",
                     Some(&bind),
                 )?;
             }
@@ -829,7 +832,7 @@ impl Outbox for SqliteWasmStorage {
                 bind.push(&JsValue::from_str(&write.pk));
                 bind.push(&Uint8Array::from(payload.as_bytes()).into());
                 self.exec(
-                    "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                    "INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) \
                      VALUES (?1, ?2, ?3, 0) \
                      ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload",
                     Some(&bind),
@@ -846,7 +849,7 @@ impl Outbox for SqliteWasmStorage {
                     bind.push(&JsValue::from_str(&write.pk));
                     bind.push(&Uint8Array::from(payload.as_bytes()).into());
                     self.exec(
-                        "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) \
+                        "INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) \
                          VALUES (?1, ?2, ?3, 0) \
                          ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload",
                         Some(&bind),
@@ -860,7 +863,7 @@ impl Outbox for SqliteWasmStorage {
     fn clear(&mut self) -> nostos_core::Result<()> {
         // Wipe the outbox + dead-letter queue (ADR-0029). Storage::clear wipes
         // rows + checkpoint; this is the outbox-only half.
-        self.exec("DELETE FROM cairn_outbox", None)?;
+        self.exec("DELETE FROM nostos_outbox", None)?;
         Ok(())
     }
 }

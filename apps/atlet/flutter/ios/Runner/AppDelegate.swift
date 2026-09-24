@@ -125,7 +125,7 @@ import UserNotifications
     // both.
     let route = url.host == "history" ? "/history\(url.path)" : url.path
     if url.scheme == "atlet", route.hasPrefix("/history/") {
-      deliverTap(["cairn_route": route])
+      deliverTap(["nostos_route": route])
       return true
     }
     return super.application(app, open: url, options: options)
@@ -184,7 +184,7 @@ private final class ForegroundBanner: NSObject, UNUserNotificationCenterDelegate
     // need not survive the standard codec.
     let info = response.notification.request.content.userInfo
     var tap: [String: Any] = [:]
-    for key in ["event_id", "cairn_route", "deep_link", "order_id", "status"] {
+    for key in ["event_id", "nostos_route", "deep_link", "order_id", "status"] {
       if let value = info[key] as? String { tap[key] = value }
     }
     if !tap.isEmpty { onTap?(tap) }

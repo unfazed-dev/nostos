@@ -58,7 +58,7 @@ against shipping code:
    pg-init sets on synced tables.
 2. The client's apply is already last-writer-wins gated on LSN
    (`nostos-client/src/sqlite.rs:649`): `DO UPDATE SET payload = excluded.payload
-   WHERE cairn_data.applied_lsn <= excluded.applied_lsn`. Deletes are gated
+   WHERE nostos_data.applied_lsn <= excluded.applied_lsn`. Deletes are gated
    identically. **The client already discards an older frame for the same key.**
 3. No delta op reaches this plane. `WriteOp::Increment` (ADR-0030 D1) is client→server
    only and replicates back as an ordinary full-row update. ADR-0030's addendum states
@@ -272,7 +272,7 @@ new counter, not `dropped`" — attempt 2 under-implemented it as a counter loca
 TokioEventSink::deliver  →  DeliveryDecision::Superseded
   → deliver_chunk        →  (delivered, dropped, superseded, faulted)
   → FanOutOutcome.superseded / FanOutOutcome::merged
-  → Metrics.superseded → MetricsSnapshot.superseded → cairn_events_superseded_total
+  → Metrics.superseded → MetricsSnapshot.superseded → nostos_events_superseded_total
   → nostos-bench: drop = attempted − delivered − superseded
 ```
 

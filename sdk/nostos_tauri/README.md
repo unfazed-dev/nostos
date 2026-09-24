@@ -13,18 +13,18 @@ See [A11](../../docs/plans/nostos-completion-assessment-2026-07-29.md).
 ```rust
 // src-tauri/src/lib.rs
 tauri::Builder::default()
-    .plugin(tauri_plugin_cairn::init())
+    .plugin(tauri_plugin_nostos::init())
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 ```
 
 ## Invoke from JS
 
-Sixteen commands, namespaced `plugin:cairn|<command>`:
+Sixteen commands, namespaced `plugin:nostos|<command>`:
 
 | command | args | returns |
 |---|---|---|
-| `connect` | `{ url?, token?, dbPath? }` | `void` — opens SQLite, builds the client, **no network I/O**. All args optional — falls back to the `plugins.cairn` config block |
+| `connect` | `{ url?, token?, dbPath? }` | `void` — opens SQLite, builds the client, **no network I/O**. All args optional — falls back to the `plugins.nostos` config block |
 | `subscribe` | `{ table }` | `void` — starts the live replication run loop |
 | `write` | `{ table, op, pk, payloadJson }` | `number` — the outbox id |
 | `query` | `{ sql }` | `string` — JSON array of rows |
@@ -49,7 +49,7 @@ dependency.
 
 ## Config (tauri.conf.json)
 
-The plugin reads a `plugins.cairn` block (see
+The plugin reads a `plugins.nostos` block (see
 `example.tauri.conf.json`):
 
 ```jsonc
@@ -59,7 +59,7 @@ The plugin reads a `plugins.cairn` block (see
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "token": null,
       "tables": ["tasks", "notes"],
-      "dbPath": "cairn.db"
+      "dbPath": "nostos.db"
     }
   }
 }
@@ -67,7 +67,7 @@ The plugin reads a `plugins.cairn` block (see
 
 Every field is optional (absent block == all-defaults); a populated block
 lets `connect()` run argless. Precedence: **per-call args > config > floor**
-(`"tasks"` / `"cairn.db"`). `deny_unknown_fields` turns a typo'd key
+(`"tasks"` / `"nostos.db"`). `deny_unknown_fields` turns a typo'd key
 into a loud plugin-init error.
 
 ## Push tokens (ADR-0037 §3)
@@ -94,25 +94,25 @@ catch a wrong key; that citation is the verification.
 ```js
 import { invoke } from "@tauri-apps/api/core";
 
-await invoke("plugin:cairn|connect", {
+await invoke("plugin:nostos|connect", {
   url: "ws://127.0.0.1:8080/sync",
   token: null,
-  dbPath: "cairn.db",
+  dbPath: "nostos.db",
 });
 
 // REQUIRED: connect() does no network I/O. Without subscribe() nothing drives
 // the run loop, so no server-pushed row ever arrives.
-await invoke("plugin:cairn|subscribe", { table: "tasks" });
+await invoke("plugin:nostos|subscribe", { table: "tasks" });
 
-await invoke("plugin:cairn|write", {
+await invoke("plugin:nostos|write", {
   table: "tasks", op: "upsert", pk: "t1",
   payloadJson: JSON.stringify({ title: "Walk dog" }),
 });
 
-const rows = JSON.parse(await invoke("plugin:cairn|query", {
+const rows = JSON.parse(await invoke("plugin:nostos|query", {
   sql: "SELECT * FROM tasks",
 }));
-const lsn = await invoke("plugin:cairn|checkpoint");
+const lsn = await invoke("plugin:nostos|checkpoint");
 ```
 
 `subscribe` was **added on 2026-07-30**. Before that the plugin registered only
@@ -127,7 +127,7 @@ The plugin's `default` permission set grants all ten commands unconditionally.
 Add it to your capability file (see `guest-js/example.capability.json`):
 
 ```json
-{ "permissions": ["cairn:default"] }
+{ "permissions": ["nostos:default"] }
 ```
 
 A shipped plugin would offer scoped per-table permissions; this scaffold does
@@ -187,17 +187,17 @@ Both rails run in CI (the `sdk-e2e` job includes the `tauri` slice since
 Third rail (2026-09-21): **`fixture/`** — a real Tauri 2 app (`cargo run`
 opens a two-table window driven over `window.__TAURI__`), whose
 `tests/ipc.rs` submits the frontend's exact `InvokeRequest`s through
-`tauri::test::get_ipc_response` — ACL (`capabilities/`), `plugins.cairn`
+`tauri::test::get_ipc_response` — ACL (`capabilities/`), `plugins.nostos`
 config, camelCase args — against a live spine. Proves the JS command boundary
 on the multi-table shape with no webview. Click-level WebDriver (WebdriverIO
 `@wdio/tauri-service`, embedded driver so macOS works) is the upgrade path.
 
 ## Ceiling (ponytail)
 
-- **Table set is fixed at `connect`** — `plugins.cairn.tables` (first =
+- **Table set is fixed at `connect`** — `plugins.nostos.tables` (first =
   primary, rest = `extra_tables`, ADR-0022, server cap 32; `table` is the
   one-entry shorthand). Table-taking commands refuse tables outside the set.
-  Per-table `where_sql` via `plugins.cairn.whereSql` (`{table: predicate}`,
+  Per-table `where_sql` via `plugins.nostos.whereSql` (`{table: predicate}`,
   keys must be in the set). No per-table `resume_lsn` by design — the LSN is
   stream-global (one socket, one checkpoint, ADR-0022). `subscribe` is one run
   loop per session, `watch` is one pump per table.

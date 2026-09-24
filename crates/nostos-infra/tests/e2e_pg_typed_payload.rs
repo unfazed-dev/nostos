@@ -17,7 +17,7 @@
 //!
 //! A dedicated `typed_probe` table + a throwaway publication scoped to just
 //! that table (created idempotently at test start — NOT added to the shared
-//! `cairn_pub`, so this test can't perturb other suites' event streams).
+//! `nostos_pub`, so this test can't perturb other suites' event streams).
 //! Covers every OID `typed.rs` special-cases: bool, int2/int4/int8, numeric,
 //! float8 (including `NaN`), timestamptz (with a non-UTC input offset — PG's
 //! `+05:30` normalizes to `+00` text since the session `TimeZone` is UTC,
@@ -37,11 +37,11 @@ use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
 use serde_json::Value;
 
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
-const PUBLICATION: &str = "cairn_pub_typed_f5";
+const PUBLICATION: &str = "nostos_pub_typed_f5";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -61,7 +61,7 @@ async fn drop_slot(sql: &tokio_postgres::Client, slot: &str) {
 }
 
 /// Idempotently create the fixture table + its own publication. A dedicated
-/// publication (rather than reusing `cairn_pub`, which is scoped to `tasks`)
+/// publication (rather than reusing `nostos_pub`, which is scoped to `tasks`)
 /// keeps this test's event stream isolated.
 ///
 /// The TRUNCATE makes the fixture RE-ENTRANT (2026-08-17): rows accumulated

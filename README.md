@@ -86,7 +86,7 @@ nostos/
 ├── sdk/                      # Flutter, Swift, Kotlin, React Native, .NET, Tauri, Capacitor, Node, web.
 ├── web/                      # SvelteKit landing + admin (static export).
 ├── apps/atlet/               # Atlet — benchmark-first app exercising every SDK against Supabase.
-├── supabase/                 # schema.sql + the `cairn-push` Edge Function (held name).
+├── supabase/                 # schema.sql + the `nostos-push` Edge Function (held name).
 ├── docs/                     # Architecture, ADRs, roadmap, strategy, API reference.
 ├── docker/                   # Postgres for the real replicator.
 ├── deploy/ · packaging/      # Deploy guide; Homebrew + release packaging.
@@ -151,16 +151,16 @@ make dev-stack
 ```
 
 This is the **real** path: `docker compose up` brings up Postgres 16 with
-`wal_level=logical` (host port `5433`, db/user/pass `cairn` — pre-rename names, held; publication
-`cairn_pub` + `tasks` table from `docker/pg-init`), the target waits for the
+`wal_level=logical` (host port `5433`, db/user/pass `nostos` — pre-rename names, held; publication
+`nostos_pub` + `tasks` table from `docker/pg-init`), the target waits for the
 publication to exist, then runs `nostos-server` with
-`NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=postgresql://cairn:cairn@localhost:5433/cairn`.
+`NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=postgresql://nostos:nostos@localhost:5433/nostos`.
 Look for the `replicator: PgReplicator (real Postgres logical replication)` log
 line. From another terminal you can insert a row and watch it flow:
 
 ```bash
 docker compose -f docker/docker-compose.yml exec postgres \
-  psql -U cairn -d cairn -c \
+  psql -U nostos -d nostos -c \
   "INSERT INTO tasks (org_id, title) VALUES ('00000000-0000-0000-0000-000000000001', 'hello nostos');"
 ```
 
@@ -237,4 +237,4 @@ See [`SECURITY.md`](SECURITY.md) for vulnerability reporting and the security mo
 
 Pre-1.0. The architecture and strategy are pinned; the code is alpha (Phase 3 🚧 — v0.2.0 tagged, launch gated on the operator). If you want to follow along, watch [`docs/ROADMAP.md`](docs/ROADMAP.md); to contribute, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-> *Nostos (formerly Cairn) is the Greek word for the homecoming. **Sync checkpoints (LSNs) are how your data gets home** — durable markers that mean it always finds its way back to the source of truth, across devices, through outages, around the world.*
+> *Nostos (formerly Nostos) is the Greek word for the homecoming. **Sync checkpoints (LSNs) are how your data gets home** — durable markers that mean it always finds its way back to the source of truth, across devices, through outages, around the world.*

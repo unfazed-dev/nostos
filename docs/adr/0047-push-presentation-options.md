@@ -1,7 +1,7 @@
 ---
 adr_decision:
   hard_to_reverse: true
-  reversal_cost: "High once used. The `[k=v,…]` group is operator config (NOSTOS_PUSH_TABLES, `nostos link --visible`), a pushd API field (`visible.options`), a stored column (`cairn.push_templates.options`), and the `nostos_*` payload keys an app's Notification Service Extension reads. Renaming a key breaks deployed configs and shipped app extensions at once."
+  reversal_cost: "High once used. The `[k=v,…]` group is operator config (NOSTOS_PUSH_TABLES, `nostos link --visible`), a pushd API field (`visible.options`), a stored column (`nostos.push_templates.options`), and the `nostos_*` payload keys an app's Notification Service Extension reads. Renaming a key breaks deployed configs and shipped app extensions at once."
   surprising_without_context: true
   surprise_reason: "The keys are nostos's own vocabulary (`collapse`, `level`, `image`), not APNs/FCM field names, and some of them do nothing without app-side code (an NSE for image/sender, capabilities for time-sensitive and Communication Notifications). A reader expecting a vendor passthrough would find neither `interruption-level` nor `notification_priority` in the config."
   result_of_real_tradeoff: true

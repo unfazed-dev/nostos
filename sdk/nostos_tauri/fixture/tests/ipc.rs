@@ -1,9 +1,9 @@
 //! The JS command boundary on the multi-table shape (Track A4).
 //!
 //! `tauri::test::get_ipc_response` submits the SAME `InvokeRequest` the
-//! frontend's `invoke("plugin:cairn|…", {camelCaseArgs})` produces — through
+//! frontend's `invoke("plugin:nostos|…", {camelCaseArgs})` produces — through
 //! the ACL (capabilities/default.json), the plugin's config block
-//! (tauri.conf.json → `plugins.cairn.tables`), and the command arg parser —
+//! (tauri.conf.json → `plugins.nostos.tables`), and the command arg parser —
 //! with no webview. A live spine on the other end makes the second-table
 //! write a real server round-trip.
 
@@ -20,7 +20,7 @@ mod common;
 
 fn app() -> WebviewWindow<MockRuntime> {
     let app = mock_builder()
-        .plugin(tauri_plugin_cairn::init())
+        .plugin(tauri_plugin_nostos::init())
         .build(tauri::generate_context!())
         .expect("build fixture app");
     // `tauri.conf.json` declares `main`; fall back to creating it for a
@@ -40,7 +40,7 @@ fn invoke(
     get_ipc_response(
         webview,
         InvokeRequest {
-            cmd: format!("plugin:cairn|{cmd}"),
+            cmd: format!("plugin:nostos|{cmd}"),
             callback: CallbackFn(0),
             error: CallbackFn(1),
             // The app origin: `tauri://localhost` on macOS/Linux (the ACL's
@@ -131,7 +131,7 @@ fn ipc_multi_table_write_round_trips_and_unlisted_table_is_refused() {
     let rows = invoke(
         &webview,
         "query",
-        serde_json::json!({ "sql": "SELECT table_name FROM cairn_data WHERE pk = 'fx-ipc-1'" }),
+        serde_json::json!({ "sql": "SELECT table_name FROM nostos_data WHERE pk = 'fx-ipc-1'" }),
     )
     .expect("query over IPC")
     .deserialize::<String>()

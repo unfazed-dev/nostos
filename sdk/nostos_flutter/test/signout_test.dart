@@ -37,7 +37,7 @@ void main() {
         pk: 'pk1',
         payload: {'title': 'seed'},
       );
-      final before = await a.query('SELECT pk FROM cairn_data');
+      final before = await a.query('SELECT pk FROM nostos_data');
       expect(
         before,
         contains('pk1'),
@@ -54,7 +54,7 @@ void main() {
         sqlitePath: db,
       );
       await b.subscribe('tasks');
-      final after = await b.query('SELECT pk FROM cairn_data');
+      final after = await b.query('SELECT pk FROM nostos_data');
       expect(
         after,
         isNot(contains('pk1')),

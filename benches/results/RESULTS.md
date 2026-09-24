@@ -50,12 +50,12 @@ is preserved in the sections below as the historical baseline.
   this throughput: 833,305 → 833,307 ops/sec, `oplog_dropped=0` — the per-event
   cost on the fan-out loop is a channel send (~ns), well within the ±5%
   run-to-run noise band. The real-Postgres write-amplification (the actual
-  `cairn_oplog` multi-row INSERT, performed off the fan-out loop by a background
+  `nostos_oplog` multi-row INSERT, performed off the fan-out loop by a background
   flush task) was **ADR-0025 slice 6** and is **MEASURED 2026-08-05** (was
   "pending"): `crates/nostos-infra/tests/e2e_pg_write_amp.rs` wires the production
   path (`PgReplicator` → `FanOutService.with_op_log(PgOpLogWriter)`) against real
   PG, inserts 200 live rows for a fresh tenant, and asserts the op-log grows
-  **exactly 1:1** (`amp=1.000`, one `cairn_oplog` row per source WAL event) with
+  **exactly 1:1** (`amp=1.000`, one `nostos_oplog` row per source WAL event) with
   **`oplog_dropped=0`** — no amplification, no drops. The `events/sec` printed by
   that harness (~42 on the dev machine) is a **test-driver-bound floor**, not an
   engine ceiling: it is dominated by the harness's 200 sequential per-row INSERT

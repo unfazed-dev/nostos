@@ -51,7 +51,7 @@ abstract class NostosDirectHandle implements RustOpaqueInterface {
   /// Idempotent.
   Future<void> disconnect();
 
-  /// Add `delta` to `field` through the generated `cairn_increment` — the one
+  /// Add `delta` to `field` through the generated `nostos_increment` — the one
   /// write Postgres serializes for us, so two devices incrementing the same
   /// row sum instead of clobbering (ADR-0030, direct-mode plan step 5).
   ///

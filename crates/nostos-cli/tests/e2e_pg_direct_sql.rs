@@ -16,12 +16,12 @@
 //! pull**, so no committed row can ever slip below an advanced horizon. That
 //! is the property the whole design rests on and it cannot be tested in Rust.
 //!
-//! ## Why it owns the `cairn` schema
+//! ## Why it owns the `nostos` schema
 //!
-//! The generated SQL hard-codes schema `cairn`, so this test drops and
+//! The generated SQL hard-codes schema `nostos`, so this test drops and
 //! recreates it — like the pg e2e tests that TRUNCATE `tasks`, it must run
 //! with `--test-threads=1`. The *synced* tables are random-suffixed, so only
-//! the `cairn` schema is exclusive. `auth`/`realtime` are stubbed with the
+//! the `nostos` schema is exclusive. `auth`/`realtime` are stubbed with the
 //! two functions the generated SQL calls; the test refuses to run against a
 //! database that has a real `auth.users`, so pointing `NOSTOS_PG_URL` at a live
 //! Supabase project aborts instead of dropping its auth schema.
@@ -35,7 +35,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -126,9 +126,9 @@ impl Fixture {
         let tasks = format!("nostos_direct_{}", uuid::Uuid::new_v4().simple());
 
         client
-            .batch_execute("drop schema if exists cairn cascade;")
+            .batch_execute("drop schema if exists nostos cascade;")
             .await
-            .expect("clearing the cairn schema");
+            .expect("clearing the nostos schema");
         client
             .batch_execute(SUPABASE_STUBS)
             .await
@@ -174,7 +174,7 @@ impl Fixture {
         // The shared secret is set out of band so it never lands in a file —
         // `nostos doctor --mode direct` fails while it is unset, on purpose.
         client
-            .batch_execute("update cairn.push_config set secret = 'test-secret' where id = 1;")
+            .batch_execute("update nostos.push_config set secret = 'test-secret' where id = 1;")
             .await
             .expect("set the push secret");
 
@@ -197,7 +197,7 @@ impl Fixture {
     /// Everything the pull returns, as `(xid, table, pk, op)`.
     ///
     /// The RPC hands back ONE jsonb array rather than a set of rows — see the
-    /// comment over `cairn_pull` in the generator for why (PostgREST truncates
+    /// comment over `nostos_pull` in the generator for why (PostgREST truncates
     /// a set at `db-max-rows` and says so only in a header). Over the wire the
     /// device reads that array directly; here we expand it so the assertions
     /// below can stay written in rows.
@@ -205,7 +205,7 @@ impl Fixture {
         self.client
             .query(
                 "select t.xid, t.table_name, t.pk, t.op \
-                 from jsonb_array_elements(public.cairn_pull($1::text::xid8, $2)) \
+                 from jsonb_array_elements(public.nostos_pull($1::text::xid8, $2)) \
                       with ordinality as a(e, ord), \
                  lateral jsonb_to_record(a.e) as t(xid text, table_name text, \
                                                    pk text, op text) \
@@ -213,7 +213,7 @@ impl Fixture {
                 &[&since, &max_txns],
             )
             .await
-            .expect("cairn_pull")
+            .expect("nostos_pull")
             .iter()
             .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
             .collect()
@@ -231,12 +231,12 @@ impl Fixture {
             .client
             .batch_execute(
                 "drop schema if exists net cascade; \
-                 drop schema if exists cairn cascade; \
-                 drop function if exists public.cairn_pull(xid8, int); \
-                 drop function if exists public.cairn_increment(text, text, text, numeric); \
-                 drop function if exists public.cairn_register_push_token(text, text); \
-                 drop function if exists public.cairn_deregister_push_token(text); \
-                 drop function if exists public.cairn_heartbeat(text);",
+                 drop schema if exists nostos cascade; \
+                 drop function if exists public.nostos_pull(xid8, int); \
+                 drop function if exists public.nostos_increment(text, text, text, numeric); \
+                 drop function if exists public.nostos_register_push_token(text, text); \
+                 drop function if exists public.nostos_deregister_push_token(text); \
+                 drop function if exists public.nostos_heartbeat(text);",
             )
             .await;
     }
@@ -376,7 +376,7 @@ async fn rls_scopes_the_log_to_the_callers_claims() {
         .client
         .query(
             "select t.pk, t.op \
-             from jsonb_array_elements(public.cairn_pull('0'::text::xid8, 200)) e, \
+             from jsonb_array_elements(public.nostos_pull('0'::text::xid8, 200)) e, \
              lateral jsonb_to_record(e) as t(pk text, op text)",
             &[],
         )
@@ -417,11 +417,11 @@ async fn increment_is_atomic_and_a_scope_change_emits_a_delete() {
     for _ in 0..5 {
         fx.client
             .execute(
-                "select public.cairn_increment($1, $2, 'hits', 1)",
+                "select public.nostos_increment($1, $2, 'hits', 1)",
                 &[&fx.tasks, &id],
             )
             .await
-            .expect("cairn_increment");
+            .expect("nostos_increment");
     }
     let hits: i64 = fx
         .client
@@ -434,7 +434,7 @@ async fn increment_is_atomic_and_a_scope_change_emits_a_delete() {
     let rejected = fx
         .client
         .execute(
-            "select public.cairn_increment('pg_class', '1', 'hits', 1)",
+            "select public.nostos_increment('pg_class', '1', 'hits', 1)",
             &[],
         )
         .await;
@@ -453,7 +453,7 @@ async fn increment_is_atomic_and_a_scope_change_emits_a_delete() {
 
     let scopes: Vec<(String, Option<String>)> = fx
         .client
-        .query("select op, scope from cairn.changes order by seq", &[])
+        .query("select op, scope from nostos.changes order by seq", &[])
         .await
         .expect("read the log")
         .iter()
@@ -474,7 +474,7 @@ async fn increment_is_atomic_and_a_scope_change_emits_a_delete() {
 }
 
 /// `nostos doctor --mode direct` has to pass a fresh deploy, and — the reason
-/// the check exists at all — catch a `cairn_pull` that pages by ROWS. That
+/// the check exists at all — catch a `nostos_pull` that pages by ROWS. That
 /// deployment still returns rows and still advances a horizon, so it looks
 /// healthy from the device while handing out half a transaction. Nothing on
 /// the client can see it.
@@ -515,14 +515,14 @@ async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
     // return type cannot be replaced in place.
     fx.client
         .batch_execute(
-            r#"drop function if exists public.cairn_pull(xid8, int);
-               create or replace function public.cairn_pull(since xid8, max_txns int default 200)
+            r#"drop function if exists public.nostos_pull(xid8, int);
+               create or replace function public.nostos_pull(since xid8, max_txns int default 200)
                returns table (horizon xid8, seq bigint, xid xid8,
                               table_name text, pk text, op text, "row" jsonb)
                language sql stable security invoker set search_path = '' as $fn$
                  with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon)
                  select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row"
-                 from cairn.changes c cross join h
+                 from nostos.changes c cross join h
                  where c.xid >= since and c.xid < h.horizon
                  order by c.xid, c.seq
                  limit max_txns;
@@ -546,7 +546,7 @@ async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
 }
 
 /// Offline past the retention window. Pruning the log leaves a hole that no
-/// later pull can fill, so `cairn_pull` must refuse a horizon below it rather
+/// later pull can fill, so `nostos_pull` must refuse a horizon below it rather
 /// than return a short answer — a short answer is indistinguishable from
 /// "nothing happened", and the rows in the hole would never arrive.
 #[tokio::test]
@@ -561,12 +561,12 @@ async fn a_horizon_below_the_pruned_window_is_refused_with_pt410() {
 
     // Age the log past the window and prune it.
     fx.client
-        .batch_execute("update cairn.changes set logged_at = now() - interval '30 days';")
+        .batch_execute("update nostos.changes set logged_at = now() - interval '30 days';")
         .await
         .expect("age the log");
     let pruned: i64 = fx
         .client
-        .query_one("select cairn.prune()", &[])
+        .query_one("select nostos.prune()", &[])
         .await
         .expect("prune")
         .get(0);
@@ -580,7 +580,7 @@ async fn a_horizon_below_the_pruned_window_is_refused_with_pt410() {
     let err = fx
         .client
         .query(
-            "select * from public.cairn_pull($1::text::xid8, 200)",
+            "select * from public.nostos_pull($1::text::xid8, 200)",
             &[&old_horizon],
         )
         .await
@@ -612,7 +612,7 @@ async fn a_pruned_device_can_re_snapshot_and_resume() {
     // (`db-max-rows` cannot truncate a scalar), so read it as one.
     let snapshot: serde_json::Value = fx
         .client
-        .query_one("select public.cairn_snapshot()", &[])
+        .query_one("select public.nostos_snapshot()", &[])
         .await
         .expect("snapshot")
         .get(0);
@@ -651,7 +651,7 @@ async fn a_pruned_device_can_re_snapshot_and_resume() {
         .to_string();
     fx.client
         .query(
-            "select * from public.cairn_pull($1::text::xid8, 200)",
+            "select * from public.nostos_pull($1::text::xid8, 200)",
             &[&horizon],
         )
         .await
@@ -688,14 +688,14 @@ async fn push_skips_awake_devices_and_debounces_the_rest() {
         .expect("claims");
     fx.client
         .execute(
-            "select public.cairn_register_push_token('fcm', 'tok-alice')",
+            "select public.nostos_register_push_token('fcm', 'tok-alice')",
             &[],
         )
         .await
         .expect("register");
     let scope: String = fx
         .client
-        .query_one("select scope from cairn.push_tokens", &[])
+        .query_one("select scope from nostos.push_tokens", &[])
         .await
         .expect("read the token")
         .get(0);
@@ -703,7 +703,7 @@ async fn push_skips_awake_devices_and_debounces_the_rest() {
 
     // Awake: the Realtime ring already reached them, so no push.
     fx.client
-        .execute("select public.cairn_heartbeat('device-1')", &[])
+        .execute("select public.nostos_heartbeat('device-1')", &[])
         .await
         .expect("heartbeat");
     fx.insert("alice", "while awake").await;
@@ -712,7 +712,7 @@ async fn push_skips_awake_devices_and_debounces_the_rest() {
     // Asleep: the first write wakes them, the next four are debounced.
     fx.client
         .batch_execute(
-            "update cairn.device_presence set last_seen = now() - interval '10 minutes';",
+            "update nostos.device_presence set last_seen = now() - interval '10 minutes';",
         )
         .await
         .expect("age the presence row");
@@ -789,4 +789,100 @@ async fn a_visible_template_pushes_every_change_with_its_row() {
     assert_eq!(body["options"]["level"], "time-sensitive");
     assert_eq!(body["row"]["title"], "visible 0");
     fx.teardown().await;
+}
+
+/// ADR-0048: a project linked before the rename is renamed in place by the
+/// next link. The log keeps its rows, nothing is left under the old names, a
+/// write is logged once rather than twice, and a function this link does not
+/// re-create (push is off this time) still works because its body was
+/// rewritten too.
+#[tokio::test]
+async fn a_pre_rename_project_is_renamed_in_place() {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+        eprintln!("skipping: set {E2E_FLAG}=1");
+        return;
+    }
+    let old = "cairn"; // rename:hold — the pre-rename identity under test
+    let client = sql_client().await;
+    assert_disposable(&client).await;
+    client
+        .batch_execute(&format!(
+            "drop schema if exists nostos cascade; drop schema if exists {old} cascade;
+             do $$ declare r record; begin
+               for r in select oid::regprocedure as f from pg_proc
+                         where pronamespace = 'public'::regnamespace
+                           and (proname like 'nostos\\_%' or proname like '{old}\\_%') loop
+                 execute 'drop function ' || r.f;
+               end loop;
+             end $$;"
+        ))
+        .await
+        .expect("clearing both schemas and their RPCs");
+    client.batch_execute(SUPABASE_STUBS).await.expect("stubs");
+    let table = format!("legacy_{}", uuid::Uuid::new_v4().simple());
+    client
+        .batch_execute(&format!(
+            "create table public.{table} (id uuid primary key default gen_random_uuid(),
+               owner_id text not null, title text);"
+        ))
+        .await
+        .expect("creating the synced table");
+    let tables = [DirectTable {
+        table: table.clone(),
+        scoping: Scoping::Claim {
+            column: "owner_id".to_string(),
+            claim: "sub".to_string(),
+        },
+    }];
+    let push = PushConfig {
+        endpoint: "https://example.test/push".to_string(),
+        presence_window: "90 seconds".to_string(),
+        cooldown: "30 seconds".to_string(),
+        templates: Vec::new(),
+    };
+    // What the pre-rename generator emitted: the same file under the old name.
+    let legacy = render_with_push(&tables, DEFAULT_RETENTION, Some(&push)).replace("nostos", old);
+    client
+        .batch_execute(&legacy)
+        .await
+        .expect("the legacy SQL applies");
+    let insert = format!("insert into public.{table} (owner_id, title) values ('u1', 'x')");
+    client.batch_execute(&insert).await.expect("legacy insert");
+
+    client
+        .batch_execute(&render_with_push(&tables, DEFAULT_RETENTION, None))
+        .await
+        .expect("the new SQL migrates the legacy project");
+
+    let count = |sql: &'static str| {
+        let c = &client;
+        async move { c.query_one(sql, &[&old]).await.expect(sql).get::<_, i64>(0) }
+    };
+    let leftovers = count(
+        "select (select count(*) from pg_namespace where nspname = $1)
+              + (select count(*) from pg_proc where proname like $1 || '\\_%')
+              + (select count(*) from pg_trigger where tgname like $1 || '\\_%')
+              + (select count(*) from pg_policy where polname like $1 || '\\_%')
+              + (select count(*) from pg_proc where pronamespace = 'nostos'::regnamespace
+                   and prokind = 'f' and pg_get_functiondef(oid) like '%' || $1 || '%')",
+    )
+    .await;
+    assert_eq!(leftovers, 0, "nothing is left under the old names");
+    client
+        .batch_execute(&insert)
+        .await
+        .expect("a write fires the renamed wake trigger, whose body now names nostos");
+    let logged: i64 = client
+        .query_one("select count(*) from nostos.changes", &[])
+        .await
+        .expect("count")
+        .get(0);
+    assert_eq!(
+        logged, 2,
+        "the legacy row survived and the new one logged once"
+    );
+    client
+        .batch_execute(&format!("drop table public.{table};"))
+        .await
+        .expect("teardown");
 }

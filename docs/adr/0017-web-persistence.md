@@ -15,7 +15,7 @@ deliberate deferral: browser-durable row storage (OPFS or otherwise) was left
 for a verified follow-up. Task E1 (commit `a5260a2`) has now shipped the WASM
 WebSocket transport, which closes the *transport* gap but leaves the *durability*
 gap: on a page reload, the in-memory rows are lost and the client replays from
-the `resume_lsn` persisted in `localStorage` (`cairn:checkpoint:<table>`).
+the `resume_lsn` persisted in `localStorage` (`nostos:checkpoint:<table>`).
 
 This ADR owns the decision the plan (`docs/plans/complete-nostos-fully-wired-operational.md`
 Task E2) explicitly punted: **which browser-durable mechanism does nostos adopt,
@@ -101,8 +101,8 @@ VFS** for the post-launch slice. Explicitly reject options (2) and (3).
    transaction primitive — you'd hand-roll a WAL, which is rebuilding SQLite
    badly.
 3. **The reference impl already exists.** `SqliteStorage` in
-   `crates/nostos-client/src/sqlite.rs` is the exact schema (`cairn_data`,
-   `cairn_meta`) and transaction shape a SQLite-WASM backend mirrors. The port
+   `crates/nostos-client/src/sqlite.rs` is the exact schema (`nostos_data`,
+   `nostos_meta`) and transaction shape a SQLite-WASM backend mirrors. The port
    is mechanical once the Worker plumbing exists.
 
 ### Why options (2) and (3) are rejected

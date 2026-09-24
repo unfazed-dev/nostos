@@ -6,7 +6,7 @@
 //! ship test code in the plugin binary).
 
 use std::time::Duration;
-use tauri_plugin_cairn::NostosState;
+use tauri_plugin_nostos::NostosState;
 
 /// Spawn the spine binary, discover its port via the NOSTOS_E2E_PORT stdout
 /// line (the discovery contract every SDK E2E harness shares — see the
@@ -101,9 +101,9 @@ pub async fn observer(port: u16, tag: &str) -> NostosState {
 /// `observer` over an explicit table set (multi-table lift, 2026-09-21): the
 /// first table is the primary, the rest ride `extra_tables` on the one socket.
 pub async fn observer_tables(port: u16, tag: &str, tables: &[&str]) -> NostosState {
-    let state = NostosState::with_config(tauri_plugin_cairn::NostosPluginConfig {
+    let state = NostosState::with_config(tauri_plugin_nostos::NostosPluginConfig {
         tables: Some(tables.iter().map(|t| (*t).to_owned()).collect()),
-        ..tauri_plugin_cairn::NostosPluginConfig::default()
+        ..tauri_plugin_nostos::NostosPluginConfig::default()
     });
     let db = std::env::temp_dir().join(format!(
         "nostos-tauri-conf-observer-{tag}-{}.sqlite",
@@ -129,7 +129,7 @@ pub async fn observer_tables(port: u16, tag: &str, tables: &[&str]) -> NostosSta
 }
 
 /// Poll state.query until at least min_rows rows matching pk_prefix exist in
-/// cairn_data, or the deadline elapses. Returns the matching row count at
+/// nostos_data, or the deadline elapses. Returns the matching row count at
 /// deadline (so callers assert on it).
 pub async fn poll_rows_with_prefix(
     state: &NostosState,
@@ -149,7 +149,7 @@ pub async fn poll_table_rows_with_prefix(
     deadline: Duration,
 ) -> usize {
     let sql = format!(
-        "SELECT pk FROM cairn_data WHERE table_name = '{table}' AND pk LIKE '{pk_prefix}%'"
+        "SELECT pk FROM nostos_data WHERE table_name = '{table}' AND pk LIKE '{pk_prefix}%'"
     );
     let end = tokio::time::Instant::now() + deadline;
     loop {

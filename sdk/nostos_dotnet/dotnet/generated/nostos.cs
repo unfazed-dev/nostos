@@ -1468,7 +1468,7 @@ internal interface INostosClient {
     /// then **await** each handle. `abort()` alone only requests
     /// cancellation; the task keeps applying frames until its next `.await`.
     /// Awaiting confirms it has STOPPED before we touch storage — a
-    /// post-clear apply/flush frame re-populates `cairn_data` / re-queues
+    /// post-clear apply/flush frame re-populates `nostos_data` / re-queues
     /// the outbox, and "half a clear is a cross-user leak" (ADR-0029; the
     /// `SyncClient::clear_local_state` docstring mandates this exact order).
     /// 2. `SyncClient::clear_local_state()` — wipes rows AND the outbox AND
@@ -1878,7 +1878,7 @@ internal class NostosClient : INostosClient, IDisposable {
     /// then **await** each handle. `abort()` alone only requests
     /// cancellation; the task keeps applying frames until its next `.await`.
     /// Awaiting confirms it has STOPPED before we touch storage — a
-    /// post-clear apply/flush frame re-populates `cairn_data` / re-queues
+    /// post-clear apply/flush frame re-populates `nostos_data` / re-queues
     /// the outbox, and "half a clear is a cross-user leak" (ADR-0029; the
     /// `SyncClient::clear_local_state` docstring mandates this exact order).
     /// 2. `SyncClient::clear_local_state()` — wipes rows AND the outbox AND
@@ -2070,7 +2070,7 @@ class FfiConverterTypeNostosClient: FfiConverter<NostosClient, IntPtr> {
 ///
 /// # Snapshot shape
 /// `json` is a JSON array-of-objects string: one object per row of the watched
-/// table's rows in `cairn_data`, full snapshot per tick (NOT a diff —
+/// table's rows in `nostos_data`, full snapshot per tick (NOT a diff —
 /// self-healing on lag, mirrors Flutter's `emit_snapshot`).
 /// </summary>
 internal interface SnapshotSink {
@@ -2108,7 +2108,7 @@ internal interface SnapshotSink {
 ///
 /// # Snapshot shape
 /// `json` is a JSON array-of-objects string: one object per row of the watched
-/// table's rows in `cairn_data`, full snapshot per tick (NOT a diff —
+/// table's rows in `nostos_data`, full snapshot per tick (NOT a diff —
 /// self-healing on lag, mirrors Flutter's `emit_snapshot`).
 /// </summary>
 internal class SnapshotSinkImpl : SnapshotSink, IDisposable {

@@ -280,7 +280,7 @@ test("Flutter-web Worker: CRDT + writeBatch delegates ship (Wave 4c)", async ({ 
 // proves counter/orSet/writeBatch SHIP on the live socket (happy path); this
 // proves an atomic writeBatch's rows SURVIVE a full page reload in durable OPFS
 // — i.e. SqliteWasmStorage.enqueue_batch's transactional commit lands in OPFS
-// (cairn_data) and the re-spawned Worker resumes from it. (Plain-write reload
+// (nostos_data) and the re-spawned Worker resumes from it. (Plain-write reload
 // persistence is already covered by sdk/nostos_web/e2e/durable.spec.cjs; this
 // closes the writeBatch-specific gap.) Storage-internal not covered here —
 // enqueue_batch rollback-on-failure and migrate_outbox_dlq mirror the native

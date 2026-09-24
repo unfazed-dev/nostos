@@ -44,7 +44,7 @@
    *
    * ## localStorage checkpoint
    *
-   * `NostosSocket` persists the checkpoint to `localStorage[cairn:checkpoint:<table>]`
+   * `NostosSocket` persists the checkpoint to `localStorage[nostos:checkpoint:<table>]`
    * internally on every ack + on close (verified in nostos-ffi-wasm/src/transport.rs).
    * The socket does NOT expose the *resumed-from* value back to JS, so for the
    * "resumed from N" subtitle this page reads the key once on connect
@@ -87,7 +87,7 @@
   let tickHandle: ReturnType<typeof setInterval> | null = null;
 
   /** The localStorage key NostosSocket persists the checkpoint under. */
-  const checkpointKey = () => `cairn:checkpoint:${table}`;
+  const checkpointKey = () => `nostos:checkpoint:${table}`;
 
   /**
    * Decode a row's opaque payload bytes to a displayable value: the
@@ -288,7 +288,7 @@
     {#if rows.length === 0}
       <p class="empty">
         No rows yet. Connect, then insert one from Postgres:<br />
-        <code>docker compose -f docker/docker-compose.yml exec -T postgres psql -U cairn -d cairn \
+        <code>docker compose -f docker/docker-compose.yml exec -T postgres psql -U nostos -d nostos \
           -c "INSERT INTO tasks (org_id, title) VALUES (gen_random_uuid(), 'ship v0.1')"</code>
       </p>
     {:else}

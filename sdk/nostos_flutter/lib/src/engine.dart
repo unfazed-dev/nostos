@@ -157,7 +157,7 @@ abstract class NostosEngine {
 
   /// Materialize the WS2 read-views for [tables] in the on-device SQLite
   /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...)
-  /// ... FROM cairn_data WHERE table_name='<table>'` — see
+  /// ... FROM nostos_data WHERE table_name='<table>'` — see
   /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema;
   /// the views persist in the SQLite file, so this only needs to run once
   /// after connect. Synchronous: the FFI is `Result<(), String>` and throws

@@ -12,7 +12,7 @@
 //! - **D2** (write-back): a `Write` frame from the client reaches the server's
 //!   `WriteBack` adapter, which surfaces it back as a `ReplicationEvent`
 //!   through the fan-out — the round-trip.
-//! - **D3** (outbox): offline writes land in the durable `cairn_outbox` and
+//! - **D3** (outbox): offline writes land in the durable `nostos_outbox` and
 //!   flush on reconnect.
 //! - **D4 Step 0** (the idempotency premise): the writer's own write comes back
 //!   to it via replication, and `apply_batch` collapses the echo to one row.
@@ -307,7 +307,7 @@ fn count_rows_with_pk_prefix(db_path: &str, prefix: &str) -> usize {
     let like = format!("{prefix}%");
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM cairn_data WHERE pk LIKE ?1",
+            "SELECT COUNT(*) FROM nostos_data WHERE pk LIKE ?1",
             rusqlite::params![like],
             |r| r.get(0),
         )
@@ -320,7 +320,7 @@ fn row_payload(db_path: &str, pk: &str) -> Option<Vec<u8>> {
     let storage = SqliteStorage::open(db_path).unwrap();
     let conn = storage.conn_for_test();
     let row: Result<Vec<u8>, _> = conn.query_row(
-        "SELECT payload FROM cairn_data WHERE pk = ?1",
+        "SELECT payload FROM nostos_data WHERE pk = ?1",
         rusqlite::params![pk],
         |r| r.get(0),
     );
@@ -438,7 +438,7 @@ async fn chaos_offline_writes_survive_mid_stream_restart_no_loss_no_dup() {
         OFFLINE_WRITES,
         "both offline writes are durable in the outbox while the server is down"
     );
-    // WS2 instant-local: the offline writes are ALREADY applied to cairn_data
+    // WS2 instant-local: the offline writes are ALREADY applied to nostos_data
     // (visible before any round-trip — offline-first) AND still durable in the
     // outbox (proven by the pending() assertion above). The server's echo later
     // UPSERTs the authoritative image on top (reconcile); the no-loss / no-dup

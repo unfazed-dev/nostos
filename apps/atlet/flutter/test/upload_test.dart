@@ -12,7 +12,7 @@ import 'package:atlet/bench/runner.dart';
 import 'package:atlet/bench/store.dart';
 import 'package:atlet/bench/upload.dart';
 
-RunRecord _fixture({String engine = 'cairn', String runType = 'cold_sync'}) =>
+RunRecord _fixture({String engine = 'nostos', String runType = 'cold_sync'}) =>
     RunRecord(
       sdk: 'flutter',
       engine: engine,

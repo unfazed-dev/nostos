@@ -24,7 +24,7 @@
 //!
 //! 6. (nostos addition, multi-table lift 2026-09-21) a write to the SECOND
 //!    configured table round-trips through the server on the one socket
-//!    (`plugins.cairn.tables` → `extra_tables`), and the primary table is
+//!    (`plugins.nostos.tables` → `extra_tables`), and the primary table is
 //!    untouched by it.
 //!
 //! Plus rail integrity (the subscribe-gap class): the four ACL edit points
@@ -49,7 +49,7 @@ use common::{
     spawn_spine,
 };
 use std::time::Duration;
-use tauri_plugin_cairn::NostosState;
+use tauri_plugin_nostos::NostosState;
 
 /// Item 1: connect → subscribe → write → the row round-trips through the
 /// server (observer sees it) within the 60s contract ceiling.
@@ -184,7 +184,7 @@ async fn item4_sign_out_wipes_local_store() {
         .await
         .expect("reconnect");
     let rows_json = state
-        .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+        .query("SELECT pk FROM nostos_data WHERE table_name = 'tasks'".into())
         .await
         .expect("query after wipe");
     let rows: serde_json::Value = serde_json::from_str(&rows_json).expect("parse");

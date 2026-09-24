@@ -94,12 +94,10 @@ Android namespaces: `dev.cairn.cairn_flutter` → `run.nostos.nostos_flutter`,
 | `cairn_rules.toml` (ADR-0031) | `nostos_rules.toml` |
 | `.cairn/` project dir (ADR-0023) | `.nostos/` |
 
-> **Held (decision 2b).** The Postgres, wire and on-device sections below are
-> the *eventual* names. Every row in them stays `cairn*` until its own
-> migration ADR; the rename script keeps `--pg-identity`, `--wire-identity`
-> and `--client-storage` off. The env and config rows above are renamed, and
-> the old `CAIRN_*` / `cairn.toml` / `.cairn/` names keep being read as a
-> fallback.
+> **Migrated (ADR-0048), formerly held (decision 2b).** The Postgres, wire and
+> on-device sections below are renamed. Postgres and device state migrate in
+> place on first touch; wire names cut over hard. The env and config rows
+> above keep their ADR-0046 fallbacks until 1.0.
 
 ## Postgres identity (`--pg-identity`; needs `docker compose down -v`)
 
@@ -142,7 +140,7 @@ Android namespaces: `dev.cairn.cairn_flutter` → `run.nostos.nostos_flutter`,
 
 ## Open decisions (unchanged from the qairn inventory)
 
-- ~~`--pg-identity`, `--wire-identity`, `--client-storage`: take or hold back~~ → held (decision 2b).
+- ~~`--pg-identity`, `--wire-identity`, `--client-storage`: take or hold back~~ → held (decision 2b), then migrated (ADR-0048).
 - Legal entity "Cairn Sync, Inc." in brand prose.
 - npm scope: `@nostos-sync` (recommended) vs `@nostos-run`.
 - pub.dev: `nostos_flutter` (mirrors today) vs bare `nostos`.

@@ -20,23 +20,23 @@
 //   close()                      — close the db handle
 
 // The schema mirrors SqliteStorage::SCHEMA verbatim
-// (crates/nostos-client/src/sqlite.rs). Three tables: cairn_data (row payloads +
-// per-row applied_lsn), cairn_meta (checkpoint/epoch), cairn_outbox (durable
+// (crates/nostos-client/src/sqlite.rs). Three tables: nostos_data (row payloads +
+// per-row applied_lsn), nostos_meta (checkpoint/epoch), nostos_outbox (durable
 // write queue with attempts/dlq dead-letter columns — ADR-0013 v2 / ADR-0027).
 const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS cairn_data (
+CREATE TABLE IF NOT EXISTS nostos_data (
     table_name TEXT NOT NULL,
     pk TEXT NOT NULL,
     payload BLOB NOT NULL,
     applied_lsn INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (table_name, pk)
 );
-CREATE TABLE IF NOT EXISTS cairn_meta (
+CREATE TABLE IF NOT EXISTS nostos_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO cairn_meta (key, value) VALUES ('checkpoint', '0');
-CREATE TABLE IF NOT EXISTS cairn_outbox (
+INSERT OR IGNORE INTO nostos_meta (key, value) VALUES ('checkpoint', '0');
+CREATE TABLE IF NOT EXISTS nostos_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     table_name TEXT NOT NULL,
     op TEXT NOT NULL,
@@ -49,24 +49,24 @@ CREATE TABLE IF NOT EXISTS cairn_outbox (
 
 // Upsert with per-row LSN gate (live/replay path).
 const SQL_UPSERT_GATED =
-  "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) " +
+  "INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) " +
   "VALUES (?, ?, ?, ?) " +
   "ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload, applied_lsn = excluded.applied_lsn " +
-  "WHERE cairn_data.applied_lsn <= ?";
+  "WHERE nostos_data.applied_lsn <= ?";
 
 // Upsert unconditional (snapshot-table path — authoritative current-state).
 const SQL_UPSERT_UNCOND =
-  "INSERT INTO cairn_data (table_name, pk, payload, applied_lsn) " +
+  "INSERT INTO nostos_data (table_name, pk, payload, applied_lsn) " +
   "VALUES (?, ?, ?, ?) " +
   "ON CONFLICT(table_name, pk) DO UPDATE SET payload = excluded.payload, applied_lsn = excluded.applied_lsn";
 
 // Delete with per-row LSN gate.
 const SQL_DELETE_GATED =
-  "DELETE FROM cairn_data WHERE table_name = ? AND pk = ? AND applied_lsn <= ?";
+  "DELETE FROM nostos_data WHERE table_name = ? AND pk = ? AND applied_lsn <= ?";
 
 // Delete unconditional (snapshot-table path).
 const SQL_DELETE_UNCOND =
-  "DELETE FROM cairn_data WHERE table_name = ? AND pk = ?";
+  "DELETE FROM nostos_data WHERE table_name = ? AND pk = ?";
 
 /**
  * Async-init sqlite-wasm with opfs-sahpool and return the wrapper object.
@@ -103,13 +103,26 @@ export async function openNostosDb() {
       "sqlite3.installOpfsSAHPoolVfs unavailable (sqlite-wasm build too old?)",
     );
   }
-  await sqlite3.installOpfsSAHPoolVfs();
+  const pool = await sqlite3.installOpfsSAHPoolVfs();
 
   // Open the DB with the sahpool VFS. The filename is an OPFS path
-  // (relative to the origin's OPFS root).
-  const db = new sqlite3.oo1.DB("file:cairn.sqlite?vfs=opfs-sahpool");
+  // (relative to the origin's OPFS root). ADR-0048: an origin holding only the
+  // pre-rename file keeps using it, so its rows and unsent writes stay.
+  const names = pool.getFileNames();
+  const file =
+    names.includes("/cairn.sqlite") && !names.includes("/nostos.sqlite") // rename:hold
+      ? "cairn.sqlite" // rename:hold
+      : "nostos.sqlite";
+  const db = new sqlite3.oo1.DB(`file:${file}?vfs=opfs-sahpool`);
 
-  // Run the schema migration (idempotent — CREATE TABLE IF NOT EXISTS).
+  // Pre-rename tables are renamed in place first (ADR-0048), so the schema
+  // migration (idempotent — CREATE TABLE IF NOT EXISTS) finds them.
+  for (const t of ["data", "meta", "outbox"]) {
+    const legacy = `cairn_${t}`; // rename:hold
+    if (db.selectValue("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", legacy)) {
+      db.exec(`ALTER TABLE ${legacy} RENAME TO nostos_${t}`);
+    }
+  }
   db.exec(SCHEMA_SQL);
 
   return makeWrapper(db);
@@ -190,7 +203,7 @@ function makeWrapper(db) {
           }
         }
         db.exec({
-          sql: "UPDATE cairn_meta SET value = ? WHERE key = 'checkpoint'",
+          sql: "UPDATE nostos_meta SET value = ? WHERE key = 'checkpoint'",
           bind: [String(checkpoint)],
         });
         db.exec("COMMIT");
@@ -205,9 +218,9 @@ function makeWrapper(db) {
     },
 
     clearAll() {
-      db.exec("DELETE FROM cairn_data");
-      db.exec("DELETE FROM cairn_outbox");
-      db.exec("UPDATE cairn_meta SET value = '0' WHERE key = 'checkpoint'");
+      db.exec("DELETE FROM nostos_data");
+      db.exec("DELETE FROM nostos_outbox");
+      db.exec("UPDATE nostos_meta SET value = '0' WHERE key = 'checkpoint'");
     },
 
     close() {

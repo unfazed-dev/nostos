@@ -523,7 +523,7 @@ mod tests {
             title: "Order shipped".into(),
             body: "On its way".into(),
             category: Some("order_status".into()),
-            data: [("cairn_route".to_string(), "/orders/42".to_string())]
+            data: [("nostos_route".to_string(), "/orders/42".to_string())]
                 .into_iter()
                 .collect(),
             options: std::collections::BTreeMap::new(),
@@ -533,7 +533,7 @@ mod tests {
             json!({
                 "title": "Order shipped", "body": "On its way",
                 "category": "order_status",
-                "data": { "cairn_route": "/orders/42" },
+                "data": { "nostos_route": "/orders/42" },
             })
         );
         // No routing keys = no `data` key at all: an SW that checks for it

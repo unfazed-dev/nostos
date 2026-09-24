@@ -8,7 +8,7 @@
 //!   drop-newest-on-full). For the benchmark + unit tests: measures the
 //!   fan-out-loop cost honestly and asserts drops stay 0.
 //! - [`PgOpLogWriter`] (feature `pg`) — the real adapter. Batched multi-row
-//!   INSERT into `cairn_oplog` via a pool-of-one client, flushed by a
+//!   INSERT into `nostos_oplog` via a pool-of-one client, flushed by a
 //!   background task off the fan-out loop.
 //!
 //! ## Non-blocking (the load-bearing invariant)
@@ -47,7 +47,7 @@ struct OpEntry {
     pk: String,
     /// "upsert" for Insert/Update, "delete" for Delete.
     op: &'static str,
-    /// Raw NEW tuple-image bytes (JSON) — what's stored in `cairn_oplog.payload`.
+    /// Raw NEW tuple-image bytes (JSON) — what's stored in `nostos_oplog.payload`.
     /// Empty for deletes (they store NULL).
     payload: Bytes,
     /// The OLD tuple image for a delete under `REPLICA IDENTITY FULL` — the
@@ -63,7 +63,7 @@ struct OpEntry {
 /// fan-out-loop cost they impose is identical (no drift between the bench's
 /// recording writer and the production one — the bench measures the real cost).
 fn build_entry(event: &ReplicationEvent) -> OpEntry {
-    // LSN is a u64 byte offset; cairn_oplog.lsn is BIGINT (i64). Real PG LSNs
+    // LSN is a u64 byte offset; nostos_oplog.lsn is BIGINT (i64). Real PG LSNs
     // are ~2^40, far within i64 positive range.
     let lsn =
         i64::try_from(event.lsn.raw()).expect("lsn fits i64 positive range (real PG LSNs ~2^40)");
@@ -175,7 +175,7 @@ mod pg {
     use tokio_postgres::NoTls;
 
     /// A persisted op-log READER for reconnect resume (ADR-0025 slice 4b).
-    /// Counterpart to [`PgOpLogWriter`] — reads `cairn_oplog` to replay the
+    /// Counterpart to [`PgOpLogWriter`] — reads `nostos_oplog` to replay the
     /// offline gap when a client reconnects with a matching epoch + an in-window
     /// `resume_lsn`. Owns no connection: each call opens a fresh one (mirror
     /// `flush_batch`'s connect-on-demand). Replay is a cold path (once per
@@ -215,7 +215,7 @@ mod pg {
             after_lsn: u64,
         ) -> Result<Vec<ReplicationEvent>, OpLogError> {
             let client = self.connect().await?;
-            // after_lsn (u64 WAL offset) → cairn_oplog.lsn BIGINT (i64). Clamp on
+            // after_lsn (u64 WAL offset) → nostos_oplog.lsn BIGINT (i64). Clamp on
             // the (impossible-for-real-LSNs) overflow so a corrupt resume_lsn
             // can't panic the replay — it'll just match nothing + fall back.
             let after_i64 = i64::try_from(after_lsn).unwrap_or(i64::MAX);
@@ -226,7 +226,7 @@ mod pg {
             let p2: &(dyn tokio_postgres::types::ToSql + Sync) = &after_i64;
             let rows = client
                 .query(
-                    "SELECT lsn, table_name, pk, op, payload::text FROM cairn_oplog \
+                    "SELECT lsn, table_name, pk, op, payload::text FROM nostos_oplog \
                      WHERE tenant_id = $1 AND lsn > $2 ORDER BY lsn",
                     &[p1, p2],
                 )
@@ -274,7 +274,7 @@ mod pg {
         async fn window_tail(&self) -> Result<u64, OpLogError> {
             let client = self.connect().await?;
             let tail: i64 = client
-                .query_one("SELECT COALESCE(MIN(lsn), 0) FROM cairn_oplog", &[])
+                .query_one("SELECT COALESCE(MIN(lsn), 0) FROM nostos_oplog", &[])
                 .await
                 .map_err(|e| OpLogError::Backend(e.to_string()))?
                 .get(0);
@@ -284,7 +284,7 @@ mod pg {
         }
     }
 
-    /// A persisted op-log writer backed by the `cairn_oplog` Postgres table.
+    /// A persisted op-log writer backed by the `nostos_oplog` Postgres table.
     ///
     /// `append` is a non-blocking `try_send` into a bounded internal channel;
     /// a background flush task batches up to [`BATCH_MAX`] entries per
@@ -319,7 +319,7 @@ mod pg {
     impl PgOpLogWriter {
         /// Construct + spawn the background flush task. `tenant_column`, when
         /// `Some`, names the row column whose value populates
-        /// `cairn_oplog.tenant_id` (lifted from each row's payload at flush
+        /// `nostos_oplog.tenant_id` (lifted from each row's payload at flush
         /// time; `None` on rows whose payload lacks it). `buffer` is the
         /// bounded internal channel depth (`NOSTOS_OPLOG_BUFFER`). `metrics`,
         /// when `Some`, receives the drop + flush-failed counters for
@@ -404,10 +404,10 @@ mod pg {
     }
 
     // -----------------------------------------------------------------------
-    // PgOpLogCompactor — bounds cairn_oplog growth (ADR-0025 slice 5).
+    // PgOpLogCompactor — bounds nostos_oplog growth (ADR-0025 slice 5).
     // -----------------------------------------------------------------------
 
-    /// Background compactor that bounds `cairn_oplog` growth. Periodically
+    /// Background compactor that bounds `nostos_oplog` growth. Periodically
     /// (1) collapses multiple ops on the same `(table_name, pk)` to the latest
     /// op (the net effect — a trailing `delete` is kept as a tombstone so a
     /// resuming client whose checkpoint predates the delete still observes the
@@ -468,16 +468,16 @@ mod pg {
     /// Collapse: keep only the latest op (`MAX(op_id)`) per `(table_name, pk)`.
     /// `op_id` is `BIGSERIAL`, so `MAX` is the chronologically-last op = the net
     /// effect. A trailing delete IS the max → survives as a tombstone.
-    const COLLAPSE_SQL: &str = "DELETE FROM cairn_oplog WHERE op_id NOT IN \
-        (SELECT MAX(op_id) FROM cairn_oplog GROUP BY table_name, pk)";
+    const COLLAPSE_SQL: &str = "DELETE FROM nostos_oplog WHERE op_id NOT IN \
+        (SELECT MAX(op_id) FROM nostos_oplog GROUP BY table_name, pk)";
     /// Retention: age out rows older than the window. `$1` binds as an i64
-    /// seconds count (`cairn_oplog.created_at` is TIMESTAMPTZ). The explicit
+    /// seconds count (`nostos_oplog.created_at` is TIMESTAMPTZ). The explicit
     /// `$1::bigint` cast matters: `make_interval(secs =>)` declares its
     /// parameter `double precision`, so an uncast `$1` makes tokio-postgres
     /// try to serialize the i64 as float8 and every tick fails at bind time
     /// with "error serializing parameter 0" (found live 2026-08-07 — the SQL
     /// string was pinned by unit test but never executed against real PG).
-    const RETENTION_SQL: &str = "DELETE FROM cairn_oplog \
+    const RETENTION_SQL: &str = "DELETE FROM nostos_oplog \
         WHERE created_at < now() - make_interval(secs => ($1::bigint)::double precision)";
 
     /// The periodic compaction loop. Lazily connects; on error drops the client
@@ -690,7 +690,7 @@ mod pg {
         // Build "VALUES ($1,..$6),($7,..$12), ..." — 6 params per row.
         let mut sql = String::with_capacity(64 + batch.len() * 28);
         sql.push_str(
-            "INSERT INTO cairn_oplog (lsn, table_name, pk, op, payload, tenant_id) VALUES ",
+            "INSERT INTO nostos_oplog (lsn, table_name, pk, op, payload, tenant_id) VALUES ",
         );
         for (i, _e) in batch.iter().enumerate() {
             if i > 0 {

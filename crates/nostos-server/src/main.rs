@@ -253,7 +253,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "pg")]
     let op_log_shutdown = op_log.clone();
 
-    // Op-log compactor (ADR-0025 slice 5): bounds cairn_oplog growth via
+    // Op-log compactor (ADR-0025 slice 5): bounds nostos_oplog growth via
     // periodic collapse (keep latest op per (table_name, pk) — a trailing
     // delete survives as a tombstone) + retention (age out old rows). Only
     // under NOSTOS_REPLICATOR=pg. Detached background task (runs until process
@@ -800,7 +800,7 @@ async fn main() -> anyhow::Result<()> {
     // ---- op-log replay-on-reconnect adapter (ADR-0025 slice 4b) ----
     // Under `NOSTOS_REPLICATOR=pg` inject a `PgOpLogReader` so a reconnecting
     // client with a matching epoch + an in-window `resume_lsn` gets its offline
-    // gap replayed from `cairn_oplog` instead of a full snapshot. Otherwise
+    // gap replayed from `nostos_oplog` instead of a full snapshot. Otherwise
     // `oplog_reader` stays `None` → reconnect always takes the snapshot path
     // (slice-1 reconcile remains the correctness floor either way).
     #[cfg(feature = "pg")]

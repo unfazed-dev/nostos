@@ -1,7 +1,7 @@
 /**
  * @nostos-sync/tauri — typed guest bindings for the nostos Tauri 2 plugin.
  *
- * Thin wrappers over invoke("plugin:cairn|<command>") mirroring the Rust
+ * Thin wrappers over invoke("plugin:nostos|<command>") mirroring the Rust
  * surface in sdk/nostos_tauri/src/lib.rs. Two tiers, one import:
  *
  *   import { nostos, upsert, query, watch } from "@nostos-sync/tauri";
@@ -23,14 +23,14 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 /** The invoke prefix every nostos command is namespaced under. */
-const CMD = "plugin:cairn|";
+const CMD = "plugin:nostos|";
 
 /**
  * Raw tier — the exact Rust command surface.
  *
  * connect() does NO network I/O: it opens SQLite + builds the client. A
  * subscribe() (or watch()) must follow or no server-pushed row ever arrives.
- * Every field is optional when the plugins.cairn config block in
+ * Every field is optional when the plugins.nostos config block in
  * tauri.conf.json supplies defaults (syncUrl / token / table / dbPath).
  */
 export const nostos = {
@@ -118,7 +118,7 @@ export const nostos = {
 
   /**
    * ADR-0030 add-wins OR-set: add `element` to the OR-set at (table, pk).
-   * The table must be declared in plugins.cairn.orSetTables AND match the
+   * The table must be declared in plugins.nostos.orSetTables AND match the
    * server's NOSTOS_OR_SET_COLUMNS (three views of one truth). Resolves
    * with the outbox id once the merge-upsert is durable locally.
    */

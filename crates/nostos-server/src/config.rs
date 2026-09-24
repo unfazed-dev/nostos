@@ -54,10 +54,10 @@ pub struct Config {
 
     /// Op-log writer's bounded internal channel depth (ADR-0025 slice 2). The
     /// fan-out loop `try_send`s each event into this buffer; a background task
-    /// drains + flushes to `cairn_oplog`. On full, the entry is dropped (the
+    /// drains + flushes to `nostos_oplog`. On full, the entry is dropped (the
     /// resume path falls back to snapshot-reconcile for the gap — correct, but
     /// a capacity signal). Default 4096; raise if
-    /// `cairn_oplog_dropped_total` is non-zero under sustained load. Only
+    /// `nostos_oplog_dropped_total` is non-zero under sustained load. Only
     /// meaningful under `NOSTOS_REPLICATOR=pg`.
     #[arg(long, env = "NOSTOS_OPLOG_BUFFER", default_value_t = 4096)]
     pub(crate) oplog_buffer: usize,
@@ -294,11 +294,11 @@ pub struct Config {
     pub(crate) push_remote_state_path: String,
 
     /// Logical-replication slot name.
-    #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "cairn_slot")]
+    #[arg(long, env = "NOSTOS_PG_SLOT", default_value = "nostos_slot")]
     pub(crate) pg_slot: String,
 
     /// Publication name.
-    #[arg(long, env = "NOSTOS_PG_PUBLICATION", default_value = "cairn_pub")]
+    #[arg(long, env = "NOSTOS_PG_PUBLICATION", default_value = "nostos_pub")]
     pub(crate) pg_publication: String,
 
     /// Log filter (RUST_LOG-style).

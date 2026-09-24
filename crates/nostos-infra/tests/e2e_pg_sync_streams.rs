@@ -41,7 +41,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 /// Init tracing so server-side stream/snapshot logs surface under
@@ -115,7 +115,7 @@ async fn spawn_stream_server(
     ));
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)));
 
-    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), slot, "cairn_pub").expect("valid PG url");
+    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), slot, "nostos_pub").expect("valid PG url");
     let mut repl = PgReplicator::new(pg_cfg);
     let fanout_drv = Arc::clone(&fanout);
     tokio::spawn(async move {

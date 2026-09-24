@@ -81,7 +81,7 @@ let storageReason = null;
 // Mirrors sdk/nostos_web/worker/nostos.worker.js — keep the two in step.
 // The loser then proxies to the leader over a BroadcastChannel (follower
 // proxy, end of file) instead of running its own memory engine.
-const LEADER_LOCK = "cairn:opfs-sahpool";
+const LEADER_LOCK = "nostos:opfs-sahpool";
 let leaderLockHeld = false; // also set by the promotion path (follower proxy)
 async function acquireLeaderLock() {
   if (typeof navigator === "undefined" || !navigator.locks) {
@@ -106,7 +106,7 @@ async function acquireLeaderLock() {
 let schemaTables = null;
 
 // Build the JSON-array-of-objects string for one table's current rows and push
-// it to Dart. Uses rowsFor (reads cairn_data directly — no view dependency, so
+// it to Dart. Uses rowsFor (reads nostos_data directly — no view dependency, so
 // this works before applySchema runs). Each row's payload is a JSON object; we
 // parse + re-emit so Dart's Collection<T>.fromRow sees plain row objects (the
 // same shape the native view query returns).
@@ -356,7 +356,7 @@ self.onmessage = async (ev) => {
         // Map Dart's {name, columns} into the ClientTableFfi shape the wasm
         // deserializer expects {name, primary_key, columns}. primary_key is
         // informational at this layer (the views key off table_name in
-        // cairn_data); default to [] when Dart omits it.
+        // nostos_data); default to [] when Dart omits it.
         schemaTables = (m.tables ?? []).map((t) => ({
           name: t.name,
           primary_key: t.primaryKey ?? [],
@@ -488,7 +488,7 @@ self.onmessage = async (ev) => {
 // the old standalone memory engine.
 // ponytail: requests in flight at a leader change are lost (no retry); a
 // promoted follower whose tab never called connect waits for one to.
-const BUS = new BroadcastChannel("cairn:multitab");
+const BUS = new BroadcastChannel("nostos:multitab");
 const MY_ID = Math.random().toString(36).slice(2);
 let standalone = false; // allowSecondaryTab: own memory engine, no proxying
 let lastConnect = null; // this tab's last connect request, replayed on promotion

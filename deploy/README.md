@@ -34,7 +34,7 @@ Both build from the repo-root [`Dockerfile`](../Dockerfile) (multi-stage,
 
 **Multi-tenant isolation = one nostos-server Fly app per project.** Each app
 binds exactly one project's `NOSTOS_PG_URL` (a Fly secret, never logged), owns
-its own `cairn_slot`/`cairn_pub`, and shares no state with other projects.
+its own `nostos_slot`/`nostos_pub`, and shares no state with other projects.
 Isolation is at the process boundary, not a multi-tenant in-process split — the
 simplest correct model (no cross-tenant leakage path through shared memory,
 connection pools, or a shared SQLite file).
@@ -122,8 +122,8 @@ apps use the default `nostos-server` command.)
   Datadog via Fly's [log shippers](https://fly.io/docs/reference/logs).
 - **Metrics**: `GET /metrics` (Prometheus text) on the sync app — scrape with
   [`fly metrics`](https://fly.io/docs/reference/metrics/) or a Prometheus
-  instance. Watch `cairn_slot_wal_status` (the P0-1 slot-health gauge) and
-  `cairn_replication_lag_bytes` — alert if `wal_status` leaves `Healthy`.
+  instance. Watch `nostos_slot_wal_status` (the P0-1 slot-health gauge) and
+  `nostos_replication_lag_bytes` — alert if `wal_status` leaves `Healthy`.
 
 ---
 

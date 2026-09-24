@@ -68,17 +68,17 @@ void main() {
     test('start() constructs and inits the requested engine; exactly one live adapter', () async {
       final log = <String>[];
       final registry = EngineRegistry(
-        nostosFactory: () => _RecordingAdapter('cairn', log),
+        nostosFactory: () => _RecordingAdapter('nostos', log),
         nostosDirectFactory: () => _RecordingAdapter('direct', log),
       );
 
-      final adapter = await registry.start(Engine.cairn, session);
+      final adapter = await registry.start(Engine.nostos, session);
 
       expect(adapter, isA<_RecordingAdapter>());
-      expect(registry.activeEngine, Engine.cairn);
+      expect(registry.activeEngine, Engine.nostos);
       expect(registry.current, same(adapter));
       expect(registry.debugLiveAdapters, hasLength(1));
-      expect(log, ['cairn.init']);
+      expect(log, ['nostos.init']);
     });
 
     test(
@@ -86,13 +86,13 @@ void main() {
       () async {
         final log = <String>[];
         final registry = EngineRegistry(
-          nostosFactory: () => _RecordingAdapter('cairn', log),
+          nostosFactory: () => _RecordingAdapter('nostos', log),
           nostosDirectFactory: () => _RecordingAdapter('direct', log),
         );
-        await registry.start(Engine.cairn, session);
+        await registry.start(Engine.nostos, session);
 
         expect(
-          () => registry.start(Engine.cairnDirect, session),
+          () => registry.start(Engine.nostosDirect, session),
           throwsStateError,
         );
       },

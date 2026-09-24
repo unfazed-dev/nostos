@@ -15,7 +15,7 @@
 //! ## Fixture
 //!
 //! A dedicated `schema_probe` table + a throwaway publication scoped to just
-//! that table (`cairn_pub_schema_ws1`, NOT the shared `cairn_pub`), so this test
+//! that table (`nostos_pub_schema_ws1`, NOT the shared `nostos_pub`), so this test
 //! can't perturb other suites. Covers one column per affinity arm: bool/int4
 //! (INTEGER), float8 (REAL), and the string-rendered types int8/text/
 //! timestamptz/uuid/jsonb (TEXT) — plus a composite-safe uuid PK.
@@ -26,11 +26,11 @@ use nostos_application::ports::{SchemaColumn, SchemaSource};
 use nostos_infra::PgSchemaSource;
 
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
-const PUBLICATION: &str = "cairn_pub_schema_ws1";
+const PUBLICATION: &str = "nostos_pub_schema_ws1";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -44,7 +44,7 @@ async fn sql_client() -> tokio_postgres::Client {
 }
 
 /// Idempotently create a dedicated fixture table + its own throwaway
-/// publication. Reusing the shared `cairn_pub` (scoped to `tasks`) would
+/// publication. Reusing the shared `nostos_pub` (scoped to `tasks`) would
 /// perturb the other e2e suites' event streams.
 async fn ensure_schema_probe(sql: &tokio_postgres::Client) {
     sql.batch_execute(

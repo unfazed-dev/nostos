@@ -19,7 +19,7 @@
 //!
 //! ```sh
 //! make pg-up
-//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn \
+//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos \
 //!   cargo test -p nostos-infra --features pg --test e2e_pg_token_store -- --nocapture
 //! ```
 
@@ -32,7 +32,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 /// Connect a control-plane SQL client for setup/teardown.
@@ -58,18 +58,18 @@ async fn ensure_table() {
         .get_or_init(|| async {
             let sql = sql_client().await;
             sql.batch_execute(
-                "CREATE TABLE IF NOT EXISTS cairn_push_tokens ( \
+                "CREATE TABLE IF NOT EXISTS nostos_push_tokens ( \
                      token      TEXT        PRIMARY KEY, \
                      platform   TEXT        NOT NULL, \
                      account_id TEXT        NOT NULL, \
                      tenant_id  TEXT        NOT NULL, \
                      updated_at TIMESTAMPTZ NOT NULL DEFAULT now() \
                  ); \
-                 CREATE INDEX IF NOT EXISTS idx_cairn_push_tokens_account \
-                     ON cairn_push_tokens (account_id, tenant_id);",
+                 CREATE INDEX IF NOT EXISTS idx_nostos_push_tokens_account \
+                     ON nostos_push_tokens (account_id, tenant_id);",
             )
             .await
-            .expect("create cairn_push_tokens");
+            .expect("create nostos_push_tokens");
         })
         .await;
 }
@@ -80,7 +80,7 @@ async fn clean_tokens(tokens: &[&str]) {
     let sql = sql_client().await;
     let owned: Vec<String> = tokens.iter().map(|t| (*t).to_string()).collect();
     sql.execute(
-        "DELETE FROM cairn_push_tokens WHERE token = ANY($1)",
+        "DELETE FROM nostos_push_tokens WHERE token = ANY($1)",
         &[&owned],
     )
     .await
@@ -179,7 +179,7 @@ async fn upsert_sweeps_stale_sibling_tokens() {
     sql_client()
         .await
         .execute(
-            "UPDATE cairn_push_tokens SET updated_at = now() - interval '31 days' \
+            "UPDATE nostos_push_tokens SET updated_at = now() - interval '31 days' \
              WHERE token = 'ttl-stale'",
             &[],
         )

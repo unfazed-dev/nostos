@@ -45,8 +45,8 @@ area_lint_test() { # fmt-check + clippy -D warnings + test --include-ignored
 }
 
 pg_probe() {
-  docker compose -f docker/docker-compose.yml exec -T postgres psql -U cairn -d cairn -tAc \
-    "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" 2>/dev/null | grep -q 1
+  docker compose -f docker/docker-compose.yml exec -T postgres psql -U nostos -d nostos -tAc \
+    "SELECT 1 FROM pg_publication WHERE pubname='nostos_pub'" 2>/dev/null | grep -q 1
 }
 
 area_e2e_pg() {
@@ -54,7 +54,7 @@ area_e2e_pg() {
   docker info >/dev/null 2>&1 || { note e2e-pg "skipped (docker daemon not running)"; return 0; }
   # A Postgres that already answers is reused (no restart under a running
   # dev stack) and left up afterwards; `make pg-down` stops it. Otherwise:
-  # the CI job's gate, cairn_pub present 5x in a row, because the init-time
+  # the CI job's gate, nostos_pub present 5x in a row, because the init-time
   # temporary server has it too (see the comment in ci.yml).
   if ! pg_probe; then
     docker compose -f docker/docker-compose.yml up -d

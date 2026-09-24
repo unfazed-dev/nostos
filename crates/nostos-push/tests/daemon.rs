@@ -1197,7 +1197,7 @@ async fn send_visible_routing_keys_validated_at_the_edge() {
         .post(
             "/v1/send",
             Some(KEY_A),
-            &with_data(json!({"cairn_route": "/orders/42", "order_id": "42"})),
+            &with_data(json!({"nostos_route": "/orders/42", "order_id": "42"})),
         )
         .await;
     assert_eq!(status, reqwest::StatusCode::ACCEPTED, "routed: {body}");

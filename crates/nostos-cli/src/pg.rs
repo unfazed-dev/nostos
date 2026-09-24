@@ -482,8 +482,8 @@ mod tests {
     #[test]
     fn tls_defaults_off_for_localhost() {
         for url in [
-            "postgresql://cairn:cairn@localhost:5433/cairn",
-            "postgresql://cairn:cairn@127.0.0.1:5433/cairn",
+            "postgresql://nostos:nostos@localhost:5433/nostos",
+            "postgresql://nostos:nostos@127.0.0.1:5433/nostos",
         ] {
             assert_eq!(ssl_mode(url), SslMode::Disable, "{url}");
         }
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn explicit_sslmode_require_wins_even_for_localhost() {
         assert_eq!(
-            ssl_mode("postgresql://cairn:cairn@localhost:5433/cairn?sslmode=require"),
+            ssl_mode("postgresql://nostos:nostos@localhost:5433/nostos?sslmode=require"),
             SslMode::Encrypt
         );
     }
@@ -552,8 +552,8 @@ mod tests {
     #[test]
     fn redacts_password_only() {
         assert_eq!(
-            redact("postgresql://cairn:s3cret@localhost:5433/cairn"),
-            "postgresql://cairn:***@localhost:5433/cairn"
+            redact("postgresql://nostos:s3cret@localhost:5433/nostos"),
+            "postgresql://nostos:***@localhost:5433/nostos"
         );
     }
 

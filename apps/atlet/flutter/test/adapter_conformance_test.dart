@@ -20,7 +20,7 @@ class FakeAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   Duration _ackDelay = const Duration(milliseconds: 100);
 
   @override
-  String get engine => 'cairn';
+  String get engine => 'nostos';
 
   @override
   Future<void> init({
