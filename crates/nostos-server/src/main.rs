@@ -19,6 +19,7 @@ mod ingest;
 mod push_api;
 mod push_config;
 mod rules;
+mod shutdown;
 mod telemetry;
 mod typed_column;
 
@@ -42,6 +43,7 @@ use crate::cors::{build_cors_layer, parse_origin_list};
 use crate::endpoints::{healthz, metrics_handler, schema, PROTECT_METADATA};
 use crate::push_config::{parse_push_tables, push_wiring, resolve_tenant_col, PushWiring};
 use crate::rules::{put_rules_handler, rules_handler, watch_rules};
+use crate::shutdown::shutdown_signal;
 use crate::telemetry::{init_tracing, redacted_request_span};
 use crate::typed_column::extract_typed_column;
 
@@ -1033,28 +1035,4 @@ async fn main() -> anyhow::Result<()> {
     let _ = rules_shutdown_tx.send(true);
     let _ = rules_watch_handle.await;
     Ok(())
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => info!("received Ctrl-C, shutting down"),
-        () = terminate => info!("received SIGTERM, shutting down"),
-    }
 }
