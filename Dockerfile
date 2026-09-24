@@ -34,6 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /usr/local/bin/nostos-server /usr/local/bin/nostos-server
 COPY --from=builder /usr/local/bin/nostos-cloud  /usr/local/bin/nostos-cloud
 COPY --from=builder /usr/local/bin/nostos-pushd  /usr/local/bin/nostos-pushd
+# ADR-0046: pre-rename binary names as symlinks (a no-op until the rename).
+RUN --mount=type=bind,source=packaging/legacy-binary-names.sh,target=/tmp/legacy-binary-names.sh \
+    sh /tmp/legacy-binary-names.sh /usr/local/bin
 # Default to the sync server; override CMD for the cloud/push binaries.
 ENV NOSTOS_LOG=info,nostos=info RUST_LOG=info
 EXPOSE 8800 9090 8090
