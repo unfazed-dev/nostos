@@ -1,0 +1,14 @@
+# The builder stage does `COPY . .`; without this file the context carried
+# every local SDK/app build output (~9 GB, measured 2026-09-24). None of these
+# are tracked, so the image build sees exactly the checked-in sources.
+.git
+.worktrees
+.claude
+.claude-flow
+**/target
+**/build
+**/.build
+**/.dart_tool
+**/node_modules
+**/*.a
+sdk/nostos_swift/xcframework

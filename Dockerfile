@@ -7,7 +7,7 @@
 # registry, selected at runtime by NOSTOS_PUSHD_DATABASE_URL).
 #
 #   docker build -t nostos .
-#   docker run --rm nostos nostos-server   # default entrypoint arg
+#   docker run --rm nostos nostos-server   # default command
 #   docker run --rm nostos nostos-cloud
 #   docker run --rm nostos nostos-pushd
 
@@ -37,4 +37,4 @@ COPY --from=builder /usr/local/bin/nostos-pushd  /usr/local/bin/nostos-pushd
 # Default to the sync server; override CMD for the cloud/push binaries.
 ENV NOSTOS_LOG=info,nostos=info RUST_LOG=info
 EXPOSE 8800 9090 8090
-ENTRYPOINT ["nostos-server"]
+CMD ["nostos-server"]
