@@ -9,13 +9,13 @@ GitHub, and only the user runs them.
 |---|---|
 | `retro.py` | groups by committer day in the commit's own tz (a kept tag closes its group), `[arxa-*]` tags, drafts `retro/titles.tsv` |
 | `rewrite.py` | stage 1: git-filter-repo on a fresh clone. Stage 2: empty root, one `--no-ff` merge per group, tags moved onto merges. Then verify |
-| `postfix.sh` | `cargo fmt --all`, `dart format` (the dirs `ci.yml` checks), uniffi C# regen; fails on anything outside that scope |
+| `postfix.sh` | `cargo fmt --all`, `flutter pub get` + `dart format` (the dirs `ci.yml` checks), uniffi C# regen; fails on anything outside that scope |
 | `hashfix.py` | the post-tip PR #39: `--style` commits postfix.sh's output, then old hash cites → final ones plus `docs/ci/retro/*.md` and the release notes; one merge |
 | `replay.py` | pushes branches, opens PRs, fast-forwards `main`, pushes tags, creates releases. Dry run by default |
 | `test_retro.py` | invariants on a synthetic repo: `python3 scripts/nostos_rename/test_retro.py` |
 
 Prereqs: `python3 -c "import git_filter_repo"` works (`pip install git-filter-repo`),
-`cargo`, `dart` (Flutter 3.47.5, as CI) and `uniffi-bindgen-cs` (`sdk/cairn_dotnet/README.md`) are on PATH,
+`cargo`, `flutter` + `dart` (3.47.5, as CI) and `uniffi-bindgen-cs` (`sdk/cairn_dotnet/README.md`) are on PATH,
 `gh auth status` is `unfazed-dev`, `scripts/nostos_rename/rules.py` has landed,
 and the cairn `main` is frozen (nothing lands until step 12).
 
@@ -49,7 +49,9 @@ delete the dirs whose `*.d` files name `$NOSTOS`.
    few `git show --stat <merge>`, then `message-cites.txt`.
 4. **Post-rename fixups.** `$T/postfix.sh $NOSTOS` (about 2 min, most of it the
    dotnet release build). It must end `postfix: in scope`: only `.rs`, the CI-formatted
-   `.dart` dirs and the checksum lines of `nostos.cs` may change. Changes stay uncommitted.
+   `.dart` dirs, the atlet + example `pubspec.lock` and atlet's macOS plugin registrant
+   (`flutter pub get` re-sorts them) and the checksum lines of `nostos.cs` may change.
+   Changes stay uncommitted.
 5. **PR #39.** `python3 $T/hashfix.py --work $NOSTOS --style`: commit (a) `style: …` is
    step 4's output, commit (b) is the hash fixups + retro docs, one `[arxa-builder]` merge. Review
    `.git/nostos-retro/hashfix-report.txt`: `kept` = the arxa-studio pins, left on
