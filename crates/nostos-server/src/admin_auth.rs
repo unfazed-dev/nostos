@@ -40,7 +40,7 @@ pub const MIN_ADMIN_TOKEN_LEN: usize = 32;
 /// request (the handler) plus one at startup (the length check), so state
 /// plumbing would be an abstraction with no second caller to justify it.
 pub fn admin_token_from_env() -> Option<SecretString> {
-    std::env::var("NOSTOS_ADMIN_TOKEN")
+    nostos_infra::env::var("NOSTOS_ADMIN_TOKEN")
         .ok()
         .filter(|s| !s.is_empty())
         .map(SecretString)

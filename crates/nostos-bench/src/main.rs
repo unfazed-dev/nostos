@@ -216,7 +216,7 @@ fn shuffle<T>(v: &mut [T], seed: u64) {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
-    let cfg = BenchConfig::parse();
+    let cfg = nostos_infra::env::parse::<BenchConfig>();
     info!(?cfg, "starting nostos-bench");
 
     // Raise file-descriptor limit — 10k clients need ~20k+ FDs (sockets + pipes).
@@ -372,7 +372,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
     // two together are the honest before/after the plan mandates (the real-PG
     // write-amplification cost is a separate real-PG measurement, slice 6).
     let op_log: Option<Arc<nostos_infra::RecordingOpLogWriter>> =
-        if std::env::var_os("NOSTOS_BENCH_OPLOG").is_some() {
+        if nostos_infra::env::var_os("NOSTOS_BENCH_OPLOG").is_some() {
             Some(Arc::new(nostos_infra::RecordingOpLogWriter::new(4096)))
         } else {
             None
@@ -385,7 +385,7 @@ async fn run_one(cfg: &BenchConfig, clients: usize, rep: usize) -> Result<RunRes
     // anonymous (no account), so the expected hint count is 0 — this measures
     // the enqueue bookkeeping on the fan-out path, not rail traffic.
     let push_count: Option<Arc<AtomicU64>> =
-        std::env::var_os("NOSTOS_BENCH_PUSH").map(|_| Arc::new(AtomicU64::new(0)));
+        nostos_infra::env::var_os("NOSTOS_BENCH_PUSH").map(|_| Arc::new(AtomicU64::new(0)));
     let fanout = Arc::new({
         let builder = match op_log {
             Some(w) => FanOutService::new(Arc::clone(&store)).with_op_log(w),

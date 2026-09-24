@@ -106,12 +106,12 @@ One app for the whole cloud (separate from the per-project sync apps):
 fly launch --no-deploy --name nostos-cloud --dockerfile Dockerfile
 fly secrets set --app nostos-cloud \
   STRIPE_SECRET_KEY=... STRIPE_WEBHOOK_SECRET=... NOSTOS_CLOUD_ADMIN_KEY=...
-# Override the entrypoint to the cloud binary (the image defaults to nostos-server):
+# The image's default command is nostos-server; the cloud app overrides it:
 fly deploy --app nostos-cloud --strategy rolling
 ```
 
 (The cloud app sets `[processes]`/CMD to `nostos-cloud`; the per-project sync
-apps use the default `nostos-server` entrypoint.)
+apps use the default `nostos-server` command.)
 
 ---
 

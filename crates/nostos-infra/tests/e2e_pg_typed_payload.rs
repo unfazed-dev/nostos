@@ -40,7 +40,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 const PUBLICATION: &str = "cairn_pub_typed_f5";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -215,7 +215,7 @@ fn assert_typed_shape(payload: &Value, uid: uuid::Uuid) {
 /// SNAPSHOT path (fresh-slot pre-existing row).
 #[tokio::test]
 async fn snapshot_row_renders_typed_json() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -257,7 +257,7 @@ async fn snapshot_row_renders_typed_json() {
 /// The same assertion via the STREAMING path (live INSERT after connect).
 #[tokio::test]
 async fn streamed_row_renders_typed_json() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -302,7 +302,7 @@ async fn streamed_row_renders_typed_json() {
 /// (necessarily different) is excluded from the comparison.
 #[tokio::test]
 async fn snapshot_and_streamed_rows_of_identical_content_are_byte_identical() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }

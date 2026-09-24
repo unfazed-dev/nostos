@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# pre-push — refuses every push to main: main moves only by merging a PR on
+# GitHub (docs/ci/setup.md). `make hooks` installs it. Git feeds one line per
+# ref on stdin: <local ref> <local sha> <remote ref> <remote sha>.
+#
+# Escape hatch, for the one-time retro replay only (it must push main):
+#   ARXA_ALLOW_MAIN_PUSH=1 git push origin main
+set -euo pipefail
+
+[[ ${ARXA_ALLOW_MAIN_PUSH:-} == 1 ]] && exit 0
+
+while read -r _ _ remote_ref _; do
+  if [[ $remote_ref == refs/heads/main ]]; then
+    echo "pre-push: refusing to push to main. Push a worktree branch and open a PR (docs/ci/setup.md)." >&2
+    exit 1
+  fi
+done

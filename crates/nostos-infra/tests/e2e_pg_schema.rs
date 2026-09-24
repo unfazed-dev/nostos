@@ -29,7 +29,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 const PUBLICATION: &str = "cairn_pub_schema_ws1";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -85,7 +85,7 @@ fn assert_col(columns: &[SchemaColumn], name: &str, oid: i32, affinity: &str) {
 
 #[tokio::test]
 async fn schema_source_reports_typed_catalog() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("{E2E_FLAG} not set — skipping (needs real Postgres; see `make pg-up`)");
         return;
     }

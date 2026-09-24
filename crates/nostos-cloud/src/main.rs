@@ -26,6 +26,11 @@ use nostos_license::Tier;
 use clap::Parser;
 use tracing::info;
 
+/// Default `--db`.
+const DEFAULT_DB: &str = "nostos-cloud.db";
+/// Pre-rename [`DEFAULT_DB`], kept when only it exists (ADR-0046).
+const LEGACY_DB: &str = "cairn-cloud.db"; // rename:hold — pre-rename database file, read as fallback until 1.0 (decision 10, ADR-0046)
+
 /// Embedded marketing landing page (Task F).
 const LANDING_HTML: &str = include_str!("../static/landing.html");
 /// Embedded admin SPA (Task E).
@@ -42,7 +47,7 @@ pub struct Config {
     license_secret: String,
 
     /// SQLite database path. `:memory:` for ephemeral dev.
-    #[arg(long, env = "NOSTOS_CLOUD_DB", default_value = "nostos-cloud.db")]
+    #[arg(long, env = "NOSTOS_CLOUD_DB", default_value = DEFAULT_DB)]
     db: String,
 
     /// Stripe secret key (`sk_...`). If unset, billing endpoints 503.
@@ -81,7 +86,12 @@ pub struct Config {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = Config::parse();
+    let mut cfg = nostos_infra::env::parse::<Config>();
+    // ADR-0046: a default-path deployment keeps its pre-rename database.
+    if cfg.db == DEFAULT_DB {
+        let db = nostos_infra::config_path::resolve(std::path::Path::new(""), DEFAULT_DB, LEGACY_DB);
+        cfg.db = db.display().to_string();
+    }
     init_tracing(&cfg.log);
 
     let store = CloudStore::open(&cfg.db).context("open cloud db")?;
@@ -162,5 +172,13 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("Ctrl-C, shutting down"),
         () = term => info!("SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn legacy_db_is_the_pre_rename_name() {
+        assert_eq!(super::LEGACY_DB, "cairn-cloud.db"); // rename:hold — pins the fallback to the database deployments already have
     }
 }

@@ -23,7 +23,7 @@ use nostos_infra::rules_file;
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -72,7 +72,7 @@ fn write_nostos_config(cwd: &std::path::Path, publication: &str, tables: &[Strin
 
 #[tokio::test]
 async fn init_writes_one_entry_per_publication_table() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -155,7 +155,7 @@ async fn init_writes_one_entry_per_publication_table() {
 /// tables must not fail `init` — it writes a template file and exits 0.
 #[tokio::test]
 async fn init_on_empty_publication_writes_template_and_succeeds() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }

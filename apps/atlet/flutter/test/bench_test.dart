@@ -37,6 +37,7 @@ Future<void> _settle(WidgetTester tester) async {
     await tester.pump();
   }
 }
+
 RunRecord _fixture({
   required String engine,
   required String runType,
@@ -306,4 +307,5 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.textContaining('Upload failed'), findsOneWidget);
     });
-  });}
+  });
+}

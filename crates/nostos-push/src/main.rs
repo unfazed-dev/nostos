@@ -11,12 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::Parser;
 use tracing::{info, warn};
 
 use nostos_push::auth::ApiKeys;
 use nostos_push::coalescer::{self, CoalescerLimits};
-use nostos_push::config::Config;
+use nostos_push::config::{Config, DEFAULT_DB, LEGACY_DB};
 use nostos_push::limit::SendRateLimiter;
 use nostos_push::rail::Rails;
 use nostos_push::store::SqliteStore;
@@ -27,7 +26,12 @@ use nostos_push::{build_router, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = Config::parse();
+    let mut cfg = nostos_infra::env::parse::<Config>();
+    // ADR-0046: a default-path deployment keeps its pre-rename registry.
+    if cfg.db == DEFAULT_DB {
+        let db = nostos_infra::config_path::resolve(std::path::Path::new(""), DEFAULT_DB, LEGACY_DB);
+        cfg.db = db.display().to_string();
+    }
     init_tracing();
 
     // Fail fast (pin 0.2): a daemon with no usable key list must never

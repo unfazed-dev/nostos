@@ -58,7 +58,7 @@ use nostos_infra::{AllowAnonymous, PgWriteBack};
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -201,7 +201,7 @@ async fn drop_stale_slot(slot: &str) {
 /// window.
 #[tokio::test]
 async fn single_external_write_on_idle_table_applies_and_advances_checkpoint() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -295,7 +295,7 @@ async fn single_external_write_on_idle_table_applies_and_advances_checkpoint() {
 /// has an entry."
 #[tokio::test]
 async fn write_enqueued_mid_session_reaches_postgres_without_reconnect() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }

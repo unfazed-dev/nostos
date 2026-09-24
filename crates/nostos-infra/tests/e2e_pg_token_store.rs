@@ -31,7 +31,7 @@ use nostos_infra::PgTokenStore;
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -92,7 +92,7 @@ async fn clean_tokens(tokens: &[&str]) {
 /// idempotence (pruning an absent token is 0 rows, not an error).
 #[tokio::test]
 async fn upsert_list_prune_roundtrip() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -157,7 +157,7 @@ async fn upsert_list_prune_roundtrip() {
 /// re-registered within the TTL — while fresh multi-device rows survive.
 #[tokio::test]
 async fn upsert_sweeps_stale_sibling_tokens() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -221,7 +221,7 @@ async fn upsert_sweeps_stale_sibling_tokens() {
 /// user's data to the next user).
 #[tokio::test]
 async fn re_registration_migrates_token_to_new_account() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -267,7 +267,7 @@ async fn re_registration_migrates_token_to_new_account() {
 /// same-tenant re-register still migrates.
 #[tokio::test]
 async fn cross_tenant_re_registration_keeps_the_existing_row() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -338,7 +338,7 @@ async fn cross_tenant_re_registration_keeps_the_existing_row() {
 /// under two tenants must only ever resolve its own tenant's devices.
 #[tokio::test]
 async fn list_by_account_is_tenant_isolated() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }
@@ -376,7 +376,7 @@ async fn list_by_account_is_tenant_isolated() {
 /// account for the coalescer's presence filter), never another tenant's.
 #[tokio::test]
 async fn list_by_tenant_groups_accounts_and_isolates_tenants() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `make pg-up` to run)");
         return;
     }

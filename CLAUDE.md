@@ -34,6 +34,9 @@ on warnings.
 
 ## Verbs (the only loops you need)
 - `make ci` — fmt-check + clippy (-D warnings) + full test suite. Gate for every change.
+- `scripts/check.sh [area]` (`make check AREA=`) — each CI job's steps locally, by job name; local green = CI green.
+- `make worktree NAME=<task>` → work in `.worktrees/<task>` (branched from `origin/main`; the main clone stays
+  on `main`) → PR, merge on GitHub → `make worktree-rm NAME=<task>`. `make hooks` once per clone: pre-push refuses `main`.
 - `cargo test -p <crate>` — focused iteration.
 - `docker compose -f docker/docker-compose.yml up -d` then
   `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg -- --test-threads=1`

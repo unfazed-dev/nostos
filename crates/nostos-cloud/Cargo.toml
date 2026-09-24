@@ -33,6 +33,9 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true }
+# `nostos_infra::env` only (ADR-0046 env fallback); path dep so the default
+# `webpush` feature stays off.
+nostos-infra = { path = "../nostos-infra", default-features = false, features = ["clap"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

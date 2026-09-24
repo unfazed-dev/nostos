@@ -45,6 +45,31 @@ check-targets: ## Verify SDK cross-compile targets are installed.
 	@rustup target list --installed | grep -qE 'aarch64-apple-ios' && echo "✓ ios" || echo "✗ ios missing"
 
 # ----------------------------------------------------------------------------
+# Worktrees — one task = one worktree = one branch at .worktrees/<name>; the
+# main clone stays on main (docs/ci/setup.md). Claude Code's worktrees land
+# here too, via the WorktreeCreate hook (scripts/worktree-create.sh).
+# ----------------------------------------------------------------------------
+.PHONY: worktree
+worktree: ## New task worktree: .worktrees/<NAME> on branch <NAME>, from origin/main.
+	@test -n "$(NAME)" || { echo "usage: make worktree NAME=<name>"; exit 2; }
+# Branches from origin/main (`git fetch origin` first for the real tip); falls
+# back to local main when origin/main is missing (no remote yet, never fetched).
+	@base=origin/main; git rev-parse -q --verify "$$base" >/dev/null || base=main; \
+	  git worktree add -b "$(NAME)" ".worktrees/$(NAME)" "$$base"
+
+.PHONY: worktree-rm
+worktree-rm: ## Remove .worktrees/<NAME> + its branch once its PR merged on GitHub.
+	@test -n "$(NAME)" || { echo "usage: make worktree-rm NAME=<name>"; exit 2; }
+# `branch -d`, not -D: an unmerged branch survives. `git pull` main first so a
+# merge on GitHub counts as merged.
+	@branch=$$(git -C ".worktrees/$(NAME)" branch --show-current); \
+	  git worktree remove ".worktrees/$(NAME)" && git branch -d "$$branch"
+
+.PHONY: hooks
+hooks: ## Once per clone: git hooks from scripts/hooks (pre-push refuses main).
+	git config core.hooksPath scripts/hooks
+
+# ----------------------------------------------------------------------------
 # Build / test / lint
 # ----------------------------------------------------------------------------
 .PHONY: build
@@ -77,6 +102,13 @@ lint: fmt-check clippy ## fmt-check + clippy (what CI runs).
 .PHONY: ci
 ci: lint test ## Local mirror of CI: lint + test.
 	@echo "✓ CI clean locally"
+
+# check: the one root check (docs/ci/setup.md). Every CI job has a same-named
+# area in scripts/check.sh; AREA=lint-test is `make ci`.
+AREA ?= all
+.PHONY: check
+check: ## Local green = CI green: every CI job's area, or one with AREA=<job>.
+	@./scripts/check.sh $(AREA)
 
 .PHONY: sdk-e2e
 sdk-e2e: ## Run all 10 SDK live-replication E2E slices (9 PUSH+ECHO + flutter PUSH-only, macOS). (flutter restored 2026-08-05)

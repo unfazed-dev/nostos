@@ -42,7 +42,7 @@ const SECRET: &[u8] = b"e2e-client-replay-secret";
 const TENANT_COL: &str = "org_id";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -245,7 +245,7 @@ fn pk_present(path: &str, pk: &str) -> i64 {
 /// delete) was received AND applied by the real client end-to-end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_client_reconnect_applies_replayed_gap_including_delete() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("skipping (set {E2E_FLAG}=1 with `docker compose up -d` to run)");
         return;
     }

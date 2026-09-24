@@ -141,7 +141,10 @@ void main() {
       await _settle(tester);
       expect(find.byKey(const Key('history-detail-screen')), findsOneWidget);
       // The payload the smoke test reads, on screen with its routing keys.
-      expect(find.textContaining('"cairn_route": "/history/e2"'), findsOneWidget);
+      expect(
+        find.textContaining('"cairn_route": "/history/e2"'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('the bench is off the feed, one tap away in the app bar', (

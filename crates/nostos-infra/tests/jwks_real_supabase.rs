@@ -34,7 +34,7 @@ use jsonwebtoken::{Algorithm, DecodingKey};
 #[tokio::test]
 #[ignore = "needs NOSTOS_SUPABASE_URL + NOSTOS_SUPABASE_JWT (operator: real Supabase project + user token)"]
 async fn real_supabase_asymmetric_token_verifies_via_live_jwks() {
-    let base = match std::env::var("NOSTOS_SUPABASE_URL") {
+    let base = match nostos_infra::env::var("NOSTOS_SUPABASE_URL") {
         Ok(u) if !u.trim().is_empty() => u.trim().trim_end_matches('/').to_string(),
         _ => {
             eprintln!(
@@ -44,7 +44,7 @@ async fn real_supabase_asymmetric_token_verifies_via_live_jwks() {
             return;
         }
     };
-    let token = match std::env::var("NOSTOS_SUPABASE_JWT") {
+    let token = match nostos_infra::env::var("NOSTOS_SUPABASE_JWT") {
         Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
             eprintln!("skipping: NOSTOS_SUPABASE_JWT not set (need a real user access_token)");
@@ -96,7 +96,7 @@ async fn real_supabase_asymmetric_token_verifies_via_live_jwks() {
 #[tokio::test]
 #[ignore = "needs NOSTOS_SUPABASE_URL only (no token) — verifies the JWKS fetch+parse half"]
 async fn live_supabase_jwks_fetches_and_parses() {
-    let base = match std::env::var("NOSTOS_SUPABASE_URL") {
+    let base = match nostos_infra::env::var("NOSTOS_SUPABASE_URL") {
         Ok(u) if !u.trim().is_empty() => u.trim().trim_end_matches('/').to_string(),
         _ => {
             eprintln!("skipping: set NOSTOS_SUPABASE_URL=https://<ref>.supabase.co to run");

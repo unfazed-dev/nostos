@@ -1,0 +1,30 @@
+name: PR
+
+# The PR-title stage tag (docs/ci/decisions.md row 5), warn-first: a missing
+# or unknown [arxa-<skill>] tag is an annotation and the job stays green. Its
+# own workflow because `edited` has to re-run it when only the title changes;
+# on ci.yml that would re-run every heavy job.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    name: PR title stage tag (warn-first)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # Through env, never ${{ }} inside run: the title is untrusted text.
+      - run: scripts/check.sh pr-title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}

@@ -21,7 +21,11 @@
 # are the production upgrade (out of scope: sim verification only).
 set -euo pipefail
 
-PROFILE="${NOSTOS_PROFILE:-debug}"
+LEGACY_PROFILE="${CAIRN_PROFILE:-}" # rename:hold — pre-rename env name, read as fallback until 1.0 (ADR-0046)
+if [ -z "${NOSTOS_PROFILE:-}" ] && [ -n "$LEGACY_PROFILE" ]; then
+  echo "warning: the pre-rename profile env var is deprecated, set NOSTOS_PROFILE instead (read as a fallback until 1.0)" >&2
+fi
+PROFILE="${NOSTOS_PROFILE:-${LEGACY_PROFILE:-debug}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RN_SDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"          # sdk/nostos_react_native
 NOSTOS_SWIFT_DIR="$(cd "$RN_SDK_DIR/../nostos_swift" && pwd)"  # sdk/nostos_swift

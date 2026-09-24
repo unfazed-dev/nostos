@@ -7,12 +7,12 @@
 # registry, selected at runtime by NOSTOS_PUSHD_DATABASE_URL).
 #
 #   docker build -t nostos .
-#   docker run --rm nostos nostos-server   # default entrypoint arg
+#   docker run --rm nostos nostos-server   # default command
 #   docker run --rm nostos nostos-cloud
 #   docker run --rm nostos nostos-pushd
 
 # ---------- builder ----------
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.98-bookworm AS builder
 WORKDIR /nostos
 # Install needed system libs (none beyond what the base image provides for our
 # deps; rusqlite uses `bundled` sqlite, reqwest uses rustls — no system deps).
@@ -34,7 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /usr/local/bin/nostos-server /usr/local/bin/nostos-server
 COPY --from=builder /usr/local/bin/nostos-cloud  /usr/local/bin/nostos-cloud
 COPY --from=builder /usr/local/bin/nostos-pushd  /usr/local/bin/nostos-pushd
+# ADR-0046: pre-rename binary names as symlinks (a no-op until the rename).
+RUN --mount=type=bind,source=packaging/legacy-binary-names.sh,target=/tmp/legacy-binary-names.sh \
+    sh /tmp/legacy-binary-names.sh /usr/local/bin
 # Default to the sync server; override CMD for the cloud/push binaries.
 ENV NOSTOS_LOG=info,nostos=info RUST_LOG=info
 EXPOSE 8800 9090 8090
-ENTRYPOINT ["nostos-server"]
+CMD ["nostos-server"]

@@ -85,7 +85,7 @@ pub fn rustc_version() -> String {
 /// to [`UNKNOWN`] on any error. The legacy `NOSTOS_BENCH_HOST` env override is
 /// still honored (useful for reproducible local runs).
 pub fn hostname() -> String {
-    if let Ok(h) = std::env::var("NOSTOS_BENCH_HOST") {
+    if let Ok(h) = nostos_infra::env::var("NOSTOS_BENCH_HOST") {
         return h;
     }
     run_capture("hostname", &[])

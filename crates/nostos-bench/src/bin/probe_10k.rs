@@ -160,7 +160,7 @@ async fn run(
     }
     eprintln!("  [diag] listeners: {}", urls.join(" "));
     // Prices the client swarm's own decode — see `count_frames_cheap`.
-    let skip_decode = std::env::var("NOSTOS_PROBE_SKIP_DECODE").is_ok_and(|v| v == "1");
+    let skip_decode = nostos_infra::env::var("NOSTOS_PROBE_SKIP_DECODE").is_ok_and(|v| v == "1");
     if skip_decode {
         eprintln!("  [diag] CLIENT DECODE DISABLED (frame counting only) — harness-cost probe");
     }

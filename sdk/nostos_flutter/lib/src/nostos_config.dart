@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart'
+    show FlutterError, debugPrint, visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
 
 /// App-level Nostos configuration, normally loaded from a bundled
@@ -91,13 +93,18 @@ class NostosConfig {
     );
   }
 
-  /// Load and parse a bundled JSON asset (default `assets/nostos.json`).
+  static const _defaultAsset = 'assets/nostos.json';
+  static const _legacyAsset = 'assets/cairn.json'; // rename:hold — pre-rename asset name, read as fallback until 1.0 (ADR-0046)
+
+  /// Load and parse a bundled JSON asset (default `assets/nostos.json`, or
+  /// the pre-rename asset when only that one is bundled — ADR-0046).
   ///
   /// The asset must be registered under `flutter/assets` in the app's
   /// `pubspec.yaml`. Throws [FlutterError] if the asset is missing and
   /// [FormatException] if it fails validation (see [NostosConfig.fromJson]).
-  static Future<NostosConfig> load({String asset = 'assets/nostos.json'}) async {
-    final raw = await rootBundle.loadString(asset);
+  static Future<NostosConfig> load({String asset = _defaultAsset}) async {
+    final legacy = asset == _defaultAsset ? _legacyAsset : asset;
+    final raw = await loadAssetOrLegacy(rootBundle.loadString, asset, legacy);
     return NostosConfig.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
@@ -121,4 +128,24 @@ class NostosConfig {
 
   /// Whether this config carries Supabase-cloud credentials.
   bool get hasSupabase => supabaseUrl != null && supabaseAnonKey != null;
+}
+
+/// `asset` via [load], or `legacy` when `asset` is missing (ADR-0046). With
+/// equal names the missing-asset error propagates unchanged.
+@visibleForTesting
+Future<String> loadAssetOrLegacy(
+  Future<String> Function(String) load,
+  String asset,
+  String legacy,
+) async {
+  try {
+    return await load(asset);
+  } on FlutterError {
+    if (legacy == asset) rethrow;
+    debugPrint(
+      'warning: $legacy is deprecated, rename it to $asset '
+      '(read as a fallback until 1.0)',
+    );
+    return load(legacy);
+  }
 }

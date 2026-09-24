@@ -28,7 +28,7 @@ pg = ["dep:tokio-postgres"]
 nostos-domain = { workspace = true }
 # Rails + RailSet, reused AS-IS (ADR-0038 §1; plan task 1.5 "no rail forks").
 # Default features keep the webpush rail on — this is a server-shaped crate.
-nostos-infra = { workspace = true }
+nostos-infra = { workspace = true, features = ["clap"] }
 
 tokio = { workspace = true }
 axum = { workspace = true }

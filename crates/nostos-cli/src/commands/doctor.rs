@@ -15,7 +15,7 @@ use clap::Args;
 
 use crate::direct::{self, Verdict};
 
-use crate::config::{NostosConfig, DEFAULT_FILE_NAME};
+use crate::config::{config_path, NostosConfig};
 use crate::dotenv;
 use crate::pg::PgControl;
 
@@ -42,7 +42,7 @@ pub async fn run(args: DoctorArgs, cwd: &Path) -> Result<()> {
 /// Direct mode has no server to be healthy: what can be wrong is the SQL in
 /// the database. Every check is a `select`, so this is safe against production.
 async fn run_direct(cwd: &Path) -> Result<()> {
-    let rules_path = cwd.join(RULES_FILE_NAME);
+    let rules_path = rules_file::path_in(cwd);
     let rules = rules_file::load(&rules_path)?.with_context(|| {
         format!(
             "no {RULES_FILE_NAME} at {} \u{2014} doctor checks one trigger per synced table",
@@ -71,7 +71,11 @@ async fn run_direct(cwd: &Path) -> Result<()> {
     let vars = dotenv::read(&env_path);
     let pg_url = ["DATABASE_URL", "NOSTOS_PG_URL", "SUPABASE_DB_URL"]
         .iter()
-        .find_map(|k| vars.get(*k).cloned().or_else(|| std::env::var(k).ok()))
+        .find_map(|k| {
+            vars.get(*k)
+                .cloned()
+                .or_else(|| nostos_infra::env::var(k).ok())
+        })
         .with_context(|| {
             format!(
                 "no DATABASE_URL in {} or the environment \u{2014} direct mode checks the \
@@ -99,7 +103,7 @@ async fn run_direct(cwd: &Path) -> Result<()> {
 }
 
 async fn run_server(cwd: &Path) -> Result<()> {
-    let cfg = NostosConfig::load(&cwd.join(DEFAULT_FILE_NAME))?;
+    let cfg = NostosConfig::load(&config_path(cwd))?;
     let env_path = cwd.join(".env");
     let dotenv_vars = dotenv::read(&env_path);
 

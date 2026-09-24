@@ -1,0 +1,40 @@
+N	date	tags	title
+1	2026-06-27	[arxa-builder]	week-1 spike: sync server, throughput moat benchmark, first full stack
+2	2026-06-28	[arxa-builder][arxa-designer][arxa-tester]	tiers 0–7 foundation: LSN resume, client SDK core, WASM bridge, predicate engine
+3	2026-07-04	[arxa-builder]	agent personas, the verify skill, Flutter pomodoro and todo fixtures
+4	2026-07-05	[arxa-builder][arxa-designer]	browser demo: live filtered sync over the WASM bridge (v0.1.0)
+5	2026-07-05	[arxa-builder][arxa-tester][arxa-designer]	engine readback API and RESULTS.md corrections after v0.1.0
+6	2026-07-12	[arxa-builder]	tenant-scoped write-back, Supabase JWKS auth, the nostos CLI and Flutter SDK
+7	2026-07-13	[arxa-builder][arxa-tester][arxa-designer]	.NET live E2E, signed licenses, snapshot-on-subscribe, typed storage
+8	2026-07-14	[arxa-builder]	NostosDatabase Dart API with apply_schema
+9	2026-07-15	[arxa-builder]	playbook renderer and make playbook target
+10	2026-07-19	[arxa-builder]	Dart reactive facade (ADR-0024) and dashboard shell
+11	2026-07-20	[arxa-builder]	op-log epoch: persisted writer, slot epochs, LSN gating, replay on reconnect (ADR-0025)
+12	2026-07-29	[arxa-builder]	write outcomes in SyncStatus; dead-letter only errors (ADR-0027)
+13	2026-07-30	[arxa-builder][arxa-designer]	paced fake replicator and a docs and SDK fix sweep
+14	2026-07-31	[arxa-builder]	web SDK thin slice in a Worker, reactive watch across SDKs, Increment writes (ADR-0030)
+15	2026-08-03	[arxa-builder][arxa-designer]	sign-out wipe and setToken across SDKs, JWT exp on HS256 (ADR-0029)
+16	2026-08-04	[arxa-designer][arxa-builder]	close live /sync sockets at JWT exp (ADR-0029 D4)
+17	2026-08-05	[arxa-builder]	OR-set loud-fail, faulted delivery counter, launch-gap closure
+18	2026-08-06	[arxa-builder]	atlet comparison suite: SyncAdapter contract, schema, Flutter pilot
+19	2026-08-07	[arxa-builder][arxa-tester]	sync rules at runtime: check report, GET/PUT /rules, admin toggle editor
+20	2026-08-08	[arxa-builder][arxa-tester]	unified API waves 1–2, CRDT counters, OPFS storage, attachments
+21	2026-08-15	[arxa-builder]	push notifications: presence index, token store, FCM/APNs/Web Push rails, router
+22	2026-08-16	[arxa-builder]	push pilot in atlet on the real FCM and iOS rails
+23	2026-08-17	[arxa-builder][arxa-tester]	nostos-pushd daemon, atlet web leg, client-apply bench
+24	2026-08-18	[arxa-builder][arxa-tester]	P5 sync streams, slices 2–8
+25	2026-08-24	[arxa-builder][arxa-designer][arxa-tester]	capacity-shed continuity signal (ADR-0040)
+26	2026-08-27	[arxa-builder]	production SDK surface: Tauri bindings, push retries, API keys, NostosDatabase.local
+27	2026-08-28	[arxa-builder][arxa-tester]	no-credentials device round-trip, tenant-column audit, tenant-scoped CRDT merge
+28	2026-08-29	[arxa-builder][arxa-designer]	iroh transport seam and native iroh sessions (ADR-0041)
+29	2026-08-30	[arxa-builder]	MirrorReplicator and the /ingest sidecar topology
+30	2026-08-31	[arxa-builder][arxa-designer][arxa-tester]	shared-secret bearer sync auth
+31	2026-09-01	[arxa-builder][arxa-designer]	first-attempt dead-letter for non-retryable writes, unified-verb completion, fix sweep
+32	2026-09-02	[arxa-tester][arxa-builder][arxa-designer]	security hardening, sequential fan-out, benchmark reruns
+33	2026-09-10	[arxa-builder]	one-pager honesty pass
+34	2026-09-21	[arxa-builder][arxa-tester]	multi-tab leader guard, Tauri conformance suite, parallel delivery walk (v0.2.0)
+35	2026-09-21	[arxa-tester][arxa-builder][arxa-designer]	ack-progress scan experiments and Android toolchain bumps
+36	2026-09-22	[arxa-builder][arxa-designer][arxa-tester]	honest conflation benchmarks; direct mode over PostgREST and Realtime
+37	2026-09-23	[arxa-builder][arxa-tester][arxa-designer]	direct-mode engine and push: routing keys, tokens, visible pushes
+38	2026-09-24	auto	nostos rename groundwork: Docker fix, CI decision record, env/config fallback (ADR-0046), rename and retro tooling, arxa CI/CD adoption
+39	-	[arxa-builder]	post-rename formatting, regenerated bindings, rewritten hash cites, retro records

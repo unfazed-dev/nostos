@@ -29,9 +29,10 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
+const LEGACY_SECRET = "CAIRN_PUSH_SECRET"; // rename:hold — pre-rename secret name, read as fallback until 1.0 (ADR-0046)
 
 Deno.serve(async (req: Request): Promise<Response> => {
-  const secret = Deno.env.get("NOSTOS_PUSH_SECRET");
+  const secret = Deno.env.get("NOSTOS_PUSH_SECRET") ?? Deno.env.get(LEGACY_SECRET);
   if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
     return new Response("forbidden", { status: 403 });
   }

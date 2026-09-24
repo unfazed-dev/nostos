@@ -34,7 +34,7 @@ use nostos_cli::direct::{
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -249,7 +249,7 @@ impl Fixture {
 /// and they are never seen again — silent, permanent loss.
 #[tokio::test]
 async fn an_in_flight_transaction_hides_every_later_commit() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -298,7 +298,7 @@ async fn an_in_flight_transaction_hides_every_later_commit() {
 /// resumes inclusively without re-reading the whole page forever.
 #[tokio::test]
 async fn the_page_is_whole_transactions_and_the_cursor_advances() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -354,7 +354,7 @@ async fn the_page_is_whole_transactions_and_the_cursor_advances() {
 /// is namespaced so two claims cannot collide.
 #[tokio::test]
 async fn rls_scopes_the_log_to_the_callers_claims() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -401,7 +401,7 @@ async fn rls_scopes_the_log_to_the_callers_claims() {
 /// losing device is told to drop it.
 #[tokio::test]
 async fn increment_is_atomic_and_a_scope_change_emits_a_delete() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -480,7 +480,7 @@ async fn increment_is_atomic_and_a_scope_change_emits_a_delete() {
 /// the client can see it.
 #[tokio::test]
 async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -551,7 +551,7 @@ async fn doctor_passes_a_fresh_deploy_and_catches_a_row_limited_pull() {
 /// "nothing happened", and the rows in the hole would never arrive.
 #[tokio::test]
 async fn a_horizon_below_the_pruned_window_is_refused_with_pt410() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -600,7 +600,7 @@ async fn a_horizon_below_the_pruned_window_is_refused_with_pt410() {
 /// statement, scoped by the same RLS that scopes a pull.
 #[tokio::test]
 async fn a_pruned_device_can_re_snapshot_and_resume() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -674,7 +674,7 @@ async fn sent(client: &tokio_postgres::Client) -> i64 {
 /// become one request per row.
 #[tokio::test]
 async fn push_skips_awake_devices_and_debounces_the_rest() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }
@@ -750,7 +750,7 @@ async fn push_skips_awake_devices_and_debounces_the_rest() {
 /// a debounced one is a lost one (atlet, 2026-09-23).
 #[tokio::test]
 async fn a_visible_template_pushes_every_change_with_its_row() {
-    if std::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
+    if nostos_infra::env::var(E2E_FLAG).ok().as_deref() != Some("1") {
         eprintln!("skipping: set {E2E_FLAG}=1");
         return;
     }

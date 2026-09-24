@@ -26,7 +26,7 @@ iroh = ["nostos-infra/iroh"]
 [dependencies]
 nostos-domain = { workspace = true }
 nostos-application = { workspace = true }
-nostos-infra = { workspace = true }
+nostos-infra = { workspace = true, features = ["clap"] }
 nostos-license = { workspace = true }
 
 tokio = { workspace = true }

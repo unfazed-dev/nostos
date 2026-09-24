@@ -1,0 +1,10 @@
+# ADR-0046: every env read goes through nostos_infra::env, which falls back to
+# the pre-rename env name after the project rename. A direct std read would
+# silently lose that fallback.
+disallowed-methods = [
+  { path = "std::env::var", reason = "use nostos_infra::env::var (ADR-0046 rename fallback)" },
+  { path = "std::env::var_os", reason = "use nostos_infra::env::var_os (ADR-0046 rename fallback)" },
+  { path = "std::env::vars", reason = "a prefix scan must accept nostos_infra::env::LEGACY_PREFIX too (ADR-0046)" },
+  { path = "std::env::vars_os", reason = "a prefix scan must accept nostos_infra::env::LEGACY_PREFIX too (ADR-0046)" },
+  { path = "clap::Parser::parse", reason = "use nostos_infra::env::parse so env = attributes get the ADR-0046 fallback" },
+]

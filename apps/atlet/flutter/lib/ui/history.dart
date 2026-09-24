@@ -117,7 +117,10 @@ class _OrderEventFeed extends StatelessWidget {
             return ListTile(
               key: Key('history-event-${e.id}'),
               dense: true,
-              trailing: const Icon(Icons.chevron_right, color: AtletTokens.ink3),
+              trailing: const Icon(
+                Icons.chevron_right,
+                color: AtletTokens.ink3,
+              ),
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) =>
@@ -147,4 +150,3 @@ IconData _statusIcon(String status) => switch (status) {
   'failed' => Icons.error_outline,
   _ => Icons.schedule,
 };
-

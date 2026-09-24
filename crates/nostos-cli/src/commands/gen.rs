@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 use serde_json::Value;
 
-use crate::config::{Backend, ProjectConfig, DOT_NOSTOS_DIR, SCHEMA_JSON};
+use crate::config::{dot_dir, Backend, ProjectConfig, SCHEMA_JSON};
 
 #[derive(Debug, Args)]
 pub struct GenArgs {
@@ -42,7 +42,7 @@ pub async fn run(args: GenArgs, cwd: &Path) -> Result<()> {
 
     let config = ProjectConfig::load(cwd)?;
 
-    let schema_path = cwd.join(DOT_NOSTOS_DIR).join(SCHEMA_JSON);
+    let schema_path = dot_dir(cwd).join(SCHEMA_JSON);
     if !schema_path.exists() {
         bail!("no .nostos/schema.json — run nostos pull first");
     }

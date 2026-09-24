@@ -229,10 +229,7 @@ class _Fact extends StatelessWidget {
         children: [
           SizedBox(
             width: 110,
-            child: Text(
-              label,
-              style: const TextStyle(color: AtletTokens.ink3),
-            ),
+            child: Text(label, style: const TextStyle(color: AtletTokens.ink3)),
           ),
           Expanded(child: SelectableText(value)),
         ],

@@ -4,6 +4,10 @@ Status: inventory, 2026-09-21. **Nothing here has been applied.** The tooling is
 `scripts/rename-to-qairn.sh` (dry-run by default). Every count below was produced
 by grepping the tracked tree, not estimated.
 
+> Superseded 2026-09-24: the name is `nostos`, and `scripts/rename-to-qairn.sh`
+> was deleted. The rename tool is `scripts/nostos_rename/` (see its README);
+> the script is still in git history for reference.
+
 Context: `docs/plans/naming-and-domain-2026-09-21.md` recommends `qairn` because
 `cairn-cli` is already taken on crates.io at v0.1.6 and `cairn` itself is squatted
 at v0.0.0 — the flagship crate name is permanently gone.

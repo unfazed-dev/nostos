@@ -19,7 +19,7 @@ use nostos_infra::snapshot_source::audit_tenant_column;
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
-    std::env::var("NOSTOS_PG_URL")
+    nostos_infra::env::var("NOSTOS_PG_URL")
         .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
 }
 
@@ -38,7 +38,7 @@ async fn sql_client() -> tokio_postgres::Client {
 /// typo (table that does not exist).
 #[tokio::test]
 async fn audit_classifies_columnless_missing_and_ok() {
-    if std::env::var(E2E_FLAG).is_err() {
+    if nostos_infra::env::var(E2E_FLAG).is_err() {
         eprintln!("SKIPPED: {E2E_FLAG} not set (no real Postgres)");
         return;
     }

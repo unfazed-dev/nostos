@@ -12,7 +12,7 @@ use clap::Args;
 
 use nostos_infra::rules_file::{self, RULES_FILE_NAME};
 
-use crate::config::{Backend, LinkMode, ProjectConfig, DOT_NOSTOS_DIR, LOCAL_DIR};
+use crate::config::{dot_dir, Backend, LinkMode, ProjectConfig, LOCAL_DIR};
 use crate::direct;
 use crate::prompt::prompt_nonempty;
 
@@ -116,7 +116,7 @@ pub async fn run(args: LinkArgs, cwd: &Path) -> Result<()> {
     };
     config.save(cwd)?;
 
-    let local_dir = cwd.join(DOT_NOSTOS_DIR).join(LOCAL_DIR);
+    let local_dir = dot_dir(cwd).join(LOCAL_DIR);
     std::fs::create_dir_all(&local_dir)?;
 
     ensure_gitignore_local(cwd)?;
@@ -156,7 +156,7 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
         );
     };
 
-    let rules_path = cwd.join(RULES_FILE_NAME);
+    let rules_path = rules_file::path_in(cwd);
     let rules = rules_file::load(&rules_path)?.ok_or_else(|| {
         anyhow::anyhow!(
             "no {RULES_FILE_NAME} at {} — direct mode generates one trigger per \
@@ -195,11 +195,11 @@ fn run_direct(args: LinkArgs, cwd: &Path) -> Result<()> {
     };
     config.save(cwd)?;
 
-    let local_dir = cwd.join(DOT_NOSTOS_DIR).join(LOCAL_DIR);
+    let local_dir = dot_dir(cwd).join(LOCAL_DIR);
     std::fs::create_dir_all(&local_dir)?;
     ensure_gitignore_local(cwd)?;
 
-    let sql_path = cwd.join(DOT_NOSTOS_DIR).join(direct::OUTPUT_FILE);
+    let sql_path = dot_dir(cwd).join(direct::OUTPUT_FILE);
     std::fs::write(&sql_path, &sql)?;
     if push.is_some() {
         let dir = cwd.join(PUSH_FN_DIR);
@@ -302,7 +302,7 @@ fn deploy(
         s
     });
 
-    let local = cwd.join(DOT_NOSTOS_DIR).join(LOCAL_DIR);
+    let local = dot_dir(cwd).join(LOCAL_DIR);
     let sql_file = local.join("deploy.sql");
     let env_file = local.join("nostos-push.env");
     let result = (|| {
@@ -414,17 +414,21 @@ fn resolve_backend(
 }
 
 fn ensure_gitignore_local(cwd: &Path) -> Result<()> {
-    const ENTRY: &str = ".nostos/local/";
+    // The resolved dir, not the constant: a pre-rename `.nostos/local/` holds
+    // the same secrets and must stay ignored (ADR-0046).
+    let dot = dot_dir(cwd);
+    let dot = dot.file_name().unwrap_or_default().to_string_lossy();
+    let entry = format!("{dot}/{LOCAL_DIR}/");
     let path = cwd.join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == ENTRY) {
+    if existing.lines().any(|line| line.trim() == entry) {
         return Ok(());
     }
     let mut content = existing;
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str(ENTRY);
+    content.push_str(&entry);
     content.push('\n');
     std::fs::write(&path, content)?;
     Ok(())
@@ -457,7 +461,7 @@ mod tests {
     fn app_dir() -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("nostos-link-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(dir.join(DOT_NOSTOS_DIR).join(LOCAL_DIR)).unwrap();
+        std::fs::create_dir_all(dot_dir(&dir).join(LOCAL_DIR)).unwrap();
         std::fs::write(
             dir.join("sa.json"),
             r#"{"project_id":"p","client_email":"e@p","private_key":"-----BEGIN-----\nk\n-----END-----\n"}"#,
@@ -498,7 +502,7 @@ mod tests {
         // A failed rollout still takes its secrets with it.
         let failing = fake_supabase(&dir, 1);
         assert!(deploy(&failing, &dir, "abc", "select 1;", &dir.join("sa.json")).is_err());
-        let local = dir.join(DOT_NOSTOS_DIR).join(LOCAL_DIR);
+        let local = dot_dir(&dir).join(LOCAL_DIR);
         assert_eq!(
             std::fs::read_dir(&local).unwrap().count(),
             0,

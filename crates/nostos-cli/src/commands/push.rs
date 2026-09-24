@@ -725,14 +725,19 @@ async fn run_check(args: CheckPushArgs, cwd: &Path) -> Result<()> {
 
 /// `check`'s view of the world: dotenv (`.env`) overlaid by any non-blank
 /// `NOSTOS_*` process env vars — a platform-injected secret must win over a
-/// stale local file, the standard dotenv precedence.
+/// stale local file, the standard dotenv precedence. Pre-rename names count
+/// too (ADR-0046).
+#[allow(clippy::disallowed_methods)] // prefix scan; fold_legacy adds the fallback
 fn merged_env(env_path: &Path) -> BTreeMap<String, String> {
+    use nostos_infra::env::{fold_legacy, LEGACY_PREFIX, PREFIX};
     let mut vars = dotenv::read(env_path);
     for (name, value) in std::env::vars() {
-        if name.starts_with("NOSTOS_") && !value.trim().is_empty() {
+        if (name.starts_with(PREFIX) || name.starts_with(LEGACY_PREFIX)) && !value.trim().is_empty()
+        {
             vars.insert(name, value);
         }
     }
+    fold_legacy(&mut vars);
     vars
 }
 

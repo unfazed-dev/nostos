@@ -28,6 +28,7 @@ import 'package:hooks/hooks.dart';
 
 const _assetName = 'src/rust/frb_generated.io.dart';
 const _crateName = 'nostos_flutter_rust';
+const _legacyFeaturesEnv = 'CAIRN_FLUTTER_CARGO_FEATURES'; // rename:hold — pre-rename env name, read as fallback until 1.0 (ADR-0046)
 
 void main(List<String> args) async {
   await build(args, (input, output) async {
@@ -273,7 +274,9 @@ Future<void> _cargoBuildFallback({
   // binaries never carry iroh — so shipped artifacts stay off-default until
   // ADR-0041's field-leg condition clears.
   final extraFeatures =
-      (Platform.environment['NOSTOS_FLUTTER_CARGO_FEATURES'] ?? '')
+      (Platform.environment['NOSTOS_FLUTTER_CARGO_FEATURES'] ??
+              Platform.environment[_legacyFeaturesEnv] ??
+              '')
           .split(',')
           .map((f) => f.trim())
           .where((f) => f.isNotEmpty)

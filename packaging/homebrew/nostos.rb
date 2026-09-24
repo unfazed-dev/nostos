@@ -51,6 +51,10 @@ class Nostos < Formula
     # release.yml's Package step) containing both binaries; only the CLI
     # ships in this formula.
     bin.install Dir["nostos-*/nostos"].first => "nostos"
+    # ADR-0046: the pre-rename command name, until 1.0. Guarded: no self-link
+    # while the names match, never over an existing file.
+    legacy = "cairn" # rename:hold — pre-rename binary name, symlinked until 1.0 (ADR-0046)
+    bin.install_symlink "nostos" => legacy unless legacy == "nostos" || (bin/legacy).exist?
   end
 
   test do

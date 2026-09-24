@@ -69,7 +69,7 @@ sdk/nostos_react_native/ios/libnostos_swift.a
 # .mcp.json pins this checkout to one operator's Supabase project; supabase/.temp/
 # is CLI scratch. Neither belongs in the shared OSS repo.
 .mcp.json
-supabase/.temp/
+**/supabase/.temp/
 
 # Firebase/Google credentials dropped for local testing
 apps/atlet/FCM/
@@ -79,4 +79,11 @@ apps/atlet/flutter/ios/Runner/GoogleService-Info.plist
 # Python bytecode from packaging/release tooling
 __pycache__/
 *.pyc
-.nostos/local/
+# nostos link output: config.json carries the project anon key
+.nostos/
+# The pre-rename project dir is still read as a fallback (ADR-0046), so it
+# must stay ignored after the rename; the [a] keeps the rename rules off it.
+.c[a]irn/
+
+# arxa worktree law: one task = one worktree at .worktrees/<name>
+.worktrees/

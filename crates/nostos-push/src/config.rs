@@ -9,6 +9,11 @@
 
 use clap::Parser;
 
+/// Default [`Config::db`].
+pub const DEFAULT_DB: &str = "./cairn-pushd.db";
+/// Pre-rename [`DEFAULT_DB`], kept when only it exists (ADR-0046).
+pub const LEGACY_DB: &str = "./cairn-pushd.db"; // rename:hold — pre-rename registry file, read as fallback until 1.0 (decision 10, ADR-0046)
+
 /// Command-line / env configuration for nostos-pushd.
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -24,7 +29,7 @@ pub struct Config {
     /// SQLite database path for the daemon-owned token + receipt registry
     /// (plan pin 0.3). ":memory:" works for tests. Ignored when
     /// `database_url` (NOSTOS_PUSHD_DATABASE_URL) is set.
-    #[arg(long, env = "NOSTOS_PUSHD_DB", default_value = "./cairn-pushd.db")]
+    #[arg(long, env = "NOSTOS_PUSHD_DB", default_value = DEFAULT_DB)]
     pub db: String,
 
     /// Postgres registry URL (v1.1, ADR-0038 §4 addendum) — selects the
@@ -103,8 +108,13 @@ pub struct Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, LEGACY_DB};
     use clap::Parser;
+
+    #[test]
+    fn legacy_db_is_the_pre_rename_name() {
+        assert_eq!(LEGACY_DB, "./cairn-pushd.db"); // rename:hold — pins the fallback to the registry deployments already have
+    }
 
     #[test]
     fn defaults_match_the_plan_pins() {

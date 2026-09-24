@@ -180,7 +180,7 @@ pub(crate) fn http_client() -> reqwest::Client {
 
 /// Env var that is set and non-blank, else `None`.
 pub(crate) fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+    crate::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 pub mod apns;

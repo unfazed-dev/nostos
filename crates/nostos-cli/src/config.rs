@@ -4,12 +4,21 @@
 //! env-var *name* reference (`db.url_env`) plus non-secret sync topology so
 //! it is safe to commit alongside the app.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_FILE_NAME: &str = "nostos.toml";
+/// Pre-rename [`DEFAULT_FILE_NAME`], read and edited in place until 1.0.
+pub const LEGACY_FILE_NAME: &str = "cairn.toml"; // rename:hold — pre-rename config name, read as fallback until 1.0 (decision 10, ADR-0046)
+
+/// The project config in `dir`: [`DEFAULT_FILE_NAME`], or the pre-rename
+/// file when only that exists (ADR-0046).
+#[must_use]
+pub fn config_path(dir: &Path) -> PathBuf {
+    nostos_infra::config_path::resolve(dir, DEFAULT_FILE_NAME, LEGACY_FILE_NAME)
+}
 
 fn default_tenant_column() -> String {
     "org_id".to_string()
@@ -193,6 +202,15 @@ impl NostosConfig {
 
 /// `.nostos/` directory name (tool-owned; sits at the app repo root).
 pub const DOT_NOSTOS_DIR: &str = ".nostos";
+/// Pre-rename [`DOT_NOSTOS_DIR`], read and written in place until 1.0.
+pub const LEGACY_DOT_DIR: &str = ".cairn"; // rename:hold — pre-rename config dir, read as fallback until 1.0 (decision 10, ADR-0046)
+
+/// The tool dir in `dir`: [`DOT_NOSTOS_DIR`], or the pre-rename dir when only
+/// that exists (ADR-0046).
+#[must_use]
+pub fn dot_dir(dir: &Path) -> PathBuf {
+    nostos_infra::config_path::resolve(dir, DOT_NOSTOS_DIR, LEGACY_DOT_DIR)
+}
 /// `.nostos/config.json` — committed app-side config (`nostos link` writes it).
 pub const CONFIG_JSON: &str = "config.json";
 /// `.nostos/schema.json` — committed SchemaDescriptor mirror (ADR-0021 shape).
@@ -264,7 +282,7 @@ impl ProjectConfig {
     /// # Errors
     /// [`anyhow::Error`] if the file is missing or malformed.
     pub fn load(dir: &Path) -> Result<Self> {
-        let path = dir.join(DOT_NOSTOS_DIR).join(CONFIG_JSON);
+        let path = dot_dir(dir).join(CONFIG_JSON);
         let text = std::fs::read_to_string(&path).with_context(|| {
             format!(
                 "no {}/{} found at {} — run `nostos link` first",
@@ -285,7 +303,7 @@ impl ProjectConfig {
     /// # Errors
     /// [`anyhow::Error`] on serialize or IO failure.
     pub fn save(&self, dir: &Path) -> Result<()> {
-        let nostos_dir = dir.join(DOT_NOSTOS_DIR);
+        let nostos_dir = dot_dir(dir);
         std::fs::create_dir_all(&nostos_dir)
             .with_context(|| format!("creating {}", nostos_dir.display()))?;
         let path = nostos_dir.join(CONFIG_JSON);
@@ -331,6 +349,12 @@ mod tests {
             }),
             server: ServerSection::default(),
         }
+    }
+
+    #[test]
+    fn legacy_names_are_the_pre_rename_names() {
+        assert_eq!(LEGACY_FILE_NAME, "cairn.toml"); // rename:hold — pins the fallback to the file projects already have
+        assert_eq!(LEGACY_DOT_DIR, ".cairn"); // rename:hold — pins the fallback to the dir projects already have
     }
 
     #[test]

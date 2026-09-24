@@ -58,7 +58,8 @@ class CartItemRow {
 
 class OrderRow {
   final String id;
-  final String status; // 'pending' | 'paid' | 'failed' | 'shipped' | 'delivered'
+  final String
+  status; // 'pending' | 'paid' | 'failed' | 'shipped' | 'delivered'
   final int subtotalCents;
   final int taxCents;
   final int shippingCents;

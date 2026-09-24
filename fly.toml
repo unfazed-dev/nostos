@@ -5,7 +5,7 @@
 # one isolated nostos-server Fly app bound to that project's Postgres source.
 #
 # Build: uses the repo-root Dockerfile (builds nostos-server --features pg +
-# nostos-cloud; the entrypoint is nostos-server). Override the app name + region
+# nostos-cloud; the default command is nostos-server). Override the app name + region
 # per project:
 #   fly deploy --app nostos-sync-<project-id> --image-label <project-id>
 #
