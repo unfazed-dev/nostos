@@ -133,7 +133,7 @@ async fn spawn(opts: SpawnOpts<'_>) -> Server {
         .env("NOSTOS_LOG", opts.log)
         // The parent test process's TERM/COLORTERM leak into the child via
         // Command's default env inheritance, so tracing_subscriber::fmt()
-        // (init_tracing, main.rs — no .with_ansi(false)) emits ANSI-colored
+        // (init_tracing, telemetry.rs — no .with_ansi(false)) emits ANSI-colored
         // log lines whenever a contributor's shell is color-capable. That
         // breaks audit_line_emitted_once_per_mutation's line.contains("x=")
         // checks (fields get wrapped in separate SGR escapes). NO_COLOR=1

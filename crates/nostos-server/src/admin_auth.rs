@@ -7,7 +7,7 @@
 //! JWTs, JWKS, or `Principal` at all, which is the point.
 //!
 //! Fail-closed by construction: [`admin_token_from_env`] returns `None`
-//! when `NOSTOS_ADMIN_TOKEN` is unset, and the caller (`main.rs`) treats
+//! when `NOSTOS_ADMIN_TOKEN` is unset, and the caller (`rules.rs`) treats
 //! `None` as "the route is not mounted" — a 404, not a 401. A default
 //! deployment that never opts in has no mutable surface to attack.
 

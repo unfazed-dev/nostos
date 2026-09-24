@@ -201,7 +201,7 @@ pub enum PushTemplate {
 /// The compiled per-table push configuration (ADR-0037 §1 amendment + §2):
 /// which tables doorbell fully-offline accounts, their templates, and the
 /// tenant column used to target those hints. Parsed by the composition root
-/// from `NOSTOS_PUSH_TABLES` (`nostos-server/src/main.rs`) — no env reads in
+/// from `NOSTOS_PUSH_TABLES` (`nostos-server/src/push_config.rs`) — no env reads in
 /// this layer. Default (empty) = no tenant-wide hints; the matched-account
 /// path (plan 1.3) runs unchanged.
 #[derive(Debug, Clone, Default)]

@@ -190,7 +190,7 @@ async fn spawn_with_cors(tag: &str, cors_origin: &str) -> Server {
 }
 
 /// C1 follow-up regression: the explicit-origins CORS branch
-/// (`crates/nostos-server/src/main.rs`, `build_cors_layer`) omitted
+/// (`crates/nostos-server/src/cors.rs`, `build_cors_layer`) omitted
 /// `Method::PUT` from `allow_methods`, so the moment an operator followed
 /// `docs/OPERATING.md`'s production guidance and set `NOSTOS_CORS_ORIGINS`,
 /// a real browser's preflight for the admin panel's own `PUT /rules` save

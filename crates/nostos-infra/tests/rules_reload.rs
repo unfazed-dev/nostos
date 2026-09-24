@@ -2,7 +2,7 @@
 //!
 //! `spawn_fake_server_with_live_rules` (in `tests/common`) hands back the raw
 //! `watch::Sender<u64>` + `Arc<RwLock<ActiveRuleset>>` pair that production's
-//! `watch_rules` (`crates/nostos-server/src/main.rs`) owns, so a test can
+//! `watch_rules` (`crates/nostos-server/src/rules.rs`) owns, so a test can
 //! simulate a reload exactly the way the real poller does: swap the
 //! `RwLock`, then notify on the channel. That poller itself lives in the
 //! `nostos-server` binary crate and isn't reachable from these
@@ -251,7 +251,7 @@ async fn identical_reload_does_not_close() {
 
 #[tokio::test]
 async fn malformed_reload_keeps_previous_ruleset() {
-    // Part 1: the load function `watch_rules` (crates/nostos-server/src/main.rs
+    // Part 1: the load function `watch_rules` (crates/nostos-server/src/rules.rs
     // — a binary-crate poller, not reachable from these nostos-infra
     // integration tests) calls on every poll tick rejects malformed TOML
     // outright rather than returning an empty/default ruleset. This is the
