@@ -60,7 +60,7 @@ gh api 'repos/{owner}/{repo}/branches/main/protection' --method PUT \
   -H "Accept: application/vnd.github+json" --input - <<'JSON'
 {
   "required_status_checks": {
-    "strict": true,
+    "strict": false,
     "contexts": [
       "conventional commit subjects",
       "fmt + clippy + test",
@@ -83,6 +83,9 @@ JSON
 ```
 
 - `gh` fills in `{owner}/{repo}` from this clone's remote.
+- `strict` is off (2026-09-24). With it on, every merge puts the other open PRs
+  behind `main`, and each needs an update plus a full CI rerun before it can merge.
+  For a solo repo that serialises every merge.
 - The contexts are the check names GitHub reports: each `ci.yml` job's `name:`,
   once per matrix entry for `sdk-typecheck`.
 - `PR title stage tag (warn-first)` stays out while row 5 keeps it warn-first.
