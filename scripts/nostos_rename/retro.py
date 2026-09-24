@@ -221,9 +221,21 @@ def _day_keys(rows):
     return keys
 
 
+AUTO_TAGS = "auto"  # tags re-derived from the files at every run: a day that is still growing
+POST_DATE = "-"  # the post-tip PR's row: dated the day hashfix.py runs
+POST_TAGS = "[arxa-builder]"
+POST_TITLE = "post-rename formatting, regenerated bindings, rewritten hash cites, retro records"
+
+
+def post_row(path, n) -> dict:
+    """The last PR (hashfix.py): the row dated `-`, or the default."""
+    row = next((r for r in read_titles(path) if r["date"] == POST_DATE), None)
+    return {"n": n, "date": POST_DATE, "tags": row["tags"] if row else POST_TAGS, "title": row["title"] if row else POST_TITLE}
+
+
 def titles_for(groups: list[Group], path) -> list[dict]:
     """The signed-off titles, checked against the groups the history yields now."""
-    rows = read_titles(path)
+    rows = [r for r in read_titles(path) if r["date"] != POST_DATE]
     want = [(g.n, g.date) for g in groups]
     have = [(r["n"], r["date"]) for r in rows]
     if want != have:
@@ -471,7 +483,7 @@ def cmd_titles(a):
     rules = load_rules(a.rules)
     groups = compute_groups(a.repo, a.ref, a.tags)
     tags = group_tags(a.repo, groups, a.ref)
-    old = read_titles(a.out)
+    old = [r for r in read_titles(a.out) if r["date"] != POST_DATE]
     kept = dict(zip(_day_keys(old), old))
     rows = []
     keys = _day_keys([{"date": g.date} for g in groups])
@@ -480,14 +492,14 @@ def cmd_titles(a):
     for g, t, key in zip(groups, tags, keys):
         prev = kept.get(key)
         if prev:
-            if prev["tags"] != tag_prefix(t):
+            if prev["tags"] not in (tag_prefix(t), AUTO_TAGS):
                 print(f"#{g.n} {g.date}: keeping signed-off tags {prev['tags']} (derived {tag_prefix(t)})")
             rows.append({"n": g.n, "date": g.date, "tags": prev["tags"], "title": prev["title"]})
         else:
             title = rules.rename_text(draft_title([recs[s].subject for s in g.fp]))
             rows.append({"n": g.n, "date": g.date, "tags": tag_prefix(t), "title": title})
             drafted += 1
-    write_titles(a.out, rows)
+    write_titles(a.out, rows + [post_row(a.out, len(groups) + 1)])
     print(f"{a.out}: {len(rows)} rows, {drafted} drafted, {len(rows) - drafted} kept")
 
 

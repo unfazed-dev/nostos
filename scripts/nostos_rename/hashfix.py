@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""The one commit after the retro tip: hash-cite fixups + retro PR summaries.
+"""The last retro PR: post-rename style commit, hash-cite fixups + retro PR summaries.
 
-  hashfix.py --work DIR [--date 2026-09-25T09:00:00+10:00] [--keep 224ccef fabc1a16]
+  hashfix.py --work DIR [--style] [--date 2026-09-25T09:00:00+10:00] [--keep 224ccef fabc1a16]
+
+`--style` first commits the worktree's uncommitted changes (postfix.sh's
+formatter + uniffi regen output) as its own commit; without it a dirty
+worktree is refused.
 
 Runs on the repo rewrite.py produced, once, while `main` is still the retro
 tip. Every >=7-hex token in a tracked text file that is the unambiguous prefix
@@ -10,8 +14,9 @@ of exactly one OLD commit becomes the same-length prefix of its FINAL commit
 are: they cite the archive on purpose (arxa-studio's pins). Tokens that look
 like a cite but resolve to nothing are listed in hashfix-report.txt.
 
-The same commit adds docs/ci/retro/NN-YYYY-MM-DD.md per retro PR and the two
-notes-only release bodies. It lands as retro PR #N+1 (its own --no-ff merge),
+The fixup commit also adds docs/ci/retro/NN-YYYY-MM-DD.md per retro PR and the
+two notes-only release bodies. Both commits land as retro PR #N+1 (one --no-ff
+merge, title + tags from titles.tsv's `-` row),
 so every commit after the root still arrives through a PR. That PR's body
 cites its own merge, so it lives outside the tree, beside replay.json, which
 is everything replay.py needs.
@@ -35,9 +40,8 @@ import rewrite  # noqa: E402
 
 RETRO_DIR = "docs/ci/retro"
 KEEP = ("224ccef", "fabc1a16")
-POST_TAGS = ["arxa-cicd"]
-POST_TITLE = "retro PR summaries and final-history hash fixups"
 POST_SUBJECT = "docs(ci): retro PR summaries and final-history hash fixups"
+STYLE_SUBJECT = "style: formatters and regenerated uniffi bindings after the nostos rename"
 
 
 def text_files(work, commit) -> dict[str, tuple[str, bytes]]:
@@ -68,6 +72,7 @@ def history_commits(work, head, base, skip) -> list[retro.Commit]:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work", required=True, help="the repo rewrite.py produced")
+    ap.add_argument("--style", action="store_true", help="commit the dirty worktree first (postfix.sh output)")
     ap.add_argument("--date", help="ISO 8601 date for the post-tip commit + merge (default: now)")
     ap.add_argument("--keep", nargs="*", default=list(KEEP), help="hash prefixes that cite the archive on purpose")
     a = ap.parse_args(argv)
@@ -77,17 +82,30 @@ def main(argv=None):
     groups, tip = meta["groups"], meta["retro_tip"]
     if retro.git(work, "rev-parse", "main").strip() != tip:
         raise SystemExit("main is not the retro tip: hashfix has run already, or the repo moved on")
-    if retro.git(work, "status", "--porcelain").strip():
-        raise SystemExit(f"{work} has uncommitted changes")
+    dirty = bool(retro.git(work, "status", "--porcelain").strip())
+    if dirty != a.style:
+        raise SystemExit(f"{work}: --style needs uncommitted changes to commit" if a.style else f"{work} has uncommitted changes")
     when = datetime.datetime.fromisoformat(a.date) if a.date else datetime.datetime.now().astimezone()
     if when.tzinfo is None:
         raise SystemExit("--date needs a UTC offset")
+    post = meta.get("post") or {"tags": retro.parse_prefix(retro.POST_TAGS), "title": retro.POST_TITLE}
+    who = stamp(when)
+    base_commit = tip
+    if a.style:  # 0. postfix.sh's output, committed as is
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_INDEX_FILE": str(Path(d) / "index")}
+            subprocess.run(["git", "-C", str(work), "read-tree", tip], env=env, check=True)
+            subprocess.run(["git", "-C", str(work), "add", "-A"], env=env, check=True)
+            style_tree = subprocess.run(["git", "-C", str(work), "write-tree"], env=env, check=True,
+                                        capture_output=True, text=True).stdout.strip()
+        base_commit = rewrite.write_obj(work, "commit", [(b"tree", style_tree.encode()), (b"parent", tip.encode()),
+                                                         (b"author", who), (b"committer", who)], rewrite.enc(STYLE_SUBJECT + "\n"))
 
     # 1. cites in the tip's text files
     cmap = dict(line.split() for line in (base / "commit-map").read_text().splitlines()[1:])
     cites = retro.Cites(list(cmap), cmap.get, keep=a.keep)
     changed: dict[str, tuple[str, bytes]] = {}
-    files = text_files(work, tip)
+    files = text_files(work, base_commit)
     for path, (mode, data) in files.items():
         new = cites.sub(data, path)
         if new != data:
@@ -124,7 +142,7 @@ def main(argv=None):
     with tempfile.TemporaryDirectory() as d:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(d) / "index")}
         run = lambda *x, **kw: subprocess.run(["git", "-C", str(work), *x], env=env, check=True, capture_output=True, **kw)
-        run("read-tree", tip)
+        run("read-tree", base_commit)
         lines = []
         for path, (mode, data) in [*changed.items(), *((p, ("100644", rewrite.enc(t))) for p, t in docs.items())]:
             sha = retro.gitb(work, "hash-object", "-w", "--stdin", input=data).decode().strip()
@@ -132,17 +150,18 @@ def main(argv=None):
         run("update-index", "-z", "--index-info", input=rewrite.enc("\0".join(lines) + "\0"))
         tree = run("write-tree").stdout.decode().strip()
 
-    who = stamp(when)
     body = (f"{len(cites.done)} commit-hash cites in {len({w for w, _, _ in cites.done})} files now name the nostos "
             f"history (old -> final through the rewrite's commit map); cites of the archive "
             f"({', '.join(a.keep)}) stay. Adds {RETRO_DIR}/: one summary per retro PR and the notes-only release bodies.\n")
-    fix = rewrite.write_obj(work, "commit", [(b"tree", tree.encode()), (b"parent", tip.encode()),
+    fix = rewrite.write_obj(work, "commit", [(b"tree", tree.encode()), (b"parent", base_commit.encode()),
                                              (b"author", who), (b"committer", who)], rewrite.enc(f"{POST_SUBJECT}\n\n{body}"))
     n, date = groups[-1]["n"] + 1, when.date().isoformat()
-    commits = [retro.commit_records(work, [fix])[fix]]
+    mine = [base_commit, fix] if a.style else [fix]
+    recs = retro.commit_records(work, mine)
+    commits = [recs[s] for s in mine]
     merge = rewrite.write_obj(work, "commit", [(b"tree", tree.encode()), (b"parent", tip.encode()), (b"parent", fix.encode()),
                                                (b"author", who), (b"committer", who)],
-                              rewrite.enc(retro.merge_message(n, POST_TAGS, date, POST_TITLE, commits)))
+                              rewrite.enc(retro.merge_message(n, post["tags"], date, post["title"], commits)))
     retro.git(work, "update-ref", "refs/heads/main", merge, tip)
     retro.git(work, "reset", "--quiet", "--hard", "main")
 
@@ -156,9 +175,9 @@ def main(argv=None):
         prs.append({"n": g["n"], "branch": retro.branch_name(g["n"], g["date"]), "head": g["head"], "merge": g["merge"],
                     "title": retro.pr_title(g["tags"], g["date"], g["title"]), "body": str(f.relative_to(work))})
     f = bodies / retro.doc_name(n, date)
-    f.write_text(retro.group_md(n, POST_TAGS, date, POST_TITLE, commits, merge, retro.branch_name(n, date)), encoding="utf-8")
+    f.write_text(retro.group_md(n, post["tags"], date, post["title"], commits, merge, retro.branch_name(n, date)), encoding="utf-8")
     prs.append({"n": n, "branch": retro.branch_name(n, date), "head": fix, "merge": merge,
-                "title": retro.pr_title(POST_TAGS, date, POST_TITLE), "body": str(f.relative_to(work))})
+                "title": retro.pr_title(post["tags"], date, post["title"]), "body": str(f.relative_to(work))})
     for r in releases:
         r["notes"] = str((bodies / Path(r["notes_in_tree"]).name).relative_to(work))
         (work / r["notes"]).write_text(docs[r["notes_in_tree"]], encoding="utf-8")
@@ -181,7 +200,7 @@ def main(argv=None):
     (base / "hashfix-report.txt").write_text("\n".join(report) + "\n")
     print(report[0])
     print(f"left {len(cites.skipped)} tokens ({len(left)} distinct): see {base / 'hashfix-report.txt'}")
-    print(f"docs: {len(docs)} files in {RETRO_DIR}/; post-tip PR #{n}: commit {fix[:10]}, merge {merge[:10]}")
+    print(f"docs: {len(docs)} files in {RETRO_DIR}/; post-tip PR #{n}: {len(mine)} commit(s) {' '.join(c[:10] for c in mine)}, merge {merge[:10]}")
     print(f"replay plan: {base / 'replay.json'} ({len(prs)} PRs, {len(releases)} releases)")
     return 0
 

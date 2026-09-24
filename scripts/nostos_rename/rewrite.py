@@ -9,7 +9,8 @@ rows 2, 2a, 3, 3b, 3c, 14). Never touches --source; works on a clone it makes.
 Stage 1, git-filter-repo on a fresh `--no-local` clone of `main` + the kept tags
 (so `pre-ads-move-2026-09-02` and every other branch never enter the new repo):
 paths via rename_path, blobs via rename_content(ORIGINAL path, data) cached on
-(blob id, original path), commit + tag messages via rename_text, every
+(blob id, original path, mode), symlink targets via rename_path (as apply.py
+does), commit + tag messages via rename_text, every
 author/committer/tagger -> noreply. Runs with --preserve-commit-hashes and
 never prunes, so the old -> stage-1 map is 1:1 and cites are translated once.
 
@@ -33,13 +34,11 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
-import io
 import json
 import os
 import re
 import subprocess
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
 
@@ -122,6 +121,11 @@ def clone(source, work, ref, tags):
 # ---- stage 1: git-filter-repo -----------------------------------------------
 
 
+def renamed_blob(rules, mode: str, path: str, data: bytes) -> bytes:
+    """A symlink's target is a path (apply.py and the README callback agree)."""
+    return enc(rules.rename_path(dec(data))) if mode == "120000" else rules.rename_content(path, data)
+
+
 def stage1(work, rules):
     import git_filter_repo as fr
 
@@ -131,11 +135,11 @@ def stage1(work, rules):
         new_name = enc(rules.rename_path(dec(filename)))
         if mode == b"160000":  # gitlink: the id is a commit, not a blob
             return new_name, mode, blob_id
-        key = (blob_id, filename)  # rules depend on the path: never key on the blob alone
+        key = (blob_id, filename, mode)  # rules depend on the path: never key on the blob alone
         if key not in blobs:
             data = value.get_contents_by_identifier(blob_id)
             assert data is not None, (filename, blob_id)
-            new = rules.rename_content(dec(filename), data)
+            new = renamed_blob(rules, mode.decode(), dec(filename), data)
             blobs[key] = blob_id if new == data else value.insert_file_with_contents(new)
         return new_name, mode, blobs[key]
 
@@ -265,18 +269,19 @@ def blob_sha(data: bytes) -> str:
 
 
 def forward_tree(source, tip, rules, work) -> str:
-    """The tip tree an independent forward rename would produce: the rules
-    applied to `git archive` of the original tip, hashed without filter-repo."""
-    tar = tarfile.open(fileobj=io.BytesIO(retro.gitb(source, "archive", "--format=tar", tip)))
-    lines = []
-    for m in tar.getmembers():
-        if m.issym():
-            mode, data = "120000", enc(m.linkname)
-        elif m.isfile():
-            mode, data = ("100755" if m.mode & 0o100 else "100644"), tar.extractfile(m).read()
-        else:
-            continue
-        lines.append(f"{mode} {blob_sha(rules.rename_content(m.name, data))}\t{rules.rename_path(m.name)}")
+    """The tip tree the forward rename produces: apply.py's plan (its own tree
+    walk, symlink and collision handling) with these rules, hashed without
+    filter-repo."""
+    import apply
+
+    apply.rename_path, apply.rename_content = rules.rename_path, rules.rename_content
+    cwd = os.getcwd()
+    os.chdir(source)  # apply.tracked() reads a ref from the current repo
+    try:
+        planned = apply.plan(tip)
+    finally:
+        os.chdir(cwd)
+    lines = [f"{mode} {blob_sha(body)}\t{new}" for mode, _old, new, body in planned]
     with tempfile.TemporaryDirectory() as d:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(d) / "index")}
         run = lambda *a, **kw: subprocess.run(["git", "-C", str(work), *a], env=env, check=True, capture_output=True, **kw)
@@ -303,7 +308,7 @@ def deep_trees(source, work, rules, cmap) -> list[str]:
         new_trees = dict(zip(olds, pool.map(lambda c: ls_tree(work, cmap[c]), olds)))
     triples = sorted({t for tree in old_trees.values() for t in tree if t[0] != "160000"})
     contents = cat_batch(source, sorted({sha for _, sha, _ in triples}))
-    renamed = {(mode, sha, path): blob_sha(rules.rename_content(path, contents[sha])) for mode, sha, path in triples}
+    renamed = {(mode, sha, path): blob_sha(renamed_blob(rules, mode, path, contents[sha])) for mode, sha, path in triples}
     bad = []
     for c in olds:
         want = {(m, s if m == "160000" else renamed[(m, s, p)], rules.rename_path(p)) for m, s, p in old_trees[c]}
@@ -382,8 +387,14 @@ def verify(source, work, rules, deep=True) -> tuple[list[str], list[str]]:
         facts.append(f"tag {name} -> merge {obj[:10]} (tree == final of old {t['old_target'][:10]})")
 
     last_merge = groups[-1]["merge"]
+    head = retro.git(work, "rev-parse", "main").strip()
+    if head != last_merge:  # hashfix ran: one more PR merge on top, nothing else
+        post = retro.git(work, "rev-list", f"{last_merge}..{head}").split()
+        facts.append(f"post-tip PR: merge {head[:10]} + {len(post) - 1} commit(s)")
+        if info[head][:1] != [last_merge] or len(info[head]) != 2 or tree(head) != tree(info[head][1]):
+            problems.append("post-tip commit is not a --no-ff merge of the retro tip with its branch's tree")
     want_tip = forward_tree(source, meta["source_tip"], rules, work)
-    facts.append(f"tip tree {tree(last_merge)} vs forward rename of archive {want_tip}")
+    facts.append(f"tip tree {tree(last_merge)} vs apply.py forward rename of the old tip {want_tip}")
     if tree(last_merge) != want_tip:
         problems.append("tip tree != forward rename of the original tip")
 
@@ -420,7 +431,10 @@ def main(argv=None):
         source_tip = retro.git(work, "rev-parse", "main").strip()
         groups = retro.compute_groups(work, "main", a.tags)
         titles = retro.titles_for(groups, a.titles)
+        post = retro.post_row(a.titles, len(groups) + 1)
         for g, derived, row in zip(groups, retro.group_tags(work, groups), titles):
+            if row["tags"] == retro.AUTO_TAGS:
+                row["tags"] = retro.tag_prefix(derived)
             if retro.tag_prefix(derived) != row["tags"]:
                 print(f"note: #{g.n} {g.date} uses signed-off tags {row['tags']} (derived {retro.tag_prefix(derived)})")
         old_all = retro.git(work, "rev-list", "main").split()
@@ -437,7 +451,8 @@ def main(argv=None):
         (base / "message-cites.txt").write_text(cites.report())
         (base / "groups.json").write_text(json.dumps(
             {"source": str(Path(a.source).resolve()), "source_tip": source_tip, "root": root,
-             "retro_tip": out_groups[-1]["merge"], "groups": out_groups, "tags": tag_out}, indent=1))
+             "retro_tip": out_groups[-1]["merge"], "groups": out_groups, "tags": tag_out,
+             "post": {**post, "tags": retro.parse_prefix(post["tags"])}}, indent=1))
         print(f"message cites: {len(cites.done)} rewritten, {len(cites.skipped)} left (see {base / 'message-cites.txt'})")
 
     problems, facts = verify(a.source, work, rules, deep=not a.shallow_verify)

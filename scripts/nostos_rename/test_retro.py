@@ -119,13 +119,23 @@ class EndToEnd(unittest.TestCase):
         cls.tags = ["v0.1.0"]
         with contextlib.redirect_stdout(io.StringIO()):
             retro.main(["titles", "--repo", str(cls.src), "--rules", STUB, "--out", str(cls.titles), "--tags", *cls.tags])
+            rows = retro.read_titles(cls.titles)
+            rows[3]["tags"] = retro.AUTO_TAGS  # today's group, still growing: re-derived at rewrite time
+            retro.write_titles(cls.titles, rows)
             cls.rc = rewrite.main(["--source", str(cls.src), "--work", str(cls.work), "--rules", STUB,
                                    "--titles", str(cls.titles), "--tags", *cls.tags])
         cls.meta = json.loads((cls.work / rewrite.OUT / "groups.json").read_text())
         cls.cmap = dict(x.split() for x in (cls.work / rewrite.OUT / "commit-map").read_text().splitlines()[1:])
         cls.retro_tip = sh(cls.work, "rev-parse", "main")
+        (cls.work / "src").mkdir()
+        (cls.work / "src/lib.rs").write_text("// what postfix.sh leaves behind\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            hashfix.main(["--work", str(cls.work), "--date", "2026-01-04T09:00:00+10:00"])
+            try:  # a dirty worktree needs --style
+                hashfix.main(["--work", str(cls.work)])
+                raise AssertionError("hashfix accepted a dirty worktree without --style")
+            except SystemExit:
+                pass
+            hashfix.main(["--work", str(cls.work), "--style", "--date", "2026-01-04T09:00:00+10:00"])
             cls.rc_after = rewrite.main(["--source", str(cls.src), "--work", str(cls.work), "--rules", STUB,
                                          "--tags", *cls.tags, "--verify-only"])
 
@@ -195,6 +205,15 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(sh(self.work, "show", "main:docs/notes.md"), f"see {new1[:7]} and {new2}; not a cite: 1234567")
         # history itself is untouched by hashfix: the old blob stays in the old commit
         self.assertIn(self.c["c1"][:7], sh(self.work, "show", f"{self.cmap[self.c['c4']]}:docs/notes.md"))
+
+    def test_post_pr(self):
+        self.assertEqual(self.meta["groups"][3]["tags"], ["arxa-builder"])
+        self.assertEqual(retro.read_titles(self.titles)[-1]["date"], "-")
+        self.assertEqual(sh(self.work, "log", "--topo-order", "--format=%s", "main^1..main^2").splitlines(),
+                         [hashfix.POST_SUBJECT, hashfix.STYLE_SUBJECT])
+        self.assertEqual(sh(self.work, "log", "-1", "--format=%s", "main"),
+                         f"[arxa-builder] 2026-01-04 — {retro.POST_TITLE} (#5)")
+        self.assertEqual(sh(self.work, "show", "main:src/lib.rs"), "// what postfix.sh leaves behind")
 
     def test_retro_docs_and_replay_plan(self):
         names = sh(self.work, "ls-tree", "--name-only", "main", "docs/ci/retro/").split()

@@ -36,4 +36,5 @@ N	date	tags	title
 35	2026-09-21	[arxa-tester][arxa-builder][arxa-designer]	ack-progress scan experiments and Android toolchain bumps
 36	2026-09-22	[arxa-builder][arxa-designer][arxa-tester]	honest conflation benchmarks; direct mode over PostgREST and Realtime
 37	2026-09-23	[arxa-builder][arxa-tester][arxa-designer]	direct-mode engine and push: routing keys, tokens, visible pushes
-38	2026-09-24	[arxa-builder][arxa-deployer][arxa-tester][arxa-designer]	dependency pins, Docker CMD fix, CI decision record
+38	2026-09-24	auto	nostos rename groundwork: Docker fix, CI decision record, env/config fallback (ADR-0046), rename and retro tooling, arxa CI/CD adoption
+39	-	[arxa-builder]	post-rename formatting, regenerated bindings, rewritten hash cites, retro records
