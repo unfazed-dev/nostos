@@ -85,8 +85,8 @@ To start over, `rm -rf $NOSTOS` and go back to step 2.
    then check that `gh api repos/unfazed-dev/nostos/actions/permissions` shows `"enabled": false`.
 11. **Root.**
     ```sh
-    git -C $NOSTOS remote add origin git@github.com:unfazed-dev/nostos.git
-    git -C $NOSTOS push origin "$(git -C $NOSTOS rev-list --max-parents=0 main):refs/heads/main"
+    git -C $NOSTOS remote set-url origin git@github.com:unfazed-dev/nostos.git   # origin already exists (https)
+    ARXA_ALLOW_MAIN_PUSH=1 git -C $NOSTOS push origin "$(git -C $NOSTOS rev-list --max-parents=0 main):refs/heads/main"
     ```
 12. **Replay.** `ARXA_ALLOW_MAIN_PUSH=1 python3 $T/replay.py --repo $NOSTOS --apply`.
     Before it pushes anything it checks: Actions off, remote `main` = root or a retro
