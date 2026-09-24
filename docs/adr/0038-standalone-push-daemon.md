@@ -61,3 +61,12 @@ re-registration is one atomic `INSERT … ON CONFLICT … DO UPDATE … WHERE`
 owner matches (zero rows ⇒ 409 Conflict) — race-safe without the SQLite
 mutex. The five registry behaviors are re-pinned against real Postgres
 behind the `NOSTOS_E2E_PG` gate.
+
+## Addendum (2026-09-24): registry store moved to infra
+
+The store (`SqliteStore`, `PgStore`) now lives in
+`crates/nostos-infra/src/push/store.rs` behind the infra features `push-store`
+and `push-store-pg`. `nostos-push` re-exports it as `nostos_push::store`, and its
+`pg` feature turns on `push-store-pg`. This lets `nostos-cli` read the registry
+without depending on the daemon crate, as the crate map requires. No behaviour
+or schema change.

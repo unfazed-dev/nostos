@@ -22,23 +22,25 @@ default = []
 # pattern. Off by default (SQLite stays the single-binary default); select
 # it at runtime with NOSTOS_PUSHD_DATABASE_URL. Setting that env var on a
 # build without this feature is a hard startup error naming the rebuild.
-pg = ["dep:tokio-postgres"]
+pg = ["dep:tokio-postgres", "nostos-infra/push-store-pg"]
 
 [dependencies]
 nostos-domain = { workspace = true }
 # Rails + RailSet, reused AS-IS (ADR-0038 §1; plan task 1.5 "no rail forks").
 # Default features keep the webpush rail on — this is a server-shaped crate.
-nostos-infra = { workspace = true, features = ["clap"] }
+# `push-store`: the registry store (SQLite; PgStore under `push-store-pg`)
+# lives in nostos-infra so the `nostos push key` CLI shares it.
+nostos-infra = { workspace = true, features = ["clap", "push-store"] }
 
 tokio = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rusqlite = { workspace = true }
-# Postgres registry backend (feature "pg", v1.1) — pool-of-one client, the
-# nostos-infra PgTokenStore / oplog precedent. Optional: already a workspace
-# dependency, so enabling pg adds no new crates to the graph.
+# Postgres registry backend (feature "pg", v1.1): PgStore itself is
+# nostos-infra's; this client is tests/e2e_pg_store.rs's raw-SQL handle.
+# Optional: already a workspace dependency, so enabling pg adds no new crates
+# to the graph.
 tokio-postgres = { workspace = true, optional = true }
 subtle = { workspace = true }
 # Digest-then-ct_eq for API-key compare (the nostos-server admin_auth.rs
@@ -47,8 +49,6 @@ subtle = { workspace = true }
 sha2 = { workspace = true }
 # push_id = uuid v4 (plan pin 0.4: uuid IS a workspace dep, so v4 it is).
 uuid = { workspace = true }
-# RFC3339 timestamps, the nostos-cloud pattern (its store.rs uses time).
-time = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
