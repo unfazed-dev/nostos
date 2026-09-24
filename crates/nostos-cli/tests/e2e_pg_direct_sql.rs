@@ -758,7 +758,7 @@ async fn a_visible_template_pushes_every_change_with_its_row() {
     // Exactly what `nostos link --visible` writes, so its quoting meets a real
     // Postgres here.
     let spec = format!(
-        "{}:action@/tasks/{{id}}:task_status:Task update:Now: {{title}}",
+        "{}:action@/tasks/{{id}}[collapse=task-{{id}},level=time-sensitive]:task_status:Task update:Now: {{title}}",
         fx.tasks
     );
     fx.client
@@ -782,6 +782,11 @@ async fn a_visible_template_pushes_every_change_with_its_row() {
     assert_eq!(body["body"], "Now: {title}", "the Edge Function fills it");
     assert_eq!(body["category"], "task_status");
     assert_eq!(body["route"], "/tasks/{id}");
+    assert_eq!(
+        body["options"]["collapse"], "task-{id}",
+        "the Edge Function fills it"
+    );
+    assert_eq!(body["options"]["level"], "time-sensitive");
     assert_eq!(body["row"]["title"], "visible 0");
     fx.teardown().await;
 }

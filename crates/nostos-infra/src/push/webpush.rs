@@ -367,6 +367,7 @@ fn plain_payload(payload: &PushPayload) -> serde_json::Value {
             body,
             category,
             data,
+            options,
         } => {
             // `category` rides the (encrypted) payload so the client SW
             // can map it to action buttons — same field FCM/APNs carry.
@@ -380,6 +381,17 @@ fn plain_payload(payload: &PushPayload) -> serde_json::Value {
             // `onBackgroundMessage`.
             if !data.is_empty() {
                 plain["data"] = json!(data);
+            }
+            // Options under the Notification API's own names (ADR-0047), so
+            // a service worker's `showNotification(p.title, p)` renders them
+            // with no mapping of its own.
+            for (key, name) in [("image", "image"), ("collapse", "tag"), ("avatar", "icon")] {
+                if let Some(value) = options.get(key) {
+                    plain[name] = json!(value);
+                }
+            }
+            if options.get("sound").is_some_and(|s| s == "none") {
+                plain["silent"] = json!(true);
             }
             plain
         }
@@ -493,6 +505,7 @@ mod tests {
                     body: "New items to sync".into(),
                     category: None,
                     data: std::collections::BTreeMap::new(),
+                    options: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -513,6 +526,7 @@ mod tests {
             data: [("cairn_route".to_string(), "/orders/42".to_string())]
                 .into_iter()
                 .collect(),
+            options: std::collections::BTreeMap::new(),
         });
         assert_eq!(
             plain,
@@ -525,6 +539,36 @@ mod tests {
         // No routing keys = no `data` key at all: an SW that checks for it
         // must not find an empty object.
         assert!(plain_payload(&silent()).get("data").is_none());
+    }
+
+    #[test]
+    fn webpush_options_use_the_notification_api_names() {
+        let plain = plain_payload(&PushPayload::Visible {
+            title: "T".into(),
+            body: "B".into(),
+            category: None,
+            data: std::collections::BTreeMap::new(),
+            options: [
+                ("collapse", "order-42"),
+                ("image", "https://cdn.example/i.png"),
+                ("sender", "Ada"),
+                ("avatar", "https://cdn.example/ada.png"),
+                ("sound", "none"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        });
+        assert_eq!(
+            plain,
+            json!({
+                "title": "T", "body": "B",
+                "image": "https://cdn.example/i.png",
+                "tag": "order-42",
+                "icon": "https://cdn.example/ada.png",
+                "silent": true
+            })
+        );
     }
 
     #[tokio::test]

@@ -80,12 +80,210 @@ pub enum PushPayload {
         /// row itself is not — the payload is unencrypted at the vendor.
         /// [`validate_data`] enforces the key and size discipline.
         data: PushData,
+        /// How the notification presents (ADR-0047): image, subtitle,
+        /// replace-previous, interruption level… nostos's own keys, which
+        /// each rail maps to its vendor's fields. [`validate_options`]
+        /// enforces them.
+        options: PushOptions,
     },
 }
 
 /// Routing keys for a visible push. `BTreeMap` for a deterministic wire —
 /// the rails' JSON and their tests both depend on a stable key order.
 pub type PushData = std::collections::BTreeMap<String, String>;
+
+/// Presentation options for a visible push (ADR-0047) — the `[k=v,…]` group
+/// of a `NOSTOS_PUSH_TABLES` / `nostos link --visible` entry, or pushd's
+/// `visible.options`. See [`OPTION_KEYS`].
+pub type PushOptions = std::collections::BTreeMap<String, String>;
+
+/// Every key [`validate_options`] accepts. What each becomes on the wire:
+///
+/// | key | APNs (`aps`, direct and via FCM) | FCM Android | Web Push |
+/// |---|---|---|---|
+/// | `subtitle` | `alert.subtitle` | — | — |
+/// | `image` | `mutable-content` + `nostos_image` (NSE attaches it; FCM also `fcm_options.image`) | `notification.image` | `image` |
+/// | `thread` | `thread-id` (groups) | — | — |
+/// | `collapse` | `apns-collapse-id` (replaces) | `notification.tag` + `collapse_key` | `tag` |
+/// | `level` | `interruption-level` | `notification_priority` | — |
+/// | `relevance` | `relevance-score` | — | — |
+/// | `sound` | `sound` (`none` = silent) | `sound` / `default_sound` | `silent` |
+/// | `channel` | — | `notification.channel_id` | — |
+/// | `sender`, `avatar` | `mutable-content` + `nostos_sender`/`nostos_avatar` (NSE → Communication Notification) | data keys | `icon` (avatar) |
+pub const OPTION_KEYS: &[&str] = &[
+    "avatar",
+    "channel",
+    "collapse",
+    "image",
+    "level",
+    "relevance",
+    "sender",
+    "sound",
+    "subtitle",
+    "thread",
+];
+
+/// Serialized cap for [`PushOptions`]: they land in the payload up to twice
+/// (`aps` + the NSE's keys) next to a 1 KiB body and 1 KiB of data, and
+/// APNs/FCM refuse anything over 4 KiB.
+pub const MAX_OPTIONS_BYTES: usize = 512;
+
+/// Key, value and size discipline for [`PushOptions`]. `{col}` placeholders
+/// pass wherever the value is free text or a URL tail; `level`, `relevance`,
+/// `sound` and `channel` must be literal — a typo there would otherwise fail
+/// at the vendor, per push, forever.
+///
+/// # Errors
+/// An unknown key, a malformed value, `avatar` without `sender`, or a map
+/// whose JSON exceeds [`MAX_OPTIONS_BYTES`].
+pub fn validate_options(options: &PushOptions) -> Result<(), String> {
+    let file_name = |v: &str| {
+        !v.is_empty()
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    };
+    for (key, value) in options {
+        let ok = match key.as_str() {
+            "subtitle" | "thread" | "sender" => !value.trim().is_empty(),
+            // An HTTP header value on APNs (`apns-collapse-id`).
+            "collapse" => !value.is_empty() && value.chars().all(|c| c.is_ascii_graphic()),
+            "image" | "avatar" => {
+                value.starts_with("https://") && !value.chars().any(char::is_whitespace)
+            }
+            "level" => matches!(
+                value.as_str(),
+                "passive" | "active" | "time-sensitive" | "critical"
+            ),
+            "relevance" => value.parse::<f64>().is_ok_and(|r| (0.0..=1.0).contains(&r)),
+            "sound" | "channel" => file_name(value),
+            _ => {
+                return Err(format!(
+                    "unknown push option {key:?} (expected one of {})",
+                    OPTION_KEYS.join(", ")
+                ))
+            }
+        };
+        if !ok {
+            let want = match key.as_str() {
+                "image" | "avatar" => "an https:// URL without whitespace",
+                "level" => "passive, active, time-sensitive or critical",
+                "relevance" => "a number from 0 to 1",
+                "sound" => "default, none, or a bundled sound file name",
+                "channel" => "an Android channel id ([A-Za-z0-9_.-])",
+                "collapse" => "printable ASCII without spaces",
+                _ => "a non-empty value",
+            };
+            return Err(format!("push option {key}={value:?} must be {want}"));
+        }
+    }
+    if options.contains_key("avatar") && !options.contains_key("sender") {
+        return Err("push option avatar needs a sender (it is the sender's picture)".into());
+    }
+    let bytes = serde_json::to_vec(options).map_or(usize::MAX, |v| v.len());
+    if bytes > MAX_OPTIONS_BYTES {
+        return Err(format!(
+            "push options are {bytes} bytes serialized, max {MAX_OPTIONS_BYTES}"
+        ));
+    }
+    Ok(())
+}
+
+/// Split the `[k=v,…]` options group off the part of a push-tables entry
+/// after `table:` — `visible@/o/{id}[image=https://…]:T:B` becomes
+/// `visible@/o/{id}:T:B` plus the options. Only a `[` before the first `:`
+/// opens the group: values hold colons (`https://`) and titles may hold
+/// brackets. One parser for both modes' grammar — `NOSTOS_PUSH_TABLES` and
+/// `nostos link --visible`.
+///
+/// # Errors
+/// An unclosed group, a pair that is not `key=value`, a repeated key, or
+/// anything [`validate_options`] refuses.
+pub fn take_options(rest: &str) -> Result<(String, PushOptions), String> {
+    let colon = rest.find(':').unwrap_or(rest.len());
+    let Some(open) = rest[..colon].find('[') else {
+        return Ok((rest.to_string(), PushOptions::new()));
+    };
+    let Some(close) = rest[open..].find(']').map(|i| open + i) else {
+        return Err("unclosed [options] group".into());
+    };
+    let mut options = PushOptions::new();
+    for pair in rest[open + 1..close].split(',').map(str::trim) {
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(format!("push option {pair:?} is not key=value"));
+        };
+        let key = key.trim();
+        if options
+            .insert(key.to_string(), value.trim().to_string())
+            .is_some()
+        {
+            return Err(format!("push option {key:?} given twice"));
+        }
+    }
+    validate_options(&options)?;
+    Ok((format!("{}{}", &rest[..open], &rest[close + 1..]), options))
+}
+
+/// The options' iOS half, shared by the APNs rail and FCM's `apns` block so
+/// an iPhone renders the same whichever rail sent it. `root` is the APNs
+/// payload (`{"aps": …}`); `aps.alert` must already hold title/body when a
+/// subtitle is set.
+///
+/// `image`, `sender` and `avatar` need a Notification Service Extension
+/// (the system renders neither a remote image nor a sender on its own):
+/// they set `mutable-content` and ride as top-level `nostos_*` keys, which
+/// the Swift SDK's `NostosNotificationService` reads.
+pub(crate) fn apply_ios_options(root: &mut serde_json::Value, options: &PushOptions) {
+    use serde_json::json;
+    let aps = &mut root["aps"];
+    if let Some(subtitle) = options.get("subtitle") {
+        aps["alert"]["subtitle"] = json!(subtitle);
+    }
+    if let Some(thread) = options.get("thread") {
+        aps["thread-id"] = json!(thread);
+    }
+    if let Some(level) = options.get("level") {
+        aps["interruption-level"] = json!(level);
+    }
+    if let Some(score) = options.get("relevance").and_then(|r| r.parse::<f64>().ok()) {
+        aps["relevance-score"] = json!(score);
+    }
+    match options.get("sound").map(String::as_str) {
+        Some("none") => {
+            if let Some(aps) = aps.as_object_mut() {
+                aps.remove("sound");
+            }
+        }
+        Some(sound) => aps["sound"] = json!(sound),
+        None => {}
+    }
+    for (key, wire) in NSE_KEYS {
+        if let Some(value) = options.get(key) {
+            root[wire] = json!(value);
+            root["aps"]["mutable-content"] = json!(1);
+        }
+    }
+}
+
+/// `apns-collapse-id` from a collapse key: ≤64 bytes per Apple, and a header
+/// value, so only printable ASCII survives — an interpolated `{col}` may have
+/// brought in anything.
+pub(crate) fn apns_collapse_id(key: &str) -> String {
+    key.chars()
+        .filter(char::is_ascii_graphic)
+        .take(64)
+        .collect()
+}
+
+/// Options only an app-side extension can render, and the payload keys they
+/// travel under (ADR-0047). Reserved from `data` by the `nostos_` prefix.
+pub(crate) const NSE_KEYS: [(&str, &str); 3] = [
+    ("image", "nostos_image"),
+    ("sender", "nostos_sender"),
+    ("avatar", "nostos_avatar"),
+];
 
 impl PushPayload {
     /// Seconds this payload stays valuable. A silent ping older than a minute
@@ -116,6 +314,7 @@ pub const MAX_DATA_BYTES: usize = 1024;
 ///   by FCM for `data` maps.
 /// - `title`, `body`, `category`, `table`, `lsn` — nostos's own: the FCM
 ///   action-mode message and the silent doorbell put these in `data`.
+/// - `nostos_*` — the push options' own keys (ADR-0047, [`NSE_KEYS`]).
 pub fn reserved_data_key(key: &str) -> bool {
     matches!(
         key,
@@ -130,6 +329,7 @@ pub fn reserved_data_key(key: &str) -> bool {
             | "lsn"
     ) || key.starts_with("google.")
         || key.starts_with("gcm.")
+        || key.starts_with("nostos_")
 }
 
 /// Key and size discipline for a visible push's routing keys. One home for
@@ -465,6 +665,7 @@ mod data_tests {
             "category",
             "table",
             "lsn",
+            "nostos_image",
             "",
         ] {
             assert!(
@@ -479,5 +680,87 @@ mod data_tests {
         let big = "x".repeat(MAX_DATA_BYTES);
         let err = validate_data(&data(&[("k", &big)])).expect_err("over the cap");
         assert!(err.contains("max 1024"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod options_tests {
+    use super::{apply_ios_options, take_options, validate_options, PushOptions};
+    use serde_json::json;
+
+    fn opts(pairs: &[(&str, &str)]) -> PushOptions {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_group_comes_off_before_the_first_colon_and_values_keep_theirs() {
+        let (rest, options) =
+            take_options("action@/o/{id}[image=https://cdn/{sku}.png, collapse=o-{id}]:c:T [x]:B")
+                .unwrap();
+        assert_eq!(rest, "action@/o/{id}:c:T [x]:B");
+        assert_eq!(
+            options,
+            opts(&[("collapse", "o-{id}"), ("image", "https://cdn/{sku}.png")])
+        );
+        // A bracket after the first colon is title text, not a group.
+        let (rest, options) = take_options("visible:T [draft]:B").unwrap();
+        assert_eq!((rest.as_str(), options.len()), ("visible:T [draft]:B", 0));
+    }
+
+    #[test]
+    fn bad_groups_and_values_are_refused() {
+        for spec in [
+            "visible[image=https://x:T:B",
+            "visible[image]:T:B",
+            "visible[thread=a,thread=b]:T:B",
+            "visible[badge=1]:T:B",
+            "visible[image=http://x.png]:T:B",
+            "visible[level=urgent]:T:B",
+            "visible[level={prio}]:T:B",
+            "visible[relevance=2]:T:B",
+            "visible[sound=../x.caf]:T:B",
+            "visible[avatar=https://x.png]:T:B",
+            "visible[subtitle=]:T:B",
+            "visible[collapse=order {id}]:T:B",
+        ] {
+            assert!(take_options(spec).is_err(), "{spec:?} must be refused");
+        }
+        let big = format!("https://{}", "x".repeat(600));
+        assert!(validate_options(&opts(&[("image", &big)])).is_err());
+    }
+
+    #[test]
+    fn ios_keys_land_in_aps_and_nse_keys_beside_it() {
+        let mut root =
+            json!({ "aps": { "alert": { "title": "T", "body": "B" }, "sound": "default" } });
+        apply_ios_options(
+            &mut root,
+            &opts(&[
+                ("subtitle", "S"),
+                ("thread", "orders"),
+                ("level", "time-sensitive"),
+                ("relevance", "0.5"),
+                ("sound", "none"),
+                ("image", "https://cdn/i.png"),
+                ("sender", "Ada"),
+            ]),
+        );
+        assert_eq!(
+            root,
+            json!({
+                "aps": {
+                    "alert": { "title": "T", "body": "B", "subtitle": "S" },
+                    "thread-id": "orders",
+                    "interruption-level": "time-sensitive",
+                    "relevance-score": 0.5,
+                    "mutable-content": 1
+                },
+                "nostos_image": "https://cdn/i.png",
+                "nostos_sender": "Ada"
+            })
+        );
     }
 }

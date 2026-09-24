@@ -195,6 +195,11 @@ pub enum PushTemplate {
         /// title/body, so `/orders/{id}` becomes the deep link to the row
         /// that just changed. Empty for a push nobody needs to route.
         data: std::collections::BTreeMap<String, String>,
+        /// Presentation options (ADR-0047): image, subtitle, collapse,
+        /// interruption level… Values interpolate `{col}` like `data`; the
+        /// keys and their per-vendor mapping live with the rails
+        /// (`nostos_infra::push::OPTION_KEYS`).
+        options: std::collections::BTreeMap<String, String>,
     },
 }
 
