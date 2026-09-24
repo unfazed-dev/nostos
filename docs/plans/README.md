@@ -13,10 +13,16 @@ Four classes:
 - **SUPERSEDED** — a later document owns this topic now, or the premise was falsified. The
   superseding document is named. Read the replacement, not this.
 
-**This index is authoritative; the plan files are not.** Only two plans carry an inline
-banner — `HANDOFF.md` and `sdk-live-e2e-consolidation.md` — because those two actively
-misdirect a reader who opens them cold. **Every other plan is unmarked, including SUPERSEDED
-ones.** So an absent banner means nothing: check this table.
+**This index is authoritative; the plan files are not.** Only one plan carries an inline
+banner — `sdk-live-e2e-consolidation.md` — because it actively misdirects a reader who opens
+it cold. **Every other plan is unmarked, including SUPERSEDED ones.** So an absent banner
+means nothing: check this table.
+
+**Cleanup 2026-09-24:** executed or superseded plans that nothing cites as evidence were
+deleted (removed in cleanup; see git history). Among them: `HANDOFF.md`,
+`nostos-next-after-oplog-epoch-2026-07-20.md`, `supabase-flutter-smoke-results.md`,
+`test-coverage-gap-analysis.md` and `flutter-pomodoro-persona-e2e-baseline.md`. Plans an
+ADR, ROADMAP, RESULTS, code, CI or a script cites stay, even when DONE or SUPERSEDED.
 
 The **Basis** column is deliberate: `verified` means established from the repo or a run this
 session; `inferred` means read off the plan's own header or cross-referenced but not
@@ -29,7 +35,7 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 | `adr-and-docs-completion-audit-2026-07-30.md` | **Read alongside the assessment below.** Audits all 28 ADRs + `docs/` against code. Finding: the engine is **more complete than its own ADRs claim** — six status lines understate reality, including ADR-0013 (direct write-back, the headline moat, filed "Deferred" long after shipping). All six corrected. Four genuine gaps; only token-refresh and web durability plausibly block a launch. | verified |
 | `nostos-completion-assessment-2026-07-29.md` | Overall project state: what is done, what gates launch. Carries the A1–A10 addendum **and the 2026-07-30 A11 / README-drift addendum** (five defects in places no test executes: an unreachable Tauri command, a malformed csproj, a failing RN typecheck, and two READMEs that misdescribed shipped behaviour). Engineering column is empty; the SDKs are packaged but **not published**. | verified |
 | `flutter-supabase-plug-and-play-launch.md` | The master plan — W0–W8 launch sequencing and the ≤5-min stranger-test gate. | inferred |
-| `reconnect-glitch-fix-2026-07-19.md` | Reconnect UI glitch. Phase 2 (the epoch resume-gate) has SHIPPED — ` + BT + `transport.rs` + BT + ` skips the snapshot on epoch+checksum match (` + BT + `snapshot_on_epoch_mismatch` test); this row's "still open" note was stale (corrected 2026-08-17). | verified |
+| `reconnect-glitch-fix-2026-07-19.md` | Reconnect UI glitch. Phase 2 (the epoch resume-gate) has SHIPPED — `transport.rs` skips the snapshot on epoch+checksum match (`snapshot_on_epoch_mismatch` test); this row's "still open" note was stale (corrected 2026-08-17). | verified |
 
 ## GATED-ON-GO — live, awaiting an operator decision
 
@@ -47,20 +53,15 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 | `sdk-parity-final-three.md` | RN + Capacitor + .NET landed. Its "→ 10/10" bar is **met**: all ten slices pass a live round-trip in strict mode (2026-07-30). Read that as *functional* parity only — every SDK is now packaged (v0.1.0, LICENSE, repository, README) but **none is published to a registry**. | verified |
 | `nostos-persisted-oplog-backfill-2026-07-19.md` | ADR-0025 — all 7 slices + F1/F2/F3 shipped; real-PG e2e green. | verified |
 | `nostos-soundness-audit-2026-07-19.md` | 3 P0s all resolved (slot invalidation, watch bug, the OPERATING.md playbook gap). | verified |
-| `nostos-next-after-oplog-epoch-2026-07-20.md` | Its C-claims are closed: C6/C7/C10/C11 verified-fixed 2026-07-20; the last open one, **C9** (W5 empirical re-verify), is closed by the 10/10 strict run on 2026-07-30. | verified |
 | `sync-strategy-analysis-2026-07-19.md` | Conclusion ratified: ONE strategy, no top-level `SyncStrategy` enum; per-field conflict tier is the seam. | verified |
 | `complete-nostos-fully-wired-operational.md` | v0.1 is code-complete: real-PG default, predicates, snapshot-on-subscribe. | inferred |
 | `nostos-reference-demo-app.md` | Produced `sdk/nostos_flutter/example` (restored by A1; its integration test passes). | inferred |
 | `w4-packaging-fallback.md` | Spike record — proved the Flutter↔Rust packaging path before W4 was built. | inferred |
-| `supabase-flutter-smoke-results.md` | Live-Supabase smoke report, 2026-07-12. Point-in-time result. | inferred |
-| `test-coverage-gap-analysis.md` | Static coverage snapshot, 2026-07-13. No coverage tooling installed, so it cannot self-refresh. | inferred |
-| `flutter-pomodoro-persona-e2e-baseline.md` | Flutter test fixtures under `fixtures/flutter/`. | inferred |
 
 ## SUPERSEDED — read the replacement instead
 
 | plan | superseded by | why | basis |
 |---|---|---|---|
-| `HANDOFF.md` | `nostos-completion-assessment-2026-07-29.md` + the reading order in `CLAUDE.md` | Says "start here / the planning phase is done, execute the committed plans". That was true in July; following it now sends a fresh agent at a stale plan list. **Most actively misleading file in this directory.** | verified |
 | `launch-readiness-gap-list.md` | `nostos-completion-assessment-2026-07-29.md` | Both answer "what stands between us and launch"; the 07-29 assessment is 17 days newer and column-splits engineering vs operator work. | inferred |
 | `sdk-live-e2e-consolidation.md` | `sdk-parity-final-three.md`, then the 10/10 strict run | Its bar was **7/7** platforms. There are now ten, and all ten pass. | verified |
 
@@ -68,6 +69,6 @@ re-proven. Treat `inferred` rows as good-faith classification, not fact.
 
 Adding this index rather than stamping 23 individual headers was deliberate: one file to keep
 accurate beats 23 that drift independently, and it avoids editing plans in place — mislabeling
-a GATED-ON-GO plan as SUPERSEDED would destroy live strategy work. Two files did get an
-inline header anyway, because opening them directly (without this index) leads you wrong:
-`HANDOFF.md` and `sdk-live-e2e-consolidation.md`.
+a GATED-ON-GO plan as SUPERSEDED would destroy live strategy work. One file did get an
+inline header anyway, because opening it directly (without this index) leads you wrong:
+`sdk-live-e2e-consolidation.md`.

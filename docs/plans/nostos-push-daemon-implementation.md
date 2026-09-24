@@ -2,7 +2,7 @@
 
 Decision record: ADR-0038 (grill-ratified 2026-08-17). Amends ADR-0037 scope.
 Research: `docs/research/push-server-brief.md`. Existing embedded push:
-ADR-0037 + `docs/plans/nostos-push-notifications-implementation.md` (24/24, done).
+ADR-0037 + `docs/plans/nostos-push-notifications-implementation.md` (24/24, done; removed in cleanup; see git history).
 
 **Sequence note:** the daemon is a launch blocker (ADR-0038 §5) — every wave is on the Phase-3 critical path. Wave 3 serves the embedded story too and can land first.
 

@@ -211,5 +211,5 @@ struct DeliveryAttributes: ActivityAttributes {
 ## Related
 
 - Decision record: [`../adr/0037-sync-aware-push-notifications.md`](../adr/0037-sync-aware-push-notifications.md)
-- Implementation plan: [`../plans/nostos-push-notifications-implementation.md`](../plans/nostos-push-notifications-implementation.md)
+- Implementation plan: `docs/plans/nostos-push-notifications-implementation.md` (removed in cleanup; see git history)
 - Security model (token trust boundary): [`../SECURITY-MODEL.md`](../SECURITY-MODEL.md)
