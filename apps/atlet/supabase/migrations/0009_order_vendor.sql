@@ -68,8 +68,10 @@ select cron.schedule(
 );
 
 -- Put the icon in the push. The row belongs to `nostos link --visible`, so a
--- re-link must pass the same title or the icon goes:
---   order_events:action@/history/{id}:order_status:{icon} Atlet order update:Your order is {status}
+-- re-link must pass the same title or the icon goes. The `collapse` option
+-- (ADR-0047) makes shipped replace paid and delivered replace shipped, one
+-- notification per order:
+--   order_events:action@/history/{id}[collapse=order-{order_id}]:order_status:{icon} Atlet order update:Your order is {status}
 -- Guarded because cairn.push_templates exists only once a project is linked
 -- with push.
 do $$
