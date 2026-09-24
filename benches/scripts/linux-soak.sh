@@ -23,7 +23,7 @@ docker run --rm --name "nostos-linux-soak-$TAG" \
   -v nostos-linux-target:/target \
   -v nostos-linux-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/target \
-  -e RUSTUP_TOOLCHAIN=1.98.0 \
+  -e RUSTUP_TOOLCHAIN=1.98.1 \
   -e CARGO_INCREMENTAL=0 \
   --ulimit nofile=1048576:1048576 \
   --sysctl net.ipv4.ip_local_port_range="1024 65535" \
