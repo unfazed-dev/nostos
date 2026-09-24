@@ -218,7 +218,10 @@ class EndToEnd(unittest.TestCase):
     def test_retro_docs_and_replay_plan(self):
         names = sh(self.work, "ls-tree", "--name-only", "main", "docs/ci/retro/").split()
         self.assertEqual(names, [f"docs/ci/retro/{x}" for x in
-                                 ("01-2026-01-01.md", "02-2026-01-02.md", "03-2026-01-02.md", "04-2026-01-03.md", "release-v0.1.0.md")])
+                                 ("01-2026-01-01.md", "02-2026-01-02.md", "03-2026-01-02.md", "04-2026-01-03.md", "commit-map.tsv", "release-v0.1.0.md")])
+        rows = sh(self.work, "show", "main:docs/ci/retro/commit-map.tsv").splitlines()
+        self.assertTrue(rows[0].startswith("# "))
+        self.assertEqual(dict(r.split("\t") for r in rows[1:]), self.cmap)
         doc = sh(self.work, "show", "main:docs/ci/retro/02-2026-01-02.md")
         self.assertIn("**Pipeline stage / agent:**", doc)
         self.assertIn("## What is now true", doc)

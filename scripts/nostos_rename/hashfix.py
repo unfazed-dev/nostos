@@ -134,6 +134,9 @@ def main(argv=None):
         docs[path] = retro.release_md(name, tag_date, t["message"], prev_tag, list(range(prev_n + 1, n_tag + 1)), commits)
         releases.append({"tag": name, "title": f"{name} (historical — no binaries)", "notes_in_tree": path})
         prev_merge, prev_n, prev_tag = t["merge"], n_tag, name
+    docs[f"{RETRO_DIR}/commit-map.tsv"] = (  # the archive's cites resolve here after the rename
+        "# cairn-archive commit\tnostos commit (composed through the rename + retro rewrite)\n"
+        + "".join(f"{o}\t{f}\n" for o, f in cmap.items()))
     clash = sorted(set(docs) & set(files))
     if clash:
         raise SystemExit(f"generated docs would overwrite tracked files: {clash}")
@@ -152,7 +155,8 @@ def main(argv=None):
 
     body = (f"{len(cites.done)} commit-hash cites in {len({w for w, _, _ in cites.done})} files now name the nostos "
             f"history (old -> final through the rewrite's commit map); cites of the archive "
-            f"({', '.join(a.keep)}) stay. Adds {RETRO_DIR}/: one summary per retro PR and the notes-only release bodies.\n")
+            f"({', '.join(a.keep)}) stay. Adds {RETRO_DIR}/: one summary per retro PR, the notes-only release bodies "
+            f"and commit-map.tsv (archive commit -> nostos commit).\n")
     fix = rewrite.write_obj(work, "commit", [(b"tree", tree.encode()), (b"parent", base_commit.encode()),
                                              (b"author", who), (b"committer", who)], rewrite.enc(f"{POST_SUBJECT}\n\n{body}"))
     n, date = groups[-1]["n"] + 1, when.date().isoformat()
