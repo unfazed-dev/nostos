@@ -26,6 +26,10 @@ T=scripts/nostos_rename
 export CARGO_TARGET_DIR=/Volumes/business_ssd/arxa_digital_solutions/.nostos-scratch/target  # rm -rf after step 6
 ```
 
+The global `build-dir` (ADR-0044) still puts intermediates under
+`/Volumes/developer_ssd/dev/cargo-build/<hash>/` (about 6 GB for steps 4–5): after step 6,
+delete the dirs whose `*.d` files name `$NOSTOS`.
+
 ## Local (repeatable)
 
 1. **Titles.** `python3 $T/retro.py titles --repo $CAIRN --rules $T/rules.py` keeps the
@@ -53,7 +57,9 @@ export CARGO_TARGET_DIR=/Volumes/business_ssd/arxa_digital_solutions/.nostos-scr
    `unresolved` = mostly not hashes (rustc ids, SwiftPM pins, hex constants).
    Then run `python3 $T/rewrite.py --source $CAIRN --work $NOSTOS --rules $T/rules.py --verify-only`,
    which must print `verify: OK` again (it also checks #39 is one merge onto the retro tip).
-   Then `make -C $NOSTOS ci` must be green.
+   Then `ln -s $CARGO_TARGET_DIR $NOSTOS/target && make -C $NOSTOS ci` must be green (the
+   link: `e2e_live_replication` looks for `target/debug/examples/e2e_server` and ignores
+   `CARGO_TARGET_DIR`; `target` is gitignored).
 6. **Dry-run the replay.** `python3 $T/replay.py --repo $NOSTOS`. This prints every
    command and runs none of them. Read it.
 
