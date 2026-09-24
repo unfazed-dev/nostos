@@ -1229,9 +1229,10 @@ dependencies = [
 
 [[package]]
 name = "nostos-application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "nostos-domain",
  "serde",
  "thiserror 1.0.69",
@@ -1242,12 +1243,13 @@ dependencies = [
 
 [[package]]
 name = "nostos-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "nostos-core",
  "nostos-domain",
  "nostos-infra",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1260,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nostos-domain",
  "serde",
@@ -1270,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "serde",
@@ -1281,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "nostos-infra"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1297,6 +1299,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.23.1",
