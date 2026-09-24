@@ -130,7 +130,7 @@ every write is refused. This trips up everyone once.
 | `GET /healthz` | liveness |
 | `POST /push-tokens` / `DELETE /push-tokens/{token}` | push-token registration (ADR-0037). Rails, `NOSTOS_PUSH_TABLES` templates and the experimental Live Activities mode: [`push.md`](push.md) |
 
-Environment variables, from `crates/nostos-server/src/main.rs` +
+Environment variables, from `crates/nostos-server/src/config.rs` +
 `crates/nostos-infra/src/`. The ones you will actually set:
 
 | Variable | Notes |

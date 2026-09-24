@@ -54,7 +54,7 @@
 
   // ---- connection config (editable; the verified dev-stack default is 8800) ----
   // The repo's `nostos-server` defaults NOSTOS_BIND to 0.0.0.0:8800 (see
-  // crates/nostos-server/src/main.rs). The plan text said 8080; that is wrong
+  // crates/nostos-server/src/config.rs). The plan text said 8080; that is wrong
   // against the code — 8800 is what `make dev-stack` actually binds. Made
   // editable so an operator on a different port need not touch the source.
   let url = $state('ws://localhost:8800/sync');

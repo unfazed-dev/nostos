@@ -12,7 +12,7 @@ depends on. Flutter / WASM client SDKs are out of scope here.
 ## 1. `nostos-server` environment
 
 Every knob is a clap `#[arg]` with both a `--long` flag and a `NOSTOS_*` env
-var (defined in `crates/nostos-server/src/main.rs:33-205`). Env wins when the
+var (defined in `crates/nostos-server/src/config.rs:7-427`). Env wins when the
 flag is absent; flag wins when present.
 
 | var | default | effect |
@@ -74,7 +74,7 @@ bail makes the misconfiguration undiscoverable-by-accident. Fix: set
 client's perspective until you read the rejection frame: the transport rejects
 every `ClientMessage::Write` with `"table not writable: '<t>' — add it to
 NOSTOS_WRITE_TABLES"` (`crates/nostos-infra/src/transport.rs:792`,
-`crates/nostos-server/src/main.rs:112`). Defense-in-depth at the SQL-injection
+`crates/nostos-server/src/config.rs:195`). Defense-in-depth at the SQL-injection
 trust boundary (ADR-0013); empty-by-default is deliberate. Fix: add the table,
 e.g. `NOSTOS_WRITE_TABLES=tasks,notes`.
 
@@ -308,7 +308,7 @@ token is only sent over `https://` or to loopback (`127.0.0.1`, `localhost`,
 `::1` — the `nostos dev` case); plain `http://` to any other host is refused
 unless `--allow-insecure-token` is passed.
 
-### 4.2 `nostos-server` (crates/nostos-server/src/main.rs:33-205)
+### 4.2 `nostos-server` (crates/nostos-server/src/config.rs:7-427)
 
 The sync server binary. Every flag has an env-var equivalent (see §1 table).
 
@@ -558,6 +558,7 @@ treats any relay URL in the peer's address as dialable). iroh's built-in
   resync), 0041 (ws | iroh transport, relay/discovery third-party contact).
   See [adr/](adr/).
 - Source code cited above: `crates/nostos-server/src/main.rs`,
+  `crates/nostos-server/src/config.rs`,
   `crates/nostos-infra/src/transport.rs`,
   `crates/nostos-infra/src/iroh_sync.rs`,
   `crates/nostos-infra/src/replicator/pg.rs`,

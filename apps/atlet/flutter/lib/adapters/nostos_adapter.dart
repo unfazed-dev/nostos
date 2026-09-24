@@ -53,7 +53,7 @@ class NostosAdapter implements SyncAdapter {
 
   /// nostos-server `/sync` endpoint for the Atlet local profile
   /// (docker-compose.atlet.yml binds nostos-server on 0.0.0.0:8080; `/sync`
-  /// is NOSTOS_WS_PATH's default in crates/nostos-server/src/main.rs).
+  /// is NOSTOS_WS_PATH's default in crates/nostos-server/src/config.rs).
   static const String _nostosUrl = String.fromEnvironment(
     'NOSTOS_SYNC_URL',
     defaultValue: 'ws://localhost:8080/sync',
