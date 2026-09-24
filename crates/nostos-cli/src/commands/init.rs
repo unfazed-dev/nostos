@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::config::{
-    config_path, NostosConfig, DbSection, ServerSection, SupabaseSection, SyncSection,
+    config_path, DbSection, NostosConfig, ServerSection, SupabaseSection, SyncSection,
 };
 use crate::pg::{PgControl, PublicationAction};
 use crate::{dotenv, prompt};

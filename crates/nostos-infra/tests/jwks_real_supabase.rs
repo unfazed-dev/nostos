@@ -24,10 +24,10 @@
 //!   cargo test -p nostos-infra --test jwks_real_supabase -- --ignored --nocapture
 //! ```
 
-use nostos_application::ports::SyncAuth;
-use nostos_infra::SupabaseJwtAuth;
 use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, JwkSet};
 use jsonwebtoken::{Algorithm, DecodingKey};
+use nostos_application::ports::SyncAuth;
+use nostos_infra::SupabaseJwtAuth;
 
 /// Verify a real Supabase asymmetric access token end-to-end through the live
 /// JWKS (RS256/ES256/EdDSA — this project is ES256). Needs a real user token.

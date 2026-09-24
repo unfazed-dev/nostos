@@ -16,7 +16,7 @@
 //! same docker Postgres.
 
 use nostos_cli::commands::rules::{InitRulesArgs, RulesArgs, RulesCommand};
-use nostos_cli::config::{NostosConfig, DbSection, ServerSection, SyncSection, DEFAULT_FILE_NAME};
+use nostos_cli::config::{DbSection, NostosConfig, ServerSection, SyncSection, DEFAULT_FILE_NAME};
 use nostos_cli::dotenv;
 use nostos_infra::rules_file;
 

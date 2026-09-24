@@ -24,9 +24,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use nostos_domain::Principal;
 use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, Jwk, JwkSet};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Header, Validation};
+use nostos_domain::Principal;
 use tokio::sync::RwLock;
 use tracing::warn;
 

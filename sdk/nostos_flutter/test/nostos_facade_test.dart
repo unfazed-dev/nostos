@@ -466,41 +466,38 @@ void main() {
   });
 
   group('SyncStatus', () {
-    test(
-      'disconnected with null lastSyncedAt initially; flips to connected '
-      'with a non-null lastSyncedAt after the engine emits connected',
-      () async {
-        final (engine, db) = newDb();
-        // Accessing currentStatus wires the internal status listener
-        // (_ensureStatusWired) — must happen BEFORE the emit so the listener
-        // captures the transition. Before any subscribe/emit, the honest P0
-        // snapshot is: disconnected, no last-sync stamp.
-        final initial = db.currentStatus;
-        expect(
-          initial.connected,
-          isFalse,
-          reason: 'default conn is disconnected',
-        );
-        expect(initial.lastSyncedAt, isNull, reason: 'never connected yet');
+    test('disconnected with null lastSyncedAt initially; flips to connected '
+        'with a non-null lastSyncedAt after the engine emits connected', () async {
+      final (engine, db) = newDb();
+      // Accessing currentStatus wires the internal status listener
+      // (_ensureStatusWired) — must happen BEFORE the emit so the listener
+      // captures the transition. Before any subscribe/emit, the honest P0
+      // snapshot is: disconnected, no last-sync stamp.
+      final initial = db.currentStatus;
+      expect(
+        initial.connected,
+        isFalse,
+        reason: 'default conn is disconnected',
+      );
+      expect(initial.lastSyncedAt, isNull, reason: 'never connected yet');
 
-        // subscribe wires engine.stateController → Nostos.connectionState, which
-        // the status listener listens to.
-        await db.subscribe('todos');
+      // subscribe wires engine.stateController → Nostos.connectionState, which
+      // the status listener listens to.
+      await db.subscribe('todos');
 
-        // Drive the state transition. Both the status listener and our
-        // connectionState watcher are subscribed to the same broadcast stream;
-        // await the watcher to guarantee propagation before reading currentStatus.
-        final connectedFuture = db.connectionState.firstWhere(
-          (s) => s == NostosConnectionState.connected,
-        );
-        engine.stateController.add(NostosConnectionState.connected);
-        await connectedFuture;
+      // Drive the state transition. Both the status listener and our
+      // connectionState watcher are subscribed to the same broadcast stream;
+      // await the watcher to guarantee propagation before reading currentStatus.
+      final connectedFuture = db.connectionState.firstWhere(
+        (s) => s == NostosConnectionState.connected,
+      );
+      engine.stateController.add(NostosConnectionState.connected);
+      await connectedFuture;
 
-        final after = db.currentStatus;
-        expect(after.connected, isTrue);
-        expect(after.lastSyncedAt, isNotNull);
-      },
-    );
+      final after = db.currentStatus;
+      expect(after.connected, isTrue);
+      expect(after.lastSyncedAt, isNotNull);
+    });
 
     test('pending writes surface without being reported as an error', () async {
       final (engine, db) = newDb();

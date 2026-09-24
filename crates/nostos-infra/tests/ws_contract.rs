@@ -27,12 +27,12 @@ use nostos_domain::{
     RULES_VERSION,
 };
 
-use nostos_application::ports::SyncAuth;
 use common::{
     decode_payload_hex, spawn_fake_server, spawn_fake_server_with,
     spawn_fake_server_with_device_cap, spawn_fake_server_with_rules,
     spawn_fake_server_with_snapshotter, spawn_fake_server_with_tables,
 };
+use nostos_application::ports::SyncAuth;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -1089,7 +1089,8 @@ impl EventSink for FillSink {
 async fn first_register_cap_reject_closes_with_code_1000() {
     use nostos_domain::{Predicate, SyncSession};
     let (addr, _server, mgr, _store) =
-        spawn_fake_server_with_device_cap(8, Arc::new(nostos_infra::AllowAnonymous::new()), 2).await;
+        spawn_fake_server_with_device_cap(8, Arc::new(nostos_infra::AllowAnonymous::new()), 2)
+            .await;
 
     // Fill the cap directly so the WS client's FIRST register hits
     // DeviceCapReached before any session exists for it.

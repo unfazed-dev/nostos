@@ -186,7 +186,9 @@ abstract class RustLibApi extends BaseApi {
     required PlatformInt64 delta,
   });
 
-  Future<void> crateApiNostosNostosHandleDisconnect({required NostosHandle that});
+  Future<void> crateApiNostosNostosHandleDisconnect({
+    required NostosHandle that,
+  });
 
   Future<BigInt> crateApiNostosNostosHandleOrSetAdd({
     required NostosHandle that,
@@ -789,7 +791,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return statusSink.stream;
   }
 
-  TaskConstMeta get kCrateApiDirectNostosDirectHandleWatchWriteStatusConstMeta =>
+  TaskConstMeta
+  get kCrateApiDirectNostosDirectHandleWatchWriteStatusConstMeta =>
       const TaskConstMeta(
         debugName: "NostosDirectHandle_watch_write_status",
         argNames: ["that", "statusSink"],
@@ -1059,7 +1062,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiNostosNostosHandleDisconnect({required NostosHandle that}) {
+  Future<void> crateApiNostosNostosHandleDisconnect({
+    required NostosHandle that,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -2692,10 +2697,11 @@ class NostosDirectHandleImpl extends RustOpaque implements NostosDirectHandle {
   /// # Errors
   /// As [`Self::write`]; one bad op rejects the whole batch before the outbox
   /// is touched.
-  Future<Uint64List> writeBatch({required List<NostosWriteInput> ops}) => RustLib
-      .instance
-      .api
-      .crateApiDirectNostosDirectHandleWriteBatch(that: this, ops: ops);
+  Future<Uint64List> writeBatch({required List<NostosWriteInput> ops}) =>
+      RustLib.instance.api.crateApiDirectNostosDirectHandleWriteBatch(
+        that: this,
+        ops: ops,
+      );
 }
 
 @sealed
@@ -2852,8 +2858,8 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// Returns an error string if `subscribe()` hasn't been called yet, the
   /// storage task panicked (`ClientError::Join`), or the SQL fails to
   /// prepare / a row fails to decode (`StorageError::Backend`).
-  Future<String> query({required String sql}) =>
-      RustLib.instance.api.crateApiNostosNostosHandleQuery(that: this, sql: sql);
+  Future<String> query({required String sql}) => RustLib.instance.api
+      .crateApiNostosNostosHandleQuery(that: this, sql: sql);
 
   /// Resume syncing after [`disconnect`]: respawn the connect/apply/reconnect
   /// loop on the SAME `SyncClient` (reusable across aborts — `run_once(&self)`,
@@ -3016,8 +3022,8 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   ///
   /// # Errors
   /// Returns an error string if `subscribe()` hasn't been called.
-  Stream<WriteQueueStatusFfi> watchWriteStatus() =>
-      RustLib.instance.api.crateApiNostosNostosHandleWatchWriteStatus(that: this);
+  Stream<WriteQueueStatusFfi> watchWriteStatus() => RustLib.instance.api
+      .crateApiNostosNostosHandleWatchWriteStatus(that: this);
 
   /// Enqueue a durable write against the active subscription's table.
   /// Returns once the write is captured in the local outbox (NOT once the
@@ -3055,8 +3061,9 @@ class NostosHandleImpl extends RustOpaque implements NostosHandle {
   /// # Errors
   /// Same preconditions as [`Self::write`] (subscribe first, valid op, table
   /// in the subscribed set). A failure on ANY op rolls back the ENTIRE batch.
-  Future<Uint64List> writeBatch({required List<NostosWriteInput> ops}) => RustLib
-      .instance
-      .api
-      .crateApiNostosNostosHandleWriteBatch(that: this, ops: ops);
+  Future<Uint64List> writeBatch({required List<NostosWriteInput> ops}) =>
+      RustLib.instance.api.crateApiNostosNostosHandleWriteBatch(
+        that: this,
+        ops: ops,
+      );
 }

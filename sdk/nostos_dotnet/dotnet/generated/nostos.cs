@@ -1162,86 +1162,86 @@ static class _UniFFILib {
     static void uniffiCheckApiChecksums() {
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_checkpoint();
-            if (checksum != 65119) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_checkpoint` checksum `65119`, library returned `{checksum}`");
+            if (checksum != 4447) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_checkpoint` checksum `4447`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_connect();
-            if (checksum != 50184) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_connect` checksum `50184`, library returned `{checksum}`");
+            if (checksum != 47310) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_connect` checksum `47310`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token();
-            if (checksum != 50310) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token` checksum `50310`, library returned `{checksum}`");
+            if (checksum != 38273) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_deregister_push_token` checksum `38273`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_disconnect();
-            if (checksum != 5562) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_disconnect` checksum `5562`, library returned `{checksum}`");
+            if (checksum != 4974) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_disconnect` checksum `4974`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_query();
-            if (checksum != 35331) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_query` checksum `35331`, library returned `{checksum}`");
+            if (checksum != 17069) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_query` checksum `17069`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_register_push_token();
-            if (checksum != 5810) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_register_push_token` checksum `5810`, library returned `{checksum}`");
+            if (checksum != 46832) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_register_push_token` checksum `46832`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_resume();
-            if (checksum != 880) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_resume` checksum `880`, library returned `{checksum}`");
+            if (checksum != 39458) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_resume` checksum `39458`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_set_token();
-            if (checksum != 25798) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_set_token` checksum `25798`, library returned `{checksum}`");
+            if (checksum != 26783) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_set_token` checksum `26783`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out();
-            if (checksum != 24733) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out` checksum `24733`, library returned `{checksum}`");
+            if (checksum != 34087) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out` checksum `34087`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_subscribe();
-            if (checksum != 47415) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_subscribe` checksum `47415`, library returned `{checksum}`");
+            if (checksum != 19631) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_subscribe` checksum `19631`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_watch();
-            if (checksum != 4020) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_watch` checksum `4020`, library returned `{checksum}`");
+            if (checksum != 7565) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_watch` checksum `7565`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_write();
-            if (checksum != 34919) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_write` checksum `34919`, library returned `{checksum}`");
+            if (checksum != 13811) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_write` checksum `13811`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_snapshotsink_on_snapshot();
-            if (checksum != 7450) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_snapshotsink_on_snapshot` checksum `7450`, library returned `{checksum}`");
+            if (checksum != 12316) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_snapshotsink_on_snapshot` checksum `12316`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_constructor_nostosclient_new();
-            if (checksum != 48674) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_constructor_nostosclient_new` checksum `48674`, library returned `{checksum}`");
+            if (checksum != 22753) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_constructor_nostosclient_new` checksum `22753`, library returned `{checksum}`");
             }
         }
     }

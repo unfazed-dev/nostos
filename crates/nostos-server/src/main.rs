@@ -22,13 +22,13 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::get;
+use clap::Parser;
 use nostos_application::ports::{Metrics, SchemaDescriptor, SchemaSource, SessionStore, TableStat};
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, ReplicationEvent, SyncMode};
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
-use clap::Parser;
 use tower_http::trace::TraceLayer;
 
 /// Request span that records the URI **path only**, never the query string.
@@ -118,7 +118,11 @@ pub struct Config {
     /// Op-log compaction tick period in seconds (ADR-0025 slice 5). The
     /// compactor collapses duplicate ops per (table_name, pk) + ages out rows
     /// past the retention window. Default 5min.
-    #[arg(long, env = "NOSTOS_OPLOG_COMPACT_INTERVAL_SECS", default_value_t = 300)]
+    #[arg(
+        long,
+        env = "NOSTOS_OPLOG_COMPACT_INTERVAL_SECS",
+        default_value_t = 300
+    )]
     oplog_compact_interval_secs: u64,
 
     /// Replicator mode: "fake" (synthetic generator) or "pg" (real Postgres).
@@ -657,7 +661,8 @@ async fn main() -> anyhow::Result<()> {
     // RecordingOpLogWriter directly). Shares the metrics handle so `/metrics`
     // surfaces the drop + flush-failure counters.
     #[cfg(feature = "pg")]
-    let op_log: Option<Arc<dyn nostos_application::ports::OpLogWriter>> = if cfg.replicator == "pg" {
+    let op_log: Option<Arc<dyn nostos_application::ports::OpLogWriter>> = if cfg.replicator == "pg"
+    {
         Some(Arc::new(nostos_infra::PgOpLogWriter::new(
             &cfg.pg_url,
             Some(cfg.tenant_column.clone()),
@@ -1175,8 +1180,12 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "pg")]
     if let Some(col) = tenant_col {
         if cfg.replicator == "pg" && !rules_tables.is_empty() {
-            match nostos_infra::snapshot_source::audit_tenant_column(&cfg.pg_url, col, &rules_tables)
-                .await
+            match nostos_infra::snapshot_source::audit_tenant_column(
+                &cfg.pg_url,
+                col,
+                &rules_tables,
+            )
+            .await
             {
                 Ok(audit) => {
                     for table in &audit.columnless {

@@ -10,8 +10,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use nostos_infra::rules_file::{self, RULES_FILE_NAME};
 use clap::Args;
+use nostos_infra::rules_file::{self, RULES_FILE_NAME};
 
 use crate::direct::{self, Verdict};
 

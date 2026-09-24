@@ -6,7 +6,10 @@ import 'package:atlet/push/push_pilot.dart';
 void main() {
   group('isNostosDoorbell', () {
     test('accepts a nostos doorbell payload {table, lsn}', () {
-      expect(isNostosDoorbell({'table': 'sessions', 'lsn': '0/1A2B3C'}), isTrue);
+      expect(
+        isNostosDoorbell({'table': 'sessions', 'lsn': '0/1A2B3C'}),
+        isTrue,
+      );
     });
 
     test('accepts the direct-mode ring {cairn: ring} (ADR-0045)', () {

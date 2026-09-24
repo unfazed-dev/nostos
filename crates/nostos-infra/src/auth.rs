@@ -30,10 +30,10 @@
 //! across the HS256 and JWKS paths.
 
 use async_trait::async_trait;
-use nostos_application::ports::SyncAuth;
-use nostos_domain::Principal;
 use hmac::{Hmac, Mac};
 use jsonwebtoken::Algorithm;
+use nostos_application::ports::SyncAuth;
+use nostos_domain::Principal;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::Duration;

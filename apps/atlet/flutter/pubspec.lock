@@ -73,13 +73,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.1"
-  nostos_flutter:
-    dependency: "direct main"
-    description:
-      path: "../../../sdk/nostos_flutter"
-      relative: true
-    source: path
-    version: "0.2.0"
   characters:
     dependency: transitive
     description:
@@ -462,6 +455,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.5.0"
+  nostos_flutter:
+    dependency: "direct main"
+    description:
+      path: "../../../sdk/nostos_flutter"
+      relative: true
+    source: path
+    version: "0.2.0"
   objective_c:
     dependency: transitive
     description:

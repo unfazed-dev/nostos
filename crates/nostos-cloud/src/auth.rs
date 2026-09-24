@@ -12,8 +12,8 @@
 //! (Supabase projects default to HS256 with a shared secret; RS256 is a later
 //! upgrade behind this same trait).
 
-use nostos_license::base64url_decode;
 use hmac::{Hmac, Mac};
+use nostos_license::base64url_decode;
 use serde::Deserialize;
 use sha2::Sha256;
 

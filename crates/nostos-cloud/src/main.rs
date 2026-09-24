@@ -20,10 +20,10 @@ use anyhow::Context;
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
+use clap::Parser;
 use nostos_cloud::routes::{checkout_ok, router, CloudState};
 use nostos_cloud::store::CloudStore;
 use nostos_license::Tier;
-use clap::Parser;
 use tracing::info;
 
 /// Default `--db`.
@@ -89,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = nostos_infra::env::parse::<Config>();
     // ADR-0046: a default-path deployment keeps its pre-rename database.
     if cfg.db == DEFAULT_DB {
-        let db = nostos_infra::config_path::resolve(std::path::Path::new(""), DEFAULT_DB, LEGACY_DB);
+        let db =
+            nostos_infra::config_path::resolve(std::path::Path::new(""), DEFAULT_DB, LEGACY_DB);
         cfg.db = db.display().to_string();
     }
     init_tracing(&cfg.log);
@@ -118,8 +119,9 @@ async fn main() -> anyhow::Result<()> {
             .context("build http client")?,
         public_base_url: cfg.public_base_url.clone(),
         jwt_verifier: cfg.supabase_jwt_secret.as_ref().map(|s| {
-            Arc::new(nostos_cloud::auth::Hs256Verifier::new(s.as_bytes().to_vec()))
-                as Arc<dyn nostos_cloud::auth::JwtVerifier>
+            Arc::new(nostos_cloud::auth::Hs256Verifier::new(
+                s.as_bytes().to_vec(),
+            )) as Arc<dyn nostos_cloud::auth::JwtVerifier>
         }),
     };
 

@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::routing::get;
+use futures_util::{SinkExt, StreamExt};
 use nostos_application::ports::SyncAuth;
 use nostos_application::{FanOutService, SessionManager};
 use nostos_domain::{ColumnValue, Principal, ReplicationEvent, StreamRule, SyncMode, SyncRules};
@@ -33,7 +34,6 @@ use nostos_infra::replicator::{PgReplicator, PgReplicatorConfig};
 use nostos_infra::snapshot_source::PgSnapshotter;
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
-use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 

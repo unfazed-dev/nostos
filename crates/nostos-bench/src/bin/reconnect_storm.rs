@@ -35,13 +35,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::routing::get;
+use futures_util::{SinkExt, StreamExt};
 use nostos_application::{FanOutService, ReplicatorStream, SessionManager};
 use nostos_domain::ColumnValue;
 use nostos_infra::replicator::{FakeReplicator, FakeReplicatorConfig};
 use nostos_infra::store::InMemorySessionStore;
 use nostos_infra::transport::{sync_handler, SyncRouterState};
 use nostos_infra::wire;
-use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Notify;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
