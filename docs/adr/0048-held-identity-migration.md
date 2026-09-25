@@ -70,7 +70,9 @@ are held for two reasons, and each needs a different answer:
    - An old client can't talk to a new server. Release them together.
    - After 1.0, this kind of change needs a protocol version bump, not a rename.
 3. **Server mode gets a runbook, not code** (below). It has one known deployment:
-   ours. The dev database is recreated with `docker compose down -v`.
+   ours. The dev database is renamed in place too (runbook below), not
+   recreated: `down -v` wipes the `docker_pgdata` volume, which other local
+   projects' slots live in.
 4. **What stays `cairn`:**
    - history: applied migrations, the rename docs and tool, git pins into the archive;
    - the brand metaphor;
@@ -109,6 +111,36 @@ Then pick one of these:
   run `select pg_drop_replication_slot('cairn_slot')` and
   `drop publication cairn_pub`. The old slot holds WAL until it's dropped. The
   new slot's epoch forces every client to resnapshot (ADR-0025).
+
+**Dev database (docker, :5433):** the init scripts only run on an empty data
+directory, so the new compose credentials don't apply to an existing
+volume. Rename the old names to the new ones while the old container is still
+up. The session user can't rename itself, so a throwaway superuser does it.
+SCRAM passwords survive a rename; they are reset because the password is part
+of the new URL.
+
+```sh
+c=cairn-postgres                                                   # rename:hold
+docker exec $c psql -U cairn -d postgres -c 'create role rename_admin superuser login'  # rename:hold
+docker exec -i $c psql -v ON_ERROR_STOP=1 -U rename_admin -d postgres <<'SQL'
+alter database cairn rename to nostos;                             -- rename:hold
+alter role cairn rename to nostos;                                 -- rename:hold
+alter role cairn_writer rename to nostos_writer;                   -- rename:hold
+alter role nostos password 'nostos';
+alter role nostos_writer password 'nostos_writer_dev_pw';
+SQL
+docker exec -i $c psql -v ON_ERROR_STOP=1 -U nostos -d nostos <<'SQL'
+drop role rename_admin;
+alter table cairn_oplog rename to nostos_oplog;                    -- rename:hold
+alter table cairn_push_tokens rename to nostos_push_tokens;        -- rename:hold
+alter publication cairn_pub rename to nostos_pub;                  -- rename:hold
+select pg_drop_replication_slot('cairn_slot');                     -- rename:hold
+SQL
+docker compose -f docker/docker-compose.yml up -d  # same project + volume: recreates as nostos-postgres
+```
+
+Other slots and publications in the cluster keep their names. Their owners
+name them in their own config.
 
 ## Consequences
 
