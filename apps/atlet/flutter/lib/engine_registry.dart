@@ -93,6 +93,17 @@ class EngineRegistry {
     return adapter;
   }
 
+  /// Tears the live engine down: `signOut()` on the adapter (disconnect +
+  /// local wipe, ADR-0029) and an empty slot, so the next sign-in can
+  /// [start] cold. No-op when nothing is live.
+  Future<void> stop() async {
+    final adapter = current;
+    _activeEngine = null;
+    _nostosAdapter = null;
+    _nostosDirectAdapter = null;
+    await adapter?.signOut();
+  }
+
   void _setSlot(Engine engine, SyncAdapter adapter) {
     switch (engine) {
       case Engine.nostos:

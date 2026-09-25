@@ -453,6 +453,18 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setState(() {}); // hand the live adapter to the tabs
   }
 
+  /// Sign out: doorbell off, engine down (local DB wiped), Supabase session
+  /// gone, back to the sign-in route. Order matters — the push pilot and the
+  /// auth listener both hold the adapter, so they let go before it does.
+  Future<void> _signOut() async {
+    await _authSub?.cancel();
+    _authSub = null;
+    if (_pushPilotEnabled) await pushPilot.detach();
+    await engineRegistry.stop();
+    await Supabase.instance.client.auth.signOut();
+    if (mounted) Navigator.of(context).pushReplacementNamed('/signin');
+  }
+
   void _notify(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -521,7 +533,15 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: AtletTokens.bone,
         elevation: 0,
         title: Text('Home', style: TextStyle(color: AtletTokens.ink)),
-        actions: const [ConnectivityLed()],
+        actions: [
+          const ConnectivityLed(),
+          IconButton(
+            key: const Key('sign-out'),
+            icon: const Icon(Icons.logout),
+            tooltip: 'Sign out',
+            onPressed: _signOut,
+          ),
+        ],
       ),
       body: TrainingHome(adapter: engineRegistry.current),
     );
