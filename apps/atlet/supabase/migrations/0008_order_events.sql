@@ -66,12 +66,20 @@ create trigger orders_record_event
   after insert or update of status on public.orders
   for each row execute function public.record_order_event();
 
--- Sync it the way every other user-scoped table syncs: cairn.log_change stamps
--- `sub:<user_id>`, so a pull only ever hands a device its own rows.
-drop trigger if exists cairn_log_order_events on public.order_events;
-create trigger cairn_log_order_events
-  after insert or delete or update on public.order_events
-  for each row execute function cairn.log_change('user_id', 'sub');
+-- Sync it the way every other user-scoped table syncs: nostos.log_change stamps
+-- `sub:<user_id>`, so a pull only ever hands a device its own rows. Guarded:
+-- on a project not yet linked (fresh, 2026-09-25) the schema does not exist,
+-- and `nostos link` owns this trigger anyway now that order_events is in
+-- nostos_rules.toml. (Written as `cairn` before ADR-0048; the link renames.)
+do $$
+begin
+  if to_regnamespace('nostos') is not null then
+    drop trigger if exists nostos_log_order_events on public.order_events;
+    create trigger nostos_log_order_events
+      after insert or delete or update on public.order_events
+      for each row execute function nostos.log_change('user_id', 'sub');
+  end if;
+end $$;
 
 -- Orders that predate the trigger get one row each, so the History tab is not
 -- empty for an account that has been shopping since August.
@@ -82,11 +90,11 @@ where not exists (
   select 1 from public.order_events e where e.order_id = o.id
 );
 
--- cairn_snapshot() is generated per table list (`cairn dev`/`cairn deploy`),
+-- nostos_snapshot() is generated per table list (`nostos link`/`nostos deploy`),
 -- so adding a table means regenerating it. Bootstrap and 410-recovery both go
 -- through here; without the new arm a fresh device would see order_events only
 -- for transitions that happen after it first syncs.
-create or replace function public.cairn_snapshot() returns jsonb
+create or replace function public.nostos_snapshot() returns jsonb
 language sql
 stable
 security invoker
