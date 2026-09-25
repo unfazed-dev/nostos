@@ -473,9 +473,17 @@ begin
             where not t.tgisinternal and t.tgname like old || '\_%' loop
     execute format('alter trigger %I on %s rename to %I', r.tgname, r.rel, 'nostos' || substr(r.tgname, length(old) + 1));
   end loop;
+  -- A policy can only be renamed by its table's owner. On hosted Supabase
+  -- realtime.messages belongs to supabase_realtime_admin and `postgres` is not
+  -- a member (measured 2026-09-25), so that one is left in place and the ring
+  -- policy block below says what to do about it.
   for r in select p.polname, p.polrelid::regclass as rel from pg_policy p
             where p.polname like old || '\_%' loop
-    execute format('alter policy %I on %s rename to %I', r.polname, r.rel, 'nostos' || substr(r.polname, length(old) + 1));
+    begin
+      execute format('alter policy %I on %s rename to %I', r.polname, r.rel, 'nostos' || substr(r.polname, length(old) + 1));
+    exception when insufficient_privilege then
+      raise warning 'nostos: policy % on % not renamed (% is not the table owner)', r.polname, r.rel, current_user;
+    end;
   end loop;
   -- A pg_cron job still calling the old schema's prune() would fail every run.
   if to_regclass('cron.job') is not null then
@@ -878,14 +886,30 @@ create policy nostos_changes_read on nostos.changes
 -- Authorization, which is a policy on realtime.messages — and it is only
 -- ENFORCED once "Allow public access" is off in the project's Realtime
 -- settings. `nostos doctor --mode direct` checks that; SQL cannot.
-drop policy if exists nostos_ring_read on realtime.messages;
-create policy nostos_ring_read on realtime.messages
-  for select to authenticated
-  using (
-    realtime.messages.extension = 'broadcast'
-    and (select realtime.topic()) like 'nostos:%'
-    and substring((select realtime.topic()) from 7) = any (nostos.current_scopes())
-  );
+--
+-- Soft-fails: on hosted Supabase the table is owned by supabase_realtime_admin
+-- and `postgres` (the SQL editor, the CLI, the MCP) is not a member. Measured
+-- 2026-09-25: creating the policy here still went through, but the `alter
+-- policy ... rename` in the ADR-0048 block did not (42501), and a `drop` may
+-- not either.
+-- The rest of the file must still land -- pull, snapshot and push work without
+-- the doorbell -- so this block warns instead of failing, and `nostos doctor
+-- --mode direct` reports a missing policy until a role that owns
+-- realtime.messages runs it.
+do $ring$
+begin
+  drop policy if exists nostos_ring_read on realtime.messages;
+  create policy nostos_ring_read on realtime.messages
+    for select to authenticated
+    using (
+      realtime.messages.extension = 'broadcast'
+      and (select realtime.topic()) like 'nostos:%'
+      and substring((select realtime.topic()) from 7) = any (nostos.current_scopes())
+    );
+exception when insufficient_privilege then
+  raise warning 'nostos: realtime.messages is owned by % and % cannot create a policy on it; the Realtime doorbell stays off until the nostos_ring_read block of .nostos/direct.sql is run by that owner (dashboard Realtime > Policies, or Supabase support). Check with `nostos doctor --mode direct`.',
+    pg_get_userbyid((select relowner from pg_class where oid = 'realtime.messages'::regclass)), current_user;
+end $ring$;
 
 grant usage on schema nostos to authenticated;
 grant select on nostos.changes to authenticated;
@@ -1530,7 +1554,9 @@ pub async fn inspect(
         .get(0);
     out.push(Check::new(
         realtime_policy,
-        "the Realtime read policy exists on realtime.messages",
+        "the Realtime read policy exists on realtime.messages (missing: the table's owner \
+         must run the nostos_ring_read block of .nostos/direct.sql \u{2014} on hosted \
+         Supabase that is supabase_realtime_admin, not postgres)",
     ));
     out.push(Check::note(
         "Realtime Authorization is only ENFORCED with \"Allow public access\" OFF in the \
@@ -1875,6 +1901,35 @@ mod tests {
             .find("create schema if not exists nostos")
             .expect("create");
         assert!(rename < create, "the rename must run first");
+    }
+
+    /// Hosted Supabase: realtime.messages is owned by supabase_realtime_admin
+    /// and `postgres` cannot create or rename a policy on it. The file must
+    /// still apply, so both places that touch that table soft-fail.
+    #[test]
+    fn the_realtime_policy_soft_fails_when_the_table_is_not_ours() {
+        let sql = sample_sql();
+        assert_eq!(
+            sql.matches("exception when insufficient_privilege").count(),
+            2,
+            "policy rename loop + ring policy block"
+        );
+        let start = sql.find("do $ring$").expect("ring block");
+        let end = sql.find("end $ring$;").expect("ring block end");
+        let create = sql
+            .find("create policy nostos_ring_read on realtime.messages")
+            .expect("ring policy");
+        assert!(
+            start < create && create < end,
+            "the ring policy is inside the guarded block"
+        );
+        let rename = sql
+            .find("alter policy %I on %s rename to %I")
+            .expect("rename");
+        let guard = sql[rename..]
+            .find("exception when insufficient_privilege")
+            .unwrap();
+        assert!(guard < sql[rename..].find("end loop;").unwrap());
     }
 
     /// Pins the contract `nostos_core::pull` and `nostos_client::postgrest`
