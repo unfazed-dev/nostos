@@ -1,6 +1,6 @@
 /// The direct-mode [NostosEngine] adapter: wraps the generated
 /// `rust.NostosDirectHandle`, which talks to a Supabase project with no
-/// `nostos-server` anywhere (ADR-0045).
+/// `nostos-server` anywhere (`docs/plans/direct-mode-sync-protocol.md`).
 ///
 /// Like `engine_io.dart` this file is native-only — it is reached solely from
 /// `engine_selector_io.dart`, so `flutter build web` never sees frb's io

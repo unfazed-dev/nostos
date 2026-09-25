@@ -3,7 +3,8 @@ import 'adapters/sync_adapter.dart';
 
 /// Which Nostos client is live. `nostosDirect` is the same engine with no
 /// `nostos-server` on the other end — the device syncs with Supabase itself
-/// (ADR-0045) — so it is a second engine here, not a flag on [Engine.nostos]:
+/// (`docs/plans/direct-mode-sync-protocol.md`) — so it is a second engine here,
+/// not a flag on [Engine.nostos]:
 /// the two hold different databases and must never be live at once.
 enum Engine { nostos, nostosDirect }
 

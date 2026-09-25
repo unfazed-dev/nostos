@@ -86,7 +86,8 @@ class Nostos {
 
   /// Open a connection with no `nostos-server` in it: this device talks to
   /// your Supabase project directly — PostgREST for the pull and the push,
-  /// Realtime for the doorbell, RLS for who may read what (ADR-0045).
+  /// Realtime for the doorbell, RLS for who may read what
+  /// (`docs/plans/direct-mode-sync-protocol.md`).
   ///
   /// Everything below this line is identical to [connect]: same durable
   /// outbox, same `watch` streams, same offline behaviour. What changes is who

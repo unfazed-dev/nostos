@@ -88,7 +88,7 @@ class NostosDatabase {
   /// connection uses — see [_deriveHttpBase].
   final String _httpBase;
 
-  /// Direct mode only (ADR-0045): the project's publishable key. Non-null
+  /// Direct mode only: the project's publishable key. Non-null
   /// means [_httpBase] is PostgREST (`{supabaseUrl}/rest/v1`) and the push
   /// tokens go through the `nostos_*_push_token` RPCs that `nostos link --mode
   /// direct --push` generates, not `nostos-server`'s `/push-tokens`.
@@ -433,8 +433,9 @@ class NostosDatabase {
   }
 
   /// Open a database with no `nostos-server` in it: this device syncs straight
-  /// with your Supabase project (ADR-0045). See [Nostos.direct] for the mode's
-  /// shape; everything else on this class behaves as it does after [connect].
+  /// with your Supabase project (`docs/plans/direct-mode-sync-protocol.md`).
+  /// See [Nostos.direct] for the mode's shape; everything else on this class
+  /// behaves as it does after [connect].
   ///
   /// [schema] is REQUIRED and cannot be fetched: `GET /schema` is a
   /// `nostos-server` endpoint, and there is no server. Declare it in the app —
@@ -1023,7 +1024,7 @@ class NostosDatabase {
   /// `FirebaseMessaging.onTokenRefresh` on Android, APNs
   /// `didRegisterForRemoteNotificationsWithDeviceToken` on iOS.
   ///
-  /// In direct mode (ADR-0045) the same call is
+  /// In direct mode the same call is
   /// `POST /rest/v1/rpc/nostos_register_push_token` with
   /// `{"p_platform": …, "p_token": …}`; the RPC stamps the scope from the JWT.
   ///

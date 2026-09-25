@@ -387,7 +387,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Brings the sync engine up. There is one engine and no way to change it
   /// (user request 2026-09-22): direct-mode Nostos, the device syncing with
-  /// Supabase itself with no `nostos-server` on the other end (ADR-0045).
+  /// Supabase itself with no `nostos-server` on the other end
+  /// (`docs/plans/direct-mode-sync-protocol.md`).
   /// It starts on its own when Home opens, and says nothing while doing it —
   /// the connectivity LED and the write-status UI are what report a sync
   /// that isn't working.

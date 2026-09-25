@@ -5,8 +5,7 @@
 //! has to operate. This one dials the customer's own Supabase project —
 //! PostgREST for the pull and the push, Realtime for the doorbell, RLS for the
 //! authorization — so an app can ship to end-user devices without shipping a
-//! process to run beside it (ADR-0045,
-//! `docs/plans/direct-mode-sync-protocol.md`).
+//! process to run beside it (`docs/plans/direct-mode-sync-protocol.md`).
 //!
 //! What is deliberately NOT here, because direct mode does not have it:
 //!

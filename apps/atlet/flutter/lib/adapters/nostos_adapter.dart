@@ -16,7 +16,8 @@ class NostosAdapter implements SyncAdapter {
   NostosAdapter() : engine = 'nostos', _open = _openServer;
 
   /// Direct mode: sync straight with Supabase, no `nostos-server` anywhere
-  /// (ADR-0045). Everything past `init()` is the same code — the mode only
+  /// (`docs/plans/direct-mode-sync-protocol.md`). Everything past `init()` is
+  /// the same code — the mode only
   /// decides who is on the other end of the pull, so the adapter takes an
   /// opener instead of having a second copy of itself.
   ///
@@ -403,7 +404,7 @@ class NostosAdapter implements SyncAdapter {
 
   /// PILOT (ADR-0037): register this device's push token against the live
   /// engine — `POST /push-tokens` in server mode, the
-  /// `nostos_register_push_token` RPC in direct mode (ADR-0045), same JWT as
+  /// `nostos_register_push_token` RPC in direct mode, same JWT as
   /// the sync either way. Passthrough so callers never hold the SDK directly;
   /// the SDK's sign-out hook deregisters session-registered tokens
   /// automatically.
@@ -451,7 +452,7 @@ StreamSubscription<NostosConnectionState> wireConnectionState(
   onConnected(state == NostosConnectionState.connected);
 });
 
-/// Opens Atlet's direct-mode database (ADR-0045). Shared by
+/// Opens Atlet's direct-mode database. Shared by
 /// [NostosAdapter.direct] and the push pilot's background wake, which must
 /// land on the SAME SQLite file with the same scope.
 Future<NostosDatabase> openNostosDirect({
