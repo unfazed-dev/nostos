@@ -1210,8 +1210,8 @@ static class _UniFFILib {
         }
         {
             var checksum = _UniFFILib.uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out();
-            if (checksum != 34087) {
-                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out` checksum `34087`, library returned `{checksum}`");
+            if (checksum != 25394) {
+                throw new UniffiContractChecksumException($"uniffi.nostos: uniffi bindings expected function `uniffi_nostos_dotnet_checksum_method_nostosclient_sign_out` checksum `25394`, library returned `{checksum}`");
             }
         }
         {
