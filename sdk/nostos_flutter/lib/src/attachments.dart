@@ -315,7 +315,19 @@ class Attachments {
   /// through the outbox would fan out to every device and needs write RLS the
   /// reader does not have. Per-user attachments keep using [queueDownload] so
   /// the transfer is durable across restarts.
-  Future<Uint8List?> bytes(String id) async {
+  ///
+  /// Concurrent callers for one id share a single download: six catalog tiles
+  /// painting at once produced 19 GETs for 5 images (atlet, 2026-09-25).
+  Future<Uint8List?> bytes(String id) => _inflight[id] ??= _fetch(id)
+      // Block body on purpose: `remove` returns the future itself and an
+      // expression body would make `whenComplete` await its own result.
+      .whenComplete(() {
+        _inflight.remove(id);
+      });
+
+  final Map<String, Future<Uint8List?>> _inflight = {};
+
+  Future<Uint8List?> _fetch(String id) async {
     final cached = await _blob.get(id);
     if (cached != null) return cached;
     try {

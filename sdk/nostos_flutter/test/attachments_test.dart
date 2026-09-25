@@ -499,9 +499,13 @@ void main() {
       isOnline: () async => false,
     );
 
+    // Six tiles paint at once: one download, not six.
+    final race = await Future.wait(
+      List.generate(6, (_) => driver.bytes('shared.jpg')),
+    );
+    expect(race, everyElement([9, 9]));
     expect(await driver.bytes('shared.jpg'), [9, 9]);
-    expect(await driver.bytes('shared.jpg'), [9, 9]);
-    expect(adapter.downloadCalls, 1); // second read served from the store
+    expect(adapter.downloadCalls, 1); // later reads served from the store
     expect(engine.attachments, isEmpty); // no state flip through the outbox
     expect(await driver.bytes('missing.jpg'), isNull);
     expect(driver.lastErrorFor('missing.jpg'), contains('not found'));

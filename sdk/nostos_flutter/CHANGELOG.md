@@ -15,7 +15,8 @@ Direct mode (`NostosDatabase.direct`), newest first:
 - **Fix: `NostosDatabase.isOnline` self-wires** the status pump. An app that
   never read `status` saw `false` forever, so the T6 driver never moved a
   byte; `bytes()` no longer gates on it at all (a miss at first paint was
-  never retried).
+  never retried). Concurrent `bytes()` calls for one id share a single
+  download (six tiles at first paint made 19 GETs for 5 images).
 - **`watch` withholds the pre-snapshot empty read.** The first emission is the
   first real read, so UIs no longer flash an empty state for the ~2 s
   bootstrap. Streams that expected an immediate `[]` on a fresh store now wait.
