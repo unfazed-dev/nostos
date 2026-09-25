@@ -70,7 +70,8 @@ gh api 'repos/{owner}/{repo}/branches/main/protection' --method PUT \
       "nostos_flutter — analyze + test",
       "throughput benchmark (smoke)",
       "nostos_react_native — typecheck",
-      "nostos_capacitor — typecheck"
+      "nostos_capacitor — typecheck",
+      "PR title stage tag"
     ]
   },
   "enforce_admins": false,
@@ -88,8 +89,8 @@ JSON
   For a solo repo that serialises every merge.
 - The contexts are the check names GitHub reports: each `ci.yml` job's `name:`,
   once per matrix entry for `sdk-typecheck`.
-- `PR title stage tag` (pr.yml) is required since row 5 flipped (2026-09-26):
-  add it to `contexts` and re-run the PUT.
+- `PR title stage tag` comes from pr.yml, not ci.yml; required since row 5
+  flipped (2026-09-26, applied the same day).
 - When you rename a job, edit this list and re-run the PUT. A stale context
   blocks every merge.
 - Check what is applied:
