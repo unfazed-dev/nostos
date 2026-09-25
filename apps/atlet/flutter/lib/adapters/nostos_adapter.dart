@@ -470,9 +470,9 @@ Future<NostosDatabase> openNostosDirect({
   token: accessToken,
   schema: _schema,
   sqlitePath: '$dbDir/nostos_direct.sqlite',
-  // ADR-0049: off = wipe on sign-out (ADR-0029). `--dart-define
-  // ATLET_KEEP_LOCAL=true` keeps this user's rows across sign-out.
-  keepLocalOnSignOut: const bool.fromEnvironment('ATLET_KEEP_LOCAL'),
+  // ADR-0049: product decision 2026-09-26 — keep this user's rows across
+  // sign-out (the engine still wipes when a different `sub` signs in).
+  keepLocalOnSignOut: true,
 );
 
 final NostosSchema _schema = NostosSchema(

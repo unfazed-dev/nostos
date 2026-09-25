@@ -62,7 +62,8 @@ default and retention is opt-in.
 5. **Flag surface:** `keepLocalOnSignOut: bool` (default `false`) on
    `NostosDatabase.direct`, `Nostos.direct`, `DirectNostosEngine.connect`,
    `createDirectNostosEngine`, and the frb `NostosDirectHandle.connect`. atlet
-   reads it from `--dart-define ATLET_KEEP_LOCAL=true`.
+   passes `true` at its one connect call (2026-09-26; briefly a dart-define,
+   dropped: every peer engine surveyed puts this in app init code).
 
 Why `sub` unverified is enough: the server verifies the signature on every
 pull and RLS decides which rows come down. A forged `sub` on the device can at
