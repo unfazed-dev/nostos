@@ -87,3 +87,9 @@ B sees A's rows and A's unsynced writes replay under B's token.
 User A signs in, writes, signs out; user B signs in on the same device. **B must not see A's rows,
 and A's unsynced writes must not be attributed to B.** Plus a resume assertion: B receives a
 snapshot, not an empty database (proving the checkpoint was cleared to 0).
+
+## Addendum (2026-09-25)
+
+The wipe stays the default. ADR-0049 adds an opt-in `LocalRetention::KeepForPrincipal`
+(`keepLocalOnSignOut: true` in the Flutter SDK) that keeps the rows across sign-out for
+the same JWT `sub` and defers the wipe to the first sync under a different one.

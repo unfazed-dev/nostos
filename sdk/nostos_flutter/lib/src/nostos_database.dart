@@ -448,6 +448,11 @@ class NostosDatabase {
   /// which files the token under this JWT's scopes. Rotate [token] with
   /// [setToken] — the RPCs authenticate with the same credential as the pull.
   ///
+  /// [keepLocalOnSignOut] (ADR-0049): by default [signOut] wipes the device
+  /// (ADR-0029) and the next sign-in downloads everything again. `true` keeps
+  /// the rows for the same user's next sign-in — one snapshot per install —
+  /// and wipes only when a different user's token syncs.
+  ///
   /// ponytail: no presence heartbeat (`nostos_heartbeat`) is sent, so the push
   /// trigger treats every device as absent and rings even a foregrounded one
   /// (once per scope per cooldown). A doorbell is idempotent, so the cost is
@@ -461,6 +466,7 @@ class NostosDatabase {
     required NostosSchema schema,
     required String sqlitePath,
     Map<String, String> counterFields = const <String, String>{},
+    bool keepLocalOnSignOut = false,
   }) async {
     if (schema.tables.isEmpty) {
       throw ArgumentError.value(
@@ -477,6 +483,7 @@ class NostosDatabase {
       token: token,
       sqlitePath: sqlitePath,
       counterFields: counterFields,
+      keepLocalOnSignOut: keepLocalOnSignOut,
     );
     nostos.applySchema(schema.toClientTables());
     final base = supabaseUrl.endsWith('/')

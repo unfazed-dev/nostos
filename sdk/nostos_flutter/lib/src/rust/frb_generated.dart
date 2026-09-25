@@ -3,8 +3,8 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
-import 'api/nostos.dart';
 import 'api/direct.dart';
+import 'api/nostos.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 32333151;
+  int get rustContentHash => -719452361;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -96,6 +96,7 @@ abstract class RustLibApi extends BaseApi {
     required String anonKey,
     String? token,
     required String dbPath,
+    required bool keepLocalOnSignOut,
   });
 
   Future<void> crateApiDirectNostosDirectHandleDisconnect({
@@ -363,6 +364,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String anonKey,
     String? token,
     required String dbPath,
+    required bool keepLocalOnSignOut,
   }) {
     return handler.executeSync(
       SyncTask(
@@ -372,6 +374,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(anonKey, serializer);
           sse_encode_opt_String(token, serializer);
           sse_encode_String(dbPath, serializer);
+          sse_encode_bool(keepLocalOnSignOut, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
@@ -380,7 +383,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiDirectNostosDirectHandleConnectConstMeta,
-        argValues: [supabaseUrl, anonKey, token, dbPath],
+        argValues: [supabaseUrl, anonKey, token, dbPath, keepLocalOnSignOut],
         apiImpl: this,
       ),
     );
@@ -389,7 +392,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiDirectNostosDirectHandleConnectConstMeta =>
       const TaskConstMeta(
         debugName: "NostosDirectHandle_connect",
-        argNames: ["supabaseUrl", "anonKey", "token", "dbPath"],
+        argNames: [
+          "supabaseUrl",
+          "anonKey",
+          "token",
+          "dbPath",
+          "keepLocalOnSignOut",
+        ],
       );
 
   @override
@@ -1768,23 +1777,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  NostosConnectionState dco_decode_nostos_connection_state(dynamic raw) {
+  bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return NostosConnectionState.values[raw as int];
-  }
-
-  @protected
-  NostosWriteInput dco_decode_nostos_write_input(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
-    return NostosWriteInput(
-      table: dco_decode_String(arr[0]),
-      op: dco_decode_String(arr[1]),
-      pk: dco_decode_String(arr[2]),
-      payloadJson: dco_decode_opt_String(arr[3]),
-    );
+    return raw as bool;
   }
 
   @protected
@@ -1825,15 +1820,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<NostosWriteInput> dco_decode_list_nostos_write_input(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_nostos_write_input).toList();
-  }
-
-  @protected
   List<ClientTableFfi> dco_decode_list_client_table_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_client_table_ffi).toList();
+  }
+
+  @protected
+  List<NostosWriteInput> dco_decode_list_nostos_write_input(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_nostos_write_input).toList();
   }
 
   @protected
@@ -1852,6 +1847,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<TableSubFfi> dco_decode_list_table_sub_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_table_sub_ffi).toList();
+  }
+
+  @protected
+  NostosConnectionState dco_decode_nostos_connection_state(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NostosConnectionState.values[raw as int];
+  }
+
+  @protected
+  NostosWriteInput dco_decode_nostos_write_input(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return NostosWriteInput(
+      table: dco_decode_String(arr[0]),
+      op: dco_decode_String(arr[1]),
+      pk: dco_decode_String(arr[2]),
+      payloadJson: dco_decode_opt_String(arr[3]),
+    );
   }
 
   @protected
@@ -2022,27 +2037,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  NostosConnectionState sse_decode_nostos_connection_state(
-    SseDeserializer deserializer,
-  ) {
+  bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return NostosConnectionState.values[inner];
-  }
-
-  @protected
-  NostosWriteInput sse_decode_nostos_write_input(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_table = sse_decode_String(deserializer);
-    var var_op = sse_decode_String(deserializer);
-    var var_pk = sse_decode_String(deserializer);
-    var var_payloadJson = sse_decode_opt_String(deserializer);
-    return NostosWriteInput(
-      table: var_table,
-      op: var_op,
-      pk: var_pk,
-      payloadJson: var_payloadJson,
-    );
+    return deserializer.buffer.getUint8() != 0;
   }
 
   @protected
@@ -2089,20 +2086,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<NostosWriteInput> sse_decode_list_nostos_write_input(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <NostosWriteInput>[];
-    for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_nostos_write_input(deserializer));
-    }
-    return ans_;
-  }
-
-  @protected
   List<ClientTableFfi> sse_decode_list_client_table_ffi(
     SseDeserializer deserializer,
   ) {
@@ -2112,6 +2095,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <ClientTableFfi>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_client_table_ffi(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<NostosWriteInput> sse_decode_list_nostos_write_input(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <NostosWriteInput>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_nostos_write_input(deserializer));
     }
     return ans_;
   }
@@ -2142,6 +2139,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ans_.add(sse_decode_table_sub_ffi(deserializer));
     }
     return ans_;
+  }
+
+  @protected
+  NostosConnectionState sse_decode_nostos_connection_state(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return NostosConnectionState.values[inner];
+  }
+
+  @protected
+  NostosWriteInput sse_decode_nostos_write_input(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_table = sse_decode_String(deserializer);
+    var var_op = sse_decode_String(deserializer);
+    var var_pk = sse_decode_String(deserializer);
+    var var_payloadJson = sse_decode_opt_String(deserializer);
+    return NostosWriteInput(
+      table: var_table,
+      op: var_op,
+      pk: var_pk,
+      payloadJson: var_payloadJson,
+    );
   }
 
   @protected
@@ -2199,12 +2220,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       deadLettered: var_deadLettered,
       lastError: var_lastError,
     );
-  }
-
-  @protected
-  bool sse_decode_bool(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getUint8() != 0;
   }
 
   @protected
@@ -2352,24 +2367,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_nostos_connection_state(
-    NostosConnectionState self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_nostos_write_input(
-    NostosWriteInput self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.table, serializer);
-    sse_encode_String(self.op, serializer);
-    sse_encode_String(self.pk, serializer);
-    sse_encode_opt_String(self.payloadJson, serializer);
+    serializer.buffer.putUint8(self ? 1 : 0);
   }
 
   @protected
@@ -2411,18 +2411,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_nostos_write_input(
-    List<NostosWriteInput> self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.length, serializer);
-    for (final item in self) {
-      sse_encode_nostos_write_input(item, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_list_client_table_ffi(
     List<ClientTableFfi> self,
     SseSerializer serializer,
@@ -2431,6 +2419,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_client_table_ffi(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_nostos_write_input(
+    List<NostosWriteInput> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_nostos_write_input(item, serializer);
     }
   }
 
@@ -2464,6 +2464,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     for (final item in self) {
       sse_encode_table_sub_ffi(item, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_nostos_connection_state(
+    NostosConnectionState self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_nostos_write_input(
+    NostosWriteInput self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.table, serializer);
+    sse_encode_String(self.op, serializer);
+    sse_encode_String(self.pk, serializer);
+    sse_encode_opt_String(self.payloadJson, serializer);
   }
 
   @protected
@@ -2515,12 +2536,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.pending, serializer);
     sse_encode_u_64(self.deadLettered, serializer);
     sse_encode_opt_String(self.lastError, serializer);
-  }
-
-  @protected
-  void sse_encode_bool(bool self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putUint8(self ? 1 : 0);
   }
 }
 
@@ -2611,6 +2626,8 @@ class NostosDirectHandleImpl extends RustOpaque implements NostosDirectHandle {
 
   /// Sign out (ADR-0029): stop syncing, drop the token, and wipe local rows,
   /// the outbox and the horizon — everything the next principal must not see.
+  /// Under `keep_local_on_sign_out` (ADR-0049) only the token goes; the wipe
+  /// is deferred to the first sync under a different user's token.
   ///
   /// The pumps stop FIRST so no watch re-reads the database halfway through
   /// the delete.

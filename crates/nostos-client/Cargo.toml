@@ -36,6 +36,9 @@ rusqlite = { workspace = true }
 # nostos-infra note above describes: openssl-sys cannot cross-compile to iOS, so
 # no rail in this crate may pull native-tls. Shares nostos-push's pin.
 reqwest = { workspace = true }
+# ADR-0049: decode the JWT payload for `sub` (no verification — the server
+# verifies; we only need a stable per-user key). Already in the lock via reqwest.
+base64 = "0.22"
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 # The doorbell's TLS. tokio-tungstenite builds its rustls config from the

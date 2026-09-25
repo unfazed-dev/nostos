@@ -81,6 +81,32 @@ pub struct SyncOutcome {
     pub resnapshotted: bool,
 }
 
+/// What [`DirectClient::sign_out`] does to the rows on the device (ADR-0049).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LocalRetention {
+    /// Sign-out wipes rows, outbox, epoch and horizon (ADR-0029), so the next
+    /// sign-in bootstraps from a snapshot whoever it is. The default.
+    #[default]
+    WipeOnSignOut,
+    /// Sign-out drops the token and nothing else. The wipe moves to the first
+    /// sync under a token whose JWT `sub` is not the one the rows were synced
+    /// for — so the same user signing back in resumes the log instead of
+    /// re-downloading, and a different user still never sees their rows.
+    KeepForPrincipal,
+}
+
+/// The `sub` claim of `jwt`, read without verifying it: the server verifies,
+/// this only decides whose rows the device is holding.
+fn jwt_sub(jwt: &str) -> Option<String> {
+    use base64::Engine as _;
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("sub")?.as_str().map(str::to_owned)
+}
+
 /// A device syncing straight from Postgres — no Nostos server anywhere.
 ///
 /// Owns the three things that must agree: the HTTP source, the apply engine
@@ -95,6 +121,10 @@ pub struct DirectClient<S> {
     base_url: String,
     apikey: String,
     token: Mutex<Option<String>>,
+    /// The `sub` of [`Self::token`], or `None` for a token without one. Read
+    /// by the [`LocalRetention::KeepForPrincipal`] check in [`Self::sync`].
+    principal: Mutex<Option<String>>,
+    retention: LocalRetention,
     /// Set while the device has never synced. The change log is not a history
     /// of the database — it begins where `nostos link` installed the trigger —
     /// so a device with no horizon cannot reach the rows that predate it by
@@ -133,8 +163,18 @@ where
             base_url: base_url.trim_end_matches('/').to_string(),
             apikey: apikey.to_string(),
             token: Mutex::new(None),
+            principal: Mutex::new(None),
+            retention: LocalRetention::default(),
             needs_bootstrap: AtomicBool::new(bootstrap),
         })
+    }
+
+    /// Choose what [`Self::sign_out`] leaves on the device (ADR-0049). The
+    /// default is [`LocalRetention::WipeOnSignOut`].
+    #[must_use]
+    pub fn with_retention(mut self, retention: LocalRetention) -> Self {
+        self.retention = retention;
+        self
     }
 
     /// The apply engine, for reads and for queueing writes on its outbox.
@@ -147,6 +187,10 @@ where
     pub async fn set_token(&self, jwt: impl Into<String>) {
         let jwt = jwt.into();
         self.source.lock().await.set_token(jwt.clone());
+        *self
+            .principal
+            .lock()
+            .expect("set_token: principal mutex poisoned") = jwt_sub(&jwt);
         *self.token.lock().expect("set_token: token mutex poisoned") = Some(jwt);
     }
 
@@ -157,6 +201,57 @@ where
             .token
             .lock()
             .expect("clear_token: token mutex poisoned") = None;
+        *self
+            .principal
+            .lock()
+            .expect("clear_token: principal mutex poisoned") = None;
+    }
+
+    /// Wipe the device and forget that it ever synced: rows, outbox, epoch,
+    /// rules checksum, horizon and principal go in one storage transaction,
+    /// the cursor restarts, and the next sync bootstraps. `storage` is the
+    /// engine's, already locked by the caller.
+    fn wipe(&self, storage: &mut S) -> Result<(), PostgrestError> {
+        // `Storage::clear`, not `Outbox::clear`: the storage one wipes rows,
+        // epoch, rules checksum, horizon AND the outbox in one transaction.
+        Storage::clear(storage).map_err(PullError::from)?;
+        *self.cursor.lock().expect("wipe: cursor mutex poisoned") = PullCursor::fresh();
+        // The wipe took the horizon with it, so the next principal is a device
+        // that has never synced — and reaches its rows the same way one does.
+        self.needs_bootstrap.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// [`LocalRetention::KeepForPrincipal`]'s guard, run before every sync:
+    /// the rows on the device belong to the principal recorded beside them,
+    /// and a token for anyone else wipes them first (ADR-0049).
+    ///
+    /// A synced database with no recorded principal — one written before this
+    /// policy existed, or by a storage that never persists the principal — is
+    /// treated as someone else's: a snapshot is cheap, a leak is not. A token
+    /// without a `sub` claims nothing and changes nothing.
+    fn adopt_principal(&self) -> Result<(), PostgrestError> {
+        let Some(sub) = self
+            .principal
+            .lock()
+            .expect("adopt_principal: principal mutex poisoned")
+            .clone()
+        else {
+            return Ok(());
+        };
+        let mut engine = self
+            .engine
+            .lock()
+            .expect("adopt_principal: engine mutex poisoned");
+        let storage = engine.storage_mut();
+        if storage.principal().map_err(PullError::from)?.as_deref() == Some(sub.as_str()) {
+            return Ok(());
+        }
+        if storage.horizon().map_err(PullError::from)?.is_some() {
+            self.wipe(storage)?;
+        }
+        storage.save_principal(&sub).map_err(PullError::from)?;
+        Ok(())
     }
 
     /// Push every queued write, then pull until caught up.
@@ -175,6 +270,11 @@ where
     /// Any [`PostgrestError`] the push or the pull did not absorb.
     pub async fn sync(&self) -> Result<SyncOutcome, PostgrestError> {
         let source = self.source.lock().await;
+        // Before the push: a queued write is the previous principal's until
+        // the wipe says otherwise, and must not leave the device as this one.
+        if self.retention == LocalRetention::KeepForPrincipal {
+            self.adopt_principal()?;
+        }
         let mut out = SyncOutcome {
             pushed: self.push_with(&source).await?,
             ..SyncOutcome::default()
@@ -262,8 +362,11 @@ where
         self.snapshot_with(&source).await
     }
 
-    /// Sign out: drop the token and wipe the device — local rows, the outbox,
-    /// the epoch, and the horizon (ADR-0029).
+    /// Sign out: drop the token and, under [`LocalRetention::WipeOnSignOut`],
+    /// wipe the device — local rows, the outbox, the epoch, and the horizon
+    /// (ADR-0029). Under [`LocalRetention::KeepForPrincipal`] the rows stay
+    /// and the wipe waits for a token that belongs to someone else
+    /// (ADR-0049).
     ///
     /// The cursor is reset with the storage, and that pairing is the whole
     /// point: a surviving `xid8` would make the next principal resume in the
@@ -278,21 +381,19 @@ where
         let mut source = self.source.lock().await;
         source.clear_token();
         *self.token.lock().expect("sign_out: token mutex poisoned") = None;
-
-        // `Storage::clear`, not `Outbox::clear`: the storage one wipes rows,
-        // epoch, rules checksum, horizon AND the outbox in one transaction.
-        Storage::clear(
+        *self
+            .principal
+            .lock()
+            .expect("sign_out: principal mutex poisoned") = None;
+        if self.retention == LocalRetention::KeepForPrincipal {
+            return Ok(());
+        }
+        self.wipe(
             self.engine
                 .lock()
                 .expect("sign_out: engine mutex poisoned")
                 .storage_mut(),
         )
-        .map_err(PullError::from)?;
-        *self.cursor.lock().expect("sign_out: cursor mutex poisoned") = PullCursor::fresh();
-        // The wipe took the horizon with it, so the next principal is a device
-        // that has never synced — and reaches its rows the same way one does.
-        self.needs_bootstrap.store(true, Ordering::Relaxed);
-        Ok(())
     }
 
     /// Sync now, then on every ring, every reconnect, and at least once per

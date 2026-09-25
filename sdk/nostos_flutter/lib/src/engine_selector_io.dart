@@ -54,6 +54,7 @@ Future<NostosEngine> createDirectNostosEngine({
   String? token,
   String? sqlitePath,
   Map<String, String> counterFields = const <String, String>{},
+  bool keepLocalOnSignOut = false,
 }) async {
   if (!_rustInitialized) {
     await RustLib.init();
@@ -67,5 +68,6 @@ Future<NostosEngine> createDirectNostosEngine({
     token: token,
     dbPath: path,
     counterFields: counterFields,
+    keepLocalOnSignOut: keepLocalOnSignOut,
   );
 }

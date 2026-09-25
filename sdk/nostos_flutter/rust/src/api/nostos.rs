@@ -26,12 +26,12 @@ use std::time::Duration;
 
 use std::collections::{HashMap, HashSet};
 
+use flutter_rust_bridge::frb;
 use nostos_client::sqlite::ClientTable;
 use nostos_client::{
     ClientError, SqliteStorage, StreamHandle, SyncClient, SyncClientConfig, TableSub,
 };
 use nostos_core::{PendingWrite, WriteOp};
-use flutter_rust_bridge::frb;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -852,7 +852,10 @@ impl NostosHandle {
     /// `NostosHandle::connect`, and Rust forbids two inherent items of the same
     /// name; the Dart public API mirrors the pause/resume pair (WS5) for the
     /// same reason — `connect` clashes with `Nostos.connect`/`NostosDatabase.connect`.
-    pub async fn resume(&self, state_sink: StreamSink<NostosConnectionState>) -> Result<(), String> {
+    pub async fn resume(
+        &self,
+        state_sink: StreamSink<NostosConnectionState>,
+    ) -> Result<(), String> {
         let mut guard = self.lock_session("resume()").await?;
         let session = guard
             .as_mut()

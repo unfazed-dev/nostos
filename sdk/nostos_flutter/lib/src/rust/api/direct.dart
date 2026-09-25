@@ -31,6 +31,11 @@ abstract class NostosDirectHandle implements RustOpaqueInterface {
   /// `anon_key` its publishable key — the only credential that ships inside
   /// the app, and the reason direct mode needs RLS rather than trust.
   ///
+  /// `keep_local_on_sign_out` (ADR-0049): `false` wipes the device on
+  /// [`Self::sign_out`] (ADR-0029, the default); `true` keeps the rows for
+  /// the same user's next sign-in and wipes only when a different JWT `sub`
+  /// syncs.
+  ///
   /// # Errors
   /// The SQLite file cannot be opened or migrated, or `supabase_url` is not a
   /// usable PostgREST base.
@@ -39,11 +44,13 @@ abstract class NostosDirectHandle implements RustOpaqueInterface {
     required String anonKey,
     String? token,
     required String dbPath,
+    required bool keepLocalOnSignOut,
   }) => RustLib.instance.api.crateApiDirectNostosDirectHandleConnect(
     supabaseUrl: supabaseUrl,
     anonKey: anonKey,
     token: token,
     dbPath: dbPath,
+    keepLocalOnSignOut: keepLocalOnSignOut,
   );
 
   /// Stop syncing without losing the device: the loop is aborted, `watch`
@@ -85,6 +92,8 @@ abstract class NostosDirectHandle implements RustOpaqueInterface {
 
   /// Sign out (ADR-0029): stop syncing, drop the token, and wipe local rows,
   /// the outbox and the horizon — everything the next principal must not see.
+  /// Under `keep_local_on_sign_out` (ADR-0049) only the token goes; the wipe
+  /// is deferred to the first sync under a different user's token.
   ///
   /// The pumps stop FIRST so no watch re-reads the database halfway through
   /// the delete.

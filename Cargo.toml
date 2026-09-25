@@ -144,7 +144,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # `http2` is needed by the APNs push rail (api.push.apple.com rejects
 # HTTP/1.1; h2 is negotiated via ALPN) — the default-features=false list
 # would otherwise drop it.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "gzip"] }
 # Webhook signature verification — HMAC-SHA256 (Stripe spec), no SDK needed.
 hmac = "0.12"
 sha2 = "0.10"
