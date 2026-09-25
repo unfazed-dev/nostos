@@ -152,3 +152,14 @@ name them in their own config.
     migration runs (the rename fails loudly and the transaction rolls back);
   - an old `cairn-push` function that nobody deletes (it keeps running
     unused).
+- Addendum 2026-09-25 (measured on the atlet project): `realtime.messages` is
+  owned by `supabase_realtime_admin` and `postgres` is not a member, so
+  neither the CLI login role, the SQL editor nor the MCP can rename
+  `cairn_ring_read` (42501). The rename loop and the
+  ring-policy block now soft-fail with a warning; the old policy stays behind
+  (harmless, it matches `cairn:%` topics nobody sends; drop it as the owner
+  when you can), and `nostos doctor --mode direct` reports whether
+  `nostos_ring_read` exists. On the atlet project the guarded `create policy`
+  did go through as `postgres` while the rename did not, so the doorbell
+  survived the cut-over; if it does not, pull, snapshot, push and the
+  foreground refresh still work without it.
