@@ -159,7 +159,8 @@ area_pr_title() {
     prefix=
   fi
   if [[ -z $prefix ]]; then
-    echo "::warning title=PR title::start the title with [arxa-<skill>] tag(s) from docs/ci/decisions.md, first = primary stage: $(tr '\n' ' ' <<<"$tags")"
+    echo "::error title=PR title::start the title with [arxa-<skill>] tag(s) from docs/ci/decisions.md, first = primary stage: $(tr '\n' ' ' <<<"$tags")"
+    return 1
   else
     echo "pr-title: $prefix"
   fi

@@ -25,7 +25,7 @@ question; change any of them and the generated files follow.
 | # | decision | answer | why |
 |---|---|---|---|
 | 4 | `scripts/check.sh` areas | one area per `ci.yml` job (`lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck`) plus `all`; an area whose toolchain or inputs are absent is skipped green | local green = CI green, by the same names; green by absence |
-| 5 | PR-title check | `[arxa-<skill>]` checked **warn-first** (annotation, job stays green) | flip it to required once the retro PRs and the first cleanup PRs have gone through |
+| 5 | PR-title check | `[arxa-<skill>]` **required** (flipped 2026-09-26; was warn-first through the retro replay and PRs #44–#53) | every PR since the replay carried a valid tag, so the gate costs nothing and catches drift |
 | 6 | commit gate | conventional prefix on `git rev-list --no-merges base..head`, **required** | GitHub's synthetic merge commit false-positives a naive check (energize PR #1, 2026-08-16) |
 | 7 | workflow token | top-level `permissions: contents: read` in `ci.yml`; `release.yml` keeps its own | least privilege; nothing in CI writes to the repo |
 | 8 | trunk + protection | repo is **public**, GitHub-hosted runners. Protection on `main` (required contexts = the `ci.yml` job names, no force-push, no deletion) is prepared in `docs/ci/setup.md` as a `gh api` call **for the user to run** after the retro replay | protection applied before the replay would refuse the replay's pushes to `main` |
