@@ -325,6 +325,10 @@ pub async fn listen(
     config: &DoorbellConfig,
     rings: mpsc::Sender<()>,
 ) -> Result<std::convert::Infallible, DoorbellError> {
+    // tungstenite uses the process-level provider; with both `ring` and
+    // `aws-lc-rs` compiled in, rustls refuses to guess and panics. Installing
+    // is once-per-process; a second call returns Err, which is the same thing.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let (ws, _) = tokio_tungstenite::connect_async(&config.url)
         .await
         .map_err(|e| DoorbellError::Socket(e.to_string()))?;
@@ -531,5 +535,39 @@ mod tests {
             fatal: true
         }
         .is_retryable());
+    }
+
+    /// Every Supabase Realtime URL is `wss://`. Without a TLS feature on
+    /// tokio-tungstenite the TCP dial succeeds, the TLS wrap fails with
+    /// "TLS support not compiled in", `listen` returns a retryable `Socket`
+    /// error, and `run` degrades to the 30 s backoff resync with no visible
+    /// symptom (measured on atlet iOS 2026-09-25: pull cadence matched the
+    /// backoff exactly and no `/realtime/v1/websocket` hit ever landed).
+    #[tokio::test]
+    async fn wss_is_refused_by_the_peer_not_by_a_missing_tls_feature() {
+        // A loopback listener that drops every connection: a TLS-capable
+        // build gets as far as the handshake and fails on the closed stream.
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                drop(stream);
+            }
+        });
+        let config =
+            DoorbellConfig::new(&format!("https://127.0.0.1:{port}"), "anon", "sub:x", "jwt")
+                .unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let err = tokio::time::timeout(Duration::from_secs(10), listen(&config, tx))
+            .await
+            .expect("listen hung on a dropped stream")
+            .unwrap_err();
+        let DoorbellError::Socket(msg) = err else {
+            panic!("expected Socket, got {err:?}");
+        };
+        assert!(
+            !msg.contains("TLS support not compiled in"),
+            "tokio-tungstenite has no TLS feature: {msg}"
+        );
     }
 }

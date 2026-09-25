@@ -30,7 +30,7 @@
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nostos_core::{
     ApplyEngine, Horizon, Outbox, PendingWrite, PullCursor, PullError, Storage, DEFAULT_MAX_TXNS,
@@ -312,7 +312,8 @@ where
     where
         F: FnMut(Result<SyncOutcome, PostgrestError>) + Send,
     {
-        let mut backoff = Duration::from_millis(500);
+        const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+        let mut backoff = INITIAL_BACKOFF;
         loop {
             // Unconditionally, before the socket exists: a ring that arrived
             // while this device was away was never delivered to anyone.
@@ -331,6 +332,7 @@ where
             let (rings, mut ring) = mpsc::channel(1);
             let listening = doorbell::listen(&config, rings);
             tokio::pin!(listening);
+            let connected_at = Instant::now();
 
             let err = loop {
                 tokio::select! {
@@ -341,6 +343,12 @@ where
             };
             if !err.is_retryable() {
                 return Err(err);
+            }
+            // A session that outlived the longest backoff was a real
+            // connection; its eventual drop is a new outage, not the next
+            // failed attempt of the last one, so the ladder restarts.
+            if connected_at.elapsed() >= MAX_BACKOFF {
+                backoff = INITIAL_BACKOFF;
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(MAX_BACKOFF);

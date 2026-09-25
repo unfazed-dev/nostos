@@ -38,6 +38,13 @@ rusqlite = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
+# The doorbell's TLS. tokio-tungstenite builds its rustls config from the
+# process-level CryptoProvider, and rustls panics when more than one provider
+# feature is compiled in (the workspace has both: reqwest brings `ring`,
+# nostos-cli's pin brings `aws-lc-rs`). Direct dep, not `workspace = true`, so
+# this crate names `ring` (already built for iOS via reqwest) and installs it
+# itself. See doorbell::listen.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 iroh = { workspace = true, optional = true }
 iroh-tickets = { workspace = true, optional = true }
 futures-util = { workspace = true }

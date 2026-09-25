@@ -91,7 +91,11 @@ regex = "1.10"
 # --- infrastructure / async runtime ---
 tokio = { version = "1.39", features = ["full"] }
 futures-util = "0.3"
-tokio-tungstenite = "0.23"
+# rustls + bundled roots: every Realtime doorbell URL is wss://, and without a
+# TLS feature `connect_async` fails with "TLS support not compiled in" (the
+# client then silently lives on the 30 s backoff resync). Not native-tls:
+# openssl-sys cannot cross-compile to iOS.
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 iroh = "1.1"
 iroh-tickets = "1"
 axum = { version = "0.7", features = ["ws"] }
