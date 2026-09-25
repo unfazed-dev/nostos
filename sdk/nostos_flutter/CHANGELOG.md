@@ -6,7 +6,12 @@ Direct mode (`NostosDatabase.direct`), newest first:
   `Nostos.direct`, `DirectNostosEngine.connect` and `createDirectNostosEngine`
   (default `false`, ADR-0029 wipe unchanged). `true` keeps the rows across
   `signOut()` for the same JWT `sub`; a different user's token wipes before its
-  first pull.
+  first pull. `NostosDatabase.keepLocalOnSignOut` is public; the T6 blob-store
+  sign-out hook skips its wipe when it is `true`.
+- **`Attachments.bytes(id)`** — read-through fetch for shared attachments
+  (local `BlobStore`, else adapter download, cached). Never touches the
+  metadata row, so a public catalog's images need no write RLS and no
+  per-device state fan-out; `queueDownload` stays the durable per-user path.
 - **`watch` withholds the pre-snapshot empty read.** The first emission is the
   first real read, so UIs no longer flash an empty state for the ~2 s
   bootstrap. Streams that expected an immediate `[]` on a fresh store now wait.

@@ -266,6 +266,11 @@ export NOSTOS_WRITE_TABLES=attachments,tasks,…   # comma-separated; empty by d
 ```
 
 The app also declares `attachments` in its `NostosSchema` (it is a normal table).
+Direct mode has no allowlist: the table needs a `nostos_log_attachments` change-log
+trigger (`nostos link --mode direct --public attachments` for a shared catalog) and RLS.
+For shared, read-only attachments use `attachments.bytes(id)` (read-through cache, no
+metadata write) instead of `queueDownload` — atlet's product images are the worked
+example (migration 0012).
 
 ### API
 

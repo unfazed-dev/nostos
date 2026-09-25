@@ -304,6 +304,29 @@ class Attachments {
   Future<void> remove(String id) =>
       _transition(id, AttachmentStateWire.queuedDelete);
 
+  /// Bytes for an attachment, read-through: the local [BlobStore] first, else
+  /// (when online) a direct adapter download that is cached and returned.
+  /// `null` when absent and offline, or when the download fails.
+  ///
+  /// Unlike [queueDownload] this never touches the metadata row, so it is the
+  /// call for SHARED attachments (a public catalog's images): a state flip
+  /// through the outbox would fan out to every device and needs write RLS the
+  /// reader does not have. Per-user attachments keep using [queueDownload] so
+  /// the transfer is durable across restarts.
+  Future<Uint8List?> bytes(String id) async {
+    final cached = await _blob.get(id);
+    if (cached != null) return cached;
+    if (!await _isOnline()) return null;
+    try {
+      final fetched = await _adapter.download(id);
+      await _blob.put(id, fetched);
+      return fetched;
+    } on Object catch (e) {
+      _lastErrors[id] = e.toString();
+      return null;
+    }
+  }
+
   // ──────────────────────────── driver tick ───────────────────────────
 
   /// One driver tick. Reads queued rows (when online) and dispatches their blob
@@ -455,18 +478,25 @@ class Attachments {
 /// the blob store's [BlobStore.wipe] into sign-out (ADR-0029 consistency).
 extension AttachmentDatabase on NostosDatabase {
   /// Build an [Attachments] driver over this database. The app MUST have
-  /// `attachments` in its subscribed tables and in the server's
-  /// `NOSTOS_WRITE_TABLES` allowlist.
+  /// `attachments` in its schema + subscribed tables. Server mode: also in
+  /// the server's `NOSTOS_WRITE_TABLES` allowlist. Direct mode: the table
+  /// needs a `nostos_log_attachments` change-log trigger (`nostos link --mode
+  /// direct`, `--public attachments` for shared catalogs) and RLS that admits
+  /// the device.
   ///
   /// Pass a [BlobStore] (normally a [LocalFileBlobStore] on a path_provider
   /// directory). Its [BlobStore.wipe] is registered as a sign-out hook so the
-  /// next principal sees no blob bytes — see [registerSignOutHook].
+  /// next principal sees no blob bytes — see [registerSignOutHook]. With
+  /// [NostosDatabase.keepLocalOnSignOut] (ADR-0049) the wipe is skipped, same
+  /// as the engine keeps the rows.
   Attachments attachments({
     required AttachmentStorageAdapter adapter,
     required BlobStore blobStore,
     int maxAttempts = 5,
   }) {
-    registerSignOutHook(blobStore.wipe);
+    registerSignOutHook(() async {
+      if (!keepLocalOnSignOut) await blobStore.wipe();
+    });
     // Online = the connection has reached `connected` at least once and is not
     // currently `disconnected`. The NostosDatabase.isOnline getter snapshots the
     // status ValueNotifier (which tracks the connection-state stream).

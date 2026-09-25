@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 class SessionRow {
   final String id;
   final String title;
@@ -31,6 +33,10 @@ class ProductRow {
   final bool plantBased;
   final String? imageUrl;
 
+  /// `attachments.id` = the Supabase Storage object key (migration 0012).
+  /// Null on rows seeded before images moved off the bundle.
+  final String? imageId;
+
   const ProductRow({
     required this.id,
     required this.name,
@@ -39,6 +45,7 @@ class ProductRow {
     this.rating,
     required this.plantBased,
     this.imageUrl,
+    this.imageId,
   });
 }
 
@@ -159,6 +166,11 @@ abstract interface class SyncAdapter {
   Future<void> deleteSession(String id);
   Stream<List<SessionRow>> watchSessions();
   Stream<List<ProductRow>> watchProducts();
+
+  /// Bytes of a product image by [ProductRow.imageId], from the local blob
+  /// cache or (online) the bucket. Null = not available yet; the UI falls
+  /// back to the bundled asset.
+  Future<Uint8List?> productImage(String imageId);
 
   // Shop flow — cart is per-user server state (tenant-scoped like sessions).
   Future<void> addToCart(CartItemRow item); // upsert (id may exist: qty edit)

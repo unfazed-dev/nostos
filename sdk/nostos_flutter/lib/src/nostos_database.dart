@@ -38,6 +38,7 @@ class NostosDatabase {
     this._supabaseAuth, {
     this._localOnly = false,
     this._anonKey,
+    this.keepLocalOnSignOut = false,
   }) {
     // ADR-0037 §3: every SDK deregisters its push tokens in its sign-out hook
     // — a leaked registration would push the previous principal's data to the
@@ -50,6 +51,12 @@ class NostosDatabase {
   /// no sync, no push rail. Gates the fail-loudly guards on [resumeSync] and
   /// the push-token REST calls, and resolves [waitForFirstSync] immediately.
   final bool _localOnly;
+
+  /// ADR-0049: this user's local rows survive [signOut] (direct mode only;
+  /// the engine still wipes when a different `sub` signs in). Sign-out hooks
+  /// that wipe per-user caches (the T6 blob store) consult it so retention
+  /// covers blobs as well as rows.
+  final bool keepLocalOnSignOut;
 
   /// Test-only: wrap an injected [Nostos] (itself injectable via
   /// `Nostos.withEngine`) to exercise the typed mappers ([watchMapped] /
@@ -64,6 +71,7 @@ class NostosDatabase {
     String? token,
     Future<String?> Function()? sessionRefresh,
     String? anonKey,
+    bool keepLocalOnSignOut = false,
   }) {
     final db = NostosDatabase._(
       nostos,
@@ -72,6 +80,7 @@ class NostosDatabase {
       token,
       false,
       anonKey: anonKey,
+      keepLocalOnSignOut: keepLocalOnSignOut,
     );
     db._sessionRefresh = sessionRefresh;
     return db;
@@ -497,6 +506,7 @@ class NostosDatabase {
       token,
       false,
       anonKey: anonKey,
+      keepLocalOnSignOut: keepLocalOnSignOut,
     );
   }
 

@@ -4,10 +4,14 @@
 // [SyncAdapter] doesn't force every test double to hand-roll it. Classes
 // can still override any member with recording behaviour.
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:atlet/adapters/sync_adapter.dart';
 
 mixin FakeCartOrdersDefaults implements SyncAdapter {
+  @override
+  Future<Uint8List?> productImage(String imageId) async => null;
+
   final List<CartItemRow> fakeCart = [];
   final List<OrderRow> fakeOrders = [];
   final List<OrderEventRow> fakeOrderEvents = [];

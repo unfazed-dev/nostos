@@ -582,6 +582,44 @@ NOSTOS_WRITE_TABLES=tasks,projects,comments
 ```
 If your writes silently do nothing, this is why — see `docs/OPERATING.md`.
 
+### Attachments (files, images) — T6 / ADR-0034
+
+Two planes: a normal synced `attachments` table (metadata:
+`id, filename, size, media_type, state, timestamp`) and a `BlobStore` +
+`AttachmentStorageAdapter` pair for the bytes. Nostos never sees the bytes;
+the object key is the attachment `id`.
+
+```dart
+final attachments = db.attachments(
+  adapter: SupabaseStorageAdapter(bucket: 'product-images'),   // your bucket
+  blobStore: LocalFileBlobStore(Directory('$dir/blobs')),      // dart:io cache
+);
+
+// Per-user files: durable transfers through the outbox.
+final id = await attachments.queueUpload(filename: 'a.jpg', bytes: b, mediaType: 'image/jpeg');
+await attachments.queueDownload(id);      // another device fetches it
+attachments.start();                      // 2 s driver while online
+
+// Shared catalog (every device reads, nobody writes): read-through, no
+// metadata write, no `start()` needed.
+final bytes = await attachments.bytes('p1-protein.jpg');   // null = offline + uncached
+```
+
+Checklist:
+- Declare `attachments` in `NostosSchema` and subscribe it.
+- Server mode: add it to `NOSTOS_WRITE_TABLES`. Direct mode: give it a
+  change-log trigger (`nostos link --mode direct --public attachments` for a
+  shared catalog, or a `<column> = claims.<field>` scope) and RLS.
+- The bucket needs `storage.objects` RLS for the device (`select` on
+  `bucket_id = '<bucket>'`; `insert`/`delete` too for uploads).
+- `signOut()` wipes the `BlobStore` unless `keepLocalOnSignOut: true`
+  (ADR-0049), same policy as the rows.
+- `LocalFileBlobStore` is `dart:io` — on web bring your own `BlobStore`
+  (IndexedDB / OPFS); the driver is platform-agnostic.
+
+Worked example: atlet's product images (`apps/atlet/supabase/migrations/0012_product_images_attachments.sql`,
+`apps/atlet/flutter/lib/adapters/nostos_adapter.dart`).
+
 ---
 
 ## 11. Production checklist
@@ -624,6 +662,11 @@ ValueListenable<SyncStatus> get status;
 SyncStatus get currentStatus;
 Stream<NostosConnectionState> get connectionState;
 Future<void> signOut();            // drops the token; wipes unless keepLocalOnSignOut
+bool get keepLocalOnSignOut;       // ADR-0049; the blob-store sign-out hook honours it
+
+// extension AttachmentDatabase (T6)
+Attachments attachments({required AttachmentStorageAdapter adapter, required BlobStore blobStore, int maxAttempts = 5});
+Future<Uint8List?> Attachments.bytes(String id);   // read-through, no metadata write
 Future<void> close();
 
 // SyncStatus

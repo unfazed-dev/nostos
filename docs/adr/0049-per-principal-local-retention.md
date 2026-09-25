@@ -99,10 +99,12 @@ same header.
 - **ponytail: direct mode only.** Server mode (`SyncClient::clear_local_state`,
   the frb `nostos.rs` `sign_out`) still wipes unconditionally; add the same
   `LocalRetention` there when a server-mode app asks.
-- **ponytail: the Flutter `signOut` hooks still run.** `NostosDatabase.signOut`
-  awaits the registered hooks (T6 blob-store wipe) regardless of the flag, so
-  attachments are wiped even in keep mode. Gate the hooks on the flag when an
-  app with attachments opts in.
+- The Flutter `signOut` hooks still run (push-token deregistration must), but
+  the T6 blob-store wipe registered by `db.attachments(...)` checks
+  `NostosDatabase.keepLocalOnSignOut` and skips itself in keep mode
+  (2026-09-26, atlet product images). A different user's first sync wipes the
+  rows only; the blob cache is keyed by attachment id and holds nothing the
+  new user could not fetch, so it is left alone.
 - The `principal` row is one more key in `nostos_meta`; no schema migration.
 
 ## The test that matters

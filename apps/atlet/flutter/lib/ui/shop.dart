@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -17,6 +18,59 @@ import '../util/uuid.dart';
 String? _assetPathFor(ProductRow p) {
   final url = p.imageUrl;
   return url == null ? null : '../$url';
+}
+
+/// Product image: bytes from the nostos attachments cache / Supabase Storage
+/// bucket (migration 0012) via [SyncAdapter.productImage]; until they arrive
+/// (or offline on a fresh install) the bundled asset, then the placeholder.
+class _ProductImage extends StatefulWidget {
+  const _ProductImage({required this.adapter, required this.product});
+
+  final SyncAdapter adapter;
+  final ProductRow product;
+
+  @override
+  State<_ProductImage> createState() => _ProductImageState();
+}
+
+class _ProductImageState extends State<_ProductImage> {
+  late Future<Uint8List?> _bytes = _load();
+
+  Future<Uint8List?> _load() async {
+    final id = widget.product.imageId;
+    return id == null ? null : widget.adapter.productImage(id);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ProductImage old) {
+    super.didUpdateWidget(old);
+    if (old.product.imageId != widget.product.imageId) _bytes = _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final assetPath = _assetPathFor(widget.product);
+    final fallback = assetPath == null
+        ? const _ImageFallback()
+        : Image.asset(
+            assetPath,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stack) => const _ImageFallback(),
+          );
+    return FutureBuilder<Uint8List?>(
+      future: _bytes,
+      builder: (context, snap) {
+        final bytes = snap.data;
+        if (bytes == null) return fallback;
+        return Image.memory(
+          bytes,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (context, error, stack) => fallback,
+        );
+      },
+    );
+  }
 }
 
 String _titleCase(String s) =>
@@ -106,6 +160,7 @@ class ShopScreen extends StatelessWidget {
                           ),
                       itemCount: products.length,
                       itemBuilder: (context, i) => _ProductCard(
+                        adapter: adapter,
                         product: products[i],
                         onTap: () => _openDetail(context, adapter, products[i]),
                       ),
@@ -175,14 +230,18 @@ class _Message extends StatelessWidget {
 }
 
 class _ProductCard extends StatelessWidget {
-  const _ProductCard({required this.product, required this.onTap});
+  const _ProductCard({
+    required this.adapter,
+    required this.product,
+    required this.onTap,
+  });
 
+  final SyncAdapter adapter;
   final ProductRow product;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final assetPath = _assetPathFor(product);
     return Material(
       key: Key('product-card-${product.id}'),
       color: AtletTokens.paper,
@@ -195,14 +254,7 @@ class _ProductCard extends StatelessWidget {
           children: [
             AspectRatio(
               aspectRatio: 1,
-              child: assetPath == null
-                  ? const _ImageFallback()
-                  : Image.asset(
-                      assetPath,
-                      fit: BoxFit.cover,
-                      errorBuilder: (context, error, stack) =>
-                          const _ImageFallback(),
-                    ),
+              child: _ProductImage(adapter: adapter, product: product),
             ),
             Expanded(
               child: Padding(
@@ -334,7 +386,6 @@ class _ProductDetailSheetState extends State<_ProductDetailSheet> {
   @override
   Widget build(BuildContext context) {
     final p = widget.product;
-    final assetPath = _assetPathFor(p);
     final rating = p.rating;
     return SafeArea(
       child: Padding(
@@ -348,14 +399,7 @@ class _ProductDetailSheetState extends State<_ProductDetailSheet> {
               borderRadius: BorderRadius.circular(16),
               child: AspectRatio(
                 aspectRatio: 1.6,
-                child: assetPath == null
-                    ? const _ImageFallback()
-                    : Image.asset(
-                        assetPath,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stack) =>
-                            const _ImageFallback(),
-                      ),
+                child: _ProductImage(adapter: widget.adapter, product: p),
               ),
             ),
             const SizedBox(height: 16),

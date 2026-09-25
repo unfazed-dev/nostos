@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:nostos_flutter/nostos_flutter.dart';
 
@@ -78,6 +80,13 @@ class NostosAdapter implements SyncAdapter {
   final MarkDeriver _deriver = MarkDeriver(Stopwatch()..start());
 
   NostosDatabase? _db;
+
+  /// T6 attachments driver over the `product-images` bucket (migration 0012).
+  /// Never started: catalog images are read-through via [Attachments.bytes],
+  /// no queued transfers to pump. ponytail: `_imageCache` is the six seed
+  /// images in memory so a 1k-cell grid never re-reads the blob store.
+  Attachments? _attachments;
+  final Map<String, Uint8List> _imageCache = <String, Uint8List>{};
   StreamSubscription<List<Map<String, dynamic>>>? _sessionsSub;
   StreamSubscription<List<ProductRow>>? _productsSub;
   StreamSubscription<NostosConnectionState>? _connSub;
@@ -159,7 +168,13 @@ class NostosAdapter implements SyncAdapter {
       NostosTableSub(name: 'cart_items'),
       NostosTableSub(name: 'orders'),
       NostosTableSub(name: 'order_events'),
+      NostosTableSub(name: 'attachments'),
     ]);
+
+    _attachments = db.attachments(
+      adapter: SupabaseStorageAdapter(bucket: 'product-images'),
+      blobStore: LocalFileBlobStore(Directory('$dbDir/blobs')),
+    );
 
     // Typed collection handles (ADR-0032 T2): the taught surface for "table,
     // maybe filter, maybe order" reads. Injection-safe by construction.
@@ -320,6 +335,15 @@ class NostosAdapter implements SyncAdapter {
   );
 
   @override
+  Future<Uint8List?> productImage(String imageId) async {
+    final hit = _imageCache[imageId];
+    if (hit != null) return hit;
+    final bytes = await _attachments?.bytes(imageId);
+    if (bytes != null) _imageCache[imageId] = bytes;
+    return bytes;
+  }
+
+  @override
   Stream<bool> get connected => replayLatest(
     _requireController(_connectedController, 'connected before init()'),
     () => _lastConnected,
@@ -372,6 +396,8 @@ class NostosAdapter implements SyncAdapter {
 
     await _db?.signOut(); // ADR-0029: full local wipe + client teardown
     _db = null;
+    _attachments = null;
+    _imageCache.clear();
     _accessToken = null;
 
     await _sessionsController?.close();
@@ -504,6 +530,21 @@ final NostosSchema _schema = NostosSchema(
         NostosColumn.real('rating'),
         NostosColumn.integer('plant_based'),
         NostosColumn.text('image_url'),
+        NostosColumn.text('image_id'),
+      ],
+    ),
+    // T6 attachments metadata (ADR-0034): the product-images catalog, public
+    // scope, read-only on the device — see migration 0012.
+    NostosTable(
+      name: AttachmentSchema.table,
+      primaryKey: const ['id'],
+      columns: [
+        NostosColumn.text(AttachmentSchema.colId),
+        NostosColumn.text(AttachmentSchema.colFilename),
+        NostosColumn.integer(AttachmentSchema.colSize),
+        NostosColumn.text(AttachmentSchema.colMediaType),
+        NostosColumn.text(AttachmentSchema.colState),
+        NostosColumn.integer(AttachmentSchema.colTimestamp),
       ],
     ),
     NostosTable(
@@ -634,6 +675,7 @@ ProductRow productFromRow(Map<String, dynamic> row) => ProductRow(
   rating: _asDoubleOrNull(row['rating']),
   plantBased: _asBool(row['plant_based']),
   imageUrl: row['image_url'] as String?,
+  imageId: row['image_id'] as String?,
 );
 
 /// Write image for `addSession`. Omits `server_committed_at` — Postgres's
