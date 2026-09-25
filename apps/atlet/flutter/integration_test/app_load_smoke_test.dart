@@ -31,20 +31,25 @@ Future<void> main() async {
     int count(Finder f) => f.evaluate().length;
     for (var i = 0; i < 5; i++) {
       await tester.pump(const Duration(seconds: 2));
-      say('APP_SMOKE_HOME_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} '
-          'sessionList=${count(find.byKey(const Key('session-list')))} '
-          'empty=${count(find.textContaining('No sessions yet'))}');
+      say(
+        'APP_SMOKE_HOME_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} '
+        'sessionList=${count(find.byKey(const Key('session-list')))} '
+        'empty=${count(find.textContaining('No sessions yet'))}',
+      );
     }
     await tester.tap(find.byKey(const Key('nav-tab-shop')));
     say('APP_SMOKE_SHOP_TAPPED');
     for (var i = 0; i < 5; i++) {
       await tester.pump(const Duration(seconds: 2));
       final cards = find.byWidgetPredicate(
-        (w) => w.key is ValueKey<String> &&
+        (w) =>
+            w.key is ValueKey<String> &&
             (w.key! as ValueKey<String>).value.startsWith('product-card-'),
       );
-      say('APP_SMOKE_SHOP_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} '
-          'grid=${count(find.byKey(const Key('shop-grid')))} cards=${count(cards)}');
+      say(
+        'APP_SMOKE_SHOP_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} '
+        'grid=${count(find.byKey(const Key('shop-grid')))} cards=${count(cards)}',
+      );
     }
     // Round 2: the sign-out -> sign-in cycle (ADR-0029 wipe, then re-snapshot).
     await tester.tap(find.byKey(const Key('nav-tab-home')));
@@ -53,26 +58,33 @@ Future<void> main() async {
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(seconds: 2));
       final signin = count(find.widgetWithText(FilledButton, 'Sign in'));
-      say('APP_SMOKE_SIGNOUT_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} signin=$signin');
+      say(
+        'APP_SMOKE_SIGNOUT_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} signin=$signin',
+      );
       if (signin > 0) break;
     }
     await tester.tap(find.widgetWithText(FilledButton, 'Sign in'));
     say('APP_SMOKE_TAPPED2');
     for (var i = 0; i < 15; i++) {
       await tester.pump(const Duration(seconds: 2));
-      say('APP_SMOKE_HOME2_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} '
-          'sessionList=${count(find.byKey(const Key('session-list')))} '
-          'empty=${count(find.textContaining('No sessions yet'))} '
-          'signin=${count(find.widgetWithText(FilledButton, 'Sign in'))}');
+      say(
+        'APP_SMOKE_HOME2_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} '
+        'sessionList=${count(find.byKey(const Key('session-list')))} '
+        'empty=${count(find.textContaining('No sessions yet'))} '
+        'signin=${count(find.widgetWithText(FilledButton, 'Sign in'))}',
+      );
     }
     await tester.tap(find.byKey(const Key('nav-tab-shop')));
     for (var i = 0; i < 15; i++) {
       await tester.pump(const Duration(seconds: 2));
       final cards = find.byWidgetPredicate(
-        (w) => w.key is ValueKey<String> &&
+        (w) =>
+            w.key is ValueKey<String> &&
             (w.key! as ValueKey<String>).value.startsWith('product-card-'),
       );
-      say('APP_SMOKE_SHOP2_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} cards=${count(cards)}');
+      say(
+        'APP_SMOKE_SHOP2_T${i * 2}s spinners=${count(find.byType(CircularProgressIndicator))} cards=${count(cards)}',
+      );
     }
     say('APP_SMOKE_DONE');
   });
