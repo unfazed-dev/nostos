@@ -697,6 +697,7 @@ pub(crate) fn build_payload(
             body,
             category,
             data,
+            options,
         }) => PushPayload::Visible {
             title: interpolate(title, payload),
             body: interpolate(body, payload),
@@ -706,6 +707,13 @@ pub(crate) fn build_payload(
             data: data
                 .iter()
                 .map(|(k, v)| (k.clone(), interpolate(v, payload)))
+                .collect(),
+            // Interpolated too (`collapse=order-{id}`); an option whose column
+            // came back empty is dropped, not sent as a blank subtitle.
+            options: options
+                .iter()
+                .map(|(k, v)| (k.clone(), interpolate(v, payload)))
+                .filter(|(_, v)| !v.is_empty())
                 .collect(),
         },
         _ => PushPayload::Silent {
@@ -1096,6 +1104,12 @@ mod tests {
                     data: [("cairn_route".to_string(), "/orders/{id}".to_string())]
                         .into_iter()
                         .collect(),
+                    options: [
+                        ("collapse".to_string(), "order-{id}".to_string()),
+                        ("subtitle".to_string(), "{missing}".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             )],
             metrics,
@@ -1116,9 +1130,12 @@ mod tests {
                 data: [("cairn_route".to_string(), "/orders/ord-42".to_string())]
                     .into_iter()
                     .collect(),
+                options: [("collapse".to_string(), "order-ord-42".to_string())]
+                    .into_iter()
+                    .collect(),
             },
-            "{{col}} interpolates in title, body and routing keys; a missing column \
-             substitutes empty"
+            "{{col}} interpolates in title, body, routing keys and options; a missing \
+             column substitutes empty, and an option left empty is dropped"
         );
     }
 
@@ -1150,6 +1167,7 @@ mod tests {
                     body: String::new(),
                     category: None,
                     data: std::collections::BTreeMap::new(),
+                    options: std::collections::BTreeMap::new(),
                 },
             )],
             live,

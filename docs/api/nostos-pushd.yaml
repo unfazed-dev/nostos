@@ -301,6 +301,18 @@ components:
                 `category`, `table`, `lsn`), or on a map over 1024
                 serialized bytes. Identifiers only — the payload is
                 plaintext at the vendor.
+            options:
+              type: object
+              additionalProperties: { type: string }
+              description: >
+                Presentation options (ADR-0047), mapped per rail — see
+                docs/api/push.md. Keys: `subtitle`, `image` (https URL),
+                `thread`, `collapse` (printable ASCII), `level`
+                (passive|active|time-sensitive|critical), `relevance`
+                (0–1), `sound` (default|none|bundled file name), `channel`
+                (Android channel id), `sender`, `avatar` (https URL; needs
+                `sender`). 400 on an unknown key, a malformed value, or a
+                map over 512 serialized bytes. Omitted = a plain banner.
           required: [title, body]
       required: [visible]
     SendRequest:

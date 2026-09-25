@@ -1326,6 +1326,7 @@ mod tests {
                         body: "{label} updated".into(),
                         category: None,
                         data: std::collections::BTreeMap::new(),
+                        options: std::collections::BTreeMap::new(),
                     },
                 )],
             ))

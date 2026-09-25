@@ -352,12 +352,14 @@ impl PayloadDto {
                 body,
                 category,
                 data,
+                options,
             } => Self::Visible(VisibleDto {
                 visible: VisibleBody {
                     title: title.clone(),
                     body: body.clone(),
                     category: category.clone(),
                     data: data.clone(),
+                    options: options.clone(),
                 },
             }),
         }
@@ -391,6 +393,11 @@ struct VisibleBody {
     /// routing keys.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     data: super::PushData,
+    /// Omitted when empty, like `data` — an older nostos-pushd rejects the
+    /// unknown field (`deny_unknown_fields`), so only a push that uses
+    /// options needs a daemon that knows them (ADR-0047).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    options: super::PushOptions,
 }
 
 #[derive(serde::Deserialize)]
@@ -1012,6 +1019,7 @@ mod tests {
                 body: "b".to_string(),
                 category: None,
                 data: std::collections::BTreeMap::new(),
+                options: std::collections::BTreeMap::new(),
             }))
             .unwrap();
         assert_eq!(
@@ -1029,6 +1037,7 @@ mod tests {
                 data: [("cairn_route".to_string(), "/orders/42".to_string())]
                     .into_iter()
                     .collect(),
+                options: std::collections::BTreeMap::new(),
             }))
             .unwrap();
         assert_eq!(
@@ -1151,6 +1160,7 @@ mod tests {
                     body: "Order {id} changed ({missing})".to_string(),
                     category: Some("ORDER".to_string()),
                     data: std::collections::BTreeMap::new(),
+                    options: std::collections::BTreeMap::new(),
                 },
             )]
             .into_iter()

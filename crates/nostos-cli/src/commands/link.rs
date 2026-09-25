@@ -44,7 +44,10 @@ pub struct LinkArgs {
     /// Repeat per table. Server mode's `NOSTOS_PUSH_TABLES` grammar:
     /// `table:visible[@/route/{id}]:<title>:<body>` or
     /// `table:action[@/route/{id}]:<category>:<title>:<body>`, `{col}` filled
-    /// from the changed row.
+    /// from the changed row. An optional `[k=v,…]` group after the mode/route
+    /// sets how it presents — `image`, `subtitle`, `collapse`, `thread`,
+    /// `level`, `relevance`, `sound`, `channel`, `sender`, `avatar`
+    /// (ADR-0047, docs/api/push.md).
     #[arg(long, requires = "push")]
     pub visible: Vec<String>,
     /// Direct mode, with `--push`: also roll it out through the `supabase` CLI

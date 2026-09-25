@@ -248,6 +248,10 @@ struct VisibleBody {
     /// which is what every caller sent before this field existed.
     #[serde(default)]
     data: PushData,
+    /// Presentation options (ADR-0047) — image, subtitle, collapse,
+    /// interruption level…, validated by `nostos_infra::push::validate_options`.
+    #[serde(default)]
+    options: nostos_infra::push::PushOptions,
 }
 
 #[derive(serde::Deserialize)]
@@ -296,6 +300,7 @@ impl SendPayloadDto {
                 body: v.visible.body,
                 category: v.visible.category,
                 data: v.visible.data,
+                options: v.visible.options,
             }),
         }
     }
@@ -314,6 +319,8 @@ impl SendPayloadDto {
             // what a rail will actually carry.
             nostos_infra::push::validate_data(&v.visible.data)
                 .map_err(|e| format!("payload.visible.data: {e}"))?;
+            nostos_infra::push::validate_options(&v.visible.options)
+                .map_err(|e| format!("payload.visible.options: {e}"))?;
         }
         Ok(())
     }

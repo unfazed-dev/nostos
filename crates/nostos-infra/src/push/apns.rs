@@ -176,8 +176,12 @@ impl ApnsRail {
                 body,
                 category,
                 data,
+                options,
             } => {
-                let mut aps = json!({ "alert": { "title": title, "body": body } });
+                // `sound`: without one the banner lands silent and still —
+                // the FCM rail has always asked for it; `sound=none` opts out.
+                let mut aps =
+                    json!({ "alert": { "title": title, "body": body }, "sound": "default" });
                 // Direct-APNs parity with the FCM rail's action pushes:
                 // render the client-registered category's buttons.
                 if let Some(category) = category {
@@ -192,6 +196,7 @@ impl ApnsRail {
                 for (key, value) in data {
                     payload[key.as_str()] = json!(value);
                 }
+                super::apply_ios_options(&mut payload, options);
                 (
                     "alert",
                     "10",
@@ -209,10 +214,15 @@ impl ApnsRail {
             .header("apns-priority", priority)
             .header("apns-expiration", expiration.to_string())
             .header("apns-topic", &self.bundle_id);
+        // A `collapse` option (ADR-0047) outranks the router's per-table key:
+        // `collapse=order-{id}` replaces per order, not per table.
+        let collapse_key = match payload {
+            PushPayload::Visible { options, .. } => options.get("collapse").map(String::as_str),
+            PushPayload::Silent { .. } => None,
+        }
+        .or(collapse_key);
         if let Some(key) = collapse_key {
-            // ≤64 bytes per Apple; chars() can only shrink below that.
-            let cid: String = key.chars().take(64).collect();
-            req = req.header("apns-collapse-id", cid);
+            req = req.header("apns-collapse-id", super::apns_collapse_id(key));
         }
         match req.json(&body).send().await {
             Ok(resp) => outcome_for(resp).await,
@@ -425,6 +435,7 @@ mod tests {
                     body: "New items to sync".into(),
                     category: None,
                     data: std::collections::BTreeMap::new(),
+                    options: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -445,7 +456,55 @@ mod tests {
         assert_eq!(req.header("apns-collapse-id"), None);
         assert_eq!(
             req.json(),
-            json!({ "aps": { "alert": { "title": "Tasks changed", "body": "New items to sync" } } })
+            json!({ "aps": {
+                "alert": { "title": "Tasks changed", "body": "New items to sync" },
+                "sound": "default"
+            } })
+        );
+    }
+
+    #[tokio::test]
+    async fn apns_options_shape_aps_and_their_collapse_outranks_the_table_key() {
+        let (rail, mock) = rail_with(vec![CannedResponse::json(200, "")]).await;
+        // Interpolated from a row, so it may hold anything: printable ASCII
+        // survives, capped at Apple's 64 bytes.
+        let collapse = format!("order é-{}", "9".repeat(80));
+        let outcome = rail
+            .send(
+                TOKEN,
+                Some("order_events"),
+                &PushPayload::Visible {
+                    title: "T".into(),
+                    body: "B".into(),
+                    category: None,
+                    data: std::collections::BTreeMap::new(),
+                    options: [
+                        ("collapse", collapse.as_str()),
+                        ("image", "https://cdn.example/shipped.png"),
+                        ("level", "time-sensitive"),
+                        ("sound", "chime.caf"),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                },
+            )
+            .await;
+        assert_eq!(outcome, RailOutcome::Delivered);
+        let req = &mock.requests()[0];
+        let cid = req.header("apns-collapse-id").expect("collapse id");
+        assert_eq!(cid, format!("order-{}", "9".repeat(58)));
+        assert_eq!(
+            req.json(),
+            json!({
+                "aps": {
+                    "alert": { "title": "T", "body": "B" },
+                    "sound": "chime.caf",
+                    "interruption-level": "time-sensitive",
+                    "mutable-content": 1
+                },
+                "nostos_image": "https://cdn.example/shipped.png"
+            })
         );
     }
 
@@ -466,6 +525,7 @@ mod tests {
                     ]
                     .into_iter()
                     .collect(),
+                    options: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -478,6 +538,7 @@ mod tests {
                 "aps": {
                     "alert": { "title": "Order shipped", "body": "Order 983979e8 is on its way" },
                     "category": "order_status",
+                    "sound": "default",
                 },
                 "cairn_route": "/orders/983979e8",
                 "order_id": "983979e8",

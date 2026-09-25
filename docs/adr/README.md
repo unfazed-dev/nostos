@@ -52,3 +52,4 @@ condensed from each ADR's own header — the ADR is the source of truth.
 | [0044](0044-cargo-build-dir-and-cache-hygiene.md) | Cargo intermediates live on the external SSD via a global `build-dir`; caches are swept weekly | Accepted — operator-machine policy |
 | [0045](0045-per-key-conflating-session-sinks.md) | Per-key conflating session sinks | Accepted |
 | [0046](0046-rename-fallback-env-config-binaries.md) | Pre-rename env, config and binary names keep working until 1.0 | Accepted |
+| [0047](0047-push-presentation-options.md) | Push presentation options — one vocabulary, every rail | Accepted |

@@ -28,8 +28,8 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use super::{
-    env_nonempty, http_client, PushPayload, PushRailError, RailOutcome, SILENT_TTL_SECS,
-    VISIBLE_TTL_SECS,
+    env_nonempty, http_client, PushOptions, PushPayload, PushRailError, RailOutcome,
+    SILENT_TTL_SECS, VISIBLE_TTL_SECS,
 };
 
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -354,6 +354,7 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             body,
             category: Some(category),
             data,
+            options,
         } => {
             // Action push (ADR-0037 §2 `action` mode), one message shaped per
             // platform by omission of the top-level `notification` block:
@@ -370,6 +371,11 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
                 "title": title, "body": body, "category": category,
             });
             merge_data(&mut message["data"], data);
+            // Android renders this one itself, so it gets every option, not
+            // just the NSE's (ADR-0047).
+            for (key, value) in options {
+                message["data"][format!("nostos_{key}")] = json!(value);
+            }
             message["apns"] = json!({ "payload": { "aps": {
                 "alert": { "title": title, "body": body },
                 "sound": "default",
@@ -378,7 +384,11 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             (VISIBLE_TTL_SECS, "HIGH")
         }
         PushPayload::Visible {
-            title, body, data, ..
+            title,
+            body,
+            data,
+            options,
+            ..
         } => {
             message["notification"] = json!({ "title": title, "body": body });
             // `notification` + `data` in one message is the supported shape:
@@ -386,6 +396,14 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             if !data.is_empty() {
                 message["data"] = json!({});
                 merge_data(&mut message["data"], data);
+            }
+            // The NSE keys ride `data` too: FCM hands `data` to iOS as the
+            // top-level `userInfo` keys the Swift SDK's extension reads,
+            // and to an Android app that wants to render a sender itself.
+            for (key, wire) in super::NSE_KEYS {
+                if let Some(value) = options.get(key) {
+                    message["data"][wire] = json!(value);
+                }
             }
             (VISIBLE_TTL_SECS, "HIGH")
         }
@@ -404,6 +422,14 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
             "vibrate_timings": ["0s", "0.3s", "0.2s", "0.3s"],
         });
     }
+    if let PushPayload::Visible {
+        category: None,
+        options,
+        ..
+    } = payload
+    {
+        apply_android_options(&mut android["notification"], options);
+    }
     // iOS: APNs plays the default tri-tone + haptic only when the APS
     // payload carries a sound — without it the banner lands silent and
     // still. Action pushes build their own apns block above (alert +
@@ -411,6 +437,21 @@ fn message_json(target: &FcmTarget, collapse_key: Option<&str>, payload: &PushPa
     if let PushPayload::Visible { category: None, .. } = payload {
         message["apns"] = json!({ "payload": { "aps": { "sound": "default" } } });
     }
+    if let PushPayload::Visible {
+        title,
+        body,
+        options,
+        ..
+    } = payload
+    {
+        apply_apns_options(&mut message["apns"], title, body, options);
+    }
+    // A `collapse` option (ADR-0047) outranks the router's per-table key.
+    let collapse_key = match payload {
+        PushPayload::Visible { options, .. } => options.get("collapse").map(String::as_str),
+        PushPayload::Silent { .. } => None,
+    }
+    .or(collapse_key);
     if let Some(key) = collapse_key {
         android["collapse_key"] = json!(key);
     }
@@ -427,6 +468,59 @@ fn merge_data(target: &mut Value, data: &std::collections::BTreeMap<String, Stri
     };
     for (key, value) in data {
         map.insert(key.clone(), Value::String(value.clone()));
+    }
+}
+
+/// The options' iOS half inside FCM's `apns` block (ADR-0047) — the same
+/// `aps` the APNs rail builds, plus the two keys only FCM speaks:
+/// `fcm_options.image` (read by Firebase's own NSE helper) and the
+/// `apns-collapse-id` header.
+fn apply_apns_options(apns: &mut Value, title: &str, body: &str, options: &PushOptions) {
+    if options.is_empty() {
+        return;
+    }
+    if options.contains_key("subtitle") && apns["payload"]["aps"].get("alert").is_none() {
+        // An `aps.alert` holding only a subtitle would stand in for the
+        // `notification` title/body on iOS; carry all three.
+        apns["payload"]["aps"]["alert"] = json!({ "title": title, "body": body });
+    }
+    super::apply_ios_options(&mut apns["payload"], options);
+    if let Some(image) = options.get("image") {
+        apns["fcm_options"] = json!({ "image": image });
+    }
+    if let Some(collapse) = options.get("collapse") {
+        apns["headers"] = json!({ "apns-collapse-id": super::apns_collapse_id(collapse) });
+    }
+}
+
+/// The options' Android half, on a system-rendered `android.notification`.
+/// `collapse` becomes the drawer `tag` — a later push with the same tag
+/// replaces the shown one, which `collapse_key` alone (in-flight only) does not.
+fn apply_android_options(notification: &mut Value, options: &PushOptions) {
+    if let Some(image) = options.get("image") {
+        notification["image"] = json!(image);
+    }
+    if let Some(tag) = options.get("collapse") {
+        notification["tag"] = json!(tag);
+    }
+    if let Some(channel) = options.get("channel") {
+        notification["channel_id"] = json!(channel);
+    }
+    if let Some(level) = options.get("level") {
+        notification["notification_priority"] = json!(match level.as_str() {
+            "passive" => "PRIORITY_LOW",
+            "time-sensitive" => "PRIORITY_HIGH",
+            "critical" => "PRIORITY_MAX",
+            _ => "PRIORITY_DEFAULT",
+        });
+    }
+    match options.get("sound").map(String::as_str) {
+        None | Some("default") => {}
+        Some("none") => notification["default_sound"] = json!(false),
+        Some(file) => {
+            notification["default_sound"] = json!(false);
+            notification["sound"] = json!(file);
+        }
     }
 }
 
@@ -570,6 +664,7 @@ mod tests {
                     body: "New items to sync".into(),
                     category: None,
                     data: std::collections::BTreeMap::new(),
+                    options: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -603,6 +698,7 @@ mod tests {
                     body: "New items to sync".into(),
                     category: Some("order_status".into()),
                     data: std::collections::BTreeMap::new(),
+                    options: std::collections::BTreeMap::new(),
                 },
             )
             .await;
@@ -633,6 +729,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fcm_options_map_to_android_notification_apns_and_data() {
+        let options: PushOptions = [
+            ("collapse", "order-42"),
+            ("image", "https://cdn.example/shipped.png"),
+            ("level", "passive"),
+            ("sound", "none"),
+            ("subtitle", "Atlet"),
+            ("channel", "orders"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let plain = |category: Option<&str>| {
+            message_json(
+                &FcmTarget::Token("tok".into()),
+                Some("order_events"),
+                &PushPayload::Visible {
+                    title: "T".into(),
+                    body: "B".into(),
+                    category: category.map(str::to_string),
+                    data: std::collections::BTreeMap::new(),
+                    options: options.clone(),
+                },
+            )["message"]
+                .clone()
+        };
+        let m = plain(None);
+        assert_eq!(m["android"]["collapse_key"], json!("order-42"));
+        assert_eq!(
+            m["android"]["notification"],
+            json!({
+                "channel_id": "orders",
+                "default_sound": false,
+                "vibrate_timings": ["0s", "0.3s", "0.2s", "0.3s"],
+                "image": "https://cdn.example/shipped.png",
+                "tag": "order-42",
+                "notification_priority": "PRIORITY_LOW"
+            })
+        );
+        assert_eq!(
+            m["apns"],
+            json!({
+                "payload": {
+                    "aps": {
+                        "alert": { "title": "T", "body": "B", "subtitle": "Atlet" },
+                        "interruption-level": "passive",
+                        "mutable-content": 1
+                    },
+                    "nostos_image": "https://cdn.example/shipped.png"
+                },
+                "fcm_options": { "image": "https://cdn.example/shipped.png" },
+                "headers": { "apns-collapse-id": "order-42" }
+            })
+        );
+        assert_eq!(
+            m["data"],
+            json!({ "nostos_image": "https://cdn.example/shipped.png" })
+        );
+        // Action mode: Android renders it itself, so every option rides data.
+        let a = plain(Some("order_status"));
+        assert_eq!(a["data"]["nostos_collapse"], json!("order-42"));
+        assert_eq!(a["data"]["nostos_subtitle"], json!("Atlet"));
+        assert!(a["android"].get("notification").is_none());
+    }
+
     #[tokio::test]
     async fn fcm_routing_keys_land_in_data_on_both_visible_modes() {
         let data: std::collections::BTreeMap<String, String> = [
@@ -657,6 +819,7 @@ mod tests {
                 body: "On its way".into(),
                 category: None,
                 data: data.clone(),
+                options: std::collections::BTreeMap::new(),
             },
         )
         .await;
@@ -680,6 +843,7 @@ mod tests {
                 body: "On its way".into(),
                 category: Some("order_status".into()),
                 data,
+                options: std::collections::BTreeMap::new(),
             },
         )
         .await;

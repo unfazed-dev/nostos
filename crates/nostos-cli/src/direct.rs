@@ -92,13 +92,17 @@ pub struct PushTemplate {
     pub body: String,
     pub category: Option<String>,
     pub route: Option<String>,
+    /// The `[k=v,…]` presentation options (ADR-0047), `{col}` filled by the
+    /// Edge Function like title/body.
+    pub options: nostos_infra::push::PushOptions,
 }
 
 /// Parse one `--visible` spec. The grammar is server mode's
 /// `NOSTOS_PUSH_TABLES` visible/action entries, so one line of config moves
-/// between the modes unchanged: `table:visible[@/route/{id}]:<title>:<body>`
-/// or `table:action[@/route/{id}]:<category>:<title>:<body>`. The body is the
-/// greedy remainder and may contain colons.
+/// between the modes unchanged: `table:visible[@/route/{id}][[k=v,…]]:<title>:<body>`
+/// or `table:action[@/route/{id}][[k=v,…]]:<category>:<title>:<body>`. The body is
+/// the greedy remainder and may contain colons; the options group is
+/// nostos-infra's `take_options`, the one parser both modes share.
 ///
 /// ponytail: a second parser of the grammar in nostos-server's
 /// `parse_push_tables`; move both into nostos-infra when a third caller shows.
@@ -112,6 +116,8 @@ pub fn parse_visible(spec: &str) -> Result<PushTemplate> {
     let Some((table, rest)) = spec.split_once(':') else {
         bail!("--visible {spec:?}: {shape}");
     };
+    let (rest, options) = nostos_infra::push::take_options(rest)
+        .map_err(|e| anyhow::anyhow!("--visible {spec:?}: {e}"))?;
     let Some((mode, rest)) = rest.split_once(':') else {
         bail!("--visible {spec:?}: {shape}");
     };
@@ -151,6 +157,7 @@ pub fn parse_visible(spec: &str) -> Result<PushTemplate> {
         body: body.trim().to_string(),
         category,
         route,
+        options,
     })
 }
 
@@ -171,13 +178,14 @@ pub fn templates_sql(templates: &[PushTemplate]) -> String {
     for t in templates {
         let _ = writeln!(
             s,
-            "insert into cairn.push_templates (table_name, title, body, category, route) \
-             values ({}, {}, {}, {}, {});",
+            "insert into cairn.push_templates (table_name, title, body, category, route, options) \
+             values ({}, {}, {}, {}, {}, {});",
             lit(&t.table),
             lit(&t.title),
             lit(&t.body),
             opt(&t.category),
-            opt(&t.route)
+            opt(&t.route),
+            lit(&serde_json::to_string(&t.options).unwrap_or_else(|_| "{}".into()))
         );
     }
     s
@@ -967,8 +975,12 @@ create table if not exists cairn.push_templates (
   title      text not null,
   body       text not null,
   category   text,
-  route      text
+  route      text,
+  options    jsonb not null default '{{}}'
 );
+-- `[k=v,…]` presentation options (ADR-0047); added in place on a project
+-- linked before they existed.
+alter table cairn.push_templates add column if not exists options jsonb not null default '{{}}';
 
 -- security definer, and here that IS the authority: the scope comes from the
 -- caller's own JWT via cairn.current_scopes(), never from an argument, so a
@@ -1054,7 +1066,7 @@ begin
     -- one request per row of them is the cost of choosing.
     v_body := v_body || jsonb_build_object(
       'row', new.row, 'title', v_tpl.title, 'body', v_tpl.body,
-      'category', v_tpl.category, 'route', v_tpl.route);
+      'category', v_tpl.category, 'route', v_tpl.route, 'options', v_tpl.options);
   else
     -- The debounce, and the advisory lock in front of it is not an
     -- optimization. One shared row per scope means a row lock per scope, held
@@ -1988,6 +2000,7 @@ mod tests {
                 body: "order:Your order's {status}".to_string(),
                 category: Some("order_status".to_string()),
                 route: Some("/history/{id}".to_string()),
+                options: nostos_infra::push::PushOptions::new(),
             }
         );
         let plain = parse_visible("orders:visible:New order:Order {id} placed").unwrap();
@@ -2001,6 +2014,7 @@ mod tests {
             "Orders:visible:t:b",
             "orders:action:Order-Status:t:b",
             "orders:visible@history:t:b",
+            "orders:visible[level=loud]:t:b",
         ] {
             assert!(parse_visible(bad).is_err(), "{bad:?} must be refused");
         }
@@ -2011,7 +2025,16 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("'order:Your order''s {status}', 'order_status', '/history/{id}'"));
-        assert!(templates_sql(&[plain]).contains(", null, null);"));
+        assert!(templates_sql(&[plain]).contains(", null, null, '{}');"));
+
+        // The same `[k=v,…]` group as NOSTOS_PUSH_TABLES, stored as jsonb.
+        let rich = parse_visible(
+            "order_events:visible@/o/{id}[image=https://cdn.example/{status}.png]:T:B",
+        )
+        .unwrap();
+        assert_eq!(rich.route.as_deref(), Some("/o/{id}"));
+        assert!(templates_sql(&[rich])
+            .contains(r#"'/o/{id}', '{"image":"https://cdn.example/{status}.png"}');"#));
     }
 
     #[test]

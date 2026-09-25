@@ -90,6 +90,12 @@ pub(crate) fn parse_push_tables(
         let template = match parts.next() {
             None => PushTemplate::Silent,
             Some(rest) => {
+                // `visible[image=…,collapse=…]` — presentation options
+                // (ADR-0047), split off before the colon split because
+                // their values hold colons.
+                let (rest, options) = nostos_infra::push::take_options(rest)
+                    .map_err(|e| anyhow::anyhow!("NOSTOS_PUSH_TABLES: {e} in {entry:?}"))?;
+                let rest = rest.as_str();
                 let (mode, args) = match rest.split_once(':') {
                     Some((m, a)) => (m.trim(), Some(a)),
                     None => (rest.trim(), None),
@@ -106,6 +112,11 @@ pub(crate) fn parse_push_tables(
                     anyhow::bail!(
                         "NOSTOS_PUSH_TABLES: only visible/action entries take an @route \
                          (a doorbell carries no routing keys): {entry:?}"
+                    );
+                }
+                if !options.is_empty() && !matches!(mode, "visible" | "action") {
+                    anyhow::bail!(
+                        "NOSTOS_PUSH_TABLES: only visible/action entries take [options]: {entry:?}"
                     );
                 }
                 let data = push_route_data(route, entry)?;
@@ -125,6 +136,7 @@ pub(crate) fn parse_push_tables(
                                 body: body.trim().to_string(),
                                 category: None,
                                 data,
+                                options,
                             },
                             None => anyhow::bail!(
                                 "NOSTOS_PUSH_TABLES: \"visible\" entries need a title and a body: \
@@ -159,6 +171,7 @@ pub(crate) fn parse_push_tables(
                                     body: body.trim().to_string(),
                                     category: Some(category.to_string()),
                                     data,
+                                    options,
                                 },
                                 None => anyhow::bail!(
                                     "NOSTOS_PUSH_TABLES: \"action\" entries need a category, \
@@ -198,6 +211,7 @@ pub(crate) fn parse_push_tables(
                             body: String::new(),
                             category: None,
                             data,
+                            options,
                         }
                     }
                     ("liveactivity", None) => anyhow::bail!(
@@ -343,6 +357,7 @@ mod parse_push_tables_tests {
                 body: "Your order {id} is {status}:really".into(),
                 category: Some("order_status".into()),
                 data: std::collections::BTreeMap::new(),
+                options: std::collections::BTreeMap::new(),
             })
         );
 
@@ -354,6 +369,51 @@ mod parse_push_tables_tests {
 
         let err = parse_push_tables("orders:action", None);
         assert!(err.is_err(), "bare action mode is rejected");
+    }
+
+    #[test]
+    fn parses_an_options_group_after_mode_and_route() {
+        let cfg = parse_push_tables(
+            "order_events:action@/history/{id}[image=https://cdn.example/{status}.png, \
+             collapse=order-{order_id}]:order_status:{icon} Update:Order is {status}",
+            None,
+        )
+        .expect("valid options group");
+        let Some(PushTemplate::Visible {
+            title,
+            category,
+            data,
+            options,
+            ..
+        }) = cfg.tables.get("order_events")
+        else {
+            panic!("order_events must be a visible template");
+        };
+        assert_eq!(title, "{icon} Update");
+        assert_eq!(category.as_deref(), Some("order_status"));
+        assert_eq!(
+            data.get("cairn_route").map(String::as_str),
+            Some("/history/{id}")
+        );
+        assert_eq!(
+            options.get("image").map(String::as_str),
+            Some("https://cdn.example/{status}.png")
+        );
+        assert_eq!(
+            options.get("collapse").map(String::as_str),
+            Some("order-{order_id}")
+        );
+
+        for bad in [
+            "orders:silent[image=https://x.png]",
+            "orders:visible[level=loud]:t:b",
+            "orders:visible[image=https://x.png:t:b",
+        ] {
+            assert!(
+                parse_push_tables(bad, None).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -375,6 +435,7 @@ mod parse_push_tables_tests {
                 data: [("cairn_route".to_string(), "/orders/{id}".to_string())]
                     .into_iter()
                     .collect(),
+                options: std::collections::BTreeMap::new(),
             })
         );
         assert_eq!(
@@ -415,6 +476,7 @@ mod parse_push_tables_tests {
                 body: "Order {id} placed".into(),
                 category: None,
                 data: std::collections::BTreeMap::new(),
+                options: std::collections::BTreeMap::new(),
             })
         );
         assert_eq!(cfg.tables.get("absent"), None);
@@ -461,6 +523,7 @@ mod parse_push_tables_tests {
                 body: String::new(),
                 category: None,
                 data: std::collections::BTreeMap::new(),
+                options: std::collections::BTreeMap::new(),
             })
         );
         assert_eq!(

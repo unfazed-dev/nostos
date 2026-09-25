@@ -37,7 +37,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response("forbidden", { status: 403 });
   }
 
-  const { scope, row, title, body, category, route } = await req.json();
+  const { scope, row, title, body, category, route, options } = await req.json();
   if (typeof scope !== "string" || scope.length === 0) {
     return new Response("missing scope", { status: 400 });
   }
@@ -63,7 +63,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // No template: data-only, high priority — the OS wakes the app, the app
   // pulls. A notification-only message would render a banner and never run code.
   const message = title
-    ? visible(fill(title, row), fill(body, row), category, route && fill(route, row))
+    ? visible(
+      fill(title, row),
+      fill(body, row),
+      category,
+      route && fill(route, row),
+      fillOptions(options, row),
+    )
     : {
       data: { cairn: "ring" },
       android: { priority: "HIGH" },
@@ -97,26 +103,101 @@ function fill(template: string, row: Record<string, unknown> | null): string {
   return template.replace(/\{(\w+)\}/g, (_, col) => String(row?.[col] ?? ""));
 }
 
+/// `[k=v,…]` presentation options (ADR-0047), `{col}` filled like the title.
+/// One whose column came back empty is dropped, as the server-mode router does.
+function fillOptions(
+  options: Record<string, string> | null | undefined,
+  row: Record<string, unknown> | null,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(options ?? {})) {
+    const filled = fill(String(v), row);
+    if (filled) out[k] = filled;
+  }
+  return out;
+}
+
+/// The options that need the app's Notification Service Extension, and the
+/// keys they ride under (crates/nostos-infra/src/push/mod.rs `NSE_KEYS`).
+const NSE_KEYS: [string, string][] = [
+  ["image", "nostos_image"],
+  ["sender", "nostos_sender"],
+  ["avatar", "nostos_avatar"],
+];
+
+const ANDROID_PRIORITY: Record<string, string> = {
+  passive: "PRIORITY_LOW",
+  active: "PRIORITY_DEFAULT",
+  "time-sensitive": "PRIORITY_HIGH",
+  critical: "PRIORITY_MAX",
+};
+
 /// The FCM v1 shapes of crates/nostos-infra/src/push/fcm.rs, so a direct-mode
-/// app renders exactly what a server-mode one did.
-function visible(title: string, body: string, category?: string, route?: string) {
+/// app renders exactly what a server-mode one did — options included.
+function visible(
+  title: string,
+  body: string,
+  category: string | undefined,
+  route: string | undefined,
+  options: Record<string, string>,
+) {
   const data: Record<string, string> = route ? { cairn_route: route } : {};
+  // deno-lint-ignore no-explicit-any
+  let message: any;
   if (category) {
     // Action push: iOS draws `aps.alert` with the app-registered category's
     // buttons, killed app included. Android gets no `notification` block, so
-    // the HIGH data message reaches the app, which posts it with the actions.
-    return {
-      data: { ...data, title, body, category },
+    // the HIGH data message reaches the app, which posts it with the actions
+    // — every option rides along as `nostos_<key>` for it to render.
+    const extra = Object.fromEntries(Object.entries(options).map(([k, v]) => [`nostos_${k}`, v]));
+    message = {
+      data: { ...data, ...extra, title, body, category },
       android: { priority: "HIGH", ttl: "3600s" },
       apns: { payload: { aps: { alert: { title, body }, sound: "default", category } } },
     };
+  } else {
+    for (const [k, wire] of NSE_KEYS) if (options[k]) data[wire] = options[k];
+    const notification: Record<string, unknown> = {
+      channel_id: options.channel ?? "cairn",
+      default_sound: !options.sound || options.sound === "default",
+      vibrate_timings: ["0s", "0.3s", "0.2s", "0.3s"],
+    };
+    if (options.image) notification.image = options.image;
+    if (options.collapse) notification.tag = options.collapse;
+    if (options.level) notification.notification_priority = ANDROID_PRIORITY[options.level];
+    if (options.sound && !["default", "none"].includes(options.sound)) {
+      notification.sound = options.sound;
+    }
+    message = {
+      notification: { title, body },
+      data,
+      android: { priority: "HIGH", ttl: "3600s", notification },
+      apns: { payload: { aps: { sound: "default" } } },
+    };
   }
-  return {
-    notification: { title, body },
-    data,
-    android: { priority: "HIGH", ttl: "3600s" },
-    apns: { payload: { aps: { sound: "default" } } },
-  };
+  if (options.collapse) message.android.collapse_key = options.collapse;
+  // The iOS half — crates/nostos-infra/src/push/mod.rs `apply_ios_options`.
+  const aps = message.apns.payload.aps;
+  if (options.subtitle) aps.alert = { title, body, subtitle: options.subtitle };
+  if (options.thread) aps["thread-id"] = options.thread;
+  if (options.level) aps["interruption-level"] = options.level;
+  if (options.relevance) aps["relevance-score"] = Number(options.relevance);
+  if (options.sound === "none") delete aps.sound;
+  else if (options.sound) aps.sound = options.sound;
+  for (const [k, wire] of NSE_KEYS) {
+    if (options[k]) {
+      message.apns.payload[wire] = options[k];
+      aps["mutable-content"] = 1;
+    }
+  }
+  if (options.image) message.apns.fcm_options = { image: options.image };
+  if (options.collapse) {
+    message.apns.headers = {
+      "apns-collapse-id": [...options.collapse].filter((c) => c > " " && c <= "~").join("")
+        .slice(0, 64),
+    };
+  }
+  return message;
 }
 
 /// OAuth2 JWT-bearer flow for the FCM HTTP v1 API — the service account signs

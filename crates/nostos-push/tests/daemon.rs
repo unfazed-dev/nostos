@@ -1140,6 +1140,44 @@ async fn send_rate_limited_429_after_burst_other_tenant_unaffected() {
     assert_eq!(s7, reqwest::StatusCode::TOO_MANY_REQUESTS, "{body7}");
 }
 
+/// Presentation options (ADR-0047) reach the rail as sent, and a key or
+/// value no rail can map is a 400, not a silently plain banner.
+#[tokio::test]
+async fn send_visible_options_validated_at_the_edge() {
+    let (calls, mock) = MockRail::new(RailOutcome::Delivered);
+    let d = spawn_daemon(50, rails_for(Platform::Apns, &mock)).await;
+    register_apns(&d, KEY_A, TOKEN_A).await;
+    let with_options = |options: serde_json::Value| {
+        json!({
+            "token": TOKEN_A,
+            "payload": {"visible": {"title": "t", "body": "b", "options": options}},
+        })
+    };
+
+    let (status, body) = d
+        .post(
+            "/v1/send",
+            Some(KEY_A),
+            &with_options(json!({"image": "https://cdn.example/i.png", "collapse": "o-42"})),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "options: {body}");
+
+    for bad in [json!({"badge": "3"}), json!({"level": "loud"})] {
+        let (status, body) = d
+            .post("/v1/send", Some(KEY_A), &with_options(bad.clone()))
+            .await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert!(
+            body["error"].as_str().expect("err").contains("options"),
+            "{body}"
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(*calls.lock().unwrap(), 1, "only the valid send dispatched");
+}
+
 /// Routing keys (ADR-0037 §2a): the map a tap resolves to is accepted, and
 /// the keys a rail would eat are refused at the edge rather than silently
 /// dropped on the wire.

@@ -56,6 +56,9 @@ rail):
   on `action` entries as well
   (`table:action@<route>:<category>:<title>:<body>`); a silent doorbell
   rejects it at startup — a wake-up carries no routing keys,
+- `table:visible[k=v,…]:<title>:<body>` — presentation options, see
+  [below](#presentation-options--how-it-looks); the group follows the mode
+  and route (`table:action@/o/{id}[image=…]:<category>:<title>:<body>`),
 - `table:liveactivity:<json>` — **experimental** Live Activity updates, see
   below; `<json>` is a JSON object whose string leaves may carry `{col}`
   placeholders.
@@ -89,7 +92,8 @@ above; `nostos-pushd`'s `POST /v1/send` takes the whole map:
 
 Refused with a 400 (and at startup, for the config path): keys a rail would
 eat — `aps`, FCM's `from` / `message_type` / `notification` / `google.*` /
-`gcm.*`, and nostos's own `title`, `body`, `category`, `table`, `lsn` — or a
+`gcm.*`, and nostos's own `title`, `body`, `category`, `table`, `lsn`,
+`nostos_*` — or a
 map over 1024 serialized bytes (APNs and FCM cap the whole payload at 4096).
 
 Silent doorbells carry no `data`: the payload stays `{table, lsn}`. And the
@@ -98,6 +102,55 @@ map is plaintext at the vendor — put identifiers in it, not the row.
 Tables listed here also doorbell the tenant's fully-offline accounts
 (`NOSTOS_TENANT_COLUMN` targeting); every other table only doorbells via
 matched sessions.
+
+### Presentation options — how it looks
+
+One `[k=v,…]` group, the same in `NOSTOS_PUSH_TABLES`, `nostos link
+--visible` (direct mode) and pushd's `visible.options` map. nostos maps each
+key to every vendor's own field (ADR-0047):
+
+| key | value | iOS (APNs, direct or via FCM) | Android (FCM) | Web Push |
+|---|---|---|---|---|
+| `subtitle` | text | `alert.subtitle` | — | — |
+| `image` | `https://` URL | attachment, via the NSE ↓ | `notification.image` | `image` |
+| `thread` | text | `thread-id` — groups in Notification Center | — | — |
+| `collapse` | printable ASCII | `apns-collapse-id` — replaces the shown one | `notification.tag` + `collapse_key` | `tag` |
+| `level` | `passive` `active` `time-sensitive` `critical` | `interruption-level` | `notification_priority` LOW/DEFAULT/HIGH/MAX | — |
+| `relevance` | 0–1 | `relevance-score` — summary ranking | — | — |
+| `sound` | `default` `none` or a bundled file | `sound` | `sound` / `default_sound` | `silent` (none) |
+| `channel` | channel id | — | `notification.channel_id` (default `cairn`) | — |
+| `sender` | text | Communication Notification, via the NSE ↓ | `nostos_sender` data key | — |
+| `avatar` | `https://` URL (needs `sender`) | the sender's picture, via the NSE ↓ | `nostos_avatar` data key | `icon` |
+
+Values take `{col}` like the title — `collapse=order-{order_id}` gives each
+order one notification that updates in place instead of one per status, where
+the default collapse key is the table name. An option whose column is empty
+is dropped. `level`, `relevance`, `sound` and `channel` must be literal, so a
+typo fails at startup, not per push.
+
+```
+order_events:action@/history/{id}[collapse=order-{order_id},image=https://cdn.example/status/{status}.png,level=time-sensitive]:order_status:{icon} Order update:Your order is {status}
+```
+
+What the app still owns:
+
+- **`image`, `sender`, `avatar` on iOS** need a Notification Service
+  Extension: the push arrives with `mutable-content: 1` and `nostos_*` keys,
+  and the extension downloads and attaches. Add an extension target and
+  subclass `NostosNotificationService` from the Swift SDK's
+  `NostosNotificationService` product — that is the whole extension.
+- **`sender` / `avatar`** render as a Communication Notification (the
+  sender's picture over the app icon) only with the *Communication
+  Notifications* capability on the app and `NSUserActivityTypes:
+  [INSendMessageIntent]` in its Info.plist; without them the banner shows
+  plain. Apple reserves this for messages from a person — not order updates.
+- **`level=time-sensitive`** needs the *Time Sensitive Notifications*
+  capability; **`critical`** needs Apple's critical-alerts entitlement.
+  Without them iOS delivers at `active`.
+- **`channel`** must exist on the device (the app creates Android channels);
+  an unknown one falls back to the default channel.
+- **Android action pushes** (`category` set) are data-only, so the app's
+  handler renders them — every option arrives as a `nostos_<key>` data key.
 
 ## Live Activities — EXPERIMENTAL
 

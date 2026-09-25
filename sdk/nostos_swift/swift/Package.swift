@@ -33,6 +33,10 @@ let package = Package(
     ],
     products: [
         .library(name: "Nostos", targets: ["Nostos"]),
+        // For an app's Notification Service Extension target: renders the
+        // push options `image` / `sender` / `avatar` (ADR-0047). Separate and
+        // dependency-free so the extension links none of the sync engine.
+        .library(name: "NostosNotificationService", targets: ["NostosNotificationService"]),
     ],
     targets: [
         // The UniFFI-generated Swift sources live in ../swift-sources/ after
@@ -43,6 +47,10 @@ let package = Package(
         .target(
             name: "Nostos",
             path: "Sources/Nostos"
+        ),
+        .target(
+            name: "NostosNotificationService",
+            path: "Sources/NostosNotificationService"
         ),
     ]
 )
