@@ -24,3 +24,9 @@ scope = "user_id = claims.sub"
 [[rules]]
 table = "orders"
 scope = "user_id = claims.sub"
+
+[[rules]]
+table = "order_events"
+scope = "user_id = claims.sub"
+# 0008 wired this table's log trigger and snapshot arm by hand; from here the
+# generated SQL owns them, and `--visible order_events` passes the synced check.
