@@ -111,7 +111,7 @@ The v1 outbox contract above let a permanently-failing write block the queue
 head forever (flagged `ponytail:` in `nostos-client/src/client.rs`). v2 bounds
 it (parity workstream P2):
 
-- `cairn_outbox` gains `attempts` + `dlq` columns (legacy DBs migrated on open
+- `nostos_outbox` gains `attempts` + `dlq` columns (legacy DBs migrated on open
   by probing `PRAGMA table_info`). `pending()` filters `WHERE dlq = 0`.
 - The flush loop bumps `attempts` on every `WriteResult{ok:false}`; at
   `dead_letter_max_attempts` (default 50, `SyncClientConfig`) the write is
@@ -129,7 +129,7 @@ operator surface; auto-retry-from-DLQ is deferred.
 ### On-device SQL read surface (read-side, same client)
 
 `SqliteStorage::query(sql)` (parity P1) runs arbitrary `SELECT` against
-`cairn_data` — the dev projects the opaque payload via `json_extract` (JSON1
+`nostos_data` — the dev projects the opaque payload via `json_extract` (JSON1
 ships in the bundled SQLite). It is deliberately on the **concrete
 `SqliteStorage`**, NOT the `Storage` trait: the trait stays WASM-clean
 (`checkpoint` + `apply_batch` only), so `nostos-ffi-wasm` is unaffected. This

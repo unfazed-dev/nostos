@@ -5,7 +5,7 @@
 - **Implements:** T6 of the unified-API contract (`docs/plans/nostos-unified-api-contract.md`
   §Amendment v1.2); execution plan `docs/plans/nostos-unified-api-implementation.md` Wave 3.
 - **References:** ADR-0013 (write-back / `NOSTOS_WRITE_TABLES`), ADR-0027 (dead-letter),
-  ADR-0028 (read-views over `cairn_data`), ADR-0029 (sign-out wipe), ADR-0033 (browser-durable
+  ADR-0028 (read-views over `nostos_data`), ADR-0029 (sign-out wipe), ADR-0033 (browser-durable
   storage — the OPFS blob store builds on this).
 
 ## Context

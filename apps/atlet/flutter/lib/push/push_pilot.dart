@@ -36,13 +36,13 @@ const String _supabaseAnonKey = String.fromEnvironment(
 );
 
 /// A nostos doorbell: server mode's `{table, lsn}` (ADR-0037 §2), or direct
-/// mode's `{cairn: ring}` from the `cairn-push` Edge Function (ADR-0045).
+/// mode's `{nostos: ring}` from the `nostos-push` Edge Function (ADR-0045).
 /// Pure so the routing decision is unit-testable (push_pilot_test.dart) —
 /// everything non-Firebase that handles a [RemoteMessage] flows through it.
 bool isNostosDoorbell(Map<String, dynamic>? data) =>
     data != null &&
     ((data.containsKey('table') && data.containsKey('lsn')) ||
-        data['cairn'] == 'ring');
+        data['nostos'] == 'ring');
 
 // Action pushes (`{title, body, category}` data, ADR-0037 §2 `action` mode)
 // never render from Dart: iOS draws the system alert + the category's
@@ -121,7 +121,7 @@ class PushPilot {
   /// re-register.
   Future<void> attach(NostosAdapter adapter) async {
     _adapter = adapter;
-    // Web arm: raw Web Push against cairn's own rail (ADR-0037 §1) — no
+    // Web arm: raw Web Push against nostos's own rail (ADR-0037 §1) — no
     // Firebase objects exist here, the service worker owns delivery.
     if (kIsWeb) {
       try {

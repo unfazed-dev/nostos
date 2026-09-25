@@ -35,7 +35,7 @@ import uniffi.nostos_kotlin.NostosClient
 val nostos = NostosClient(
     url = "ws://10.0.2.2:8080/sync",   // 10.0.2.2 = the host, from an emulator
     token = null,
-    dbPath = "${context.filesDir}/cairn.db",
+    dbPath = "${context.filesDir}/nostos.db",
 )
 nostos.connect()
 nostos.subscribe("tasks")
@@ -83,7 +83,7 @@ nostos.resume()
 // Killed app: no handle survives. Cold-open the SAME dbPath — the durable
 // checkpoint lives in the SQLite file, so this is a delta catch-up, not a
 // resync:
-val nostos = NostosClient(url, token, "$filesDir/cairn.db")
+val nostos = NostosClient(url, token, "$filesDir/nostos.db")
 nostos.connect()
 nostos.subscribe("tasks")   // delta applies from the checkpoint; then disconnect()
 ```

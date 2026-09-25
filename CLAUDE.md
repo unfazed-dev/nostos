@@ -40,7 +40,7 @@ on warnings.
   on `main`) → PR, merge on GitHub → `make worktree-rm NAME=<task>`. `make hooks` once per clone: pre-push refuses `main`.
 - `cargo test -p <crate>` — focused iteration.
 - `docker compose -f docker/docker-compose.yml up -d` then
-  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg -- --test-threads=1`
+  `NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos cargo test -p nostos-infra --features pg -- --test-threads=1`
   — the real-Postgres e2e. Without `NOSTOS_E2E_PG=1` the tests self-skip and
   report a false-positive pass. (Check docker/docker-compose.yml for the
   actual port/credentials.) The `--test-threads=1` is REQUIRED: several pg

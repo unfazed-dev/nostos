@@ -1,4 +1,4 @@
-//! Direct mode's native change source — `rpc/cairn_pull` over HTTPS.
+//! Direct mode's native change source — `rpc/nostos_pull` over HTTPS.
 //!
 //! The I/O half of [`nostos_core::pull`]. Core decodes, groups by `xid` and
 //! advances the horizon; this makes the POST and drives the paging loop. The
@@ -44,7 +44,7 @@ pub const MAX_PAGES_PER_DRAIN: usize = 64;
 /// What went wrong pulling from PostgREST.
 #[derive(Debug, thiserror::Error)]
 pub enum PostgrestError {
-    /// The URL could not be assembled into a `rpc/cairn_pull` endpoint.
+    /// The URL could not be assembled into a `rpc/nostos_pull` endpoint.
     #[error("invalid PostgREST base url {0:?}")]
     BadUrl(String),
 
@@ -156,17 +156,17 @@ impl PostgrestSource {
         self.token = None;
     }
 
-    /// The `rpc/cairn_pull` endpoint (for logs and `nostos doctor`).
+    /// The `rpc/nostos_pull` endpoint (for logs and `nostos doctor`).
     ///
     /// The function lives in `public` under a `nostos_` prefix, not in the
-    /// `cairn` schema: Supabase exposes `public, graphql_public` by default, so
+    /// `nostos` schema: Supabase exposes `public, graphql_public` by default, so
     /// a third schema would need a `Content-Profile` header on every request
     /// AND an operator ticking it into "Exposed schemas". Prefixing instead
     /// keeps the log table off the REST API entirely — `nostos link --mode
     /// direct` generates it that way.
     #[must_use]
     pub fn pull_endpoint(&self) -> String {
-        format!("{}/rpc/cairn_pull", self.rest_base)
+        format!("{}/rpc/nostos_pull", self.rest_base)
     }
 
     /// POST one page and return the raw response body.
@@ -194,7 +194,7 @@ impl PostgrestSource {
             .map_err(|e| PostgrestError::Transport(e.to_string()))?;
         if status.as_u16() == 410 {
             // Only the pull can be Gone: 410 is the retention guard the
-            // generated `cairn_pull` raises, and nothing else in the schema
+            // generated `nostos_pull` raises, and nothing else in the schema
             // uses that status.
             return Err(PostgrestError::Gone(body));
         }
@@ -207,7 +207,7 @@ impl PostgrestSource {
         Ok(body)
     }
 
-    /// Fetch a full `cairn_snapshot()` — the current rows of every synced
+    /// Fetch a full `nostos_snapshot()` — the current rows of every synced
     /// table plus a horizon, from one statement.
     ///
     /// The recovery half of [`PostgrestError::Gone`]. That error is permanent
@@ -224,7 +224,7 @@ impl PostgrestSource {
         let bearer = self.token.as_deref().unwrap_or(&self.apikey);
         let res = self
             .http
-            .post(format!("{}/rpc/cairn_snapshot", self.rest_base))
+            .post(format!("{}/rpc/nostos_snapshot", self.rest_base))
             .header("apikey", &self.apikey)
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -325,7 +325,7 @@ impl PostgrestSource {
     /// | `Upsert` | `POST /<table>` with `Prefer: resolution=merge-duplicates` |
     /// | `Patch` | `PATCH /<table>?id=eq.<pk>` — never inserts |
     /// | `Delete` | `DELETE /<table>?id=eq.<pk>` — 0 rows matched is success |
-    /// | `Increment` | `POST /rpc/cairn_increment` |
+    /// | `Increment` | `POST /rpc/nostos_increment` |
     ///
     /// **`Increment` is the one that cannot be a plain table call.** ADR-0030's
     /// guarantee is that Postgres serializes concurrent increments
@@ -355,7 +355,7 @@ impl PostgrestSource {
                 .delete(format!("{}/{table}?{PK_COLUMN}=eq.{pk}", self.rest_base)),
             WriteOp::Increment => self
                 .http
-                .post(format!("{}/rpc/cairn_increment", self.rest_base))
+                .post(format!("{}/rpc/nostos_increment", self.rest_base))
                 .header("Prefer", "return=minimal"),
         };
 
@@ -425,7 +425,7 @@ impl PostgrestSource {
         token: &str,
     ) -> Result<(), PostgrestError> {
         self.rpc(
-            "cairn_register_push_token",
+            "nostos_register_push_token",
             &serde_json::json!({ "p_platform": platform, "p_token": token }),
         )
         .await
@@ -438,7 +438,7 @@ impl PostgrestSource {
     /// [`PostgrestError`] on transport failure or any non-success status.
     pub async fn deregister_push_token(&self, token: &str) -> Result<(), PostgrestError> {
         self.rpc(
-            "cairn_deregister_push_token",
+            "nostos_deregister_push_token",
             &serde_json::json!({ "p_token": token }),
         )
         .await
@@ -454,7 +454,7 @@ impl PostgrestSource {
     /// [`PostgrestError`] on transport failure or any non-success status.
     pub async fn heartbeat(&self, device_id: &str) -> Result<(), PostgrestError> {
         self.rpc(
-            "cairn_heartbeat",
+            "nostos_heartbeat",
             &serde_json::json!({ "p_device_id": device_id }),
         )
         .await
@@ -516,7 +516,7 @@ mod tests {
         let b = PostgrestSource::new("https://ref.supabase.co/", "anon").unwrap();
         assert_eq!(
             a.pull_endpoint(),
-            "https://ref.supabase.co/rest/v1/rpc/cairn_pull"
+            "https://ref.supabase.co/rest/v1/rpc/nostos_pull"
         );
         assert_eq!(a.pull_endpoint(), b.pull_endpoint());
     }

@@ -40,7 +40,7 @@ class RunRecord {
       'Internal evaluation — not a published benchmark';
 
   final String sdk;
-  final String engine; // 'cairn' | 'cairn-direct'
+  final String engine; // 'nostos' | 'nostos-direct'
   final String profile; // 'local' | 'cloud'
   final String
   runType; // 'cold_sync' | 'propagation' | 'write_ack' | 'queue_drain'
@@ -357,7 +357,7 @@ class Runner {
 
   /// db_bytes (spec/metrics.md item 5): sums every regular file under
   /// [dbDir], recursively. Deliberately does NOT hard-code an engine-specific
-  /// filename (`cairn.sqlite` vs `cairn_direct.sqlite`) — Runner never imports a
+  /// filename (`nostos.sqlite` vs `nostos_direct.sqlite`) — Runner never imports a
   /// concrete adapter type (see class doc), and summing the whole directory
   /// keeps this method correct for either engine's on-disk footprint,
   /// including WAL/SHM/journal sidecars. Best effort per spec: the caller is

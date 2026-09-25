@@ -911,7 +911,7 @@ impl NostosEngine {
         Ok(id as f64)
     }
 
-    /// Materialize the WS2 read-views over `cairn_data`. After this,
+    /// Materialize the WS2 read-views over `nostos_data`. After this,
     /// `SELECT col FROM <table>` resolves against a VIEW that
     /// `json_extract`s each column from the opaque payload. SqliteWasm only
     /// (Memory is a no-op). Mirrors native `SqliteStorage::apply_schema`.
@@ -1057,7 +1057,7 @@ pub fn set_kv_store(store: Option<js_sys::Object>) {
 /// frame is queued (sent on `open`). The server then streams events; each
 /// inbound message is decoded by the pure frame-pump, applied to the socket's
 /// engine, ACKed per committed batch, and the resulting checkpoint is
-/// persisted under the `cairn:checkpoint:<table>` key so a reload can resume —
+/// persisted under the `nostos:checkpoint:<table>` key so a reload can resume —
 /// to `localStorage` by default, or to whatever store was injected via
 /// [`set_kv_store`] (plan 6.1: the SW-compatible KV seam).
 ///
@@ -1079,7 +1079,7 @@ pub fn set_kv_store(store: Option<js_sys::Object>) {
 /// const sock = await NostosSocket.connect(
 ///   "ws://localhost:8080/sync", "tok", "tasks", "priority > 5"
 /// );
-/// // rows flow in; checkpoint persists to localStorage["cairn:checkpoint:tasks"]
+/// // rows flow in; checkpoint persists to localStorage["nostos:checkpoint:tasks"]
 /// console.log(sock.checkpoint, sock.rowCount);
 /// sock.close();
 /// ```
@@ -1109,13 +1109,13 @@ impl NostosSocket {
     /// `async` fn, so `await NostosSocket.connect(...)` returns the ready socket.
     /// The subscribe frame is sent in the `onopen` handler; inbound frames flow
     /// into the socket's engine, are acked per committed batch, and the
-    /// checkpoint is persisted to `localStorage[cairn:checkpoint:<table>]`.
+    /// checkpoint is persisted to `localStorage[nostos:checkpoint:<table>]`.
     ///
     /// `token` is appended as `?token=` on the URL (browsers can't set headers
     /// on a WS handshake — same convention as the native `SyncClient`).
     /// `table` is the table to subscribe; `where_sql` is the optional safe-SQL
     /// predicate (cleared if empty/`null`). `resume_lsn` is read from
-    /// `localStorage[cairn:checkpoint:<table>]`, falling back to 0.
+    /// `localStorage[nostos:checkpoint:<table>]`, falling back to 0.
     ///
     /// # Errors
     /// The `Promise` rejects if the browser can't open the socket (e.g. mixed
@@ -1326,7 +1326,7 @@ impl NostosSocket {
     // Wave 4a: socket-level typed-verb surface.
     // ========================================================================
 
-    /// Materialize the WS2 read-views over `cairn_data` on the socket's engine.
+    /// Materialize the WS2 read-views over `nostos_data` on the socket's engine.
     /// Delegates to [`NostosEngine::apply_schema`]. SqliteWasm only.
     #[wasm_bindgen(js_name = applySchema)]
     pub fn apply_schema(&self, tables: Vec<JsValue>) -> Result<(), JsValue> {
@@ -1963,10 +1963,10 @@ mod transport_tests {
 
     #[test]
     fn checkpoint_key_format() {
-        assert_eq!(checkpoint_key("tasks"), "cairn:checkpoint:tasks");
+        assert_eq!(checkpoint_key("tasks"), "nostos:checkpoint:tasks");
         assert_eq!(
             checkpoint_key("org_members"),
-            "cairn:checkpoint:org_members"
+            "nostos:checkpoint:org_members"
         );
     }
 
@@ -2122,7 +2122,7 @@ mod transport_tests {
         write_checkpoint("tasks", 42, &kv);
         assert_eq!(
             kv.0.borrow()
-                .get("cairn:checkpoint:tasks")
+                .get("nostos:checkpoint:tasks")
                 .map(String::as_str),
             Some("42"),
             "the injected store received the checkpoint under the pinned key"
@@ -2136,7 +2136,7 @@ mod transport_tests {
         // connect path resumes from 0, never panics.
         let kv = MemKv::new();
         assert_eq!(read_checkpoint("tasks", &kv), None, "no key → None");
-        kv.set("cairn:checkpoint:tasks", "not a number");
+        kv.set("nostos:checkpoint:tasks", "not a number");
         assert_eq!(read_checkpoint("tasks", &kv), None, "malformed → None");
     }
 

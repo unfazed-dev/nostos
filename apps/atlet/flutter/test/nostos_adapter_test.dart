@@ -14,9 +14,9 @@ import 'package:atlet/adapters/sync_adapter.dart';
 // NostosAdapter's schema.
 void main() {
   group('NostosAdapter type', () {
-    test('implements SyncAdapter with engine == cairn', () {
+    test('implements SyncAdapter with engine == nostos', () {
       final SyncAdapter adapter = NostosAdapter();
-      expect(adapter.engine, 'cairn');
+      expect(adapter.engine, 'nostos');
     });
   });
 

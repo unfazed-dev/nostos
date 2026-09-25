@@ -400,7 +400,7 @@ mod tests {
             }),
         };
         let schema_json = r#"{
-            "publication": "cairn_pub",
+            "publication": "nostos_pub",
             "tables": [
                 { "name": "providers", "primary_key": ["id"],
                   "columns": [

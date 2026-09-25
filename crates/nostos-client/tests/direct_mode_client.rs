@@ -1,6 +1,6 @@
 //! The native direct-mode loop, against a fake PostgREST that serves all three
-//! endpoints one device talks to: `cairn_pull`, a table (the write), and
-//! `cairn_snapshot`.
+//! endpoints one device talks to: `nostos_pull`, a table (the write), and
+//! `nostos_snapshot`.
 //!
 //! `direct_mode_pull.rs` pins the protocol pieces in isolation. What is only
 //! visible here is the ORDER they run in — a queued write must leave the device
@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 #[derive(Clone)]
 struct Fake {
-    /// Set once the device has pushed its write, so `cairn_pull` can answer
+    /// Set once the device has pushed its write, so `nostos_pull` can answer
     /// with the echo exactly as the real trigger would.
     pushed: Arc<Mutex<Option<String>>>,
     /// Every pull before this many has been "pruned away" — the 410 path.
@@ -93,8 +93,11 @@ async fn spawn(gone: bool) -> (String, Fake) {
         snapshots: Arc::new(Mutex::new(0)),
     };
     let app = Router::new()
-        .route("/rest/v1/rpc/cairn_pull", axum::routing::post(pull))
-        .route("/rest/v1/rpc/cairn_snapshot", axum::routing::post(snapshot))
+        .route("/rest/v1/rpc/nostos_pull", axum::routing::post(pull))
+        .route(
+            "/rest/v1/rpc/nostos_snapshot",
+            axum::routing::post(snapshot),
+        )
         .route("/rest/v1/orders", axum::routing::post(write))
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -121,12 +124,12 @@ fn resuming_client(base: &str) -> DirectClient<SqliteStorage> {
 
 /// The change log is not a history of the database: it begins where the
 /// trigger was installed, so every row older than that is reachable only
-/// through `cairn_snapshot`. A first sync that pulls from `Horizon::fresh`
+/// through `nostos_snapshot`. A first sync that pulls from `Horizon::fresh`
 /// instead of snapshotting therefore shows an empty app forever, not just
 /// until the next write.
 ///
 /// Caught against a live Supabase project 2026-09-22: 1000 products and 4
-/// sessions in the tables, 4 rows in `cairn.changes`, and a device that
+/// sessions in the tables, 4 rows in `nostos.changes`, and a device that
 /// rendered "No sessions yet" / "No products yet".
 #[tokio::test]
 async fn a_fresh_device_bootstraps_from_the_snapshot_not_the_log() {

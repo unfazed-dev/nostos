@@ -12,8 +12,8 @@ nostos-server fan-out ── doorbell {table, lsn} ──▶ FCM HTTP v1 ──�
 
 Assertions, both sides of the rail:
 
-- **server**: `cairn_push_sent_total` on `GET /metrics` increases after the
-  row insert (`cairn_push_failed_total` / `cairn_push_enqueued_total` are
+- **server**: `nostos_push_sent_total` on `GET /metrics` increases after the
+  row insert (`nostos_push_failed_total` / `nostos_push_enqueued_total` are
   printed for diagnosis on failure);
 - **device**: the integration test (`integration_test/push_smoke_test.dart`)
   receives the data message via `FirebaseMessaging.onMessage` and prints
@@ -124,7 +124,7 @@ apps/atlet/flutter/tool/push_smoke.sh
 ```
 
 Expected, leg 1 (silent doorbell): three lines — `device ready: user=…`,
-`server: cairn_push_sent_total 0 → 1`,
+`server: nostos_push_sent_total 0 → 1`,
 `device: PUSH_SMOKE_RECEIVED table=sessions lsn=…`, then
 `PASS  real-rail FCM doorbell: PG row → nostos-server → FCM → device`.
 
@@ -259,7 +259,7 @@ later → `order banner:` in the log → the OS banner on screen.
 A banner is gone the moment it is dismissed, so "did the push fire?" used to be
 answerable only from a log. Migration 0007 makes every status an order reaches a
 row in `public.order_events` (written by a trigger on `public.orders`, synced
-with the same `cairn.log_change('user_id','sub')` stamp as everything else), and
+with the same `nostos.log_change('user_id','sub')` stamp as everything else), and
 the History tab stacks them newest-first.
 
 Round trip proven 2026-09-23:
@@ -268,7 +268,7 @@ Round trip proven 2026-09-23:
 # server
 update public.orders set status = 'delivered' where id = '983979e8-…';
 # device, within SYNC_FLOOR (60s)
-sqlite3 "$(xcrun simctl get_app_container "$UDID" internal.atlet.atlet data)/Documents/cairn_direct.sqlite" \
+sqlite3 "$(xcrun simctl get_app_container "$UDID" internal.atlet.atlet data)/Documents/nostos_direct.sqlite" \
   "select previous_status||'->'||status from order_events order by created_at desc limit 1"
 # -> shipped->delivered
 ```
@@ -289,7 +289,7 @@ exactly that event:
 {"title": "Atlet order update",
  "body": "Order 983979e8 is shipped",
  "category": "order_status",
- "data": {"cairn_route": "/history/<event-id>",
+ "data": {"nostos_route": "/history/<event-id>",
           "deep_link": "atlet://history/<event-id>",
           "event_id": …, "order_id": …, "status": …,
           "previous_status": …, "occurred_at": …}}

@@ -340,12 +340,12 @@ pub fn pump_committed(pump: &PumpResult, flush_committed: bool) -> bool {
 // -----------------------------------------------------------------------------
 
 /// The `localStorage` key under which the table's durable checkpoint lives.
-/// Format: `cairn:checkpoint:<table>`. Survives reloads so a reconnect can
+/// Format: `nostos:checkpoint:<table>`. Survives reloads so a reconnect can
 /// resume from `resume_lsn` (the rows themselves are in-memory until OPFS in
 /// E2 — the ceiling is "reload replays from resume_lsn").
 #[must_use]
 pub fn checkpoint_key(table: &str) -> String {
-    format!("cairn:checkpoint:{table}")
+    format!("nostos:checkpoint:{table}")
 }
 
 /// Parse a `localStorage` value into a checkpoint LSN. Accepts a bare decimal

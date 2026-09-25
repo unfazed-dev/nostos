@@ -1,11 +1,11 @@
 //! Push-token registry — the transport-token table behind ADR-0037 §3.
 //!
-//! `PgTokenStore` owns `cairn_push_tokens`, the server-internal table the
+//! `PgTokenStore` owns `nostos_push_tokens`, the server-internal table the
 //! push router resolves an offline account's devices through. It follows the
 //! `PgWriteBack` pool-of-one pattern (`write_back.rs`): one lazily-opened
 //! `tokio_postgres::Client` behind a tokio `Mutex`, transparently reopened
 //! after a connection death. The table is created by the same idempotent-DDL
-//! migration path as `cairn_oplog` (`docker/pg-init/01-sources.sql` /
+//! migration path as `nostos_oplog` (`docker/pg-init/01-sources.sql` /
 //! `supabase/schema.sql`) — nostos has no migration framework and does not
 //! invent one here.
 //!
@@ -56,7 +56,7 @@ pub struct PushToken {
 #[error("token store backend: {0}")]
 pub struct TokenStoreError(pub String);
 
-/// The `cairn_push_tokens` registry, backed by a pool-of-one
+/// The `nostos_push_tokens` registry, backed by a pool-of-one
 /// `tokio_postgres::Client` (the `PgWriteBack` construction pattern:
 /// lazy connect, reuse, transparent reopen after a dead connection).
 ///
@@ -142,17 +142,17 @@ impl PgTokenStore {
     ) -> Result<(), TokenStoreError> {
         let sql = "\
             WITH reg AS ( \
-                INSERT INTO cairn_push_tokens (token, platform, account_id, tenant_id, updated_at) \
+                INSERT INTO nostos_push_tokens (token, platform, account_id, tenant_id, updated_at) \
                 VALUES ($1, $2, $3, $4, now()) \
                 ON CONFLICT (token) DO UPDATE SET \
                     platform = EXCLUDED.platform, \
                     account_id = EXCLUDED.account_id, \
                     tenant_id = EXCLUDED.tenant_id, \
                     updated_at = now() \
-                WHERE cairn_push_tokens.tenant_id = EXCLUDED.tenant_id \
+                WHERE nostos_push_tokens.tenant_id = EXCLUDED.tenant_id \
                 RETURNING token \
             ) \
-            DELETE FROM cairn_push_tokens \
+            DELETE FROM nostos_push_tokens \
             WHERE account_id = $3 AND tenant_id = $4 \
               AND token <> $1 \
               AND updated_at < now() - interval '30 days'";
@@ -180,7 +180,7 @@ impl PgTokenStore {
     pub async fn prune(&self, token: &str) -> Result<u64, TokenStoreError> {
         let client = self.client().await?;
         match client
-            .execute("DELETE FROM cairn_push_tokens WHERE token = $1", &[&token])
+            .execute("DELETE FROM nostos_push_tokens WHERE token = $1", &[&token])
             .await
         {
             Ok(n) => {
@@ -208,7 +208,7 @@ impl PgTokenStore {
         let client = self.client().await?;
         let rows = match client
             .query(
-                "SELECT platform, token FROM cairn_push_tokens \
+                "SELECT platform, token FROM nostos_push_tokens \
                  WHERE tenant_id = $1 AND account_id = $2",
                 &[&tenant_id, &account_id],
             )
@@ -244,7 +244,7 @@ impl PgTokenStore {
         let client = self.client().await?;
         match client
             .query_one(
-                "SELECT count(*) FROM cairn_push_tokens \
+                "SELECT count(*) FROM nostos_push_tokens \
                  WHERE tenant_id = $1 AND account_id = $2",
                 &[&tenant_id, &account_id],
             )
@@ -276,7 +276,7 @@ impl PgTokenStore {
         let client = self.client().await?;
         let rows = match client
             .query(
-                "SELECT tenant_id, account_id, platform, token FROM cairn_push_tokens \
+                "SELECT tenant_id, account_id, platform, token FROM nostos_push_tokens \
                  WHERE tenant_id = $1",
                 &[&tenant_id],
             )
@@ -313,7 +313,7 @@ impl PgTokenStore {
         account_id: &str,
         token: &str,
     ) -> Result<u64, TokenStoreError> {
-        let sql = "DELETE FROM cairn_push_tokens \
+        let sql = "DELETE FROM nostos_push_tokens \
                    WHERE token = $1 AND tenant_id = $2 AND account_id = $3";
         let client = self.client().await?;
         match client
@@ -416,7 +416,7 @@ mod tests {
         let re = regex::Regex::new(r"^[a-z_][a-z0-9_]*$")
             .expect("identifier regex is a valid static pattern");
         for ident in [
-            "cairn_push_tokens",
+            "nostos_push_tokens",
             "token",
             "platform",
             "account_id",

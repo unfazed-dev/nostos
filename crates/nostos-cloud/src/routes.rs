@@ -123,7 +123,7 @@ async fn login(
 }
 
 async fn logout(cookies: Cookies) -> impl IntoResponse {
-    cookies.remove(Cookie::build("cairn_session").path("/").build());
+    cookies.remove(Cookie::build("nostos_session").path("/").build());
     StatusCode::NO_CONTENT
 }
 
@@ -131,7 +131,7 @@ fn set_session(cookies: &Cookies, account_id: &str) {
     // For a launch: the session cookie IS the account id (signed/sealed in a
     // real deploy via tower-cookies' private jar). Documented upgrade.
     cookies.add(
-        Cookie::build(("cairn_session", account_id.to_string()))
+        Cookie::build(("nostos_session", account_id.to_string()))
             .path("/")
             .build(),
     );
@@ -140,7 +140,7 @@ fn set_session(cookies: &Cookies, account_id: &str) {
 /// Resolve the current account id from either credential path:
 ///
 /// 1. `Authorization: Bearer <jwt>` → verified via the configured JWT verifier
-/// 2. else the `cairn_session` cookie → account id (the OSS/self-host path)
+/// 2. else the `nostos_session` cookie → account id (the OSS/self-host path)
 ///
 /// Then validate the resolved id exists in the store. Returns 401 on failure.
 async fn current_account_id(
@@ -158,7 +158,7 @@ async fn current_account_id(
     }
     // Path 2: session cookie (OSS self-host + web admin).
     let id = cookies
-        .get("cairn_session")
+        .get("nostos_session")
         .ok_or(ApiError(
             StatusCode::UNAUTHORIZED,
             "not authenticated".into(),
@@ -574,11 +574,11 @@ mod tests {
             .unwrap()
     }
 
-    /// Pull the `cairn_session` cookie value out of a response's Set-Cookie.
+    /// Pull the `nostos_session` cookie value out of a response's Set-Cookie.
     fn session_cookie(resp: &axum::response::Response) -> Option<String> {
         resp.headers().get_all("set-cookie").iter().find_map(|h| {
             let s = h.to_str().ok()?;
-            let part = s.strip_prefix("cairn_session=")?;
+            let part = s.strip_prefix("nostos_session=")?;
             Some(part.split(';').next()?.to_string())
         })
     }
@@ -609,7 +609,7 @@ mod tests {
         let me_req = Request::builder()
             .method("GET")
             .uri("/v1/me")
-            .header("cookie", format!("cairn_session={cookie}"))
+            .header("cookie", format!("nostos_session={cookie}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(me_req).await.unwrap();
@@ -643,7 +643,7 @@ mod tests {
             Request::builder()
                 .method(method)
                 .uri(path)
-                .header("cookie", format!("cairn_session={cookie}"))
+                .header("cookie", format!("nostos_session={cookie}"))
                 .header("content-type", "application/json")
                 .body(b)
                 .unwrap()
@@ -735,7 +735,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/projects/{}/checkout", proj.id))
-                    .header("cookie", format!("cairn_session={cookie}"))
+                    .header("cookie", format!("nostos_session={cookie}"))
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::json!({"tier":"pro"}).to_string()))
                     .unwrap(),

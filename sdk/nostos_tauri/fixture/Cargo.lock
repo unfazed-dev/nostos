@@ -2388,7 +2388,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
- "tauri-plugin-cairn",
+ "tauri-plugin-nostos",
  "tokio",
 ]
 
@@ -4209,7 +4209,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri-plugin-cairn"
+name = "tauri-plugin-nostos"
 version = "0.1.0"
 dependencies = [
  "nostos-client",

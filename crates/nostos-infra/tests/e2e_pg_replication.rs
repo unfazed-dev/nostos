@@ -41,7 +41,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 /// Connect a control-plane SQL client (tokio-postgres) for setup/inserts.
@@ -160,7 +160,7 @@ async fn pg_insert_reaches_ws_client() {
         return;
     }
     let slot = format!("e2e_basic_{}", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
     // Drop a leftover slot from a prior run, then start clean.
     let _ = sql
@@ -225,7 +225,7 @@ async fn lsn_resume_delivers_missed_events() {
 
     // Connection 1: stream one row to establish a confirmed_flush_lsn.
     let mut repl1 =
-        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").unwrap());
+        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").unwrap());
     repl1.ensure_connected().await.unwrap();
     let warmer = format!("resume-warm-{}", uuid::Uuid::new_v4());
     sql.execute(
@@ -258,7 +258,7 @@ async fn lsn_resume_delivers_missed_events() {
     // Connection 2: resumes from confirmed_flush_lsn (>= confirmed1). PG must
     // replay the 3 missed rows. Collect up to 8 events with a deadline.
     let mut repl2 =
-        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").unwrap());
+        PgReplicator::new(PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").unwrap());
     repl2.ensure_connected().await.unwrap();
     let confirmed2 = repl2.last_confirmed_lsn();
     assert!(

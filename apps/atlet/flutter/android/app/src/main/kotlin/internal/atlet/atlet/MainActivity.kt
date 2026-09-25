@@ -23,20 +23,23 @@ class MainActivity : FlutterActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
             val channel = NotificationChannel(
-                "cairn",
+                "nostos",
                 "Nostos updates",
                 NotificationManager.IMPORTANCE_HIGH,
             )
             channel.enableVibration(true)
             channel.vibrationPattern = longArrayOf(0, 300, 200, 300)
             nm.createNotificationChannel(channel)
+            // ADR-0048: the channel was "cairn" before the rename; left alone it
+            // sits in the app's notification settings, empty, forever.
+            nm.deleteNotificationChannel("cairn") // rename:hold — pre-rename channel id
         }
     }
 
     override fun configureFlutterEngine(engine: FlutterEngine) {
         super.configureFlutterEngine(engine)
         // Foreground order banner: posts a LOCAL heads-up notification on the
-        // same channel as cairn's FCM pushes, so the online (live-sync)
+        // same channel as nostos's FCM pushes, so the online (live-sync)
         // experience looks identical to the background push one — slide-in
         // banner, then it sits in the tray. Tapping one opens the order event
         // it came from (lib/main.dart openHistoryEvent).
@@ -72,7 +75,7 @@ class MainActivity : FlutterActivity() {
             val id = body.hashCode()
             nm().notify(
                 id,
-                Notification.Builder(this, "cairn")
+                Notification.Builder(this, "nostos")
                     .setSmallIcon(applicationInfo.icon)
                     .setContentTitle(call.argument<String>("title") ?: "Atlet order update")
                     .setContentText(body)
@@ -107,7 +110,7 @@ class MainActivity : FlutterActivity() {
             else if (uri.host == "history") "/history${uri.path}" else uri.path
         }
         val tap = mutableMapOf<String, String>()
-        if (route != null && route.startsWith("/history/")) tap["cairn_route"] = route
+        if (route != null && route.startsWith("/history/")) tap["nostos_route"] = route
         for (key in TAP_KEYS) {
             intent.getStringExtra(key)?.let { tap[key] = it }
         }
@@ -130,6 +133,6 @@ class MainActivity : FlutterActivity() {
     private var pendingTap: Map<String, String>? = null
 
     private companion object {
-        val TAP_KEYS = listOf("event_id", "cairn_route", "deep_link", "order_id", "status")
+        val TAP_KEYS = listOf("event_id", "nostos_route", "deep_link", "order_id", "status")
     }
 }

@@ -2464,7 +2464,7 @@ mod tests {
         // WS2 slice-2 regression (offline-first): write() must broadcast a
         // checkpoint-preserving change tick after the optimistic local apply,
         // so a live watch pump re-queries and renders the row BEFORE the server
-        // echoes it. Before the fix, apply_local wrote the row into cairn_data
+        // echoes it. Before the fix, apply_local wrote the row into nostos_data
         // but never notified `changes`, so an offline write was
         // durable-but-invisible until the echo — the "offline-first broken"
         // symptom. Checkpoint preservation is covered by the sqlite test
@@ -2543,7 +2543,7 @@ mod tests {
                 .await
                 .unwrap(),
             0,
-            "clear_local_state wiped cairn_data"
+            "clear_local_state wiped nostos_data"
         );
         assert_eq!(
             c.with_storage(|s| s.pending().map_or(0, |p| p.len()))

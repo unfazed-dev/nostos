@@ -52,7 +52,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -173,7 +173,7 @@ async fn timestamptz_iso8601_string_binds_and_lands() {
         .batch_execute(&format!("SELECT pg_drop_replication_slot('{slot}');"))
         .await;
 
-    let (addr, shutdown, server, driver) = spawn_server(&slot, "cairn_pub").await;
+    let (addr, shutdown, server, driver) = spawn_server(&slot, "nostos_pub").await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let row_id = uuid::Uuid::new_v4();

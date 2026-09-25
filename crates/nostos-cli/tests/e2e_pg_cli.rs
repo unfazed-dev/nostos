@@ -9,7 +9,7 @@
 //! NOSTOS_E2E_PG=1 cargo test -p nostos-cli --test e2e_pg_cli -- --nocapture --test-threads=1
 //! ```
 //!
-//! Uses its own publication name (`nostos_cli_test_pub*`, never `cairn_pub`)
+//! Uses its own publication name (`nostos_cli_test_pub*`, never `nostos_pub`)
 //! and throwaway tables (random-suffixed, dropped at the end) so this never
 //! collides with other agents' concurrent e2e runs against the same docker
 //! Postgres.
@@ -20,7 +20,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {

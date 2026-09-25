@@ -50,7 +50,7 @@ Imported from the `--target web` build (`pkg-web/`), not from `index.js`.
 
 | member | behavior |
 |---|---|
-| `NostosSocket.connect(url, token, table, whereSql)` | **static**, `Promise<NostosSocket>` — opens the real `WebSocket` and subscribes. `token` goes on the URL as `?token=` (browsers cannot set handshake headers). `resume_lsn` is read from `localStorage["cairn:checkpoint:<table>"]`, defaulting to 0 |
+| `NostosSocket.connect(url, token, table, whereSql)` | **static**, `Promise<NostosSocket>` — opens the real `WebSocket` and subscribes. `token` goes on the URL as `?token=` (browsers cannot set handshake headers). `resume_lsn` is read from `localStorage["nostos:checkpoint:<table>"]`, defaulting to 0 |
 | `write(table, op, pk, payloadJson, clientWriteId)` | sends a write frame; rejects if the socket is not OPEN |
 | `rowsFor(table)` | the rows currently applied |
 | `checkpoint` | getter — the durable LSN persisted to `localStorage` |
@@ -140,7 +140,7 @@ Service Worker, asks for notification permission, or touches `/push-tokens`
 until the host app calls it with explicit config — existing embedders see zero
 behavior change (ADR-0033 experimental-flag discipline). In the e2e boot path
 (`e2e/app.html`) the config persists under the localStorage flag key
-**`cairn:experimental:webpush`** so every load re-arms the wake listener
+**`nostos:experimental:webpush`** so every load re-arms the wake listener
 (remove that key + call `disable()` to turn it off; a listener does not
 survive a reload).
 
@@ -228,7 +228,7 @@ offline-capable within a session only.
 
 - **One durable engine per origin, every tab uses it.** `opfs-sahpool` installs
   once per origin (sqlite.org persistence doc). The Worker takes a Web Lock
-  (`cairn:opfs-sahpool`) before opening OPFS; a tab that loses the lock becomes
+  (`nostos:opfs-sahpool`) before opening OPFS; a tab that loses the lock becomes
   a **follower**: it proxies every command over a `BroadcastChannel` to the
   leader tab's Worker (responses by id, pushes mirrored) and reports the
   leader's mode with `reason:"follower"`. A later `connect` joins the live

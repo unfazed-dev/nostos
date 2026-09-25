@@ -24,7 +24,7 @@ the native, Tauri, Flutter, Swift, Kotlin, and Node SDKs drive, loaded into
 ```csharp
 using uniffi.nostos;
 
-var client = new NostosClient("ws://127.0.0.1:8080/sync", token: null, dbPath: "cairn.db");
+var client = new NostosClient("ws://127.0.0.1:8080/sync", token: null, dbPath: "nostos.db");
 client.Connect();
 client.Subscribe("tasks");
 

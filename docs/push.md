@@ -94,7 +94,7 @@ nostos push check
 # 2. Daemon auth: tenant API keys (tenant is force-stamped from the key)
 echo 'NOSTOS_PUSHD_API_KEYS=acme:secret-word,hq:another-secret' >> .env
 
-# 3. Run (SQLite registry at ./cairn-pushd.db by default; NOSTOS_PUSHD_DB to move it)
+# 3. Run (SQLite registry at ./nostos-pushd.db by default; NOSTOS_PUSHD_DB to move it)
 nostos-pushd   # binds 127.0.0.1:8090; NOSTOS_PUSHD_BIND to expose it
 ```
 
@@ -120,7 +120,7 @@ curl -s -X POST localhost:8090/v1/send \
 # docs/api/push.md.
 curl -s -X POST localhost:8090/v1/send \
   -H "Authorization: Bearer $API" -H 'Content-Type: application/json' \
-  -d '{"token":"a1b2...","payload":{"visible":{"title":"Tasks changed","body":"You have new tasks","data":{"cairn_route":"/tasks"}}}}'
+  -d '{"token":"a1b2...","payload":{"visible":{"title":"Tasks changed","body":"You have new tasks","data":{"nostos_route":"/tasks"}}}}'
 
 # Poll the append-only receipt log (outcome + echoed metadata per push)
 curl -s "localhost:8090/v1/receipts?since=0" -H "Authorization: Bearer $API"

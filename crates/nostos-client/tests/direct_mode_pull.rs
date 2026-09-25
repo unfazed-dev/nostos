@@ -1,7 +1,7 @@
 //! Direct mode end to end against a fake PostgREST — no Nostos server anywhere
 //! in this test, which is the whole point of the mode.
 //!
-//! The fake implements `cairn.pull`'s contract in Rust: the horizon filter, the
+//! The fake implements `nostos.pull`'s contract in Rust: the horizon filter, the
 //! **distinct-xid** page limit, and `order by xid, seq`. That is deliberate
 //! duplication — it pins the contract the real SQL function must satisfy, and
 //! the paging livelock it exists to prevent (a row-limited page plus an
@@ -15,7 +15,7 @@ use nostos_client::{PostgrestError, PostgrestSource, SqliteStorage};
 use nostos_core::{ApplyEngine, Horizon, PendingWrite, PullCursor, Storage, WriteOp};
 use serde::Deserialize;
 
-/// One row of `cairn.changes` as the fake holds it.
+/// One row of `nostos.changes` as the fake holds it.
 #[derive(Clone, Copy)]
 struct Change {
     seq: u64,
@@ -41,7 +41,7 @@ struct PullArgs {
     max_txns: usize,
 }
 
-/// `cairn.pull`, reimplemented: horizon filter, whole-transaction page, ordered.
+/// `nostos.pull`, reimplemented: horizon filter, whole-transaction page, ordered.
 async fn pull(State(fake): State<Fake>, Json(args): Json<PullArgs>) -> Json<serde_json::Value> {
     *fake.hits.lock().unwrap() += 1;
     let since: u64 = args.since.parse().expect("since must be an xid8");
@@ -88,7 +88,7 @@ async fn spawn_fake(rows: Vec<Change>, horizon: u64) -> (String, Arc<Mutex<usize
         hits: Arc::clone(&hits),
     };
     let app = Router::new()
-        .route("/rest/v1/rpc/cairn_pull", axum::routing::post(pull))
+        .route("/rest/v1/rpc/nostos_pull", axum::routing::post(pull))
         .with_state(fake);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -198,7 +198,7 @@ async fn a_rejected_jwt_surfaces_as_a_status_not_as_missing_rows() {
     // missing grants all come back as an HTTP status with a usable body, and
     // must never be mistaken for "no changes".
     let app = Router::new().route(
-        "/rest/v1/rpc/cairn_pull",
+        "/rest/v1/rpc/nostos_pull",
         axum::routing::post(|| async {
             (
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -342,7 +342,7 @@ async fn each_write_op_maps_to_the_right_postgrest_request() {
     let (m, p, _, body) = &seen[3];
     assert_eq!(
         (m.as_str(), p.as_str()),
-        ("POST", "/rest/v1/rpc/cairn_increment")
+        ("POST", "/rest/v1/rpc/nostos_increment")
     );
     let args: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(args["p_table"], "counters");
@@ -405,13 +405,13 @@ async fn an_upsert_with_no_payload_never_leaves_the_device() {
 
 /// A device that was offline past the retention window must be told, not
 /// quietly handed a shorter answer: the rows in the gap cannot arrive any
-/// other way, so a short answer is silent loss. The generated `cairn_pull`
+/// other way, so a short answer is silent loss. The generated `nostos_pull`
 /// raises `PT410`, PostgREST turns that into 410, and the client surfaces it
 /// as its own variant rather than a generic status the caller would retry.
 #[tokio::test]
 async fn a_pruned_horizon_surfaces_as_gone_not_as_an_empty_page() {
     let app = Router::new().route(
-        "/rest/v1/rpc/cairn_pull",
+        "/rest/v1/rpc/nostos_pull",
         axum::routing::post(|| async {
             (
                 axum::http::StatusCode::GONE,

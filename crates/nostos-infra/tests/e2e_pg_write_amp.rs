@@ -1,7 +1,7 @@
-//! ADR-0025 slice 6 — real-Postgres `cairn_oplog` write-amplification harness.
+//! ADR-0025 slice 6 — real-Postgres `nostos_oplog` write-amplification harness.
 //!
-//! ADR-0025 §Consequences: "every WAL event now also writes a `cairn_oplog` row."
-//! ADR-0026: "Real-Postgres `cairn_oplog` INSERT write-amplification is still
+//! ADR-0025 §Consequences: "every WAL event now also writes a `nostos_oplog` row."
+//! ADR-0026: "Real-Postgres `nostos_oplog` INSERT write-amplification is still
 //! unmeasured... is the slice-6 open item." `NOSTOS_BENCH_OPLOG` is an in-process
 //! recorder (0 PG rows) and `make bench` runs `FakeReplicator`, so the real-PG
 //! amplification was never measured — this test closes that gap.
@@ -19,7 +19,7 @@
 //! ## Running
 //! ```sh
 //! docker compose -f docker/docker-compose.yml up -d
-//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn \
+//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos \
 //!   cargo test -p nostos-infra --features pg --test e2e_pg_write_amp \
 //!   -- --nocapture --test-threads=1
 //! ```
@@ -43,7 +43,7 @@ const N: i64 = 200;
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -88,12 +88,12 @@ async fn slot_exists(slot: &str) -> bool {
     }
 }
 
-/// `cairn_oplog` rows tagged for `tenant` (the production fan-out chokepoint wrote
+/// `nostos_oplog` rows tagged for `tenant` (the production fan-out chokepoint wrote
 /// them via `PgOpLogWriter`; `tenant_id = payload[tenant_column]`).
 async fn oplog_count(tenant: &str) -> i64 {
     let c = sql_client().await;
     c.query_one(
-        "SELECT count(*)::bigint FROM cairn_oplog WHERE tenant_id = $1",
+        "SELECT count(*)::bigint FROM nostos_oplog WHERE tenant_id = $1",
         &[&tenant],
     )
     .await
@@ -127,9 +127,9 @@ async fn oplog_write_amplification_is_one_to_one_no_drops() {
         .await;
     // Confirm the op-log table exists (docker/pg-init applies it).
     let _ = sql
-        .query("SELECT 1 FROM cairn_oplog LIMIT 1", &[])
+        .query("SELECT 1 FROM nostos_oplog LIMIT 1", &[])
         .await
-        .expect("cairn_oplog table exists (run docker compose up -d)");
+        .expect("nostos_oplog table exists (run docker compose up -d)");
 
     let metrics = Arc::new(Metrics::new());
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
@@ -144,7 +144,8 @@ async fn oplog_write_amplification_is_one_to_one_no_drops() {
     // Replicator driver. The slot is created on the LIVE table BEFORE the N
     // inserts, so the slot-creation snapshot excludes our rows — they enter
     // strictly as post-snapshot live WAL events (one op-log row each).
-    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").expect("valid PG url");
+    let pg_cfg =
+        PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").expect("valid PG url");
     let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
     let fanout_drv = Arc::clone(&fanout);
     let driver = tokio::spawn(async move {

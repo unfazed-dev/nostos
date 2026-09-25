@@ -99,7 +99,7 @@ clients, 0% drops = 35.6× a competitor's published ceiling — see benches/resu
 - `make ci` — fmt-check + clippy (-D warnings) + full test suite. Gate for every change.
 - `cargo test -p <crate>` — focused iteration.
 - `docker compose -f docker/docker-compose.yml up -d` then
-  `NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test -p nostos-infra --features pg`
+  `NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos cargo test -p nostos-infra --features pg`
   — the real-Postgres e2e. (Check docker/docker-compose.yml for the actual port/credentials.)
 - `make bench` — throughput benchmark. Record environment; report drop rates; never compare
   eval-only numbers against end-to-end numbers.
@@ -487,7 +487,7 @@ The gap: a client subscribing to a populated table receives nothing until rows c
 - Consumes: `ReplicatorStream::next_event() -> Option<ReplicationEvent>` (verified seam — snapshot rows flow through the same port; no fan-out or client changes needed) and `pg.rs`'s existing `tuple_to_json_payload` row-encoding shape.
 - Produces: on first start (slot does not exist), `next_event` yields one `ReplicationEvent` insert per existing row in every table of the publication, at the slot's consistent-point LSN, then seamlessly continues with live streamed events. On restart (slot exists), no snapshot is emitted.
 
-- [x] **Step 1: Read the current docs before coding** (the crates are young; do not trust memory): [docs.rs/pgwire-replication/0.3.2](https://docs.rs/pgwire-replication) for `CREATE_REPLICATION_SLOT … (SNAPSHOT 'export')` support and the returned `consistent_point`/`snapshot_name`; [docs.rs/tokio-postgres](https://docs.rs/tokio-postgres) for `copy_out` and `SET TRANSACTION SNAPSHOT`. If pgwire-replication 0.3.2 cannot create a slot with an exported snapshot, the fallback design is: create the slot via SQL on a regular connection (`SELECT pg_create_logical_replication_slot('cairn_slot','pgoutput')` inside the same transaction discipline) — decide based on what the docs actually say and record the choice as a comment citing the doc section.
+- [x] **Step 1: Read the current docs before coding** (the crates are young; do not trust memory): [docs.rs/pgwire-replication/0.3.2](https://docs.rs/pgwire-replication) for `CREATE_REPLICATION_SLOT … (SNAPSHOT 'export')` support and the returned `consistent_point`/`snapshot_name`; [docs.rs/tokio-postgres](https://docs.rs/tokio-postgres) for `copy_out` and `SET TRANSACTION SNAPSHOT`. If pgwire-replication 0.3.2 cannot create a slot with an exported snapshot, the fallback design is: create the slot via SQL on a regular connection (`SELECT pg_create_logical_replication_slot('nostos_slot','pgoutput')` inside the same transaction discipline) — decide based on what the docs actually say and record the choice as a comment citing the doc section.
 
 - [x] **Step 2: Write the failing e2e test** (`crates/nostos-infra/tests/e2e_pg_snapshot.rs`, gated like the existing e2e on `NOSTOS_PG_URL`):
 
@@ -568,24 +568,24 @@ Identifier safety: quote schema/table with `quote_ident` semantics (tokio-postgr
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: cairn
-          POSTGRES_PASSWORD: cairn
-          POSTGRES_DB: cairn
+          POSTGRES_USER: nostos
+          POSTGRES_PASSWORD: nostos
+          POSTGRES_DB: nostos
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U cairn" --health-interval 5s
+          --health-cmd "pg_isready -U nostos" --health-interval 5s
           --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable   # match the repo's existing toolchain step style
       - name: Enable logical replication + publication
         run: |
-          psql postgres://cairn:cairn@localhost:5432/cairn -c "ALTER SYSTEM SET wal_level = 'logical';"
+          psql postgres://nostos:nostos@localhost:5432/nostos -c "ALTER SYSTEM SET wal_level = 'logical';"
           docker restart $(docker ps -q --filter ancestor=postgres:16)
           sleep 5
-          psql postgres://cairn:cairn@localhost:5432/cairn -f docker/pg-init/01-sources.sql
+          psql postgres://nostos:nostos@localhost:5432/nostos -f docker/pg-init/01-sources.sql
       - name: Run feature-gated e2e
-        run: NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5432/cairn cargo test -p nostos-infra --features pg
+        run: NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5432/nostos cargo test -p nostos-infra --features pg
 ```
 
 Note: GH Actions `services:` containers can't take `command:` args, hence the ALTER SYSTEM + restart dance; if it proves flaky, switch the job to `docker compose -f docker/docker-compose.yml up -d` directly on the runner (compose already sets `wal_level=logical` — check that file first and prefer whichever is simpler; that's a judgment call the executor makes and records in the commit).
@@ -858,7 +858,7 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 
 **Interfaces:**
 - Consumes: existing `NostosEngine` apply API and the wire JSON (`ClientMessage::Subscribe`/`Ack`, event frames, `where_sql` from C2).
-- Produces: `NostosSocket::connect(url, token, table, where_sql: Option<String>) -> Promise`; incoming frames applied to the engine; checkpoint persisted to `localStorage` key `cairn:checkpoint:<table>`; ACKs sent per applied batch; `resume_lsn` read from localStorage on connect. (`ponytail: localStorage checkpoint + in-memory rows; durable rows arrive with OPFS in E2 — the ceiling is "reload replays from resume_lsn".`)
+- Produces: `NostosSocket::connect(url, token, table, where_sql: Option<String>) -> Promise`; incoming frames applied to the engine; checkpoint persisted to `localStorage` key `nostos:checkpoint:<table>`; ACKs sent per applied batch; `resume_lsn` read from localStorage on connect. (`ponytail: localStorage checkpoint + in-memory rows; durable rows arrive with OPFS in E2 — the ceiling is "reload replays from resume_lsn".`)
 
 - [x] **Step 1: Read the docs first** — wasm-bindgen web-sys WebSocket example (rustwasm book), `wasm-bindgen-futures` for the async bridge; verify against the pinned wasm-bindgen version in Cargo.toml.
 - [x] **Step 2: Failing wasm test** — `wasm_bindgen_test` against an in-process… no: browser tests can't spawn the Rust server. Test seam instead: factor frame-pump logic (`on_message(bytes) -> {apply, maybe_ack, checkpoint}`) as a pure function over `NostosEngine` + a `Sender` closure; unit-test THAT in wasm (feed encoded frames, assert apply outcomes + ack bytes + stored checkpoint), leaving only the thin `web_sys::WebSocket` glue untested (`ponytail: WS glue untested in CI; covered by the E3 demo page manual check`).
@@ -898,7 +898,7 @@ and `SyncClient::write(PendingWrite)` — enqueue always (even offline); the con
 ### Task F1: Stranger test + fixes
 
 - [x] **Step 1:** A fresh agent (or the operator) follows README.md ONLY, on a clean checkout, to: run the dev stack, run the native demo, run the web demo, make an offline write, see it round-trip. Time-box 30 minutes; log every friction point verbatim.
-  - Stranger test run 2026-07-05. **Verified working as-documented:** `cp .env.example .env` → `make setup` (toolchain ready) → `make test` (all green, 0 failures) → native demo `cargo run -p nostos-client --example reactive_scroll` (exits 0; demonstrates offline write + round-trip — `ROUND-TRIP: wrote 'demo-write', received it back via replication` — plus `resumed from durable checkpoint`). Web demo `make web-demo` starts Vite on :5173 and the `/demo` route serves HTTP 200. **Couldn't verify (env):** `make dev-stack` (Docker daemon won't start on this machine — README's port 5433 / db-user-pass `nostos` / `cairn_pub` + `tasks` claims verified against `docker/docker-compose.yml` + `docker/pg-init/01-sources.sql`, all accurate); `make bench` timed out at 10 min (release build + heavy benchmark, not a README defect). **Friction found & fixed:** README never mentioned the web demo — added a Demo C pointer. **Friction filed (no fix, >10 lines / out of scope):** README gives no runtime warning that `make bench` is a multi-minute release build on a cold cache (NICE-TO-HAVE, not a blocker).
+  - Stranger test run 2026-07-05. **Verified working as-documented:** `cp .env.example .env` → `make setup` (toolchain ready) → `make test` (all green, 0 failures) → native demo `cargo run -p nostos-client --example reactive_scroll` (exits 0; demonstrates offline write + round-trip — `ROUND-TRIP: wrote 'demo-write', received it back via replication` — plus `resumed from durable checkpoint`). Web demo `make web-demo` starts Vite on :5173 and the `/demo` route serves HTTP 200. **Couldn't verify (env):** `make dev-stack` (Docker daemon won't start on this machine — README's port 5433 / db-user-pass `nostos` / `nostos_pub` + `tasks` claims verified against `docker/docker-compose.yml` + `docker/pg-init/01-sources.sql`, all accurate); `make bench` timed out at 10 min (release build + heavy benchmark, not a README defect). **Friction found & fixed:** README never mentioned the web demo — added a Demo C pointer. **Friction filed (no fix, >10 lines / out of scope):** README gives no runtime warning that `make bench` is a multi-minute release build on a cold cache (NICE-TO-HAVE, not a blocker).
 - [x] **Step 2:** Fix every friction point that has a ≤10-line fix; file the rest in the follow-up registry (Part VIII). A `nostos dev` CLI binary is **deliberately skipped** — `make dev-stack` covers it; build the CLI only if the stranger test proves Make is the friction (`ponytail:` the roadmap's CLI is deferred, not dead).
   - Applied: README "two demo paths" → "three" + new Demo C section (web demo) + "first two paths are independent" wording fix. 14 insertions / 2 deletions, all in README.md. Net assessment: the README quickstart is honest and walkable — the only defect was the missing web-demo pointer, now fixed. No CLI friction found (Make targets sufficed).
 - [x] **Step 3: Commit** — `git commit -m "fix: stranger-test friction fixes for the v0.1 quickstart"`

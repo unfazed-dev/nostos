@@ -2,7 +2,7 @@
 
 > *Ports & Adapters (hexagonal) + DDD. The domain never knows about tokio, postgres, or axum — and that is the whole point.*
 
-This document describes the **as-built** architecture of Nostos (formerly Cairn; updated 2026-09) — server, native client, WASM bridge, push daemon, CLI and Cloud control plane. The repo spans twelve workspace crates; the multi-platform SDK surface ships progressively under `sdk/` (Flutter first-class; web, Kotlin, Swift, .NET, RN following) per [ADR-0015](adr/0015-ffi-bridge-strategy.md) and [ADR-0016](adr/0016-client-sdk-and-wal-bloat-protection.md).
+This document describes the **as-built** architecture of Nostos (formerly Nostos; updated 2026-09) — server, native client, WASM bridge, push daemon, CLI and Cloud control plane. The repo spans twelve workspace crates; the multi-platform SDK surface ships progressively under `sdk/` (Flutter first-class; web, Kotlin, Swift, .NET, RN following) per [ADR-0015](adr/0015-ffi-bridge-strategy.md) and [ADR-0016](adr/0016-client-sdk-and-wal-bloat-protection.md).
 
 ---
 

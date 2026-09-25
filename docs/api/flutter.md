@@ -16,14 +16,14 @@ final db = await NostosDatabase.connect(
   url: 'ws://127.0.0.1:8800/sync',
   token: null,               // bearer JWT; omit for NOSTOS_SYNC_AUTH=none
   schema: null,              // null → fetched from GET {base}/schema
-  sqlitePath: '$dir/cairn.db',
+  sqlitePath: '$dir/nostos.db',
 );
 
 // 2. Supabase — takes NO Supabase arguments. It reads Supabase.instance's
 //    current session itself, and throws StateError if you have not signed in.
 final db = await NostosDatabase.supabase(
   nostosUrl: 'ws://127.0.0.1:8800/sync',
-  sqlitePath: '$dir/cairn.db',
+  sqlitePath: '$dir/nostos.db',
 );
 
 // 3. Config-driven, from `nostos pull && nostos gen`. What example/ uses.
@@ -40,7 +40,7 @@ final db = await NostosDatabase.open(
 ## Reading — typed `Collection<T>` (the taught surface)
 
 `lib/src/nostos_database.dart` (ADR-0024 / ADR-0032 T2). `toRow` is only needed
-for typed `upsert`. Reads run over **SQLite views on `cairn_data`** (ADR-0028) —
+for typed `upsert`. Reads run over **SQLite views on `nostos_data`** (ADR-0028) —
 never materialized typed tables.
 
 ```dart
@@ -210,13 +210,13 @@ maybe order" read** — it is injection-safe by construction.
 
 > **`execute` does not write.** It is an alias of `getAll`, by convention and **not** by
 > enforcement — nothing parses your SQL. Statements aimed at a synced table fail loudly (the read
-> surface is a VIEW), but `DELETE FROM cairn_outbox` would silently destroy queued writes. Route
+> surface is a VIEW), but `DELETE FROM nostos_outbox` would silently destroy queued writes. Route
 > every mutation through `write` or a `Collection`.
 
 Reads run against **one SQLite VIEW per synced table**, projected from the server schema
 (ADR-0028). The view is named after the table (a `public.` prefix is stripped), the replication
 key is exposed as `_pk`, and columns come from `json_extract` over the stored payload. A slow
-`WHERE col = ?` is fixed with a partial expression index on `cairn_data` — **not** by
+`WHERE col = ?` is fixed with a partial expression index on `nostos_data` — **not** by
 materializing tables (ADR-0028 has the measurement). Columns have no SQLite *affinity* (a
 timestamp arriving as a JSON string sorts lexicographically — fine for ISO-8601); a
 non-`public` Postgres schema is **untested** against the view naming.

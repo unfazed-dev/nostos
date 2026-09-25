@@ -37,7 +37,7 @@ cleanup() {
   if [ -n "$SERVER_PID" ]; then
     kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null
   fi
-  docker exec "$PG_CONTAINER" psql -U cairn -d cairn -qc \
+  docker exec "$PG_CONTAINER" psql -U nostos -d nostos -qc \
     "SELECT pg_drop_replication_slot('$SLOT') FROM pg_replication_slots WHERE slot_name='$SLOT';" \
     >/dev/null 2>&1
 }
@@ -71,17 +71,17 @@ case "$DEVICE_MODE" in
 esac
 
 # ---- 2. docker PG (repo e2e stack) ---------------------------------------
-if ! docker exec "$PG_CONTAINER" pg_isready -U cairn -d cairn >/dev/null 2>&1; then
+if ! docker exec "$PG_CONTAINER" pg_isready -U nostos -d nostos >/dev/null 2>&1; then
   docker compose -f "$ROOT_DIR/docker/docker-compose.yml" up -d >/dev/null 2>&1 \
     || skip "docker PG not reachable and failed to start"
 fi
 for _ in $(seq 1 30); do
-  docker exec "$PG_CONTAINER" pg_isready -U cairn -d cairn >/dev/null 2>&1 && break
+  docker exec "$PG_CONTAINER" pg_isready -U nostos -d nostos >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec "$PG_CONTAINER" pg_isready -U cairn -d cairn >/dev/null 2>&1 \
+docker exec "$PG_CONTAINER" pg_isready -U nostos -d nostos >/dev/null 2>&1 \
   || skip "docker PG never became ready"
-psql_exec() { docker exec "$PG_CONTAINER" psql -U cairn -d cairn -qAt -c "$1"; }
+psql_exec() { docker exec "$PG_CONTAINER" psql -U nostos -d nostos -qAt -c "$1"; }
 
 psql_exec "DROP PUBLICATION IF EXISTS $PUB;" >/dev/null
 psql_exec "DROP TABLE IF EXISTS $TABLE;" >/dev/null
@@ -107,7 +107,7 @@ printf 'version = 1\nsync_mode = "all"\n' >"$RULES_ALL"
 printf "  starting nostos-server (cargo run, log: $SERVER_LOG)…\n"
 NOSTOS_BIND="$BIND:$PORT" \
 NOSTOS_REPLICATOR=pg \
-NOSTOS_PG_URL="postgres://cairn:cairn@localhost:5433/cairn" \
+NOSTOS_PG_URL="postgres://nostos:nostos@localhost:5433/nostos" \
 NOSTOS_PG_PUBLICATION="$PUB" \
 NOSTOS_PG_SLOT="$SLOT" \
 NOSTOS_SYNC_AUTH=none \

@@ -97,7 +97,7 @@ async fn poll_row(
     pk: &str,
     deadline: Duration,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let sql = format!("SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = '{pk}'");
+    let sql = format!("SELECT pk FROM nostos_data WHERE table_name = 'tasks' AND pk = '{pk}'");
     let end = tokio::time::Instant::now() + deadline;
     loop {
         let sql = sql.clone();

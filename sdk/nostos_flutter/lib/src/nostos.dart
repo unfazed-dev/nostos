@@ -100,7 +100,7 @@ class Nostos {
   /// decide what a device can see. Run `nostos doctor --mode direct` to check
   /// them.
   ///
-  /// [counterFields] names the column `cairn_increment` adds to, per table —
+  /// [counterFields] names the column `nostos_increment` adds to, per table —
   /// required before [counterIncrement] on that table (server mode reads it
   /// from `NOSTOS_COUNTER_COLUMNS`; there is no server here to read it from).
   ///
@@ -155,7 +155,7 @@ class Nostos {
 
   /// Materialize the WS2 read-views for [tables] in the on-device SQLite
   /// file (`CREATE VIEW IF NOT EXISTS <table> AS SELECT json_extract(...)
-  /// AS col, ... FROM cairn_data WHERE table_name='<table>'` — see
+  /// AS col, ... FROM nostos_data WHERE table_name='<table>'` — see
   /// `SqliteStorage::apply_schema`). Idempotent for an unchanged schema;
   /// the views persist in the SQLite file, so this only needs to run once
   /// after [connect] and before the first [watch] / [watchQuery] / [getAll]
@@ -289,7 +289,7 @@ class Nostos {
   /// synced data changes (the same change-tick [watch] pumps) and emits the
   /// decoded result set. Requires an active subscription first (v1: one
   /// table per `Nostos` instance — see the class doc). `sql` typically uses
-  /// `json_extract(payload, '$.col')` against the synced `cairn_data` table
+  /// `json_extract(payload, '$.col')` against the synced `nostos_data` table
   /// (JSON1 ships in the bundled SQLite; ADR-0019).
   ///
   /// Unlike [watch] (which emits the full subscribed row set verbatim), this

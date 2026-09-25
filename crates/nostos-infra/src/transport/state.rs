@@ -52,7 +52,7 @@ pub struct SyncRouterState {
     pub schema_source: Option<Arc<dyn SchemaSource>>,
     /// The op-log replay port (ADR-0025 slice 4b). When set + the client's
     /// epoch matches + its `resume_lsn` is in-window, `register_subscribe`
-    /// replays the offline gap from `cairn_oplog` instead of full-snapshotting.
+    /// replays the offline gap from `nostos_oplog` instead of full-snapshotting.
     /// `None` (fake mode, or a binary built without feature `pg`) → always
     /// snapshot. Injected under `NOSTOS_REPLICATOR=pg`.
     pub oplog_reader: Option<Arc<dyn OpLogSource>>,

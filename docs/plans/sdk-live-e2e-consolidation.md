@@ -117,7 +117,7 @@ round-trip → capture proof.
    pump never flushed standalone frames (the U3 risk); an unconditional
    `engine.flush()` mirrors the native client's per-batch commit. PUSH_OK/ECHO_OK.
    (Note: the WASM apply engine is an in-memory KV, not SQL — the test reads
-   `rowsFor("tasks")`, not `cairn_data` SQL.)
+   `rowsFor("tasks")`, not `nostos_data` SQL.)
 9. ✅ **`make sdk-e2e` runner** (`scripts/sdk-e2e.sh` + Makefile target) — runs
    all 7 slices; host slices (rust/node/tauri/web) always run, device slices
    (flutter/swift/kotlin) SKIP-with-reason when their runtime is absent. Optional

@@ -258,7 +258,7 @@ impl PullCursor {
     }
 }
 
-/// One row of a `cairn_snapshot()` response. `table_name` null marks the
+/// One row of a `nostos_snapshot()` response. `table_name` null marks the
 /// horizon-only row; `pk` null marks a table header (the table is covered by
 /// this snapshot, and may legitimately be empty).
 #[derive(Debug, serde::Deserialize)]
@@ -270,7 +270,7 @@ struct SnapshotRow {
 }
 
 impl PullCursor {
-    /// Rebuild from a `cairn_snapshot()` response and resume from its horizon.
+    /// Rebuild from a `nostos_snapshot()` response and resume from its horizon.
     ///
     /// This is the answer to [`crate::pull`]'s one unrecoverable error: a
     /// device offline longer than the retention window gets a 410, and no
@@ -286,7 +286,7 @@ impl PullCursor {
     /// (ADR-0025 hole #1).
     ///
     /// # Errors
-    /// [`PullError::Decode`] if the body is not a `cairn_snapshot()` array, or
+    /// [`PullError::Decode`] if the body is not a `nostos_snapshot()` array, or
     /// [`PullError::Storage`] if a table's apply does not commit. A failure
     /// part-way leaves the horizon untouched, so the next attempt re-snapshots
     /// rather than resuming from a picture that was never finished.
@@ -300,7 +300,7 @@ impl PullCursor {
             serde_json::from_str(body).map_err(|e| PullError::Decode(e.to_string()))?;
         let Some(horizon) = rows.first().map(|r| Horizon::new(r.horizon.clone())) else {
             return Err(PullError::Decode(
-                "empty snapshot: cairn_snapshot always returns at least the horizon row".into(),
+                "empty snapshot: nostos_snapshot always returns at least the horizon row".into(),
             ));
         };
 
@@ -394,7 +394,7 @@ pub struct PullOutcome {
     pub more: bool,
 }
 
-/// One row of `cairn.pull`'s result set.
+/// One row of `nostos.pull`'s result set.
 #[derive(Debug, Deserialize)]
 struct PullRow {
     #[serde(deserialize_with = "opaque_id")]

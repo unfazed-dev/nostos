@@ -16,10 +16,10 @@ BENCH_EVENTS  ?= 100000
 # Default Postgres URL for `make dev-stack` — mirrors docker/docker-compose.yml
 # (host port 5433 → container 5432, user/db/pass = nostos). Override by setting
 # this env var if you point dev-stack at a different Postgres.
-# nostos-server connects as the least-privilege `cairn_writer` role (NOT the
-# `cairn` superuser) — see docker/pg-init/02-nostos-role.sql. A compromised
+# nostos-server connects as the least-privilege `nostos_writer` role (NOT the
+# `nostos` superuser) — see docker/pg-init/02-nostos-role.sql. A compromised
 # server can then only touch synced tables, not the whole DB (ADR-0013/0018).
-NOSTOS_PG_URL_DEFAULT ?= postgresql://cairn_writer:cairn_writer_dev_pw@localhost:5433/cairn
+NOSTOS_PG_URL_DEFAULT ?= postgresql://nostos_writer:nostos_writer_dev_pw@localhost:5433/nostos
 
 CARGO := cargo
 
@@ -132,20 +132,20 @@ pg-up: ## Start a Postgres 16 with logical replication enabled (docker).
 # CLAUDE.md). Sweeps INACTIVE e2e_*/repro_* slots first: every test names its
 # slot after its pid, so an aborted run (Ctrl-C, PG restart) leaks them and the
 # next run dies with "all replication slots are in use" (max 20). Live slots
-# and the app slots (cairn_slot, atlet_*) are left alone.
-# Uses the `cairn` superuser (not NOSTOS_PG_URL_DEFAULT's least-privilege
-# cairn_writer): the tests create slots/publications and TRUNCATE.
-NOSTOS_E2E_PG_URL ?= postgres://cairn:cairn@localhost:5433/cairn
+# and the app slots (nostos_slot, atlet_*) are left alone.
+# Uses the `nostos` superuser (not NOSTOS_PG_URL_DEFAULT's least-privilege
+# nostos_writer): the tests create slots/publications and TRUNCATE.
+NOSTOS_E2E_PG_URL ?= postgres://nostos:nostos@localhost:5433/nostos
 .PHONY: pg-e2e
 pg-e2e: ## Real-Postgres e2e suite; drops leaked inactive e2e_* slots first.
 	@docker compose -f docker/docker-compose.yml exec -T postgres \
-	  psql -U cairn -d cairn -tAc \
+	  psql -U nostos -d nostos -tAc \
 	  "SELECT count(pg_drop_replication_slot(slot_name)) FROM pg_replication_slots WHERE NOT active AND (slot_name LIKE 'e2e_%' OR slot_name LIKE 'repro_%')" \
 	  | sed 's/^/swept leaked e2e slots: /'
 	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-infra --features pg --no-fail-fast -- --test-threads=1
 # nostos-cli's pg suite too: `nostos link --mode direct` generates SQL, and the
 # only place a generator bug shows up is Postgres refusing (or silently
-# mis-scoping) it. e2e_pg_direct_sql owns the `cairn` schema, hence -threads=1.
+# mis-scoping) it. e2e_pg_direct_sql owns the `nostos` schema, hence -threads=1.
 	NOSTOS_E2E_PG=1 NOSTOS_PG_URL=$(NOSTOS_E2E_PG_URL) $(CARGO) test -p nostos-cli --no-fail-fast -- --test-threads=1
 
 .PHONY: supabase-e2e
@@ -173,7 +173,7 @@ web-conformance: ## The browser-Worker leg of nostos_core::conformance (OPFS, he
 
 # dev-stack: real-Postgres quickstart — compose up, wait for the publication,
 # then run nostos-server against it with PgReplicator. The readiness poll gates
-# on `cairn_pub` existing (not just `pg_isready`): during first init the
+# on `nostos_pub` existing (not just `pg_isready`): during first init the
 # entrypoint runs a *temporary* server to apply pg-init scripts, then restarts
 # into the real one, so a plain readiness probe flips accepting -> rejecting
 # -> accepting and can fool `sleep 3`. The publication only exists once the
@@ -182,20 +182,20 @@ web-conformance: ## The browser-Worker leg of nostos_core::conformance (OPFS, he
 .PHONY: dev-stack
 dev-stack: ## Real-Postgres quickstart: compose up + run server with PgReplicator.
 	docker compose -f docker/docker-compose.yml up -d
-	@echo "waiting for postgres (polling for cairn_pub publication)…"
+	@echo "waiting for postgres (polling for nostos_pub publication)…"
 	@for i in $$(seq 1 60); do \
 	  if docker compose -f docker/docker-compose.yml exec -T postgres \
-	       psql -U cairn -d cairn -tAc \
-	       "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" \
+	       psql -U nostos -d nostos -tAc \
+	       "SELECT 1 FROM pg_publication WHERE pubname='nostos_pub'" \
 	       | grep -q 1; then \
-	    echo "Postgres ready (cairn_pub present) after $${i}s"; \
+	    echo "Postgres ready (nostos_pub present) after $${i}s"; \
 	    break; \
 	  fi; \
 	  sleep 1; \
 	done
 	@docker compose -f docker/docker-compose.yml exec -T postgres \
-	  psql -U cairn -d cairn -tAc \
-	  "SELECT 1 FROM pg_publication WHERE pubname='cairn_pub'" | grep -q 1 \
+	  psql -U nostos -d nostos -tAc \
+	  "SELECT 1 FROM pg_publication WHERE pubname='nostos_pub'" | grep -q 1 \
 	  || { echo "Postgres did not become ready in 60s — try 'make pg-logs'"; exit 1; }
 	NOSTOS_REPLICATOR=pg NOSTOS_PG_URL=$(NOSTOS_PG_URL_DEFAULT) NOSTOS_WRITE_TABLES=tasks,providers,clients,availabilities,appointments,invoices $(CARGO) run -p nostos-server
 

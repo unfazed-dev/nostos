@@ -4,14 +4,14 @@
 //! Direct mode has no Nostos server: the device pulls from the client's own
 //! Postgres through PostgREST and is woken by a Realtime broadcast. Everything
 //! that makes that safe lives in the database, so `nostos link --mode direct`
-//! emits it as one re-runnable SQL file: the `cairn.changes` log, a per-table
-//! trigger that appends to it inside the writing transaction, `cairn_pull`,
-//! `cairn_increment`, the broadcast doorbell, RLS and the grants.
+//! emits it as one re-runnable SQL file: the `nostos.changes` log, a per-table
+//! trigger that appends to it inside the writing transaction, `nostos_pull`,
+//! `nostos_increment`, the broadcast doorbell, RLS and the grants.
 //!
 //! ## Why the refusal is the interesting part
 //!
 //! The log holds row images from many tables, so **one** policy on
-//! `cairn.changes` has to say what N per-table policies say. The trigger
+//! `nostos.changes` has to say what N per-table policies say. The trigger
 //! stamps a single `scope` text column and RLS compares it to the caller's
 //! claims — which only works when a table's rule is exactly
 //! `<column> = claims.<field>`. Anything else (a literal term, an inequality,
@@ -19,13 +19,13 @@
 //! [`plan`] refuses it by name instead of generating a policy that silently
 //! shows the wrong rows. That refusal is cost #2 in the plan, made executable.
 //!
-//! ## Why `cairn_pull` lives in `public`, not in `nostos`
+//! ## Why `nostos_pull` lives in `public`, not in `nostos`
 //!
 //! Supabase's default exposed schemas are `public, graphql_public`; a third
 //! schema is reachable only with a `Content-Profile` header, and only after an
 //! operator ticks it into "Exposed schemas" in the dashboard. Putting the two
 //! entry points in `public` under a `nostos_` prefix removes both: the client
-//! posts to `/rest/v1/rpc/cairn_pull` with no extra header, and the log table
+//! posts to `/rest/v1/rpc/nostos_pull` with no extra header, and the log table
 //! itself stays off the REST API entirely — there is no `GET /rest/v1/changes`
 //! to get the grants wrong on.
 
@@ -42,7 +42,7 @@ pub const PK_COLUMN: &str = "id";
 /// The scope value stamped on rows from a table the operator declared public.
 pub const PUBLIC_SCOPE: &str = "public";
 
-/// How long `cairn.prune()` keeps change rows by default. A device offline
+/// How long `nostos.prune()` keeps change rows by default. A device offline
 /// longer than this has to re-snapshot (plan cost #4).
 pub const DEFAULT_RETENTION: &str = "7 days";
 
@@ -83,7 +83,7 @@ pub struct PushConfig {
     pub templates: Vec<PushTemplate>,
 }
 
-/// One `cairn.push_templates` row — a visible (or, with a category, action)
+/// One `nostos.push_templates` row — a visible (or, with a category, action)
 /// push per change to `table`, ADR-0037 §2b.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushTemplate {
@@ -167,18 +167,18 @@ fn is_identifier(s: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
-/// The `cairn.push_templates` rows, as the flags say they are: the set is
+/// The `nostos.push_templates` rows, as the flags say they are: the set is
 /// replaced, not merged, so dropping a `--visible` and re-applying stops that
 /// table's banners.
 #[must_use]
 pub fn templates_sql(templates: &[PushTemplate]) -> String {
     let lit = |v: &str| format!("'{}'", v.replace('\'', "''"));
     let opt = |v: &Option<String>| v.as_deref().map_or("null".to_string(), lit);
-    let mut s = String::from("delete from cairn.push_templates;\n");
+    let mut s = String::from("delete from nostos.push_templates;\n");
     for t in templates {
         let _ = writeln!(
             s,
-            "insert into cairn.push_templates (table_name, title, body, category, route, options) \
+            "insert into nostos.push_templates (table_name, title, body, category, route, options) \
              values ({}, {}, {}, {}, {}, {});",
             lit(&t.table),
             lit(&t.title),
@@ -433,7 +433,59 @@ fn header(s: &mut String, tables: &[DirectTable]) {
             ),
         };
     }
-    s.push_str("\nbegin;\n\ncreate schema if not exists cairn;\n");
+    s.push_str("\nbegin;\n");
+    legacy_rename(s);
+    s.push_str("\ncreate schema if not exists nostos;\n");
+}
+
+/// ADR-0048: a project linked before the rename has a `cairn` schema, the
+/// `public.cairn_*` RPCs and `cairn_*` triggers and policies. Renamed in place,
+/// not rebuilt, so the change log, its sequence, the push tokens and config
+/// keep their rows and every trigger keeps firing. Bodies still name the old
+/// schema, so each function in the renamed set is re-created with the names
+/// swapped; the rest of the file then replaces the ones it knows.
+fn legacy_rename(s: &mut String) {
+    s.push_str(
+        r"
+-- ADR-0048: a project linked before the rename is renamed in place, so the
+-- change log and push registry keep their rows. Runs once: afterwards there is
+-- no old schema left to find.
+do $rename$
+declare
+  old constant text := 'cairn'; -- rename:hold — the pre-rename identity (ADR-0048)
+  r record;
+begin
+  if to_regnamespace(old) is null or to_regnamespace('nostos') is not null then
+    return;
+  end if;
+  execute format('alter schema %I rename to nostos', old);
+  for r in select p.oid::regprocedure as fn, p.proname from pg_proc p
+            where p.pronamespace = 'public'::regnamespace and p.proname like old || '\_%' loop
+    execute format('alter function %s rename to %I', r.fn, 'nostos' || substr(r.proname, length(old) + 1));
+  end loop;
+  for r in select p.oid from pg_proc p
+            where p.prokind in ('f', 'p')
+              and (p.pronamespace = 'nostos'::regnamespace
+                   or (p.pronamespace = 'public'::regnamespace and p.proname like 'nostos\_%')) loop
+    execute replace(pg_get_functiondef(r.oid), old, 'nostos');
+  end loop;
+  for r in select t.tgname, t.tgrelid::regclass as rel from pg_trigger t
+            where not t.tgisinternal and t.tgname like old || '\_%' loop
+    execute format('alter trigger %I on %s rename to %I', r.tgname, r.rel, 'nostos' || substr(r.tgname, length(old) + 1));
+  end loop;
+  for r in select p.polname, p.polrelid::regclass as rel from pg_policy p
+            where p.polname like old || '\_%' loop
+    execute format('alter policy %I on %s rename to %I', r.polname, r.rel, 'nostos' || substr(r.polname, length(old) + 1));
+  end loop;
+  -- A pg_cron job still calling the old schema's prune() would fail every run.
+  if to_regclass('cron.job') is not null then
+    for r in select jobid, command from cron.job where command like '%' || old || '.%' loop
+      perform cron.alter_job(r.jobid, command := replace(r.command, old || '.', 'nostos.'));
+    end loop;
+  end if;
+end $rename$;
+",
+    );
 }
 
 fn log_table(s: &mut String) {
@@ -443,7 +495,7 @@ fn log_table(s: &mut String) {
 -- transaction, so a data change and its change record commit together or not at
 -- all. `xid` is what makes a cross-table transaction reassemblable on the
 -- device; `seq` only orders rows within one.
-create table if not exists cairn.changes (
+create table if not exists nostos.changes (
   seq        bigserial primary key,
   xid        xid8        not null default pg_current_xact_id(),
   table_name text        not null,
@@ -453,18 +505,18 @@ create table if not exists cairn.changes (
   scope      text,
   logged_at  timestamptz not null default now()
 );
-create index if not exists changes_xid_seq_idx    on cairn.changes (xid, seq);
-create index if not exists changes_logged_at_idx  on cairn.changes (logged_at);
+create index if not exists changes_xid_seq_idx    on nostos.changes (xid, seq);
+create index if not exists changes_logged_at_idx  on nostos.changes (logged_at);
 
 -- How far the log has been pruned. Without this a device that was away longer
 -- than the retention window resumes from a horizon whose rows are gone and
 -- gets a shorter answer instead of an error -- the rows in the gap would
--- simply never arrive. One row, so the guard in cairn_pull is a lookup.
-create table if not exists cairn.retention (
+-- simply never arrive. One row, so the guard in nostos_pull is a lookup.
+create table if not exists nostos.retention (
   id           int  primary key default 1 check (id = 1),
   pruned_below xid8 not null default '0'::xid8
 );
-insert into cairn.retention (id) values (1) on conflict do nothing;
+insert into nostos.retention (id) values (1) on conflict do nothing;
 "#,
     );
 }
@@ -482,7 +534,7 @@ fn current_scopes(s: &mut String, claims: &BTreeSet<&str>, any_public: bool) {
 -- holding USAGE on `auth` — hosted Supabase grants that to `authenticated`, a
 -- self-hosted PostgREST need not, and the failure mode there is every pull
 -- erroring with "permission denied for schema auth" (caught by the pg e2e).
-create or replace function cairn.current_scopes()
+create or replace function nostos.current_scopes()
 returns text[] language sql stable security definer set search_path = '' as $fn$
   select array_remove(array[
 "#,
@@ -510,7 +562,7 @@ fn log_trigger_fn(s: &mut String) {
 -- records — a delete under the old scope and the update under the new one.
 -- Without it the losing tenant keeps a row on-device forever, since a row they
 -- can no longer see can never be sent to them again.
-create or replace function cairn.log_change() returns trigger
+create or replace function nostos.log_change() returns trigger
 language plpgsql security definer set search_path = '' as $fn$
 declare
   v_img       jsonb;
@@ -538,11 +590,11 @@ begin
   end if;
 
   if v_old_scope is not null and v_old_scope is distinct from v_scope then
-    insert into cairn.changes (table_name, pk, op, "row", scope)
+    insert into nostos.changes (table_name, pk, op, "row", scope)
     values (tg_table_name, v_old ->> '{PK_COLUMN}', 'delete', null, v_old_scope);
   end if;
 
-  insert into cairn.changes (table_name, pk, op, "row", scope)
+  insert into nostos.changes (table_name, pk, op, "row", scope)
   values (
     tg_table_name,
     v_img ->> '{PK_COLUMN}',
@@ -571,10 +623,10 @@ fn per_table_triggers(s: &mut String, tables: &[DirectTable]) {
         };
         let _ = write!(
             s,
-            "drop trigger if exists cairn_log_{name} on public.{name};\n\
-             create trigger cairn_log_{name}\n  \
+            "drop trigger if exists nostos_log_{name} on public.{name};\n\
+             create trigger nostos_log_{name}\n  \
              after insert or update or delete on public.{name}\n  \
-             for each row execute function cairn.log_change{args};\n\n"
+             for each row execute function nostos.log_change{args};\n\n"
         );
     }
 }
@@ -593,7 +645,7 @@ fn pull_fn(s: &mut String) {
 -- the same page and cuts the same tail forever. `greatest(max_txns, 2)`
 -- guarantees a full page spans two xids, so the cursor always advances.
 --
--- security invoker: RLS on cairn.changes applies as the calling device.
+-- security invoker: RLS on nostos.changes applies as the calling device.
 --
 -- Returns ONE jsonb array, not a set of rows, and that is not a style choice.
 -- PostgREST caps a set-returning response at `db-max-rows` (1000 on a stock
@@ -611,8 +663,8 @@ fn pull_fn(s: &mut String) {
 -- function's return type, so a project still carrying the set-returning
 -- version would fail this file rather than upgrade. The grants below are
 -- re-issued after, which is what a drop costs.
-drop function if exists public.cairn_pull(xid8, int);
-create or replace function public.cairn_pull(since xid8, max_txns int default 200)
+drop function if exists public.nostos_pull(xid8, int);
+create or replace function public.nostos_pull(since xid8, max_txns int default 200)
 returns jsonb
 language plpgsql stable security invoker set search_path = '' as $fn$
 declare
@@ -623,10 +675,10 @@ begin
   -- not quietly given a shorter answer: the rows in the gap can never arrive
   -- any other way. PostgREST turns a `PTxyz` sqlstate into HTTP xyz, so this
   -- reaches the client as 410 Gone -- re-snapshot and reset the horizon.
-  select r.pruned_below into v_pruned from cairn.retention r;
+  select r.pruned_below into v_pruned from nostos.retention r;
   if since <> '0'::xid8 and v_pruned is not null and since <= v_pruned then
     raise sqlstate 'PT410' using
-      message = 'cairn: the change log has been pruned past this horizon',
+      message = 'nostos: the change log has been pruned past this horizon',
       detail  = 'the device was offline longer than the retention window',
       hint    = 'reset the stored horizon and re-snapshot the synced tables';
   end if;
@@ -634,7 +686,7 @@ begin
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
   page as (
     select distinct c.xid
-    from cairn.changes c, h
+    from nostos.changes c, h
     where c.xid >= since and c.xid < h.horizon
     order by c.xid
     limit greatest(max_txns, 2)
@@ -643,7 +695,7 @@ begin
     into v_page
   from (
     select h.horizon, c.seq, c.xid, c.table_name, c.pk, c.op, c."row"
-    from cairn.changes c
+    from nostos.changes c
     join page p on p.xid = c.xid
     cross join h
   ) r;
@@ -654,9 +706,9 @@ $fn$;
     );
 }
 
-/// `public.cairn_snapshot()` — the only way back from a 410.
+/// `public.nostos_snapshot()` — the only way back from a 410.
 ///
-/// `cairn_pull` refuses a horizon below the pruned window, which is correct: a
+/// `nostos_pull` refuses a horizon below the pruned window, which is correct: a
 /// short answer would be indistinguishable from "nothing happened" and the rows
 /// in the gap would never arrive. But a refusal the client cannot act on is a
 /// device bricked by going on holiday. This is the act: the CURRENT rows of
@@ -681,7 +733,7 @@ fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
     let _ = write!(
         s,
         r#"
--- The re-snapshot path. `cairn_pull` answers a horizon below the retention
+-- The re-snapshot path. `nostos_pull` answers a horizon below the retention
 -- window with 410; this is what the client does about it. Returns the current
 -- rows of every synced table AND the horizon to resume from, from one
 -- statement -- so, like a pull, it is one consistent cross-table view.
@@ -696,7 +748,7 @@ fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
 -- makes the two interchangeable.
 --
 -- One jsonb array rather than a set of rows, for the reason spelled out over
--- `cairn_pull`: PostgREST silently truncates a set-returning RPC at
+-- `nostos_pull`: PostgREST silently truncates a set-returning RPC at
 -- `db-max-rows`, and a snapshot is the one call guaranteed to be big.
 --
 -- ponytail: the whole snapshot is materialised in one value, so its ceiling is
@@ -706,10 +758,10 @@ fn snapshot_fn(s: &mut String, tables: &[DirectTable]) {
 -- anything that changed mid-pagination is then re-delivered by the log, the
 -- same way a base backup is healed by the WAL that follows it.
 --
--- Dropped first for the same reason as `cairn_pull`: a return type cannot be
+-- Dropped first for the same reason as `nostos_pull`: a return type cannot be
 -- replaced in place.
-drop function if exists public.cairn_snapshot();
-create or replace function public.cairn_snapshot()
+drop function if exists public.nostos_snapshot();
+create or replace function public.nostos_snapshot()
 returns jsonb
 language sql stable security invoker set search_path = '' as $fn$
   with h as (select pg_snapshot_xmin(pg_current_snapshot()) as horizon),
@@ -739,14 +791,14 @@ fn increment_fn(s: &mut String, tables: &[DirectTable]) {
 -- security invoker, so RLS on the target table is what authorizes the write.
 -- The table allow-list and `%I` quoting are belt and braces: without them this
 -- would be a general "update any column of any table" gadget.
-create or replace function public.cairn_increment(
+create or replace function public.nostos_increment(
   p_table text, p_pk text, p_field text, p_delta numeric)
 returns void language plpgsql security invoker set search_path = '' as $fn$
 declare
   v_pk_type text;
 begin
   if p_table not in ({allowed}) then
-    raise exception 'cairn_increment: table % is not synced', p_table
+    raise exception 'nostos_increment: table % is not synced', p_table
       using errcode = '42501';
   end if;
 
@@ -756,7 +808,7 @@ begin
     and a.attname = '{PK_COLUMN}'
     and a.attnum > 0;
   if v_pk_type is null then
-    raise exception 'cairn_increment: public.% has no {PK_COLUMN} column', p_table
+    raise exception 'nostos_increment: public.% has no {PK_COLUMN} column', p_table
       using errcode = '42703';
   end if;
 
@@ -785,23 +837,23 @@ fn doorbell(s: &mut String) {
 -- one pull anyway. Upgrade path if a bulk import floods it: dedupe per
 -- transaction (a deferred constraint trigger, or a statement trigger over a
 -- transition table once the log trigger batches).
-create or replace function cairn.ring() returns trigger
+create or replace function nostos.ring() returns trigger
 language plpgsql security definer set search_path = '' as $fn$
 begin
   perform realtime.send(
     '{}'::jsonb,                                  -- payload: deliberately empty
-    'cairn_ring',                                 -- event
-    'cairn:' || coalesce(new.scope, 'unscoped'),  -- topic (channel joins as realtime:<topic>)
+    'nostos_ring',                                 -- event
+    'nostos:' || coalesce(new.scope, 'unscoped'),  -- topic (channel joins as realtime:<topic>)
     true                                          -- private: RLS below authorizes it
   );
   return null;
 end;
 $fn$;
 
-drop trigger if exists cairn_changes_ring on cairn.changes;
-create trigger cairn_changes_ring
-  after insert on cairn.changes
-  for each row execute function cairn.ring();
+drop trigger if exists nostos_changes_ring on nostos.changes;
+create trigger nostos_changes_ring
+  after insert on nostos.changes
+  for each row execute function nostos.ring();
 "#,
     );
 }
@@ -812,33 +864,33 @@ fn policies_and_grants(s: &mut String) {
 -- RLS is the ONLY thing authorizing a direct-mode read. That is the security
 -- argument, not a caveat: a forbidden row is refused by Postgres rather than by
 -- a service the developer has to trust.
-alter table cairn.changes enable row level security;
+alter table nostos.changes enable row level security;
 
-drop policy if exists cairn_changes_read on cairn.changes;
-create policy cairn_changes_read on cairn.changes
+drop policy if exists nostos_changes_read on nostos.changes;
+create policy nostos_changes_read on nostos.changes
   for select to authenticated
-  using (scope = any (cairn.current_scopes()));
+  using (scope = any (nostos.current_scopes()));
 
--- No insert/update/delete policy exists, and none should: cairn.log_change is
+-- No insert/update/delete policy exists, and none should: nostos.log_change is
 -- security definer, so the trigger writes history and nobody else can.
 
 -- The private Realtime channel. Broadcast-from-database requires Realtime
 -- Authorization, which is a policy on realtime.messages — and it is only
 -- ENFORCED once "Allow public access" is off in the project's Realtime
 -- settings. `nostos doctor --mode direct` checks that; SQL cannot.
-drop policy if exists cairn_ring_read on realtime.messages;
-create policy cairn_ring_read on realtime.messages
+drop policy if exists nostos_ring_read on realtime.messages;
+create policy nostos_ring_read on realtime.messages
   for select to authenticated
   using (
     realtime.messages.extension = 'broadcast'
-    and (select realtime.topic()) like 'cairn:%'
-    and substring((select realtime.topic()) from 7) = any (cairn.current_scopes())
+    and (select realtime.topic()) like 'nostos:%'
+    and substring((select realtime.topic()) from 7) = any (nostos.current_scopes())
   );
 
-grant usage on schema cairn to authenticated;
-grant select on cairn.changes to authenticated;
-grant select on cairn.retention to authenticated;
-grant execute on function cairn.current_scopes() to authenticated;
+grant usage on schema nostos to authenticated;
+grant select on nostos.changes to authenticated;
+grant select on nostos.retention to authenticated;
+grant execute on function nostos.current_scopes() to authenticated;
 
 -- Postgres grants EXECUTE to PUBLIC on every new function, which would hand the
 -- whole change log to the anon key. Revoke first, then grant narrowly.
@@ -851,13 +903,13 @@ grant execute on function cairn.current_scopes() to authenticated;
 -- named. For a `security invoker` function that is only defence in depth (the
 -- table grants still hold the line); a `security definer` one bypasses those,
 -- so naming the roles is what actually closes it.
-revoke all on function public.cairn_pull(xid8, int) from public, anon, authenticated;
-revoke all on function public.cairn_snapshot() from public, anon, authenticated;
-revoke all on function public.cairn_increment(text, text, text, numeric)
+revoke all on function public.nostos_pull(xid8, int) from public, anon, authenticated;
+revoke all on function public.nostos_snapshot() from public, anon, authenticated;
+revoke all on function public.nostos_increment(text, text, text, numeric)
   from public, anon, authenticated;
-grant execute on function public.cairn_pull(xid8, int) to authenticated;
-grant execute on function public.cairn_snapshot() to authenticated;
-grant execute on function public.cairn_increment(text, text, text, numeric) to authenticated;
+grant execute on function public.nostos_pull(xid8, int) to authenticated;
+grant execute on function public.nostos_snapshot() to authenticated;
+grant execute on function public.nostos_increment(text, text, text, numeric) to authenticated;
 "#,
     );
 }
@@ -869,19 +921,19 @@ fn prune(s: &mut String, retention: &str) {
 -- Retention. A device offline longer than this re-snapshots instead of
 -- resuming, so the window is a product decision, not a storage one. Schedule it
 -- with pg_cron:
---   select cron.schedule('nostos-prune', '0 * * * *', $$select cairn.prune()$$);
-create or replace function cairn.prune(retain interval default interval '{retention}')
+--   select cron.schedule('nostos-prune', '0 * * * *', $$select nostos.prune()$$);
+create or replace function nostos.prune(retain interval default interval '{retention}')
 returns bigint language plpgsql security definer set search_path = '' as $fn$
 declare
   n        bigint;
   v_high   xid8;
 begin
   with gone as (
-    delete from cairn.changes where logged_at < now() - retain returning xid
+    delete from nostos.changes where logged_at < now() - retain returning xid
   )
   select count(*), max(xid) into n, v_high from gone;
   if v_high is not null then
-    update cairn.retention
+    update nostos.retention
        set pruned_below = case when pruned_below > v_high then pruned_below else v_high end
      where id = 1;
   end if;
@@ -900,7 +952,7 @@ $fn$;
 /// A doorbell only has to reach devices that are *not* already connected — a
 /// live device got the Realtime ring milliseconds ago. Server mode knows who
 /// is connected because it holds the sockets; direct mode has no server, so
-/// the device says so itself with `cairn_heartbeat()`. A stale heartbeat is
+/// the device says so itself with `nostos_heartbeat()`. A stale heartbeat is
 /// the only "offline" signal that exists here, and it is a heuristic: a device
 /// that dies mid-window is pushed a little late, and one that was awake very
 /// recently may be skipped. That is the honest cost of having no server.
@@ -928,37 +980,37 @@ fn push_path(s: &mut String, cfg: &PushConfig) {
 -- wakes is indistinguishable from broken sync, so this is not a follow-up.
 -- ===========================================================================
 
-create table if not exists cairn.push_config (
+create table if not exists nostos.push_config (
   id               int  primary key default 1 check (id = 1),
   endpoint         text not null,
   secret           text,
   presence_window  interval not null default interval '{presence_window}',
   cooldown         interval not null default interval '{cooldown}'
 );
-insert into cairn.push_config (id, endpoint) values (1, '{endpoint}')
+insert into nostos.push_config (id, endpoint) values (1, '{endpoint}')
 on conflict (id) do update set endpoint = excluded.endpoint;
 -- The shared secret the Edge Function checks. Set it out of band, so it is
 -- never written into a file that lands in git:
---   update cairn.push_config set secret = '<random>' where id = 1;
+--   update nostos.push_config set secret = '<random>' where id = 1;
 
-create table if not exists cairn.push_tokens (
+create table if not exists nostos.push_tokens (
   scope      text not null,
   platform   text not null check (platform in ('fcm', 'apns', 'webpush')),
   token      text not null,
   updated_at timestamptz not null default now(),
   primary key (scope, platform, token)
 );
-create index if not exists push_tokens_scope_idx on cairn.push_tokens (scope);
+create index if not exists push_tokens_scope_idx on nostos.push_tokens (scope);
 
-create table if not exists cairn.device_presence (
+create table if not exists nostos.device_presence (
   scope     text not null,
   device_id text not null,
   last_seen timestamptz not null default now(),
   primary key (scope, device_id)
 );
-create index if not exists device_presence_seen_idx on cairn.device_presence (scope, last_seen);
+create index if not exists device_presence_seen_idx on nostos.device_presence (scope, last_seen);
 
-create table if not exists cairn.push_cooldown (
+create table if not exists nostos.push_cooldown (
   scope        text primary key,
   last_push_at timestamptz not null default now()
 );
@@ -970,7 +1022,7 @@ create table if not exists cairn.push_cooldown (
 -- in title/body/route is filled from the changed row by the Edge Function; a
 -- non-null category makes it an action push. The rows come from `nostos link
 -- --visible`, at the end of this section.
-create table if not exists cairn.push_templates (
+create table if not exists nostos.push_templates (
   table_name text primary key,
   title      text not null,
   body       text not null,
@@ -980,70 +1032,70 @@ create table if not exists cairn.push_templates (
 );
 -- `[k=v,…]` presentation options (ADR-0047); added in place on a project
 -- linked before they existed.
-alter table cairn.push_templates add column if not exists options jsonb not null default '{{}}';
+alter table nostos.push_templates add column if not exists options jsonb not null default '{{}}';
 
 -- security definer, and here that IS the authority: the scope comes from the
--- caller's own JWT via cairn.current_scopes(), never from an argument, so a
+-- caller's own JWT via nostos.current_scopes(), never from an argument, so a
 -- device cannot register a token against somebody else's scope no matter what
 -- it sends.
-create or replace function public.cairn_register_push_token(p_platform text, p_token text)
+create or replace function public.nostos_register_push_token(p_platform text, p_token text)
 returns void language plpgsql security definer set search_path = '' as $fn$
-declare v_scopes text[] := cairn.current_scopes();
+declare v_scopes text[] := nostos.current_scopes();
 begin
   if p_platform not in ('fcm', 'apns', 'webpush') then
-    raise sqlstate 'PT400' using message = 'cairn: unknown push platform';
+    raise sqlstate 'PT400' using message = 'nostos: unknown push platform';
   end if;
   if coalesce(array_length(v_scopes, 1), 0) = 0 then
     raise sqlstate 'PT401' using
-      message = 'cairn: no scope in the caller''s claims',
+      message = 'nostos: no scope in the caller''s claims',
       hint    = 'register the token while signed in';
   end if;
-  insert into cairn.push_tokens (scope, platform, token)
+  insert into nostos.push_tokens (scope, platform, token)
   select s, p_platform, p_token from unnest(v_scopes) as s
   on conflict (scope, platform, token) do update set updated_at = now();
 end;
 $fn$;
 
-create or replace function public.cairn_deregister_push_token(p_token text)
+create or replace function public.nostos_deregister_push_token(p_token text)
 returns void language plpgsql security definer set search_path = '' as $fn$
 begin
-  delete from cairn.push_tokens
-   where token = p_token and scope = any (cairn.current_scopes());
+  delete from nostos.push_tokens
+   where token = p_token and scope = any (nostos.current_scopes());
 end;
 $fn$;
 
 -- How the Edge Function reads the registry -- and the reason it is a function
--- rather than a select on cairn.push_tokens. `nostos` is deliberately not an
--- exposed schema (the same decision that put cairn_pull in `public`), so a
--- service-role client pointed at it gets `500 Invalid schema: cairn` and no
+-- rather than a select on nostos.push_tokens. `nostos` is deliberately not an
+-- exposed schema (the same decision that put nostos_pull in `public`), so a
+-- service-role client pointed at it gets `500 Invalid schema: nostos` and no
 -- push is ever sent. Caught against a real Supabase stack, not by reasoning.
 --
 -- security definer to reach the unexposed table; granted to `service_role`
 -- ONLY, so the anon and authenticated keys cannot enumerate anybody's tokens.
-create or replace function public.cairn_push_targets(p_scope text)
+create or replace function public.nostos_push_targets(p_scope text)
 returns table (platform text, token text)
 language sql stable security definer set search_path = '' as $fn$
-  select t.platform, t.token from cairn.push_tokens t where t.scope = p_scope;
+  select t.platform, t.token from nostos.push_tokens t where t.scope = p_scope;
 $fn$;
 
 -- "I am awake." Cheap enough to send on every foreground and every pull.
-create or replace function public.cairn_heartbeat(p_device_id text)
+create or replace function public.nostos_heartbeat(p_device_id text)
 returns void language plpgsql security definer set search_path = '' as $fn$
 begin
-  insert into cairn.device_presence (scope, device_id)
-  select s, p_device_id from unnest(cairn.current_scopes()) as s
+  insert into nostos.device_presence (scope, device_id)
+  select s, p_device_id from unnest(nostos.current_scopes()) as s
   on conflict (scope, device_id) do update set last_seen = now();
 end;
 $fn$;
 
-create or replace function cairn.wake_absent_devices() returns trigger
+create or replace function nostos.wake_absent_devices() returns trigger
 language plpgsql security definer set search_path = '' as $fn$
 declare
-  v_cfg  cairn.push_config%rowtype;
-  v_tpl  cairn.push_templates%rowtype;
+  v_cfg  nostos.push_config%rowtype;
+  v_tpl  nostos.push_templates%rowtype;
   v_body jsonb := jsonb_build_object('scope', new.scope);
 begin
-  select * into v_cfg from cairn.push_config where id = 1;
+  select * into v_cfg from nostos.push_config where id = 1;
   if v_cfg.endpoint is null or v_cfg.endpoint = '' then
     return null;
   end if;
@@ -1054,12 +1106,12 @@ begin
   end if;
   -- Somebody is listening: the Realtime ring already reached them.
   if exists (
-    select 1 from cairn.device_presence
+    select 1 from nostos.device_presence
      where scope = new.scope and last_seen > now() - v_cfg.presence_window
   ) then
     return null;
   end if;
-  select * into v_tpl from cairn.push_templates where table_name = new.table_name;
+  select * into v_tpl from nostos.push_templates where table_name = new.table_name;
   if found and new.op <> 'delete' then
     -- A visible push is the news itself, so it skips the debounce: a
     -- debounced banner is a lost banner. The operator chose these tables, and
@@ -1076,12 +1128,12 @@ begin
     -- that finds the scope taken skips, which is exactly what the debounce
     -- would have told it to do anyway. (Found by the pg e2e, which deadlocked
     -- without it.)
-    if not pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope)) then
+    if not pg_try_advisory_xact_lock(hashtext('nostos:push:' || new.scope)) then
       return null;
     end if;
-    insert into cairn.push_cooldown (scope, last_push_at) values (new.scope, now())
+    insert into nostos.push_cooldown (scope, last_push_at) values (new.scope, now())
     on conflict (scope) do update set last_push_at = now()
-     where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown;
+     where nostos.push_cooldown.last_push_at < now() - v_cfg.cooldown;
     if not found then
       return null;
     end if;
@@ -1098,10 +1150,10 @@ begin
 end;
 $fn$;
 
-drop trigger if exists cairn_changes_wake on cairn.changes;
-create trigger cairn_changes_wake
-  after insert on cairn.changes
-  for each row execute function cairn.wake_absent_devices();
+drop trigger if exists nostos_changes_wake on nostos.changes;
+create trigger nostos_changes_wake
+  after insert on nostos.changes
+  for each row execute function nostos.wake_absent_devices();
 
 -- Devices talk to all of this through the three functions above and nothing
 -- else: no direct table access, so there is no policy to get wrong and no way
@@ -1110,21 +1162,21 @@ create trigger cairn_changes_wake
 -- `security definer`, so a leftover `anon=X` is not defence in depth: it is an
 -- anonymous caller registering a push token under the `public` scope, or
 -- reading another tenant's tokens outright.
-revoke all on function public.cairn_register_push_token(text, text)
+revoke all on function public.nostos_register_push_token(text, text)
   from public, anon, authenticated;
-revoke all on function public.cairn_deregister_push_token(text)
+revoke all on function public.nostos_deregister_push_token(text)
   from public, anon, authenticated;
-revoke all on function public.cairn_heartbeat(text) from public, anon, authenticated;
-revoke all on function public.cairn_push_targets(text) from public, anon, authenticated;
-grant execute on function public.cairn_register_push_token(text, text) to authenticated;
-grant execute on function public.cairn_deregister_push_token(text) to authenticated;
-grant execute on function public.cairn_heartbeat(text) to authenticated;
+revoke all on function public.nostos_heartbeat(text) from public, anon, authenticated;
+revoke all on function public.nostos_push_targets(text) from public, anon, authenticated;
+grant execute on function public.nostos_register_push_token(text, text) to authenticated;
+grant execute on function public.nostos_deregister_push_token(text) to authenticated;
+grant execute on function public.nostos_heartbeat(text) to authenticated;
 -- Not `authenticated`: the registry is the Edge Function's business only.
-grant execute on function public.cairn_push_targets(text) to service_role;
-alter table cairn.push_tokens     enable row level security;
-alter table cairn.device_presence enable row level security;
-alter table cairn.push_cooldown   enable row level security;
-alter table cairn.push_templates  enable row level security;
+grant execute on function public.nostos_push_targets(text) to service_role;
+alter table nostos.push_tokens     enable row level security;
+alter table nostos.device_presence enable row level security;
+alter table nostos.push_cooldown   enable row level security;
+alter table nostos.push_templates  enable row level security;
 "#
     );
     s.push_str(&templates_sql(templates));
@@ -1179,7 +1231,7 @@ impl Check {
 ///
 /// ## The check that justifies the command
 ///
-/// **`cairn_pull` must page by transaction.** A deployed `pull` that pages by
+/// **`nostos_pull` must page by transaction.** A deployed `pull` that pages by
 /// *rows* still returns rows, still advances a horizon, and still looks
 /// healthy from the device — it just hands out half a transaction, which the
 /// client applies atomically and cannot detect as partial. There is no
@@ -1196,10 +1248,10 @@ pub async fn inspect(
     let mut out = Vec::new();
 
     let log_exists: bool = client
-        .query_one("select to_regclass('cairn.changes') is not null", &[])
+        .query_one("select to_regclass('nostos.changes') is not null", &[])
         .await?
         .get(0);
-    out.push(Check::new(log_exists, "cairn.changes exists"));
+    out.push(Check::new(log_exists, "nostos.changes exists"));
     if !log_exists {
         out.push(Check::note(
             "nothing else can be checked \u{2014} run `nostos link --mode direct` \
@@ -1210,20 +1262,20 @@ pub async fn inspect(
 
     let rls: bool = client
         .query_one(
-            "select relrowsecurity from pg_class where oid = 'cairn.changes'::regclass",
+            "select relrowsecurity from pg_class where oid = 'nostos.changes'::regclass",
             &[],
         )
         .await?
         .get(0);
     out.push(Check::new(
         rls,
-        "row level security enabled on cairn.changes",
+        "row level security enabled on nostos.changes",
     ));
 
     let policies: Vec<(String, String)> = client
         .query(
             "select policyname, cmd from pg_policies \
-             where schemaname = 'cairn' and tablename = 'changes'",
+             where schemaname = 'nostos' and tablename = 'changes'",
             &[],
         )
         .await?
@@ -1234,7 +1286,7 @@ pub async fn inspect(
     out.push(Check::new(
         read_only,
         format!(
-            "cairn.changes has read-only policies ({})",
+            "nostos.changes has read-only policies ({})",
             if policies.is_empty() {
                 "none found \u{2014} every device would see an empty log".to_string()
             } else {
@@ -1247,14 +1299,14 @@ pub async fn inspect(
         ),
     ));
 
-    // `cairn_snapshot` is checked alongside the other two because without it a
+    // `nostos_snapshot` is checked alongside the other two because without it a
     // 410 is terminal: the device is told to re-snapshot and has nothing to
     // call. A deploy that predates it looks healthy right up to the first
     // device that comes back after the retention window.
     for (proname, args) in [
-        ("cairn_pull", "xid8, int"),
-        ("cairn_snapshot", ""),
-        ("cairn_increment", "text, text, text, numeric"),
+        ("nostos_pull", "xid8, int"),
+        ("nostos_snapshot", ""),
+        ("nostos_increment", "text, text, text, numeric"),
     ] {
         // `proretset` rather than a grep of the definition: `pg_get_functiondef`
         // renders the header in UPPERCASE (`RETURNS jsonb`), so matching the
@@ -1281,7 +1333,7 @@ pub async fn inspect(
         // on a 200 — so a read simply arrives short, and the device then
         // stores a horizon past rows it never saw. A scalar result is one row
         // at any size, so the cap cannot reach it.
-        if matches!(proname, "cairn_pull" | "cairn_snapshot") {
+        if matches!(proname, "nostos_pull" | "nostos_snapshot") {
             let scalar = !returns_set;
             out.push(Check::new(
                 scalar,
@@ -1298,15 +1350,15 @@ pub async fn inspect(
             ));
         }
 
-        if proname == "cairn_pull" {
+        if proname == "nostos_pull" {
             // See the doc comment: this is the one bug no client can detect.
             let by_txn = def.contains("select distinct") && def.contains("greatest(max_txns, 2)");
             out.push(Check::new(
                 by_txn,
                 if by_txn {
-                    "cairn_pull pages by transaction".to_string()
+                    "nostos_pull pages by transaction".to_string()
                 } else {
-                    "cairn_pull does NOT page by transaction \u{2014} it can hand a device \
+                    "nostos_pull does NOT page by transaction \u{2014} it can hand a device \
                      half a transaction, which applies atomically and looks correct. \
                      Regenerate with `nostos link --mode direct`."
                         .to_string()
@@ -1316,10 +1368,10 @@ pub async fn inspect(
             out.push(Check::new(
                 guards_retention,
                 if guards_retention {
-                    "cairn_pull reports a pruned horizon as 410 rather than a short answer"
+                    "nostos_pull reports a pruned horizon as 410 rather than a short answer"
                         .to_string()
                 } else {
-                    "cairn_pull does NOT guard the retention window \u{2014} a device that was \
+                    "nostos_pull does NOT guard the retention window \u{2014} a device that was \
                      offline too long resumes into a gap and never receives the missing rows"
                         .to_string()
                 },
@@ -1328,9 +1380,9 @@ pub async fn inspect(
             out.push(Check::new(
                 inclusive,
                 if inclusive {
-                    "cairn_pull resumes inclusively (`xid >= since`)".to_string()
+                    "nostos_pull resumes inclusively (`xid >= since`)".to_string()
                 } else {
-                    "cairn_pull uses an exclusive lower bound \u{2014} it silently drops the \
+                    "nostos_pull uses an exclusive lower bound \u{2014} it silently drops the \
                      transaction sitting exactly on the horizon"
                         .to_string()
                 },
@@ -1384,27 +1436,27 @@ pub async fn inspect(
 
     let can_select: bool = client
         .query_one(
-            "select has_table_privilege('authenticated', 'cairn.changes', 'select')",
+            "select has_table_privilege('authenticated', 'nostos.changes', 'select')",
             &[],
         )
         .await?
         .get(0);
     let can_write: bool = client
         .query_one(
-            "select has_table_privilege('authenticated', 'cairn.changes', 'insert') \
-                 or has_table_privilege('authenticated', 'cairn.changes', 'update') \
-                 or has_table_privilege('authenticated', 'cairn.changes', 'delete')",
+            "select has_table_privilege('authenticated', 'nostos.changes', 'insert') \
+                 or has_table_privilege('authenticated', 'nostos.changes', 'update') \
+                 or has_table_privilege('authenticated', 'nostos.changes', 'delete')",
             &[],
         )
         .await?
         .get(0);
     out.push(Check::new(
         can_select,
-        "authenticated may read cairn.changes",
+        "authenticated may read nostos.changes",
     ));
     out.push(Check::new(
         !can_write,
-        "authenticated may NOT write cairn.changes (history is append-only, by the trigger)",
+        "authenticated may NOT write nostos.changes (history is append-only, by the trigger)",
     ));
 
     for t in tables {
@@ -1413,7 +1465,7 @@ pub async fn inspect(
                 "select exists (select from pg_trigger g \
                    join pg_class c on c.oid = g.tgrelid \
                    where c.relname = $1 and g.tgname = $2 and not g.tgisinternal)",
-                &[&t.table, &format!("cairn_log_{}", t.table)],
+                &[&t.table, &format!("nostos_log_{}", t.table)],
             )
             .await?
             .get(0);
@@ -1425,7 +1477,7 @@ pub async fn inspect(
 
     // The anti-feedback assertion. A change-log trigger on pg_net's queue turns
     // every push attempt into a change row, which fires another push; one on
-    // cairn.device_presence turns a liveness ping into fan-out for every device
+    // nostos.device_presence turns a liveness ping into fan-out for every device
     // in the scope. Neither is reachable through `nostos link` — it refuses the
     // names — but a hand-applied migration can do it, and the symptom is an
     // unexplained write storm rather than an error.
@@ -1434,8 +1486,8 @@ pub async fn inspect(
             "select n.nspname || '.' || c.relname \
              from pg_trigger g join pg_class c on c.oid = g.tgrelid \
              join pg_namespace n on n.oid = c.relnamespace \
-             where not g.tgisinternal and g.tgname like 'cairn\\_log\\_%' \
-               and n.nspname in ('net', 'cairn')",
+             where not g.tgisinternal and g.tgname like 'nostos\\_log\\_%' \
+               and n.nspname in ('net', 'nostos')",
             &[],
         )
         .await?
@@ -1457,7 +1509,7 @@ pub async fn inspect(
     let ring: bool = client
         .query_one(
             "select exists (select from pg_trigger \
-             where tgname = 'cairn_changes_ring' and not tgisinternal)",
+             where tgname = 'nostos_changes_ring' and not tgisinternal)",
             &[],
         )
         .await?
@@ -1471,7 +1523,7 @@ pub async fn inspect(
         .query_one(
             "select exists (select from pg_policies \
              where schemaname = 'realtime' and tablename = 'messages' \
-               and policyname = 'cairn_ring_read')",
+               and policyname = 'nostos_ring_read')",
             &[],
         )
         .await?
@@ -1490,9 +1542,9 @@ pub async fn inspect(
         let r = client
             .query_one(
                 "select count(*)::bigint, \
-                        pg_size_pretty(pg_total_relation_size('cairn.changes')), \
+                        pg_size_pretty(pg_total_relation_size('nostos.changes')), \
                         extract(epoch from now() - min(logged_at))::float8 \
-                 from cairn.changes",
+                 from nostos.changes",
                 &[],
             )
             .await?;
@@ -1500,19 +1552,19 @@ pub async fn inspect(
     };
     out.push(Check::note(format!(
         "change log: {rows} rows, {bytes}, oldest {} \u{2014} prune with \
-         `select cairn.prune()`",
+         `select nostos.prune()`",
         oldest.map_or_else(|| "n/a".to_string(), |s| format!("{:.0}h old", s / 3600.0))
     )));
 
     let push_installed: bool = client
-        .query_one("select to_regclass('cairn.push_config') is not null", &[])
+        .query_one("select to_regclass('nostos.push_config') is not null", &[])
         .await?
         .get(0);
     if push_installed {
         let (endpoint, has_secret): (Option<String>, bool) = {
             let r = client
                 .query_one(
-                    "select endpoint, coalesce(secret, '') <> '' from cairn.push_config \
+                    "select endpoint, coalesce(secret, '') <> '' from nostos.push_config \
                      where id = 1",
                     &[],
                 )
@@ -1528,7 +1580,7 @@ pub async fn inspect(
         ));
         out.push(Check::new(
             has_secret,
-            "cairn.push_config.secret is set \u{2014} without it the Edge Function cannot tell              a real doorbell from anyone who found the URL",
+            "nostos.push_config.secret is set \u{2014} without it the Edge Function cannot tell              a real doorbell from anyone who found the URL",
         ));
         let pg_net: bool = client
             .query_one("select to_regproc('net.http_post') is not null", &[])
@@ -1549,10 +1601,10 @@ pub async fn inspect(
         // privileges, and `revoke ... from public` does not take it away, so
         // this really does fire on a project that was set up by hand.
         for (proname, args) in [
-            ("cairn_register_push_token", "text, text"),
-            ("cairn_deregister_push_token", "text"),
-            ("cairn_heartbeat", "text"),
-            ("cairn_push_targets", "text"),
+            ("nostos_register_push_token", "text, text"),
+            ("nostos_deregister_push_token", "text"),
+            ("nostos_heartbeat", "text"),
+            ("nostos_push_targets", "text"),
         ] {
             let signature = format!("public.{proname}({args})");
             let leaked: bool = client
@@ -1576,16 +1628,16 @@ pub async fn inspect(
         }
 
         // The check that catches a silently dead push path: the Edge Function
-        // runs with the service role and must reach `cairn.push_tokens`, but
+        // runs with the service role and must reach `nostos.push_tokens`, but
         // `nostos` is not an exposed schema. A function that reads the table
-        // through the Data API gets `Invalid schema: cairn` and drops every
+        // through the Data API gets `Invalid schema: nostos` and drops every
         // notification with no error anywhere the operator will look.
         let (targets_rpc, service_may_call): (bool, bool) = {
             let r = client
                 .query_one(
-                    "select to_regprocedure('public.cairn_push_targets(text)') is not null, \
+                    "select to_regprocedure('public.nostos_push_targets(text)') is not null, \
                             coalesce(has_function_privilege('service_role', \
-                              'public.cairn_push_targets(text)', 'execute'), false)",
+                              'public.nostos_push_targets(text)', 'execute'), false)",
                     &[],
                 )
                 .await?;
@@ -1595,11 +1647,11 @@ pub async fn inspect(
             targets_rpc && service_may_call,
             if targets_rpc {
                 "the Edge Function can read the token registry (service_role may execute \
-                 public.cairn_push_targets)"
+                 public.nostos_push_targets)"
                     .to_string()
             } else {
-                "public.cairn_push_targets is MISSING \u{2014} the Edge Function would have \
-                 to read the unexposed `cairn` schema, which fails with `Invalid schema: \
+                "public.nostos_push_targets is MISSING \u{2014} the Edge Function would have \
+                 to read the unexposed `nostos` schema, which fails with `Invalid schema: \
                  nostos` and drops every notification. Re-run `nostos link --mode direct \
                  --push`."
                     .to_string()
@@ -1609,10 +1661,10 @@ pub async fn inspect(
         let (tokens, awake): (i64, i64) = {
             let r = client
                 .query_one(
-                    "select (select count(*)::bigint from cairn.push_tokens), \
-                            (select count(*)::bigint from cairn.device_presence \
+                    "select (select count(*)::bigint from nostos.push_tokens), \
+                            (select count(*)::bigint from nostos.device_presence \
                               where last_seen > now() - (select presence_window \
-                                                           from cairn.push_config where id = 1))",
+                                                           from nostos.push_config where id = 1))",
                     &[],
                 )
                 .await?;
@@ -1625,7 +1677,7 @@ pub async fn inspect(
 
     let withheld: i64 = client
         .query_one(
-            "select count(*)::bigint from cairn.changes \
+            "select count(*)::bigint from nostos.changes \
              where xid >= pg_snapshot_xmin(pg_current_snapshot())",
             &[],
         )
@@ -1810,6 +1862,21 @@ mod tests {
         )
     }
 
+    /// ADR-0048: a pre-rename project is renamed before anything is created,
+    /// or the `create ... if not exists` below would build a second, empty log
+    /// beside the renamed one.
+    #[test]
+    fn a_pre_rename_project_is_renamed_before_the_schema_is_created() {
+        let sql = sample_sql();
+        let rename = sql
+            .find("alter schema %I rename to nostos")
+            .expect("rename block");
+        let create = sql
+            .find("create schema if not exists nostos")
+            .expect("create");
+        assert!(rename < create, "the rename must run first");
+    }
+
     /// Pins the contract `nostos_core::pull` and `nostos_client::postgrest`
     /// already depend on. A rename here is a wire break, so it should fail a
     /// test rather than a device.
@@ -1818,8 +1885,8 @@ mod tests {
         let sql = sample_sql();
         for needle in [
             // The client posts here, with these argument names.
-            "function public.cairn_pull(since xid8, max_txns int default 200)",
-            "function public.cairn_increment(",
+            "function public.nostos_pull(since xid8, max_txns int default 200)",
+            "function public.nostos_increment(",
             "p_table text, p_pk text, p_field text, p_delta numeric",
             // The keys `PullRow` deserializes, now carried by `to_jsonb` over
             // the column names rather than by a table signature.
@@ -1833,7 +1900,7 @@ mod tests {
             "where c.xid >= since and c.xid < h.horizon",
             "limit greatest(max_txns, 2)",
             // The topic `nostos_client::doorbell` joins.
-            "'cairn:' || coalesce(new.scope, 'unscoped')",
+            "'nostos:' || coalesce(new.scope, 'unscoped')",
         ] {
             assert!(sql.contains(needle), "generated SQL is missing: {needle}");
         }
@@ -1842,14 +1909,14 @@ mod tests {
     #[test]
     fn each_table_gets_a_trigger_carrying_its_own_scope_binding() {
         let sql = sample_sql();
-        assert!(sql.contains("execute function cairn.log_change('owner_id', 'sub');"));
-        assert!(sql.contains("execute function cairn.log_change('org_id', 'org_id');"));
+        assert!(sql.contains("execute function nostos.log_change('owner_id', 'sub');"));
+        assert!(sql.contains("execute function nostos.log_change('org_id', 'org_id');"));
         // A public table passes no arguments, so the trigger stamps the
         // literal public scope instead of reading a column.
-        assert!(sql.contains("execute function cairn.log_change();"));
+        assert!(sql.contains("execute function nostos.log_change();"));
         for t in ["tasks", "projects", "countries"] {
             assert!(sql.contains(&format!(
-                "drop trigger if exists cairn_log_{t} on public.{t};"
+                "drop trigger if exists nostos_log_{t} on public.{t};"
             )));
         }
     }
@@ -1861,9 +1928,9 @@ mod tests {
     fn the_snapshot_is_one_statement_and_announces_every_table() {
         let sql = sample_sql();
         let body = sql
-            .split("create or replace function public.cairn_snapshot()")
+            .split("create or replace function public.nostos_snapshot()")
             .nth(1)
-            .expect("cairn_snapshot is generated")
+            .expect("nostos_snapshot is generated")
             .split("$fn$;")
             .next()
             .expect("the function body terminates");
@@ -1886,7 +1953,7 @@ mod tests {
         // Same authority as the pull, or the two are not interchangeable.
         assert!(body.contains("security invoker"));
         assert!(sql.contains(
-            "revoke all on function public.cairn_snapshot() from public, anon, authenticated;"
+            "revoke all on function public.nostos_snapshot() from public, anon, authenticated;"
         ));
     }
 
@@ -1904,7 +1971,7 @@ mod tests {
         // privileges grant EXECUTE to `anon` BY NAME, and revoking from the
         // PUBLIC pseudo-role leaves that grant standing.
         assert!(sql.contains(
-            "revoke all on function public.cairn_pull(xid8, int) from public, anon, authenticated;"
+            "revoke all on function public.nostos_pull(xid8, int) from public, anon, authenticated;"
         ));
         for line in sql
             .lines()
@@ -1917,14 +1984,14 @@ mod tests {
             );
         }
         assert!(sql
-            .contains("grant execute on function public.cairn_pull(xid8, int) to authenticated;"));
+            .contains("grant execute on function public.nostos_pull(xid8, int) to authenticated;"));
         assert!(
             !sql.contains("to anon"),
             "the anon role must never be granted the change log"
         );
         // Devices read history; only the security-definer trigger writes it.
-        assert!(sql.contains("grant select on cairn.changes to authenticated;"));
-        assert!(!sql.contains("grant insert on cairn.changes"));
+        assert!(sql.contains("grant select on nostos.changes to authenticated;"));
+        assert!(!sql.contains("grant insert on nostos.changes"));
     }
 
     #[test]
@@ -1937,7 +2004,7 @@ mod tests {
     fn push_is_opt_in_and_never_instruments_its_own_tables() {
         let plain = sample_sql();
         assert!(
-            !plain.contains("cairn.push_tokens"),
+            !plain.contains("nostos.push_tokens"),
             "no --push means no push objects at all"
         );
 
@@ -1951,31 +2018,31 @@ mod tests {
             }],
             DEFAULT_RETENTION,
             Some(&PushConfig {
-                endpoint: "https://ref.functions.supabase.co/cairn-push".to_string(),
+                endpoint: "https://ref.functions.supabase.co/nostos-push".to_string(),
                 ..PushConfig::default()
             }),
         );
         for needle in [
-            "function public.cairn_register_push_token(p_platform text, p_token text)",
-            "function public.cairn_deregister_push_token(p_token text)",
-            "function public.cairn_heartbeat(p_device_id text)",
+            "function public.nostos_register_push_token(p_platform text, p_token text)",
+            "function public.nostos_deregister_push_token(p_token text)",
+            "function public.nostos_heartbeat(p_device_id text)",
             // The Edge Function's only way into the registry: `nostos` is not an
             // exposed schema, so a direct table read fails with `Invalid
-            // schema: cairn` and drops every notification silently.
-            "function public.cairn_push_targets(p_scope text)",
-            "grant execute on function public.cairn_push_targets(text) to service_role;",
-            "https://ref.functions.supabase.co/cairn-push",
+            // schema: nostos` and drops every notification silently.
+            "function public.nostos_push_targets(p_scope text)",
+            "grant execute on function public.nostos_push_targets(text) to service_role;",
+            "https://ref.functions.supabase.co/nostos-push",
             // The atomic per-scope debounce, which is also the pg_net rate guard.
             "on conflict (scope) do update set last_push_at = now()",
-            "pg_try_advisory_xact_lock(hashtext('cairn:push:' || new.scope))",
-            "where cairn.push_cooldown.last_push_at < now() - v_cfg.cooldown",
+            "pg_try_advisory_xact_lock(hashtext('nostos:push:' || new.scope))",
+            "where nostos.push_cooldown.last_push_at < now() - v_cfg.cooldown",
             // Skipping when pg_net is absent beats failing every write.
             "if to_regproc('net.http_post') is null then",
         ] {
             assert!(with_push.contains(needle), "push SQL is missing: {needle}");
         }
         // The trigger is attached to public tables only — never to nostos's own.
-        assert!(!with_push.contains("execute function cairn.log_change('scope'"));
+        assert!(!with_push.contains("execute function nostos.log_change('scope'"));
         assert_eq!(
             with_push
                 .matches("after insert or update or delete on")
@@ -2021,7 +2088,7 @@ mod tests {
 
         let sql = templates_sql(&[action]);
         assert!(
-            sql.starts_with("delete from cairn.push_templates;\n"),
+            sql.starts_with("delete from nostos.push_templates;\n"),
             "{sql}"
         );
         assert!(sql.contains("'order:Your order''s {status}', 'order_status', '/history/{id}'"));
@@ -2057,9 +2124,9 @@ mod tests {
         assert!(sql.starts_with("-- Generated by `nostos link --mode direct`"));
         assert!(sql.contains("\nbegin;\n") && sql.trim_end().ends_with("commit;"));
         // Nothing may fail on a second apply.
-        assert!(!sql.contains("create table cairn.changes ("));
-        // current_scopes, log_change, cairn_pull, cairn_snapshot,
-        // cairn_increment, ring, prune. All `or replace`, so re-applying the
+        assert!(!sql.contains("create table nostos.changes ("));
+        // current_scopes, log_change, nostos_pull, nostos_snapshot,
+        // nostos_increment, ring, prune. All `or replace`, so re-applying the
         // file is a no-op rather than a duplicate-object error.
         assert_eq!(sql.matches("create or replace function").count(), 7);
         assert_eq!(

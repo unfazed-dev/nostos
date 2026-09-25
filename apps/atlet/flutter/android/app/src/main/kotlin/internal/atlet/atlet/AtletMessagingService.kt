@@ -77,7 +77,7 @@ class AtletMessagingService : FlutterFirebaseMessagingService() {
     }
 
     companion object {
-        const val CHANNEL_ID = "cairn"
+        const val CHANNEL_ID = "nostos"
     }
 }
 

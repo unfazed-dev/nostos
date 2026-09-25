@@ -87,7 +87,7 @@ class NostosClientTest {
      * (`sdk/nostos_swift/ios-test/Sources/NostosSmoke/main.swift`) prove, adapted
      * to Kotlin + UniFFI on Android:
      *
-     *   1. connect() → subscribe("tasks") → run loop applies rows to cairn_data.
+     *   1. connect() → subscribe("tasks") → run loop applies rows to nostos_data.
      *   2. POST /push to the host-side spine → server pushes a `tasks` row →
      *      poll query() until the row lands on-device → [kt-e2e] PUSH_OK.
      *   3. SDK write()s `kt-echo` to its durable outbox → the spine's echo
@@ -145,7 +145,7 @@ class NostosClientTest {
         // time — a push that races the subscribe is missed, not queued, so a
         // single shot flakes under cold-start latency.
         val pushBody = """{"pk":"kt-push","payload":{"title":"from-server","status":"open","priority":"5"}}"""
-        val pushSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='kt-push'"
+        val pushSql = "SELECT pk FROM nostos_data WHERE table_name='tasks' AND pk='kt-push'"
         val pushDeadline = System.currentTimeMillis() + 15_000L
         var pushOk = false
         var pushRows = ""
@@ -162,14 +162,14 @@ class NostosClientTest {
             }
             pushRows = runCatching { client.query(pushSql) }.getOrDefault("<query failed>")
         }
-        assertTrue("[kt-e2e] kt-push never landed in cairn_data; rows=$pushRows", pushOk)
+        assertTrue("[kt-e2e] kt-push never landed in nostos_data; rows=$pushRows", pushOk)
         Log.i("NostosClientTest", "[kt-e2e] PUSH_OK")
 
         // ---- direction 2: client WRITE → server echo → on-device query ----
         val echoPayload = """{"title":"from-kotlin","status":"open","priority":"7"}"""
         val writeId = client.write("tasks", "upsert", "kt-echo", echoPayload)
         Log.i("NostosClientTest", "[kt-e2e] write() id=$writeId (kt-echo enqueued)")
-        val echoSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='kt-echo'"
+        val echoSql = "SELECT pk FROM nostos_data WHERE table_name='tasks' AND pk='kt-echo'"
         val echoOk = pollQueryContains(client, echoSql, "kt-echo", timeoutMillis = 8000L)
         val echoRows = runCatching { client.query(echoSql) }.getOrDefault("<query failed>")
         assertTrue("[kt-e2e] kt-echo never echoed back; rows=$echoRows", echoOk)

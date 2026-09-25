@@ -238,7 +238,7 @@ fixtures/
   <sdk>/pomodoro/          # flutter, web, node, kotlin, swift, dotnet, react_native, capacitor, tauri
     supabase/schema.sql    # per-SDK tables
     env.example.json       # per-SDK creds + TWO users
-    tool/                  # cairn_live_{up,down}.sh, mint_jwt.sh  (shared, symlink or generated)
+    tool/                  # nostos_live_{up,down}.sh, mint_jwt.sh  (shared, symlink or generated)
   shared/
     spec/keys.json         # THE contract: key namespace + assertion list (see §8)
     spec/personas/         # multi-actor journeys

@@ -169,7 +169,7 @@
 - `sqlite_wasm.rs:361` — selectObjects→selectRows fallback; shape difference self-documented.
 - `sqlite_wasm.rs:751` — `apply_local` mirror of native.
 - `main.rs:1060` — liveactivity placeholder PushTemplate coupling; router consults live_activities first as stated.
-- `main.rs:1547` — audit source always "api"; `X-Cairn-Source` upgrade path.
+- `main.rs:1547` — audit source always "api"; `X-Nostos-Source` upgrade path.
 - `main.rs:1603` — last-write-wins accurate; CLI-vs-PUT lost update reachable exactly as documented (`apply_put_rules` snapshots 'hand' at L1641, writes at L1670). One undocumented wrinkle: two concurrent PUTs can interleave save/swap so memory briefly enforces the LOSER, but `watch_rules` (L1014) dedupes against `rules_tx.borrow()`, so the next poll tick self-heals. Transient only.
 - `push_api.rs:168` — race claim accurate: upsert is `INSERT..ON CONFLICT(token) DO UPDATE` (`token_store.rs:152`) keyed by token → no dup rows; over-cap bounded by in-flight concurrency; "a few rows over cap, never unbounded" holds.
 - `coalescer.rs:66` — 10k/64 ceilings are env-exposed guesses.

@@ -28,7 +28,7 @@ never block the event loop.
 ```js
 const { NostosClient } = require("./nostos_node.node");
 
-const nostos = new NostosClient("ws://127.0.0.1:8080/sync", null, "./cairn.db");
+const nostos = new NostosClient("ws://127.0.0.1:8080/sync", null, "./nostos.db");
 await nostos.connect();
 await nostos.subscribe("tasks");                    // optional: "status = 'open'"
 

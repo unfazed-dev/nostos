@@ -18,7 +18,7 @@ import 'package:meta/meta.dart';
 /// Validates a column / identifier against the SQLite-safe grammar.
 ///
 /// Allows schema-qualified `table.col` (one dot, each side an ident) because
-/// `cairn_data`-backed views sometimes need it. Anything outside this set
+/// `nostos_data`-backed views sometimes need it. Anything outside this set
 /// (`'`, `"`, `;`, whitespace, `-`, …) is rejected with [ArgumentError] — the
 /// only way an attacker-controlled string reaches `toSql()` is through a column
 /// name, so this is the injection boundary.

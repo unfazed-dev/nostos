@@ -37,7 +37,7 @@ Split by **workload characteristics**, not by vendor preference:
 
 1. `Authorization: Bearer <jwt>` — verified against the Supabase JWT secret
    (HS256). Managed-Cloud clients send this.
-2. `cairn_session` cookie — the existing email/password → cookie flow. The
+2. `nostos_session` cookie — the existing email/password → cookie flow. The
    self-hosted OSS path + the web admin use this.
 
 The verifier is trait-abstracted (`JwtVerifier`) so `cfg(test)` injects one that

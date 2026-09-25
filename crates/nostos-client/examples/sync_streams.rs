@@ -300,7 +300,7 @@ async fn main() {
                 let conn = s.conn_for_test();
                 let mut stmt = conn
                     .prepare(
-                        "SELECT pk, payload FROM cairn_data WHERE table_name = 'tasks' ORDER BY pk",
+                        "SELECT pk, payload FROM nostos_data WHERE table_name = 'tasks' ORDER BY pk",
                     )
                     .expect("prepare");
                 let rows = stmt

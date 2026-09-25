@@ -982,7 +982,7 @@ void main() {
   });
 
   group('deadLetters (ADR-0032 T5 / ADR-0027)', () {
-    test('lists quarantined rows from cairn_outbox WHERE dlq=1', () async {
+    test('lists quarantined rows from nostos_outbox WHERE dlq=1', () async {
       final rows = [
         {
           'id': 5,
@@ -1007,7 +1007,7 @@ void main() {
       expect(dl.first.timestamp, isNull);
       expect(
         engine.queries.single,
-        contains('FROM cairn_outbox WHERE dlq = 1'),
+        contains('FROM nostos_outbox WHERE dlq = 1'),
       );
     });
   });

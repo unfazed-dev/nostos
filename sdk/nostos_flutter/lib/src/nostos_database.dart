@@ -19,7 +19,7 @@ import 'schema.dart';
 /// ```dart
 /// final db = await NostosDatabase.connect(
 ///   url: 'ws://localhost:8800/sync',
-///   sqlitePath: './cairn.sqlite',
+///   sqlitePath: './nostos.sqlite',
 /// );
 /// await db.subscribe('todos');
 /// db.watch('SELECT * FROM todos').listen((rows) => print(rows));
@@ -271,7 +271,7 @@ class NostosDatabase {
   /// is no first sync to await).
   static Future<NostosDatabase> local({
     required String sqliteDir,
-    String sqliteFilename = 'cairn.sqlite',
+    String sqliteFilename = 'nostos.sqlite',
     required NostosSchema schema,
     Set<String>? orSetTables,
     Set<String>? counterTables,
@@ -448,7 +448,7 @@ class NostosDatabase {
   /// which files the token under this JWT's scopes. Rotate [token] with
   /// [setToken] — the RPCs authenticate with the same credential as the pull.
   ///
-  /// ponytail: no presence heartbeat (`cairn_heartbeat`) is sent, so the push
+  /// ponytail: no presence heartbeat (`nostos_heartbeat`) is sent, so the push
   /// trigger treats every device as absent and rings even a foregrounded one
   /// (once per scope per cooldown). A doorbell is idempotent, so the cost is
   /// one redundant pull; send the heartbeat from the run loop if push volume
@@ -602,7 +602,7 @@ class NostosDatabase {
   /// is which: statements aimed at a **synced table** fail loudly, with SQLite's
   /// `cannot modify ... because it is a view` (the read surface is a VIEW —
   /// ADR-0028), but statements aimed at an **internal** table are not
-  /// protected, and `DELETE FROM cairn_outbox` would silently destroy queued
+  /// protected, and `DELETE FROM nostos_outbox` would silently destroy queued
   /// writes. Do not route DML through here.
   ///
   /// ponytail: writes through raw SQL are a deliberate ceiling — add/delete/edit
@@ -682,7 +682,7 @@ class NostosDatabase {
 
   /// Read-only snapshot of the dead-letter queue (ADR-0032 T5 / ADR-0027):
   /// writes the server permanently rejected and the flush loop quarantined.
-  /// Rows stay in `cairn_outbox` with `dlq = 1`; this lists them so failures are
+  /// Rows stay in `nostos_outbox` with `dlq = 1`; this lists them so failures are
   /// diagnosable. Each row carries the server's per-row reason ([DeadLetter]
   /// .error) and the quarantine timestamp ([DeadLetter.timestamp]). Order is
   /// oldest-first. v1 is read-only — `retryDeadLetter(id)` /
@@ -693,7 +693,7 @@ class NostosDatabase {
       // `execute`-writes-by-convention warning does not apply to a SELECT).
       'SELECT id, table_name, op, pk, payload, attempts, last_error, '
       'dead_lettered_at '
-      'FROM cairn_outbox WHERE dlq = 1 ORDER BY id ASC',
+      'FROM nostos_outbox WHERE dlq = 1 ORDER BY id ASC',
     );
     return rows
         .map((r) {
@@ -1017,7 +1017,7 @@ class NostosDatabase {
   /// `didRegisterForRemoteNotificationsWithDeviceToken` on iOS.
   ///
   /// In direct mode (ADR-0045) the same call is
-  /// `POST /rest/v1/rpc/cairn_register_push_token` with
+  /// `POST /rest/v1/rpc/nostos_register_push_token` with
   /// `{"p_platform": …, "p_token": …}`; the RPC stamps the scope from the JWT.
   ///
   /// Throws [ArgumentError] for an unknown platform, or
@@ -1045,7 +1045,7 @@ class NostosDatabase {
     await _pushTokensRest(
       'register',
       'POST',
-      _anonKey == null ? '/push-tokens' : '/rpc/cairn_register_push_token',
+      _anonKey == null ? '/push-tokens' : '/rpc/nostos_register_push_token',
       body: jsonEncode(
         _anonKey == null
             ? <String, String>{'platform': platform, 'token': token}
@@ -1060,7 +1060,7 @@ class NostosDatabase {
   /// receive on this token (e.g. the user disables notifications);
   /// [signOut] deregisters every session-registered token automatically.
   ///
-  /// Direct mode: `POST /rest/v1/rpc/cairn_deregister_push_token` with
+  /// Direct mode: `POST /rest/v1/rpc/nostos_deregister_push_token` with
   /// `{"p_token": …}`.
   ///
   /// Throws [NostosPushTokenException] when the server replies anything other
@@ -1082,7 +1082,7 @@ class NostosDatabase {
       await _pushTokensRest(
         'deregister',
         'POST',
-        '/rpc/cairn_deregister_push_token',
+        '/rpc/nostos_deregister_push_token',
         body: jsonEncode(<String, String>{'p_token': token}),
       );
     }

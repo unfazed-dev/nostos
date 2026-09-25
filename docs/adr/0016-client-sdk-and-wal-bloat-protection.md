@@ -49,7 +49,7 @@ no tokio, no SQLite (WASM-clean — this is what the FFI bridges will bind):
 **`crates/nostos-client`** — the native client (where async + rusqlite live):
 
 - **`SqliteStorage`** — real `rusqlite` persistence. Opaque payload bytes per
-  `(table, pk)` + an LSN checkpoint in `cairn_meta`. `apply_batch` wraps every
+  `(table, pk)` + an LSN checkpoint in `nostos_meta`. `apply_batch` wraps every
   row op + the checkpoint write in ONE transaction (crash-safe by design).
   **Opaque bytes** is a deliberate scoping: the wire delivers the tuple image
   as hex; a column decoder arrives with ADR-0012. Storage is durable +

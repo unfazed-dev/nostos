@@ -6,12 +6,12 @@
 //!    durable outbox and returns `Ok` even with no server reachable. The caller
 //!    never blocks on the network to capture user intent.
 //! 2. **The queue is durable.** A fresh `SqliteStorage` handle on the SAME file
-//!    sees the enqueued write (it's in `cairn_outbox`, committed to disk). Drop
+//!    sees the enqueued write (it's in `nostos_outbox`, committed to disk). Drop
 //!    the whole client process and the row is still there.
 //! 3. **The queue flushes on reconnect.** Once the server is up, the client's
 //!    connected loop drains `pending()` in order, sends each as a `Write` frame,
 //!    and `mark_done`s on `WriteResult{ok:true}`. The written row then flows back
-//!    through normal replication and lands in the client's `cairn_data` table —
+//!    through normal replication and lands in the client's `nostos_data` table —
 //!    the round-trip.
 //!
 //! The kill-restart variant drops the client process entirely between the
@@ -241,7 +241,7 @@ fn row_payload(db_path: &str, table: &str, pk: &str) -> Option<Vec<u8>> {
     let storage = SqliteStorage::open(db_path).unwrap();
     let conn = storage.conn_for_test();
     let row: std::result::Result<Vec<u8>, _> = conn.query_row(
-        "SELECT payload FROM cairn_data WHERE table_name = ?1 AND pk = ?2",
+        "SELECT payload FROM nostos_data WHERE table_name = ?1 AND pk = ?2",
         rusqlite::params![table, pk],
         |r| r.get(0),
     );
@@ -292,7 +292,7 @@ async fn offline_write_survives_and_flushes_on_reconnect() {
     assert!(write_id > 0, "enqueue returns a monotonic id");
 
     // ---- DURABILITY: a FRESH SqliteStorage handle on the SAME file sees the
-    // enqueued write. The outbox is in `cairn_outbox`, committed to disk — a
+    // enqueued write. The outbox is in `nostos_outbox`, committed to disk — a
     // crash can't strand it. ----
     let fresh = SqliteStorage::open(&db_path).unwrap();
     let pending = fresh.pending().expect("pending reads the outbox");

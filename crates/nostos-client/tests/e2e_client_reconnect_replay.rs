@@ -13,7 +13,7 @@
 //! ## Running
 //! ```sh
 //! docker compose -f docker/docker-compose.yml up -d
-//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn \
+//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos \
 //!   cargo test -p nostos-client --features pg --test e2e_client_reconnect_replay \
 //!   -- --nocapture --test-threads=1
 //! ```
@@ -43,7 +43,7 @@ const TENANT_COL: &str = "org_id";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -92,7 +92,7 @@ async fn slot_exists(slot: &str) -> bool {
 async fn oplog_max_lsn(tenant: &str) -> i64 {
     let c = sql_client().await;
     c.query_one(
-        "SELECT COALESCE(MAX(lsn), 0)::bigint FROM cairn_oplog WHERE tenant_id = $1",
+        "SELECT COALESCE(MAX(lsn), 0)::bigint FROM nostos_oplog WHERE tenant_id = $1",
         &[&tenant],
     )
     .await
@@ -162,7 +162,7 @@ async fn harness(tenant: &str, slot: &str) -> Harness {
     ));
     let fanout = Arc::new(FanOutService::new(Arc::clone(&store)).with_op_log(oplog));
 
-    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), slot, "cairn_pub").expect("valid PG url");
+    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), slot, "nostos_pub").expect("valid PG url");
     let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
     let fanout_drv = Arc::clone(&fanout);
     let driver = tokio::spawn(async move {
@@ -226,13 +226,13 @@ async fn insert_task(tenant: &str, title: &str) -> String {
     id.to_string()
 }
 
-/// Count `cairn_data` rows for a pk in the client's on-disk SQLite (a second
+/// Count `nostos_data` rows for a pk in the client's on-disk SQLite (a second
 /// read connection — `SqliteStorage` is moved into the `SyncClient`, so we
 /// re-open the file to introspect the applied state).
 fn pk_present(path: &str, pk: &str) -> i64 {
     let conn = rusqlite::Connection::open(path).expect("open client sqlite for read");
     conn.query_row(
-        "SELECT COUNT(*) FROM cairn_data WHERE pk = ?1",
+        "SELECT COUNT(*) FROM nostos_data WHERE pk = ?1",
         rusqlite::params![pk],
         |r| r.get(0),
     )
@@ -312,7 +312,7 @@ async fn real_client_reconnect_applies_replayed_gap_including_delete() {
             async move {
                 let c = sql_client().await;
                 c.query_one(
-                    "SELECT count(*) FROM cairn_oplog WHERE pk = $1 AND op = 'delete'",
+                    "SELECT count(*) FROM nostos_oplog WHERE pk = $1 AND op = 'delete'",
                     &[&pk],
                 )
                 .await
@@ -321,7 +321,7 @@ async fn real_client_reconnect_applies_replayed_gap_including_delete() {
             }
         })
         .await,
-        "offline-gap ops never landed in cairn_oplog"
+        "offline-gap ops never landed in nostos_oplog"
     );
 
     // Session 2: reconnect. The client resends its persisted epoch + checkpoint

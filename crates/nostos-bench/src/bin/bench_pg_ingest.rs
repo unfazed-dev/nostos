@@ -106,8 +106,8 @@ const FRAMING: &str = "STAGE MEASUREMENT: real-Postgres logical-replication inge
 /// The publication `docker/pg-init/01-sources.sql` creates (tasks + booking
 /// tables). Preflight fails fast if it is missing — a missing publication must
 /// NOT be silently re-created `FOR ALL TABLES` by the replicator here (that
-/// variant would feed `cairn_oplog` back into replication).
-const PUBLICATION: &str = "cairn_pub";
+/// variant would feed `nostos_oplog` back into replication).
+const PUBLICATION: &str = "nostos_pub";
 
 /// CLI configuration.
 #[derive(Debug, Clone, Parser)]
@@ -157,7 +157,7 @@ struct Config {
     #[arg(
         long,
         env = "NOSTOS_PG_URL",
-        default_value = "postgres://cairn:cairn@localhost:5433/cairn"
+        default_value = "postgres://nostos:nostos@localhost:5433/nostos"
     )]
     pg_url: String,
 }

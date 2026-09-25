@@ -242,7 +242,7 @@ struct VisibleBody {
     title: String,
     body: String,
     category: Option<String>,
-    /// Routing keys handed to the app on tap — `{"cairn_route":
+    /// Routing keys handed to the app on tap — `{"nostos_route":
     /// "/orders/42"}` is the shape that makes a notification open the thing
     /// it is about (ADR-0037 §2 amendment). Absent = an unroutable push,
     /// which is what every caller sent before this field existed.

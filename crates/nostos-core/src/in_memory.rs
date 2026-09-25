@@ -5,7 +5,7 @@
 //! without a SQLite build. The [`InMemoryStorage`] implements [`crate::Storage`]
 //! AND [`crate::Outbox`] with the exact semantics the traits document: atomic
 //! batch apply (all rows + the checkpoint move together), idempotent upsert-by-pk,
-//! monotonic LSN; and a monotonic-id write queue that mirrors `cairn_outbox`.
+//! monotonic LSN; and a monotonic-id write queue that mirrors `nostos_outbox`.
 //!
 //! The data model mirrors what `SqliteStorage` will persist: a row keyed by
 //! `(table, pk)` holding the opaque payload bytes, plus a single checkpoint LSN.

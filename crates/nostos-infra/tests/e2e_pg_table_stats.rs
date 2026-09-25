@@ -15,7 +15,7 @@
 //! ## Fixture
 //!
 //! Two dedicated tables in a throwaway publication
-//! (`cairn_pub_table_stats_ws4`, NOT the shared `cairn_pub`): `stats_analyzed`
+//! (`nostos_pub_table_stats_ws4`, NOT the shared `nostos_pub`): `stats_analyzed`
 //! is `ANALYZE`d after being seeded, `stats_unanalyzed` is left untouched. The
 //! hard assertion is never-negative/never-panic — Postgres may autovacuum the
 //! unanalyzed table before this test runs, so its estimate is allowed to come
@@ -27,11 +27,11 @@ use nostos_application::ports::{TableStat, TableStatsSource};
 use nostos_infra::PgTableStats;
 
 const E2E_FLAG: &str = "NOSTOS_E2E_PG";
-const PUBLICATION: &str = "cairn_pub_table_stats_ws4";
+const PUBLICATION: &str = "nostos_pub_table_stats_ws4";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -45,7 +45,7 @@ async fn sql_client() -> tokio_postgres::Client {
 }
 
 /// Idempotently create two fixture tables + a dedicated throwaway
-/// publication. Reusing the shared `cairn_pub` (scoped to `tasks`) would
+/// publication. Reusing the shared `nostos_pub` (scoped to `tasks`) would
 /// perturb the other e2e suites' event streams.
 async fn ensure_table_stats_probe(sql: &tokio_postgres::Client) {
     sql.batch_execute(

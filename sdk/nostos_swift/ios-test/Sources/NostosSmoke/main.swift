@@ -3,7 +3,7 @@
 // Drives the SAME two-direction round-trip the Rust reference template
 // (`crates/nostos-client/tests/e2e_live_replication.rs`) proves, adapted to
 // Swift + UniFFI:
-//   1. connect() → subscribe("tasks") → run loop applies rows to cairn_data.
+//   1. connect() → subscribe("tasks") → run loop applies rows to nostos_data.
 //   2. POST /push to the spine → server pushes a `tasks` row → poll query()
 //      until the row lands on-device → [swift-e2e] PUSH_OK.
 //   3. SDK write()s `swift-echo` to its durable outbox → the spine's echo
@@ -150,12 +150,12 @@ enum Smoke {
                 {"pk":"swift-push","payload":{"title":"from-server","status":"open","priority":"5"}}
                 """
             httpPush(port: port, body: pushBody)
-            let pushSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='swift-push'"
+            let pushSql = "SELECT pk FROM nostos_data WHERE table_name='tasks' AND pk='swift-push'"
             if pollQueryContains(client, sql: pushSql, needle: "swift-push", timeoutSeconds: 8) {
                 print("[swift-e2e] PUSH_OK")
             } else {
                 let rows = (try? client.query(sql: pushSql)) ?? "<query failed>"
-                print("[swift-e2e] FAIL: swift-push never landed in cairn_data; rows=\(rows)")
+                print("[swift-e2e] FAIL: swift-push never landed in nostos_data; rows=\(rows)")
                 exit(1)
             }
 
@@ -168,7 +168,7 @@ enum Smoke {
                 payloadJson: echoPayload
             )
             print("[swift-e2e] write() id=\(writeId) (swift-echo enqueued)")
-            let echoSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='swift-echo'"
+            let echoSql = "SELECT pk FROM nostos_data WHERE table_name='tasks' AND pk='swift-echo'"
             if pollQueryContains(client, sql: echoSql, needle: "swift-echo", timeoutSeconds: 8) {
                 print("[swift-e2e] ECHO_OK")
             } else {
@@ -195,7 +195,7 @@ enum Smoke {
             // ---- direction 4: signOut wipe (ADR-0029) ----
             // swift-echo (from direction 2) is the principal-A row on disk.
             // signOut() aborts the run loop, awaits quiescence, and wipes
-            // cairn_data + checkpoint + epoch + outbox (the same clear_local_state
+            // nostos_data + checkpoint + epoch + outbox (the same clear_local_state
             // primitive every other SDK calls). To prove the wipe SURVIVES a
             // reopen WITHOUT the still-live spine refilling it, reopen the SAME
             // dbPath against ws://localhost:0 (no server: connect() starts the run
@@ -203,7 +203,7 @@ enum Smoke {
             // NOTHING re-replicates). This is the dead-endpoint trick the Rust
             // `clear_local_state_wipes_on_sign_out` test uses — the "B must not
             // see A's rows" guarantee signout_test.dart lands for Flutter.
-            let aRowSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='swift-echo'"
+            let aRowSql = "SELECT pk FROM nostos_data WHERE table_name='tasks' AND pk='swift-echo'"
             try client.signOut()
             print("[swift-e2e] SIGNOUT_OK (run loop aborted + local state wiped)")
 

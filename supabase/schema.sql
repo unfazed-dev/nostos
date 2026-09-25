@@ -8,7 +8,7 @@
 --
 -- After it runs:
 --   1. 7 tables (tasks, providers, clients, availabilities, appointments,
---      invoices, messages) + the `cairn_pub` publication exist in your Supabase DB.
+--      invoices, messages) + the `nostos_pub` publication exist in your Supabase DB.
 --   2. Point nostos-server at Supabase with the DIRECT connection (NOT the
 --      pooler — logical replication needs a direct connection):
 --        NOSTOS_REPLICATOR=pg \
@@ -20,7 +20,7 @@
 --
 -- Mirrors docker/pg-init/01-sources.sql (schema + publication) + the demo seed
 -- (03-seed-booking.sql). Supabase manages DB roles itself, so the least-priv
--- `cairn_writer` role (02-nostos-role.sql) is omitted — nostos connects as
+-- `nostos_writer` role (02-nostos-role.sql) is omitted — nostos connects as
 -- `postgres` here. For production, create a dedicated REPLICATION role (ADR-0013/0018).
 --
 -- TYPE CHOICE NOTE (write-back safety):
@@ -182,8 +182,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread        ON messages (provider_id, 
 -- The publication is what the replicator subscribes to via logical replication.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'cairn_pub') THEN
-        CREATE PUBLICATION cairn_pub FOR TABLE tasks;
+    IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'nostos_pub') THEN
+        CREATE PUBLICATION nostos_pub FOR TABLE tasks;
     END IF;
 END $$;
 -- Add the booking tables to the publication (idempotent across re-init/re-runs).
@@ -193,9 +193,9 @@ BEGIN
     FOREACH t IN ARRAY ARRAY['providers','clients','availabilities','appointments','invoices','messages'] LOOP
         IF NOT EXISTS (
             SELECT 1 FROM pg_publication_tables
-            WHERE pubname = 'cairn_pub' AND schemaname = 'public' AND tablename = t
+            WHERE pubname = 'nostos_pub' AND schemaname = 'public' AND tablename = t
         ) THEN
-            EXECUTE format('ALTER PUBLICATION cairn_pub ADD TABLE public.%I', t);
+            EXECUTE format('ALTER PUBLICATION nostos_pub ADD TABLE public.%I', t);
         END IF;
     END LOOP;
 END $$;
@@ -273,7 +273,7 @@ INSERT INTO messages (id, provider_id, client_id, sender_type, sender_id, body, 
 ON CONFLICT (id) DO NOTHING;
 
 -- ===========================================================================
--- cairn_oplog — persisted operation log for reconnect resume (ADR-0025 slice 2).
+-- nostos_oplog — persisted operation log for reconnect resume (ADR-0025 slice 2).
 -- Written at the fan-out chokepoint (batched, off the fan-out loop by a
 -- background flush task) and replayed on reconnect from a client's checkpoint
 -- so a resuming client receives missed INSERT/UPDATE/DELETE ops in-window
@@ -284,12 +284,12 @@ ON CONFLICT (id) DO NOTHING;
 -- non-tenant-scoped tables); the (tenant_id, lsn) index is the replay path.
 -- (table_name, pk) supports future compaction (slice 5).
 --
--- NOT IN cairn_pub: this is nostos's internal resume table, not a synced app
+-- NOT IN nostos_pub: this is nostos's internal resume table, not a synced app
 -- table. Publishing it would feed its own writes back through logical
 -- replication as spurious client events (a feedback loop). Keep it out of the
 -- publication.
 -- ===========================================================================
-CREATE TABLE IF NOT EXISTS cairn_oplog (
+CREATE TABLE IF NOT EXISTS nostos_oplog (
     op_id      BIGSERIAL   PRIMARY KEY,
     lsn        BIGINT      NOT NULL,
     table_name TEXT        NOT NULL,
@@ -299,11 +299,11 @@ CREATE TABLE IF NOT EXISTS cairn_oplog (
     tenant_id  TEXT,                                  -- NULL when the row's table has no tenant column
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_cairn_oplog_tenant_lsn ON cairn_oplog (tenant_id, lsn);
-CREATE INDEX IF NOT EXISTS idx_cairn_oplog_table_pk   ON cairn_oplog (table_name, pk);
+CREATE INDEX IF NOT EXISTS idx_nostos_oplog_tenant_lsn ON nostos_oplog (tenant_id, lsn);
+CREATE INDEX IF NOT EXISTS idx_nostos_oplog_table_pk   ON nostos_oplog (table_name, pk);
 
 -- ===========================================================================
--- cairn_push_tokens — push-notification transport-token registry (ADR-0037 §3).
+-- nostos_push_tokens — push-notification transport-token registry (ADR-0037 §3).
 -- Registered via REST (POST /push-tokens) authenticated like /sync; tenant_id
 -- and account_id are stamped SERVER-SIDE from the principal (ADR-0018
 -- discipline — a client-attested tenant on a token row is an
@@ -313,15 +313,15 @@ CREATE INDEX IF NOT EXISTS idx_cairn_oplog_table_pk   ON cairn_oplog (table_name
 -- data to the next user). Pruned on APNs 410 / FCM UNREGISTERED. The
 -- (account_id, tenant_id) index is the offline-account device lookup.
 --
--- NOT in cairn_pub, same as cairn_oplog: nostos-internal table, and publishing
+-- NOT in nostos_pub, same as nostos_oplog: nostos-internal table, and publishing
 -- it would replicate device push tokens through the sync stream.
 -- ===========================================================================
-CREATE TABLE IF NOT EXISTS cairn_push_tokens (
+CREATE TABLE IF NOT EXISTS nostos_push_tokens (
     token      TEXT        PRIMARY KEY,
     platform   TEXT        NOT NULL,                -- 'apns' | 'fcm' | 'webpush'
     account_id TEXT        NOT NULL,
     tenant_id  TEXT        NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_cairn_push_tokens_account
-    ON cairn_push_tokens (account_id, tenant_id);
+CREATE INDEX IF NOT EXISTS idx_nostos_push_tokens_account
+    ON nostos_push_tokens (account_id, tenant_id);

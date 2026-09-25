@@ -3,7 +3,7 @@
 **Status:** Accepted. §Decision-1/3/4 shipped 2026-08-03. **§Decision-2 RESOLVED 2026-08-05:
 ratified "full-wipe is the v1 cross-principal isolation policy"** — the per-principal outbox
 retention recommended below is **deferred**. Rationale: (a) the current full-wipe (`Storage::clear`
-wipes `cairn_data` + checkpoint + outbox in one transaction) *is* the cross-principal isolation —
+wipes `nostos_data` + checkpoint + outbox in one transaction) *is* the cross-principal isolation —
 provably no leak; (b) the marker-specified "outbox-internal principal tag" is **inert on the
 sign-out path** because `Storage::clear` already wipes the outbox in that same transaction, so it
 would ship as unobservable dead code; (c) making per-principal retention *meaningful* requires

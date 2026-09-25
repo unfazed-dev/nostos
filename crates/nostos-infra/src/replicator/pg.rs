@@ -623,7 +623,7 @@ impl PgReplicator {
                     "DATA-LOSS RISK: replication slot was missing or wal_status='lost' \
                      on connect. WAL between the last client-acked LSN and the new \
                      consistent point is unrecoverable. Recreating + re-snapshotting; \
-                     alert on cairn_slot_recreated_total and investigate \
+                     alert on nostos_slot_recreated_total and investigate \
                      max_slot_wal_keep_size / nostos downtime. (ADR-0009)"
                 );
                 self.record_health(SlotHealth::Lost);
@@ -1291,7 +1291,7 @@ impl ReplicatorStream for PgReplicator {
                             slot = %self.cfg.slot,
                             "DATA-LOSS RISK: replication slot dropped or invalidated \
                              mid-stream (SQLSTATE 55000 class). Recreating + re-snapshotting \
-                             on reconnect; alert on cairn_slot_recreated_total. (ADR-0009)"
+                             on reconnect; alert on nostos_slot_recreated_total. (ADR-0009)"
                         );
                         self.record_health(SlotHealth::Lost);
                         self.record_recreate();
@@ -1366,18 +1366,18 @@ mod tests {
     #[test]
     fn parses_libpq_url_with_credentials() {
         let cfg = PgReplicatorConfig::from_url(
-            "postgresql://cairn:cairn@localhost:5433/cairn",
-            "cairn_slot",
-            "cairn_pub",
+            "postgresql://nostos:nostos@localhost:5433/nostos",
+            "nostos_slot",
+            "nostos_pub",
         )
         .unwrap();
         assert_eq!(cfg.host, "localhost");
         assert_eq!(cfg.port, 5433);
-        assert_eq!(cfg.user, "cairn");
-        assert_eq!(cfg.password, "cairn");
-        assert_eq!(cfg.database, "cairn");
-        assert_eq!(cfg.slot, "cairn_slot");
-        assert_eq!(cfg.publication, "cairn_pub");
+        assert_eq!(cfg.user, "nostos");
+        assert_eq!(cfg.password, "nostos");
+        assert_eq!(cfg.database, "nostos");
+        assert_eq!(cfg.slot, "nostos_slot");
+        assert_eq!(cfg.publication, "nostos_pub");
     }
 
     #[test]

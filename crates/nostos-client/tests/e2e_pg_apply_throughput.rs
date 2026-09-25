@@ -73,7 +73,7 @@ fn session_buffer() -> usize {
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -134,7 +134,7 @@ async fn setup_bench_table() {
         );
         ALTER TABLE bench_apply REPLICA IDENTITY FULL;
         DO $$ BEGIN
-            ALTER PUBLICATION cairn_pub ADD TABLE public.bench_apply;
+            ALTER PUBLICATION nostos_pub ADD TABLE public.bench_apply;
         EXCEPTION WHEN duplicate_object THEN NULL; END $$;",
     )
     .await
@@ -145,13 +145,13 @@ async fn setup_bench_table() {
         .expect("truncate bench_apply");
 }
 
-/// Take the bench table back OUT of `cairn_pub` and empty it.
+/// Take the bench table back OUT of `nostos_pub` and empty it.
 ///
 /// # Why this is not optional housekeeping
 ///
 /// Leaving `bench_apply` published is a **cross-suite test-isolation leak that
 /// silently breaks unrelated e2e tests.** This bench leaves ~40k rows behind;
-/// `cairn_pub` is shared, so every later test that opens a FRESH replication
+/// `nostos_pub` is shared, so every later test that opens a FRESH replication
 /// slot snapshots those rows too. Tests with a fixed event budget
 /// (`collect_events(&mut repl, 8, ..)`) then fill that budget with bench rows
 /// before their own row ever arrives, and fail with a message that points at
@@ -170,7 +170,7 @@ async fn setup_bench_table() {
 /// until the next clean run. Upgrade path: a `Drop` guard, which needs a
 /// blocking SQL handle in `Drop`; not worth it until a bench actually panics
 /// here. The cheap manual antidote is one line:
-/// `ALTER PUBLICATION cairn_pub DROP TABLE bench_apply;`
+/// `ALTER PUBLICATION nostos_pub DROP TABLE bench_apply;`
 async fn teardown_bench_table() {
     // Connect defensively like `drop_slot`, NOT via `sql_client()` — that
     // helper `.expect()`s on connect, and a teardown that panics turns a bench
@@ -188,7 +188,7 @@ async fn teardown_bench_table() {
     // so that error would take the TRUNCATE down with it. Discarding each
     // independently means "already unpublished" is simply the state we wanted.
     let _ = c
-        .batch_execute("ALTER PUBLICATION cairn_pub DROP TABLE bench_apply;")
+        .batch_execute("ALTER PUBLICATION nostos_pub DROP TABLE bench_apply;")
         .await;
     let _ = c.batch_execute("TRUNCATE bench_apply;").await;
 }
@@ -251,7 +251,8 @@ async fn real_pg_to_client_apply_sustained_throughput() {
 
     let fanout =
         Arc::new(FanOutService::new(Arc::clone(&store)).with_metrics(Arc::clone(&metrics)));
-    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").expect("valid PG url");
+    let pg_cfg =
+        PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").expect("valid PG url");
     let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
     let fanout_drv = Arc::clone(&fanout);
     let _driver = tokio::spawn(async move {
@@ -306,7 +307,7 @@ async fn real_pg_to_client_apply_sustained_throughput() {
     // (observed: matched=29009 delivered=1000 on a 28k-row table). The
     // measured window below must be PURE live path, so wait until the
     // snapshot fully drains (client row total stable across polls).
-    let count_all_sql: &'static str = "SELECT count(*) FROM cairn_data";
+    let count_all_sql: &'static str = "SELECT count(*) FROM nostos_data";
     let mut prev_total: i64 = -1;
     let settle_deadline = Instant::now() + Duration::from_mins(3);
     loop {
@@ -353,7 +354,7 @@ async fn real_pg_to_client_apply_sustained_throughput() {
     // events from other tenants' leftovers sharing the tasks publication.
     let deadline = Instant::now() + Duration::from_mins(5);
     let count_sql = format!(
-        "SELECT count(*) FROM cairn_data WHERE payload LIKE '%\"title\":\"{title_prefix}%'"
+        "SELECT count(*) FROM nostos_data WHERE payload LIKE '%\"title\":\"{title_prefix}%'"
     );
     let mut db_count: i64 = 0;
     loop {
@@ -490,7 +491,7 @@ async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
 
     let fanout =
         Arc::new(FanOutService::new(Arc::clone(&store)).with_metrics(Arc::clone(&metrics)));
-    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), &slot, "cairn_pub").expect("url");
+    let pg_cfg = PgReplicatorConfig::from_url(&pg_url(), &slot, "nostos_pub").expect("url");
     let mut repl = PgReplicator::new(pg_cfg).with_metrics(Arc::clone(&metrics));
     let fanout_drv = Arc::clone(&fanout);
     tokio::spawn(async move {
@@ -554,7 +555,7 @@ async fn resync_signal_recovers_capacity_shed_at_default_buffer() {
     // Eventual correctness: count reaches N even though the burst shed.
     let deadline = Instant::now() + Duration::from_mins(5);
     let count_sql = format!(
-        "SELECT count(*) FROM cairn_data WHERE payload LIKE '%\"title\":\"{title_prefix}%'"
+        "SELECT count(*) FROM nostos_data WHERE payload LIKE '%\"title\":\"{title_prefix}%'"
     );
     let mut db_count: i64;
     let mut next_progress = Instant::now();

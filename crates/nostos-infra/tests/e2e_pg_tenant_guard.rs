@@ -9,7 +9,7 @@
 //! make pg-up; NOSTOS_E2E_PG=1 cargo test -p nostos-infra --features pg --test e2e_pg_tenant_guard -- --nocapture --test-threads=1
 //!
 //! Self-skips when NOSTOS_E2E_PG is unset — the suite's shared convention.
-//! Uses dedicated throwaway tables (NOT the shared cairn_pub fixtures) so
+//! Uses dedicated throwaway tables (NOT the shared nostos_pub fixtures) so
 //! the classification queries touch nothing other suites assert on.
 
 #![cfg(feature = "pg")]
@@ -20,7 +20,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {

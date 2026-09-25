@@ -105,7 +105,7 @@ atlet `sessions` sort uses `watchSql` for exactly this reason — the structured
   `orderBy: String?` → `orderBy: List<Order>?`. The pilot app and the facade
   tests are the only callers; both migrate with this change. The other eight
   SDKs adopt the same shape when their wave lands.
-- Reads remain over **SQLite views on `cairn_data`** (ADR-0028) — never
+- Reads remain over **SQLite views on `nostos_data`** (ADR-0028) — never
   materialized typed tables.
 - `writeBatch` entry atomicity is REAL: `NostosHandle::write_batch` (FFI) +
   `Outbox::enqueue_batch` (trait, default sequential) + `SqliteStorage`

@@ -113,7 +113,7 @@
   <h2>2. Meet the cast</h2>
   <div class="grid">
     <div class="card"><div class="em">🗄️</div><b>Postgres</b><small>The big fridge in the kitchen. The real, permanent data lives here. On Supabase it already speaks HTTP, so a phone can talk to it without anything in between.</small></div>
-    <div class="card"><div class="em">📒</div><b>The change log</b><small>A plain table — <code>cairn.changes</code>. A trigger appends to it inside the <i>same transaction</i> as your write, so a change and the note about it are never out of step.</small></div>
+    <div class="card"><div class="em">📒</div><b>The change log</b><small>A plain table — <code>nostos.changes</code>. A trigger appends to it inside the <i>same transaction</i> as your write, so a change and the note about it are never out of step.</small></div>
     <div class="card"><div class="em">🔔</div><b>Realtime</b><small>The doorbell. It rings "something changed for you" — it doesn't carry the data. The phone hears the ring and goes and reads the log itself.</small></div>
     <div class="card"><div class="em">📨</div><b>Push (optional)</b><small>The doorbell for an app that isn't running. Realtime needs an open app; a silent FCM/APNs push wakes a closed one for a few seconds so it can read the log.</small></div>
     <div class="card"><div class="em">📱</div><b>SQLite + outbox</b><small>Your snack drawer. Your rows, plus a queue of your own writes that haven't reached the fridge yet.</small></div>
@@ -202,16 +202,16 @@ nostos.<span class="f">watch</span>(<span class="s">'todos'</span>).<span class=
   <div class="truth">
     <div><b>“I need a server. And Docker.”</b> — Not in direct mode. The phone talks to Postgres through the HTTP API Supabase already gives you. What you deploy is <i>SQL</i>: <code>nostos link --mode direct</code> writes it, you apply it once, and <code>nostos doctor --mode direct</code> tells you whether the deployed schema, the grants and the policies actually match.</div>
     <div><b>“No internet means no app.”</b> — Wrong, and this is the whole point. Writes land on your phone's disk <i>first</i> and return immediately. The UI never waits for Wi-Fi. The change sits in an outbox until the world comes back, then leaves in order.</div>
-    <div><b>“A phone that's been off for a month silently loses rows.”</b> — No. The log is kept for a retention window and pruned behind it. A phone resuming from a horizon that's been pruned away gets a <b>410 Gone</b> — not a short answer it would mistake for "nothing changed" — and re-reads the whole picture with <code>cairn_snapshot()</code>. Loud, and it heals itself. (Try 🧹 Prune while a phone is in airplane mode.)</div>
-    <div><b>“A closed app is stale until you open it.”</b> — Only with push off. Turn it on and a database trigger calls a tiny Edge Function after each commit, which sends a <i>silent</i> push: <code>{cairn: "ring"}</code>, no rows. The phone wakes for a few seconds, pulls from Postgres like it always does, and goes back to sleep. Your data never travels through Apple or Google — only the ring does. (Try 💤 Close app on B, then add a to-do on A.)</div>
+    <div><b>“A phone that's been off for a month silently loses rows.”</b> — No. The log is kept for a retention window and pruned behind it. A phone resuming from a horizon that's been pruned away gets a <b>410 Gone</b> — not a short answer it would mistake for "nothing changed" — and re-reads the whole picture with <code>nostos_snapshot()</code>. Loud, and it heals itself. (Try 🧹 Prune while a phone is in airplane mode.)</div>
+    <div><b>“A closed app is stale until you open it.”</b> — Only with push off. Turn it on and a database trigger calls a tiny Edge Function after each commit, which sends a <i>silent</i> push: <code>{nostos: "ring"}</code>, no rows. The phone wakes for a few seconds, pulls from Postgres like it always does, and goes back to sleep. Your data never travels through Apple or Google — only the ring does. (Try 💤 Close app on B, then add a to-do on A.)</div>
   </div>
 
   <h2>6. What you'd actually need to run this</h2>
   <div class="grid">
     <div class="card"><b>① A Supabase project</b><small>or anything else serving PostgREST + Realtime over your Postgres. Nothing to install on it.</small></div>
-    <div class="card"><b>② One SQL file, applied once</b><small><code>nostos link --mode direct</code> generates <code>.nostos/direct.sql</code> — the log table, the triggers, the RLS policies, and the <code>cairn_pull</code> / <code>cairn_snapshot</code> functions. Re-runnable.</small></div>
+    <div class="card"><b>② One SQL file, applied once</b><small><code>nostos link --mode direct</code> generates <code>.nostos/direct.sql</code> — the log table, the triggers, the RLS policies, and the <code>nostos_pull</code> / <code>nostos_snapshot</code> functions. Re-runnable.</small></div>
     <div class="card"><b>③ Your Flutter app</b><small><code>flutter pub add nostos_flutter</code>, then those ten lines. Nothing else runs anywhere.</small></div>
-    <div class="card"><b>④ Push, if you want it</b><small><code>nostos link --mode direct --push &lt;function url&gt;</code> adds the wake trigger; deploy <code>supabase/functions/cairn-push</code> with your FCM key as a secret; call <code>db.registerPushToken('fcm', token)</code> in the app. The key lives in the function — never on the phone.</small></div>
+    <div class="card"><b>④ Push, if you want it</b><small><code>nostos link --mode direct --push &lt;function url&gt;</code> adds the wake trigger; deploy <code>supabase/functions/nostos-push</code> with your FCM key as a secret; call <code>db.registerPushToken('fcm', token)</code> in the app. The key lives in the function — never on the phone.</small></div>
   </div>
   <p class="muted">Heads-up: Nostos is <b>alpha</b> right now — great for learning and side projects, not for your bank.</p>
 
@@ -225,7 +225,7 @@ nostos.<span class="f">watch</span>(<span class="s">'todos'</span>).<span class=
   <p>The other reason is scale: one Rust process fanning out to many clients does work a per-device HTTP pull cannot. That is a measured claim with rules attached — see <code>docs/BENCHMARK-METHODOLOGY.md</code> — and it is not the claim being made on this page.</p>
   <p class="muted">One thing that is genuinely different: in server mode the process must stay awake. It holds a Postgres replication slot, and while it sleeps Postgres piles up WAL for it. Direct mode has no slot to hold — the log is an ordinary table with an ordinary retention window, which is why a phone can be away for a week and the failure is a 410 rather than a hole.</p>
 
-  <footer>Built from the Nostos repo's own docs: README · docs/QUICKSTART.md · docs/plans/direct-mode-sync-protocol.md · ADR-0045 · <code>.nostos/direct.sql</code> · <code>crates/nostos-client/src/direct.rs</code> · <code>supabase/functions/cairn-push</code> · docs/plans/direct-mode-push-and-presence.md. Last revised 2026-09-23, when direct-mode push reached the Flutter SDK.</footer>
+  <footer>Built from the Nostos repo's own docs: README · docs/QUICKSTART.md · docs/plans/direct-mode-sync-protocol.md · ADR-0045 · <code>.nostos/direct.sql</code> · <code>crates/nostos-client/src/direct.rs</code> · <code>supabase/functions/nostos-push</code> · docs/plans/direct-mode-push-and-presence.md. Last revised 2026-09-23, when direct-mode push reached the Flutter SDK.</footer>
 </div>
 
 <script>
@@ -328,7 +328,7 @@ function render(){
   $('#puPill').className = 'pill ' + (S.pushOn ? 'on' : 'off');
   $('#btnPush').textContent = S.pushOn ? 'Turn push off' : '📨 Turn push on';
   $('#puMsg').textContent = S.pushOn
-    ? 'After each commit a trigger calls the cairn-push Edge Function, which sends closed apps a silent {cairn: "ring"}.'
+    ? 'After each commit a trigger calls the nostos-push Edge Function, which sends closed apps a silent {nostos: "ring"}.'
     : 'Opt-in. Realtime only reaches apps that are open — a closed app waits until it is opened.';
   $('#rtPill').textContent = S.rtUp ? 'ringing' : 'DOWN';
   $('#rtPill').className = 'pill ' + (S.rtUp ? 'on' : 'off');
@@ -375,18 +375,18 @@ async function pull(p){
 
   // A device that has never synced cannot reach rows older than the log.
   if (ph.horizon === 0){
-    await packet($('#n'+p), $('#nPg'), 'cairn_snapshot()', '#a78bfa', 420);
+    await packet($('#n'+p), $('#nPg'), 'nostos_snapshot()', '#a78bfa', 420);
     ph.rows = S.db.map(r => ({ id: r.id, title: r.title }));
     ph.horizon = S.nextXid - 1;
     render();
-    log(`   🆕 <b>${p}</b> has never synced, so it bootstraps with <code>cairn_snapshot()</code>: ${ph.rows.length} row(s), then follows the log from #${ph.horizon}. The log only knows what changed since the trigger was installed — everything older arrives this way or not at all.`, 'good');
+    log(`   🆕 <b>${p}</b> has never synced, so it bootstraps with <code>nostos_snapshot()</code>: ${ph.rows.length} row(s), then follows the log from #${ph.horizon}. The log only knows what changed since the trigger was installed — everything older arrives this way or not at all.`, 'good');
     return;
   }
 
   // Resuming from a horizon the server has already pruned past.
   if (ph.horizon < S.prunedBelow){
     log(`   ⛔ <b>${p}</b> asked for everything after #${ph.horizon}, but the log is pruned below #${S.prunedBelow+1} → <b>410 Gone</b>. Not a short answer it could mistake for "nothing new".`, 'warn');
-    await packet($('#n'+p), $('#nPg'), 'cairn_snapshot()', '#a78bfa', 420);
+    await packet($('#n'+p), $('#nPg'), 'nostos_snapshot()', '#a78bfa', 420);
     ph.rows = S.db.map(r => ({ id: r.id, title: r.title }));
     ph.horizon = S.nextXid - 1;
     render();
@@ -396,7 +396,7 @@ async function pull(p){
 
   const missing = S.clog.filter(e => e.xid > ph.horizon);
   if (!missing.length) return;
-  await packet($('#n'+p), $('#nPg'), `cairn_pull(#${ph.horizon})`, '#a78bfa', 420);
+  await packet($('#n'+p), $('#nPg'), `nostos_pull(#${ph.horizon})`, '#a78bfa', 420);
   for (const e of missing){
     if (!ph.rows.some(r => r.id === e.id)) ph.rows.push({ id: e.id, title: e.title });
     ph.horizon = e.xid;
@@ -425,9 +425,9 @@ async function wake(p){
     log(`   💤 <b>${p}</b>'s app is closed, so there's no Realtime socket to ring, and push is off. It catches up the moment it's opened.`, 'warn');
     return;
   }
-  await packet($('#nPg'), $('#nPush'), 'pg_net → cairn-push', '#34d399', 420);
-  log(`   ⚡ After the commit, a trigger on the change log posted <code>{scope}</code> to the <code>cairn-push</code> Edge Function. It holds the FCM key; the phone never does. (At most one push per user every 30 s — bursts don't spam.)`);
-  await packet($('#nPush'), $('#n'+p), '📨 {cairn:"ring"}', '#34d399', 460);
+  await packet($('#nPg'), $('#nPush'), 'pg_net → nostos-push', '#34d399', 420);
+  log(`   ⚡ After the commit, a trigger on the change log posted <code>{scope}</code> to the <code>nostos-push</code> Edge Function. It holds the FCM key; the phone never does. (At most one push per user every 30 s — bursts don't spam.)`);
+  await packet($('#nPush'), $('#n'+p), '📨 {nostos:"ring"}', '#34d399', 460);
   log(`   📨 <b>${p}</b> got a <i>silent</i> push via FCM/APNs. Like the Realtime ring it carries no rows — Apple and Google never see your data.`);
   await pull(p);
   log(`   😴 <b>${p}</b> woke for a few seconds in the background, pulled, and went back to sleep. Open it on the train with no signal: the row is already there.`, 'good');
@@ -505,7 +505,7 @@ const EXPLAIN = [
   "<b>Nostos.direct()</b> — the whole setup. No URL of yours, no process of yours: the phone will talk to Supabase's own HTTP API. There is no <code>connect()</code> handshake to wait on — the first sync is just an HTTP call.",
   "<b>supabaseUrl + anonKey</b> — the publishable key, the same one your web app ships. It is not a secret and it grants nothing on its own; row-level security on each table is what decides what this device can read.",
   "<b>scope + token</b> — the signed-in user's JWT, and the name of the doorbell channel for their rows (<code>sub:&lt;user id&gt;</code>). The database checks the token on every single call; the phone is never trusted to filter its own data.",
-  "<b>subscribe()</b> — 'I care about the todos table.' On a device that has never synced this bootstraps from <code>cairn_snapshot()</code> — a full, consistent picture — and then follows the change log from that picture's horizon.",
+  "<b>subscribe()</b> — 'I care about the todos table.' On a device that has never synced this bootstraps from <code>nostos_snapshot()</code> — a full, consistent picture — and then follows the change log from that picture's horizon.",
   "<b>watch()</b> — a Dart Stream of the whole current table. It fires once immediately from local SQLite (so your UI has data before the network answers), then again after every change lands.",
   "<b>setState()</b> — plain old Flutter. This is the punchline: your widget code has no idea a network exists. It's just a list that changes.",
   "That's the whole read path.",

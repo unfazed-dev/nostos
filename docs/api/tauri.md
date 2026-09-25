@@ -1,4 +1,4 @@
-# Tauri — `tauri-plugin-cairn`
+# Tauri — `tauri-plugin-nostos`
 
 Extracted from `sdk/nostos_tauri/src/lib.rs`, `build.rs`, and `permissions/` on 2026-07-30.
 Index: [`README.md`](README.md).
@@ -11,12 +11,12 @@ reaches it through `invoke`.
 ```rust
 // src-tauri/src/lib.rs
 tauri::Builder::default()
-    .plugin(tauri_plugin_cairn::init())
+    .plugin(tauri_plugin_nostos::init())
 ```
 
 ## Commands
 
-Five, namespaced `plugin:cairn|<command>`:
+Five, namespaced `plugin:nostos|<command>`:
 
 | Command | Arguments | Returns |
 |---|---|---|
@@ -29,15 +29,15 @@ Five, namespaced `plugin:cairn|<command>`:
 ```js
 import { invoke } from "@tauri-apps/api/core";
 
-await invoke("plugin:cairn|connect", {
-  url: "ws://127.0.0.1:8800/sync", token: null, dbPath: "cairn.db",
+await invoke("plugin:nostos|connect", {
+  url: "ws://127.0.0.1:8800/sync", token: null, dbPath: "nostos.db",
 });
-await invoke("plugin:cairn|subscribe", { table: "tasks" });
-await invoke("plugin:cairn|write", {
+await invoke("plugin:nostos|subscribe", { table: "tasks" });
+await invoke("plugin:nostos|write", {
   table: "tasks", op: "upsert", pk: "1", payloadJson: JSON.stringify({ title: "buy milk" }),
 });
-const rows = JSON.parse(await invoke("plugin:cairn|query", { sql: "SELECT * FROM tasks" }));
-const lsn = await invoke("plugin:cairn|checkpoint");
+const rows = JSON.parse(await invoke("plugin:nostos|query", { sql: "SELECT * FROM tasks" }));
+const lsn = await invoke("plugin:nostos|checkpoint");
 ```
 
 ### Argument names are camelCase, and it matters

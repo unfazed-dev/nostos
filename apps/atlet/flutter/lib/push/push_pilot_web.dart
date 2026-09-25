@@ -1,4 +1,4 @@
-/// Web arm of the Atlet push pilot — raw Web Push over cairn's own rail
+/// Web arm of the Atlet push pilot — raw Web Push over nostos's own rail
 /// (ADR-0037 §1: direct VAPID, no Firebase intermediary on the web).
 ///
 /// Compiled ONLY on web: push_pilot.dart's conditional import routes here via

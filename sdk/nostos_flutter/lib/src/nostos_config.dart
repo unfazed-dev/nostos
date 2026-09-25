@@ -17,7 +17,7 @@ import 'package:flutter/services.dart' show rootBundle;
 ///     "url": "https://xyz.supabase.co",
 ///     "anon_key": "eyJ..."
 ///   },
-///   "sqlite_filename": "cairn.sqlite"        // optional — default shown
+///   "sqlite_filename": "nostos.sqlite"        // optional — default shown
 /// }
 /// ```
 ///
@@ -41,7 +41,7 @@ class NostosConfig {
     required this.url,
     this.supabaseUrl,
     this.supabaseAnonKey,
-    this.sqliteFilename = 'cairn.sqlite',
+    this.sqliteFilename = 'nostos.sqlite',
   });
 
   /// Parse a decoded `nostos.json` map. Throws [FormatException] with a
@@ -84,7 +84,7 @@ class NostosConfig {
         );
       }
     }
-    final filename = json['sqlite_filename'] as String? ?? 'cairn.sqlite';
+    final filename = json['sqlite_filename'] as String? ?? 'nostos.sqlite';
     return NostosConfig(
       url: url,
       supabaseUrl: supabaseUrl,
@@ -123,7 +123,7 @@ class NostosConfig {
   final String? supabaseAnonKey;
 
   /// Local SQLite filename, joined onto the directory the app passes to
-  /// [NostosDatabase.open] (`sqliteDir`). Default `cairn.sqlite`.
+  /// [NostosDatabase.open] (`sqliteDir`). Default `nostos.sqlite`.
   final String sqliteFilename;
 
   /// Whether this config carries Supabase-cloud credentials.

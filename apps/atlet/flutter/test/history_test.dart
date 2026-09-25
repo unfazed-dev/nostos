@@ -142,7 +142,7 @@ void main() {
       expect(find.byKey(const Key('history-detail-screen')), findsOneWidget);
       // The payload the smoke test reads, on screen with its routing keys.
       expect(
-        find.textContaining('"cairn_route": "/history/e2"'),
+        find.textContaining('"nostos_route": "/history/e2"'),
         findsOneWidget,
       );
     });

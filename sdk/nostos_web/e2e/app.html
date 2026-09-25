@@ -135,7 +135,7 @@
           };
           const { onWake, ...persist } = full;
           localStorage.setItem(
-            "cairn:experimental:webpush",
+            "nostos:experimental:webpush",
             JSON.stringify(persist),
           );
           return mod.enableWebPush(full);
@@ -154,7 +154,7 @@
           try {
             for (let i = localStorage.length - 1; i >= 0; i--) {
               const key = localStorage.key(i);
-              if (key && key.startsWith("cairn:checkpoint:")) {
+              if (key && key.startsWith("nostos:checkpoint:")) {
                 localStorage.removeItem(key);
               }
             }
@@ -197,7 +197,7 @@
       // absent: the default remains untouched for every other embedder/spec.
       (async () => {
         try {
-          const raw = localStorage.getItem("cairn:experimental:webpush");
+          const raw = localStorage.getItem("nostos:experimental:webpush");
           if (raw) {
             const mod = await import("/push.js");
             await mod.enableWebPush({

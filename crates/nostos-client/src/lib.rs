@@ -11,7 +11,7 @@
 //! ## What's here
 //!
 //! - [`sqlite::SqliteStorage`] — real `rusqlite` persistence: opaque row bytes
-//!   per `(table, pk)` + a `cairn_meta` checkpoint, applied atomically.
+//!   per `(table, pk)` + a `nostos_meta` checkpoint, applied atomically.
 //! - [`client::SyncClient`] — the tokio orchestrator: subscribe with the durable
 //!   `resume_lsn`, drive the apply engine, `Ack` each commit, reconnect with
 //!   backoff.

@@ -29,11 +29,11 @@ fn default_url_env() -> String {
 }
 
 fn default_publication() -> String {
-    "cairn_pub".to_string()
+    "nostos_pub".to_string()
 }
 
 fn default_slot() -> String {
-    "cairn_slot".to_string()
+    "nostos_slot".to_string()
 }
 
 fn default_bind() -> String {
@@ -387,8 +387,8 @@ mod tests {
         let text = "[sync]\ntables = [\"tasks\"]\n";
         let cfg: NostosConfig = toml::from_str(text).unwrap();
         assert_eq!(cfg.sync.tenant_column, "org_id");
-        assert_eq!(cfg.db.publication, "cairn_pub");
-        assert_eq!(cfg.db.slot, "cairn_slot");
+        assert_eq!(cfg.db.publication, "nostos_pub");
+        assert_eq!(cfg.db.slot, "nostos_slot");
         assert_eq!(cfg.server.bind, "0.0.0.0:8800");
         assert!(cfg.supabase.is_none());
     }

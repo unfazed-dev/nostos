@@ -269,9 +269,9 @@ void main() {
     });
 
     test('sums all regular file sizes under dbDir', () async {
-      await File('${tempDir.path}/cairn.sqlite')
+      await File('${tempDir.path}/nostos.sqlite')
           .writeAsBytes(List.filled(100, 0));
-      await File('${tempDir.path}/cairn.sqlite-wal')
+      await File('${tempDir.path}/nostos.sqlite-wal')
           .writeAsBytes(List.filled(25, 0));
 
       final record = await runner.dbBytes(tempDir.path);
@@ -281,9 +281,9 @@ void main() {
     });
 
     test('records wal journal mode when a -wal sidecar is present', () async {
-      await File('${tempDir.path}/cairn_direct.sqlite')
+      await File('${tempDir.path}/nostos_direct.sqlite')
           .writeAsBytes(List.filled(10, 0));
-      await File('${tempDir.path}/cairn_direct.sqlite-wal')
+      await File('${tempDir.path}/nostos_direct.sqlite-wal')
           .writeAsBytes(List.filled(5, 0));
 
       final record = await runner.dbBytes(tempDir.path);
@@ -294,7 +294,7 @@ void main() {
     test(
       'records a non-wal journal mode when no -wal sidecar exists',
       () async {
-        await File('${tempDir.path}/cairn.sqlite')
+        await File('${tempDir.path}/nostos.sqlite')
             .writeAsBytes(List.filled(10, 0));
 
         final record = await runner.dbBytes(tempDir.path);
@@ -317,7 +317,7 @@ void main() {
         final subDir = Directory('${tempDir.path}/nested')..createSync();
         await File('${subDir.path}/extra.sqlite')
             .writeAsBytes(List.filled(50, 0));
-        await File('${tempDir.path}/cairn.sqlite')
+        await File('${tempDir.path}/nostos.sqlite')
             .writeAsBytes(List.filled(50, 0));
 
         final record = await runner.dbBytes(tempDir.path);

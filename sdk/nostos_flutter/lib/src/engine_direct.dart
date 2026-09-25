@@ -32,7 +32,7 @@ class DirectNostosEngine implements NostosEngine {
   /// Realtime channel this device may join — `sub:<user-uuid>` for a
   /// user-scoped app.
   ///
-  /// [counterFields] maps a table to the column `cairn_increment` should add
+  /// [counterFields] maps a table to the column `nostos_increment` should add
   /// to, and is what makes [counterIncrement] expressible: server mode gets
   /// that column from `NOSTOS_COUNTER_COLUMNS`, and direct mode has no server to
   /// read it from, so the app declares it here.
@@ -79,7 +79,7 @@ class DirectNostosEngine implements NostosEngine {
       throw UnsupportedError(
         'direct mode: OR-set tables (${orSetTables.join(", ")}) need the '
         "server's add-wins merge. Only counters are serializable without one "
-        '(cairn_increment).',
+        '(nostos_increment).',
       );
     }
     return _handle.start(scope: _scope).map(_mapState);
@@ -180,7 +180,7 @@ class DirectNostosEngine implements NostosEngine {
       throw StateError(
         'counter table "$table" was not declared: pass '
         'counterFields: {"$table": "<column>"} to DirectNostosEngine.connect. '
-        'Without the column name cairn_increment has nothing to add to.',
+        'Without the column name nostos_increment has nothing to add to.',
       );
     }
     final id = await _handle.increment(

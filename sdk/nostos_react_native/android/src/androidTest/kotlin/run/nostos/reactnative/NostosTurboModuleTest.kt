@@ -131,7 +131,7 @@ class NostosTurboModuleTest {
      * two-direction round-trip `nostos_kotlin`'s
      * `live_connect_push_echo_roundTrip` proves, but through the TurboModule:
      *
-     *   1. connect() → subscribe("tasks") → run loop applies rows to cairn_data.
+     *   1. connect() → subscribe("tasks") → run loop applies rows to nostos_data.
      *   2. POST /push to the host-side spine → server pushes a `tasks` row →
      *      poll query() until it lands → [rn-e2e] PUSH_OK.
      *   3. TurboModule write()s `rn-echo` → spine echo WriteBack re-emits it
@@ -179,7 +179,7 @@ class NostosTurboModuleTest {
         // single /push that races the subscribe is missed, not queued. Same
         // cold-start race nostos_kotlin's test handles.
         val pushBody = """{"pk":"rn-push","payload":{"title":"from-server","status":"open","priority":"5"}}"""
-        val pushSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='rn-push'"
+        val pushSql = "SELECT pk FROM nostos_data WHERE table_name='tasks' AND pk='rn-push'"
         val pushDeadline = System.currentTimeMillis() + 15_000L
         var pushOk = false
         var pushRows = ""
@@ -196,14 +196,14 @@ class NostosTurboModuleTest {
             }
             pushRows = runCatching { module.querySync(pushSql) }.getOrDefault("<query failed>")
         }
-        assertTrue("[rn-e2e] rn-push never landed in cairn_data; rows=$pushRows", pushOk)
+        assertTrue("[rn-e2e] rn-push never landed in nostos_data; rows=$pushRows", pushOk)
         Log.i("NostosTurboModuleTest", "[rn-e2e] PUSH_OK")
 
         // ---- direction 2: client WRITE → server echo → on-device query ----
         val echoPayload = """{"title":"from-rn","status":"open","priority":"7"}"""
         val writeId = module.writeSync("tasks", "upsert", "rn-echo", echoPayload)
         Log.i("NostosTurboModuleTest", "[rn-e2e] write() id=$writeId (rn-echo enqueued)")
-        val echoSql = "SELECT pk FROM cairn_data WHERE table_name='tasks' AND pk='rn-echo'"
+        val echoSql = "SELECT pk FROM nostos_data WHERE table_name='tasks' AND pk='rn-echo'"
         val echoOk = pollQueryContains(module, echoSql, "rn-echo", timeoutMillis = 8000L)
         val echoRows = runCatching { module.querySync(echoSql) }.getOrDefault("<query failed>")
         assertTrue("[rn-e2e] rn-echo never echoed back; rows=$echoRows", echoOk)

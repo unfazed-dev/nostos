@@ -1,11 +1,11 @@
 import 'adapters/nostos_adapter.dart';
 import 'adapters/sync_adapter.dart';
 
-/// Which Nostos client is live. `cairnDirect` is the same engine with no
+/// Which Nostos client is live. `nostosDirect` is the same engine with no
 /// `nostos-server` on the other end — the device syncs with Supabase itself
-/// (ADR-0045) — so it is a second engine here, not a flag on [Engine.cairn]:
+/// (ADR-0045) — so it is a second engine here, not a flag on [Engine.nostos]:
 /// the two hold different databases and must never be live at once.
-enum Engine { cairn, cairnDirect }
+enum Engine { nostos, nostosDirect }
 
 /// Session/env parameters needed to bring an adapter up from cold — mirrors
 /// [SyncAdapter.init]'s named parameters as one value so callers don't have
@@ -56,8 +56,8 @@ class EngineRegistry {
   Engine? get activeEngine => _activeEngine;
 
   SyncAdapter? get current => switch (_activeEngine) {
-    Engine.cairn => _nostosAdapter,
-    Engine.cairnDirect => _nostosDirectAdapter,
+    Engine.nostos => _nostosAdapter,
+    Engine.nostosDirect => _nostosDirectAdapter,
     null => null,
   };
 
@@ -80,8 +80,8 @@ class EngineRegistry {
       );
     }
     final adapter = switch (engine) {
-      Engine.cairn => _nostosFactory(),
-      Engine.cairnDirect => _nostosDirectFactory(),
+      Engine.nostos => _nostosFactory(),
+      Engine.nostosDirect => _nostosDirectFactory(),
     };
     _setSlot(engine, adapter);
     await adapter.init(
@@ -95,9 +95,9 @@ class EngineRegistry {
 
   void _setSlot(Engine engine, SyncAdapter adapter) {
     switch (engine) {
-      case Engine.cairn:
+      case Engine.nostos:
         _nostosAdapter = adapter;
-      case Engine.cairnDirect:
+      case Engine.nostosDirect:
         _nostosDirectAdapter = adapter;
     }
     _activeEngine = engine;

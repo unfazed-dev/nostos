@@ -153,7 +153,7 @@ impl NostosError {
 ///
 /// # Snapshot shape
 /// `json` is a JSON array-of-objects string: one object per row of the watched
-/// table's rows in `cairn_data`, full snapshot per tick (NOT a diff —
+/// table's rows in `nostos_data`, full snapshot per tick (NOT a diff —
 /// self-healing on lag, mirrors Flutter's `emit_snapshot`).
 #[uniffi::export(with_foreign)]
 pub trait SnapshotSink: Send + Sync {
@@ -656,7 +656,7 @@ impl NostosClient {
     ///    then **await** each handle. `abort()` alone only requests
     ///    cancellation; the task keeps applying frames until its next `.await`.
     ///    Awaiting confirms it has STOPPED before we touch storage — a
-    ///    post-clear apply/flush frame re-populates `cairn_data` / re-queues
+    ///    post-clear apply/flush frame re-populates `nostos_data` / re-queues
     ///    the outbox, and "half a clear is a cross-user leak" (ADR-0029; the
     ///    `SyncClient::clear_local_state` docstring mandates this exact order).
     /// 2. `SyncClient::clear_local_state()` — wipes rows AND the outbox AND
@@ -827,16 +827,16 @@ impl NostosClient {
 
 /// Read the full row snapshot for `table` as a JSON array-of-objects string.
 ///
-/// Queries `cairn_data` directly (NOT a `SELECT * FROM {table}` VIEW): the
+/// Queries `nostos_data` directly (NOT a `SELECT * FROM {table}` VIEW): the
 /// `tasks`/etc. VIEW is only created by `SqliteStorage::apply_schema` once the
-/// server has shipped a schema, but `cairn_data` exists on every store right
-/// after `open()` (`CREATE TABLE IF NOT EXISTS cairn_data` in
+/// server has shipped a schema, but `nostos_data` exists on every store right
+/// after `open()` (`CREATE TABLE IF NOT EXISTS nostos_data` in
 /// `nostos-client/src/sqlite.rs`). So this snapshot succeeds on a fresh/empty
 /// store (returning `"[]"`) as well as a populated one — the correct
 /// offline-first UX. `table` is the session-validated value (the caller's
 /// `watch()` already confirmed it equals the fixed session table), so the
 /// interpolation is injection-safe; the canonical per-table snapshot query is
-/// `SELECT pk, payload FROM cairn_data WHERE table_name = ?1 ...`
+/// `SELECT pk, payload FROM nostos_data WHERE table_name = ?1 ...`
 /// (nostos-client/src/sqlite.rs).
 ///
 /// Mirrors `nostos_kotlin`'s `snapshot_json` verbatim (commit 41265fd).
@@ -845,7 +845,7 @@ async fn snapshot_json(
     table: &str,
 ) -> Result<String, NostosError> {
     let sql =
-        format!("SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC");
+        format!("SELECT pk, payload FROM nostos_data WHERE table_name = '{table}' ORDER BY pk ASC");
     let rows = client
         .with_storage(move |s| s.query(&sql))
         .await
@@ -1136,7 +1136,7 @@ mod tests {
 
     /// REACTIVITY PROOF (host, no device/.NET runtime): `watch()` emits the
     /// initial snapshot, and a local `write()` — which applies a row to
-    /// `cairn_data` AND fires the change broadcast (nostos-client/client.rs
+    /// `nostos_data` AND fires the change broadcast (nostos-client/client.rs
     /// invariant `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
     /// `rows_applied == 1`) — causes the pump to emit a NEW snapshot, WITHOUT
     /// the test polling a timer. `recv_timeout` blocks on the callback
@@ -1165,7 +1165,7 @@ mod tests {
         // snapshot synchronously before returning.
         client.watch("tasks".into(), sink).expect("watch");
 
-        // (1) Initial snapshot delivered — empty store → "[]" (cairn_data has
+        // (1) Initial snapshot delivered — empty store → "[]" (nostos_data has
         // no rows for tasks yet). No polling: blocking event wait, 5s ceiling.
         let initial = rx
             .recv_timeout(Duration::from_secs(5))
@@ -1175,7 +1175,7 @@ mod tests {
             "fresh store tasks snapshot should be empty array"
         );
 
-        // (2) Local write applies a row to cairn_data AND fires the change
+        // (2) Local write applies a row to nostos_data AND fires the change
         // broadcast tick. The pump (on the owned runtime) wakes, re-snapshots,
         // and fires on_snapshot AGAIN — the reactive proof.
         client
@@ -1289,7 +1289,7 @@ mod tests {
         )));
         let path = db.0.to_string_lossy().to_string();
 
-        // User A: connect, write a row (applies to cairn_data + queues outbox),
+        // User A: connect, write a row (applies to nostos_data + queues outbox),
         // then sign out.
         let client = NostosClient::new(
             "ws://localhost:0".into(),
@@ -1307,7 +1307,7 @@ mod tests {
             )
             .expect("write A");
         let before = client
-            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .query("SELECT pk FROM nostos_data WHERE table_name = 'tasks'".into())
             .expect("query pre-sign-out");
         assert!(
             before.contains("pk1"),
@@ -1329,7 +1329,7 @@ mod tests {
         // 0 — proving clear_local_state ran (not just a session drop).
         client.connect().expect("connect B");
         let after = client
-            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .query("SELECT pk FROM nostos_data WHERE table_name = 'tasks'".into())
             .expect("query post-sign-out");
         assert_eq!(
             after, "[]",

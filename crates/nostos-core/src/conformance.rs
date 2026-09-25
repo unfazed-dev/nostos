@@ -48,7 +48,7 @@ pub fn run_all<S: Storage>(mut make: impl FnMut() -> S) -> Vec<&'static str> {
     ran
 }
 
-/// One `cairn_snapshot()` row. The horizon-only row and the per-table header
+/// One `nostos_snapshot()` row. The horizon-only row and the per-table header
 /// row both carry nulls; see the generated SQL for why the headers exist.
 fn snap(horizon: u64, table: Option<&str>, pk: Option<&str>) -> serde_json::Value {
     serde_json::json!({
@@ -115,7 +115,7 @@ fn nostos_horizon_str(h: &crate::Horizon) -> String {
     h.as_str().to_string()
 }
 
-/// One change row in a `cairn_pull` response.
+/// One change row in a `nostos_pull` response.
 fn row(seq: u64, xid: u64, table: &str, pk: &str, op: &str, horizon: u64) -> serde_json::Value {
     serde_json::json!({
         "horizon": horizon.to_string(),

@@ -162,8 +162,8 @@ mod tests {
             },
             db: DbSection {
                 url_env: "NOSTOS_PG_URL".into(),
-                publication: "cairn_pub".into(),
-                slot: "cairn_slot".into(),
+                publication: "nostos_pub".into(),
+                slot: "nostos_slot".into(),
             },
             supabase: None,
             server: ServerSection {
@@ -190,8 +190,8 @@ mod tests {
         write_fly(&cfg, &dir).unwrap();
 
         let fly_toml = std::fs::read_to_string(dir.join("fly.toml")).unwrap();
-        assert!(fly_toml.contains("NOSTOS_PG_PUBLICATION = \"cairn_pub\""));
-        assert!(fly_toml.contains("NOSTOS_PG_SLOT = \"cairn_slot\""));
+        assert!(fly_toml.contains("NOSTOS_PG_PUBLICATION = \"nostos_pub\""));
+        assert!(fly_toml.contains("NOSTOS_PG_SLOT = \"nostos_slot\""));
         assert!(fly_toml.contains("NOSTOS_WRITE_TABLES = \"tasks\""));
         assert!(fly_toml.contains("8800"));
         // Never leak a placeholder for the real secret.
@@ -216,7 +216,7 @@ mod tests {
             serde_json::from_str(&text).expect("railway.json must be valid JSON");
         assert_eq!(
             parsed["environments"]["production"]["NOSTOS_PG_PUBLICATION"],
-            "cairn_pub"
+            "nostos_pub"
         );
         assert_eq!(
             parsed["environments"]["production"]["NOSTOS_WRITE_TABLES"],

@@ -67,7 +67,7 @@ void main() {
     test('toJson/fromJson preserves fields', () {
       final record = RunRecord(
         sdk: 'flutter',
-        engine: 'cairn',
+        engine: 'nostos',
         profile: 'local',
         runType: 'write_ack',
         specVersion: 'v0',
@@ -100,7 +100,7 @@ void main() {
     test('toJson always stamps the evaluation-only label', () {
       final record = RunRecord(
         sdk: 'flutter',
-        engine: 'cairn-direct',
+        engine: 'nostos-direct',
         profile: 'cloud',
         runType: 'cold_sync',
         specVersion: 'v0',
@@ -131,7 +131,7 @@ void main() {
     test('append then readAll returns the same records in order', () async {
       final a = RunRecord(
         sdk: 'flutter',
-        engine: 'cairn',
+        engine: 'nostos',
         profile: 'local',
         runType: 'cold_sync',
         specVersion: 'v0',
@@ -143,7 +143,7 @@ void main() {
       );
       final b = RunRecord(
         sdk: 'flutter',
-        engine: 'cairn',
+        engine: 'nostos',
         profile: 'local',
         runType: 'propagation',
         specVersion: 'v0',
@@ -168,7 +168,7 @@ void main() {
       await store.append(
         RunRecord(
           sdk: 'flutter',
-          engine: 'cairn',
+          engine: 'nostos',
           profile: 'local',
           runType: 'queue_drain',
           specVersion: 'v0',
@@ -182,7 +182,7 @@ void main() {
       await store.append(
         RunRecord(
           sdk: 'flutter',
-          engine: 'cairn',
+          engine: 'nostos',
           profile: 'local',
           runType: 'queue_drain',
           specVersion: 'v0',

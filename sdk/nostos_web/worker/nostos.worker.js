@@ -93,7 +93,7 @@ let storageReason = null;
 // can refuse `connect` unless the app opts in with `allowSecondaryTab`.
 // The loser then proxies to the leader over a BroadcastChannel (follower
 // proxy, end of file) instead of running its own memory engine.
-const LEADER_LOCK = "cairn:opfs-sahpool";
+const LEADER_LOCK = "nostos:opfs-sahpool";
 let leaderLockHeld = false; // also set by the promotion path (follower proxy)
 async function acquireLeaderLock() {
   if (typeof navigator === "undefined" || !navigator.locks) {
@@ -510,7 +510,7 @@ self.onmessage = async (ev) => {
 // the old standalone memory engine.
 // ponytail: requests in flight at a leader change are lost (no retry); a
 // promoted follower whose tab never called connect waits for one to.
-const BUS = new BroadcastChannel("cairn:multitab");
+const BUS = new BroadcastChannel("nostos:multitab");
 const MY_ID = Math.random().toString(36).slice(2);
 let standalone = false; // allowSecondaryTab: own memory engine, no proxying
 let lastConnect = null; // this tab's last connect request, replayed on promotion

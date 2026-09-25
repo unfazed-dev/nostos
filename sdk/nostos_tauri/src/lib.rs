@@ -34,12 +34,12 @@
 //!   `watch()` / Flutter's `rows_sink` (ADR-0024), NOT a poll. Floors: no
 //!   per-watch cancel handle (the pump self-terminates when JS drops the
 //!   channel — the unsubscribe path — and on session teardown).
-//! - **Multi-table (2026-09-21)**: `plugins.cairn.tables[]` is the session's
+//! - **Multi-table (2026-09-21)**: `plugins.nostos.tables[]` is the session's
 //!   table set — the first entry is `SyncClient`'s primary table, the rest ride
 //!   `extra_tables` (ADR-0022, one socket, one checkpoint, server cap 32).
 //!   Every table-taking command checks membership in that set. `subscribe`'s
 //!   `table` arg is API parity only: the run loop is per session, not per
-//!   table. Per-table `where_sql` comes from `plugins.cairn.whereSql`
+//!   table. Per-table `where_sql` comes from `plugins.nostos.whereSql`
 //!   (`{table: predicate}`, ADR-0012 safe-SQL). There is no per-table
 //!   `resume_lsn` by design: the LSN is stream-global — one socket, one
 //!   checkpoint per session (ADR-0022).
@@ -85,16 +85,16 @@ use std::sync::Mutex as StdMutex;
 /// reconnect, not a per-write latency mechanism.
 const IDLE_RECONNECT_BACKSTOP: Duration = Duration::from_secs(120);
 
-/// The `plugins.cairn` block of `tauri.conf.json` (A2 config story). Every
+/// The `plugins.nostos` block of `tauri.conf.json` (A2 config story). Every
 /// field is optional: an absent block deserializes to all-`None` (Tauri hands
-/// the plugin `{}` when `plugins.cairn` is missing — verified against tauri
+/// the plugin `{}` when `plugins.nostos` is missing — verified against tauri
 /// 2.11.5 `plugin.rs` `initialize`: `.get(name).cloned().unwrap_or_default()`),
 /// and `deny_unknown_fields` turns a typo'd key into a loud startup error
-/// ("Error deserializing 'plugins.cairn' within your Tauri configuration").
+/// ("Error deserializing 'plugins.nostos' within your Tauri configuration").
 ///
 /// These are DEFAULTS for `connect()`, not a second way to open a session:
 /// `connect`'s explicit args win, then these, then the hard-coded floor
-/// (table `"tasks"`, db path `"cairn.db"`). One config, one precedence rule —
+/// (table `"tasks"`, db path `"nostos.db"`). One config, one precedence rule —
 /// the same "config is the floor, args are the override" shape the official
 /// plugins use.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -124,7 +124,7 @@ pub struct NostosPluginConfig {
     /// Default on-device SQLite path. Relative paths open relative to the
     /// process working directory — desktop apps should pass an absolute path
     /// (e.g. from `app.path().app_data_dir()`) either here or per `connect`.
-    /// Defaults to `"cairn.db"`.
+    /// Defaults to `"nostos.db"`.
     pub db_path: Option<String>,
     /// Tables this session treats as add-wins OR-sets (ADR-0030) — the
     /// client-side gate for the `orSetAdd`/`orSetRemove` commands. MUST
@@ -147,17 +147,17 @@ impl NostosPluginConfig {
         }
     }
 
-    /// The resolved default SQLite path (`"cairn.db"` floor).
+    /// The resolved default SQLite path (`"nostos.db"` floor).
     fn db_path(&self) -> String {
         self.db_path
             .clone()
-            .unwrap_or_else(|| "cairn.db".to_owned())
+            .unwrap_or_else(|| "nostos.db".to_owned())
     }
 }
 
 /// Plugin state, managed by Tauri. Owns a `tokio::runtime::Runtime` (home of
 /// the `subscribe()` run loop) plus at most one active session covering the
-/// configured table set (`plugins.cairn.tables`).
+/// configured table set (`plugins.nostos.tables`).
 ///
 /// Construct via `NostosState::new()` (the plugin's `setup` hook does this and
 /// registers it with `app.manage(...)`); drive with `connect` / `subscribe` /
@@ -177,7 +177,7 @@ pub struct NostosState {
     // drops outside async and pays no such cost.
     rt: Option<tokio::runtime::Runtime>,
     session: AsyncMutex<Option<Session>>,
-    // A2 config defaults (plugins.cairn from tauri.conf.json). Immutable
+    // A2 config defaults (plugins.nostos from tauri.conf.json). Immutable
     // after init() — connect() merges per-call args over it.
     config: NostosPluginConfig,
     // A3 push-REST credentials — the same "one credential source, one URL
@@ -226,7 +226,7 @@ impl Session {
             Ok(&self.client)
         } else {
             Err(format!(
-                "{op}() table {table:?} is not in the session tables {:?} — add it to plugins.cairn.tables",
+                "{op}() table {table:?} is not in the session tables {:?} — add it to plugins.nostos.tables",
                 self.tables
             ))
         }
@@ -251,7 +251,7 @@ impl Session {
 pub struct NostosSnapshot {
     /// The session table this snapshot covers.
     pub table: String,
-    /// One JSON object per row (`pk`, `payload`) read from `cairn_data`.
+    /// One JSON object per row (`pk`, `payload`) read from `nostos_data`.
     pub rows: Vec<serde_json::Value>,
 }
 
@@ -298,10 +298,10 @@ impl SnapshotEmitter for ChannelEmitter {
     }
 }
 
-/// Snapshot the session table's rows directly from `cairn_data` (NOT a typed
-/// VIEW — mirrors `sdk/nostos_node::snapshot_json`): `cairn_data` exists on every
+/// Snapshot the session table's rows directly from `nostos_data` (NOT a typed
+/// VIEW — mirrors `sdk/nostos_node::snapshot_json`): `nostos_data` exists on every
 /// store right after `open()`, so this works before any server schema ships. The
-/// query is `SELECT pk, payload FROM cairn_data WHERE table_name = '{table}'` —
+/// query is `SELECT pk, payload FROM nostos_data WHERE table_name = '{table}'` —
 /// the same shape `query()` emits, minus the serialize-to-string step (the Tauri
 /// channel serializes `NostosSnapshot` natively).
 ///
@@ -313,7 +313,7 @@ async fn snapshot_rows(
     table: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
     let sql =
-        format!("SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC");
+        format!("SELECT pk, payload FROM nostos_data WHERE table_name = '{table}' ORDER BY pk ASC");
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = client
         .with_storage(move |s| s.query(&sql))
         .await
@@ -336,7 +336,7 @@ impl NostosState {
         Self::with_config(NostosPluginConfig::default())
     }
 
-    /// Construct with plugins.cairn config defaults (the production path:
+    /// Construct with plugins.nostos config defaults (the production path:
     /// init() calls this with the deserialized tauri.conf.json block).
     /// See NostosPluginConfig for the per-field precedence.
     ///
@@ -358,9 +358,9 @@ impl NostosState {
     /// No network I/O — the subscribe/run loop is a separate command.
     /// Idempotent: a second call while a session is live is a no-op.
     ///
-    /// A2 precedence — per-call args override `plugins.cairn` config, config
+    /// A2 precedence — per-call args override `plugins.nostos` config, config
     /// overrides the floor: `url` falls back to `config.syncUrl`, `token` to
-    /// `config.token`, `db_path` to `config.dbPath` (floor `"cairn.db"`), and
+    /// `config.token`, `db_path` to `config.dbPath` (floor `"nostos.db"`), and
     /// the session tables to `config.tables` (floor `["tasks"]`, matching
     /// `nostos_node`). With a fully-populated config, `connect()` needs no
     /// args at all.
@@ -381,7 +381,7 @@ impl NostosState {
         // A2 precedence: arg > config. A missing URL is the one hard error —
         // every other field has a floor.
         let Some(url) = url.or_else(|| self.config.sync_url.clone()) else {
-            return Err("connect() called with no url and no plugins.cairn.syncUrl config — one of the two is required".to_string());
+            return Err("connect() called with no url and no plugins.nostos.syncUrl config — one of the two is required".to_string());
         };
         let token = token.or_else(|| self.config.token.clone());
         let db_path = db_path.unwrap_or_else(|| self.config.db_path());
@@ -389,7 +389,7 @@ impl NostosState {
         let where_sql = self.config.where_sql.clone().unwrap_or_default();
         if let Some(stray) = where_sql.keys().find(|k| !tables.contains(k)) {
             return Err(format!(
-                "plugins.cairn.whereSql names table {stray:?} which is not in the session tables {tables:?}"
+                "plugins.nostos.whereSql names table {stray:?} which is not in the session tables {tables:?}"
             ));
         }
         let storage = SqliteStorage::open(&db_path).map_err(|e| e.to_string())?;
@@ -782,7 +782,7 @@ impl NostosState {
     /// ADR-0030 add-wins OR-set: add `element` to the OR-set at `pk`.
     /// Optimistic-local like every write — resolves once the merge-upsert
     /// is durable in the outbox. The table must be declared in
-    /// `plugins.cairn.orSetTables` (the client gate; the server's
+    /// `plugins.nostos.orSetTables` (the client gate; the server's
     /// `NOSTOS_OR_SET_COLUMNS` must agree).
     pub async fn or_set_add(
         &self,
@@ -813,7 +813,7 @@ impl NostosState {
     }
 
     /// ADR-0030 PN-Counter increment by `delta` (bumps this replica's
-    /// positive counter). Table must be in `plugins.cairn.counterTables`.
+    /// positive counter). Table must be in `plugins.nostos.counterTables`.
     pub async fn counter_increment(
         &self,
         table: String,
@@ -1107,7 +1107,7 @@ impl Drop for NostosState {
 // ---------------------------------------------------------------------------
 
 /// Open the local SQLite store + build the `SyncClient`. No network I/O.
-/// Every arg is optional and falls back to the `plugins.cairn` config block
+/// Every arg is optional and falls back to the `plugins.nostos` config block
 /// (A2): with a populated `tauri.conf.json`, `connect()` needs no args.
 #[tauri::command]
 async fn connect(
@@ -1264,14 +1264,14 @@ async fn connection_state(state: State<'_, NostosState>) -> Result<bool, String>
 
 /// Build the `nostos` Tauri plugin. Generic over `R: Runtime` so a Tauri app
 /// using any runtime (the default `Wry`, or a custom one) can register it via
-/// `tauri::Builder::default().plugin(tauri_plugin_cairn::init())`.
+/// `tauri::Builder::default().plugin(tauri_plugin_nostos::init())`.
 pub fn init<R: Runtime>() -> TauriPlugin<R, NostosPluginConfig> {
     // A2 config story: the second Builder type parameter is the
-    // plugins.cairn block of tauri.conf.json — Tauri deserializes it in
+    // plugins.nostos block of tauri.conf.json — Tauri deserializes it in
     // TauriPlugin::initialize (erroring loudly on a malformed block) and
     // hands it to setup via api.config(). Absent block == empty object ==
     // all-None defaults, so the plugin also works with zero config.
-    Builder::<R, NostosPluginConfig>::new("cairn")
+    Builder::<R, NostosPluginConfig>::new("nostos")
         .setup(|app, api| {
             app.manage(NostosState::with_config(api.config().clone()));
             Ok(())
@@ -1332,14 +1332,14 @@ mod tests {
             "expected an one=1 row in the JSON, got: {rows_json}"
         );
 
-        // `checkpoint()` reads the durable LSN from `cairn_meta` — proves the
+        // `checkpoint()` reads the durable LSN from `nostos_meta` — proves the
         // schema initialized + the engine storage accessor is wired. A fresh
         // store reports 0.
         let lsn = state.checkpoint().await.expect("checkpoint");
         assert_eq!(lsn, 0, "fresh store should report Lsn(0)");
     }
 
-    /// `plugins.cairn.whereSql` deserializes camelCase and a key outside the
+    /// `plugins.nostos.whereSql` deserializes camelCase and a key outside the
     /// table set is refused at `connect` (not silently dropped).
     #[tokio::test]
     async fn where_sql_config_is_validated_against_tables() {
@@ -1416,14 +1416,14 @@ mod tests {
             .await
             .expect("write");
 
-        // Sanity: the write landed in cairn_data (instant-local-apply, WS2).
+        // Sanity: the write landed in nostos_data (instant-local-apply, WS2).
         let before = state
-            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .query("SELECT pk FROM nostos_data WHERE table_name = 'tasks'".into())
             .await
             .expect("query before sign_out");
         assert!(
             before.contains("pk1"),
-            "write should land in cairn_data before sign_out, got: {before}"
+            "write should land in nostos_data before sign_out, got: {before}"
         );
 
         // Sign out: abort + quiesce + clear + clear-token + drop session.
@@ -1446,7 +1446,7 @@ mod tests {
             .await
             .expect("reconnect");
         let rows_json = state
-            .query("SELECT pk FROM cairn_data WHERE table_name = 'tasks'".into())
+            .query("SELECT pk FROM nostos_data WHERE table_name = 'tasks'".into())
             .await
             .expect("query after reconnect");
         let rows: serde_json::Value = serde_json::from_str(&rows_json).expect("parse rows json");
@@ -1470,7 +1470,7 @@ mod tests {
 
     /// REACTIVITY PROOF (host, no Tauri env, no live server): `watch_internal()`
     /// emits the initial snapshot, and a local `write()` — which applies a row
-    /// to `cairn_data` AND fires the change broadcast (nostos-client invariant
+    /// to `nostos_data` AND fires the change broadcast (nostos-client invariant
     /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
     /// `rows_applied == 1`) — causes the pump to emit a NEW snapshot, WITHOUT
     /// the test polling a timer. The `mpsc` receiver blocks on the pump's emit
@@ -1522,7 +1522,7 @@ mod tests {
         );
         assert_eq!(initial.table, "tasks");
 
-        // (2) Local write applies a row to cairn_data AND fires the change tick.
+        // (2) Local write applies a row to nostos_data AND fires the change tick.
         // The pump (on the owned runtime) wakes, re-snapshots, emits AGAIN.
         state
             .write(
@@ -1822,7 +1822,7 @@ mod tests {
 
     // ─────────── plugin config (Track A2) ───────────
 
-    /// A2 precedence: with a populated plugins.cairn config, connect() takes
+    /// A2 precedence: with a populated plugins.nostos config, connect() takes
     /// no args — url/table/dbPath all fall through from the config block, and
     /// the session table is honored by write()'s table guard.
     #[tokio::test]
@@ -1944,10 +1944,10 @@ mod tests {
     }
 
     /// Poll the on-device store via `query()` until a row for `pk` appears in
-    /// `cairn_data` (the apply engine's target table) or `deadline` elapses.
+    /// `nostos_data` (the apply engine's target table) or `deadline` elapses.
     /// Returns `Some(())` once the row is queryable.
     async fn poll_query_pk(state: &NostosState, pk: &str, deadline: Duration) -> Option<()> {
-        let sql = format!("SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = '{pk}'");
+        let sql = format!("SELECT pk FROM nostos_data WHERE table_name = 'tasks' AND pk = '{pk}'");
         let end = tokio::time::Instant::now() + deadline;
         loop {
             let rows_json = state.query(sql.clone()).await.expect("query");
@@ -2085,7 +2085,7 @@ mod tests {
 
     // ---------------------------------------- unified verbs (Track A1)
 
-    /// plugins.cairn parses the CRDT table declarations camelCase (the
+    /// plugins.nostos parses the CRDT table declarations camelCase (the
     /// guest's spelling) and feeds them into the client config at connect.
     #[test]
     fn plugin_config_parses_crdt_tables_camel_case() {
@@ -2127,7 +2127,7 @@ mod tests {
     /// the ADR-0027 status), and an UNTAGGED table is refused by the
     /// client gate with the three-views-of-one-truth error. The table
     /// membership guard fires first: a CRDT table must also be in
-    /// `plugins.cairn.tables`.
+    /// `plugins.nostos.tables`.
     #[tokio::test]
     async fn crdt_verbs_offline_round_trip_and_gate() {
         let config = NostosPluginConfig {
@@ -2184,7 +2184,7 @@ mod tests {
             "names the three-views rule: {err}"
         );
     }
-    /// Multi-table lift (2026-09-21): `plugins.cairn.tables` feeds
+    /// Multi-table lift (2026-09-21): `plugins.nostos.tables` feeds
     /// `SyncClient.extra_tables`; every listed table passes the guard, an
     /// unlisted one is refused naming the set; `tables` wins over `table`.
     #[tokio::test]

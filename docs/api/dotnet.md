@@ -30,7 +30,7 @@ Implements `IDisposable` — the generated handle owns Rust-side resources, so `
 
 ```csharp
 using var client = new NostosClient("ws://127.0.0.1:8800/sync", null,
-    Path.Combine(Path.GetTempPath(), "cairn.db"));
+    Path.Combine(Path.GetTempPath(), "nostos.db"));
 client.Connect();
 client.Subscribe("tasks");
 client.Write("tasks", "upsert", "1", """{"title":"buy milk"}""");

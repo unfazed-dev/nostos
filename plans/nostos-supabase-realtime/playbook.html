@@ -70,7 +70,7 @@ ul.checklist li .n{color:var(--muted);font-size:12.5px;display:block}
 <p>Both nostos and Supabase Realtime read the <strong>same Postgres write-ahead log</strong>. They are independent consumers with <strong>different publications and different slots</strong> — neither knows the other exists.</p>
 <pre class="mermaid">flowchart LR
   PG[(&quot;Postgres\nSupabase db.postgres\n+ WAL&quot;)]
-  PUBC[&quot;cairn_pub\n+ slot cairn_slot&quot;]
+  PUBC[&quot;nostos_pub\n+ slot nostos_slot&quot;]
   PUBR[&quot;supabase_realtime\n+ Realtime slot&quot;]
   NOSTOS[&quot;nostos-server\nlogical replication\nRust&quot;]
   APP[&quot;Flutter app\nlocal SQLite\noffline-first + writes&quot;]
@@ -78,8 +78,8 @@ ul.checklist li .n{color:var(--muted);font-size:12.5px;display:block}
   SUB[&quot;websocket subscribers\nnon-nostos clients\nedge functions&quot;]
   PG --&gt; PUBC --&gt; NOSTOS --&gt; APP
   PG --&gt; PUBR --&gt; RT --&gt; SUB
-</pre><p style="text-align:center;color:var(--muted);font-size:13px;margin-top:4px">One Postgres WAL, two independent consumers. A nostos app listens to cairn_pub, NOT supabase_realtime.</p>
-<p>Implication: toggling a table on in <strong>Dashboard → Database → Publications → <code>supabase_realtime</code></strong> adds it to the Realtime broadcast. It has <strong>zero effect on a nostos app</strong>, because the nostos app subscribes to <code>cairn_pub</code> over <code>/sync</code>, not to the Realtime websocket. This is why "I enabled Realtime and nothing changed" is the expected result, not a failure.</p>
+</pre><p style="text-align:center;color:var(--muted);font-size:13px;margin-top:4px">One Postgres WAL, two independent consumers. A nostos app listens to nostos_pub, NOT supabase_realtime.</p>
+<p>Implication: toggling a table on in <strong>Dashboard → Database → Publications → <code>supabase_realtime</code></strong> adds it to the Realtime broadcast. It has <strong>zero effect on a nostos app</strong>, because the nostos app subscribes to <code>nostos_pub</code> over <code>/sync</code>, not to the Realtime websocket. This is why "I enabled Realtime and nothing changed" is the expected result, not a failure.</p>
 <h2>The collapsed-write model (why there is no uploadData)</h2>
 <p>nostos's headline DX edge is <strong>zero-backend-write</strong>: the server's <code>PgWriteBack</code> applies client writes <em>directly</em> to the source Postgres. The app never talks to Postgres and never implements <code>uploadData</code>. The server itself runs the SQL, so it owns the trust boundary (table allowlist → column regex → bind parameters) on top of JWT auth and tenant scoping. See <code>SECURITY.md</code>.</p>
 <pre class="mermaid">sequenceDiagram
@@ -89,7 +89,7 @@ ul.checklist li .n{color:var(--muted);font-size:12.5px;display:block}
   App-&gt;&gt;Srv: write(table, op, pk, payload) over /sync
   Srv-&gt;&gt;Srv: allowlist + column regex + bind params + tenant stamp
   Srv-&gt;&gt;PG: INSERT / UPDATE / DELETE (auto-applied)
-  PG--&gt;&gt;Srv: WAL change on cairn_pub
+  PG--&gt;&gt;Srv: WAL change on nostos_pub
   Srv--&gt;&gt;App: replicated row echo over /sync
 </pre><p style="text-align:center;color:var(--muted);font-size:13px;margin-top:4px">A toggle: the app sends one write; the server applies it and the row echoes back through nostos&#x27;s own replication.</p>
 <p>Nostos's allowlist (<code>NOSTOS_WRITE_TABLES</code>) is the cost of applying writes server-side. It is a deliberate architectural choice, not a limitation.</p>
@@ -101,8 +101,8 @@ NOSTOS_WRITE_TABLES=tasks make dev-stack
 </code></pre>
 
 <p style="font-size:12px;color:var(--muted);margin:14px 0 2px"><code>terminal — nostos-server against Supabase</code></p><p style="font-size:12px;color:var(--muted);margin:2px 0 4px">Cloud: same env var; connect over the WARP relay or direct IPv6.</p><pre><code>NOSTOS_REPLICATOR=pg \\
-NOSTOS_PG_URL=&#x27;postgresql://cairn_writer:&lt;secret&gt;@127.0.0.1:15433/postgres&#x27; \\
-NOSTOS_PG_SLOT=cairn_slot NOSTOS_PG_PUBLICATION=cairn_pub \\
+NOSTOS_PG_URL=&#x27;postgresql://nostos_writer:&lt;secret&gt;@127.0.0.1:15433/postgres&#x27; \\
+NOSTOS_PG_SLOT=nostos_slot NOSTOS_PG_PUBLICATION=nostos_pub \\
 NOSTOS_WRITE_TABLES=tasks \\
 ./target/debug/nostos-server
 </code></pre>
@@ -130,8 +130,8 @@ PGCONNECT_TIMEOUT=8 PGPASSWORD=&quot;$PW&quot; psql \\
 <p>If you adopt nostos, you usually do <strong>not</strong> need to enable <code>supabase_realtime</code> on your synced tables at all. Enable it only when a second consumer (a dashboard, a worker) needs the push.</p>
 <h2>Adopter checklist</h2>
 <ul class="checklist">
-<li>CREATE PUBLICATION cairn_pub FOR TABLE <synced tables></li>
-<li>CREATE ROLE cairn_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser<span class="n">See SECURITY.md for the Supabase SQL.</span></li>
+<li>CREATE PUBLICATION nostos_pub FOR TABLE <synced tables></li>
+<li>CREATE ROLE nostos_writer (REPLICATION + BYPASSRLS) + GRANT on synced tables only — not superuser<span class="n">See SECURITY.md for the Supabase SQL.</span></li>
 <li>Set NOSTOS_WRITE_TABLES to every table clients may write (empty default = none)</li>
 <li>Point nostos-server at Supabase (direct IPv6, or WARP relay for IPv4-only egress)<span class="n">The pooler cannot carry logical replication — use the direct connection.</span></li>
 <li>Verify writes with a DIRECT psql/libpq read, never the dashboard<span class="n">Refresh the Table Editor manually; it does not live-update.</span></li>

@@ -17,7 +17,7 @@
   "rate_target_rows_per_sec": 500,
   "batch_rows": 250,
   "buffer": 1024,
-  "pg_url_redacted": "postgres://***@localhost:5433/cairn",
+  "pg_url_redacted": "postgres://***@localhost:5433/nostos",
   "slot_name": "bench_pgi_59436_a4fd497b",
   "slot_pre_created": true,
   "initial_snapshot_skipped": true,

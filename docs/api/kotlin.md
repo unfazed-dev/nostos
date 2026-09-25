@@ -41,7 +41,7 @@ has exactly one error variant (`src/lib.rs:97`).
 ## Lifecycle
 
 ```kotlin
-val client = NostosClient("ws://10.0.2.2:8800/sync", null, "${filesDir}/cairn.db")
+val client = NostosClient("ws://10.0.2.2:8800/sync", null, "${filesDir}/nostos.db")
 client.connect()                       // local store only
 client.subscribe("tasks")              // ← socket opens here
 client.write("tasks", "upsert", "1", """{"title":"buy milk"}""")

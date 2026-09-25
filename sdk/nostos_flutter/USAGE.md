@@ -157,7 +157,7 @@ Bundled with the app and loaded by `NostosConfig.load()`. Keys (verified in
     "url": "https://<project-ref>.supabase.co",
     "anon_key": "YOUR_SUPABASE_ANON_OR_PUBLISHABLE_KEY"
   },
-  "sqlite_filename": "cairn.sqlite"
+  "sqlite_filename": "nostos.sqlite"
 }
 ```
 
@@ -168,7 +168,7 @@ Bundled with the app and loaded by `NostosConfig.load()`. Keys (verified in
   name `publishable_key`). Present this block and `NostosDatabase.open` will
   initialize Supabase and use the signed-in session's access token as the sync
   bearer token.
-- `sqlite_filename` *(optional, default `cairn.sqlite`)* — joined onto the
+- `sqlite_filename` *(optional, default `nostos.sqlite`)* — joined onto the
   `sqliteDir` you pass at connect time.
 
 **Transports (ADR-0041).** `ws`/`wss` is the default everywhere. `iroh://`
@@ -193,7 +193,7 @@ flutter:
 A declared `NostosSchema` **is** the migration story: every connect re-applies
 it (read-views are dropped + recreated server-side, `SqliteStorage::apply_schema`).
 Adding a column = adding a `NostosColumn`; no migration files, no version
-counters. The row payloads under `cairn_data` are schema-less JSON, so only the
+counters. The row payloads under `nostos_data` are schema-less JSON, so only the
 view shape changes (ADR-0019).
 
 ```dart
@@ -253,7 +253,7 @@ Throws `StateError` if no Supabase session is live — sign in first (Section 3)
 final db = await NostosDatabase.supabase(
   nostosUrl: 'wss://sync.<your-project>.nostos.app/sync',
   schema: appSchema,                  // omit to fetch via GET /schema
-  sqlitePath: '${dir.path}/cairn.sqlite',
+  sqlitePath: '${dir.path}/nostos.sqlite',
 );
 ```
 
@@ -274,7 +274,7 @@ final db = await NostosDatabase.connect(
   url: 'wss://sync.<your-project>.nostos.app/sync',
   token: nostosToken,                  // bearer JWT (Section 3); omit for NOSTOS_SYNC_AUTH=none
   schema: appSchema,                  // omit to fetch via GET /schema
-  sqlitePath: '${dir.path}/cairn.sqlite',
+  sqlitePath: '${dir.path}/nostos.sqlite',
 );
 await db.subscribe('tasks');
 ```

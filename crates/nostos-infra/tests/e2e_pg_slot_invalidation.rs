@@ -13,7 +13,7 @@
 //! 1. **Detection**: when the slot is dropped mid-stream, nostos notices via
 //!    `pg_replication_slots.wal_status` (on the next reconnect) AND/OR via the
 //!    SQLSTATE-55000 string match in the recv-error path. The
-//!    `cairn_slot_recreated_total` counter increments, making the loss
+//!    `nostos_slot_recreated_total` counter increments, making the loss
 //!    operator-visible instead of silent.
 //! 2. **Recovery**: the slot is dropped + re-created with a fresh snapshot —
 //!    clients continue to receive live changes after recovery (the snapshot-vs-
@@ -25,7 +25,7 @@
 //!
 //! ```sh
 //! docker compose -f docker/docker-compose.yml up -d
-//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn \
+//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos \
 //!   cargo test -p nostos-infra --features pg --test e2e_pg_slot_invalidation \
 //!   -- --nocapture --test-threads=1
 //! ```
@@ -51,7 +51,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgresql://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgresql://nostos:nostos@localhost:5433/nostos".into())
 }
 
 async fn sql_client() -> tokio_postgres::Client {
@@ -110,7 +110,7 @@ async fn dropped_slot_is_detected_and_recovered() {
     }
 
     let slot = format!("e2e_slot_invalid_{}", std::process::id());
-    let publication = "cairn_pub";
+    let publication = "nostos_pub";
     let sql = sql_client().await;
 
     // Clean any leftover slot from a prior run.

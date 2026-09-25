@@ -6,7 +6,7 @@
 //   inserts a `sessions` row into the local docker PG → nostos-server
 //   replicates → doorbell → FCM → THIS test's onMessage fires.
 //
-// The harness asserts the server side (cairn_push_sent_total on /metrics);
+// The harness asserts the server side (nostos_push_sent_total on /metrics);
 // this test asserts the device side (message received + doorbell payload).
 //
 // Dart-defines (all passed by the harness; see tool/PUSH_SMOKE.md):
@@ -101,7 +101,7 @@ Future<void> main() async {
     debugPrint('PUSH_SMOKE_USER=${liveSession.user.id}');
 
     final dir = await getApplicationDocumentsDirectory();
-    // Scratch store — NOT the real app's cairn.sqlite; the smoke is disposable.
+    // Scratch store — NOT the real app's nostos.sqlite; the smoke is disposable.
     // (iOS Local Network permission-window retries live in the SDK's
     // `_retryConn`, not here.)
     final db = await NostosDatabase.connect(

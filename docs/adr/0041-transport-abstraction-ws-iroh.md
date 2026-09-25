@@ -37,7 +37,7 @@ What iroh offers (verified against docs.rs **iroh 0.91.2**, MIT OR Apache-2.0 �
 
 ### 2. Server: an iroh accept loop beside the axum mount, one session per connection
 
-An iroh `Endpoint` registered for ALPN `cairn/sync/1`; each accepted connection drives **the same session core** `sync_handler` drives today, factored one level up in `nostos-infra/src/transport/`. Mapping: one client session = one QUIC connection = one bidirectional stream; each JSON frame = one message. QUIC streams provide the same reliable ordered per-stream delivery WS provided, so the resume and dedup logic is untouched. HTTP surface (`/healthz`, `/schema`, `/rules`, `/metrics`, ADR-0037 push-token REST) **stays on the HTTP listener** — v1 is the sync session only.
+An iroh `Endpoint` registered for ALPN `nostos/sync/1`; each accepted connection drives **the same session core** `sync_handler` drives today, factored one level up in `nostos-infra/src/transport/`. Mapping: one client session = one QUIC connection = one bidirectional stream; each JSON frame = one message. QUIC streams provide the same reliable ordered per-stream delivery WS provided, so the resume and dedup logic is untouched. HTTP surface (`/healthz`, `/schema`, `/rules`, `/metrics`, ADR-0037 push-token REST) **stays on the HTTP listener** — v1 is the sync session only.
 
 ### 3. Client: dial-by-scheme, generic loop unchanged in shape
 

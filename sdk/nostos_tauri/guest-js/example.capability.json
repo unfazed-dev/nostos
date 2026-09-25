@@ -5,6 +5,6 @@
   "local": true,
   "windows": ["main"],
   "permissions": [
-    "cairn:default"
+    "nostos:default"
   ]
 }

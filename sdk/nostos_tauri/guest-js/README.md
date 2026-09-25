@@ -1,7 +1,7 @@
 # @nostos-sync/tauri
 
 Typed JS/TS guest bindings for the [`nostos_tauri`](../README.md) Tauri 2
-plugin. Thin wrappers over `invoke("plugin:cairn|…")` with two tiers in one
+plugin. Thin wrappers over `invoke("plugin:nostos|…")` with two tiers in one
 import:
 
 - **Raw tier** (`nostos.*`) — the exact Rust command surface:
@@ -27,13 +27,13 @@ Requires `@tauri-apps/api` ^2 (peer dependency) and the Rust plugin
 registered:
 
 ```rust
-tauri::Builder::default().plugin(tauri_plugin_cairn::init())
+tauri::Builder::default().plugin(tauri_plugin_nostos::init())
 ```
 
 plus the capability grant (see `example.capability.json`):
 
 ```json
-{ "permissions": ["cairn:default"] }
+{ "permissions": ["nostos:default"] }
 ```
 
 ## Config (tauri.conf.json)
@@ -45,7 +45,7 @@ plus the capability grant (see `example.capability.json`):
       "syncUrl": "ws://127.0.0.1:8080/sync",
       "token": null,
       "tables": ["tasks", "notes"],
-      "dbPath": "cairn.db"
+      "dbPath": "nostos.db"
     }
   }
 }
@@ -53,7 +53,7 @@ plus the capability grant (see `example.capability.json`):
 
 All fields optional — with the block populated, `connect()` takes no args.
 Per-call args override config; config overrides the floor (`"tasks"` /
-`"cairn.db"`). A typo'd key fails plugin init loudly.
+`"nostos.db"`). A typo'd key fails plugin init loudly.
 
 ## Usage
 
@@ -66,7 +66,7 @@ await nostos.subscribe("tasks");
 
 const id = await upsert("tasks", "t1", { title: "Walk dog" });
 const stop = watchRows("tasks", (rows) => render(rows));
-const all = await fetchAll("SELECT pk, payload FROM cairn_data WHERE table_name = 'tasks'");
+const all = await fetchAll("SELECT pk, payload FROM nostos_data WHERE table_name = 'tasks'");
 
 // Push registration (ADR-0037 §3) — mobile shells pass the native token:
 await nostos.registerPushToken("fcm", fcmToken);

@@ -31,7 +31,7 @@ import 'engine.dart' show ClientTableFfi;
 /// edit the declaration and ship — adding a column exposes it from already
 /// -synced payloads on next launch; removing one drops it from the view.
 /// No migration files, no version counters: the row payloads in
-/// `cairn_data` are schema-less JSON, so only the view projection changes.
+/// `nostos_data` are schema-less JSON, so only the view projection changes.
 ///
 /// Convert to the FFI mirror with [toClientTables].
 class NostosSchema {
@@ -94,14 +94,14 @@ class NostosTable {
     required this.columns,
   });
 
-  /// Canonical table id (matches `cairn_data.table_name` / the wire `table`).
+  /// Canonical table id (matches `nostos_data.table_name` / the wire `table`).
   final String name;
 
   /// Primary-key column names. Informational for the current WS2 view path
   /// (reads are name-keyed); carried for the future materialized-table path.
   final List<String> primaryKey;
 
-  /// Columns in tuple order — the JSON keys inside `cairn_data.payload`, each
+  /// Columns in tuple order — the JSON keys inside `nostos_data.payload`, each
   /// carrying the server-reported type. WS6 (typed records): the
   /// affinity/pg_oid let a typed record's fields be derived from the schema
   /// rather than hand-cast. Both type fields are nullable so a hand-built

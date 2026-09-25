@@ -169,7 +169,7 @@ pub async fn run(args: PullArgs, cwd: &Path) -> Result<()> {
         println!(
             "⚠ 0 tables published — nostos reads your schema, it does not create it. \
              Create the tables upstream (paste supabase/schema.sql into the Supabase \
-             SQL editor, or apply your own migration to the `cairn_pub` publication), \
+             SQL editor, or apply your own migration to the `nostos_pub` publication), \
              then re-run `nostos pull`."
         );
     }

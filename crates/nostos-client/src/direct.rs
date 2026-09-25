@@ -15,7 +15,7 @@
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! use nostos_client::{DirectClient, SqliteStorage};
 //!
-//! let storage = SqliteStorage::open("cairn.sqlite")?;
+//! let storage = SqliteStorage::open("nostos.sqlite")?;
 //! let client = DirectClient::new("https://ref.supabase.co", "anon-key", storage)?;
 //! client.set_token(std::env::var("USER_JWT")?).await;
 //! client.run(&format!("sub:{}", "the-user-uuid"), |r| {
@@ -98,7 +98,7 @@ pub struct DirectClient<S> {
     /// Set while the device has never synced. The change log is not a history
     /// of the database — it begins where `nostos link` installed the trigger —
     /// so a device with no horizon cannot reach the rows that predate it by
-    /// pulling, no matter how far back it asks. Only `cairn_snapshot` has
+    /// pulling, no matter how far back it asks. Only `nostos_snapshot` has
     /// them. Cleared by the bootstrap in [`DirectClient::sync`], and set again
     /// by [`DirectClient::sign_out`], which wipes the storage this was read
     /// from.
@@ -112,7 +112,7 @@ where
     /// Open a client over `storage`, resuming from whatever horizon it holds.
     ///
     /// A database with no horizon has never synced, so its first
-    /// [`sync`](Self::sync) bootstraps from `cairn_snapshot` rather than
+    /// [`sync`](Self::sync) bootstraps from `nostos_snapshot` rather than
     /// pulling: the log only holds what has changed since the trigger was
     /// installed, and pulling would silently skip everything older.
     ///
@@ -161,7 +161,7 @@ where
 
     /// Push every queued write, then pull until caught up.
     ///
-    /// A device that has never synced bootstraps from `cairn_snapshot` first:
+    /// A device that has never synced bootstraps from `nostos_snapshot` first:
     /// see [`Self::new`]. The push still runs ahead of it, so a write queued
     /// offline before the first sync is in the server's picture rather than
     /// only in the reap exemption.
@@ -212,7 +212,7 @@ where
     /// storage transaction, so the row is on screen before the network has an
     /// opinion about it. Returns the outbox ids, in the order given.
     ///
-    /// The queue alone is not enough: `watch()` reads `cairn_data`, not the
+    /// The queue alone is not enough: `watch()` reads `nostos_data`, not the
     /// outbox, so a write that is only enqueued shows the user nothing until
     /// the echo lands — and nothing at all if the server refuses it. The
     /// optimistic image is deliberately *not* a commit: it does not advance

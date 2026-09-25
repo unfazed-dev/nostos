@@ -201,7 +201,7 @@ test("kv seam: default persists to localStorage; injected store swaps in untouch
       .poll(
         () =>
           page.evaluate(
-            () => Number(localStorage.getItem("cairn:checkpoint:tasks") || 0),
+            () => Number(localStorage.getItem("nostos:checkpoint:tasks") || 0),
           ),
         { timeout: 15000, message: "default run persists checkpoint to localStorage" },
       )
@@ -210,7 +210,7 @@ test("kv seam: default persists to localStorage; injected store swaps in untouch
     await page.evaluate(() => window.__sock.close());
 
     // ---- phase B: INJECTED store — same key, localStorage untouched ----
-    const before = await page.evaluate(() => localStorage.getItem("cairn:checkpoint:tasks"));
+    const before = await page.evaluate(() => localStorage.getItem("nostos:checkpoint:tasks"));
     expect(before, "phase A left a localStorage checkpoint").toBeTruthy();
 
     await page.goto(`http://127.0.0.1:${staticServer.port}/e2e/kv_seam.html`, {
@@ -247,14 +247,14 @@ test("kv seam: default persists to localStorage; injected store swaps in untouch
       .poll(
         () =>
           page.evaluate(() => {
-            const hit = (window.__kv.calls || []).find(([k]) => k === "cairn:checkpoint:tasks");
+            const hit = (window.__kv.calls || []).find(([k]) => k === "nostos:checkpoint:tasks");
             return hit ? hit[1] : null;
           }),
         { timeout: 15000, message: "injected store received the checkpoint under the pinned key" },
       )
       .toBeTruthy();
 
-    const after = await page.evaluate(() => localStorage.getItem("cairn:checkpoint:tasks"));
+    const after = await page.evaluate(() => localStorage.getItem("nostos:checkpoint:tasks"));
     expect(after, "injected run must NOT touch localStorage").toBe(before);
 
     await page.evaluate(() => window.__sock.close());

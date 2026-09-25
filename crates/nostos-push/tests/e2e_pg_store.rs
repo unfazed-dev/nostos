@@ -19,7 +19,7 @@
 //! is a FALSE positive, not a verified one:
 //!
 //! ```sh
-//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://cairn:cairn@localhost:5433/cairn \
+//! NOSTOS_E2E_PG=1 NOSTOS_PG_URL=postgres://nostos:nostos@localhost:5433/nostos \
 //!   cargo test -p nostos-push --features pg --test e2e_pg_store -- --nocapture
 //! ```
 
@@ -36,7 +36,7 @@ const E2E_FLAG: &str = "NOSTOS_E2E_PG";
 
 fn pg_url() -> String {
     nostos_infra::env::var("NOSTOS_PG_URL")
-        .unwrap_or_else(|_| "postgres://cairn:cairn@localhost:5433/cairn".into())
+        .unwrap_or_else(|_| "postgres://nostos:nostos@localhost:5433/nostos".into())
 }
 
 /// The self-skip gate: without `NOSTOS_E2E_PG=1` a test returns early with

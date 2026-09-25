@@ -10,7 +10,7 @@
 #   harness inserts a `sessions` row into the local docker PG → nostos-server
 #   replicates it → doorbell → FCM HTTP v1 send → device receives the
 #   {table,lsn} data message. Server side asserted via /metrics
-#   (cairn_push_sent_total ≥ 1); device side via the integration test's
+#   (nostos_push_sent_total ≥ 1); device side via the integration test's
 #   PUSH_SMOKE_RECEIVED marker.
 #
 # Automated device path: a booted ANDROID EMULATOR (FCM fully works there,
@@ -59,7 +59,7 @@ cleanup() {
     wait "$SERVER_PID" 2>/dev/null
   fi
   # Best-effort slot drop — a leaked slot only pins WAL in the throwaway PG.
-  docker exec "$PG_CONTAINER" psql -U cairn -d cairn -qc \
+  docker exec "$PG_CONTAINER" psql -U nostos -d nostos -qc \
     "SELECT pg_drop_replication_slot('$SLOT') FROM pg_replication_slots WHERE slot_name='$SLOT';" \
     >/dev/null 2>&1
 }
@@ -140,20 +140,20 @@ case "$DEVICE_MODE" in
 esac
 
 # ---- 3. local docker PG (repo's own e2e stack, port 5433) -----------------
-if ! docker exec "$PG_CONTAINER" pg_isready -U cairn -d cairn >/dev/null 2>&1; then
+if ! docker exec "$PG_CONTAINER" pg_isready -U nostos -d nostos >/dev/null 2>&1; then
   command -v docker >/dev/null 2>&1 || skip "docker PG not reachable and docker absent"
   printf "  starting docker PG (docker/docker-compose.yml)…\n"
   docker compose -f "$ROOT_DIR/docker/docker-compose.yml" up -d >/dev/null 2>&1 \
     || skip "failed to start the docker PG"
 fi
 for _ in $(seq 1 30); do
-  docker exec "$PG_CONTAINER" pg_isready -U cairn -d cairn >/dev/null 2>&1 && break
+  docker exec "$PG_CONTAINER" pg_isready -U nostos -d nostos >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec "$PG_CONTAINER" pg_isready -U cairn -d cairn >/dev/null 2>&1 \
+docker exec "$PG_CONTAINER" pg_isready -U nostos -d nostos >/dev/null 2>&1 \
   || skip "docker PG never became ready"
 
-psql_exec() { docker exec "$PG_CONTAINER" psql -U cairn -d cairn -qAt -c "$1"; }
+psql_exec() { docker exec "$PG_CONTAINER" psql -U nostos -d nostos -qAt -c "$1"; }
 
 # Throwaway schema: atlet's REAL table shapes so the actual app (Shop tab,
 # cart, checkout) runs unmodified against the smoke server. REPLICA
@@ -212,13 +212,13 @@ psql_exec "SELECT pg_drop_replication_slot('$SLOT') FROM pg_replication_slots WH
 # flutter-test install mints a FRESH FCM token (app data wiped per install)
 # — stale rows otherwise accumulate and eat send quota (each is now pruned
 # on first UNREGISTERED, but start each run clean regardless).
-psql_exec "TRUNCATE cairn_push_tokens;" >/dev/null 2>&1 || true
+psql_exec "TRUNCATE nostos_push_tokens;" >/dev/null 2>&1 || true
 
 # ---- 4. nostos-server (real PG replicator + FCM rail + doorbell table) -----
 printf "  starting nostos-server (cargo run, log: $SERVER_LOG)…\n"
 NOSTOS_BIND="$BIND:$PORT" \
 NOSTOS_REPLICATOR=pg \
-NOSTOS_PG_URL="postgres://cairn:cairn@localhost:5433/cairn" \
+NOSTOS_PG_URL="postgres://nostos:nostos@localhost:5433/nostos" \
 NOSTOS_PG_PUBLICATION="$PUB" \
 NOSTOS_PG_SLOT="$SLOT" \
 NOSTOS_SYNC_AUTH=supabase-jwt \
@@ -227,7 +227,7 @@ NOSTOS_SUPABASE_JWT_SECRET="$NOSTOS_SUPABASE_JWT_SECRET" \
 # the push doorbell's fully-offline fallback (fanout.rs — the killed-app
 # case, which pauseSync models) targets tenants by reading the ROW's tenant
 # column; with the column unset (empty opt-out) that path has no tenant to
-# read and enqueues NOTHING — leg 1 dies with cairn_push_sent_total 0. And
+# read and enqueues NOTHING — leg 1 dies with nostos_push_sent_total 0. And
 # the column must never be merely UNSET: the clap default is "org_id", a
 # column no smoke table has — every snapshot AND live predicate 42703s /
 # never matches (no frames, no doorbells). The original leg-2 failure
@@ -255,7 +255,7 @@ done
 curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 \
   || { printf "  ${RED}FAIL${RESET}  nostos-server never became healthy\n"; exit 1; }
 
-sent_before="$(curl -s "http://127.0.0.1:$PORT/metrics" | awk '/^cairn_push_sent_total/ {print $2; exit}')"
+sent_before="$(curl -s "http://127.0.0.1:$PORT/metrics" | awk '/^nostos_push_sent_total/ {print $2; exit}')"
 sent_before="${sent_before:-0}"
 
 # ---- 5. device leg: register token, go offline, listen -------------------
@@ -297,18 +297,18 @@ psql_exec "INSERT INTO $TABLE (id, user_id, title, type, metric, unit, occurred_
 # ---- 7. assert the rail fired (server metrics) ----------------------------
 sent_after=""
 for _ in $(seq 1 90); do
-  sent_after="$(curl -s "http://127.0.0.1:$PORT/metrics" | awk '/^cairn_push_sent_total/ {print $2; exit}')"
+  sent_after="$(curl -s "http://127.0.0.1:$PORT/metrics" | awk '/^nostos_push_sent_total/ {print $2; exit}')"
   sent_after="${sent_after:-0}"
   [ "$sent_after" -gt "$sent_before" ] 2>/dev/null && break
   sleep 1
 done
 if [ "$sent_after" -le "$sent_before" ] 2>/dev/null; then
-  printf "  ${RED}FAIL${RESET}  cairn_push_sent_total did not move ($sent_before → $sent_after)\n"
-  curl -s "http://127.0.0.1:$PORT/metrics" | grep '^cairn_push_' || true
+  printf "  ${RED}FAIL${RESET}  nostos_push_sent_total did not move ($sent_before → $sent_after)\n"
+  curl -s "http://127.0.0.1:$PORT/metrics" | grep '^nostos_push_' || true
   tail -10 "$SERVER_LOG"
   exit 1
 fi
-printf "  server: cairn_push_sent_total %s → %s\n" "$sent_before" "$sent_after"
+printf "  server: nostos_push_sent_total %s → %s\n" "$sent_before" "$sent_after"
 
 # ---- 8. assert the device received the doorbell ---------------------------
 wait "$APP_PID"
@@ -368,7 +368,7 @@ done
   || { printf "  ${RED}FAIL${RESET}  order $ORDER_ID never landed in PG\n"; exit 1; }
 
 # Advance one lifecycle step and assert BOTH sides: the rail fired
-# (cairn_push_sent_total) and the device received it (PUSH_SMOKE_PUSH marker).
+# (nostos_push_sent_total) and the device received it (PUSH_SMOKE_PUSH marker).
 order_step() {  # $1 = new status
   psql_exec "UPDATE orders SET status='$1' WHERE id='$ORDER_ID';" >/dev/null
   for _ in $(seq 1 90); do
@@ -377,7 +377,7 @@ order_step() {  # $1 = new status
     sleep 1
   done
   printf "  ${RED}FAIL${RESET}  '$1' push not received within 90s (log: $ORDER_LOG)\n"
-  curl -s "http://127.0.0.1:$PORT/metrics" | grep '^cairn_push_' || true
+  curl -s "http://127.0.0.1:$PORT/metrics" | grep '^nostos_push_' || true
   tail -15 "$ORDER_LOG"
   exit 1
 }

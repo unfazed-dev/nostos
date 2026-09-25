@@ -36,12 +36,12 @@ pub struct InitArgs {
     #[arg(long)]
     pub supabase_url: Option<String>,
     /// Publication name.
-    #[arg(long, default_value = "cairn_pub")]
+    #[arg(long, default_value = "nostos_pub")]
     pub publication: String,
     /// Replication slot name. `init` never creates the slot — nostos-server
     /// creates it lazily on first `nostos dev` (see `crate::pg` module docs)
     /// — this only records the name it will use.
-    #[arg(long, default_value = "cairn_slot")]
+    #[arg(long, default_value = "nostos_slot")]
     pub slot: String,
     /// Server bind address written to `nostos.toml` (`nostos dev` uses it).
     #[arg(long, default_value = "0.0.0.0:8800")]

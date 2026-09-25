@@ -141,7 +141,7 @@ impl NostosError {
 ///
 /// # Snapshot shape
 /// `json` is a JSON array-of-objects string: one object per row of the watched
-/// table's rows in `cairn_data`, full snapshot per tick (NOT a diff —
+/// table's rows in `nostos_data`, full snapshot per tick (NOT a diff —
 /// self-healing on lag, mirrors Flutter's `emit_snapshot`).
 #[uniffi::export(with_foreign)]
 pub trait SnapshotSink: Send + Sync {
@@ -820,23 +820,23 @@ impl NostosClient {
 
 /// Read the full row snapshot for `table` as a JSON array-of-objects string.
 ///
-/// Queries `cairn_data` directly (NOT a `SELECT * FROM {table}` VIEW): the
+/// Queries `nostos_data` directly (NOT a `SELECT * FROM {table}` VIEW): the
 /// `tasks`/etc. VIEW is only created by `SqliteStorage::apply_schema` once the
-/// server has shipped a schema, but `cairn_data` exists on every store right
-/// after `open()` (`CREATE TABLE IF NOT EXISTS cairn_data` in
+/// server has shipped a schema, but `nostos_data` exists on every store right
+/// after `open()` (`CREATE TABLE IF NOT EXISTS nostos_data` in
 /// `nostos-client/src/sqlite.rs`). So this snapshot succeeds on a fresh/empty
 /// store (returning `"[]"`) as well as a populated one — the correct
 /// offline-first UX. `table` is the session-validated value (the caller's
 /// `watch()`/`write()` already confirmed it equals the fixed session table),
 /// so the interpolation is injection-safe; the canonical per-table snapshot
-/// query is `SELECT pk, payload FROM cairn_data WHERE table_name = ?1 ...`
+/// query is `SELECT pk, payload FROM nostos_data WHERE table_name = ?1 ...`
 /// (nostos-client/src/sqlite.rs).
 async fn snapshot_json(
     client: &Arc<SyncClient<SqliteStorage>>,
     table: &str,
 ) -> Result<String, NostosError> {
     let sql =
-        format!("SELECT pk, payload FROM cairn_data WHERE table_name = '{table}' ORDER BY pk ASC");
+        format!("SELECT pk, payload FROM nostos_data WHERE table_name = '{table}' ORDER BY pk ASC");
     let rows = client
         .with_storage(move |s| s.query(&sql))
         .await
@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     /// REACTIVITY PROOF (host, no device/JNI): `watch()` emits the initial
-    /// snapshot, and a local `write()` — which applies a row to `cairn_data`
+    /// snapshot, and a local `write()` — which applies a row to `nostos_data`
     /// AND fires the change broadcast (nostos-client/client.rs invariant
     /// `subscribe_changes_must_precede_apply_to_avoid_missed_snapshot`,
     /// `rows_applied == 1`) — causes the pump to emit a NEW snapshot, WITHOUT
@@ -1154,7 +1154,7 @@ mod tests {
         // snapshot synchronously before returning.
         client.watch("tasks".into(), sink).expect("watch");
 
-        // (1) Initial snapshot delivered — empty store → "[]" (cairn_data has
+        // (1) Initial snapshot delivered — empty store → "[]" (nostos_data has
         // no rows for tasks yet). No polling: blocking event wait, 5s ceiling.
         let initial = rx
             .recv_timeout(Duration::from_secs(5))
@@ -1164,7 +1164,7 @@ mod tests {
             "fresh store tasks snapshot should be empty array"
         );
 
-        // (2) Local write applies a row to cairn_data AND fires the change
+        // (2) Local write applies a row to nostos_data AND fires the change
         // broadcast tick. The pump (on the owned runtime) wakes, re-snapshots,
         // and fires on_snapshot AGAIN — the reactive proof.
         client
@@ -1178,11 +1178,11 @@ mod tests {
 
         // (3) The post-write snapshot arrives without the test polling. The row's
         // pk is a TEXT column and unambiguously proves the new row is in the
-        // snapshot (it was absent from the initial "[]"). NOTE: cairn_data
+        // snapshot (it was absent from the initial "[]"). NOTE: nostos_data
         // stores `payload` as a BLOB, so serde_json renders it hex-encoded
         // (e.g. 7b22... = `{"id":"pk1"...}`) — the SAME shape the sibling
         // `query()` emits. Decoding BLOBs to readable JSON is the WS2
-        // typed-read (VIEW-over-cairn_data) layer's job, out of scope for the
+        // typed-read (VIEW-over-nostos_data) layer's job, out of scope for the
         // reactive port; this test proves the CHANNEL, not the encoding.
         let after = rx
             .recv_timeout(Duration::from_secs(5))
@@ -1296,7 +1296,7 @@ mod tests {
         // store keeps rows across a plain disconnect — only the wipe empties it.
         client.connect().expect("reconnect as user B");
         let rows = client
-            .query("SELECT pk FROM cairn_data".into())
+            .query("SELECT pk FROM nostos_data".into())
             .expect("query as user B");
         assert!(
             !rows.contains("pk1"),

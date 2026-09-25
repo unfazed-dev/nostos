@@ -35,7 +35,7 @@ Errors are thrown as the single-variant `NostosError.Message(description:)`.
 
 ```swift
 let path = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    .appendingPathComponent("cairn.db").path
+    .appendingPathComponent("nostos.db").path
 let client = try NostosClient(url: "ws://127.0.0.1:8800/sync", token: nil, dbPath: path)
 try client.connect()
 try client.subscribe(table: "tasks")

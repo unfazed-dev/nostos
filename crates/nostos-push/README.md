@@ -51,7 +51,7 @@ NOSTOS_PUSHD_API_KEYS="acme:s3cr3t,hq:delegator-key:rail" nostos-pushd
 # 4. Register + send (see docs/api/nostos-pushd.yaml):
 #    POST /v1/tokens  {"token": "…", "platform": "fcm"}
 #    POST /v1/send    {"token": "…", "payload": {"visible": {"title": "Hi", "body": "…",
-#                     "data": {"cairn_route": "/orders/42"}}}}   # data = the tap destination
+#                     "data": {"nostos_route": "/orders/42"}}}}   # data = the tap destination
 #    POST /v1/send/batch  {"items": [ …up to 100 SendRequests… ]}  (contract v0.4.0)
 #    GET  /v1/receipts?since=0
 ```

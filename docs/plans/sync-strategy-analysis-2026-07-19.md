@@ -22,7 +22,7 @@ Source: code-archaeology agent over `crates/` + `sdk/nostos_flutter/`.
 | Dimension | nostos's behavior | Evidence |
 |---|---|---|
 | **Source of truth** | Server-authoritative (Postgres). Client holds a cache + outbox, not canonical state. | ADR-0013 addendum; collapsed write-back |
-| **Reads while offline** | **Local-first** — reads hit on-device SQLite (`cairn_data` via `json_extract`). Fully offline-capable. | `sdk/nostos_flutter/lib/src/nostos_database.dart:223-226`; ADR-0013 addendum "On-device SQL read surface" |
+| **Reads while offline** | **Local-first** — reads hit on-device SQLite (`nostos_data` via `json_extract`). Fully offline-capable. | `sdk/nostos_flutter/lib/src/nostos_database.dart:223-226`; ADR-0013 addendum "On-device SQL read surface" |
 | **Writes while disconnected** | **Optimistic local apply + durable outbox queue.** `SyncClient::write` enqueues to SQLite outbox, applies locally, returns immediately. Flush loop drains `Outbox::pending()` on reconnect. Exponential backoff; dead-letter at 50 attempts. | `crates/nostos-client/src/client.rs` (write + run_once); `crates/nostos-core/src/outbox.rs:53-59` (`mark_dead_letter`) |
 | **Delivery model** | **Snapshot-then-stream** (initial COPY snapshot at consistent-point LSN, then WAL changes). Only model — no real-time-only path. | `crates/nostos-infra/src/replicator/pg.rs:452`; `snapshot.rs:29-52` |
 | **Consistency** | **Eventual consistency** with ack-driven LSN resume + exactly-once. Server advances slot by *min* acked LSN (slowest client wins). | ADR-0009 |
@@ -125,7 +125,7 @@ Source: code-archaeology agent over `crates/` + `sdk/nostos_flutter/`.
 | Competitor feature | nostos equivalent |
 |---|---|
 | Replicache mutator+rebase | nostos collapsed write-back + server-authoritative apply |
-| ElectricSQL Shapes (read-only) | nostos predicates over `cairn_data` views |
+| ElectricSQL Shapes (read-only) | nostos predicates over `nostos_data` views |
 | CRDT mode (Yjs/Ditto) | nostos tier-(b), reserved per ADR-0014 |
 | "Online mode" / cache-first | N/A — nostos is offline-first by design (the cache is on-device SQLite) |
 

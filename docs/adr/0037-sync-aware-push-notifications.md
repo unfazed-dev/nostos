@@ -94,19 +94,19 @@ against APNs/FCM's 4096-byte ceiling.
 
 Two producers: `nostos-pushd`'s `POST /v1/send` takes the whole map, and
 `NOSTOS_PUSH_TABLES` grows one sugar — `orders:visible@/orders/{id}:…` sets
-`cairn_route` with the same `{col}` interpolation title/body use. One key
+`nostos_route` with the same `{col}` interpolation title/body use. One key
 rather than a map there because that config is a colon-delimited string; a
 map means JSON-in-env, and nobody has asked for a second key.
 
 ### 2b. Visible pushes in direct mode — amendment 2026-09-23
 
-Direct mode shipped the doorbell only: `cairn.wake_absent_devices()` →
-`cairn-push` Edge Function → a silent `content-available` push. The Atlet pilot
+Direct mode shipped the doorbell only: `nostos.wake_absent_devices()` →
+`nostos-push` Edge Function → a silent `content-available` push. The Atlet pilot
 showed what §2 already said: iOS never wakes a user-quit app for a silent push
 and throttles the rest, so order updates only appeared once the app was
 reopened.
 
-`cairn.push_templates (table_name, title, body, category, route)` is the
+`nostos.push_templates (table_name, title, body, category, route)` is the
 direct-mode `NOSTOS_PUSH_TABLES`, one row per visible table. A change to such a
 table posts `{scope, row, title, body, category, route}`. The Edge Function
 fills `{col}` and sends the fcm.rs shapes: `action` when category is set,
@@ -129,8 +129,8 @@ categories are still manual.
 
 ### 3. Token registry in the customer's Postgres, tenant force-stamped
 
-`cairn_push_tokens(token, platform, account_id, tenant_id, updated_at)` —
-server-internal table like `cairn_oplog`, managed by a `PgTokenStore` following
+`nostos_push_tokens(token, platform, account_id, tenant_id, updated_at)` —
+server-internal table like `nostos_oplog`, managed by a `PgTokenStore` following
 the `PgWriteBack` pool-of-one pattern. Registration via REST (`POST
 /push-tokens`), authenticated by the same JWT path as `/sync`; `tenant_id` /
 `account_id` are stamped server-side from `Principal::tenant_scope` (ADR-0018

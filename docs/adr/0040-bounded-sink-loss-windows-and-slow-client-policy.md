@@ -45,7 +45,7 @@ connected client that loses part of a stream.
    advancing past a threshold and pushes a snapshot boundary + fresh snapshot
    down the same session. No client change; server does bookkeeping.
 3. **Op-log replay for live sessions.** Attach the op-log writer by default
-   and let mid-session gaps be back-filled from `cairn_oplog` without any
+   and let mid-session gaps be back-filled from `nostos_oplog` without any
    resnapshot. Heaviest: changes the op-log's opt-in posture (ADR-0025).
 4. **Buffer sizing guidance only.** Document raising
    `NOSTOS_SESSION_BUFFER` (32,768 demonstrated zero-loss on the 20k burst)

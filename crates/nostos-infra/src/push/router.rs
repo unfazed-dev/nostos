@@ -1101,7 +1101,7 @@ mod tests {
                     category: None,
                     // Routing keys interpolate by the same rules — a route
                     // that cannot name the row that changed is useless.
-                    data: [("cairn_route".to_string(), "/orders/{id}".to_string())]
+                    data: [("nostos_route".to_string(), "/orders/{id}".to_string())]
                         .into_iter()
                         .collect(),
                     options: [
@@ -1127,7 +1127,7 @@ mod tests {
                 title: "New activity".into(),
                 body: "Order ord-42 changed ()".into(),
                 category: None,
-                data: [("cairn_route".to_string(), "/orders/ord-42".to_string())]
+                data: [("nostos_route".to_string(), "/orders/ord-42".to_string())]
                     .into_iter()
                     .collect(),
                 options: [("collapse".to_string(), "order-ord-42".to_string())]

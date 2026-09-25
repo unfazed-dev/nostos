@@ -315,6 +315,8 @@ pub const MAX_DATA_BYTES: usize = 1024;
 /// - `title`, `body`, `category`, `table`, `lsn` — nostos's own: the FCM
 ///   action-mode message and the silent doorbell put these in `data`.
 /// - `nostos_*` — the push options' own keys (ADR-0047, [`NSE_KEYS`]).
+///   Except `nostos_route`: the tap route is a routing key the caller sets
+///   (ADR-0048 renamed it from `cairn_route` into this prefix).
 pub fn reserved_data_key(key: &str) -> bool {
     matches!(
         key,
@@ -329,7 +331,7 @@ pub fn reserved_data_key(key: &str) -> bool {
             | "lsn"
     ) || key.starts_with("google.")
         || key.starts_with("gcm.")
-        || key.starts_with("nostos_")
+        || (key.starts_with("nostos_") && key != "nostos_route")
 }
 
 /// Key and size discipline for a visible push's routing keys. One home for
@@ -643,9 +645,10 @@ mod data_tests {
 
     #[test]
     fn ordinary_routing_keys_pass() {
-        assert!(
-            validate_data(&data(&[("cairn_route", "/orders/42"), ("order_id", "42"),])).is_ok()
-        );
+        assert!(validate_data(&data(
+            &[("nostos_route", "/orders/42"), ("order_id", "42"),]
+        ))
+        .is_ok());
         assert!(validate_data(&PushData::new()).is_ok());
     }
 

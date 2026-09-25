@@ -64,7 +64,7 @@ internal static class Program
             Console.WriteLine("[dotnet-e2e] POST /push ok");
 
             string pushedPk = PollRow(client,
-                "SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = 'dotnet-push'",
+                "SELECT pk FROM nostos_data WHERE table_name = 'tasks' AND pk = 'dotnet-push'",
                 TimeSpan.FromSeconds(8));
             if (pushedPk != "dotnet-push")
                 throw new Exception($"unexpected pushed pk: {pushedPk}");
@@ -76,7 +76,7 @@ internal static class Program
             Console.WriteLine("[dotnet-e2e] write() enqueued (dotnet-echo)");
 
             string echoedPk = PollRow(client,
-                "SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = 'dotnet-echo'",
+                "SELECT pk FROM nostos_data WHERE table_name = 'tasks' AND pk = 'dotnet-echo'",
                 TimeSpan.FromSeconds(8));
             if (echoedPk != "dotnet-echo")
                 throw new Exception($"unexpected echoed pk: {echoedPk}");

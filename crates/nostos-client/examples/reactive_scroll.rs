@@ -441,7 +441,7 @@ async fn main() {
         let conn = after_write.conn_for_test();
         let roundtrip: Vec<u8> = conn
             .query_row(
-                "SELECT payload FROM cairn_data WHERE pk = 'demo-write'",
+                "SELECT payload FROM nostos_data WHERE pk = 'demo-write'",
                 [],
                 |r| r.get::<_, Vec<u8>>(0),
             )

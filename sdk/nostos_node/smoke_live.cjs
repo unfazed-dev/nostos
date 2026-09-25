@@ -173,7 +173,7 @@ async function main() {
 
     const pushed = await pollRow(
       client,
-      "SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = 'node-push'",
+      "SELECT pk FROM nostos_data WHERE table_name = 'tasks' AND pk = 'node-push'",
       8000,
     );
     if (!pushed) throw new Error('pushed row never became queryable');
@@ -193,7 +193,7 @@ async function main() {
 
     const echoed = await pollRow(
       client,
-      "SELECT pk FROM cairn_data WHERE table_name = 'tasks' AND pk = 'node-echo'",
+      "SELECT pk FROM nostos_data WHERE table_name = 'tasks' AND pk = 'node-echo'",
       8000,
     );
     if (!echoed) throw new Error('echoed write never became queryable');
