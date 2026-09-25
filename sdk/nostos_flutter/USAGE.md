@@ -221,7 +221,7 @@ If you omit `schema` at connect time, the SDK fetches it via
 
 ## 6. Connect
 
-Three factories, one underlying engine. Pick by ergonomics:
+Four factories, one underlying engine. Pick by ergonomics:
 
 ### Recommended — `NostosDatabase.open` (config-driven)
 
@@ -278,6 +278,39 @@ final db = await NostosDatabase.connect(
 );
 await db.subscribe('tasks');
 ```
+
+### No server — `NostosDatabase.direct` (Supabase projects)
+
+The device talks to your Supabase project itself: PostgREST for the pull and
+the push, Realtime as the doorbell, RLS decides who reads what. Nothing to
+operate. Set the project up once with `nostos link --mode direct` and check it
+with `nostos doctor --mode direct`; the walkthrough is
+[`docs/nostos-explained.html`](../../docs/nostos-explained.html).
+
+```dart
+final user = Supabase.instance.client.auth.currentUser!;
+final db = await NostosDatabase.direct(
+  supabaseUrl: 'https://<ref>.supabase.co',
+  anonKey: supabaseAnonKey,            // the publishable key; RLS does the gating
+  scope: 'sub:${user.id}',             // what your change-log trigger stamps
+  token: session.accessToken,          // rotate with db.setToken(...)
+  schema: appSchema,                   // REQUIRED: there is no /schema to fetch
+  sqlitePath: '${dir.path}/nostos_direct.sqlite',
+  keepLocalOnSignOut: true,            // optional, see below
+);
+```
+
+Everything after this line is the same API as `connect`: same outbox, same
+`watch`, same offline behaviour.
+
+**Sign-out and what stays on the device.** `db.signOut()` drops the token and,
+by default, wipes the local store (ADR-0029): the next sign-in downloads a
+fresh snapshot. `keepLocalOnSignOut: true` (ADR-0049) keeps the rows instead.
+The store remembers the JWT `sub` it holds rows for; the same user's next
+sign-in resumes from where it left off (one snapshot per install), and a
+different user's token wipes before its first pull. Keep it `false` for
+shared-device apps. Call `db.signOut()` **before** `supabase.auth.signOut()` so
+the push-token deregistration hook still has a session.
 
 Multi-table? Subscribe to several at once:
 ```dart
@@ -412,6 +445,13 @@ final List<Map<String, dynamic>> rows =
     await db.getAll('SELECT * FROM tasks LIMIT 10');
 ```
 
+> **First emission waits for real data.** Until the first snapshot has
+> landed, a table is empty because nothing has been read, not because there is
+> nothing. `watch` withholds that read (direct mode, since 2026-09-25): the
+> stream stays silent for the bootstrap (~2 s for 1k rows on an iPhone) and
+> its first value is the real one. Render a spinner on `!snapshot.hasData`,
+> never an empty state — see `apps/atlet/flutter/lib/ui/home.dart`.
+
 > **v1 boundary (honest):** `db.watch(sql)` does **not** yet take a
 > `parameters: [...]` list (it's P1). Until it lands, interpolate carefully or
 > prefer the typed `Collection<T>.watch(where:)`. `execute(sql)` is SELECT-only
@@ -519,6 +559,20 @@ See `NostosSchema`'s class doc.
 merge semantics, the per-field conflict-tier seam is the extension point — see
 ADR-0004 / ADR-0014.
 
+### Direct mode: stalls, retries, two engines on one file
+
+- Every PostgREST request is bounded: 10 s to connect, 30 s between bytes
+  (reqwest ships with no timeout at all; a VPN'd iPhone hung the first sync
+  forever, measured 2026-09-25). A long snapshot that is still flowing never
+  trips it.
+- A failed sync retries on a 0.5 s → 30 s backoff, so a bad first sync comes
+  back in seconds, not at the 60 s poll floor. `status` shows `reconnecting`
+  meanwhile; nothing for you to do.
+- The pull is gzip'd (7.4× fewer bytes on a 1k-row snapshot).
+- The SQLite file opens in WAL mode with a 5 s busy timeout, so a push wake
+  isolate and the foreground app can share one `sqlitePath` without
+  `SQLITE_BUSY`.
+
 ### Server-side write allowlist
 
 Writes are **server-gated** by `NOSTOS_WRITE_TABLES` (empty default = all writes
@@ -547,6 +601,10 @@ If your writes silently do nothing, this is why — see `docs/OPERATING.md`.
       lands).
 - [ ] **SQLite path:** pass the same `sqlitePath` / `sqliteDir` across launches
       so the durable store + its read-views persist.
+- [ ] **Sign-out policy (direct mode):** decide `keepLocalOnSignOut`. Default
+      wipes on `signOut()`; `true` keeps this user's rows for their next
+      sign-in and only wipes when another user signs in (ADR-0049). Shared
+      devices: leave it `false`.
 
 ---
 
@@ -556,7 +614,8 @@ If your writes silently do nothing, this is why — see `docs/OPERATING.md`.
 // Connect (pick one)
 static Future<NostosDatabase> open({required NostosConfig config, NostosSchema? schema, required String sqliteDir});
 static Future<NostosDatabase> connect({required String url, String? token, NostosSchema? schema, required String sqlitePath});
-static Future<NostosDatabase> supabase({/* nostosUrl, supabaseUrl, supabaseAnonKey, schema, sqlitePath */});
+static Future<NostosDatabase> supabase({required String nostosUrl, NostosSchema? schema, required String sqlitePath, Set<String>? orSetTables, Set<String>? counterTables});
+static Future<NostosDatabase> direct({required String supabaseUrl, required String anonKey, required String scope, String? token, required NostosSchema schema, required String sqlitePath, Map<String, String> counterFields = const {}, bool keepLocalOnSignOut = false});
 
 // Session
 Future<void> subscribe(String table, {String? where});
@@ -564,6 +623,7 @@ Future<void> subscribeTables(List<String> tables);
 ValueListenable<SyncStatus> get status;
 SyncStatus get currentStatus;
 Stream<NostosConnectionState> get connectionState;
+Future<void> signOut();            // drops the token; wipes unless keepLocalOnSignOut
 Future<void> close();
 
 // SyncStatus
