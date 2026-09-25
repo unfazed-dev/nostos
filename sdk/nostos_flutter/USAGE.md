@@ -602,7 +602,7 @@ attachments.start();                      // 2 s driver while online
 
 // Shared catalog (every device reads, nobody writes): read-through, no
 // metadata write, no `start()` needed.
-final bytes = await attachments.bytes('p1-protein.jpg');   // null = offline + uncached
+final bytes = await attachments.bytes('p1-protein.jpg');   // null = uncached + download failed
 ```
 
 Checklist:

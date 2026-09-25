@@ -558,7 +558,10 @@ class NostosDatabase {
   /// True only after [status] has observed a `connected` transition; false
   /// before the first wire AND while `disconnected`. Used by the T6 attachment
   /// driver to gate blob transfers on connectivity (ADR-0034).
-  bool get isOnline => _status?.value.conn == NostosConnectionState.connected;
+  // Through [currentStatus] so the pump is wired on first use: an app that
+  // never reads `status` (atlet, 2026-09-25) otherwise saw `false` forever
+  // and the T6 driver never transferred a byte.
+  bool get isOnline => currentStatus.conn == NostosConnectionState.connected;
 
   /// Subscribe to [table], optionally filtered by [where] (a safe-SQL
   /// predicate — see `Nostos.subscribe`). Must be called before [watch] /

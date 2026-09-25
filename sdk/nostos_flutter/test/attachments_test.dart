@@ -490,16 +490,15 @@ void main() {
     final blob = _MemBlobStore();
     final adapter = _FakeAdapter()
       ..remote['shared.jpg'] = Uint8List.fromList([9, 9]);
-    var online = false;
+    // isOnline is NOT consulted: the status pump may be unwired or still
+    // `connecting` at first paint (atlet 2026-09-25: no image ever fetched).
     final driver = Attachments(
       db: db,
       adapter: adapter,
       blobStore: blob,
-      isOnline: () async => online,
+      isOnline: () async => false,
     );
 
-    expect(await driver.bytes('shared.jpg'), isNull); // offline, not cached
-    online = true;
     expect(await driver.bytes('shared.jpg'), [9, 9]);
     expect(await driver.bytes('shared.jpg'), [9, 9]);
     expect(adapter.downloadCalls, 1); // second read served from the store

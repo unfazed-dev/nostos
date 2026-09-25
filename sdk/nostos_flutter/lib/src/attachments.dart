@@ -305,8 +305,10 @@ class Attachments {
       _transition(id, AttachmentStateWire.queuedDelete);
 
   /// Bytes for an attachment, read-through: the local [BlobStore] first, else
-  /// (when online) a direct adapter download that is cached and returned.
-  /// `null` when absent and offline, or when the download fails.
+  /// a direct adapter download that is cached and returned. `null` when the
+  /// download fails (offline included — see [lastErrorFor]). No online gate:
+  /// the first paint races the `connected` transition, and a gated miss is
+  /// never retried while a failed attempt costs one request.
   ///
   /// Unlike [queueDownload] this never touches the metadata row, so it is the
   /// call for SHARED attachments (a public catalog's images): a state flip
@@ -316,7 +318,6 @@ class Attachments {
   Future<Uint8List?> bytes(String id) async {
     final cached = await _blob.get(id);
     if (cached != null) return cached;
-    if (!await _isOnline()) return null;
     try {
       final fetched = await _adapter.download(id);
       await _blob.put(id, fetched);

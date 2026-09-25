@@ -12,6 +12,10 @@ Direct mode (`NostosDatabase.direct`), newest first:
   (local `BlobStore`, else adapter download, cached). Never touches the
   metadata row, so a public catalog's images need no write RLS and no
   per-device state fan-out; `queueDownload` stays the durable per-user path.
+- **Fix: `NostosDatabase.isOnline` self-wires** the status pump. An app that
+  never read `status` saw `false` forever, so the T6 driver never moved a
+  byte; `bytes()` no longer gates on it at all (a miss at first paint was
+  never retried).
 - **`watch` withholds the pre-snapshot empty read.** The first emission is the
   first real read, so UIs no longer flash an empty state for the ~2 s
   bootstrap. Streams that expected an immediate `[]` on a fresh store now wait.
