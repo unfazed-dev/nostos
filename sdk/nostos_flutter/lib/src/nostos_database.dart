@@ -38,6 +38,7 @@ class NostosDatabase {
     this._supabaseAuth, {
     this._localOnly = false,
     this._anonKey,
+    this.keepLocalOnSignOut = false,
   }) {
     // ADR-0037 §3: every SDK deregisters its push tokens in its sign-out hook
     // — a leaked registration would push the previous principal's data to the
@@ -50,6 +51,12 @@ class NostosDatabase {
   /// no sync, no push rail. Gates the fail-loudly guards on [resumeSync] and
   /// the push-token REST calls, and resolves [waitForFirstSync] immediately.
   final bool _localOnly;
+
+  /// ADR-0049: this user's local rows survive [signOut] (direct mode only;
+  /// the engine still wipes when a different `sub` signs in). Sign-out hooks
+  /// that wipe per-user caches (the T6 blob store) consult it so retention
+  /// covers blobs as well as rows.
+  final bool keepLocalOnSignOut;
 
   /// Test-only: wrap an injected [Nostos] (itself injectable via
   /// `Nostos.withEngine`) to exercise the typed mappers ([watchMapped] /
@@ -64,6 +71,7 @@ class NostosDatabase {
     String? token,
     Future<String?> Function()? sessionRefresh,
     String? anonKey,
+    bool keepLocalOnSignOut = false,
   }) {
     final db = NostosDatabase._(
       nostos,
@@ -72,6 +80,7 @@ class NostosDatabase {
       token,
       false,
       anonKey: anonKey,
+      keepLocalOnSignOut: keepLocalOnSignOut,
     );
     db._sessionRefresh = sessionRefresh;
     return db;
@@ -88,7 +97,7 @@ class NostosDatabase {
   /// connection uses — see [_deriveHttpBase].
   final String _httpBase;
 
-  /// Direct mode only (ADR-0045): the project's publishable key. Non-null
+  /// Direct mode only: the project's publishable key. Non-null
   /// means [_httpBase] is PostgREST (`{supabaseUrl}/rest/v1`) and the push
   /// tokens go through the `nostos_*_push_token` RPCs that `nostos link --mode
   /// direct --push` generates, not `nostos-server`'s `/push-tokens`.
@@ -433,8 +442,9 @@ class NostosDatabase {
   }
 
   /// Open a database with no `nostos-server` in it: this device syncs straight
-  /// with your Supabase project (ADR-0045). See [Nostos.direct] for the mode's
-  /// shape; everything else on this class behaves as it does after [connect].
+  /// with your Supabase project (`docs/plans/direct-mode-sync-protocol.md`).
+  /// See [Nostos.direct] for the mode's shape; everything else on this class
+  /// behaves as it does after [connect].
   ///
   /// [schema] is REQUIRED and cannot be fetched: `GET /schema` is a
   /// `nostos-server` endpoint, and there is no server. Declare it in the app —
@@ -447,6 +457,11 @@ class NostosDatabase {
   /// `nostos link --mode direct --push <url>`: it calls the generated RPC,
   /// which files the token under this JWT's scopes. Rotate [token] with
   /// [setToken] — the RPCs authenticate with the same credential as the pull.
+  ///
+  /// [keepLocalOnSignOut] (ADR-0049): by default [signOut] wipes the device
+  /// (ADR-0029) and the next sign-in downloads everything again. `true` keeps
+  /// the rows for the same user's next sign-in — one snapshot per install —
+  /// and wipes only when a different user's token syncs.
   ///
   /// ponytail: no presence heartbeat (`nostos_heartbeat`) is sent, so the push
   /// trigger treats every device as absent and rings even a foregrounded one
@@ -461,6 +476,7 @@ class NostosDatabase {
     required NostosSchema schema,
     required String sqlitePath,
     Map<String, String> counterFields = const <String, String>{},
+    bool keepLocalOnSignOut = false,
   }) async {
     if (schema.tables.isEmpty) {
       throw ArgumentError.value(
@@ -477,6 +493,7 @@ class NostosDatabase {
       token: token,
       sqlitePath: sqlitePath,
       counterFields: counterFields,
+      keepLocalOnSignOut: keepLocalOnSignOut,
     );
     nostos.applySchema(schema.toClientTables());
     final base = supabaseUrl.endsWith('/')
@@ -489,6 +506,7 @@ class NostosDatabase {
       token,
       false,
       anonKey: anonKey,
+      keepLocalOnSignOut: keepLocalOnSignOut,
     );
   }
 
@@ -540,7 +558,10 @@ class NostosDatabase {
   /// True only after [status] has observed a `connected` transition; false
   /// before the first wire AND while `disconnected`. Used by the T6 attachment
   /// driver to gate blob transfers on connectivity (ADR-0034).
-  bool get isOnline => _status?.value.conn == NostosConnectionState.connected;
+  // Through [currentStatus] so the pump is wired on first use: an app that
+  // never reads `status` (atlet, 2026-09-25) otherwise saw `false` forever
+  // and the T6 driver never transferred a byte.
+  bool get isOnline => currentStatus.conn == NostosConnectionState.connected;
 
   /// Subscribe to [table], optionally filtered by [where] (a safe-SQL
   /// predicate — see `Nostos.subscribe`). Must be called before [watch] /
@@ -1016,7 +1037,7 @@ class NostosDatabase {
   /// `FirebaseMessaging.onTokenRefresh` on Android, APNs
   /// `didRegisterForRemoteNotificationsWithDeviceToken` on iOS.
   ///
-  /// In direct mode (ADR-0045) the same call is
+  /// In direct mode the same call is
   /// `POST /rest/v1/rpc/nostos_register_push_token` with
   /// `{"p_platform": …, "p_token": …}`; the RPC stamps the scope from the JWT.
   ///

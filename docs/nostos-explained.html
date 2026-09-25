@@ -225,7 +225,7 @@ nostos.<span class="f">watch</span>(<span class="s">'todos'</span>).<span class=
   <p>The other reason is scale: one Rust process fanning out to many clients does work a per-device HTTP pull cannot. That is a measured claim with rules attached — see <code>docs/BENCHMARK-METHODOLOGY.md</code> — and it is not the claim being made on this page.</p>
   <p class="muted">One thing that is genuinely different: in server mode the process must stay awake. It holds a Postgres replication slot, and while it sleeps Postgres piles up WAL for it. Direct mode has no slot to hold — the log is an ordinary table with an ordinary retention window, which is why a phone can be away for a week and the failure is a 410 rather than a hole.</p>
 
-  <footer>Built from the Nostos repo's own docs: README · docs/QUICKSTART.md · docs/plans/direct-mode-sync-protocol.md · ADR-0045 · <code>.nostos/direct.sql</code> · <code>crates/nostos-client/src/direct.rs</code> · <code>supabase/functions/nostos-push</code> · docs/plans/direct-mode-push-and-presence.md. Last revised 2026-09-23, when direct-mode push reached the Flutter SDK.</footer>
+  <footer>Built from the Nostos repo's own docs: README · docs/QUICKSTART.md · docs/plans/direct-mode-sync-protocol.md · <code>.nostos/direct.sql</code> · <code>crates/nostos-client/src/direct.rs</code> · <code>supabase/functions/nostos-push</code> · docs/plans/direct-mode-push-and-presence.md. Last revised 2026-09-23, when direct-mode push reached the Flutter SDK.</footer>
 </div>
 
 <script>

@@ -1,3 +1,35 @@
+## Unreleased
+
+Direct mode (`NostosDatabase.direct`), newest first:
+
+- **ADR-0049 — `keepLocalOnSignOut`** on `NostosDatabase.direct`,
+  `Nostos.direct`, `DirectNostosEngine.connect` and `createDirectNostosEngine`
+  (default `false`, ADR-0029 wipe unchanged). `true` keeps the rows across
+  `signOut()` for the same JWT `sub`; a different user's token wipes before its
+  first pull. `NostosDatabase.keepLocalOnSignOut` is public; the T6 blob-store
+  sign-out hook skips its wipe when it is `true`.
+- **`Attachments.bytes(id)`** — read-through fetch for shared attachments
+  (local `BlobStore`, else adapter download, cached). Never touches the
+  metadata row, so a public catalog's images need no write RLS and no
+  per-device state fan-out; `queueDownload` stays the durable per-user path.
+- **Fix: `NostosDatabase.isOnline` self-wires** the status pump. An app that
+  never read `status` saw `false` forever, so the T6 driver never moved a
+  byte; `bytes()` no longer gates on it at all (a miss at first paint was
+  never retried). Concurrent `bytes()` calls for one id share a single
+  download (six tiles at first paint made 19 GETs for 5 images).
+- **`watch` withholds the pre-snapshot empty read.** The first emission is the
+  first real read, so UIs no longer flash an empty state for the ~2 s
+  bootstrap. Streams that expected an immediate `[]` on a fresh store now wait.
+- **Bounded PostgREST requests** (10 s connect, 30 s read) and a failed first
+  sync retries on the 0.5–30 s backoff instead of waiting for the 60 s floor.
+- **gzip on the pull** (7.4× fewer snapshot bytes).
+- **Doorbell TLS**: `wss://` Realtime works on iOS (rustls `ring` provider
+  compiled in); the reconnect backoff resets after a healthy session.
+- **WAL + `busy_timeout=5000`** on the SQLite file so two engines (app + push
+  wake isolate) share it.
+- `nostos link --mode direct` policy: the Realtime join check slices the topic
+  by prefix length, so `nostos:` channels pass RLS after the rename.
+
 ## 0.2.0 (2026-09-01)
 
 The first flutter-carrying tag. `0.1.0` below was never published to pub.dev,

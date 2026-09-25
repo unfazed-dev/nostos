@@ -27,8 +27,8 @@
 
 // Section: imports
 
-use crate::api::nostos::*;
 use crate::api::direct::*;
+use crate::api::nostos::*;
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
 use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
@@ -41,7 +41,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 32333151;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -719452361;
 
 // Section: executor
 
@@ -182,6 +182,7 @@ fn wire__crate__api__direct__NostosDirectHandle_connect_impl(
             let api_anon_key = <String>::sse_decode(&mut deserializer);
             let api_token = <Option<String>>::sse_decode(&mut deserializer);
             let api_db_path = <String>::sse_decode(&mut deserializer);
+            let api_keep_local_on_sign_out = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
                 let output_ok = crate::api::direct::NostosDirectHandle::connect(
@@ -189,6 +190,7 @@ fn wire__crate__api__direct__NostosDirectHandle_connect_impl(
                     api_anon_key,
                     api_token,
                     api_db_path,
+                    api_keep_local_on_sign_out,
                 )?;
                 std::result::Result::Ok(output_ok)
             })())
@@ -366,9 +368,11 @@ fn wire__crate__api__direct__NostosDirectHandle_query_impl(
                             }
                         }
                         let api_that_guard = api_that_guard.unwrap();
-                        let output_ok =
-                            crate::api::direct::NostosDirectHandle::query(&*api_that_guard, api_sql)
-                                .await?;
+                        let output_ok = crate::api::direct::NostosDirectHandle::query(
+                            &*api_that_guard,
+                            api_sql,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -900,7 +904,8 @@ fn wire__crate__api__direct__NostosDirectHandle_write_batch_impl(
             let api_that = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NostosDirectHandle>,
             >>::sse_decode(&mut deserializer);
-            let api_ops = <Vec<crate::api::nostos::NostosWriteInput>>::sse_decode(&mut deserializer);
+            let api_ops =
+                <Vec<crate::api::nostos::NostosWriteInput>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -1558,8 +1563,11 @@ fn wire__crate__api__nostos__NostosHandle_set_token_impl(
                         }
                         let api_that_guard = api_that_guard.unwrap();
                         let output_ok = Ok::<_, ()>({
-                            crate::api::nostos::NostosHandle::set_token(&*api_that_guard, api_token)
-                                .await;
+                            crate::api::nostos::NostosHandle::set_token(
+                                &*api_that_guard,
+                                api_token,
+                            )
+                            .await;
                         })?;
                         std::result::Result::Ok(output_ok)
                     })()
@@ -2035,7 +2043,8 @@ fn wire__crate__api__nostos__NostosHandle_write_batch_impl(
             let api_that = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NostosHandle>,
             >>::sse_decode(&mut deserializer);
-            let api_ops = <Vec<crate::api::nostos::NostosWriteInput>>::sse_decode(&mut deserializer);
+            let api_ops =
+                <Vec<crate::api::nostos::NostosWriteInput>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -2057,9 +2066,11 @@ fn wire__crate__api__nostos__NostosHandle_write_batch_impl(
                             }
                         }
                         let api_that_guard = api_that_guard.unwrap();
-                        let output_ok =
-                            crate::api::nostos::NostosHandle::write_batch(&*api_that_guard, api_ops)
-                                .await?;
+                        let output_ok = crate::api::nostos::NostosHandle::write_batch(
+                            &*api_that_guard,
+                            api_ops,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -2204,33 +2215,10 @@ impl SseDecode for String {
     }
 }
 
-impl SseDecode for crate::api::nostos::NostosConnectionState {
+impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::nostos::NostosConnectionState::Connecting,
-            1 => crate::api::nostos::NostosConnectionState::Connected,
-            2 => crate::api::nostos::NostosConnectionState::Reconnecting,
-            3 => crate::api::nostos::NostosConnectionState::Disconnected,
-            _ => unreachable!("Invalid variant for NostosConnectionState: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::nostos::NostosWriteInput {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_table = <String>::sse_decode(deserializer);
-        let mut var_op = <String>::sse_decode(deserializer);
-        let mut var_pk = <String>::sse_decode(deserializer);
-        let mut var_payloadJson = <Option<String>>::sse_decode(deserializer);
-        return crate::api::nostos::NostosWriteInput {
-            table: var_table,
-            op: var_op,
-            pk: var_pk,
-            payload_json: var_payloadJson,
-        };
+        deserializer.cursor.read_u8().unwrap() != 0
     }
 }
 
@@ -2281,20 +2269,6 @@ impl SseDecode for Vec<String> {
     }
 }
 
-impl SseDecode for Vec<crate::api::nostos::NostosWriteInput> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = Vec::with_capacity(len_ as usize);
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::nostos::NostosWriteInput>::sse_decode(
-                deserializer,
-            ));
-        }
-        return ans_;
-    }
-}
-
 impl SseDecode for Vec<crate::api::nostos::ClientTableFfi> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2302,6 +2276,20 @@ impl SseDecode for Vec<crate::api::nostos::ClientTableFfi> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::nostos::ClientTableFfi>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::nostos::NostosWriteInput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::nostos::NostosWriteInput>::sse_decode(
                 deserializer,
             ));
         }
@@ -2342,6 +2330,36 @@ impl SseDecode for Vec<crate::api::nostos::TableSubFfi> {
             ans_.push(<crate::api::nostos::TableSubFfi>::sse_decode(deserializer));
         }
         return ans_;
+    }
+}
+
+impl SseDecode for crate::api::nostos::NostosConnectionState {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::nostos::NostosConnectionState::Connecting,
+            1 => crate::api::nostos::NostosConnectionState::Connected,
+            2 => crate::api::nostos::NostosConnectionState::Reconnecting,
+            3 => crate::api::nostos::NostosConnectionState::Disconnected,
+            _ => unreachable!("Invalid variant for NostosConnectionState: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::nostos::NostosWriteInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_table = <String>::sse_decode(deserializer);
+        let mut var_op = <String>::sse_decode(deserializer);
+        let mut var_pk = <String>::sse_decode(deserializer);
+        let mut var_payloadJson = <Option<String>>::sse_decode(deserializer);
+        return crate::api::nostos::NostosWriteInput {
+            table: var_table,
+            op: var_op,
+            pk: var_pk,
+            payload_json: var_payloadJson,
+        };
     }
 }
 
@@ -2405,13 +2423,6 @@ impl SseDecode for crate::api::nostos::WriteQueueStatusFfi {
             dead_lettered: var_deadLettered,
             last_error: var_lastError,
         };
-    }
-}
-
-impl SseDecode for bool {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_u8().unwrap() != 0
     }
 }
 
@@ -2515,12 +2526,18 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        21 => {
-            wire__crate__api__nostos__NostosHandle_disconnect_impl(port, ptr, rust_vec_len, data_len)
-        }
-        22 => {
-            wire__crate__api__nostos__NostosHandle_or_set_add_impl(port, ptr, rust_vec_len, data_len)
-        }
+        21 => wire__crate__api__nostos__NostosHandle_disconnect_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        22 => wire__crate__api__nostos__NostosHandle_or_set_add_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
         23 => wire__crate__api__nostos__NostosHandle_or_set_remove_impl(
             port,
             ptr,
@@ -2532,7 +2549,9 @@ fn pde_ffi_dispatcher_primary_impl(
         26 => {
             wire__crate__api__nostos__NostosHandle_set_token_impl(port, ptr, rust_vec_len, data_len)
         }
-        27 => wire__crate__api__nostos__NostosHandle_sign_out_impl(port, ptr, rust_vec_len, data_len),
+        27 => {
+            wire__crate__api__nostos__NostosHandle_sign_out_impl(port, ptr, rust_vec_len, data_len)
+        }
         28 => {
             wire__crate__api__nostos__NostosHandle_subscribe_impl(port, ptr, rust_vec_len, data_len)
         }
@@ -2556,9 +2575,12 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         33 => wire__crate__api__nostos__NostosHandle_write_impl(port, ptr, rust_vec_len, data_len),
-        34 => {
-            wire__crate__api__nostos__NostosHandle_write_batch_impl(port, ptr, rust_vec_len, data_len)
-        }
+        34 => wire__crate__api__nostos__NostosHandle_write_batch_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
         35 => wire__crate__api__nostos__init_app_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
@@ -2593,7 +2615,10 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<NostosDirectHandle> {
             .into_dart()
     }
 }
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<NostosDirectHandle> {}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<NostosDirectHandle>
+{
+}
 
 impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<NostosDirectHandle>> for NostosDirectHandle {
     fn into_into_dart(self) -> FrbWrapper<NostosDirectHandle> {
@@ -2616,6 +2641,28 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<NostosHandle>> for NostosHandl
     }
 }
 
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::nostos::ClientTableFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.name.into_into_dart().into_dart(),
+            self.primary_key.into_into_dart().into_dart(),
+            self.columns.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::nostos::ClientTableFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::nostos::ClientTableFfi>
+    for crate::api::nostos::ClientTableFfi
+{
+    fn into_into_dart(self) -> crate::api::nostos::ClientTableFfi {
+        self
+    }
+}
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::nostos::NostosConnectionState {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
@@ -2659,28 +2706,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::nostos::NostosWriteInput>
     for crate::api::nostos::NostosWriteInput
 {
     fn into_into_dart(self) -> crate::api::nostos::NostosWriteInput {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::nostos::ClientTableFfi {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.name.into_into_dart().into_dart(),
-            self.primary_key.into_into_dart().into_dart(),
-            self.columns.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::nostos::ClientTableFfi
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::nostos::ClientTableFfi>
-    for crate::api::nostos::ClientTableFfi
-{
-    fn into_into_dart(self) -> crate::api::nostos::ClientTableFfi {
         self
     }
 }
@@ -2809,31 +2834,10 @@ impl SseEncode for String {
     }
 }
 
-impl SseEncode for crate::api::nostos::NostosConnectionState {
+impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::nostos::NostosConnectionState::Connecting => 0,
-                crate::api::nostos::NostosConnectionState::Connected => 1,
-                crate::api::nostos::NostosConnectionState::Reconnecting => 2,
-                crate::api::nostos::NostosConnectionState::Disconnected => 3,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::nostos::NostosWriteInput {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.table, serializer);
-        <String>::sse_encode(self.op, serializer);
-        <String>::sse_encode(self.pk, serializer);
-        <Option<String>>::sse_encode(self.payload_json, serializer);
+        serializer.cursor.write_u8(self as _).unwrap();
     }
 }
 
@@ -2877,22 +2881,22 @@ impl SseEncode for Vec<String> {
     }
 }
 
-impl SseEncode for Vec<crate::api::nostos::NostosWriteInput> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::nostos::NostosWriteInput>::sse_encode(item, serializer);
-        }
-    }
-}
-
 impl SseEncode for Vec<crate::api::nostos::ClientTableFfi> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::nostos::ClientTableFfi>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::nostos::NostosWriteInput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::nostos::NostosWriteInput>::sse_encode(item, serializer);
         }
     }
 }
@@ -2924,6 +2928,34 @@ impl SseEncode for Vec<crate::api::nostos::TableSubFfi> {
         for item in self {
             <crate::api::nostos::TableSubFfi>::sse_encode(item, serializer);
         }
+    }
+}
+
+impl SseEncode for crate::api::nostos::NostosConnectionState {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::nostos::NostosConnectionState::Connecting => 0,
+                crate::api::nostos::NostosConnectionState::Connected => 1,
+                crate::api::nostos::NostosConnectionState::Reconnecting => 2,
+                crate::api::nostos::NostosConnectionState::Disconnected => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::nostos::NostosWriteInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.table, serializer);
+        <String>::sse_encode(self.op, serializer);
+        <String>::sse_encode(self.pk, serializer);
+        <Option<String>>::sse_encode(self.payload_json, serializer);
     }
 }
 
@@ -2983,13 +3015,6 @@ impl SseEncode for crate::api::nostos::WriteQueueStatusFfi {
     }
 }
 
-impl SseEncode for bool {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_u8(self as _).unwrap();
-    }
-}
-
 #[cfg(not(target_family = "wasm"))]
 mod io {
     // This file is automatically generated, so please do not edit it.
@@ -2998,8 +3023,8 @@ mod io {
     // Section: imports
 
     use super::*;
-    use crate::api::nostos::*;
     use crate::api::direct::*;
+    use crate::api::nostos::*;
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
@@ -3050,8 +3075,8 @@ mod web {
     // Section: imports
 
     use super::*;
-    use crate::api::nostos::*;
     use crate::api::direct::*;
+    use crate::api::nostos::*;
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };

@@ -460,4 +460,54 @@ void main() {
     expect(blob.wipeCalls, 1); // blobs gone — next principal sees nothing
     expect(engine.signOutCalls, 1); // core signOut ran too
   });
+
+  test('keepLocalOnSignOut keeps the blob store too (ADR-0049)', () async {
+    final engine = _AttachFakeEngine();
+    final db = NostosDatabase.forTest(
+      Nostos.withEngine(engine),
+      const NostosSchema(tables: []),
+      keepLocalOnSignOut: true,
+    );
+    await db.subscribe('attachments');
+    final blob = _MemBlobStore();
+    final driver = db.attachments(adapter: _FakeAdapter(), blobStore: blob);
+    final id = await driver.queueUpload(
+      filename: 'keep.bin',
+      bytes: Uint8List.fromList([1]),
+      mediaType: 'application/octet-stream',
+    );
+
+    await db.signOut();
+
+    expect(blob.wipeCalls, 0);
+    expect(blob.has(id), isTrue); // same principal returns to its cache
+    expect(engine.signOutCalls, 1);
+  });
+
+  test('bytes() reads through the cache without touching metadata', () async {
+    final engine = _AttachFakeEngine();
+    final db = await _newSubscribedDb(engine);
+    final blob = _MemBlobStore();
+    final adapter = _FakeAdapter()
+      ..remote['shared.jpg'] = Uint8List.fromList([9, 9]);
+    // isOnline is NOT consulted: the status pump may be unwired or still
+    // `connecting` at first paint (atlet 2026-09-25: no image ever fetched).
+    final driver = Attachments(
+      db: db,
+      adapter: adapter,
+      blobStore: blob,
+      isOnline: () async => false,
+    );
+
+    // Six tiles paint at once: one download, not six.
+    final race = await Future.wait(
+      List.generate(6, (_) => driver.bytes('shared.jpg')),
+    );
+    expect(race, everyElement([9, 9]));
+    expect(await driver.bytes('shared.jpg'), [9, 9]);
+    expect(adapter.downloadCalls, 1); // later reads served from the store
+    expect(engine.attachments, isEmpty); // no state flip through the outbox
+    expect(await driver.bytes('missing.jpg'), isNull);
+    expect(driver.lastErrorFor('missing.jpg'), contains('not found'));
+  });
 }

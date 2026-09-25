@@ -1,6 +1,6 @@
 /// The direct-mode [NostosEngine] adapter: wraps the generated
 /// `rust.NostosDirectHandle`, which talks to a Supabase project with no
-/// `nostos-server` anywhere (ADR-0045).
+/// `nostos-server` anywhere (`docs/plans/direct-mode-sync-protocol.md`).
 ///
 /// Like `engine_io.dart` this file is native-only — it is reached solely from
 /// `engine_selector_io.dart`, so `flutter build web` never sees frb's io
@@ -36,6 +36,11 @@ class DirectNostosEngine implements NostosEngine {
   /// to, and is what makes [counterIncrement] expressible: server mode gets
   /// that column from `NOSTOS_COUNTER_COLUMNS`, and direct mode has no server to
   /// read it from, so the app declares it here.
+  ///
+  /// [keepLocalOnSignOut] (ADR-0049): `false` wipes the device on [signOut]
+  /// (ADR-0029, the default). `true` keeps the rows across sign-out so the
+  /// same user's next sign-in resumes instead of re-downloading; a different
+  /// user's token wipes before its first pull.
   factory DirectNostosEngine.connect({
     required String supabaseUrl,
     required String anonKey,
@@ -43,12 +48,14 @@ class DirectNostosEngine implements NostosEngine {
     String? token,
     required String dbPath,
     Map<String, String> counterFields = const <String, String>{},
+    bool keepLocalOnSignOut = false,
   }) => DirectNostosEngine._(
     direct.NostosDirectHandle.connect(
       supabaseUrl: supabaseUrl,
       anonKey: anonKey,
       token: token,
       dbPath: dbPath,
+      keepLocalOnSignOut: keepLocalOnSignOut,
     ),
     scope,
     counterFields,

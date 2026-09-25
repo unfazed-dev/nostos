@@ -49,6 +49,7 @@ Future<NostosEngine> createDirectNostosEngine({
   String? token,
   String? sqlitePath,
   Map<String, String> counterFields = const <String, String>{},
+  bool keepLocalOnSignOut = false,
 }) async {
   throw UnsupportedError(
     'direct mode is not available on web yet — use Nostos.connect against a '

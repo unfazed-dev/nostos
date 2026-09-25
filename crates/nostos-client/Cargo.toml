@@ -36,8 +36,18 @@ rusqlite = { workspace = true }
 # nostos-infra note above describes: openssl-sys cannot cross-compile to iOS, so
 # no rail in this crate may pull native-tls. Shares nostos-push's pin.
 reqwest = { workspace = true }
+# ADR-0049: decode the JWT payload for `sub` (no verification — the server
+# verifies; we only need a stable per-user key). Already in the lock via reqwest.
+base64 = "0.22"
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
+# The doorbell's TLS. tokio-tungstenite builds its rustls config from the
+# process-level CryptoProvider, and rustls panics when more than one provider
+# feature is compiled in (the workspace has both: reqwest brings `ring`,
+# nostos-cli's pin brings `aws-lc-rs`). Direct dep, not `workspace = true`, so
+# this crate names `ring` (already built for iOS via reqwest) and installs it
+# itself. See doorbell::listen.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 iroh = { workspace = true, optional = true }
 iroh-tickets = { workspace = true, optional = true }
 futures-util = { workspace = true }
@@ -59,6 +69,8 @@ nostos-application = { workspace = true }
 nostos-infra = { workspace = true, features = ["clap"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
+# paused-clock tests (direct_stall_timeout): the 30 s read timeout elapses instantly.
+tokio = { workspace = true, features = ["test-util"] }
 bytes = { workspace = true }
 # pg-only (behind the `pg` feature above) — the e2e_pg_sync harness needs a
 # control-plane SQL client (slot cleanup, direct-row assertions) and typed

@@ -41,8 +41,8 @@ Future<String> _defaultSqlitePath(String url) async {
 }
 
 /// Create the direct-mode [NostosEngine] ([DirectNostosEngine]): device →
-/// Supabase, no `nostos-server` process (ADR-0045). Initializes the Rust runtime
-/// once, exactly like [createNostosEngine].
+/// Supabase, no `nostos-server` process (`docs/plans/direct-mode-sync-protocol.md`).
+/// Initializes the Rust runtime once, exactly like [createNostosEngine].
 ///
 /// The SQLite path is keyed off the project URL, not the [scope]: signing out
 /// wipes the file (`signOut`), so one device-per-project file is enough and a
@@ -54,6 +54,7 @@ Future<NostosEngine> createDirectNostosEngine({
   String? token,
   String? sqlitePath,
   Map<String, String> counterFields = const <String, String>{},
+  bool keepLocalOnSignOut = false,
 }) async {
   if (!_rustInitialized) {
     await RustLib.init();
@@ -67,5 +68,6 @@ Future<NostosEngine> createDirectNostosEngine({
     token: token,
     dbPath: path,
     counterFields: counterFields,
+    keepLocalOnSignOut: keepLocalOnSignOut,
   );
 }

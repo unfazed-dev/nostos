@@ -904,7 +904,10 @@ begin
     using (
       realtime.messages.extension = 'broadcast'
       and (select realtime.topic()) like 'nostos:%'
-      and substring((select realtime.topic()) from 7) = any (nostos.current_scopes())
+      -- Slice by the prefix length, not a literal: the cairn: -> nostos: rename
+      -- (6 -> 7 chars) left a literal 7 yielding ':sub:<uid>' and every join
+      -- rejected Unauthorized (measured 2026-09-25).
+      and substring((select realtime.topic()) from length('nostos:') + 1) = any (nostos.current_scopes())
     );
 exception when insufficient_privilege then
   raise warning 'nostos: realtime.messages is owned by % and % cannot create a policy on it; the Realtime doorbell stays off until the nostos_ring_read block of .nostos/direct.sql is run by that owner (dashboard Realtime > Policies, or Supabase support). Check with `nostos doctor --mode direct`.',

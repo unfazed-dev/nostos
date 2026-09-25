@@ -40,7 +40,10 @@ void main() {
     await tester.pump();
 
     await tester.tap(find.widgetWithText(FilledButton, 'Sign in'));
-    await tester.pumpAndSettle();
+    // Not pumpAndSettle: the engine-less Home spins a progress indicator
+    // forever, which never settles. The route transition is 300 ms.
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
 
     // 'Home' now also labels the bottom-nav destination (I-1's tab shell),
     // so pin this to the app bar title specifically.

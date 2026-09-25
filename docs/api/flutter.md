@@ -8,7 +8,7 @@ surface), structured predicates, and a sync-status signal. Contract: ADR-0032.
 `NostosDatabase` is the supported surface. `Nostos` (the low-level engine handle) is still exported
 as an escape hatch and is the seam tests fake against, but everything you need is here.
 
-Three factories (`lib/src/nostos_database.dart:62`, `:97`, `:167`):
+Five factories (`lib/src/nostos_database.dart:148` connect, `:191` open, `:272` local, `:376` supabase, `:461` direct):
 
 ```dart
 // 1. Raw URL — the general case.
@@ -31,6 +31,26 @@ final db = await NostosDatabase.open(
   config: config,            // NostosConfig; a supabase block here is honoured
   schema: nostosSchema,       // generated
   sqliteDir: dir.path,       // note: DIR, not a file path
+);
+
+// 4. Local-only — no server, sync loop parked. Same file later reopens with
+//    connect(url:) and syncs: zero migration.
+final db = await NostosDatabase.local(
+  sqliteDir: dir.path,
+  schema: nostosSchema,       // REQUIRED, at least one table
+);
+
+// 5. Direct — the device talks to your Supabase project itself (PostgREST +
+//    Realtime + RLS), no nostos-server anywhere. `nostos link --mode direct`
+//    installs the SQL side; docs/plans/direct-mode-sync-protocol.md is the design.
+final db = await NostosDatabase.direct(
+  supabaseUrl: 'https://<ref>.supabase.co',
+  anonKey: anonKey,          // publishable key; RLS does the gating
+  scope: 'sub:${user.id}',   // what the change-log trigger stamps
+  token: accessToken,        // rotate with setToken
+  schema: nostosSchema,       // REQUIRED, nothing to fetch
+  sqlitePath: '$dir/nostos_direct.sqlite',
+  keepLocalOnSignOut: false, // ADR-0049; true = keep this user's rows across signOut
 );
 ```
 
@@ -149,7 +169,7 @@ await db.writeBatch([
 | `pauseSync` / `resumeSync` | `Future<void>` / `void` | ADR-0032 canonical pause/resume — retain token, schema, and watches; watches re-emit on resume. (`disconnect`/`resume` are back-compat aliases) |
 | `waitForFirstSync` | `Future<void>` | completes once the first sync has landed; resolves immediately if already synced (ADR-0032 T1) |
 | `setToken` | `Future<void> setToken(String? token)` | live credential swap — **never reconnect to refresh** |
-| `signOut` | `Future<void>` | disconnect + **wipe** local data (ADR-0029) |
+| `signOut` | `Future<void>` | disconnect + **wipe** local data (ADR-0029). Direct mode with `keepLocalOnSignOut: true`: drops the token only, rows stay for the same JWT `sub`; a different user's sign-in wipes before its first pull (ADR-0049) |
 | `close` | `Future<void>` | release resources (keeps local data) |
 | `schema` | `NostosSchema` | the resolved schema the read-views were built from |
 
@@ -246,6 +266,11 @@ export NOSTOS_WRITE_TABLES=attachments,tasks,…   # comma-separated; empty by d
 ```
 
 The app also declares `attachments` in its `NostosSchema` (it is a normal table).
+Direct mode has no allowlist: the table needs a `nostos_log_attachments` change-log
+trigger (`nostos link --mode direct --public attachments` for a shared catalog) and RLS.
+For shared, read-only attachments use `attachments.bytes(id)` (read-through cache, no
+metadata write) instead of `queueDownload` — atlet's product images are the worked
+example (migration 0012).
 
 ### API
 

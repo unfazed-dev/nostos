@@ -6,8 +6,8 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
-import 'api/nostos.dart';
 import 'api/direct.dart';
+import 'api/nostos.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -86,10 +86,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
-  NostosConnectionState dco_decode_nostos_connection_state(dynamic raw);
-
-  @protected
-  NostosWriteInput dco_decode_nostos_write_input(dynamic raw);
+  bool dco_decode_bool(dynamic raw);
 
   @protected
   ClientTableFfi dco_decode_client_table_ffi(dynamic raw);
@@ -107,10 +104,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
-  List<NostosWriteInput> dco_decode_list_nostos_write_input(dynamic raw);
+  List<ClientTableFfi> dco_decode_list_client_table_ffi(dynamic raw);
 
   @protected
-  List<ClientTableFfi> dco_decode_list_client_table_ffi(dynamic raw);
+  List<NostosWriteInput> dco_decode_list_nostos_write_input(dynamic raw);
 
   @protected
   Uint64List dco_decode_list_prim_u_64_strict(dynamic raw);
@@ -120,6 +117,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<TableSubFfi> dco_decode_list_table_sub_ffi(dynamic raw);
+
+  @protected
+  NostosConnectionState dco_decode_nostos_connection_state(dynamic raw);
+
+  @protected
+  NostosWriteInput dco_decode_nostos_write_input(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -202,12 +205,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
-  NostosConnectionState sse_decode_nostos_connection_state(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  NostosWriteInput sse_decode_nostos_write_input(SseDeserializer deserializer);
+  bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
   ClientTableFfi sse_decode_client_table_ffi(SseDeserializer deserializer);
@@ -225,12 +223,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
-  List<NostosWriteInput> sse_decode_list_nostos_write_input(
+  List<ClientTableFfi> sse_decode_list_client_table_ffi(
     SseDeserializer deserializer,
   );
 
   @protected
-  List<ClientTableFfi> sse_decode_list_client_table_ffi(
+  List<NostosWriteInput> sse_decode_list_nostos_write_input(
     SseDeserializer deserializer,
   );
 
@@ -242,6 +240,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<TableSubFfi> sse_decode_list_table_sub_ffi(SseDeserializer deserializer);
+
+  @protected
+  NostosConnectionState sse_decode_nostos_connection_state(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  NostosWriteInput sse_decode_nostos_write_input(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -265,9 +271,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WriteQueueStatusFfi sse_decode_write_queue_status_ffi(
     SseDeserializer deserializer,
   );
-
-  @protected
-  bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
   void sse_encode_AnyhowException(
@@ -339,16 +342,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
-  void sse_encode_nostos_connection_state(
-    NostosConnectionState self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_nostos_write_input(
-    NostosWriteInput self,
-    SseSerializer serializer,
-  );
+  void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_client_table_ffi(
@@ -369,14 +363,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
-  void sse_encode_list_nostos_write_input(
-    List<NostosWriteInput> self,
+  void sse_encode_list_client_table_ffi(
+    List<ClientTableFfi> self,
     SseSerializer serializer,
   );
 
   @protected
-  void sse_encode_list_client_table_ffi(
-    List<ClientTableFfi> self,
+  void sse_encode_list_nostos_write_input(
+    List<NostosWriteInput> self,
     SseSerializer serializer,
   );
 
@@ -395,6 +389,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_table_sub_ffi(
     List<TableSubFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_nostos_connection_state(
+    NostosConnectionState self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_nostos_write_input(
+    NostosWriteInput self,
     SseSerializer serializer,
   );
 
@@ -421,9 +427,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     WriteQueueStatusFfi self,
     SseSerializer serializer,
   );
-
-  @protected
-  void sse_encode_bool(bool self, SseSerializer serializer);
 }
 
 // Section: wire_class

@@ -91,7 +91,11 @@ regex = "1.10"
 # --- infrastructure / async runtime ---
 tokio = { version = "1.39", features = ["full"] }
 futures-util = "0.3"
-tokio-tungstenite = "0.23"
+# rustls + bundled roots: every Realtime doorbell URL is wss://, and without a
+# TLS feature `connect_async` fails with "TLS support not compiled in" (the
+# client then silently lives on the 30 s backoff resync). Not native-tls:
+# openssl-sys cannot cross-compile to iOS.
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 iroh = "1.1"
 iroh-tickets = "1"
 axum = { version = "0.7", features = ["ws"] }
@@ -140,7 +144,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # `http2` is needed by the APNs push rail (api.push.apple.com rejects
 # HTTP/1.1; h2 is negotiated via ALPN) — the default-features=false list
 # would otherwise drop it.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "gzip"] }
 # Webhook signature verification — HMAC-SHA256 (Stripe spec), no SDK needed.
 hmac = "0.12"
 sha2 = "0.10"

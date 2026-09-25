@@ -54,3 +54,4 @@ condensed from each ADR's own header — the ADR is the source of truth.
 | [0046](0046-rename-fallback-env-config-binaries.md) | Pre-rename env, config and binary names keep working until 1.0 | Accepted |
 | [0047](0047-push-presentation-options.md) | Push presentation options — one vocabulary, every rail | Accepted |
 | [0048](0048-held-identity-migration.md) | The held identity migrates — state in place, wire by hard cut | Accepted |
+| [0049](0049-per-principal-local-retention.md) | Per-principal local retention — an opt-in that keeps rows across sign-out | Accepted |

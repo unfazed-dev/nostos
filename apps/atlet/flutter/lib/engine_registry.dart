@@ -3,7 +3,8 @@ import 'adapters/sync_adapter.dart';
 
 /// Which Nostos client is live. `nostosDirect` is the same engine with no
 /// `nostos-server` on the other end — the device syncs with Supabase itself
-/// (ADR-0045) — so it is a second engine here, not a flag on [Engine.nostos]:
+/// (`docs/plans/direct-mode-sync-protocol.md`) — so it is a second engine here,
+/// not a flag on [Engine.nostos]:
 /// the two hold different databases and must never be live at once.
 enum Engine { nostos, nostosDirect }
 
@@ -91,6 +92,17 @@ class EngineRegistry {
       dbDir: session.dbDir,
     );
     return adapter;
+  }
+
+  /// Tears the live engine down: `signOut()` on the adapter (disconnect +
+  /// local wipe, ADR-0029) and an empty slot, so the next sign-in can
+  /// [start] cold. No-op when nothing is live.
+  Future<void> stop() async {
+    final adapter = current;
+    _activeEngine = null;
+    _nostosAdapter = null;
+    _nostosDirectAdapter = null;
+    await adapter?.signOut();
   }
 
   void _setSlot(Engine engine, SyncAdapter adapter) {

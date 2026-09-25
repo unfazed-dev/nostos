@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, Json, Router};
-use nostos_client::{DirectClient, SqliteStorage};
+use nostos_client::{DirectClient, LocalRetention, SqliteStorage};
 use nostos_core::{Outbox, PendingWrite, Storage, WriteOp};
 use serde::Deserialize;
 
@@ -330,4 +330,106 @@ async fn the_optimistic_row_does_not_advance_the_checkpoint() {
         before,
         "only a server echo moves the checkpoint"
     );
+}
+
+/// Unsigned JWT whose payload is `{"sub":"<sub>"}`. The client never verifies
+/// it — the server does — it only reads `sub` to key the local rows.
+fn jwt(sub: &str) -> String {
+    let payload = match sub {
+        "a" => "eyJzdWIiOiJhIn0",
+        "b" => "eyJzdWIiOiJiIn0",
+        other => panic!("no fixture for sub {other}"),
+    };
+    format!("h.{payload}.s")
+}
+
+/// ADR-0029, the default: sign-out wipes, so the next sign-in snapshots again.
+#[tokio::test]
+async fn by_default_sign_out_wipes_and_the_next_sign_in_re_snapshots() {
+    let (base, fake) = spawn(false).await;
+    let client = client(&base);
+    client.set_token(jwt("a")).await;
+    client.sync().await.unwrap();
+
+    client.sign_out().await.unwrap();
+    assert!(
+        client
+            .engine()
+            .lock()
+            .unwrap()
+            .storage()
+            .pks_for_table("orders")
+            .unwrap()
+            .is_empty(),
+        "the rows left with the user"
+    );
+
+    client.set_token(jwt("a")).await;
+    client.sync().await.unwrap();
+    assert_eq!(
+        *fake.snapshots.lock().unwrap(),
+        2,
+        "same user, second snapshot"
+    );
+}
+
+/// ADR-0049: with `KeepForPrincipal` the rows outlive the session. The same
+/// user signing back in resumes the log; the snapshot is once per install.
+#[tokio::test]
+async fn keep_for_principal_retains_rows_across_sign_out_for_the_same_user() {
+    let (base, fake) = spawn(false).await;
+    let client = client(&base).with_retention(LocalRetention::KeepForPrincipal);
+    client.set_token(jwt("a")).await;
+    client.sync().await.unwrap();
+
+    client.sign_out().await.unwrap();
+    {
+        let engine = client.engine().lock().unwrap();
+        assert_eq!(
+            engine.storage().pks_for_table("orders").unwrap(),
+            ["srv-1"],
+            "signed out, rows still on the device"
+        );
+        assert_eq!(engine.storage().horizon().unwrap().as_deref(), Some("950"));
+        assert_eq!(engine.storage().principal().unwrap().as_deref(), Some("a"));
+    }
+
+    client.set_token(jwt("a")).await;
+    let out = client.sync().await.unwrap();
+    assert_eq!(*fake.snapshots.lock().unwrap(), 1, "no second snapshot");
+    assert!(!out.resnapshotted, "the sync resumed the log");
+}
+
+/// ADR-0049: the retention is per principal, never per device. A different
+/// user's token on a store that holds someone else's rows wipes before it
+/// pulls — the rows never cross accounts.
+#[tokio::test]
+async fn keep_for_principal_wipes_when_a_different_user_signs_in() {
+    let (base, fake) = spawn(false).await;
+    let client = client(&base).with_retention(LocalRetention::KeepForPrincipal);
+    client.set_token(jwt("a")).await;
+    client.sync().await.unwrap();
+    client
+        .write_batch(&[PendingWrite {
+            table: "orders".into(),
+            op: WriteOp::Upsert,
+            pk: "a-only".into(),
+            payload_json: Some(r#"{"id":"a-only","total":1}"#.into()),
+        }])
+        .unwrap();
+    client.sign_out().await.unwrap();
+
+    client.set_token(jwt("b")).await;
+    let out = client.sync().await.unwrap();
+
+    assert_eq!(*fake.snapshots.lock().unwrap(), 2, "b bootstraps afresh");
+    assert!(out.resnapshotted);
+    let engine = client.engine().lock().unwrap();
+    assert_eq!(
+        engine.storage().pks_for_table("orders").unwrap(),
+        ["srv-1"],
+        "a's queued write is gone, not pushed under b's token"
+    );
+    assert_eq!(engine.storage().principal().unwrap().as_deref(), Some("b"));
+    assert!(engine.storage().pending().unwrap().is_empty());
 }

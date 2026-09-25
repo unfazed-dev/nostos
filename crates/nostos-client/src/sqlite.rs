@@ -92,6 +92,8 @@ const RULES_CHECKSUM_KEY: &str = "rules_checksum";
 /// Beside the checkpoint rather than replacing it: server mode resumes from the
 /// LSN, direct mode from this.
 const HORIZON_KEY: &str = "horizon";
+/// ADR-0049: JWT `sub` of the principal whose rows the store holds.
+const PRINCIPAL_KEY: &str = "principal";
 
 /// A synced table's schema as the client sees it — the minimal projection of
 /// the server's `SchemaDescriptor` (nostos-application) that the view layer
@@ -137,6 +139,15 @@ impl SqliteStorage {
     pub fn open(path: &str) -> Result<Self, StorageError> {
         adopt_legacy_file(path)?;
         let conn = Connection::open(path).map_err(rusqlite_err)?;
+        // Two engines share this file on a device: the app's and the push
+        // wake isolate's (atlet push_pilot). WAL lets one write while the
+        // other reads; busy_timeout makes a second writer wait instead of
+        // failing SQLITE_BUSY (rusqlite's default: no busy handler).
+        // ponytail: both loops still pull the same delta (apply is
+        // idempotent); skip the wake when a foreground engine is alive if
+        // double pulls ever show up in practice.
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .map_err(rusqlite_err)?;
         Self::init(conn)
     }
 
@@ -677,6 +688,34 @@ impl Storage for SqliteStorage {
         Ok(())
     }
 
+    fn principal(&self) -> nostos_core::Result<Option<String>> {
+        let conn = self.conn.lock().expect("principal: storage mutex poisoned");
+        conn.query_row(
+            "SELECT value FROM nostos_meta WHERE key = ?1",
+            rusqlite::params![PRINCIPAL_KEY],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(rusqlite_err)
+    }
+
+    fn save_principal(&mut self, principal: &str) -> nostos_core::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("save_principal: storage mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO nostos_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![PRINCIPAL_KEY, principal],
+        )
+        .map_err(rusqlite_err)?;
+        Ok(())
+    }
+
     fn apply_batch(
         &mut self,
         ops: &[(RowOp, u64)],
@@ -1045,6 +1084,12 @@ impl Storage for SqliteStorage {
         tx.execute(
             "DELETE FROM nostos_meta WHERE key = ?1",
             rusqlite::params![HORIZON_KEY],
+        )
+        .map_err(rusqlite_err)?;
+        // 3d. Principal → gone (ADR-0049): an empty store belongs to nobody.
+        tx.execute(
+            "DELETE FROM nostos_meta WHERE key = ?1",
+            rusqlite::params![PRINCIPAL_KEY],
         )
         .map_err(rusqlite_err)?;
 
@@ -2619,6 +2664,19 @@ mod tests {
         // Disambiguated: `Outbox::clear` is the other `clear` on this type.
         Storage::clear(&mut s).unwrap();
         assert_eq!(s.horizon().unwrap(), None, "clear() wipes the horizon");
+    }
+
+    #[test]
+    fn principal_roundtrips_and_clear_wipes_it() {
+        let mut s = SqliteStorage::open_in_memory().unwrap();
+        assert_eq!(s.principal().unwrap(), None, "fresh DB has no principal");
+        s.save_principal("user-a").unwrap();
+        assert_eq!(s.principal().unwrap().as_deref(), Some("user-a"));
+        s.save_principal("user-b").unwrap();
+        assert_eq!(s.principal().unwrap().as_deref(), Some("user-b"));
+        // ADR-0049: wiped rows belong to nobody.
+        Storage::clear(&mut s).unwrap();
+        assert_eq!(s.principal().unwrap(), None, "clear() wipes the principal");
     }
 
     #[test]

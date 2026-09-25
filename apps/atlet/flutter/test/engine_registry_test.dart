@@ -97,5 +97,40 @@ void main() {
         );
       },
     );
+
+    test(
+      'stop() signs the live adapter out and frees the slot for a cold start',
+      () async {
+        final log = <String>[];
+        final registry = EngineRegistry(
+          nostosFactory: () => _RecordingAdapter('nostos', log),
+          nostosDirectFactory: () => _RecordingAdapter('direct', log),
+        );
+        await registry.start(Engine.nostosDirect, session);
+
+        await registry.stop();
+
+        expect(registry.activeEngine, isNull);
+        expect(registry.current, isNull);
+        expect(registry.debugLiveAdapters, isEmpty);
+        expect(log, [
+          'direct.init',
+          'direct.signOut.start',
+          'direct.signOut.end',
+        ]);
+
+        await registry.start(Engine.nostos, session); // no StateError
+        expect(registry.activeEngine, Engine.nostos);
+      },
+    );
+
+    test('stop() with nothing live is a no-op', () async {
+      final registry = EngineRegistry(
+        nostosFactory: () => _RecordingAdapter('nostos', []),
+        nostosDirectFactory: () => _RecordingAdapter('direct', []),
+      );
+      await registry.stop();
+      expect(registry.activeEngine, isNull);
+    });
   });
 }

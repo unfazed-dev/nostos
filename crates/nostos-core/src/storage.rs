@@ -125,6 +125,22 @@ pub trait Storage {
         Ok(())
     }
 
+    /// Whose rows this store holds (ADR-0049): the JWT `sub` of the last token
+    /// that synced into it, or `None` on a fresh or pre-0049 store. Under
+    /// `LocalRetention::KeepForPrincipal` the client compares this to the
+    /// current token before syncing and wipes on a mismatch. The default
+    /// degrades safely: a synced store with `None` counts as someone else's,
+    /// costing one extra snapshot, never a leak.
+    fn principal(&self) -> crate::Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Persist the principal. Non-fatal on failure like [`Self::save_horizon`].
+    /// [`Self::clear`] must drop it too. Default no-op.
+    fn save_principal(&mut self, _principal: &str) -> crate::Result<()> {
+        Ok(())
+    }
+
     /// Atomically apply a batch of row operations and advance the checkpoint.
     ///
     /// **Atomicity contract:** every `op` in `ops` AND the checkpoint advance to

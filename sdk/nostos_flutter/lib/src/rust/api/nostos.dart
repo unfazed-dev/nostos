@@ -326,6 +326,42 @@ abstract class NostosHandle implements RustOpaqueInterface {
   Future<Uint64List> writeBatch({required List<NostosWriteInput> ops});
 }
 
+/// frb-friendly mirror of `nostos_client`'s `ClientTable` — the client-side
+/// schema projection the WS2 view layer consumes. frb generates Dart bindings
+/// for structs declared in THIS crate, so we mirror (rather than configuring
+/// frb to reflect an external crate's type). The Dart side builds these from
+/// the server's `GET /schema` `SchemaDescriptor` (drop per-column affinity down
+/// to names) and hands them to [`NostosHandle::apply_schema`].
+class ClientTableFfi {
+  /// Canonical table id (matches `nostos_data.table_name` / the wire `table`).
+  final String name;
+
+  /// Primary-key column names (informational for the view; carried for the
+  /// future materialized-table path).
+  final List<String> primaryKey;
+
+  /// Column names in tuple order.
+  final List<String> columns;
+
+  const ClientTableFfi({
+    required this.name,
+    required this.primaryKey,
+    required this.columns,
+  });
+
+  @override
+  int get hashCode => name.hashCode ^ primaryKey.hashCode ^ columns.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ClientTableFfi &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          primaryKey == other.primaryKey &&
+          columns == other.columns;
+}
+
 /// Coarse connection-state signal for `Stream<NostosConnectionState>` on the
 /// Dart side.
 ///
@@ -375,42 +411,6 @@ class NostosWriteInput {
           op == other.op &&
           pk == other.pk &&
           payloadJson == other.payloadJson;
-}
-
-/// frb-friendly mirror of `nostos_client`'s `ClientTable` — the client-side
-/// schema projection the WS2 view layer consumes. frb generates Dart bindings
-/// for structs declared in THIS crate, so we mirror (rather than configuring
-/// frb to reflect an external crate's type). The Dart side builds these from
-/// the server's `GET /schema` `SchemaDescriptor` (drop per-column affinity down
-/// to names) and hands them to [`NostosHandle::apply_schema`].
-class ClientTableFfi {
-  /// Canonical table id (matches `nostos_data.table_name` / the wire `table`).
-  final String name;
-
-  /// Primary-key column names (informational for the view; carried for the
-  /// future materialized-table path).
-  final List<String> primaryKey;
-
-  /// Column names in tuple order.
-  final List<String> columns;
-
-  const ClientTableFfi({
-    required this.name,
-    required this.primaryKey,
-    required this.columns,
-  });
-
-  @override
-  int get hashCode => name.hashCode ^ primaryKey.hashCode ^ columns.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is ClientTableFfi &&
-          runtimeType == other.runtimeType &&
-          name == other.name &&
-          primaryKey == other.primaryKey &&
-          columns == other.columns;
 }
 
 /// One subscription's table spec for [`NostosHandle::subscribe`]: a table name

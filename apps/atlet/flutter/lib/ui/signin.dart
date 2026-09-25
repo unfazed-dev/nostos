@@ -87,9 +87,17 @@ class _SigninScreenState extends State<SigninScreen> {
     if (session == null || !mounted) return;
     // Post-frame: an already-restored session resolves during the initial
     // route push, and Navigator asserts (_debugLocked) if pushed mid-mount.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) widget.onSignedIn();
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _finishSignIn());
+  }
+
+  /// Once, whichever path gets there first: a restored session resolving
+  /// while the user already tapped Sign in used to call onSignedIn twice
+  /// (double route push + setState on the disposed screen).
+  bool _signedIn = false;
+  void _finishSignIn() {
+    if (_signedIn || !mounted) return;
+    _signedIn = true;
+    widget.onSignedIn();
   }
 
   @override
@@ -110,12 +118,13 @@ class _SigninScreenState extends State<SigninScreen> {
     });
     try {
       await widget.passwordSignIn(_email.text, _password.text);
-      widget.onSignedIn();
+      _finishSignIn();
     } on AuthException catch (e) {
       // Surface the server's reason (e.g. "Invalid login credentials") —
       // a generic message here previously masked a wrong-email root cause.
-      setState(() => _error = 'Sign-in failed: ${e.message}');
+      if (mounted) setState(() => _error = 'Sign-in failed: ${e.message}');
     } catch (e) {
+      if (!mounted) return;
       setState(
         () => _error = 'Sign-in failed. Check the password and try again.',
       );
@@ -146,8 +155,9 @@ class _SigninScreenState extends State<SigninScreen> {
     });
     try {
       await widget.verifyEmailOtp(_email.text, _otp.text);
-      widget.onSignedIn();
+      _finishSignIn();
     } catch (e) {
+      if (!mounted) return;
       setState(() => _error = "That code didn't match. Try again.");
     } finally {
       if (mounted) setState(() => _working = false);

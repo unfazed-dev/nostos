@@ -44,6 +44,8 @@ pub struct InMemoryStorage {
     /// `None` = fresh. Overridden rather than left on the trait default so a
     /// direct-mode test exercises a horizon that actually persists.
     horizon: Option<String>,
+    /// ADR-0049: whose rows these are (JWT `sub`).
+    principal: Option<String>,
 }
 
 impl InMemoryStorage {
@@ -233,6 +235,15 @@ impl Storage for InMemoryStorage {
         Ok(())
     }
 
+    fn principal(&self) -> crate::Result<Option<String>> {
+        Ok(self.principal.clone())
+    }
+
+    fn save_principal(&mut self, principal: &str) -> crate::Result<()> {
+        self.principal = Some(principal.to_string());
+        Ok(())
+    }
+
     fn clear(&mut self) -> crate::Result<()> {
         // ADR-0029: reset to fresh-client state for sign-out / principal switch.
         // `rows.clear()` empties the data store; the checkpoint reset to ZERO is
@@ -248,6 +259,8 @@ impl Storage for InMemoryStorage {
         // Same reason, direct mode's half: a surviving horizon would make the
         // next principal resume mid-log and never see the rows below it.
         self.horizon = None;
+        // ADR-0049: the rows are gone, so is their owner.
+        self.principal = None;
         self.outbox.clear();
         Ok(())
     }

@@ -5,8 +5,7 @@
 //! has to operate. This one dials the customer's own Supabase project —
 //! PostgREST for the pull and the push, Realtime for the doorbell, RLS for the
 //! authorization — so an app can ship to end-user devices without shipping a
-//! process to run beside it (ADR-0045,
-//! `docs/plans/direct-mode-sync-protocol.md`).
+//! process to run beside it (`docs/plans/direct-mode-sync-protocol.md`).
 //!
 //! What is deliberately NOT here, because direct mode does not have it:
 //!
@@ -22,15 +21,15 @@
 
 use std::sync::Arc;
 
-use nostos_client::sqlite::ClientTable;
-use nostos_client::{DirectClient, SqliteStorage};
-use nostos_core::{Outbox, PendingWrite, WriteOp};
 use flutter_rust_bridge::frb;
+use nostos_client::sqlite::ClientTable;
+use nostos_client::{DirectClient, LocalRetention, SqliteStorage};
+use nostos_core::{Outbox, PendingWrite, WriteOp};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::api::nostos::{
-    NostosConnectionState, NostosWriteInput, ClientTableFfi, WriteQueueStatusFfi,
+    ClientTableFfi, NostosConnectionState, NostosWriteInput, WriteQueueStatusFfi,
 };
 use crate::frb_generated::StreamSink;
 
@@ -68,6 +67,11 @@ impl NostosDirectHandle {
     /// `anon_key` its publishable key — the only credential that ships inside
     /// the app, and the reason direct mode needs RLS rather than trust.
     ///
+    /// `keep_local_on_sign_out` (ADR-0049): `false` wipes the device on
+    /// [`Self::sign_out`] (ADR-0029, the default); `true` keeps the rows for
+    /// the same user's next sign-in and wipes only when a different JWT `sub`
+    /// syncs.
+    ///
     /// # Errors
     /// The SQLite file cannot be opened or migrated, or `supabase_url` is not a
     /// usable PostgREST base.
@@ -77,12 +81,19 @@ impl NostosDirectHandle {
         anon_key: String,
         token: Option<String>,
         db_path: String,
+        keep_local_on_sign_out: bool,
     ) -> Result<NostosDirectHandle, String> {
         let rt =
             tokio::runtime::Runtime::new().expect("nostos_flutter: failed to start tokio runtime");
         let storage = SqliteStorage::open(&db_path).map_err(|e| e.to_string())?;
-        let client =
-            DirectClient::new(&supabase_url, &anon_key, storage).map_err(|e| e.to_string())?;
+        let retention = if keep_local_on_sign_out {
+            LocalRetention::KeepForPrincipal
+        } else {
+            LocalRetention::WipeOnSignOut
+        };
+        let client = DirectClient::new(&supabase_url, &anon_key, storage)
+            .map_err(|e| e.to_string())?
+            .with_retention(retention);
         if let Some(jwt) = token {
             rt.block_on(client.set_token(jwt));
         }
@@ -159,7 +170,10 @@ impl NostosDirectHandle {
     ///
     /// # Errors
     /// [`Self::start`] was never called, or a loop is already running.
-    pub async fn resume(&self, state_sink: StreamSink<NostosConnectionState>) -> Result<(), String> {
+    pub async fn resume(
+        &self,
+        state_sink: StreamSink<NostosConnectionState>,
+    ) -> Result<(), String> {
         let scope = self
             .scope
             .lock()
@@ -196,7 +210,14 @@ impl NostosDirectHandle {
         // sync landing in between would otherwise stay invisible until the next
         // one (server mode's "connected but the list is empty" regression).
         let mut changes = self.changes.subscribe();
-        emit_rows(&self.client, &table, &rows_sink);
+        // Before the first snapshot the table is empty because nothing has
+        // been read, not because there is nothing: withhold that read so the
+        // UI shows "loading" rather than "no rows" for the ~2 s bootstrap
+        // (measured on the iPhone 2026-09-25). The snapshot apply ticks the
+        // pump, which delivers the real first rows.
+        if !self.client.needs_bootstrap() {
+            emit_rows(&self.client, &table, &rows_sink);
+        }
 
         let client = Arc::clone(&self.client);
         self.track(self.rt.spawn(async move {
@@ -323,6 +344,8 @@ impl NostosDirectHandle {
 
     /// Sign out (ADR-0029): stop syncing, drop the token, and wipe local rows,
     /// the outbox and the horizon — everything the next principal must not see.
+    /// Under `keep_local_on_sign_out` (ADR-0049) only the token goes; the wipe
+    /// is deferred to the first sync under a different user's token.
     ///
     /// The pumps stop FIRST so no watch re-reads the database halfway through
     /// the delete.
@@ -360,11 +383,13 @@ impl NostosDirectHandle {
                         }
                         let _ = state_sink.add(NostosConnectionState::Connected);
                     }
-                    Err(_) => {
+                    Err(e) => {
                         // Not fatal: the next ring or reconnect retries it. What
                         // the UI needs to know is that the device is not
                         // current — which is what `reconnecting` means in
-                        // server mode too.
+                        // server mode too. The cause goes to stderr so a
+                        // device that never loads is diagnosable.
+                        eprintln!("nostos direct: sync failed: {e}");
                         let _ = state_sink.add(NostosConnectionState::Reconnecting);
                     }
                 })

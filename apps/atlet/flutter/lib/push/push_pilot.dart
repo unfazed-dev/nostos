@@ -36,7 +36,8 @@ const String _supabaseAnonKey = String.fromEnvironment(
 );
 
 /// A nostos doorbell: server mode's `{table, lsn}` (ADR-0037 §2), or direct
-/// mode's `{nostos: ring}` from the `nostos-push` Edge Function (ADR-0045).
+/// mode's `{nostos: ring}` from the `nostos-push` Edge Function
+/// (`docs/plans/direct-mode-push-and-presence.md`).
 /// Pure so the routing decision is unit-testable (push_pilot_test.dart) —
 /// everything non-Firebase that handles a [RemoteMessage] flows through it.
 bool isNostosDoorbell(Map<String, dynamic>? data) =>

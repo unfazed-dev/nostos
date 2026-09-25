@@ -46,7 +46,7 @@ pub use client::{
     ClientError, SessionOutcome, StreamDecl, StreamHandle, StreamSubscription, SyncClient,
     SyncClientConfig, TableSub, WriteQueueStatus,
 };
-pub use direct::{DirectClient, SyncOutcome};
+pub use direct::{DirectClient, LocalRetention, SyncOutcome};
 pub use doorbell::{listen, DoorbellConfig, DoorbellError, Inbound};
 pub use postgrest::{DrainOutcome, PostgrestError, PostgrestSource, MAX_PAGES_PER_DRAIN};
 pub use sqlite::SqliteStorage;

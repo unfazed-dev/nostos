@@ -1,2 +1,2 @@
-pub mod nostos;
 pub mod direct;
+pub mod nostos;

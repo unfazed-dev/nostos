@@ -387,7 +387,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Brings the sync engine up. There is one engine and no way to change it
   /// (user request 2026-09-22): direct-mode Nostos, the device syncing with
-  /// Supabase itself with no `nostos-server` on the other end (ADR-0045).
+  /// Supabase itself with no `nostos-server` on the other end
+  /// (`docs/plans/direct-mode-sync-protocol.md`).
   /// It starts on its own when Home opens, and says nothing while doing it —
   /// the connectivity LED and the write-status UI are what report a sync
   /// that isn't working.
@@ -451,6 +452,18 @@ class _HomeScreenState extends State<HomeScreen> {
       debugPrint('engine start failed: $e');
     }
     if (mounted) setState(() {}); // hand the live adapter to the tabs
+  }
+
+  /// Sign out: doorbell off, engine down (local DB wiped), Supabase session
+  /// gone, back to the sign-in route. Order matters — the push pilot and the
+  /// auth listener both hold the adapter, so they let go before it does.
+  Future<void> _signOut() async {
+    await _authSub?.cancel();
+    _authSub = null;
+    if (_pushPilotEnabled) await pushPilot.detach();
+    await engineRegistry.stop();
+    await Supabase.instance.client.auth.signOut();
+    if (mounted) Navigator.of(context).pushReplacementNamed('/signin');
   }
 
   void _notify(String message) {
@@ -521,7 +534,15 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: AtletTokens.bone,
         elevation: 0,
         title: Text('Home', style: TextStyle(color: AtletTokens.ink)),
-        actions: const [ConnectivityLed()],
+        actions: [
+          const ConnectivityLed(),
+          IconButton(
+            key: const Key('sign-out'),
+            icon: const Icon(Icons.logout),
+            tooltip: 'Sign out',
+            onPressed: _signOut,
+          ),
+        ],
       ),
       body: TrainingHome(adapter: engineRegistry.current),
     );

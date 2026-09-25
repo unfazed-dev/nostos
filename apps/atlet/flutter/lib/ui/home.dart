@@ -47,15 +47,15 @@ class TrainingHome extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final adapter = this.adapter;
-    if (adapter == null) {
-      return const _EmptyState(
-        message: 'No sync engine selected.\nOpen Settings to pick one.',
-      );
-    }
+    // Engine starting or first emission pending: never say "No sessions yet"
+    // about data that has not been read. Measured 2026-09-25: the empty state
+    // flashed ~50 ms on a warm local DB and ~2 s during a first snapshot.
+    if (adapter == null) return const _Loading();
     return StreamBuilder<List<SessionRow>>(
       stream: adapter.watchSessions(),
       builder: (context, snapshot) {
-        final sessions = snapshot.data ?? const <SessionRow>[];
+        if (!snapshot.hasData) return const _Loading();
+        final sessions = snapshot.data!;
         return Scaffold(
           backgroundColor: AtletTokens.bone,
           floatingActionButton: FloatingActionButton(
@@ -103,6 +103,16 @@ class TrainingHome extends StatelessWidget {
       builder: (_) => _AddSessionSheet(adapter: adapter),
     );
   }
+}
+
+class _Loading extends StatelessWidget {
+  const _Loading();
+
+  @override
+  Widget build(BuildContext context) => const Scaffold(
+    backgroundColor: AtletTokens.bone,
+    body: Center(child: CircularProgressIndicator(color: AtletTokens.accent)),
+  );
 }
 
 class _EmptyState extends StatelessWidget {

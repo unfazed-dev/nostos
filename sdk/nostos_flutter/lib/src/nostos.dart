@@ -86,7 +86,8 @@ class Nostos {
 
   /// Open a connection with no `nostos-server` in it: this device talks to
   /// your Supabase project directly — PostgREST for the pull and the push,
-  /// Realtime for the doorbell, RLS for who may read what (ADR-0045).
+  /// Realtime for the doorbell, RLS for who may read what
+  /// (`docs/plans/direct-mode-sync-protocol.md`).
   ///
   /// Everything below this line is identical to [connect]: same durable
   /// outbox, same `watch` streams, same offline behaviour. What changes is who
@@ -104,6 +105,10 @@ class Nostos {
   /// required before [counterIncrement] on that table (server mode reads it
   /// from `NOSTOS_COUNTER_COLUMNS`; there is no server here to read it from).
   ///
+  /// [keepLocalOnSignOut] (ADR-0049): by default `signOut` wipes the device
+  /// (ADR-0029) and the next sign-in re-downloads. Set `true` to keep the rows
+  /// for the same user's next sign-in; another user's token still wipes.
+  ///
   /// Native-only today; on web this throws [UnsupportedError].
   static Future<Nostos> direct({
     required String supabaseUrl,
@@ -112,6 +117,7 @@ class Nostos {
     String? token,
     String? sqlitePath,
     Map<String, String> counterFields = const <String, String>{},
+    bool keepLocalOnSignOut = false,
   }) async {
     return Nostos._(
       await createDirectNostosEngine(
@@ -121,6 +127,7 @@ class Nostos {
         token: token,
         sqlitePath: sqlitePath,
         counterFields: counterFields,
+        keepLocalOnSignOut: keepLocalOnSignOut,
       ),
       counterTables: counterFields.keys.toSet(),
     );
