@@ -139,6 +139,15 @@ impl SqliteStorage {
     pub fn open(path: &str) -> Result<Self, StorageError> {
         adopt_legacy_file(path)?;
         let conn = Connection::open(path).map_err(rusqlite_err)?;
+        // Two engines share this file on a device: the app's and the push
+        // wake isolate's (atlet push_pilot). WAL lets one write while the
+        // other reads; busy_timeout makes a second writer wait instead of
+        // failing SQLITE_BUSY (rusqlite's default: no busy handler).
+        // ponytail: both loops still pull the same delta (apply is
+        // idempotent); skip the wake when a foreground engine is alive if
+        // double pulls ever show up in practice.
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .map_err(rusqlite_err)?;
         Self::init(conn)
     }
 
