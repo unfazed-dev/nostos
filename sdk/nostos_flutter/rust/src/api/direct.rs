@@ -377,11 +377,13 @@ impl NostosDirectHandle {
                         }
                         let _ = state_sink.add(NostosConnectionState::Connected);
                     }
-                    Err(_) => {
+                    Err(e) => {
                         // Not fatal: the next ring or reconnect retries it. What
                         // the UI needs to know is that the device is not
                         // current — which is what `reconnecting` means in
-                        // server mode too.
+                        // server mode too. The cause goes to stderr so a
+                        // device that never loads is diagnosable.
+                        eprintln!("nostos direct: sync failed: {e}");
                         let _ = state_sink.add(NostosConnectionState::Reconnecting);
                     }
                 })

@@ -69,6 +69,8 @@ nostos-application = { workspace = true }
 nostos-infra = { workspace = true, features = ["clap"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
+# paused-clock tests (direct_stall_timeout): the 30 s read timeout elapses instantly.
+tokio = { workspace = true, features = ["test-util"] }
 bytes = { workspace = true }
 # pg-only (behind the `pg` feature above) — the e2e_pg_sync harness needs a
 # control-plane SQL client (slot cleanup, direct-row assertions) and typed

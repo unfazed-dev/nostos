@@ -28,6 +28,7 @@
 //!   session rather than caching a token forever.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use nostos_core::{ApplyEngine, Horizon, PendingWrite, PullCursor, PullError, Storage, WriteOp};
 
@@ -136,8 +137,18 @@ impl PostgrestSource {
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(PostgrestError::BadUrl(base_url.to_string()));
         }
+        // reqwest 0.12 defaults to NO timeouts (async_impl/client.rs docs):
+        // a stalled connection (measured 2026-09-25, iPhone behind a VPN)
+        // hung the first sync forever. Connect bounds the handshake; read
+        // bounds the gap between bytes, so a long snapshot download that
+        // is still flowing never trips it.
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| PostgrestError::Transport(e.to_string()))?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            http,
             rest_base: format!("{base}/rest/v1"),
             apikey: apikey.into(),
             token: None,

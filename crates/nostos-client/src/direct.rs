@@ -418,7 +418,17 @@ where
         loop {
             // Unconditionally, before the socket exists: a ring that arrived
             // while this device was away was never delivered to anyone.
-            on_sync(self.sync().await);
+            let first = self.sync().await;
+            let failed = first.is_err();
+            on_sync(first);
+            if failed {
+                // No doorbell on top of a sync that did not land: a failed
+                // first sync used to fall through to the join, and a fatal
+                // join then ended the loop with the device never synced.
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
 
             let token = self
                 .token
