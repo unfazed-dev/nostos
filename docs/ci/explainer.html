@@ -136,7 +136,7 @@ checked, and the trade-offs chosen on purpose.</p>
 <li><b>Flutter kit and demo app.</b> The Flutter kit and the atlet reference app build and pass their tests on a Mac.<div class="detail">flutter · required</div></li>
 <li><b>Speed smoke test.</b> A small benchmark still runs. It only proves nothing broke; the headline speed numbers are measured separately.<div class="detail">benchmark · required</div></li>
 <li><b>JavaScript kits.</b> The React Native and Capacitor kits still type-check.<div class="detail">sdk-typecheck · required</div></li>
-<li class="warn"><b>Labelled proposal.</b> The proposal title carries its pipeline label. For now this is only a reminder and never blocks.<div class="detail">pr-title · warn-first</div></li>
+<li><b>Labelled proposal.</b> The proposal title carries its pipeline label. A missing label blocks the proposal.<div class="detail">pr-title · required</div></li>
 </ul>
 </section>
 
@@ -169,7 +169,7 @@ checked, and the trade-offs chosen on purpose.</p>
 <tr><td>0 · mode</td><td><b>adopt</b>: <code>ci.yml</code> and <code>release.yml</code> already existed; audited and patched, not regenerated</td><td class="why">skill §0</td></tr>
 <tr><td>3 · retro PR convention</td><td>one <code>--no-ff</code> merge commit per feature group on the rewritten <code>main</code>, each with an <code>[arxa-&lt;skill&gt;]</code> title and a real GitHub PR page, replayed in order with Actions off</td><td class="why">the summaries stay visible on GitHub; a fresh repo numbers the PRs cleanly</td></tr>
 <tr><td>4 · check.sh areas</td><td>one area per CI job plus <code>all</code>; an area whose toolchain or inputs are absent is skipped green</td><td class="why">local green = CI green, by the same names; green by absence</td></tr>
-<tr><td>5 · PR-title check</td><td><code>[arxa-&lt;skill&gt;]</code> checked <b>warn-first</b>: an annotation, the job stays green</td><td class="why">flip it to required once the retro PRs and the first cleanup PRs have gone through</td></tr>
+<tr><td>5 · PR-title check</td><td><code>[arxa-&lt;skill&gt;]</code> <b>required</b> (flipped 2026-09-26; warn-first through the retro replay and PRs #44–#53)</td><td class="why">every PR since the replay carried a valid tag, so the gate costs nothing and catches drift</td></tr>
 <tr><td>6 · commit gate</td><td>conventional prefix on <code>git rev-list --no-merges</code> over the branch, <b>required</b></td><td class="why">GitHub's synthetic merge commit false-positives a naive check (energize PR #1, 2026-08-16)</td></tr>
 <tr><td>7 · workflow token</td><td>top-level <code>permissions: contents: read</code>; <code>release.yml</code> keeps its own</td><td class="why">least privilege; nothing in CI writes to the repo</td></tr>
 <tr><td>8 · trunk + protection</td><td>public repo, GitHub-hosted runners; protection on <code>main</code> (required contexts = the job names, no force-push, no deletion) prepared in <code>docs/ci/setup.md</code> for the user to run after the retro replay</td><td class="why">protection applied before the replay would refuse the replay's pushes to <code>main</code></td></tr>
@@ -207,7 +207,7 @@ nostos_flutter and apps/atlet: pub get, <code>dart format</code>, analyze, test;
 <div class="job-card"><div class="job-name"><span>sdk-typecheck</span><span class="job-req">required</span></div>
 <div class="job-meta">ci.yml · ubuntu-latest · 20 min · matrix, one context per SDK</div>
 <code>nostos_react_native</code>: <code>npm run typecheck</code>; <code>nostos_capacitor</code>: <code>npm run build</code></div>
-<div class="job-card"><div class="job-name"><span>pr-title</span><span class="job-req no">warn-first</span></div>
+<div class="job-card"><div class="job-name"><span>pr-title</span><span class="job-req">required</span></div>
 <div class="job-meta">pr.yml · ubuntu-latest · 5 min · re-runs when the title is edited</div>
 <code>scripts/check.sh pr-title</code>: leading <code>[arxa-&lt;skill&gt;]</code> tags against the tag map; a <code>::warning::</code> annotation, never red</div>
 </div>
@@ -241,7 +241,7 @@ read-only token. &ldquo;required&rdquo; = listed in the protection PUT prepared 
 <li>The CI token is read-only: top-level <code>permissions: contents: read</code>.</li>
 <li>The title check reads its allowlist from the tag map in <code>decisions.md</code> and warns when the PR template's copy drifts.</li>
 <li class="no">Protection contexts = the real job names. Prepared, not yet applied: the user runs the PUT after the retro replay. Rename a job &rarr; edit the list and re-run the PUT.</li>
-<li class="no">The PR-title check is warn-first until row 5 flips it to required.</li>
+<li>The PR-title check is required (row 5); add its context to the protection PUT in setup.md.</li>
 <li>A queued job is never fixed by changing code. On GitHub-hosted runners, queued means GitHub capacity.</li>
 </ul>
 </section>

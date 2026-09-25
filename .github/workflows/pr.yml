@@ -1,7 +1,7 @@
 name: PR
 
-# The PR-title stage tag (docs/ci/decisions.md row 5), warn-first: a missing
-# or unknown [arxa-<skill>] tag is an annotation and the job stays green. Its
+# The PR-title stage tag (docs/ci/decisions.md row 5), required since
+# 2026-09-26: a missing or unknown [arxa-<skill>] tag fails the job. Its
 # own workflow because `edited` has to re-run it when only the title changes;
 # on ci.yml that would re-run every heavy job.
 
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   pr-title:
-    name: PR title stage tag (warn-first)
+    name: PR title stage tag
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

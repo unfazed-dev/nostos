@@ -16,7 +16,7 @@ waiting for GitHub capacity. Changing code never fixes that.
 | workflow | trigger | jobs |
 |---|---|---|
 | `ci.yml` | push to `main`, PR into `main` | `commits`, `lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck` |
-| `pr.yml` | PR opened, edited, synchronized, reopened | `pr-title` (warn-first, row 5) |
+| `pr.yml` | PR opened, edited, synchronized, reopened | `pr-title` (required, row 5) |
 | `release.yml` | `v*` tag | release builds. There is no deploy on merge (row 11) |
 
 ## Once per clone
@@ -88,8 +88,8 @@ JSON
   For a solo repo that serialises every merge.
 - The contexts are the check names GitHub reports: each `ci.yml` job's `name:`,
   once per matrix entry for `sdk-typecheck`.
-- `PR title stage tag (warn-first)` stays out while row 5 keeps it warn-first.
-  Add it here when that decision flips.
+- `PR title stage tag` (pr.yml) is required since row 5 flipped (2026-09-26):
+  add it to `contexts` and re-run the PUT.
 - When you rename a job, edit this list and re-run the PUT. A stale context
   blocks every merge.
 - Check what is applied:
