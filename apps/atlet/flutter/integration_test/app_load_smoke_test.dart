@@ -10,11 +10,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
 // Release builds drop debugPrint on iOS; stderr reaches `devicectl --console`.
-void say(String m) => stderr.writeln(m);
+void say(String m) => stderr.writeln('${DateTime.now().toIso8601String()} $m');
 
 Future<void> main() async {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.defaultTestTimeout = const Timeout(Duration(minutes: 6));
+  // Real-time frames: the default policy only pumps on tester.pump, which
+  // hides how long the app itself takes to render after sign-in.
+  binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
 
   testWidgets('real app load smoke', (tester) async {
     await app.main();

@@ -211,7 +211,14 @@ impl NostosDirectHandle {
         // sync landing in between would otherwise stay invisible until the next
         // one (server mode's "connected but the list is empty" regression).
         let mut changes = self.changes.subscribe();
-        emit_rows(&self.client, &table, &rows_sink);
+        // Before the first snapshot the table is empty because nothing has
+        // been read, not because there is nothing: withhold that read so the
+        // UI shows "loading" rather than "no rows" for the ~2 s bootstrap
+        // (measured on the iPhone 2026-09-25). The snapshot apply ticks the
+        // pump, which delivers the real first rows.
+        if !self.client.needs_bootstrap() {
+            emit_rows(&self.client, &table, &rows_sink);
+        }
 
         let client = Arc::clone(&self.client);
         self.track(self.rt.spawn(async move {

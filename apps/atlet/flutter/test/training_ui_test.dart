@@ -93,6 +93,9 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: TrainingHome(adapter: adapter)));
     await tester.pump();
     expect(find.text('Sunrise 5k'), findsNothing);
+    // Nothing emitted yet: a spinner, never the "No sessions yet" copy.
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.textContaining('No sessions yet'), findsNothing);
 
     await adapter.addSession(_fixture());
     await tester.pump();

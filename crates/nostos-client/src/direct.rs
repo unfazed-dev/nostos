@@ -254,6 +254,14 @@ where
         Ok(())
     }
 
+    /// True until the first successful snapshot lands in this storage (and
+    /// again after [`wipe`](Self::wipe)). Watchers use it to withhold the
+    /// pre-snapshot empty read: an empty table is not "no rows" yet.
+    #[must_use]
+    pub fn needs_bootstrap(&self) -> bool {
+        self.needs_bootstrap.load(Ordering::Relaxed)
+    }
+
     /// Push every queued write, then pull until caught up.
     ///
     /// A device that has never synced bootstraps from `nostos_snapshot` first:
