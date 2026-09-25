@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{bail, Result};
 use clap::Args;
@@ -351,13 +351,19 @@ fn deploy(
                 "--use-api",
             ],
         ] {
-            let status = Command::new(bin)
-                .args(args)
-                .current_dir(cwd)
-                .stdout(Stdio::null())
-                .status()?;
-            if !status.success() {
-                bail!("`supabase {}` failed ({status})", args[..2].join(" "));
+            // stdout captured, not dropped: the CLI reports SQL errors there
+            // (measured 2026-09-25: a 42501 on realtime.messages surfaced as a
+            // bare "exit status: 1"). The secret is redacted in case the
+            // failing statement is the one that sets it.
+            let out = Command::new(bin).args(args).current_dir(cwd).output()?;
+            if !out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout).replace(&secret, "<secret>");
+                bail!(
+                    "`supabase {}` failed ({}):\n{}",
+                    args[..2].join(" "),
+                    out.status,
+                    text.trim()
+                );
             }
         }
         Ok(())
