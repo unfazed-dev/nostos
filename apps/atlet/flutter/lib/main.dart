@@ -254,6 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription<bool>? _accessRevokedSub;
   String? _engineStartError;
   bool _signOutWipeFailed = false;
+  bool _signingOut = false;
   Future<BenchStore>? _benchStoreFuture;
   ConnectivityGuard? _connectivityGuard;
 
@@ -576,6 +577,11 @@ class _HomeScreenState extends State<HomeScreen> {
   /// gone, back to the sign-in route. Order matters — the push pilot and the
   /// auth listener both hold the adapter, so they let go before it does.
   Future<void> _signOut() async {
+    _signingOut = true;
+    await _orderBannerSub?.cancel();
+    _orderBannerSub = null;
+    await _orderBannerReadySub?.cancel();
+    _orderBannerReadySub = null;
     await _authSub?.cancel();
     _authSub = null;
     await _profileRoleSub?.cancel();
@@ -596,6 +602,7 @@ class _HomeScreenState extends State<HomeScreen> {
               'Offline data could not be cleared. Retry sign out.';
         });
       }
+      _signingOut = false;
       return;
     }
     await AtletCloudAuth.instance.signOut();
@@ -603,11 +610,16 @@ class _HomeScreenState extends State<HomeScreen> {
     _sessionUserId = null;
     _accessRevoked = false;
     _signOutWipeFailed = false;
-    if (mounted) Navigator.of(context).pushReplacementNamed('/signin');
+    if (mounted) {
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.clearSnackBars();
+      messenger.removeCurrentSnackBar();
+      Navigator.of(context).pushReplacementNamed('/signin');
+    }
   }
 
   void _notify(String message) {
-    if (!mounted) return;
+    if (!mounted || _signingOut) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),

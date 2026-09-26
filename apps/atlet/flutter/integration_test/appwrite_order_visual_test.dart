@@ -271,6 +271,7 @@ Future<void> _signOut(WidgetTester tester) async {
   await _waitFor(tester, find.byKey(const Key('sign-out')));
   await tester.tap(find.byKey(const Key('sign-out')));
   await _waitFor(tester, find.byKey(const Key('signin-email')));
+  expect(find.byType(SnackBar), findsNothing);
   expect(app.engineRegistry.current, isNull);
 }
 
