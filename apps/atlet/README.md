@@ -36,7 +36,35 @@ cargo run -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role
 cargo run -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role admin
 cargo run -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --scenario order
 cargo run -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role customer_b --scenario revoked
+cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role admin
+cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_a --no-build
+cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_b --no-build
 ```
+
+For the Chrome commands, install the Flutter web toolchain and Google Chrome;
+install the locked browser dependencies with `npm ci --prefix sdk/nostos_web`.
+`scripts/check.sh atlet-web-cloud` installs those browser dependencies and
+Playwright Chromium, runs the broker regression suite, then runs all three
+hosted browser roles with one Flutter build. The Rust binary is the persistent
+entry point; its browser assertion file is
+`flutter/web/e2e/appwrite_cloud.cjs`. It passes only the public Appwrite
+endpoint and project as Flutter build defines. Credentials reach the browser
+test process through environment variables and are absent from the release
+bundle. Evidence JSON lives under the ignored `.results/` directory; use
+`--evidence-dir` to choose another location.
+
+The Chrome run serves the built UI on a loopback origin registered with
+Appwrite. It checks a local write while the Function is unreachable, reloads
+the page and reads that write from SQLite-WASM OPFS, then resumes and verifies
+the cloud commit from a second Nostos client. The customer A run then signs
+customer B into the same browser store and checks that A's private session is
+absent. The admin run also creates a
+catalog product, checks both customer browser views and the Users panel,
+drives customer A checkout, verifies customer B's order isolation, then ships
+and delivers the order through the admin UI. It deletes its catalog fixture.
+A missing durable store, cloud Function, or browser is a
+failed run. All three accounts target the same hosted project; no local
+Appwrite instance is used.
 
 The Flutter test drives the real UI: sign-in, an offline SQLite session write,
 cloud echo, cleanup, and sign-out for each customer; catalog create/delete and
@@ -87,8 +115,10 @@ its product fixture and retains the delivered order as demo history.
 The fresh-account revocation visual check also passes. Live Appwrite team
 promotion and demotion in the Flutter UI remain unvalidated; role-scope reset
 is covered by the native client test.
-Supabase remains available through the same Flutter UI. Appwrite Flutter web,
-Appwrite server mode, physical-device push, and the other SDK app ports still
-need cloud acceptance before this is a complete cross-SDK reference. The
+The Flutter Chrome UI check passes against the same hosted Appwrite project:
+offline OPFS reload and replay, admin catalog and Users, customer A checkout,
+customer B isolation, and admin fulfilment. Supabase remains available through
+the same Flutter UI. Appwrite server mode, physical-device push, and the other
+SDK app ports still need cloud acceptance before this is a complete cross-SDK reference. The
 [design plan](../../docs/plans/atlet-appwrite-flutter-design-2026-09-26.md)
 tracks those gates.

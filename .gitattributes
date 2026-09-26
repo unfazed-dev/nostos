@@ -1,0 +1,2 @@
+# Preserve the pinned upstream SQLite WASM distribution byte for byte.
+apps/atlet/flutter/web/nostos/sqlite-wasm/index.mjs -whitespace

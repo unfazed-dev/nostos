@@ -19,8 +19,8 @@ import 'web_worker_port.dart';
 /// (opfs-sahpool, ADR-0033). [sqlitePath] is ignored on web — durability is
 /// OPFS-backed, not a filesystem path.
 ///
-/// [workerUrl] overrides where the nostos Worker script is served from (default
-/// `nostos/nostos_worker.js`). The Worker + wasm + sqlite-wasm assets must be
+/// [workerUrl] overrides where the SharedWorker broker is served from (default
+/// `nostos/nostos_broker.js`). The broker, dedicated Worker, wasm, and sqlite-wasm assets must be
 /// served at that URL's directory — see ADR-0036's bootstrap section.
 Future<NostosEngine> createNostosEngine({
   required String url,
@@ -65,5 +65,11 @@ Future<NostosEngine> createAppwriteNostosEngine({
   required String jwt,
   String? sqlitePath,
 }) async {
-  throw UnsupportedError('Appwrite web transport is not implemented yet.');
+  final port = spawnNostosWorker();
+  return WebNostosEngine.connect(
+    url: endpoint,
+    token: jwt,
+    port: port,
+    appwrite: (projectId: projectId, functionId: functionId, userId: userId),
+  )..start();
 }

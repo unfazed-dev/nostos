@@ -19,6 +19,107 @@ WebNostosEngine _engine(FakeNostosWorkerPort port) {
 
 void main() {
   test(
+    'signOut waits for the Worker to acknowledge the durable wipe',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = _engine(port);
+      var finished = false;
+      final signingOut = eng.signOut().then((_) => finished = true);
+      await Future<void>.delayed(Duration.zero);
+      final request = port.sent.single;
+      expect(request['cmd'], 'signOut');
+      expect(finished, isFalse);
+      port.reply({'id': request['id'], 'ok': true});
+      await signingOut;
+      expect(finished, isTrue);
+    },
+  );
+
+  test('signOut surfaces a failed Worker wipe', () async {
+    final port = FakeNostosWorkerPort();
+    final eng = _engine(port);
+    final signingOut = expectLater(eng.signOut(), throwsStateError);
+    await Future<void>.delayed(Duration.zero);
+    final request = port.sent.single;
+    port.reply({'id': request['id'], 'error': 'OPFS wipe failed'});
+    await signingOut;
+    final retry = eng.signOut();
+    final retryRequest = port.sent.last;
+    expect(retryRequest['cmd'], 'signOut');
+    port.reply({'id': retryRequest['id'], 'ok': true});
+    await retry;
+  });
+
+  test('late storage subscriber receives the already reported mode', () async {
+    final port = FakeNostosWorkerPort();
+    final eng = _engine(port);
+    port.reply({'type': 'storage', 'mode': 'memory'});
+    await Future<void>.delayed(Duration.zero);
+    expect(await eng.webStorageDegraded.first, isTrue);
+    await eng.close();
+  });
+
+  test('Appwrite token refresh and pause/resume reach the Worker', () async {
+    final port = FakeNostosWorkerPort();
+    final eng = WebNostosEngine.forPort(
+      port,
+      url: 'https://cloud.example/v1',
+      token: 'old',
+      appwrite: (projectId: 'project', functionId: 'sync', userId: 'alice'),
+    )..start();
+    final refreshed = eng.setToken('new');
+    final tokenRequest = port.sent.last;
+    expect(tokenRequest['cmd'], 'setToken');
+    expect(tokenRequest['token'], 'new');
+    port.reply({'id': tokenRequest['id'], 'ok': true});
+    await refreshed;
+
+    final paused = eng.disconnect();
+    final pauseRequest = port.sent.last;
+    expect(pauseRequest['cmd'], 'disconnect');
+    port.reply({'id': pauseRequest['id'], 'ok': true});
+    await paused;
+
+    eng.resume();
+    final resumeRequest = port.sent.last;
+    expect(resumeRequest['cmd'], 'resume');
+    port.reply({'id': resumeRequest['id'], 'ok': true});
+    await eng.close();
+  });
+
+  test(
+    'Appwrite connect carries cloud identity and revoked status stays distinct',
+    () async {
+      final port = FakeNostosWorkerPort();
+      final eng = WebNostosEngine.forPort(
+        port,
+        url: 'https://cloud.example/v1',
+        token: 'short-lived-jwt',
+        appwrite: (
+          projectId: 'project',
+          functionId: 'atlet_sync',
+          userId: 'alice',
+        ),
+      )..start();
+      final states = <NostosConnectionState>[];
+      final sub = eng.subscribe(tables: const [NostosTableSub(name: 'orders')]);
+      final done = sub.listen(states.add);
+      await Future<void>.delayed(Duration.zero);
+      final connect = port.sent.single;
+      expect(connect['provider'], 'appwrite');
+      expect(connect['projectId'], 'project');
+      expect(connect['functionId'], 'atlet_sync');
+      expect(connect['userId'], 'alice');
+      expect(connect['token'], 'short-lived-jwt');
+      port.reply({'type': 'status', 'connected': false, 'accessRevoked': true});
+      await Future<void>.delayed(Duration.zero);
+      expect(states.last, NostosConnectionState.accessRevoked);
+      await done.cancel();
+      await eng.close();
+    },
+  );
+
+  test(
     'subscribe emits connecting, then connected on a Worker status push',
     () async {
       final port = FakeNostosWorkerPort();

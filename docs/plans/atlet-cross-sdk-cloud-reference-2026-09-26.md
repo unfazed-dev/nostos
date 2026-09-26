@@ -42,7 +42,11 @@ app's behavior and acceptance scenarios are the same.
 | 7 | Cross-SDK convergence | Simultaneous devices using different SDKs, both providers independently, offline conflict/replay/isolation checks |
 
 Phase 1 is implemented on the `atlet-appwrite-flutter` worktree and has passed
-the real cloud native and macOS visual flows. Phases 2–7 are open. The
+the real cloud native and macOS visual flows. Phase 2 is implemented on the
+`atlet-appwrite-web` worktree; its 15 Chrome broker regressions and hosted
+admin/customer A/customer B cloud gate pass locally, including OPFS reload,
+checkout, fulfilment, and a same-origin account switch. Source review found
+no remaining lifecycle blocker; PR CI is pending. Phases 3–7 are open. The
 [Flutter Appwrite design](atlet-appwrite-flutter-design-2026-09-26.md) and
 [ADR-0050](../adr/0050-appwrite-direct-sync-function-and-journal.md) define
 the first provider path. The historical

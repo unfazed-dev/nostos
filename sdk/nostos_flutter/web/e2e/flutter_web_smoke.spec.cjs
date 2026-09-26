@@ -36,6 +36,7 @@ const SPINE_EXE = path.join(
 );
 const PKG_WEB = path.join(REPO_ROOT, "crates", "nostos-ffi-wasm", "pkg-web");
 const FLUTTER_WEB = path.join(REPO_ROOT, "sdk", "nostos_flutter", "web", "nostos");
+const ATLET_WEB = path.join(REPO_ROOT, "apps", "atlet", "flutter", "web", "nostos");
 const E2E_DIR = path.join(REPO_ROOT, "sdk", "nostos_flutter", "web", "e2e");
 const SQLITE_WASM_NODE = path.join(
   REPO_ROOT,
@@ -59,19 +60,60 @@ const MIME = {
 // resolves relative to /nostos/).
 function startStaticServer() {
   return new Promise((resolve, reject) => {
+    const executionTokens = [];
+    const state = { accountAvailable: true, revokedTokens: new Set(), accountDelayMs: {},
+      failWasm: false, failSqlite: false };
     const server = http.createServer((req, res) => {
       try {
         const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+        if (state.failWasm && urlPath === "/nostos/nostos_ffi_wasm_bg.wasm") {
+          res.writeHead(503);
+          res.end("wasm unavailable");
+          return;
+        }
+        if (state.failSqlite && urlPath === "/nostos/sqlite_wasm_glue.js") {
+          res.writeHead(503);
+          res.end("sqlite unavailable");
+          return;
+        }
         let filePath;
-        if (urlPath === "/") {
+        if (urlPath === "/account") {
+          if (!state.accountAvailable) {
+            res.writeHead(503);
+            res.end("offline");
+            return;
+          }
+          const jwt = String(req.headers["x-appwrite-jwt"] || "");
+          const respond = () => {
+            if (state.revokedTokens.has(jwt)) {
+              res.writeHead(401);
+              res.end("revoked");
+              return;
+            }
+            const user = jwt.startsWith("token-a") ? "user-a" : "user-b";
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ $id: user, status: true }));
+          };
+          const delay = state.accountDelayMs[jwt] || 0;
+          if (delay) setTimeout(respond, delay);
+          else respond();
+          return;
+        } else if (urlPath === "/functions/test-function/executions") {
+          executionTokens.push(String(req.headers["x-appwrite-jwt"] || ""));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ responseStatusCode: 500,
+            responseBody: JSON.stringify({ message: "mock transient failure" }) }));
+          return;
+        } else if (urlPath === "/") {
           filePath = path.join(E2E_DIR, "flutter_web_smoke.html");
         } else if (urlPath.startsWith("/nostos/")) {
           const rel = urlPath.slice("/nostos/".length);
           // worker + glue live in web/nostos/; the wasm .js/.wasm in pkg-web.
           const tryFlutter = path.join(FLUTTER_WEB, rel);
+          const tryAtlet = path.join(ATLET_WEB, rel);
           filePath = fs.existsSync(tryFlutter)
             ? tryFlutter
-            : path.join(PKG_WEB, rel);
+            : fs.existsSync(tryAtlet) ? tryAtlet : path.join(PKG_WEB, rel);
         } else if (urlPath.startsWith("/node_modules/@sqlite.org/sqlite-wasm/")) {
           filePath = path.join(
             SQLITE_WASM_NODE,
@@ -106,7 +148,7 @@ function startStaticServer() {
     });
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
-      resolve({ server, port: server.address().port });
+      resolve({ server, port: server.address().port, executionTokens, state });
     });
   });
 }
@@ -164,15 +206,16 @@ test("Flutter-web Worker: connect + write + reactive snapshot (ADR-0036)", async
       timeout: 10000,
     });
 
-    // Worker reports a storage mode (durable OR memory) on boot — either is fine.
+    // Connecting asks this page to host the dedicated OPFS worker. The broker
+    // then reports its storage mode over this tab's private port.
+    await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
     const mode = await page.waitForFunction(() => window.nostosStorage !== null, null, {
       timeout: 15000,
     }).then(() => page.evaluate(() => window.nostosStorage));
     console.log("[flutter-web-smoke] storage mode:", mode);
     expect(["durable", "memory"]).toContain(mode);
 
-    // Connect to the live server.
-    await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
+    // The live server connection and reactive status are now observable.
     await expect
       .poll(() => page.evaluate(() => window.nostosConnected), { timeout: 15000 })
       .toBe(true);
@@ -192,7 +235,8 @@ test("Flutter-web Worker: connect + write + reactive snapshot (ADR-0036)", async
         async () => {
           const snaps = await page.evaluate(() => window.nostosSnapshots);
           return snaps.some(
-            (s) => s.table === "tasks" && s.json && s.json.includes("smoke-1"),
+            (s) => s.table === "tasks" && s.json && s.json.includes("smoke-1") &&
+              s.json.includes("smoke row"),
           );
         },
         { timeout: 20000 },
@@ -205,6 +249,411 @@ test("Flutter-web Worker: connect + write + reactive snapshot (ADR-0036)", async
   } finally {
     await staticServer.server.close();
     spine.child.kill("SIGTERM");
+  }
+});
+
+test("Flutter-web Worker rejects mismatched JWT before opening cached Appwrite rows", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`, { waitUntil: "load" });
+    const result = await page.evaluate(async (url) => {
+      function start() {
+        const worker = new Worker("/nostos/nostos_worker.js", { type: "module" });
+        const messages = [];
+        const pending = new Map();
+        let nextId = 1;
+        worker.onmessage = ({ data }) => {
+          messages.push(data);
+          if (pending.has(data.id)) {
+            pending.get(data.id)(data);
+            pending.delete(data.id);
+          }
+        };
+        const request = (message) => new Promise((resolve) => {
+          const id = nextId++;
+          pending.set(id, resolve);
+          worker.postMessage({ ...message, id });
+        });
+        return { worker, messages, request };
+      }
+      const connect = (token) => ({ cmd: "connect", url, provider: "appwrite",
+        projectId: "test-project", functionId: "test-function", userId: "user-a",
+        token, tables: [{ name: "tasks" }] });
+      const first = start();
+      const firstReply = await first.request(connect("token-a"));
+      first.worker.postMessage({ cmd: "watch", table: "tasks" });
+      const write = await first.request({ cmd: "write", table: "tasks", op: "upsert",
+        pk: "private-a", payloadJson: JSON.stringify({ title: "private-a-title" }) });
+      await first.request({ cmd: "close" });
+      first.worker.terminate();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      const wrong = start();
+      const wrongReply = await wrong.request(connect("token-b"));
+      wrong.worker.postMessage({ cmd: "watch", table: "tasks" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const wrongRows = wrong.messages.filter((m) => m.type === "snapshot");
+      wrong.worker.terminate();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      const restored = start();
+      const restoredReply = await restored.request(connect("token-a"));
+      restored.worker.postMessage({ cmd: "watch", table: "tasks" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const restoredRows = restored.messages.filter((m) => m.type === "snapshot");
+      await restored.request({ cmd: "close" });
+      restored.worker.terminate();
+      return { firstReply, write, wrongReply, wrongRows, restoredReply, restoredRows };
+    }, endpoint);
+    expect(result.firstReply.ok).toBe(true);
+    expect(result.write.ok).toBe(true);
+    expect(result.wrongReply.error).toMatch(/token does not match/i);
+    expect(result.wrongRows.every((row) => !row.json.includes("private-a-title"))).toBe(true);
+    expect(result.restoredReply.ok).toBe(true);
+    expect(result.restoredRows.some((row) => row.json.includes("private-a-title"))).toBe(true);
+  } finally {
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web Worker refuses wipe ACK when WASM bootstrap fails", async ({ page }) => {
+  test.setTimeout(30000);
+  const staticServer = await startStaticServer();
+  try {
+    staticServer.state.failWasm = true;
+    await page.goto(`http://127.0.0.1:${staticServer.port}/`);
+    const result = await page.evaluate(() => new Promise((resolve, reject) => {
+      const worker = new Worker("/nostos/nostos_worker.js", { type: "module" });
+      const timer = setTimeout(() => {
+        worker.terminate();
+        reject(new Error("worker did not answer failed-bootstrap wipe"));
+      }, 15000);
+      worker.onmessage = ({ data }) => {
+        if (data.type === "storage" && data.error) {
+          worker.postMessage({ id: 1, cmd: "signOut" });
+        }
+        if (data.id === 1) {
+          clearTimeout(timer);
+          worker.terminate();
+          resolve(data);
+        }
+      };
+    }));
+    expect(result.error).toMatch(/storage unavailable for local wipe/);
+  } finally {
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web Worker refuses durable wipe ACK during OPFS fallback", async ({ page }) => {
+  test.setTimeout(30000);
+  const staticServer = await startStaticServer();
+  try {
+    staticServer.state.failSqlite = true;
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    const result = await page.evaluate(async (url) => {
+      const worker = new Worker("/nostos/nostos_worker.js", { type: "module" });
+      const pending = new Map();
+      let nextId = 1;
+      let storage = null;
+      worker.onmessage = ({ data }) => {
+        if (data.type === "storage") storage = data;
+        if (pending.has(data.id)) {
+          pending.get(data.id)(data);
+          pending.delete(data.id);
+        }
+      };
+      const request = (message) => new Promise((resolve) => {
+        const id = nextId++;
+        pending.set(id, resolve);
+        worker.postMessage({ ...message, id });
+      });
+      const connected = await request({ cmd: "connect", url, provider: "appwrite",
+        projectId: "test-project", functionId: "test-function", userId: "user-a",
+        token: "token-a", tables: [{ name: "tasks" }] });
+      const wiped = await request({ cmd: "signOut" });
+      worker.terminate();
+      return { connected, wiped, storage };
+    }, endpoint);
+    expect(result.connected.ok).toBe(true);
+    expect(result.storage.mode).toBe("memory");
+    expect(result.storage.reason).toBe("opfs-unavailable");
+    expect(result.wiped.error).toMatch(/storage unavailable for local wipe/);
+  } finally {
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker promotes a validated Appwrite tab after the OPFS host closes", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  const follower = await page.context().newPage();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    const firstWrite = await page.evaluate(() =>
+      window.nostosWrite("tasks", "host-row", JSON.stringify({ title: "host-private-row" })));
+    expect(firstWrite.ok).toBe(true);
+
+    await follower.goto(`${endpoint}/`);
+    await follower.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await follower.evaluate(() => window.nostosWatch("tasks"));
+    await expect.poll(() => follower.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("host-private-row"))), { timeout: 10000 }).toBe(true);
+    await follower.evaluate(() => { window.nostosSnapshots = []; });
+
+    await page.evaluate(() => window.nostosClose());
+    await page.close();
+    await expect.poll(() => follower.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("host-private-row"))), { timeout: 15000 }).toBe(true);
+    const secondWrite = await follower.evaluate(() =>
+      window.nostosWrite("tasks", "promoted-row", JSON.stringify({ title: "promoted-write" })));
+    expect(secondWrite.ok).toBe(true);
+  } finally {
+    await follower.close().catch(() => {});
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker retires wiped engine before another account signs in", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  const follower = await page.context().newPage();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await page.evaluate(() => window.nostosWrite("tasks", "a-row",
+      JSON.stringify({ title: "only-user-a" })));
+    await follower.goto(`${endpoint}/`);
+    await follower.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await follower.evaluate(() => window.nostosWatch("tasks"));
+    await expect.poll(() => follower.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("only-user-a"))), { timeout: 10000 }).toBe(true);
+
+    await page.evaluate(() => window.nostosSignOut());
+    await expect.poll(() => follower.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json === "[]")), { timeout: 10000 }).toBe(true);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-b", "user-b"), endpoint);
+    const bWrite = await page.evaluate(() => window.nostosWrite("tasks", "b-row",
+      JSON.stringify({ title: "only-user-b" })));
+    expect(bWrite.ok).toBe(true);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("only-user-b"))), { timeout: 10000 }).toBe(true);
+    expect(await follower.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("only-user-b")))).toBe(false);
+  } finally {
+    await follower.close().catch(() => {});
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker lets a follower sign out and switch accounts", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  const follower = await page.context().newPage();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await page.evaluate(() => { window.nostosRetireDelayMs = 600; });
+    await follower.goto(`${endpoint}/`);
+    await follower.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await follower.evaluate(() => window.nostosSignOut());
+    await follower.evaluate((url) => window.nostosConnectAppwrite(url, "token-b", "user-b"), endpoint);
+    const bWrite = await follower.evaluate(() => window.nostosWrite("tasks", "follower-b-row",
+      JSON.stringify({ title: "follower-user-b" })));
+    expect(bWrite.ok).toBe(true);
+    await follower.evaluate(() => window.nostosWatch("tasks"));
+    await expect.poll(() => follower.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("follower-user-b"))), { timeout: 10000 }).toBe(true);
+    expect(await page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("follower-user-b")))).toBe(false);
+  } finally {
+    await follower.close().catch(() => {});
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker accepts a fresh JWT after a tab lease expires", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    const shortToken = await page.evaluate(() =>
+      `token-a.${btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 2 }))}.sig`);
+    await page.evaluate(({ url, token }) => window.nostosConnectAppwrite(url, token),
+      { url: endpoint, token: shortToken });
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await page.evaluate(() => window.nostosWrite("tasks", "lease-row",
+      JSON.stringify({ title: "restored-after-lease" })));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("restored-after-lease"))), { timeout: 10000 }).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots.at(-1)?.json === "[]"),
+      { timeout: 10000 }).toBe(true);
+    await page.evaluate(() => { window.nostosSnapshots = []; });
+    await page.evaluate(() => window.nostosSetToken("token-a"));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("restored-after-lease"))), { timeout: 10000 }).toBe(true);
+  } finally {
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker wipes expired session offline before fresh sign-in", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    const shortToken = await page.evaluate(() =>
+      `token-a.${btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 2 }))}.sig`);
+    await page.evaluate(({ url, token }) => window.nostosConnectAppwrite(url, token),
+      { url: endpoint, token: shortToken });
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await page.evaluate(() => window.nostosWrite("tasks", "wipe-row",
+      JSON.stringify({ title: "must-be-wiped" })));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("must-be-wiped"))), { timeout: 10000 }).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots.at(-1)?.json === "[]"),
+      { timeout: 10000 }).toBe(true);
+    staticServer.state.accountAvailable = false;
+    await page.evaluate(() => window.nostosSignOut());
+    staticServer.state.accountAvailable = true;
+    await page.evaluate(() => { window.nostosSnapshots = []; });
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json === "[]")), { timeout: 10000 }).toBe(true);
+    expect(await page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("must-be-wiped")))).toBe(false);
+  } finally {
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker retries offline wipe after a silent Worker death", async ({ page }) => {
+  test.setTimeout(65000);
+  const staticServer = await startStaticServer();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await page.evaluate(() => window.nostosWrite("tasks", "dead-worker-row",
+      JSON.stringify({ title: "wipe-after-worker-death" })));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("wipe-after-worker-death"))), { timeout: 10000 }).toBe(true);
+    staticServer.state.accountAvailable = false;
+    await page.evaluate(() => window.nostosCrashEngine());
+    const wiped = await page.evaluate(() => window.nostosSignOut());
+    expect(wiped.ok).toBe(true);
+    staticServer.state.accountAvailable = true;
+    await page.evaluate(() => { window.nostosSnapshots = []; });
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json === "[]")), { timeout: 10000 }).toBe(true);
+    expect(await page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("wipe-after-worker-death")))).toBe(false);
+  } finally {
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker restores host bearer when a follower closes", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  const follower = await page.context().newPage();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await expect.poll(() => staticServer.executionTokens.includes("token-a"),
+      { timeout: 10000 }).toBe(true);
+    await follower.goto(`${endpoint}/`);
+    await follower.evaluate((url) => window.nostosConnectAppwrite(url, "token-a2"), endpoint);
+    await follower.evaluate(() => window.nostosSetToken("token-a2"));
+    await expect.poll(() => staticServer.executionTokens.includes("token-a2"),
+      { timeout: 10000 }).toBe(true);
+    const handoffStart = staticServer.executionTokens.length;
+    await follower.evaluate(() => window.nostosClose());
+    await follower.close();
+    await page.evaluate(() => window.nostosWrite("tasks", "handoff-row",
+      JSON.stringify({ title: "host-bearer" })));
+    await expect.poll(() => staticServer.executionTokens.slice(handoffStart).includes("token-a"),
+      { timeout: 10000 }).toBe(true);
+  } finally {
+    await follower.close().catch(() => {});
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker resumes cloud sync when a new tab joins after pause", async ({ page }) => {
+  test.setTimeout(90000);
+  const staticServer = await startStaticServer();
+  const follower = await page.context().newPage();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await expect.poll(() => staticServer.executionTokens.includes("token-a"),
+      { timeout: 10000 }).toBe(true);
+    await page.evaluate(() => window.nostosDisconnect());
+    await page.evaluate(() => window.nostosSetToken("token-a2"));
+    const pausedAt = staticServer.executionTokens.length;
+    await follower.goto(`${endpoint}/`);
+    await follower.evaluate((url) => window.nostosConnectAppwrite(url, "token-a3"), endpoint);
+    await follower.evaluate(() => window.nostosWrite("tasks", "resumed-row",
+      JSON.stringify({ title: "after-pause" })));
+    await expect.poll(() => staticServer.executionTokens.slice(pausedAt).includes("token-a3"),
+      { timeout: 10000 }).toBe(true);
+  } finally {
+    await follower.close().catch(() => {});
+    await staticServer.server.close();
+  }
+});
+
+test("Flutter-web broker restores an authenticated engine after Worker failure", async ({ page }) => {
+  test.setTimeout(70000);
+  const staticServer = await startStaticServer();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`);
+    await page.evaluate((url) => window.nostosConnectAppwrite(url, "token-a"), endpoint);
+    await page.evaluate(() => window.nostosWatch("tasks"));
+    await page.evaluate(() => window.nostosWrite("tasks", "recovery-row",
+      JSON.stringify({ title: "survives-worker-failure" })));
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("survives-worker-failure"))), { timeout: 10000 }).toBe(true);
+    await page.evaluate(() => window.nostosCrashEngine());
+    await expect(page.evaluate(() => window.nostosWrite("tasks", "timed-out-row",
+      JSON.stringify({ title: "timed-out" })))).rejects.toThrow(/timed out/);
+    await page.evaluate(() => { window.nostosSnapshots = []; });
+    staticServer.state.revokedTokens.add("token-a");
+    staticServer.state.accountDelayMs["token-a"] = 500;
+    const refresh = await page.evaluate(async () => {
+      const pendingWrite = window.nostosWrite("tasks", "failed-old-bearer",
+        JSON.stringify({ title: "old-bearer" })).then(() => "ok", () => "rejected");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const rotated = await window.nostosSetToken("token-a2");
+      return { rotated, pendingWrite: await pendingWrite };
+    });
+    expect(refresh.rotated.ok).toBe(true);
+    expect(refresh.pendingWrite).toBe("rejected");
+    await expect.poll(() => page.evaluate(() => window.nostosSnapshots
+      .some((s) => s.json.includes("survives-worker-failure"))), { timeout: 10000 }).toBe(true);
+  } finally {
+    await staticServer.server.close();
   }
 });
 
@@ -233,10 +682,9 @@ test("Flutter-web Worker: CRDT + writeBatch delegates ship (Wave 4c)", async ({ 
     await page.waitForFunction(() => typeof window.nostosConnect === "function", null, {
       timeout: 10000,
     });
-    await page.waitForFunction(() => window.nostosStorage !== null, { timeout: 15000 });
-
     // Connect + tag the CRDT tables before any CRDT verb (the loud-fail gate).
     await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
+    await page.waitForFunction(() => window.nostosStorage !== null, { timeout: 15000 });
     await expect
       .poll(() => page.evaluate(() => window.nostosConnected), { timeout: 15000 })
       .toBe(true);
@@ -315,12 +763,12 @@ test("Flutter-web Worker: writeBatch rows survive reload in durable OPFS", async
     await page.waitForFunction(() => typeof window.nostosConnect === "function", null, {
       timeout: 10000,
     });
+    await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
     const mode = await page
       .waitForFunction(() => window.nostosStorage !== null, null, { timeout: 15000 })
       .then(() => page.evaluate(() => window.nostosStorage));
     console.log("[flutter-web-smoke-reload] storage mode:", mode);
 
-    await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
     await expect
       .poll(() => page.evaluate(() => window.nostosConnected), { timeout: 15000 })
       .toBe(true);
@@ -351,9 +799,8 @@ test("Flutter-web Worker: writeBatch rows survive reload in durable OPFS", async
     await page.waitForFunction(() => typeof window.nostosConnect === "function", null, {
       timeout: 10000,
     });
-    await page.waitForFunction(() => window.nostosStorage !== null, { timeout: 15000 });
-
     await page.evaluate((u) => window.nostosConnect(u, "tasks"), wsUrl);
+    await page.waitForFunction(() => window.nostosStorage !== null, { timeout: 15000 });
     await expect
       .poll(() => page.evaluate(() => window.nostosConnected), { timeout: 15000 })
       .toBe(true);

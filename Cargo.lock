@@ -3167,11 +3167,13 @@ name = "nostos-ffi-wasm"
 version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
+ "hex",
  "js-sys",
  "nostos-core",
  "nostos-domain",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "wasm-bindgen",
  "wasm-bindgen-futures 0.4.76",
  "wasm-bindgen-test",

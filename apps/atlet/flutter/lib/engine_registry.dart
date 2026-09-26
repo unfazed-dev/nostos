@@ -131,11 +131,11 @@ class EngineRegistry {
   /// [start] cold. No-op when nothing is live.
   Future<void> stop() async {
     final adapter = current;
+    await adapter?.signOut();
     _activeEngine = null;
     _nostosAdapter = null;
     _nostosDirectAdapter = null;
     _nostosAppwriteAdapter = null;
-    await adapter?.signOut();
   }
 
   void _setSlot(Engine engine, SyncAdapter adapter) {

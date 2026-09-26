@@ -124,6 +124,48 @@ jobs:
         if: always()
         run: rm -f apps/atlet/.env.cloud
 
+  atlet-web-cloud:
+    name: Atlet Appwrite Cloud — Chrome OPFS and multi-user UI
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The browser and macOS jobs share fixed real accounts and cloud rows.
+    concurrency:
+      group: atlet-appwrite-cloud-accounts
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.5"
+          channel: stable
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Load scoped demo accounts
+        env:
+          ATLET_APPWRITE_CREDENTIALS: ${{ secrets.ATLET_APPWRITE_CREDENTIALS }}
+        run: |
+          test -n "$ATLET_APPWRITE_CREDENTIALS" || {
+            echo 'ATLET_APPWRITE_CREDENTIALS is required for the browser cloud gate' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$ATLET_APPWRITE_CREDENTIALS" > apps/atlet/.env.cloud
+      - name: Built Flutter UI in Chrome against hosted Appwrite
+        run: scripts/check.sh atlet-web-cloud
+      - name: Upload credential-free browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlet-appwrite-chrome-evidence
+          path: apps/atlet/.results/appwrite-flutter-web-*.json
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Remove demo credentials
+        if: always()
+        run: rm -f apps/atlet/.env.cloud
+
   # Conventional commit subjects, required (docs/ci/decisions.md row 6). The
   # range is origin/main..HEAD without merges: a PR's own commits (not GitHub's
   # synthetic merge commit), and nothing on a push to main. fetch-depth 0 so

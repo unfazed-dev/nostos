@@ -60,6 +60,7 @@ class TrainingHome extends StatelessWidget {
           backgroundColor: AtletTokens.bone,
           floatingActionButton: FloatingActionButton(
             key: const Key('add-session-button'),
+            tooltip: 'Add session',
             backgroundColor: AtletTokens.accent,
             onPressed: () => _openAddSheet(context, adapter),
             child: const Icon(Icons.add, color: AtletTokens.textOnAccent),

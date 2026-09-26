@@ -63,7 +63,7 @@ class Nostos {
   /// dylib + a `path_provider` SQLite path); web → [WebNostosEngine] over the
   /// shared `nostos-ffi-wasm` Worker (opfs-sahpool). [sqlitePath] is native-only
   /// (web durability is OPFS-backed); [workerUrl] overrides the web Worker
-  /// script URL (default `nostos/nostos_worker.js`).
+  /// broker script URL (default `nostos/nostos_broker.js`).
   static Future<Nostos> connect({
     required String url,
     String? token,
@@ -164,6 +164,7 @@ class Nostos {
 
   final StreamController<NostosConnectionState> _stateController =
       StreamController<NostosConnectionState>.broadcast();
+  StreamSubscription<NostosConnectionState>? _stateSubscription;
 
   /// Connection-state transitions for the current (or most recently started)
   /// subscription. Empty until [subscribe] has been called at least once.
@@ -204,7 +205,8 @@ class Nostos {
     _subscribedTables
       ..clear()
       ..addAll(tables.map((t) => t.name));
-    _engine
+    await _stateSubscription?.cancel();
+    _stateSubscription = _engine
         .subscribe(
           tables: tables,
           orSetTables: _orSetTables,
@@ -558,6 +560,8 @@ class Nostos {
 
   Future<void> close() async {
     await _engine.close();
+    await _stateSubscription?.cancel();
+    _stateSubscription = null;
     await _stateController.close();
   }
 
@@ -567,6 +571,8 @@ class Nostos {
   /// `clear_local_state` before tearing the session down. Idempotent.
   Future<void> signOut() async {
     await _engine.signOut();
+    await _stateSubscription?.cancel();
+    _stateSubscription = null;
     await _stateController.close();
   }
 
@@ -586,7 +592,9 @@ class Nostos {
   /// [subscribe] (throws otherwise). Named `resume`, not `connect`, to avoid
   /// clashing with the `static Nostos.connect` constructor.
   void resume() {
-    _engine.resume().listen(_stateController.add);
+    final previous = _stateSubscription;
+    if (previous != null) unawaited(previous.cancel());
+    _stateSubscription = _engine.resume().listen(_stateController.add);
   }
 
   static List<Map<String, dynamic>> _decodeRows(String jsonArray) {

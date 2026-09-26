@@ -20,11 +20,11 @@ and [the direct protocol](docs/plans/direct-mode-sync-protocol.md).
 | Path | Cloud source | Current implementation |
 |---|---|---|
 | Supabase direct | Postgres change journal and RPC, Realtime wake-ups | Native client and Flutter integration; generated SQL and a real Supabase-stack test |
-| Appwrite direct | TablesDB journal and hosted Rust Function | Native client and Atlet Flutter macOS cloud test with an admin and two customers |
+| Appwrite direct | TablesDB journal and hosted Rust Function | Native client and Atlet Flutter macOS/Chrome cloud tests with an admin and two customers |
 | Nostos server | Postgres logical replication and WebSocket | Rust server and SDK transports; [operator runbook](docs/OPERATING.md) |
 
-Direct mode is selected per signed-in session. The Appwrite path currently
-requires a native Flutter target; its web transport, server mode, and physical
+Direct mode is selected per signed-in session. The Appwrite Flutter web path
+uses SQLite-WASM with durable browser storage; its server mode and physical
 push checks are in progress. Each provider has its own schema and credentials.
 The [Atlet reference app](apps/atlet/README.md) is the shared visual scenario
 for validating them. Its full cross-SDK coverage is being built against the
@@ -49,13 +49,15 @@ The repeatable visual test is a Rust command:
 
 ```sh
 cargo run -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --scenario order
+cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role admin
 ```
 
-It signs into one hosted project as an admin and two customers, makes an
-offline purchase in the Flutter UI, then verifies cloud fulfilment, durable
-order events, and customer isolation. An ignored credentials file is required;
-the setup guide explains its format. The scenario keeps its delivered order
-as demo history and removes its catalog fixture.
+Both commands use one hosted project with an admin and two customers. They
+exercise an offline purchase, cloud fulfilment, and customer isolation. The
+Chrome run also checks browser reload while offline and cloud replay from a
+second Nostos client. An ignored credentials file is required; the setup guide
+explains its format. The scenarios keep delivered orders as demo history and
+remove their catalog fixtures.
 
 ## Repository map
 
@@ -84,9 +86,10 @@ make ci
 
 It runs Rust format, Clippy with warnings denied, and the workspace tests.
 `scripts/check.sh [area]` runs a CI job locally. Real Postgres tests require
-`make pg-e2e`; `scripts/check.sh atlet-cloud` runs the hosted multi-user Atlet
-suite with the ignored demo credentials. The matching PR check uses scoped
-repository secrets; Atlet changes must pass it before merge. See [contributing](CONTRIBUTING.md) and the
+`make pg-e2e`; `scripts/check.sh atlet-cloud` and
+`scripts/check.sh atlet-web-cloud` run the hosted multi-user Atlet suites with
+the ignored demo credentials. The matching PR checks use scoped repository
+secrets; Atlet changes must pass them before merge. See [contributing](CONTRIBUTING.md) and the
 [operator runbook](docs/OPERATING.md).
 
 ## Performance

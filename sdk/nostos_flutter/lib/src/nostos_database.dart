@@ -867,6 +867,7 @@ class NostosDatabase {
         deadLetteredWrites: prev.deadLetteredWrites,
         lastWriteError: prev.lastWriteError,
         webStorageDegraded: prev.webStorageDegraded,
+        webStorageKnown: prev.webStorageKnown,
       );
     });
     // The other half of the later-of rule (see [_wireWriteStatus]): status
@@ -910,6 +911,7 @@ class NostosDatabase {
           deadLetteredWrites: w.deadLettered,
           lastWriteError: w.lastError,
           webStorageDegraded: prev.webStorageDegraded,
+          webStorageKnown: prev.webStorageKnown,
         );
       },
       // A dead pump must not take the app with it: the connection half of
@@ -921,7 +923,7 @@ class NostosDatabase {
     unawaited(_storageDegradedSub?.cancel());
     _storageDegradedSub = _nostos.webStorageDegraded.listen((degraded) {
       final prev = _status!.value;
-      if (prev.webStorageDegraded == degraded) return;
+      if (prev.webStorageKnown && prev.webStorageDegraded == degraded) return;
       _status!.value = SyncStatus(
         conn: prev.conn,
         lastSyncedAt: prev.lastSyncedAt,
@@ -929,6 +931,7 @@ class NostosDatabase {
         deadLetteredWrites: prev.deadLetteredWrites,
         lastWriteError: prev.lastWriteError,
         webStorageDegraded: degraded,
+        webStorageKnown: true,
       );
     }, onError: (Object _) {});
   }
@@ -1660,6 +1663,7 @@ class SyncStatus {
     this.deadLetteredWrites = 0,
     this.lastWriteError,
     this.webStorageDegraded = false,
+    this.webStorageKnown = false,
   });
 
   /// Writes captured locally but not yet ack'd by the server.
@@ -1690,6 +1694,10 @@ class SyncStatus {
   /// outbox do NOT survive a reload — surface a "session not persisted"
   /// banner so the user knows to use a non-private window.
   final bool webStorageDegraded;
+
+  /// True after the web Worker reports its actual storage backend. A false
+  /// [webStorageDegraded] before this point does not prove durable storage.
+  final bool webStorageKnown;
 
   /// True when at least one write is permanently lost. This is the condition
   /// Flutter's own optimistic-state guidance expects you to render (revert the
@@ -1722,7 +1730,7 @@ class SyncStatus {
   String toString() =>
       'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt, '
       'pendingWrites: $pendingWrites, deadLetteredWrites: $deadLetteredWrites, '
-      'webStorageDegraded: $webStorageDegraded, '
+      'webStorageDegraded: $webStorageDegraded, webStorageKnown: $webStorageKnown, '
       'lastWriteError: $lastWriteError)';
 }
 

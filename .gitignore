@@ -30,6 +30,8 @@ nbproject/
 .env.*
 !.env.example
 /apps/atlet/.results/
+/apps/atlet/.tools/
+/test-results/
 *.pem
 *.key
 secrets/

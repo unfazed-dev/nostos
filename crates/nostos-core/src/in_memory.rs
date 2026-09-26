@@ -10,7 +10,10 @@
 //! The data model mirrors what `SqliteStorage` will persist: a row keyed by
 //! `(table, pk)` holding the opaque payload bytes, plus a single checkpoint LSN.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Mutex,
+};
 
 use nostos_domain::{Lsn, RowOp};
 
@@ -31,6 +34,9 @@ pub struct InMemoryStorage {
     /// The write outbox: `(id, PendingWrite)` pairs, oldest first. The next id
     /// to assign is `next_write_id` (monotonic, mirrors AUTOINCREMENT).
     outbox: BTreeMap<u64, PendingWrite>,
+    /// Failed writes remain inspectable but are excluded from `pending()`.
+    /// The mutex matches Outbox's `&self` dead-letter methods.
+    dead_letters: Mutex<BTreeMap<u64, Option<String>>>,
     next_write_id: u64,
     /// Tables whose payload is an add-wins OR-set (ADR-0030): applies MERGE
     /// element-wise by HLC instead of clobbering. Empty by default — the apply
@@ -53,6 +59,25 @@ impl InMemoryStorage {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Number of permanently failed writes still retained for inspection.
+    #[must_use]
+    pub fn dead_letter_count(&self) -> usize {
+        self.dead_letters
+            .lock()
+            .expect("in-memory dead-letter mutex poisoned")
+            .len()
+    }
+
+    /// Most recent permanent failure reason, if the server supplied one.
+    #[must_use]
+    pub fn last_dead_letter_error(&self) -> Option<String> {
+        self.dead_letters
+            .lock()
+            .expect("in-memory dead-letter mutex poisoned")
+            .last_key_value()
+            .and_then(|(_, error)| error.clone())
     }
 
     /// Declare which tables hold add-wins OR-sets (ADR-0030). For those tables
@@ -262,6 +287,10 @@ impl Storage for InMemoryStorage {
         // ADR-0049: the rows are gone, so is their owner.
         self.principal = None;
         self.outbox.clear();
+        self.dead_letters
+            .get_mut()
+            .expect("in-memory dead-letter mutex poisoned")
+            .clear();
         Ok(())
     }
 }
@@ -297,9 +326,14 @@ impl Outbox for InMemoryStorage {
     fn pending(&self) -> crate::Result<Vec<(u64, PendingWrite)>> {
         // BTreeMap iterates in ascending key order → oldest first, as the
         // contract requires.
+        let dead = self
+            .dead_letters
+            .lock()
+            .expect("in-memory dead-letter mutex poisoned");
         Ok(self
             .outbox
             .iter()
+            .filter(|(id, _)| !dead.contains_key(id))
             .map(|(&id, pw)| (id, pw.clone()))
             .collect())
     }
@@ -308,6 +342,24 @@ impl Outbox for InMemoryStorage {
         // Idempotent: removing an unknown id is a no-op (BTreeMap::remove
         // returns Option, not an error).
         self.outbox.remove(&id);
+        self.dead_letters
+            .get_mut()
+            .expect("in-memory dead-letter mutex poisoned")
+            .remove(&id);
+        Ok(())
+    }
+
+    fn mark_dead_letter(&self, id: u64) -> crate::Result<()> {
+        self.mark_dead_letter_with_error(id, None)
+    }
+
+    fn mark_dead_letter_with_error(&self, id: u64, error: Option<&str>) -> crate::Result<()> {
+        if self.outbox.contains_key(&id) {
+            self.dead_letters
+                .lock()
+                .expect("in-memory dead-letter mutex poisoned")
+                .insert(id, error.map(str::to_owned));
+        }
         Ok(())
     }
 
@@ -363,10 +415,12 @@ impl Outbox for InMemoryStorage {
     fn clear(&mut self) -> crate::Result<()> {
         // ponytail: 4b per-principal retention layers above this (ADR-0029
         // §Decision-2, pending ratification) — today sign-out discards ALL
-        // pending writes. InMemoryStorage has no dead-letter state (the
-        // bump_attempts/mark_dead_letter defaults are no-ops here), so draining
-        // the BTreeMap is the complete wipe.
+        // pending writes and dead letters.
         self.outbox.clear();
+        self.dead_letters
+            .get_mut()
+            .expect("in-memory dead-letter mutex poisoned")
+            .clear();
         Ok(())
     }
 }
@@ -720,16 +774,20 @@ mod tests {
             &empty_snap(),
         )
         .unwrap();
-        s.enqueue(PendingWrite {
-            table: "tasks".into(),
-            op: WriteOp::Upsert,
-            pk: "2".into(),
-            payload_json: Some(r#"{"title":"b"}"#.into()),
-        })
-        .unwrap();
+        let rejected_id = s
+            .enqueue(PendingWrite {
+                table: "tasks".into(),
+                op: WriteOp::Upsert,
+                pk: "2".into(),
+                payload_json: Some(r#"{"title":"b"}"#.into()),
+            })
+            .unwrap();
+        s.mark_dead_letter_with_error(rejected_id, Some("previous account rejected"))
+            .unwrap();
         assert_eq!(s.row_count(), 1);
         assert_eq!(s.checkpoint().unwrap(), Lsn::new(100));
         assert_eq!(s.outbox_len(), 1);
+        assert_eq!(s.dead_letter_count(), 1);
 
         Storage::clear(&mut s).unwrap();
 
@@ -740,6 +798,8 @@ mod tests {
             "checkpoint reset to 0 — the resume-without-snapshot guard",
         );
         assert_eq!(s.outbox_len(), 0, "outbox cleared");
+        assert_eq!(s.dead_letter_count(), 0, "prior account failures cleared");
+        assert_eq!(s.last_dead_letter_error(), None);
     }
 
     /// A store with one OR-set table ("tags"); all others ordinary.

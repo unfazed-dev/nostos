@@ -82,10 +82,18 @@ export async function openNostosDb() {
   // (Node smoke path never reaches here). The path resolves relative to this
   // module's URL inside the Worker. The package's default export is
   // `sqlite3InitModule` (the low-level init function).
-  const mod = await import(
-    /* @vite-ignore */ /* webpackIgnore: true */
-    resolveSqliteWasmPath()
-  );
+  let mod;
+  try {
+    // Flutter serves its own pinned copy; OPFS must also boot with the network
+    // offline after the app shell has been cached.
+    mod = await import("./sqlite-wasm/index.mjs");
+  } catch (_) {
+    // The SDK's standalone Worker smoke serves npm dependencies separately.
+    mod = await import(
+      /* @vite-ignore */ /* webpackIgnore: true */
+      resolveSqliteWasmPath()
+    );
+  }
   const sqlite3 = await mod.default({
     print: () => {},
     printErr: () => {},
@@ -126,7 +134,24 @@ export async function openNostosDb() {
   }
   db.exec(SCHEMA_SQL);
 
-  return makeWrapper(db);
+  // The Appwrite Function deduplicates mutations by an opaque ID derived from
+  // this device ID and the durable AUTOINCREMENT outbox ID. Keep the device ID
+  // across sign-out; clearAll() intentionally leaves nostos_meta's device_id.
+  let deviceId = db.selectValue(
+    "SELECT value FROM nostos_meta WHERE key = 'device_id'",
+  );
+  if (!deviceId) {
+    deviceId = crypto.randomUUID();
+    db.exec({
+      sql: "INSERT OR IGNORE INTO nostos_meta (key, value) VALUES ('device_id', ?)",
+      bind: [deviceId],
+    });
+    deviceId = db.selectValue(
+      "SELECT value FROM nostos_meta WHERE key = 'device_id'",
+    );
+  }
+
+  return makeWrapper(db, deviceId);
 }
 
 /**
@@ -150,8 +175,9 @@ function resolveSqliteWasmPath() {
  * @param {object} db — the sqlite3.oo1.OpfsDb instance.
  * @returns {object} the wrapper with exec/selectValue/selectRows/applyBatch/clearAll/close.
  */
-function makeWrapper(db) {
+function makeWrapper(db, deviceId) {
   return {
+    deviceId,
     exec(sql, bind) {
       if (bind && bind.length > 0) {
         db.exec({ sql, bind });
@@ -232,9 +258,17 @@ function makeWrapper(db) {
     },
 
     clearAll() {
-      db.exec("DELETE FROM nostos_data");
-      db.exec("DELETE FROM nostos_outbox");
-      db.exec("UPDATE nostos_meta SET value = '0' WHERE key = 'checkpoint'");
+      db.exec("BEGIN");
+      try {
+        db.exec("DELETE FROM nostos_data");
+        db.exec("DELETE FROM nostos_outbox");
+        db.exec("UPDATE nostos_meta SET value = '0' WHERE key = 'checkpoint'");
+        db.exec("DELETE FROM nostos_meta WHERE key IN ('horizon', 'principal')");
+        db.exec("COMMIT");
+      } catch (error) {
+        try { db.exec("ROLLBACK"); } catch (_) {}
+        throw error;
+      }
     },
 
     close() {

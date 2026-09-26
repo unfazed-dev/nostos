@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:nostos_flutter/nostos_flutter.dart';
 
 import '../bench/marks.dart';
@@ -587,6 +587,8 @@ class NostosAdapter implements SyncAdapter {
 
   SyncStatus get syncStatus => _requireDb().currentStatus;
 
+  ValueListenable<SyncStatus> get syncStatusListenable => _requireDb().status;
+
   /// Read the SQLite queue directly when an integration test must distinguish
   /// a slow status stream from a write that was already sent.
   Future<int> durablePendingWrites() async {
@@ -754,6 +756,7 @@ final NostosSchema _schema = NostosSchema(
       primaryKey: const ['id'],
       columns: [
         NostosColumn.text('id'),
+        NostosColumn.text('user_id'),
         NostosColumn.text('status'),
         NostosColumn.integer('subtotal_cents'),
         NostosColumn.integer('tax_cents'),

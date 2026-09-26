@@ -3,7 +3,7 @@
   flutter_web_smoke.html — Playwright harness for the Flutter-web Worker (ADR-0036).
 
   This is the browser half of the Flutter-web smoke. It spawns the Flutter-web
-  Worker (`nostos/nostos_worker.js`) and drives WebNostosEngine's boundary protocol
+  SharedWorker broker (`nostos/nostos_broker.js`) and drives WebNostosEngine's boundary protocol
   directly from JS — connect, watch, write — surfacing every push + response on
   `window.nostos*` for the Playwright spec to poll. The Dart WebNostosEngine layer
   (the pure-Dart protocol fanout) is covered by test/engine_web_test.dart; this
@@ -23,7 +23,8 @@
     <p id="status">spawning worker…</p>
     <script type="module">
       const log = (m) => console.log("[flutter-web-smoke] " + m);
-      const worker = new Worker("/nostos/nostos_worker.js", { type: "module" });
+      const worker = new SharedWorker("/nostos/nostos_broker.js", { type: "module" }).port;
+      worker.start();
 
       const pending = new Map();
       let nextId = 1;
@@ -33,12 +34,30 @@
       window.nostosStorage = null;
       window.nostosErrors = [];
 
-      worker.onerror = (e) => {
-        window.nostosErrors.push("worker.onerror: " + (e.message || e));
+      worker.onmessageerror = (e) => {
+        window.nostosErrors.push("worker.onmessageerror: " + (e.message || e));
       };
 
       worker.onmessage = (ev) => {
         const d = ev.data || {};
+        if (d.type === "retireEngine") {
+          const retire = () => {
+            window.nostosChildWorker?.terminate();
+            window.nostosChildWorker = null;
+          };
+          if (window.nostosRetireDelayMs) setTimeout(retire, window.nostosRetireDelayMs);
+          else retire();
+          return;
+        }
+        if (d.type === "needEngine") {
+          window.nostosChildWorker?.terminate();
+          const child = new Worker("/nostos/nostos_worker.js", { type: "module" });
+          const channel = new MessageChannel();
+          child.postMessage({ cmd: "attachPort", port: channel.port1 }, [channel.port1]);
+          worker.postMessage({ cmd: "attachEngine", port: channel.port2 }, [channel.port2]);
+          window.nostosChildWorker = child;
+          return;
+        }
         // Unsolicited push (has `type`).
         if (d.type) {
           window.nostosEvents.push(d);
@@ -80,6 +99,21 @@
           tables: [{ name: table, whereSql: null }],
         });
 
+      window.nostosConnectAppwrite = (url, token, userId = "user-a") =>
+        request({ cmd: "connect", url, provider: "appwrite", projectId: "test-project",
+          functionId: "test-function", userId, token,
+          tables: [{ name: "tasks" }] });
+
+      window.nostosClose = () => request({ cmd: "close" });
+      window.nostosSignOut = () => request({ cmd: "signOut" });
+      window.nostosSetToken = (token) => request({ cmd: "setToken", token });
+      window.nostosDisconnect = () => request({ cmd: "disconnect" });
+      window.nostosResume = () => request({ cmd: "resume" });
+      window.nostosCrashEngine = () => {
+        window.nostosChildWorker?.terminate();
+        window.nostosChildWorker = null;
+      };
+
       window.nostosWrite = (table, pk, payloadJson) =>
         request({ cmd: "write", table, op: "upsert", pk, payloadJson });
 
@@ -100,6 +134,11 @@
 
       window.nostosWriteBatch = (ops) =>
         request({ cmd: "writeBatch", ops });
+
+      window.addEventListener("pagehide", () => {
+        window.nostosChildWorker?.terminate();
+        worker.postMessage({ cmd: "close" });
+      });
 
       document.getElementById("status").textContent = "worker spawned — drive via window.nostos*";
       log("harness ready");

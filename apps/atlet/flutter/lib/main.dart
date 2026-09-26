@@ -6,6 +6,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
+import 'package:nostos_flutter/nostos_flutter.dart' show SyncStatus;
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -252,6 +253,7 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription<List<UserProfileRow>>? _profileRoleSub;
   StreamSubscription<bool>? _accessRevokedSub;
   String? _engineStartError;
+  bool _signOutWipeFailed = false;
   Future<BenchStore>? _benchStoreFuture;
   ConnectivityGuard? _connectivityGuard;
 
@@ -260,6 +262,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // arrives over the live sync socket (a push is suppressed by the offline
   // gate by design), so the in-app banner IS the foreground notification.
   StreamSubscription<List<OrderEventRow>>? _orderBannerSub;
+  StreamSubscription<bool>? _orderBannerReadySub;
 
   /// Every event id this run has already seen. The first emission only seeds
   /// it — the history a fresh device pulls is not news.
@@ -330,6 +333,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _connectivityGuard = null;
     _orderBannerSub?.cancel();
     _orderBannerSub = null;
+    _orderBannerReadySub?.cancel();
+    _orderBannerReadySub = null;
     _authSub?.cancel();
     _authSub = null;
     _profileRoleSub?.cancel();
@@ -350,21 +355,39 @@ class _HomeScreenState extends State<HomeScreen> {
   /// device pulls on open is not news, and neither is the user's own checkout.
   void _wireOrderBanner(NostosAdapter adapter) {
     _orderBannerSub?.cancel();
+    _orderBannerSub = null;
+    _orderBannerReadySub?.cancel();
+    _orderBannerReadySub = null;
     _seenEventIds.clear();
     _eventsSeeded = false;
-    _orderBannerSub = adapter.watchOrderEvents().listen((events) {
-      final fresh = events.where((e) => !_seenEventIds.contains(e.id)).toList();
-      _seenEventIds.addAll(events.map((e) => e.id));
-      if (!_eventsSeeded) {
-        _eventsSeeded = true;
-        return;
-      }
-      // The stream is newest-first; post oldest-first so a burst reads in the
-      // order it happened.
-      for (final e in fresh.reversed) {
-        unawaited(_postOrderBanner(e));
-      }
-    });
+    void attach() {
+      _orderBannerSub ??= adapter.watchOrderEvents().listen((events) {
+        final fresh = events
+            .where((e) => !_seenEventIds.contains(e.id))
+            .toList();
+        _seenEventIds.addAll(events.map((e) => e.id));
+        if (!_eventsSeeded) {
+          _eventsSeeded = true;
+          return;
+        }
+        // The stream is newest-first; post oldest-first so a burst reads in
+        // the order it happened.
+        for (final e in fresh.reversed) {
+          unawaited(_postOrderBanner(e));
+        }
+      });
+    }
+
+    // Appwrite's first pull backfills the journal after the adapter opens.
+    // Wait until that pull finishes before seeding the banner stream; a
+    // first-time install must not toast every historical order event.
+    if (usesAppwrite) {
+      _orderBannerReadySub = adapter.connected.listen((online) {
+        if (online) attach();
+      });
+    } else {
+      attach();
+    }
   }
 
   /// Posts one order event to the user and records what the platform did with
@@ -562,18 +585,38 @@ class _HomeScreenState extends State<HomeScreen> {
     _jwtRefreshTimer?.cancel();
     _jwtRefreshTimer = null;
     if (_pushPilotEnabled && !usesAppwrite) await pushPilot.detach();
-    await engineRegistry.stop();
+    try {
+      await engineRegistry.stop();
+    } catch (error) {
+      debugPrint('offline data wipe failed during sign-out: $error');
+      if (mounted) {
+        setState(() {
+          _signOutWipeFailed = true;
+          _engineStartError =
+              'Offline data could not be cleared. Retry sign out.';
+        });
+      }
+      return;
+    }
     await AtletCloudAuth.instance.signOut();
     _isAdmin = false;
     _sessionUserId = null;
     _accessRevoked = false;
+    _signOutWipeFailed = false;
     if (mounted) Navigator.of(context).pushReplacementNamed('/signin');
   }
 
   void _notify(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+        // The shell owns this messenger while tab Scaffolds own their FABs.
+        // Reserve their button row so a notification cannot block checkout.
+        margin: const EdgeInsets.fromLTRB(16, 5, 16, 100),
+      ),
+    );
   }
 
   /// Builds the Nth synthetic bench session — mirrors test/harness_test.dart's
@@ -689,8 +732,34 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildWebStorageStatus(SyncStatus status) {
+    final degraded = status.webStorageKnown && status.webStorageDegraded;
+    final label = !status.webStorageKnown
+        ? 'Checking offline storage…'
+        : degraded
+        ? 'Browser storage is temporary. Offline changes may be lost.'
+        : 'Offline storage ready · ${status.pendingWrites} pending';
+    return Container(
+      key: const Key('web-storage-status'),
+      color: degraded ? const Color(0xFFFFE4D6) : AtletTokens.bone,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Icon(
+            degraded ? Icons.warning_amber_rounded : Icons.storage_outlined,
+            size: 18,
+            color: AtletTokens.ink,
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(label)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final adapter = engineRegistry.current;
     return Scaffold(
       key: const Key('home-shell'),
       body: Column(
@@ -701,10 +770,22 @@ class _HomeScreenState extends State<HomeScreen> {
               content: Text(_engineStartError!),
               actions: [
                 TextButton(
-                  onPressed: _accessRevoked ? _signOut : _startEngine,
-                  child: Text(_accessRevoked ? 'Sign out' : 'Retry'),
+                  onPressed: _accessRevoked || _signOutWipeFailed
+                      ? _signOut
+                      : _startEngine,
+                  child: Text(
+                    _accessRevoked || _signOutWipeFailed
+                        ? 'Retry sign out'
+                        : 'Retry',
+                  ),
                 ),
               ],
+            ),
+          if (kIsWeb && adapter is NostosAdapter)
+            ValueListenableBuilder<SyncStatus>(
+              valueListenable: adapter.syncStatusListenable,
+              builder: (context, status, child) =>
+                  _buildWebStorageStatus(status),
             ),
           // Offline banner removed — the AppBar ConnectivityLed carries the
           // online/offline signal now (user request 2026-08-07).

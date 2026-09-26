@@ -1,6 +1,53 @@
 /* @ts-self-types="./nostos_ffi_wasm.d.ts" */
 
 /**
+ * A replication frame, mirrored from `nostos_core::Frame` into JS-friendly types.
+ *
+ * `payload` is an optional `Uint8Array`-backed `Vec<u8>` (the opaque tuple
+ * image); `None`/null/undefined for deletes. `lsn` is `f64` (see module docs).
+ */
+export class Frame {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        FrameFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_frame_free(ptr, 0);
+    }
+    /**
+     * Build a frame from JS. `op` is `"insert" | "update" | "delete"`.
+     * `payload` may be null/undefined (deletes); `txn_id` may be null/undefined.
+     *
+     * `lsn` and `txn_id` are `f64` to avoid BigInt at the JS boundary; they're
+     * narrowed to `u64` internally (real LSNs never approach 2^53).
+     * @param {number} lsn
+     * @param {string} op
+     * @param {string} table
+     * @param {string} pk
+     * @param {Uint8Array | null} [payload]
+     * @param {number | null} [txn_id]
+     */
+    constructor(lsn, op, table, pk, payload, txn_id) {
+        const ptr0 = passStringToWasm0(op, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(table, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(pk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(payload) ? 0 : passArray8ToWasm0(payload, wasm.__wbindgen_export);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.frame_new(lsn, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, !isLikeNone(txn_id), isLikeNone(txn_id) ? 0 : txn_id);
+        this.__wbg_ptr = ret;
+        FrameFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+}
+if (Symbol.dispose) Frame.prototype[Symbol.dispose] = Frame.prototype.free;
+
+/**
  * The Nostos apply engine, running in-memory in the browser.
  *
  * Construct with `new NostosEngine()`. Feed frames; flush to commit a pending
@@ -16,6 +63,12 @@
  * at connect time without a separate config object crossing the JS boundary.
  */
 export class NostosEngine {
+    static __wrap(ptr) {
+        const obj = Object.create(NostosEngine.prototype);
+        obj.__wbg_ptr = ptr;
+        NostosEngineFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -24,7 +77,39 @@ export class NostosEngine {
     }
     free() {
         const ptr = this.__destroy_into_raw();
-        wasm.__wbg_cairnengine_free(ptr, 0);
+        wasm.__wbg_nostosengine_free(ptr, 0);
+    }
+    /**
+     * Validate principal and role before applying a Function page. A role
+     * change returns `resnapshot:true`; the Worker must pull again from zero.
+     * @param {string} body
+     * @returns {string}
+     */
+    applyAppwritePage(body) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(body, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.nostosengine_applyAppwritePage(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
+                ptr2 = 0; len2 = 0;
+                throw takeObject(r2);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export5(deferred3_0, deferred3_1, 1);
+        }
     }
     /**
      * Materialize the WS2 read-views over `nostos_data`. After this,
@@ -40,7 +125,143 @@ export class NostosEngine {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passArrayJsValueToWasm0(tables, wasm.__wbindgen_export);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnengine_applySchema(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostosengine_applySchema(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * @param {string} id
+     */
+    appwriteAck(id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.nostosengine_appwriteAck(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get appwriteAfter() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.nostosengine_appwriteAfter(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr1 = r0;
+            var len1 = r1;
+            if (r3) {
+                ptr1 = 0; len1 = 0;
+                throw takeObject(r2);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export5(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    appwritePending() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.nostosengine_appwritePending(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr1 = r0;
+            var len1 = r1;
+            if (r3) {
+                ptr1 = 0; len1 = 0;
+                throw takeObject(r2);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export5(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * @param {string} id
+     * @param {string} error
+     * @param {boolean} permanent
+     */
+    appwriteReject(id, error, permanent) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(error, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.nostosengine_appwriteReject(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, permanent);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    appwriteRevoke() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.nostosengine_appwriteRevoke(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Bind the locally authenticated user before exposing cached rows. The
+     * Function independently verifies the JWT on every cloud request.
+     * @param {string} endpoint
+     * @param {string} project
+     * @param {string} _function
+     * @param {string} user
+     */
+    bindAppwritePrincipal(endpoint, project, _function, user) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(endpoint, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(project, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(_function, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len2 = WASM_VECTOR_LEN;
+            const ptr3 = passStringToWasm0(user, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len3 = WASM_VECTOR_LEN;
+            wasm.nostosengine_bindAppwritePrincipal(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -56,7 +277,7 @@ export class NostosEngine {
      * @returns {number}
      */
     get checkpoint() {
-        const ret = wasm.cairnengine_checkpoint(this.__wbg_ptr);
+        const ret = wasm.nostosengine_checkpoint(this.__wbg_ptr);
         return ret;
     }
     /**
@@ -67,7 +288,7 @@ export class NostosEngine {
      * `NostosSocket::close` on sign-out.
      */
     clear() {
-        wasm.cairnengine_clear(this.__wbg_ptr);
+        wasm.nostosengine_clear(this.__wbg_ptr);
     }
     /**
      * Decrement the PN-Counter by `delta` (bumps the negative counter `n`).
@@ -83,7 +304,7 @@ export class NostosEngine {
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(pk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
-            wasm.cairnengine_counterDecrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
+            wasm.nostosengine_counterDecrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -115,7 +336,7 @@ export class NostosEngine {
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(pk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
-            wasm.cairnengine_counterIncrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
+            wasm.nostosengine_counterIncrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -132,7 +353,7 @@ export class NostosEngine {
      * @returns {number}
      */
     get deadLetteredCount() {
-        const ret = wasm.cairnengine_deadLetteredCount(this.__wbg_ptr);
+        const ret = wasm.nostosengine_deadLetteredCount(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -148,7 +369,7 @@ export class NostosEngine {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             _assertClass(frame, Frame);
             var ptr0 = frame.__destroy_into_raw();
-            wasm.cairnengine_feed(retptr, this.__wbg_ptr, ptr0);
+            wasm.nostosengine_feed(retptr, this.__wbg_ptr, ptr0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -169,7 +390,7 @@ export class NostosEngine {
     flush() {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.cairnengine_flush(retptr, this.__wbg_ptr);
+            wasm.nostosengine_flush(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -188,7 +409,7 @@ export class NostosEngine {
     get lastError() {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.cairnengine_lastError(retptr, this.__wbg_ptr);
+            wasm.nostosengine_lastError(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             let v1;
@@ -208,10 +429,34 @@ export class NostosEngine {
      * standalone default + the OPFS-unavailable degrade path.
      */
     constructor() {
-        const ret = wasm.cairnengine_new();
+        const ret = wasm.nostosengine_new();
         this.__wbg_ptr = ret;
         NostosEngineFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * Browser direct-mode engine. The Worker supplies a device ID persisted in
+     * the same OPFS database as the outbox, never a per-page-load random ID.
+     * @param {object | null | undefined} db
+     * @param {string} device_id
+     * @returns {NostosEngine}
+     */
+    static newAppwrite(db, device_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(device_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.nostosengine_newAppwrite(retptr, isLikeNone(db) ? 0 : addHeapObject(db), ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return NostosEngine.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Add `element` to the add-wins OR-set in row `pk` of `table` (ADR-0030 /
@@ -235,7 +480,7 @@ export class NostosEngine {
             const len1 = WASM_VECTOR_LEN;
             const ptr2 = passStringToWasm0(element, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len2 = WASM_VECTOR_LEN;
-            wasm.cairnengine_orSetAdd(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            wasm.nostosengine_orSetAdd(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -264,7 +509,7 @@ export class NostosEngine {
             const len1 = WASM_VECTOR_LEN;
             const ptr2 = passStringToWasm0(element, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len2 = WASM_VECTOR_LEN;
-            wasm.cairnengine_orSetRemove(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            wasm.nostosengine_orSetRemove(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -282,7 +527,7 @@ export class NostosEngine {
      * @returns {number}
      */
     get pendingCount() {
-        const ret = wasm.cairnengine_pendingCount(this.__wbg_ptr);
+        const ret = wasm.nostosengine_pendingCount(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -299,7 +544,7 @@ export class NostosEngine {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(sql, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnengine_query(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostosengine_query(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -323,7 +568,7 @@ export class NostosEngine {
      * @returns {number}
      */
     get rowCount() {
-        const ret = wasm.cairnengine_rowCount(this.__wbg_ptr);
+        const ret = wasm.nostosengine_rowCount(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -353,7 +598,7 @@ export class NostosEngine {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(table, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnengine_rowsFor(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostosengine_rowsFor(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var v2 = getArrayJsValueFromWasm0(r0, r1).slice();
@@ -375,7 +620,7 @@ export class NostosEngine {
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArrayJsValueToWasm0(counter, wasm.__wbindgen_export);
         const len1 = WASM_VECTOR_LEN;
-        wasm.cairnengine_setCrdtTables(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        wasm.nostosengine_setCrdtTables(this.__wbg_ptr, ptr0, len0, ptr1, len1);
     }
     /**
      * Set the `where_sql` predicate the transport (E1) will attach to the next
@@ -395,7 +640,7 @@ export class NostosEngine {
     setWhereSql(sql) {
         var ptr0 = isLikeNone(sql) ? 0 : passStringToWasm0(sql, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         var len0 = WASM_VECTOR_LEN;
-        wasm.cairnengine_setWhereSql(this.__wbg_ptr, ptr0, len0);
+        wasm.nostosengine_setWhereSql(this.__wbg_ptr, ptr0, len0);
     }
     /**
      * The configured `where_sql`, or `null` if none. E1's transport reads this
@@ -405,7 +650,7 @@ export class NostosEngine {
     get whereSql() {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.cairnengine_whereSql(retptr, this.__wbg_ptr);
+            wasm.nostosengine_whereSql(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             let v1;
@@ -433,7 +678,7 @@ export class NostosEngine {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passArrayJsValueToWasm0(ops, wasm.__wbindgen_export);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnengine_writeBatch(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostosengine_writeBatch(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -501,7 +746,7 @@ export class NostosSocket {
     }
     free() {
         const ptr = this.__destroy_into_raw();
-        wasm.__wbg_cairnsocket_free(ptr, 0);
+        wasm.__wbg_nostossocket_free(ptr, 0);
     }
     /**
      * Materialize the WS2 read-views over `nostos_data` on the socket's engine.
@@ -513,7 +758,7 @@ export class NostosSocket {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passArrayJsValueToWasm0(tables, wasm.__wbindgen_export);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_applySchema(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostossocket_applySchema(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -529,7 +774,7 @@ export class NostosSocket {
      * @returns {number}
      */
     get checkpoint() {
-        const ret = wasm.cairnsocket_checkpoint(this.__wbg_ptr);
+        const ret = wasm.nostossocket_checkpoint(this.__wbg_ptr);
         return ret;
     }
     /**
@@ -537,14 +782,14 @@ export class NostosSocket {
      * before [`Self::close`]. Mirrors `nostos_client::SyncClient::clear_local_state`.
      */
     clearLocalState() {
-        wasm.cairnsocket_clearLocalState(this.__wbg_ptr);
+        wasm.nostossocket_clearLocalState(this.__wbg_ptr);
     }
     /**
      * Close the socket. The server treats this as a session end; the client
      * keeps its checkpoint so the next `connect` resumes.
      */
     close() {
-        wasm.cairnsocket_close(this.__wbg_ptr);
+        wasm.nostossocket_close(this.__wbg_ptr);
     }
     /**
      * Connect to `url`, await the browser's `open`, then resolve. JS sees an
@@ -578,7 +823,7 @@ export class NostosSocket {
         const len2 = WASM_VECTOR_LEN;
         var ptr3 = isLikeNone(where_sql) ? 0 : passStringToWasm0(where_sql, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         var len3 = WASM_VECTOR_LEN;
-        const ret = wasm.cairnsocket_connect(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, isLikeNone(db_handle) ? 0 : addHeapObject(db_handle));
+        const ret = wasm.nostossocket_connect(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, isLikeNone(db_handle) ? 0 : addHeapObject(db_handle));
         return takeObject(ret);
     }
     /**
@@ -596,7 +841,7 @@ export class NostosSocket {
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(pk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_counterDecrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
+            wasm.nostossocket_counterDecrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -625,7 +870,7 @@ export class NostosSocket {
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(pk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_counterIncrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
+            wasm.nostossocket_counterIncrement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, delta);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -642,7 +887,7 @@ export class NostosSocket {
      * @returns {number}
      */
     get deadLetteredCount() {
-        const ret = wasm.cairnsocket_deadLetteredCount(this.__wbg_ptr);
+        const ret = wasm.nostossocket_deadLetteredCount(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -652,7 +897,7 @@ export class NostosSocket {
     get lastError() {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.cairnsocket_lastError(retptr, this.__wbg_ptr);
+            wasm.nostossocket_lastError(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             let v1;
@@ -670,7 +915,7 @@ export class NostosSocket {
      * the JS function). Idempotent. Dropping the socket also cleans up.
      */
     offChange() {
-        wasm.cairnsocket_offChange(this.__wbg_ptr);
+        wasm.nostossocket_offChange(this.__wbg_ptr);
     }
     /**
      * Register a reactive callback nostos invokes on EVERY change tick — the
@@ -709,7 +954,7 @@ export class NostosSocket {
      * @param {Function} callback
      */
     onChange(callback) {
-        wasm.cairnsocket_onChange(this.__wbg_ptr, addHeapObject(callback));
+        wasm.nostossocket_onChange(this.__wbg_ptr, addHeapObject(callback));
     }
     /**
      * Add `element` to the add-wins OR-set in row `pk` of `table`. Delegates to
@@ -731,7 +976,7 @@ export class NostosSocket {
             const len1 = WASM_VECTOR_LEN;
             const ptr2 = passStringToWasm0(element, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len2 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_orSetAdd(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            wasm.nostossocket_orSetAdd(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -761,7 +1006,7 @@ export class NostosSocket {
             const len1 = WASM_VECTOR_LEN;
             const ptr2 = passStringToWasm0(element, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len2 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_orSetRemove(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            wasm.nostossocket_orSetRemove(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -779,7 +1024,7 @@ export class NostosSocket {
      * @returns {number}
      */
     get pendingCount() {
-        const ret = wasm.cairnsocket_pendingCount(this.__wbg_ptr);
+        const ret = wasm.nostossocket_pendingCount(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -795,7 +1040,7 @@ export class NostosSocket {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(sql, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_query(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostossocket_query(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -815,21 +1060,20 @@ export class NostosSocket {
         }
     }
     /**
-     * Reconnect retaining engine state (Wave 4a). If the socket is closed,
-     * opens a new WebSocket with the stored connection params. The engine
-     * (rows, checkpoint, outbox) survives — the server resumes streaming from
-     * the persisted checkpoint. Returns `true` if a reconnect was initiated,
-     * `false` if the socket was already open.
-     *
-     * ponytail: this creates a new `NostosSocket` internally because the
-     * existing `ws` field is not `RefCell` (changing it would ripple through
-     * the transport). The JS caller should use the returned socket and drop
-     * the old one. A future refactor should make `ws` interior-mutable so
-     * resume can hot-swap in place.
+     * Re-assert the subscription on an already-open socket (heartbeat
+     * re-send of the subscribe frame with the persisted checkpoint;
+     * returns `false`). If the socket is CLOSED this returns `Err` —
+     * call `connect()` instead. (Audit 2026-08-17 L3: an earlier version of
+     * this doc promised a socket-creating resume returning `true` — never
+     * implemented. The `ws` field is not interior-mutable, so an in-place
+     * hot-swap would ripple through the transport; that refactor is the
+     * upgrade path for a true resume.) The engine (rows, checkpoint,
+     * outbox) survives a reconnect — the server resumes streaming from
+     * the persisted checkpoint.
      * @returns {Promise<boolean>}
      */
     resume() {
-        const ret = wasm.cairnsocket_resume(this.__wbg_ptr);
+        const ret = wasm.nostossocket_resume(this.__wbg_ptr);
         return takeObject(ret);
     }
     /**
@@ -837,7 +1081,7 @@ export class NostosSocket {
      * @returns {number}
      */
     get rowCount() {
-        const ret = wasm.cairnsocket_rowCount(this.__wbg_ptr);
+        const ret = wasm.nostossocket_rowCount(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -857,7 +1101,7 @@ export class NostosSocket {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(table, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_rowsFor(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostossocket_rowsFor(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var v2 = getArrayJsValueFromWasm0(r0, r1).slice();
@@ -878,7 +1122,7 @@ export class NostosSocket {
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArrayJsValueToWasm0(counter, wasm.__wbindgen_export);
         const len1 = WASM_VECTOR_LEN;
-        wasm.cairnsocket_setCrdtTables(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        wasm.nostossocket_setCrdtTables(this.__wbg_ptr, ptr0, len0, ptr1, len1);
     }
     /**
      * Send an additional subscribe frame for a DIFFERENT table over the
@@ -902,7 +1146,7 @@ export class NostosSocket {
             const len0 = WASM_VECTOR_LEN;
             var ptr1 = isLikeNone(where_sql) ? 0 : passStringToWasm0(where_sql, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             var len1 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_subscribe(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            wasm.nostossocket_subscribe(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -965,7 +1209,7 @@ export class NostosSocket {
             var len3 = WASM_VECTOR_LEN;
             const ptr4 = passStringToWasm0(client_write_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len4 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_write(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4);
+            wasm.nostossocket_write(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4);
             var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
@@ -991,7 +1235,7 @@ export class NostosSocket {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passArrayJsValueToWasm0(ops, wasm.__wbindgen_export);
             const len0 = WASM_VECTOR_LEN;
-            wasm.cairnsocket_writeBatch(retptr, this.__wbg_ptr, ptr0, len0);
+            wasm.nostossocket_writeBatch(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -1008,53 +1252,6 @@ export class NostosSocket {
     }
 }
 if (Symbol.dispose) NostosSocket.prototype[Symbol.dispose] = NostosSocket.prototype.free;
-
-/**
- * A replication frame, mirrored from `nostos_core::Frame` into JS-friendly types.
- *
- * `payload` is an optional `Uint8Array`-backed `Vec<u8>` (the opaque tuple
- * image); `None`/null/undefined for deletes. `lsn` is `f64` (see module docs).
- */
-export class Frame {
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        FrameFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_frame_free(ptr, 0);
-    }
-    /**
-     * Build a frame from JS. `op` is `"insert" | "update" | "delete"`.
-     * `payload` may be null/undefined (deletes); `txn_id` may be null/undefined.
-     *
-     * `lsn` and `txn_id` are `f64` to avoid BigInt at the JS boundary; they're
-     * narrowed to `u64` internally (real LSNs never approach 2^53).
-     * @param {number} lsn
-     * @param {string} op
-     * @param {string} table
-     * @param {string} pk
-     * @param {Uint8Array | null} [payload]
-     * @param {number | null} [txn_id]
-     */
-    constructor(lsn, op, table, pk, payload, txn_id) {
-        const ptr0 = passStringToWasm0(op, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(table, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(pk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len2 = WASM_VECTOR_LEN;
-        var ptr3 = isLikeNone(payload) ? 0 : passArray8ToWasm0(payload, wasm.__wbindgen_export);
-        var len3 = WASM_VECTOR_LEN;
-        const ret = wasm.frame_new(lsn, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, !isLikeNone(txn_id), isLikeNone(txn_id) ? 0 : txn_id);
-        this.__wbg_ptr = ret;
-        FrameFinalization.register(this, this.__wbg_ptr, this);
-        return this;
-    }
-}
-if (Symbol.dispose) Frame.prototype[Symbol.dispose] = Frame.prototype.free;
 
 /**
  * The result of an atomic commit, mirrored to JS.
@@ -1204,6 +1401,12 @@ function __wbg_get_imports() {
             const ret = getObject(arg0) === undefined;
             return ret;
         },
+        __wbg___wbindgen_number_get_394265ed1e1b84ee: function(arg0, arg1) {
+            const obj = getObject(arg1);
+            const ret = typeof(obj) === 'number' ? obj : undefined;
+            getDataViewMemory0().setFloat64(arg0 + 8 * 1, isLikeNone(ret) ? 0 : ret, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
+        },
         __wbg___wbindgen_string_get_b0ca35b86a603356: function(arg0, arg1) {
             const obj = getObject(arg1);
             const ret = typeof(obj) === 'string' ? obj : undefined;
@@ -1222,10 +1425,6 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).apply(getObject(arg1), getObject(arg2));
             return addHeapObject(ret);
         }, arguments); },
-        __wbg_cairnsocket_new: function(arg0) {
-            const ret = NostosSocket.__wrap(arg0);
-            return addHeapObject(ret);
-        },
         __wbg_call_8a2dd23819f8a60a: function() { return handleError(function (arg0, arg1) {
             const ret = getObject(arg0).call(getObject(arg1));
             return addHeapObject(ret);
@@ -1310,7 +1509,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_516(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_582(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -1344,7 +1543,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_516(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_582(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -1354,6 +1553,10 @@ function __wbg_get_imports() {
             } finally {
                 state0.a = 0;
             }
+        },
+        __wbg_nostossocket_new: function(arg0) {
+            const ret = NostosSocket.__wrap(arg0);
+            return addHeapObject(ret);
         },
         __wbg_now_86c0d4ba3fa605b8: function() {
             const ret = Date.now();
@@ -1440,32 +1643,32 @@ function __wbg_get_imports() {
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 5, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_122);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_148);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 77, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_504);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 81, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_568);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("CloseEvent")], shim_idx: 5, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_122_2);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_148_2);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("ErrorEvent")], shim_idx: 5, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_122_3);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_148_3);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 5, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_122_4);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_148_4);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000006: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 10, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_127);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_153);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000007: function(arg0) {
@@ -1488,34 +1691,34 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./cairn_ffi_wasm_bg.js": import0,
+        "./nostos_ffi_wasm_bg.js": import0,
     };
 }
 
-function __wasm_bindgen_func_elem_127(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_127(arg0, arg1);
+function __wasm_bindgen_func_elem_153(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_153(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_122(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_122(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_148(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_148(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_122_2(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_122_2(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_148_2(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_148_2(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_122_3(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_122_3(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_148_3(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_148_3(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_122_4(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_122_4(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_148_4(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_148_4(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_504(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_568(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_504(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_568(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -1526,21 +1729,21 @@ function __wasm_bindgen_func_elem_504(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_516(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_516(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_582(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_582(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 
 const __wbindgen_enum_BinaryType = ["blob", "arraybuffer"];
-const NostosEngineFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_cairnengine_free(ptr, 1));
-const NostosSocketFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_cairnsocket_free(ptr, 1));
 const FrameFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_frame_free(ptr, 1));
+const NostosEngineFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_nostosengine_free(ptr, 1));
+const NostosSocketFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_nostossocket_free(ptr, 1));
 const OutcomeFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_outcome_free(ptr, 1));
