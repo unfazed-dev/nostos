@@ -6,7 +6,7 @@ not a claim that every Atlet client or push rail has passed end to end.
 | Target | What exists | Evidence from this run | Remaining acceptance |
 |---|---|---|---|
 | Flutter web | `apps/atlet/flutter`, browser assets, `atlet-push-sw.js` | Release builds passed with push pilot off and on. Headless Chromium loaded the built page and rendered Sign in with no page errors. Four focused Chrome test files passed (13 tests). | Real Supabase sign-in, home/shop data, offline replay, and browser push delivery need test credentials and a live service. The full Chrome test sweep had 74 passes and 27 failures: native `dart:io` temp-directory tests plus one asset-loader timeout. |
-| JS/TS Atlet web | Design JSX/HTML and a draft RN+web adapter plan; no runnable Atlet JS/TS app package | The underlying `@nostos-sync/web` SDK passed 9 Playwright tests, with one feature-gated conformance test skipped. Its packed tarball also passed the Node Wasm smoke test after the packaging fix in this branch. | Build the Atlet TS adapter and web app, then run the frozen adapter conformance scorecard against the live project. SDK tests are not an Atlet app test. |
+| JS/TS Atlet web | Design JSX/HTML and a draft RN+web adapter plan; no runnable Atlet JS/TS app package | The underlying `@nostos-sync/web` SDK passed 9 default Playwright tests; the feature-gated Worker conformance test passed separately. Its packed tarball also passed the Node Wasm smoke test after the packaging fix in this branch. | Build the Atlet TS adapter and web app, then run the frozen adapter conformance scorecard against the live project. SDK tests are not an Atlet app test. |
 | Push | Flutter mobile FCM harness, Flutter web VAPID subscription code and service worker, web SDK synthetic push tests | Web service worker passed `node --check`; push-enabled Flutter web release build passed. SDK Playwright exercised a synthetic service-worker push, wake, reconnect, and REST registration contract. | Real encrypted Web Push through a push service, foreground/background behavior, click routing, sign-out deregistration, and the mobile FCM rail need operator credentials and a test device/browser. |
 | Tauri | `sdk/nostos_tauri` plugin and generic Tauri fixture; no Atlet Tauri application | `SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh tauri` passed the plugin and fixture slice (122 seconds, zero skipped slices). Both standalone crates also pass `cargo test --locked --no-run` after the lockfile refresh in this branch. | Build an Atlet Tauri shell or adapter before an Atlet-specific desktop/mobile sign-off. The generic fixture cannot prove Atlet UI, auth, offline writes, or push. |
 
@@ -38,9 +38,12 @@ cd ../.. && cargo build -p nostos-infra --example e2e_server
 cd sdk/nostos_web && npm test && npm run check:pack
 ```
 
-The browser SDK result is 9 Playwright passes and one conformance skip. The
-web-push Playwright test uses a **synthetic** push event: headless Chromium has
-no push service, so this does not validate real notification delivery.
+The default browser SDK result is 9 Playwright passes and one conformance
+skip. A separate `wasm-pack build ... -- --features conformance` followed by
+`npx playwright test e2e/conformance.spec.cjs` passed that final case; the
+standard bundle was rebuilt afterward. The web-push Playwright test uses a
+**synthetic** push event: headless Chromium has no push service, so this does
+not validate real notification delivery.
 
 From the repo root, `SDK_E2E_STRICT=1 ./scripts/sdk-e2e.sh tauri` exercises the
 generic Tauri plugin and IPC fixture. The tracked standalone lockfiles needed
