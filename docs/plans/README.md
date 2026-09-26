@@ -1,8 +1,9 @@
 # Plans index — what is live, what is history
 
-23 plans accumulated here with no status markers, so a reader could not tell which were
-live and which had been overtaken. This index is the answer (A8, 2026-07-30). **Start here
-before opening any plan in this directory.**
+This index classified 23 plans on 2026-07-30 so readers could tell which were
+live and which had been overtaken. More plans have arrived since then; their
+status must be read from the individual document until this index is expanded.
+**Start here before opening one of the plans listed below.**
 
 Four classes:
 
@@ -13,7 +14,7 @@ Four classes:
 - **SUPERSEDED** — a later document owns this topic now, or the premise was falsified. The
   superseding document is named. Read the replacement, not this.
 
-**This index is authoritative; the plan files are not.** Only one plan carries an inline
+**For the plans listed here, this index is authoritative; the plan files are not.** Only one plan carries an inline
 banner — `sdk-live-e2e-consolidation.md` — because it actively misdirects a reader who opens
 it cold. **Every other plan is unmarked, including SUPERSEDED ones.** So an absent banner
 means nothing: check this table.
@@ -23,6 +24,15 @@ deleted (removed in cleanup; see git history). Among them: `HANDOFF.md`,
 `nostos-next-after-oplog-epoch-2026-07-20.md`, `supabase-flutter-smoke-results.md`,
 `test-coverage-gap-analysis.md` and `flutter-pomodoro-persona-e2e-baseline.md`. Plans an
 ADR, ROADMAP, RESULTS, code, CI or a script cites stay, even when DONE or SUPERSEDED.
+
+**Cleanup 2026-09-26:** the Supabase Realtime adopter playbook moved from the
+stray top-level `plans/` directory to `docs/guides/supabase-realtime/`, with
+the `make playbook` target updated. Cited historical plans stay until their
+references can be revised safely. A filename-reference scan found 42 of the
+46 preexisting plans cited elsewhere. The four uncited files cover a draft
+Atlet wave, unresolved code audit, pending field leg, and AI roadmap; none
+is a safe deletion based on citation alone. Broader pruning awaits an agreed
+keep list and reference cleanup.
 
 The **Basis** column is deliberate: `verified` means established from the repo or a run this
 session; `inferred` means read off the plan's own header or cross-referenced but not

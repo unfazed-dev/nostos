@@ -24,17 +24,23 @@ question; change any of them and the generated files follow.
 
 | # | decision | answer | why |
 |---|---|---|---|
-| 4 | `scripts/check.sh` areas | one area per `ci.yml` job (`lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck`) plus `all`; an area whose toolchain or inputs are absent is skipped green | local green = CI green, by the same names; green by absence |
+| 4 | `scripts/check.sh` areas | nine areas: `commits`, `pr-title`, `deny`, `lint-test`, `sdk-typecheck`, `benchmark`, `e2e-pg`, `sdk-e2e`, `flutter`, plus `all`; an area whose toolchain or inputs are absent is skipped green | areas mirror the CI gates (`pr-title` runs in `pr.yml`; `sdk-typecheck` covers two jobs); green by absence |
 | 5 | PR-title check | `[arxa-<skill>]` **required** (flipped 2026-09-26; was warn-first through the retro replay and PRs #44–#53) | every PR since the replay carried a valid tag, so the gate costs nothing and catches drift |
 | 6 | commit gate | conventional prefix on `git rev-list --no-merges base..head`, **required** | GitHub's synthetic merge commit false-positives a naive check (energize PR #1, 2026-08-16) |
 | 7 | workflow token | top-level `permissions: contents: read` in `ci.yml`; `release.yml` keeps its own | least privilege; nothing in CI writes to the repo |
-| 8 | trunk + protection | repo is **public**, GitHub-hosted runners. Protection on `main` (required contexts = the `ci.yml` job names, no force-push, no deletion) is prepared in `docs/ci/setup.md` as a `gh api` call **for the user to run** after the retro replay | protection applied before the replay would refuse the replay's pushes to `main` |
+| 8 | trunk + protection | repo is **public**, GitHub-hosted runners. Protection on `main` is applied with ten required contexts, including `PR title stage tag`; no force-push or deletion. `docs/ci/setup.md` records the `gh api` setup call | protection was applied after the retro replay so it would not refuse the replay's pushes to `main` |
 | 9 | registries | npm scope `@nostos-sync`, pub `nostos_flutter`; nothing registered or published | mirrors today's names; claiming names needs the user |
 | 10 | fallback lifetime | `CAIRN_*` env, `cairn*` config files and `cairn-*` binary symlinks stay until the first major (1.0), with a one-time deprecation warning | Parallel Change: contract only after every consumer has moved |
 | 11 | CD | stays tag-triggered (`release.yml` on `v*`); no deploy on merge | there is no deploy target CI should own; fly deploys stay manual |
 | 12 | retro summaries | a small Python generator in git-cliff's grouping (commit type → section) instead of git-cliff | git-cliff isn't installed; one script, no new tool |
 | 13 | branching | worktrees (the arxa default) | skill default; the pre-push hook enforces it |
 | 14 | retro base | the retro `main` starts at an empty root commit dated just before the first real commit, so every real commit lands through a PR | otherwise the first commit would sit on `main` outside any PR |
+
+Operational spot check (2026-09-26): rows 4 and 8 were corrected to match the
+current checks and applied protection. Rows 6, 7, 10–14 are consistent with
+the scripts, workflows, and rewritten history checked this day. Row 9 still
+requires registry account access and a first-release decision. This check does
+not record owner acceptance of the defaults above.
 
 ## Tag map (SSOT)
 

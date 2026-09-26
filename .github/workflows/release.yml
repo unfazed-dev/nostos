@@ -1,8 +1,7 @@
 name: Release
 
-# Tag-triggered: `git tag v0.1.0 && git push origin v0.1.0`. Nothing here has
-# been exercised end to end yet — there is no GitHub remote for this repo as
-# of writing (see docs/plans/flutter-supabase-plug-and-play-launch.md W6).
+# Tag-triggered by a pushed `v*` tag. Nothing here has been exercised end to
+# end yet.
 # Every job below was designed against what's locally verifiable (target
 # lists, crate builds, action syntax via `actionlint`) and documented as
 # such; the first real tag push is this pipeline's first real test.
