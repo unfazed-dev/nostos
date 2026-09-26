@@ -41,6 +41,14 @@ async fn main() -> Result<()> {
     let args = nostos_infra::env::parse::<Args>();
     let root = find_checkout()?;
     let flutter = root.join("apps/atlet/flutter");
+    if !root
+        .join("sdk/nostos_web/node_modules/@playwright/test")
+        .is_dir()
+    {
+        bail!(
+            "Playwright is missing; run npm ci --prefix sdk/nostos_web before the cloud web smoke"
+        );
+    }
     let credentials = absolute(&root, &args.credentials);
     let secrets = Credentials::read(&credentials)?;
     let evidence_dir = absolute(&root, &args.evidence_dir);
