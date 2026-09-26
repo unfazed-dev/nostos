@@ -117,7 +117,9 @@ jobs:
         with:
           name: atlet-appwrite-visual-evidence
           path: apps/atlet/.results/*.json
-          if-no-files-found: ignore
+          # Only credential-free result JSONs are selected; .results is hidden.
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Remove demo credentials
         if: always()
         run: rm -f apps/atlet/.env.cloud

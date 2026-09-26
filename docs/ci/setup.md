@@ -29,6 +29,8 @@ repository fixtures use random IDs, while the user-disable check necessarily
 uses a real fixed account. Do not run the local cloud check during a CI cloud
 run. The job uploads credential-free JSON results. Locally,
 run `scripts/check.sh atlet-cloud` with the ignored credentials file present.
+The artifact upload selects only `.results/*.json`, includes that hidden
+directory explicitly, and fails the job if no evidence was produced.
 
 ## Once per clone
 
