@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "database": { "database_id": "atlet", "name": "Atlet" },
+  "team": { "team_id": "atlet_admins", "name": "Atlet admins" },
+  "tables": [
+    {
+      "table_id": "schema_migrations", "name": "Schema migrations", "row_security": false,
+      "columns": [
+        { "key": "version", "type": "integer", "required": true },
+        { "key": "checksum", "type": "varchar", "size": 64, "required": true },
+        { "key": "applied_at", "type": "datetime", "required": true }
+      ]
+    },
+    {
+      "table_id": "sync_clock", "name": "Sync clock", "row_security": false,
+      "columns": [
+        { "key": "head", "type": "bigint", "required": true }
+      ]
+    },
+    {
+      "table_id": "sync_changes", "name": "Sync changes", "row_security": false,
+      "columns": [
+        { "key": "seq", "type": "bigint", "required": true },
+        { "key": "table_name", "type": "varchar", "size": 64, "required": true },
+        { "key": "pk", "type": "varchar", "size": 36, "required": true },
+        { "key": "op", "type": "varchar", "size": 12, "required": true },
+        { "key": "row_json", "type": "longtext", "required": false },
+        { "key": "owner_id", "type": "varchar", "size": 36, "required": false },
+        { "key": "audience", "type": "varchar", "size": 16, "required": true }
+      ],
+      "indexes": [
+        { "key": "seq_unique", "type": "unique", "attributes": ["seq"] },
+        { "key": "owner_seq", "type": "key", "attributes": ["owner_id", "seq"] }
+      ]
+    },
+    {
+      "table_id": "sessions", "name": "Training sessions", "row_security": true,
+      "columns": [
+        { "key": "user_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "title", "type": "varchar", "size": 256, "required": true },
+        { "key": "type", "type": "varchar", "size": 64, "required": true },
+        { "key": "metric", "type": "integer", "required": true },
+        { "key": "unit", "type": "varchar", "size": 32, "required": true },
+        { "key": "note", "type": "text", "required": false },
+        { "key": "streak", "type": "integer", "required": true },
+        { "key": "occurred_on", "type": "datetime", "required": true },
+        { "key": "server_committed_at", "type": "datetime", "required": false }
+      ],
+      "indexes": [{ "key": "session_user_date", "type": "key", "attributes": ["user_id", "occurred_on"] }]
+    },
+    {
+      "table_id": "products", "name": "Products", "row_security": true,
+      "columns": [
+        { "key": "name", "type": "varchar", "size": 256, "required": true },
+        { "key": "category", "type": "varchar", "size": 128, "required": true },
+        { "key": "price_cents", "type": "integer", "required": true },
+        { "key": "rating", "type": "double", "required": false },
+        { "key": "plant_based", "type": "boolean", "required": true },
+        { "key": "image_url", "type": "url", "required": false },
+        { "key": "image_id", "type": "varchar", "size": 36, "required": false }
+      ]
+    },
+    {
+      "table_id": "cart_items", "name": "Cart items", "row_security": true,
+      "columns": [
+        { "key": "user_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "product_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "qty", "type": "integer", "required": true },
+        { "key": "added_at", "type": "datetime", "required": true }
+      ],
+      "indexes": [{ "key": "cart_user", "type": "key", "attributes": ["user_id"] }]
+    },
+    {
+      "table_id": "orders", "name": "Orders", "row_security": true,
+      "columns": [
+        { "key": "user_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "status", "type": "varchar", "size": 24, "required": true },
+        { "key": "subtotal_cents", "type": "integer", "required": true },
+        { "key": "tax_cents", "type": "integer", "required": true },
+        { "key": "shipping_cents", "type": "integer", "required": true },
+        { "key": "total_cents", "type": "integer", "required": true },
+        { "key": "payment_ref", "type": "varchar", "size": 128, "required": false },
+        { "key": "items_json", "type": "longtext", "required": false },
+        { "key": "created_at", "type": "datetime", "required": true }
+      ],
+      "indexes": [{ "key": "orders_user_date", "type": "key", "attributes": ["user_id", "created_at"] }]
+    },
+    {
+      "table_id": "order_events", "name": "Order events", "row_security": true,
+      "columns": [
+        { "key": "user_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "order_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "status", "type": "varchar", "size": 24, "required": true },
+        { "key": "previous_status", "type": "varchar", "size": 24, "required": false },
+        { "key": "note", "type": "text", "required": false },
+        { "key": "created_at", "type": "datetime", "required": true }
+      ],
+      "indexes": [{ "key": "events_order_date", "type": "key", "attributes": ["order_id", "created_at"] }]
+    },
+    {
+      "table_id": "attachments", "name": "Product image metadata", "row_security": true,
+      "columns": [
+        { "key": "filename", "type": "varchar", "size": 256, "required": true },
+        { "key": "size", "type": "bigint", "required": true },
+        { "key": "media_type", "type": "varchar", "size": 128, "required": true },
+        { "key": "state", "type": "varchar", "size": 24, "required": true },
+        { "key": "timestamp", "type": "bigint", "required": true }
+      ]
+    },
+    {
+      "table_id": "user_profiles", "name": "User profiles", "row_security": true,
+      "columns": [
+        { "key": "user_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "display_name", "type": "varchar", "size": 128, "required": true },
+        { "key": "active", "type": "boolean", "required": true }
+      ],
+      "indexes": [{ "key": "profile_user", "type": "unique", "attributes": ["user_id"] }]
+    }
+  ],
+  "bootstrap_rows": [
+    { "table_id": "sync_clock", "row_id": "clock", "data": { "head": 0 } }
+  ]
+}

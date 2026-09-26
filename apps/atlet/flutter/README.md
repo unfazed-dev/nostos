@@ -1,29 +1,59 @@
-# atlet
+# Atlet Flutter
 
-A new Flutter project.
+Atlet is a visual training and shop app for exercising Nostos with a real
+hosted database. It has a customer experience for sessions, products, cart,
+checkout, and order history, plus an admin experience for catalog, orders, and
+users. Nostos owns the local SQLite cache and durable outbox; cloud Auth is used
+for identity. Direct sync is the default.
 
-## Getting Started
+## Run with Appwrite Cloud
 
-First `pub get` on a fresh checkout (or after `flutter clean`) on macOS:
+From this directory:
 
 ```sh
-mkdir -p build/ios/SourcePackages build/macos/SourcePackages   # Flutter 3.47 SwiftPM rsync bug
+mkdir -p build/ios/SourcePackages build/macos/SourcePackages
 fvm flutter pub get
+fvm flutter run -d macos \
+  --dart-define=ATLET_PROVIDER=appwrite \
+  --dart-define=APPWRITE_ENDPOINT=https://fra.cloud.appwrite.io/v1 \
+  --dart-define=APPWRITE_PROJECT_ID=6ab741900038c74d1086
 ```
 
-Flutter's SwiftPM step rsyncs plugins that depend on other plugins
-(firebase_messaging → firebase_core) into `build/<os>/SourcePackages` without
-creating the parent dir, so `pub get` fails with `rsync error (code 11)` until
-those dirs exist. CI does the same `mkdir -p` (.github/workflows/ci.yml).
+Sign in with an Appwrite Auth account in the ADS `nostos` project. The admin
+account must belong to the `atlet_admins` team. The app obtains a short-lived
+user JWT and calls the `atlet_sync` Rust Function. Its API key stays in the
+Function; do not pass one to Flutter. The checked-in
+[Appwrite setup](../README.md#appwrite-cloud-setup) explains migrations and
+the Rust cloud runners.
 
-This project is a starting point for a Flutter application.
+The macOS UI has been tested against the hosted project with one admin and two
+customers. Its Appwrite web transport and Appwrite server mode are still being
+built. The current Appwrite direct implementation is native. The same app has
+a Supabase mode; run it with `SUPABASE_URL` and `SUPABASE_ANON_KEY` Dart defines
+and leave `ATLET_PROVIDER` unset. `NOSTOS_MODE=server` selects the existing
+Supabase server path; direct is the default.
 
-A few resources to get you started if this is your first Flutter project:
+## Repeat the real cloud test
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+From the repository root, create the ignored `apps/atlet/.env.cloud` from
+`apps/atlet/appwrite/credentials.example`, then run:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```sh
+cargo run -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --scenario order
+```
+
+This drives the visible UI: an admin creates a product, customer A adds it to
+the cart and checks out while offline, customer B cannot see A's order, and the
+admin ships and delivers it. The final customer view verifies the three durable
+order events. The runner gives each invocation a fresh local SQLite file and
+keeps credentials out of command arguments.
+
+For ordinary Flutter checks:
+
+```sh
+fvm flutter analyze
+fvm flutter test
+```
+
+The SourcePackages directories above work around Flutter 3.47's SwiftPM
+plugin-copy issue on a fresh macOS checkout.

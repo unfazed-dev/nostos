@@ -18,7 +18,7 @@ export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
 if [[ -d .fvm/flutter_sdk/bin ]]; then PATH="$PWD/.fvm/flutter_sdk/bin:$PATH"; fi
 
 # `all` runs them in this order: cheap first.
-AREAS=(commits pr-title deny lint-test sdk-typecheck benchmark e2e-pg sdk-e2e flutter)
+AREAS=(commits pr-title deny lint-test appwrite-function sdk-typecheck benchmark e2e-pg sdk-e2e flutter atlet-cloud)
 
 # Conventional-commit types: the standard set plus `bench`, which this repo's
 # history uses for measurement commits. git's own `Revert "…"` also passes.
@@ -42,6 +42,28 @@ tag_map() { grep -oE '^\| `\[arxa-[a-z-]+\]`' "$1" | tr -d '|` '; }
 area_lint_test() { # fmt-check + clippy -D warnings + test --include-ignored
   need lint-test cargo make || return 0
   make ci
+}
+
+area_appwrite_function() {
+  need appwrite-function cargo cargo-deny || return 0
+  local manifest=apps/atlet/appwrite/function/Cargo.toml
+  cargo fmt --manifest-path "$manifest" -- --check
+  cargo +1.83.0 clippy --manifest-path "$manifest" --all-targets --locked -- -D warnings
+  cargo +1.83.0 test --manifest-path "$manifest" --locked
+  cargo deny --manifest-path "$manifest" check --config deny.toml licenses advisories bans
+}
+
+area_atlet_cloud() {
+  need atlet-cloud cargo flutter || return 0
+  [[ -f apps/atlet/.env.cloud ]] || {
+    echo 'atlet-cloud: apps/atlet/.env.cloud is required' >&2
+    return 1
+  }
+  cargo run --locked -q -p atlet-harness --bin appwrite_smoke -- --users-workflow
+  cargo run --locked -q -p atlet-harness --bin appwrite_native_smoke
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role admin
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role customer_a
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --scenario order
 }
 
 pg_probe() {

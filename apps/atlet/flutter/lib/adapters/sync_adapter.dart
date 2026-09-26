@@ -49,6 +49,19 @@ class ProductRow {
   });
 }
 
+/// Public admin view of an Appwrite Auth account's synced profile.
+class UserProfileRow {
+  const UserProfileRow({
+    required this.id,
+    required this.displayName,
+    required this.active,
+  });
+
+  final String id;
+  final String displayName;
+  final bool active;
+}
+
 class CartItemRow {
   final String id;
   final String productId;
@@ -67,6 +80,7 @@ class OrderRow {
   final String id;
   final String
   status; // 'pending' | 'paid' | 'failed' | 'shipped' | 'delivered'
+  final String? userId;
   final int subtotalCents;
   final int taxCents;
   final int shippingCents;
@@ -78,6 +92,7 @@ class OrderRow {
   const OrderRow({
     required this.id,
     required this.status,
+    this.userId,
     required this.subtotalCents,
     required this.taxCents,
     required this.shippingCents,

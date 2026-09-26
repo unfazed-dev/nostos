@@ -56,3 +56,14 @@ Future<NostosEngine> createDirectNostosEngine({
     'nostos-server, or run this build on iOS/Android/desktop.',
   );
 }
+
+Future<NostosEngine> createAppwriteNostosEngine({
+  required String endpoint,
+  required String projectId,
+  required String functionId,
+  required String userId,
+  required String jwt,
+  String? sqlitePath,
+}) async {
+  throw UnsupportedError('Appwrite web transport is not implemented yet.');
+}

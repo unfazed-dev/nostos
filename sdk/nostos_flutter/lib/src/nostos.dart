@@ -133,6 +133,27 @@ class Nostos {
     );
   }
 
+  /// Open Nostos against an Appwrite Cloud project through its sync Function.
+  /// The JWT comes from an authenticated Appwrite session and expires quickly;
+  /// call [setToken] after `Account.createJWT` refreshes it.
+  static Future<Nostos> appwrite({
+    required String endpoint,
+    required String projectId,
+    required String functionId,
+    required String userId,
+    required String jwt,
+    String? sqlitePath,
+  }) async => Nostos._(
+    await createAppwriteNostosEngine(
+      endpoint: endpoint,
+      projectId: projectId,
+      functionId: functionId,
+      userId: userId,
+      jwt: jwt,
+      sqlitePath: sqlitePath,
+    ),
+  );
+
   /// The set of tables the active subscription covers (empty before the first
   /// subscribe). Drives the [watch]/[write] membership checks.
   final Set<String> _subscribedTables = {};

@@ -15,9 +15,17 @@ waiting for GitHub capacity. Changing code never fixes that.
 
 | workflow | trigger | jobs |
 |---|---|---|
-| `ci.yml` | push to `main`, PR into `main` | `commits`, `lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck` |
+| `ci.yml` | push to `main`, PR into `main` | `commits`, `lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck`, `appwrite-function`, `atlet-cloud` |
 | `pr.yml` | PR opened, edited, synchronized, reopened | `pr-title` (required, row 5) |
 | `release.yml` | `v*` tag | release builds. There is no deploy on merge (row 11) |
+
+`atlet-cloud` runs the Rust Appwrite account, native SQLite, and macOS Flutter
+visual flows against the ADS demo project. Its repository secret
+`ATLET_APPWRITE_CREDENTIALS` contains the mode-0600 `.env.cloud` file for the
+three dedicated demo accounts. The job fails when the secret is unavailable,
+including fork PRs; a maintainer must move reviewed fork changes to an internal
+branch before merging. The job uploads credential-free JSON results. Locally,
+run `scripts/check.sh atlet-cloud` with the ignored credentials file present.
 
 ## Once per clone
 
@@ -54,6 +62,9 @@ fresh clone needs this once. All worktrees of a clone share it.
 
 Run it once the retro replay (rows 3 and 14) has finished. Until then,
 protection would refuse the replay's pushes to `main` (row 8).
+The two Atlet contexts in the target list below should be added only after
+the workflow defining them lands on `main`. Adding them earlier would leave
+other open PRs without those checks and block their merges.
 
 ```sh
 gh api 'repos/{owner}/{repo}/branches/main/protection' --method PUT \
@@ -66,6 +77,8 @@ gh api 'repos/{owner}/{repo}/branches/main/protection' --method PUT \
       "fmt + clippy + test",
       "real-Postgres logical-replication e2e",
       "cargo-deny (licenses, advisories, bans)",
+      "Appwrite Function — fmt + clippy + test + deny",
+      "Atlet Appwrite Cloud — multi-user visual sync",
       "SDK live-replication e2e (host slices)",
       "nostos_flutter — analyze + test",
       "throughput benchmark (smoke)",

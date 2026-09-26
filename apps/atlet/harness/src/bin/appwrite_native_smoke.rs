@@ -1,0 +1,198 @@
+//! Real Nostos SQLite outbox/apply acceptance against the hosted Atlet Function.
+
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
+use atlet_harness::auth::{sign_in, Credentials};
+use clap::Parser;
+use nostos_client::{appwrite::AppwriteDirectClient, SqliteStorage};
+use nostos_core::{Outbox, PendingWrite, WriteOp};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+#[derive(Parser)]
+struct Args {
+    /// Ignored credentials file for the real Appwrite demo accounts.
+    #[arg(long, default_value = "apps/atlet/.env.cloud")]
+    credentials: PathBuf,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = nostos_infra::env::parse::<Args>();
+    let credentials = Credentials::read(&args.credentials)?;
+    let endpoint = credentials.get("APPWRITE_ENDPOINT")?;
+    let project = credentials.get("APPWRITE_PROJECT_ID")?;
+    let http = reqwest::Client::new();
+    let user_a = sign_in(
+        &http,
+        endpoint,
+        project,
+        credentials.get("ATLET_USER_A_EMAIL")?,
+        credentials.get("ATLET_USER_A_PASSWORD")?,
+        "atlet_user_a_demo",
+    )
+    .await?;
+    let user_b = sign_in(
+        &http,
+        endpoint,
+        project,
+        credentials.get("ATLET_USER_B_EMAIL")?,
+        credentials.get("ATLET_USER_B_PASSWORD")?,
+        "atlet_user_b_demo",
+    )
+    .await?;
+    let admin = sign_in(
+        &http,
+        endpoint,
+        project,
+        credentials.get("ATLET_ADMIN_EMAIL")?,
+        credentials.get("ATLET_ADMIN_PASSWORD")?,
+        "atlet_admin_demo",
+    )
+    .await?;
+    let database = std::env::temp_dir().join(format!("atlet-native-{}.sqlite3", Uuid::new_v4()));
+    let second_database =
+        std::env::temp_dir().join(format!("atlet-native-{}.sqlite3", Uuid::new_v4()));
+    let buyer_b_database =
+        std::env::temp_dir().join(format!("atlet-native-{}.sqlite3", Uuid::new_v4()));
+    let admin_database =
+        std::env::temp_dir().join(format!("atlet-native-{}.sqlite3", Uuid::new_v4()));
+    let session_id = format!("s{}", Uuid::new_v4().simple());
+    let client = open(endpoint, project, &database)?;
+    client.set_user("atlet_user_a_demo", &user_a).await?;
+    if !client.needs_bootstrap() {
+        bail!("new device did not require bootstrap");
+    }
+    client.sync().await.context("initial cloud bootstrap")?;
+    // Keep three other devices online while A writes offline. They all share
+    // one hosted journal but have independent SQLite stores and cursors.
+    let second_a = open(endpoint, project, &second_database)?;
+    second_a.set_user("atlet_user_a_demo", &user_a).await?;
+    let buyer_b = open(endpoint, project, &buyer_b_database)?;
+    buyer_b.set_user("atlet_user_b_demo", &user_b).await?;
+    let admin_client = open(endpoint, project, &admin_database)?;
+    admin_client.set_user("atlet_admin_demo", &admin).await?;
+    tokio::try_join!(second_a.sync(), buyer_b.sync(), admin_client.sync())?;
+    let payload = json!({
+        "id":session_id,
+        "title":"Atlet Nostos native offline smoke",
+        "type":"reps",
+        "metric":10,
+        "unit":"reps",
+        "streak":1,
+        "occurred_on":"2026-09-26"
+    });
+    client.write_batch(&[PendingWrite {
+        table: "sessions".into(),
+        op: WriteOp::Upsert,
+        pk: session_id.clone(),
+        payload_json: Some(payload.to_string()),
+    }])?;
+    assert_session(&client, &session_id, true)?;
+    if pending(&client)? != 1 {
+        bail!("offline session was not queued");
+    }
+    drop(client);
+
+    let client = open(endpoint, project, &database)?;
+    client.set_user("atlet_user_a_demo", &user_a).await?;
+    if client.needs_bootstrap() {
+        bail!("reopened device lost its saved cloud horizon");
+    }
+    assert_session(&client, &session_id, true)?;
+    if pending(&client)? != 1 {
+        bail!("offline write did not survive SQLite reopen");
+    }
+    let outcome = client.sync().await.context("push offline session")?;
+    if outcome.pushed != 1 || pending(&client)? != 0 {
+        bail!("outbox was not acknowledged after cloud commit");
+    }
+    let row = session(&client, &session_id)?.context("server echo absent")?;
+    if row["user_id"] != "atlet_user_a_demo" || row["server_committed_at"].is_null() {
+        bail!("server-authoritative row was not applied");
+    }
+
+    tokio::try_join!(second_a.sync(), buyer_b.sync(), admin_client.sync())?;
+    assert_session(&second_a, &session_id, true)?;
+    assert_session(&buyer_b, &session_id, false)?;
+    assert_session(&admin_client, &session_id, false)?;
+
+    client.set_user("atlet_user_b_demo", &user_b).await?;
+    assert_session(&client, &session_id, false)?;
+    client.sync().await.context("customer B private pull")?;
+    assert_session(&client, &session_id, false)?;
+    client.set_user("atlet_user_a_demo", &user_a).await?;
+    client.sync().await.context("customer A replay")?;
+    assert_session(&client, &session_id, true)?;
+
+    client.write_batch(&[PendingWrite {
+        table: "sessions".into(),
+        op: WriteOp::Delete,
+        pk: session_id.clone(),
+        payload_json: None,
+    }])?;
+    client.sync().await.context("journaled session cleanup")?;
+    assert_session(&client, &session_id, false)?;
+    tokio::try_join!(second_a.sync(), buyer_b.sync(), admin_client.sync())?;
+    assert_session(&second_a, &session_id, false)?;
+    client.sign_out().await?;
+    second_a.sign_out().await?;
+    buyer_b.sign_out().await?;
+    admin_client.sign_out().await?;
+    drop(client);
+    drop(second_a);
+    drop(buyer_b);
+    drop(admin_client);
+    for path in [
+        &database,
+        &second_database,
+        &buyer_b_database,
+        &admin_database,
+    ] {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+    println!("Appwrite native smoke: offline SQLite reopen, concurrent four-device convergence, private isolation, replay, cleanup passed");
+    Ok(())
+}
+
+fn open(endpoint: &str, project: &str, path: &std::path::Path) -> Result<AppwriteDirectClient> {
+    let storage = SqliteStorage::open(&path.to_string_lossy())?;
+    Ok(AppwriteDirectClient::new(
+        endpoint,
+        project,
+        "atlet_sync",
+        storage,
+    )?)
+}
+
+fn pending(client: &AppwriteDirectClient) -> Result<usize> {
+    Ok(client
+        .engine()
+        .lock()
+        .expect("engine lock")
+        .storage()
+        .pending()?
+        .len())
+}
+
+fn session(client: &AppwriteDirectClient, id: &str) -> Result<Option<Value>> {
+    let engine = client.engine().lock().expect("engine lock");
+    let row = engine
+        .storage()
+        .rows_for("sessions")?
+        .into_iter()
+        .find(|(pk, _)| pk == id)
+        .map(|(_, bytes)| serde_json::from_slice(&bytes))
+        .transpose()?;
+    Ok(row)
+}
+
+fn assert_session(client: &AppwriteDirectClient, id: &str, expected: bool) -> Result<()> {
+    if session(client, id)?.is_some() != expected {
+        bail!("session visibility mismatch for {id}");
+    }
+    Ok(())
+}

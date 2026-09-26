@@ -57,6 +57,24 @@ class _RecordingAdapter with FakeCartOrdersDefaults implements SyncAdapter {
 }
 
 void main() {
+  test(
+    'provider and mode selection rejects unsupported Appwrite server mode',
+    () {
+      expect(
+        selectEngine(provider: 'appwrite', mode: 'direct'),
+        Engine.nostosAppwrite,
+      );
+      expect(
+        selectEngine(provider: 'supabase', mode: 'direct'),
+        Engine.nostosDirect,
+      );
+      expect(selectEngine(provider: 'supabase', mode: 'server'), Engine.nostos);
+      expect(
+        () => selectEngine(provider: 'appwrite', mode: 'server'),
+        throwsA(isA<UnsupportedError>()),
+      );
+    },
+  );
   const session = SyncSession(
     supabaseUrl: 'http://localhost:3000',
     accessToken: 'test-token',

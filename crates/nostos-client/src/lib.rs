@@ -31,6 +31,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod appwrite;
 pub mod client;
 pub mod direct;
 pub mod doorbell;

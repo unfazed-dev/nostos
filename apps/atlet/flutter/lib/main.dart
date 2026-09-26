@@ -15,11 +15,13 @@ import 'adapters/sync_adapter.dart';
 import 'bench/harness.dart';
 import 'bench/store.dart';
 import 'bench/upload.dart';
+import 'cloud_auth.dart';
 import 'design/tokens.dart';
 import 'engine_registry.dart';
 import 'push/order_push.dart';
 import 'push/push_pilot.dart';
 import 'ui/history.dart';
+import 'ui/admin.dart';
 import 'ui/history_detail.dart';
 import 'ui/connectivity_led.dart';
 import 'ui/home.dart';
@@ -38,6 +40,10 @@ const _supabaseAnonKey = String.fromEnvironment(
   'SUPABASE_ANON_KEY',
   defaultValue: 'PLACEHOLDER_ANON_KEY',
 );
+const _nostosMode = String.fromEnvironment(
+  'NOSTOS_MODE',
+  defaultValue: 'direct',
+);
 
 // ponytail: no package_info_plus dep for one hand-copied version string;
 // wire it in if the bench harness ever needs per-build accuracy.
@@ -49,13 +55,18 @@ const _appVersion = '1.0.0+1'; // mirrors pubspec.yaml's `version:`
 // NOTE: bool.fromEnvironment only accepts the literal string "true" — pass
 // `--dart-define=ATLET_PUSH_PILOT=true`; `=1` silently parses as false.
 const _pushPilotEnabled = bool.fromEnvironment('ATLET_PUSH_PILOT');
+const _manualConnectivity = bool.fromEnvironment(
+  'ATLET_TEST_MANUAL_CONNECTIVITY',
+);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Supabase.initialize(
-    url: _supabaseUrl,
-    publishableKey: _supabaseAnonKey,
-  );
+  if (!usesAppwrite) {
+    await Supabase.initialize(
+      url: _supabaseUrl,
+      publishableKey: _supabaseAnonKey,
+    );
+  }
   // Firebase is the mobile rail only. On web the pilot uses raw Web Push
   // (push_pilot_web.dart) — no Firebase init, no web config to throw on.
   if (_pushPilotEnabled && !kIsWeb) {
@@ -235,6 +246,8 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _tabIndex = 0;
+  bool _isAdmin = false;
+  String? _engineStartError;
   Future<BenchStore>? _benchStoreFuture;
   ConnectivityGuard? _connectivityGuard;
 
@@ -253,6 +266,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// engine keeps the token it was opened with until it expires — see
   /// NostosAdapter.setToken for what that costs.
   StreamSubscription<AuthState>? _authSub;
+  Timer? _jwtRefreshTimer;
 
   /// Drives the offline banner. Sourced from platform connectivity (the
   /// guard), not the engine's `connected` stream: the banner must show even
@@ -273,7 +287,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // the connectivity_plus stream.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startEngine();
-      _startConnectivityGuard();
+      if (!_manualConnectivity) _startConnectivityGuard();
       // A notification tapped from a cold start reaches openHistoryEvent
       // before any navigator exists; this is the first frame that has one.
       final pending = _pendingEventId;
@@ -314,6 +328,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _orderBannerSub = null;
     _authSub?.cancel();
     _authSub = null;
+    _jwtRefreshTimer?.cancel();
+    _jwtRefreshTimer = null;
     super.dispose();
   }
 
@@ -400,13 +416,15 @@ class _HomeScreenState extends State<HomeScreen> {
   /// reload, route re-push) or when there is no session.
   Future<void> _startEngine() async {
     if (engineRegistry.activeEngine != null) return;
-    Session? session;
+    CloudSession? session;
     try {
-      session = Supabase.instance.client.auth.currentSession;
-    } catch (_) {
-      return; // Supabase not initialized (widget tests) — stay engine-less.
+      session = await AtletCloudAuth.instance.session();
+    } catch (error) {
+      debugPrint('cloud session failed: $error');
+      return;
     }
     if (session == null) return; // signed out — sign-in re-enters Home
+    _isAdmin = session.isAdmin;
     try {
       // path_provider has no web impl; the web engine's storage is
       // OPFS-backed and ignores sqlitePath (ADR-0036), so dbDir is an
@@ -415,11 +433,11 @@ class _HomeScreenState extends State<HomeScreen> {
           ? ''
           : (await getApplicationDocumentsDirectory()).path;
       final adapter = await engineRegistry.start(
-        Engine.nostosDirect,
+        selectEngine(provider: atletProvider, mode: _nostosMode),
         SyncSession(
-          supabaseUrl: _supabaseUrl,
-          accessToken: session.accessToken,
-          userId: session.user.id,
+          supabaseUrl: usesAppwrite ? appwriteEndpoint : _supabaseUrl,
+          accessToken: session.jwt,
+          userId: session.userId,
           dbDir: dbDir,
         ),
       );
@@ -430,25 +448,42 @@ class _HomeScreenState extends State<HomeScreen> {
       _wireOrderBanner(nostos);
       // Supabase rotates the access token about hourly. The engine was opened
       // with one token and has no way to learn the next, so forward it.
-      await _authSub?.cancel();
-      _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((s) {
-        final token = s.session?.accessToken;
-        if (token == null) return;
-        if (s.event == AuthChangeEvent.tokenRefreshed ||
-            s.event == AuthChangeEvent.signedIn) {
-          // Best-effort: a refused swap leaves the previous token in place and
-          // the next rotation tries again.
-          unawaited(nostos.setToken(token).catchError((Object _) {}));
-        }
-      });
+      if (usesAppwrite) {
+        // Appwrite user JWTs expire after 15 minutes. Renew before expiry;
+        // the underlying persisted account session remains the authority.
+        _jwtRefreshTimer?.cancel();
+        _jwtRefreshTimer = Timer.periodic(const Duration(minutes: 10), (_) {
+          unawaited(() async {
+            try {
+              await nostos.setToken(
+                await AtletCloudAuth.instance.refreshedJwt(),
+              );
+            } catch (error) {
+              debugPrint('Appwrite JWT refresh failed: $error');
+            }
+          }());
+        });
+      } else {
+        await _authSub?.cancel();
+        _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((s) {
+          final token = s.session?.accessToken;
+          if (token == null) return;
+          if (s.event == AuthChangeEvent.tokenRefreshed ||
+              s.event == AuthChangeEvent.signedIn) {
+            unawaited(nostos.setToken(token).catchError((Object _) {}));
+          }
+        });
+      }
       // PILOT (ADR-0037): doorbell registration follows the nostos engine —
       // push is a nostos feature, and direct mode is still a NostosAdapter.
-      if (_pushPilotEnabled) {
+      if (_pushPilotEnabled && !usesAppwrite) {
         unawaited(pushPilot.attach(nostos));
       }
+      _engineStartError = null;
     } catch (e) {
-      // Deliberately not a snackbar: the engine is not a thing the user
-      // chose, so its lifecycle is not news to them.
+      // Configuration failures need a persistent visible surface; a quiet
+      // debug log leaves a signed-in user looking at empty tabs forever.
+      _engineStartError = e.toString();
       debugPrint('engine start failed: $e');
     }
     if (mounted) setState(() {}); // hand the live adapter to the tabs
@@ -460,9 +495,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _signOut() async {
     await _authSub?.cancel();
     _authSub = null;
-    if (_pushPilotEnabled) await pushPilot.detach();
+    _jwtRefreshTimer?.cancel();
+    _jwtRefreshTimer = null;
+    if (_pushPilotEnabled && !usesAppwrite) await pushPilot.detach();
     await engineRegistry.stop();
-    await Supabase.instance.client.auth.signOut();
+    await AtletCloudAuth.instance.signOut();
+    _isAdmin = false;
     if (mounted) Navigator.of(context).pushReplacementNamed('/signin');
   }
 
@@ -586,13 +624,24 @@ class _HomeScreenState extends State<HomeScreen> {
       key: const Key('home-shell'),
       body: Column(
         children: [
+          if (_engineStartError != null)
+            MaterialBanner(
+              key: const Key('engine-start-error'),
+              content: Text(_engineStartError!),
+              actions: [
+                TextButton(onPressed: _startEngine, child: const Text('Retry')),
+              ],
+            ),
           // Offline banner removed — the AppBar ConnectivityLed carries the
           // online/offline signal now (user request 2026-08-07).
           Expanded(
             child: switch (_tabIndex) {
               0 => _buildHomeTab(context),
               1 => ShopScreen(adapter: engineRegistry.current),
-              _ => _buildHistoryTab(context),
+              2 => _buildHistoryTab(context),
+              _ => AdminScreen(
+                adapter: engineRegistry.current as NostosAdapter?,
+              ),
             },
           ),
         ],
@@ -602,25 +651,32 @@ class _HomeScreenState extends State<HomeScreen> {
         selectedIndex: _tabIndex,
         backgroundColor: AtletTokens.bone,
         onDestinationSelected: (index) => setState(() => _tabIndex = index),
-        destinations: const [
-          NavigationDestination(
+        destinations: [
+          const NavigationDestination(
             key: Key('nav-tab-home'),
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home),
             label: 'Home',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             key: Key('nav-tab-shop'),
             icon: Icon(Icons.storefront_outlined),
             selectedIcon: Icon(Icons.storefront),
             label: 'Shop',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             key: Key('nav-tab-history'),
             icon: Icon(Icons.history_outlined),
             selectedIcon: Icon(Icons.history),
             label: 'History',
           ),
+          if (_isAdmin && usesAppwrite)
+            const NavigationDestination(
+              key: Key('nav-tab-admin'),
+              icon: Icon(Icons.admin_panel_settings_outlined),
+              selectedIcon: Icon(Icons.admin_panel_settings),
+              label: 'Admin',
+            ),
         ],
       ),
     );

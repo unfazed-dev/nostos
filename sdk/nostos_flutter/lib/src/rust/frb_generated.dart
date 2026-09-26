@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/appwrite.dart';
 import 'api/direct.dart';
 import 'api/nostos.dart';
 
@@ -70,7 +71,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -719452361;
+  int get rustContentHash => 1421475201;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -82,6 +83,83 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  void crateApiAppwriteNostosAppwriteHandleApplySchema({
+    required NostosAppwriteHandle that,
+    required List<ClientTableFfi> tables,
+  });
+
+  Future<void> crateApiAppwriteNostosAppwriteHandleClose({
+    required NostosAppwriteHandle that,
+  });
+
+  NostosAppwriteHandle crateApiAppwriteNostosAppwriteHandleConnect({
+    required String endpoint,
+    required String projectId,
+    required String functionId,
+    required String userId,
+    required String jwt,
+    required String dbPath,
+  });
+
+  Future<void> crateApiAppwriteNostosAppwriteHandleDisconnect({
+    required NostosAppwriteHandle that,
+  });
+
+  Future<String> crateApiAppwriteNostosAppwriteHandleQuery({
+    required NostosAppwriteHandle that,
+    required String sql,
+  });
+
+  Stream<NostosConnectionState> crateApiAppwriteNostosAppwriteHandleResume({
+    required NostosAppwriteHandle that,
+  });
+
+  Future<void> crateApiAppwriteNostosAppwriteHandleSetToken({
+    required NostosAppwriteHandle that,
+    String? token,
+  });
+
+  Future<void> crateApiAppwriteNostosAppwriteHandleSetUser({
+    required NostosAppwriteHandle that,
+    required String userId,
+    required String jwt,
+  });
+
+  Future<void> crateApiAppwriteNostosAppwriteHandleSignOut({
+    required NostosAppwriteHandle that,
+  });
+
+  Stream<NostosConnectionState> crateApiAppwriteNostosAppwriteHandleStart({
+    required NostosAppwriteHandle that,
+  });
+
+  Future<BigInt> crateApiAppwriteNostosAppwriteHandleSyncNow({
+    required NostosAppwriteHandle that,
+  });
+
+  Stream<String> crateApiAppwriteNostosAppwriteHandleWatch({
+    required NostosAppwriteHandle that,
+    required String table,
+  });
+
+  Stream<WriteQueueStatusFfi>
+  crateApiAppwriteNostosAppwriteHandleWatchWriteStatus({
+    required NostosAppwriteHandle that,
+  });
+
+  Future<BigInt> crateApiAppwriteNostosAppwriteHandleWrite({
+    required NostosAppwriteHandle that,
+    required String table,
+    required String op,
+    required String pk,
+    String? payloadJson,
+  });
+
+  Future<Uint64List> crateApiAppwriteNostosAppwriteHandleWriteBatch({
+    required NostosAppwriteHandle that,
+    required List<NostosWriteInput> ops,
+  });
+
   void crateApiDirectNostosDirectHandleApplySchema({
     required NostosDirectHandle that,
     required List<ClientTableFfi> tables,
@@ -264,6 +342,15 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiNostosInitApp();
 
   RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_NostosAppwriteHandle;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_NostosAppwriteHandle;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_NostosAppwriteHandlePtr;
+
+  RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_NostosDirectHandle;
 
   RustArcDecrementStrongCountFnType
@@ -290,6 +377,605 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  void crateApiAppwriteNostosAppwriteHandleApplySchema({
+    required NostosAppwriteHandle that,
+    required List<ClientTableFfi> tables,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          sse_encode_list_client_table_ffi(tables, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleApplySchemaConstMeta,
+        argValues: [that, tables],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleApplySchemaConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_apply_schema",
+        argNames: ["that", "tables"],
+      );
+
+  @override
+  Future<void> crateApiAppwriteNostosAppwriteHandleClose({
+    required NostosAppwriteHandle that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 2,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleCloseConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleCloseConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_close",
+        argNames: ["that"],
+      );
+
+  @override
+  NostosAppwriteHandle crateApiAppwriteNostosAppwriteHandleConnect({
+    required String endpoint,
+    required String projectId,
+    required String functionId,
+    required String userId,
+    required String jwt,
+    required String dbPath,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(endpoint, serializer);
+          sse_encode_String(projectId, serializer);
+          sse_encode_String(functionId, serializer);
+          sse_encode_String(userId, serializer);
+          sse_encode_String(jwt, serializer);
+          sse_encode_String(dbPath, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleConnectConstMeta,
+        argValues: [endpoint, projectId, functionId, userId, jwt, dbPath],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleConnectConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_connect",
+        argNames: [
+          "endpoint",
+          "projectId",
+          "functionId",
+          "userId",
+          "jwt",
+          "dbPath",
+        ],
+      );
+
+  @override
+  Future<void> crateApiAppwriteNostosAppwriteHandleDisconnect({
+    required NostosAppwriteHandle that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleDisconnectConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleDisconnectConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_disconnect",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<String> crateApiAppwriteNostosAppwriteHandleQuery({
+    required NostosAppwriteHandle that,
+    required String sql,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(sql, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleQueryConstMeta,
+        argValues: [that, sql],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleQueryConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_query",
+        argNames: ["that", "sql"],
+      );
+
+  @override
+  Stream<NostosConnectionState> crateApiAppwriteNostosAppwriteHandleResume({
+    required NostosAppwriteHandle that,
+  }) {
+    final stateSink = RustStreamSink<NostosConnectionState>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+              that,
+              serializer,
+            );
+            sse_encode_StreamSink_nostos_connection_state_Sse(
+              stateSink,
+              serializer,
+            );
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 6,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiAppwriteNostosAppwriteHandleResumeConstMeta,
+          argValues: [that, stateSink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return stateSink.stream;
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleResumeConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_resume",
+        argNames: ["that", "stateSink"],
+      );
+
+  @override
+  Future<void> crateApiAppwriteNostosAppwriteHandleSetToken({
+    required NostosAppwriteHandle that,
+    String? token,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          sse_encode_opt_String(token, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleSetTokenConstMeta,
+        argValues: [that, token],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleSetTokenConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_set_token",
+        argNames: ["that", "token"],
+      );
+
+  @override
+  Future<void> crateApiAppwriteNostosAppwriteHandleSetUser({
+    required NostosAppwriteHandle that,
+    required String userId,
+    required String jwt,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(userId, serializer);
+          sse_encode_String(jwt, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleSetUserConstMeta,
+        argValues: [that, userId, jwt],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleSetUserConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_set_user",
+        argNames: ["that", "userId", "jwt"],
+      );
+
+  @override
+  Future<void> crateApiAppwriteNostosAppwriteHandleSignOut({
+    required NostosAppwriteHandle that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleSignOutConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleSignOutConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_sign_out",
+        argNames: ["that"],
+      );
+
+  @override
+  Stream<NostosConnectionState> crateApiAppwriteNostosAppwriteHandleStart({
+    required NostosAppwriteHandle that,
+  }) {
+    final stateSink = RustStreamSink<NostosConnectionState>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+              that,
+              serializer,
+            );
+            sse_encode_StreamSink_nostos_connection_state_Sse(
+              stateSink,
+              serializer,
+            );
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 10,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiAppwriteNostosAppwriteHandleStartConstMeta,
+          argValues: [that, stateSink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return stateSink.stream;
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleStartConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_start",
+        argNames: ["that", "stateSink"],
+      );
+
+  @override
+  Future<BigInt> crateApiAppwriteNostosAppwriteHandleSyncNow({
+    required NostosAppwriteHandle that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleSyncNowConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleSyncNowConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_sync_now",
+        argNames: ["that"],
+      );
+
+  @override
+  Stream<String> crateApiAppwriteNostosAppwriteHandleWatch({
+    required NostosAppwriteHandle that,
+    required String table,
+  }) {
+    final rowsSink = RustStreamSink<String>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+              that,
+              serializer,
+            );
+            sse_encode_String(table, serializer);
+            sse_encode_StreamSink_String_Sse(rowsSink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 12,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiAppwriteNostosAppwriteHandleWatchConstMeta,
+          argValues: [that, table, rowsSink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return rowsSink.stream;
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleWatchConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_watch",
+        argNames: ["that", "table", "rowsSink"],
+      );
+
+  @override
+  Stream<WriteQueueStatusFfi>
+  crateApiAppwriteNostosAppwriteHandleWatchWriteStatus({
+    required NostosAppwriteHandle that,
+  }) {
+    final statusSink = RustStreamSink<WriteQueueStatusFfi>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+              that,
+              serializer,
+            );
+            sse_encode_StreamSink_write_queue_status_ffi_Sse(
+              statusSink,
+              serializer,
+            );
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 13,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta:
+              kCrateApiAppwriteNostosAppwriteHandleWatchWriteStatusConstMeta,
+          argValues: [that, statusSink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return statusSink.stream;
+  }
+
+  TaskConstMeta
+  get kCrateApiAppwriteNostosAppwriteHandleWatchWriteStatusConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_watch_write_status",
+        argNames: ["that", "statusSink"],
+      );
+
+  @override
+  Future<BigInt> crateApiAppwriteNostosAppwriteHandleWrite({
+    required NostosAppwriteHandle that,
+    required String table,
+    required String op,
+    required String pk,
+    String? payloadJson,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          sse_encode_String(table, serializer);
+          sse_encode_String(op, serializer);
+          sse_encode_String(pk, serializer);
+          sse_encode_opt_String(payloadJson, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleWriteConstMeta,
+        argValues: [that, table, op, pk, payloadJson],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleWriteConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_write",
+        argNames: ["that", "table", "op", "pk", "payloadJson"],
+      );
+
+  @override
+  Future<Uint64List> crateApiAppwriteNostosAppwriteHandleWriteBatch({
+    required NostosAppwriteHandle that,
+    required List<NostosWriteInput> ops,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+            that,
+            serializer,
+          );
+          sse_encode_list_nostos_write_input(ops, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_64_strict,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiAppwriteNostosAppwriteHandleWriteBatchConstMeta,
+        argValues: [that, ops],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAppwriteNostosAppwriteHandleWriteBatchConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostosAppwriteHandle_write_batch",
+        argNames: ["that", "ops"],
+      );
+
+  @override
   void crateApiDirectNostosDirectHandleApplySchema({
     required NostosDirectHandle that,
     required List<ClientTableFfi> tables,
@@ -303,7 +989,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_list_client_table_ffi(tables, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -337,7 +1023,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 17,
             port: port_,
           );
         },
@@ -375,7 +1061,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_opt_String(token, serializer);
           sse_encode_String(dbPath, serializer);
           sse_encode_bool(keepLocalOnSignOut, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
         },
         codec: SseCodec(
           decodeSuccessData:
@@ -416,7 +1102,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 19,
             port: port_,
           );
         },
@@ -460,7 +1146,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 20,
             port: port_,
           );
         },
@@ -498,7 +1184,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 21,
             port: port_,
           );
         },
@@ -540,7 +1226,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 7,
+              funcId: 22,
               port: port_,
             );
           },
@@ -580,7 +1266,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 23,
             port: port_,
           );
         },
@@ -616,7 +1302,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 24,
             port: port_,
           );
         },
@@ -660,7 +1346,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 10,
+              funcId: 25,
               port: port_,
             );
           },
@@ -698,7 +1384,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 26,
             port: port_,
           );
         },
@@ -739,7 +1425,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 12,
+              funcId: 27,
               port: port_,
             );
           },
@@ -783,7 +1469,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 13,
+              funcId: 28,
               port: port_,
             );
           },
@@ -830,7 +1516,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 29,
             port: port_,
           );
         },
@@ -868,7 +1554,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 30,
             port: port_,
           );
         },
@@ -903,7 +1589,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_list_client_table_ffi(tables, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -935,7 +1621,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 32,
             port: port_,
           );
         },
@@ -966,7 +1652,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(url, serializer);
           sse_encode_opt_String(token, serializer);
           sse_encode_String(dbPath, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 33)!;
         },
         codec: SseCodec(
           decodeSuccessData:
@@ -1007,7 +1693,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1049,7 +1735,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1085,7 +1771,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1127,7 +1813,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1169,7 +1855,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1207,7 +1893,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1249,7 +1935,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 25,
+              funcId: 40,
               port: port_,
             );
           },
@@ -1289,7 +1975,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1323,7 +2009,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 42,
             port: port_,
           );
         },
@@ -1371,7 +2057,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 28,
+              funcId: 43,
               port: port_,
             );
           },
@@ -1419,7 +2105,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1457,7 +2143,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 45,
             port: port_,
           );
         },
@@ -1498,7 +2184,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 31,
+              funcId: 46,
               port: port_,
             );
           },
@@ -1542,7 +2228,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 32,
+              funcId: 47,
               port: port_,
             );
           },
@@ -1588,7 +2274,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 48,
             port: port_,
           );
         },
@@ -1626,7 +2312,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 49,
             port: port_,
           );
         },
@@ -1656,7 +2342,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 50,
             port: port_,
           );
         },
@@ -1673,6 +2359,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiNostosInitAppConstMeta =>
       const TaskConstMeta(debugName: "init_app", argNames: []);
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_NostosAppwriteHandle => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_NostosAppwriteHandle => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle;
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_NostosDirectHandle => wire
@@ -1697,6 +2391,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostosAppwriteHandle
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NostosAppwriteHandleImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
   NostosDirectHandle
   dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosDirectHandle(
     dynamic raw,
@@ -1715,6 +2418,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostosAppwriteHandle
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NostosAppwriteHandleImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
   NostosDirectHandle
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosDirectHandle(
     dynamic raw,
@@ -1730,6 +2442,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return NostosHandleImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  NostosAppwriteHandle
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NostosAppwriteHandleImpl.frbInternalDcoDecode(raw as List<dynamic>);
   }
 
   @protected
@@ -1932,6 +2653,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostosAppwriteHandle
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NostosAppwriteHandleImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
   NostosDirectHandle
   sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosDirectHandle(
     SseDeserializer deserializer,
@@ -1956,6 +2689,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostosAppwriteHandle
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NostosAppwriteHandleImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
   NostosDirectHandle
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosDirectHandle(
     SseDeserializer deserializer,
@@ -1974,6 +2719,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return NostosHandleImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  NostosAppwriteHandle
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NostosAppwriteHandleImpl.frbInternalSseDecode(
       sse_decode_usize(deserializer),
       sse_decode_i_32(deserializer),
     );
@@ -2233,6 +2990,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    NostosAppwriteHandle self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as NostosAppwriteHandleImpl).frbInternalSseEncode(move: true),
+      serializer,
+    );
+  }
+
+  @protected
+  void
   sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosDirectHandle(
     NostosDirectHandle self,
     SseSerializer serializer,
@@ -2259,6 +3029,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    NostosAppwriteHandle self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as NostosAppwriteHandleImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosDirectHandle(
     NostosDirectHandle self,
     SseSerializer serializer,
@@ -2279,6 +3062,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_usize(
       (self as NostosHandleImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostosAppwriteHandle(
+    NostosAppwriteHandle self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as NostosAppwriteHandleImpl).frbInternalSseEncode(move: null),
       serializer,
     );
   }
@@ -2537,6 +3333,99 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.deadLettered, serializer);
     sse_encode_opt_String(self.lastError, serializer);
   }
+}
+
+@sealed
+class NostosAppwriteHandleImpl extends RustOpaque
+    implements NostosAppwriteHandle {
+  // Not to be used by end users
+  NostosAppwriteHandleImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  NostosAppwriteHandleImpl.frbInternalSseDecode(
+    BigInt ptr,
+    int externalSizeOnNative,
+  ) : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount: RustLib
+        .instance
+        .api
+        .rust_arc_increment_strong_count_NostosAppwriteHandle,
+    rustArcDecrementStrongCount: RustLib
+        .instance
+        .api
+        .rust_arc_decrement_strong_count_NostosAppwriteHandle,
+    rustArcDecrementStrongCountPtr: RustLib
+        .instance
+        .api
+        .rust_arc_decrement_strong_count_NostosAppwriteHandlePtr,
+  );
+
+  void applySchema({required List<ClientTableFfi> tables}) =>
+      RustLib.instance.api.crateApiAppwriteNostosAppwriteHandleApplySchema(
+        that: this,
+        tables: tables,
+      );
+
+  Future<void> close() => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleClose(that: this);
+
+  Future<void> disconnect() => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleDisconnect(that: this);
+
+  Future<String> query({required String sql}) => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleQuery(that: this, sql: sql);
+
+  Stream<NostosConnectionState> resume() => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleResume(that: this);
+
+  /// Rotate a short-lived JWT; `None` pauses authenticated sync.
+  Future<void> setToken({String? token}) => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleSetToken(that: this, token: token);
+
+  /// Bind a different account, clearing the previous principal's rows and outbox.
+  Future<void> setUser({required String userId, required String jwt}) =>
+      RustLib.instance.api.crateApiAppwriteNostosAppwriteHandleSetUser(
+        that: this,
+        userId: userId,
+        jwt: jwt,
+      );
+
+  Future<void> signOut() => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleSignOut(that: this);
+
+  Stream<NostosConnectionState> start() => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleStart(that: this);
+
+  Future<BigInt> syncNow() => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleSyncNow(that: this);
+
+  Stream<String> watch({required String table}) => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleWatch(that: this, table: table);
+
+  Stream<WriteQueueStatusFfi> watchWriteStatus() => RustLib.instance.api
+      .crateApiAppwriteNostosAppwriteHandleWatchWriteStatus(that: this);
+
+  Future<BigInt> write({
+    required String table,
+    required String op,
+    required String pk,
+    String? payloadJson,
+  }) => RustLib.instance.api.crateApiAppwriteNostosAppwriteHandleWrite(
+    that: this,
+    table: table,
+    op: op,
+    pk: pk,
+    payloadJson: payloadJson,
+  );
+
+  Future<Uint64List> writeBatch({required List<NostosWriteInput> ops}) =>
+      RustLib.instance.api.crateApiAppwriteNostosAppwriteHandleWriteBatch(
+        that: this,
+        ops: ops,
+      );
 }
 
 @sealed

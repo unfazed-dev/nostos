@@ -372,9 +372,6 @@ class _ProductDetailSheetState extends State<_ProductDetailSheet> {
       await widget.adapter.addToCart(line);
       if (!mounted) return;
       Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Added ${widget.product.name} to cart')),
-      );
     } catch (e) {
       if (!mounted) return;
       setState(() => _adding = false);

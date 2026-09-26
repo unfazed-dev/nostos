@@ -7,6 +7,8 @@ import 'package:nostos_flutter/nostos_flutter.dart';
 import '../bench/marks.dart';
 import 'sync_adapter.dart';
 
+const _appwriteTestDbSuffix = String.fromEnvironment('ATLET_TEST_DB_SUFFIX');
+
 /// Nostos engine implementation of [SyncAdapter] for the Atlet pilot.
 ///
 /// Wraps [NostosDatabase] (sdk/nostos_flutter/lib/src/nostos_database.dart).
@@ -15,7 +17,7 @@ import 'sync_adapter.dart';
 /// nostos_adapter_test.dart.
 class NostosAdapter implements SyncAdapter {
   /// Server mode: sync through a `nostos-server` `/sync` socket.
-  NostosAdapter() : engine = 'nostos', _open = _openServer;
+  NostosAdapter() : engine = 'nostos', _appwrite = false, _open = _openServer;
 
   /// Direct mode: sync straight with Supabase, no `nostos-server` anywhere
   /// (`docs/plans/direct-mode-sync-protocol.md`). Everything past `init()` is
@@ -27,6 +29,7 @@ class NostosAdapter implements SyncAdapter {
   /// ships; RLS on the deployed schema is what actually gates the rows.
   NostosAdapter.direct({required String anonKey})
     : engine = 'nostos-direct',
+      _appwrite = false,
       _open =
           (({
             required String supabaseUrl,
@@ -41,8 +44,30 @@ class NostosAdapter implements SyncAdapter {
             dbDir: dbDir,
           ));
 
+  /// Direct mode through the Appwrite Cloud sync Function.
+  NostosAdapter.appwrite({required String projectId})
+    : engine = 'nostos-appwrite',
+      _appwrite = true,
+      _open =
+          (({
+            required String supabaseUrl,
+            required String accessToken,
+            required String userId,
+            required String dbDir,
+          }) => NostosDatabase.appwrite(
+            endpoint: supabaseUrl,
+            projectId: projectId,
+            userId: userId,
+            jwt: accessToken,
+            schema: _schema,
+            sqlitePath: _appwriteTestDbSuffix.isEmpty
+                ? '$dbDir/nostos_appwrite.sqlite'
+                : '$dbDir/nostos_appwrite_$_appwriteTestDbSuffix.sqlite',
+          ));
+
   @override
   final String engine;
+  final bool _appwrite;
 
   /// How this adapter opens its database — the one thing server and direct
   /// mode do differently.
@@ -89,9 +114,11 @@ class NostosAdapter implements SyncAdapter {
   final Map<String, Uint8List> _imageCache = <String, Uint8List>{};
   StreamSubscription<List<Map<String, dynamic>>>? _sessionsSub;
   StreamSubscription<List<ProductRow>>? _productsSub;
+  StreamSubscription<List<UserProfileRow>>? _userProfilesSub;
   StreamSubscription<NostosConnectionState>? _connSub;
   StreamController<List<SessionRow>>? _sessionsController;
   StreamController<List<ProductRow>>? _productsController;
+  StreamController<List<UserProfileRow>>? _userProfilesController;
   StreamController<bool>? _connectedController;
 
   // Latest values, replayed to late subscribers via replayLatest (see
@@ -101,6 +128,7 @@ class NostosAdapter implements SyncAdapter {
   // hot values; this layer must not discard that property.
   List<SessionRow>? _lastSessions;
   List<ProductRow>? _lastProducts;
+  List<UserProfileRow>? _lastUserProfiles;
   List<CartItemRow>? _lastCart;
   List<OrderRow>? _lastOrders;
   List<OrderEventRow>? _lastOrderEvents;
@@ -126,6 +154,10 @@ class NostosAdapter implements SyncAdapter {
   /// True only between the end of a successful init() and signOut().
   /// setConnected() no-ops outside that window — see its comment.
   bool _ready = false;
+  bool? _pendingConnectivity;
+
+  /// True after the database, subscriptions, and local watches are installed.
+  bool get isReady => _ready;
 
   @override
   Future<void> init({
@@ -138,6 +170,10 @@ class NostosAdapter implements SyncAdapter {
     _accessToken = accessToken;
     _sessionsController = StreamController<List<SessionRow>>.broadcast();
     _productsController = StreamController<List<ProductRow>>.broadcast();
+    if (_appwrite) {
+      _userProfilesController =
+          StreamController<List<UserProfileRow>>.broadcast();
+    }
     _cartController = StreamController<List<CartItemRow>>.broadcast();
     _ordersController = StreamController<List<OrderRow>>.broadcast();
     _orderEventsController = StreamController<List<OrderEventRow>>.broadcast();
@@ -162,19 +198,22 @@ class NostosAdapter implements SyncAdapter {
       _connectedController?.add(isConnected);
     });
 
-    await db.subscribeTables(const [
-      NostosTableSub(name: 'sessions'),
-      NostosTableSub(name: 'products'),
-      NostosTableSub(name: 'cart_items'),
-      NostosTableSub(name: 'orders'),
-      NostosTableSub(name: 'order_events'),
-      NostosTableSub(name: 'attachments'),
+    await db.subscribeTables([
+      const NostosTableSub(name: 'sessions'),
+      const NostosTableSub(name: 'products'),
+      const NostosTableSub(name: 'cart_items'),
+      const NostosTableSub(name: 'orders'),
+      const NostosTableSub(name: 'order_events'),
+      const NostosTableSub(name: 'attachments'),
+      if (_appwrite) const NostosTableSub(name: 'user_profiles'),
     ]);
 
-    _attachments = db.attachments(
-      adapter: SupabaseStorageAdapter(bucket: 'product-images'),
-      blobStore: LocalFileBlobStore(Directory('$dbDir/blobs')),
-    );
+    if (!_appwrite) {
+      _attachments = db.attachments(
+        adapter: SupabaseStorageAdapter(bucket: 'product-images'),
+        blobStore: LocalFileBlobStore(Directory('$dbDir/blobs')),
+      );
+    }
 
     // Typed collection handles (ADR-0032 T2): the taught surface for "table,
     // maybe filter, maybe order" reads. Injection-safe by construction.
@@ -220,6 +259,19 @@ class NostosAdapter implements SyncAdapter {
       _productsController?.add(items);
     });
 
+    if (_appwrite) {
+      _userProfilesSub = db
+          .collection<UserProfileRow>(
+            table: 'user_profiles',
+            fromRow: userProfileFromRow,
+          )
+          .watch(orderBy: [Order.asc('display_name')])
+          .listen((items) {
+            _lastUserProfiles = items;
+            _userProfilesController?.add(items);
+          });
+    }
+
     _cartSub = cartItems.watch(orderBy: [Order.desc('added_at')]).listen((
       items,
     ) {
@@ -242,6 +294,11 @@ class NostosAdapter implements SyncAdapter {
         });
 
     _ready = true;
+    final pendingConnectivity = _pendingConnectivity;
+    _pendingConnectivity = null;
+    if (pendingConnectivity == false) {
+      await setConnected(false);
+    }
   }
 
   @override
@@ -301,6 +358,68 @@ class NostosAdapter implements SyncAdapter {
     return o.id;
   }
 
+  /// Admin catalog write; cloud authorization is enforced by the provider.
+  Future<void> saveProduct(ProductRow product) => _requireDb().write(
+    table: 'products',
+    op: 'upsert',
+    pk: product.id,
+    payload: {
+      'id': product.id,
+      'name': product.name,
+      'category': product.category,
+      'price_cents': product.priceCents,
+      'rating': ?product.rating,
+      'plant_based': product.plantBased,
+      'image_url': ?product.imageUrl,
+      'image_id': ?product.imageId,
+    },
+  );
+
+  Future<void> deleteProduct(String id) =>
+      _requireDb().write(table: 'products', op: 'delete', pk: id);
+
+  Stream<List<UserProfileRow>> watchUserProfiles() => replayLatest(
+    _requireController(
+      _userProfilesController,
+      'watchUserProfiles() requires Appwrite',
+    ),
+    () => _lastUserProfiles,
+  );
+
+  Future<void> saveUserProfile(UserProfileRow profile) => _requireDb().write(
+    table: 'user_profiles',
+    op: 'upsert',
+    pk: profile.id,
+    payload: {
+      'id': profile.id,
+      'user_id': profile.id,
+      'display_name': profile.displayName,
+      'active': profile.active,
+    },
+  );
+
+  /// Admin fulfils a customer's order without changing its owner or totals.
+  Future<void> setOrderStatus(OrderRow order, String status) =>
+      _requireDb().write(
+        table: 'orders',
+        op: 'upsert',
+        pk: order.id,
+        payload: orderWritePayload(
+          OrderRow(
+            id: order.id,
+            status: status,
+            userId: order.userId,
+            subtotalCents: order.subtotalCents,
+            taxCents: order.taxCents,
+            shippingCents: order.shippingCents,
+            totalCents: order.totalCents,
+            paymentRef: order.paymentRef,
+            itemsJson: order.itemsJson,
+            createdAt: order.createdAt,
+          ),
+        ),
+      );
+
   @override
   Stream<List<CartItemRow>> watchCart() => replayLatest(
     _requireController(_cartController, 'watchCart() before init()'),
@@ -358,7 +477,10 @@ class NostosAdapter implements SyncAdapter {
     // subscribe()" invariant — drop the event instead; init() always
     // finishes in the connected state anyway.
     final db = _db;
-    if (db == null || !_ready) return;
+    if (db == null || !_ready) {
+      _pendingConnectivity = up;
+      return;
+    }
     if (up) {
       // ponytail: NostosDatabase.resumeSync() is fire-and-forget (no Future) —
       // setConnected(true) does not itself await a reconnect. Record this in
@@ -381,14 +503,17 @@ class NostosAdapter implements SyncAdapter {
   @override
   Future<void> signOut() async {
     _ready = false;
+    _pendingConnectivity = null;
     await _sessionsSub?.cancel();
     await _productsSub?.cancel();
+    await _userProfilesSub?.cancel();
     await _cartSub?.cancel();
     await _ordersSub?.cancel();
     await _orderEventsSub?.cancel();
     await _connSub?.cancel();
     _sessionsSub = null;
     _productsSub = null;
+    _userProfilesSub = null;
     _cartSub = null;
     _ordersSub = null;
     _orderEventsSub = null;
@@ -402,18 +527,21 @@ class NostosAdapter implements SyncAdapter {
 
     await _sessionsController?.close();
     await _productsController?.close();
+    await _userProfilesController?.close();
     await _cartController?.close();
     await _ordersController?.close();
     await _orderEventsController?.close();
     await _connectedController?.close();
     _sessionsController = null;
     _productsController = null;
+    _userProfilesController = null;
     _cartController = null;
     _ordersController = null;
     _orderEventsController = null;
     _connectedController = null;
     _lastSessions = null;
     _lastProducts = null;
+    _lastUserProfiles = null;
     _lastCart = null;
     _lastOrders = null;
     _lastOrderEvents = null;
@@ -427,6 +555,20 @@ class NostosAdapter implements SyncAdapter {
 
   NostosDatabase _requireDb() =>
       _db ?? (throw StateError('NostosAdapter.init() must be called first'));
+
+  /// Exact durable outbox count for cloud acceptance checks and diagnostics.
+  int get pendingWrites => _requireDb().currentStatus.pendingWrites;
+
+  SyncStatus get syncStatus => _requireDb().currentStatus;
+
+  /// Read the SQLite queue directly when an integration test must distinguish
+  /// a slow status stream from a write that was already sent.
+  Future<int> durablePendingWrites() async {
+    final rows = await _requireDb().getAll(
+      'SELECT COUNT(*) AS count FROM nostos_outbox WHERE dlq = 0',
+    );
+    return _asInt(rows.single['count']);
+  }
 
   /// PILOT (ADR-0037): register this device's push token against the live
   /// engine — `POST /push-tokens` in server mode, the
@@ -533,6 +675,16 @@ final NostosSchema _schema = NostosSchema(
         NostosColumn.text('image_id'),
       ],
     ),
+    NostosTable(
+      name: 'user_profiles',
+      primaryKey: const ['id'],
+      columns: [
+        NostosColumn.text('id'),
+        NostosColumn.text('user_id'),
+        NostosColumn.text('display_name'),
+        NostosColumn.integer('active'),
+      ],
+    ),
     // T6 attachments metadata (ADR-0034): the product-images catalog, public
     // scope, read-only on the device — see migration 0012.
     NostosTable(
@@ -612,6 +764,7 @@ OrderEventRow orderEventFromRow(Map<String, dynamic> row) => OrderEventRow(
 OrderRow orderFromRow(Map<String, dynamic> row) => OrderRow(
   id: row['id'] as String,
   status: row['status'] as String,
+  userId: row['user_id'] as String?,
   subtotalCents: _asInt(row['subtotal_cents']),
   taxCents: _asInt(row['tax_cents']),
   shippingCents: _asInt(row['shipping_cents']),
@@ -619,6 +772,12 @@ OrderRow orderFromRow(Map<String, dynamic> row) => OrderRow(
   paymentRef: row['payment_ref'] as String?,
   itemsJson: row['items_json'] as String?,
   createdAt: DateTime.parse(row['created_at'] as String),
+);
+
+UserProfileRow userProfileFromRow(Map<String, dynamic> row) => UserProfileRow(
+  id: row['user_id'] as String,
+  displayName: row['display_name'] as String,
+  active: _asBool(row['active']),
 );
 
 /// Write payload for a cart upsert (snake_case wire keys, like
@@ -640,7 +799,7 @@ Map<String, dynamic> cartItemWritePayload(CartItemRow c, {String? userId}) => {
 /// reason as [cartItemWritePayload].
 Map<String, dynamic> orderWritePayload(OrderRow o, {String? userId}) => {
   'id': o.id,
-  'user_id': ?userId,
+  'user_id': ?(o.userId ?? userId),
   'status': o.status,
   'subtotal_cents': o.subtotalCents,
   'tax_cents': o.taxCents,
