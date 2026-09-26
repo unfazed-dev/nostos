@@ -18,7 +18,7 @@ export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
 if [[ -d .fvm/flutter_sdk/bin ]]; then PATH="$PWD/.fvm/flutter_sdk/bin:$PATH"; fi
 
 # `all` runs them in this order: cheap first.
-AREAS=(commits pr-title deny lint-test appwrite-function sdk-typecheck benchmark e2e-pg sdk-e2e flutter atlet-cloud atlet-web-cloud)
+AREAS=(commits pr-title deny lint-test appwrite-function sdk-typecheck benchmark e2e-pg sdk-e2e flutter atlet-cloud atlet-web-cloud atlet-server-cloud)
 
 # Conventional-commit types: the standard set plus `bench`, which this repo's
 # history uses for measurement commits. git's own `Revert "…"` also passes.
@@ -94,6 +94,31 @@ area_atlet_web_cloud() {
   cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role admin
   cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_a --no-build
   cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_b --no-build
+}
+
+area_atlet_server_cloud() {
+  local tool
+  for tool in cargo flutter node npm; do
+    command -v "$tool" >/dev/null 2>&1 || {
+      echo "atlet-server-cloud: $tool is required" >&2
+      return 1
+    }
+  done
+  [[ -f apps/atlet/.env.cloud ]] || {
+    echo 'atlet-server-cloud: apps/atlet/.env.cloud is required' >&2
+    return 1
+  }
+  grep -q '^NOSTOS_APPWRITE_GATEWAY_URL=https://' apps/atlet/.env.cloud || {
+    echo 'atlet-server-cloud: hosted NOSTOS_APPWRITE_GATEWAY_URL is required' >&2
+    return 1
+  }
+  npm ci --prefix sdk/nostos_web
+  sdk/nostos_web/node_modules/.bin/playwright install chromium
+  cargo run --locked -q -p atlet-harness --bin appwrite_native_smoke -- --mode server
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --scenario order --mode server
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role admin --mode server
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_a --mode server --no-build
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_b --mode server --no-build
 }
 
 pg_probe() {

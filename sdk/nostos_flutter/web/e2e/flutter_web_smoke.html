@@ -99,9 +99,9 @@
           tables: [{ name: table, whereSql: null }],
         });
 
-      window.nostosConnectAppwrite = (url, token, userId = "user-a") =>
+      window.nostosConnectAppwrite = (url, token, userId = "user-a", gatewayUrl = null) =>
         request({ cmd: "connect", url, provider: "appwrite", projectId: "test-project",
-          functionId: "test-function", userId, token,
+          functionId: "test-function", userId, token, gatewayUrl,
           tables: [{ name: "tasks" }] });
 
       window.nostosClose = () => request({ cmd: "close" });

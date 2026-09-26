@@ -2,12 +2,9 @@ import 'adapters/nostos_adapter.dart';
 import 'adapters/sync_adapter.dart';
 import 'cloud_auth.dart';
 
-/// Which Nostos client is live. `nostosDirect` is the same engine with no
-/// `nostos-server` on the other end — the device syncs with Supabase itself
-/// (`docs/plans/direct-mode-sync-protocol.md`) — so it is a second engine here,
-/// not a flag on [Engine.nostos]:
-/// the two hold different databases and must never be live at once.
-enum Engine { nostos, nostosDirect, nostosAppwrite }
+/// Which provider and transport is live. Every choice has a distinct local
+/// store, and at most one engine may be active for a signed-in session.
+enum Engine { nostos, nostosDirect, nostosAppwrite, nostosAppwriteServer }
 
 /// Resolve the configured transport before starting any local database.
 Engine selectEngine({required String provider, required String mode}) =>
@@ -15,9 +12,7 @@ Engine selectEngine({required String provider, required String mode}) =>
       ('supabase', 'direct') => Engine.nostosDirect,
       ('supabase', 'server') => Engine.nostos,
       ('appwrite', 'direct') => Engine.nostosAppwrite,
-      ('appwrite', 'server') => throw UnsupportedError(
-        'Appwrite server mode is not implemented yet; use direct mode.',
-      ),
+      ('appwrite', 'server') => Engine.nostosAppwriteServer,
       _ => throw UnsupportedError(
         'Unsupported Atlet provider/mode: $provider/$mode',
       ),
@@ -41,7 +36,7 @@ class SyncSession {
 }
 
 /// Owns which engine is live and enforces plan decision #4: two engines must
-/// never be live at the same time, because they hold two databases. The app
+/// never be live at the same time, because they hold different databases. The app
 /// picks its engine once, at startup, and cannot change it (user request
 /// 2026-09-22), so this is [start] and nothing else — decision #4 now holds
 /// because there is no swap to get wrong, and [start] throws rather than
@@ -57,6 +52,8 @@ class EngineRegistry {
     SyncAdapter Function()? nostosFactory,
     SyncAdapter Function()? nostosDirectFactory,
     SyncAdapter Function()? nostosAppwriteFactory,
+    SyncAdapter Function()? nostosAppwriteServerFactory,
+    String appwriteGatewayUrl = '',
     String supabaseAnonKey = '',
   }) : _nostosFactory = nostosFactory ?? (() => NostosAdapter()),
        _nostosDirectFactory =
@@ -64,15 +61,23 @@ class EngineRegistry {
            (() => NostosAdapter.direct(anonKey: supabaseAnonKey)),
        _nostosAppwriteFactory =
            nostosAppwriteFactory ??
-           (() => NostosAdapter.appwrite(projectId: appwriteProjectId));
+           (() => NostosAdapter.appwrite(projectId: appwriteProjectId)),
+       _nostosAppwriteServerFactory =
+           nostosAppwriteServerFactory ??
+           (() => NostosAdapter.appwrite(
+             projectId: appwriteProjectId,
+             gatewayUrl: appwriteGatewayUrl,
+           ));
 
   final SyncAdapter Function() _nostosFactory;
   final SyncAdapter Function() _nostosDirectFactory;
   final SyncAdapter Function() _nostosAppwriteFactory;
+  final SyncAdapter Function() _nostosAppwriteServerFactory;
 
   SyncAdapter? _nostosAdapter;
   SyncAdapter? _nostosDirectAdapter;
   SyncAdapter? _nostosAppwriteAdapter;
+  SyncAdapter? _nostosAppwriteServerAdapter;
   Engine? _activeEngine;
 
   Engine? get activeEngine => _activeEngine;
@@ -81,6 +86,7 @@ class EngineRegistry {
     Engine.nostos => _nostosAdapter,
     Engine.nostosDirect => _nostosDirectAdapter,
     Engine.nostosAppwrite => _nostosAppwriteAdapter,
+    Engine.nostosAppwriteServer => _nostosAppwriteServerAdapter,
     null => null,
   };
 
@@ -91,6 +97,7 @@ class EngineRegistry {
     ?_nostosAdapter,
     ?_nostosDirectAdapter,
     ?_nostosAppwriteAdapter,
+    ?_nostosAppwriteServerAdapter,
   ];
 
   /// Brings up [engine] cold. Throws [StateError] if an adapter is already
@@ -107,6 +114,7 @@ class EngineRegistry {
       Engine.nostos => _nostosFactory(),
       Engine.nostosDirect => _nostosDirectFactory(),
       Engine.nostosAppwrite => _nostosAppwriteFactory(),
+      Engine.nostosAppwriteServer => _nostosAppwriteServerFactory(),
     };
     _setSlot(engine, adapter);
     try {
@@ -122,6 +130,7 @@ class EngineRegistry {
       _nostosAdapter = null;
       _nostosDirectAdapter = null;
       _nostosAppwriteAdapter = null;
+      _nostosAppwriteServerAdapter = null;
       rethrow;
     }
   }
@@ -136,6 +145,7 @@ class EngineRegistry {
     _nostosAdapter = null;
     _nostosDirectAdapter = null;
     _nostosAppwriteAdapter = null;
+    _nostosAppwriteServerAdapter = null;
   }
 
   void _setSlot(Engine engine, SyncAdapter adapter) {
@@ -146,6 +156,8 @@ class EngineRegistry {
         _nostosDirectAdapter = adapter;
       case Engine.nostosAppwrite:
         _nostosAppwriteAdapter = adapter;
+      case Engine.nostosAppwriteServer:
+        _nostosAppwriteServerAdapter = adapter;
     }
     _activeEngine = engine;
     _assertInvariant();

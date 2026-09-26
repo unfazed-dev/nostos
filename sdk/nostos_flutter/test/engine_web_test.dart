@@ -65,7 +65,12 @@ void main() {
       port,
       url: 'https://cloud.example/v1',
       token: 'old',
-      appwrite: (projectId: 'project', functionId: 'sync', userId: 'alice'),
+      appwrite: (
+        projectId: 'project',
+        functionId: 'sync',
+        userId: 'alice',
+        gatewayUrl: null,
+      ),
     )..start();
     final refreshed = eng.setToken('new');
     final tokenRequest = port.sent.last;
@@ -99,6 +104,7 @@ void main() {
           projectId: 'project',
           functionId: 'atlet_sync',
           userId: 'alice',
+          gatewayUrl: 'https://gateway.example',
         ),
       )..start();
       final states = <NostosConnectionState>[];
@@ -110,6 +116,7 @@ void main() {
       expect(connect['projectId'], 'project');
       expect(connect['functionId'], 'atlet_sync');
       expect(connect['userId'], 'alice');
+      expect(connect['gatewayUrl'], 'https://gateway.example');
       expect(connect['token'], 'short-lived-jwt');
       port.reply({'type': 'status', 'connected': false, 'accessRevoked': true});
       await Future<void>.delayed(Duration.zero);

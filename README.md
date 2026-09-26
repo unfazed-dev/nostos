@@ -9,11 +9,14 @@ continue while the device is offline. When connectivity returns, Nostos
 reconciles changes with the selected cloud database.
 
 Nostos has two transport modes. **Direct** is the default: the device syncs
-with a hosted backend using a database-side change journal, without an
-always-on Nostos server. **Server** uses `nostos-server` and Postgres logical
-replication for a self-hosted WebSocket sync service. The app-facing local
-database and write API stay the same. See [the architecture](docs/ARCHITECTURE.md)
-and [the direct protocol](docs/plans/direct-mode-sync-protocol.md).
+with a hosted backend using its change journal. **Server** adds a hosted
+`nostos-server` transport. With Postgres, the server consumes logical
+replication and serves WebSocket clients. The Atlet Appwrite gateway forwards
+authenticated sync requests to the same hosted Function and TablesDB journal
+used in direct mode. In either mode, the app reads locally and queues writes
+in the same Rust apply engine. See [the architecture](docs/ARCHITECTURE.md),
+[direct protocol](docs/plans/direct-mode-sync-protocol.md), and
+[Appwrite gateway decision](docs/adr/0052-appwrite-server-transport-over-function-journal.md).
 
 ## Providers and current status
 
@@ -21,11 +24,14 @@ and [the direct protocol](docs/plans/direct-mode-sync-protocol.md).
 |---|---|---|
 | Supabase direct | Postgres change journal and RPC, Realtime wake-ups | Native client and Flutter integration; generated SQL and a real Supabase-stack test |
 | Appwrite direct | TablesDB journal and hosted Rust Function | Native client and Atlet Flutter macOS/Chrome cloud tests with an admin and two customers |
+| Appwrite server | The same TablesDB journal and Function through a fixed Nostos HTTP gateway | Native and Flutter transport code with local forwarding tests; hosted gateway acceptance is pending |
 | Nostos server | Postgres logical replication and WebSocket | Rust server and SDK transports; [operator runbook](docs/OPERATING.md) |
 
-Direct mode is selected per signed-in session. The Appwrite Flutter web path
-uses SQLite-WASM with durable browser storage; its server mode and physical
-push checks are in progress. Each provider has its own schema and credentials.
+Direct mode is selected by default. The Appwrite Flutter web path uses
+SQLite-WASM with durable browser storage. A provider or transport switch uses
+a distinct local store and a fresh cloud pull. Hosted Appwrite server mode and
+physical push checks are in progress. Each provider has its own schema and
+credentials.
 The [Atlet reference app](apps/atlet/README.md) is the shared visual scenario
 for validating them. Its full cross-SDK coverage is being built against the
 [cloud reference contract](docs/plans/atlet-cross-sdk-cloud-reference-2026-09-26.md).

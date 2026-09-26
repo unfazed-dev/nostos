@@ -78,7 +78,8 @@ class WebNostosEngine implements NostosEngine {
     required String url,
     String? token,
     required NostosWorkerPort port,
-    ({String projectId, String functionId, String userId})? appwrite,
+    ({String projectId, String functionId, String userId, String? gatewayUrl})?
+    appwrite,
   }) {
     final e = WebNostosEngine._(
       port,
@@ -95,7 +96,13 @@ class WebNostosEngine implements NostosEngine {
   /// The `/sync` URL (baked into the WS handshake; a token refresh reconnects).
   final String url;
   String? token;
-  final ({String projectId, String functionId, String userId})? appwrite;
+  final ({
+    String projectId,
+    String functionId,
+    String userId,
+    String? gatewayUrl,
+  })?
+  appwrite;
 
   int _nextId = 1;
   bool _closed = false;
@@ -182,6 +189,7 @@ class WebNostosEngine implements NostosEngine {
           'projectId': appwrite!.projectId,
           'functionId': appwrite!.functionId,
           'userId': appwrite!.userId,
+          'gatewayUrl': appwrite!.gatewayUrl,
         },
         'tables': tables
             .map((t) => {'name': t.name, 'whereSql': t.whereSql})

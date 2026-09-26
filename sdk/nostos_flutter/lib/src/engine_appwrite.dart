@@ -14,6 +14,7 @@ class AppwriteNostosEngine implements NostosEngine {
     required String functionId,
     required String userId,
     required String jwt,
+    String? gatewayUrl,
     required String dbPath,
   }) => AppwriteNostosEngine._(
     appwrite.NostosAppwriteHandle.connect(
@@ -22,6 +23,7 @@ class AppwriteNostosEngine implements NostosEngine {
       functionId: functionId,
       userId: userId,
       jwt: jwt,
+      gatewayUrl: gatewayUrl,
       dbPath: dbPath,
     ),
   );

@@ -15,12 +15,30 @@ struct Args {
     /// Ignored credentials file for the real Appwrite demo accounts.
     #[arg(long, default_value = "apps/atlet/.env.cloud")]
     credentials: PathBuf,
+    /// In server mode, alternate gateway and direct devices on one journal.
+    #[arg(long, default_value = "direct", value_parser = ["direct", "server"])]
+    mode: String,
+    #[arg(long)]
+    gateway_url: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = nostos_infra::env::parse::<Args>();
     let credentials = Credentials::read(&args.credentials)?;
+    let gateway_url = if args.mode == "server" {
+        let url = args
+            .gateway_url
+            .as_deref()
+            .or_else(|| credentials.get("NOSTOS_APPWRITE_GATEWAY_URL").ok())
+            .context("server mode needs --gateway-url or NOSTOS_APPWRITE_GATEWAY_URL")?;
+        if !url.starts_with("https://") {
+            bail!("server mode requires an HTTPS gateway URL");
+        }
+        Some(url)
+    } else {
+        None
+    };
     let endpoint = credentials.get("APPWRITE_ENDPOINT")?;
     let project = credentials.get("APPWRITE_PROJECT_ID")?;
     let http = reqwest::Client::new();
@@ -59,7 +77,7 @@ async fn main() -> Result<()> {
     let admin_database =
         std::env::temp_dir().join(format!("atlet-native-{}.sqlite3", Uuid::new_v4()));
     let session_id = format!("s{}", Uuid::new_v4().simple());
-    let client = open(endpoint, project, &database)?;
+    let client = open(endpoint, project, gateway_url, &database)?;
     client.set_user("atlet_user_a_demo", &user_a).await?;
     if !client.needs_bootstrap() {
         bail!("new device did not require bootstrap");
@@ -67,11 +85,11 @@ async fn main() -> Result<()> {
     client.sync().await.context("initial cloud bootstrap")?;
     // Keep three other devices online while A writes offline. They all share
     // one hosted journal but have independent SQLite stores and cursors.
-    let second_a = open(endpoint, project, &second_database)?;
+    let second_a = open(endpoint, project, None, &second_database)?;
     second_a.set_user("atlet_user_a_demo", &user_a).await?;
-    let buyer_b = open(endpoint, project, &buyer_b_database)?;
+    let buyer_b = open(endpoint, project, gateway_url, &buyer_b_database)?;
     buyer_b.set_user("atlet_user_b_demo", &user_b).await?;
-    let admin_client = open(endpoint, project, &admin_database)?;
+    let admin_client = open(endpoint, project, None, &admin_database)?;
     admin_client.set_user("atlet_admin_demo", &admin).await?;
     tokio::try_join!(second_a.sync(), buyer_b.sync(), admin_client.sync())?;
     let payload = json!({
@@ -95,7 +113,7 @@ async fn main() -> Result<()> {
     }
     drop(client);
 
-    let client = open(endpoint, project, &database)?;
+    let client = open(endpoint, project, gateway_url, &database)?;
     client.set_user("atlet_user_a_demo", &user_a).await?;
     if client.needs_bootstrap() {
         bail!("reopened device lost its saved cloud horizon");
@@ -205,18 +223,22 @@ async fn main() -> Result<()> {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
     }
-    println!("Appwrite native smoke: offline reopen, four-device convergence, private isolation, disabled-user cache wipe, cleanup passed");
+    println!("Appwrite native smoke ({}): offline reopen, four-device convergence, private isolation, disabled-user cache wipe, cleanup passed", args.mode);
     Ok(())
 }
 
-fn open(endpoint: &str, project: &str, path: &std::path::Path) -> Result<AppwriteDirectClient> {
+fn open(
+    endpoint: &str,
+    project: &str,
+    gateway_url: Option<&str>,
+    path: &std::path::Path,
+) -> Result<AppwriteDirectClient> {
     let storage = SqliteStorage::open(&path.to_string_lossy())?;
-    Ok(AppwriteDirectClient::new(
-        endpoint,
-        project,
-        "atlet_sync",
-        storage,
-    )?)
+    Ok(if let Some(url) = gateway_url {
+        AppwriteDirectClient::new_server(endpoint, project, "atlet_sync", url, storage)?
+    } else {
+        AppwriteDirectClient::new(endpoint, project, "atlet_sync", storage)?
+    })
 }
 
 fn pending(client: &AppwriteDirectClient) -> Result<usize> {

@@ -35,7 +35,8 @@ function sameScope(request) {
       request.url !== scope.url) return false;
   return scope.provider !== "appwrite" ||
     (request.projectId === scope.projectId &&
-      request.functionId === scope.functionId && request.userId === scope.userId);
+      request.functionId === scope.functionId && request.userId === scope.userId &&
+      (request.gatewayUrl ?? null) === (scope.gatewayUrl ?? null));
 }
 
 function leaseDeadline(jwt) {
@@ -325,6 +326,7 @@ async function connect(client, message) {
       scope = {
         provider: message.provider ?? "server", url: message.url,
         projectId: message.projectId, functionId: message.functionId,
+        gatewayUrl: message.gatewayUrl ?? null,
         userId: message.userId,
       };
       engineReady = true;

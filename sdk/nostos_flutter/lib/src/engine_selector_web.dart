@@ -63,6 +63,7 @@ Future<NostosEngine> createAppwriteNostosEngine({
   required String functionId,
   required String userId,
   required String jwt,
+  String? gatewayUrl,
   String? sqlitePath,
 }) async {
   final port = spawnNostosWorker();
@@ -70,6 +71,11 @@ Future<NostosEngine> createAppwriteNostosEngine({
     url: endpoint,
     token: jwt,
     port: port,
-    appwrite: (projectId: projectId, functionId: functionId, userId: userId),
+    appwrite: (
+      projectId: projectId,
+      functionId: functionId,
+      userId: userId,
+      gatewayUrl: gatewayUrl,
+    ),
   )..start();
 }

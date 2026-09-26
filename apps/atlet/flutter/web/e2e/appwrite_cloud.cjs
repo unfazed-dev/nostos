@@ -12,6 +12,14 @@ const root = path.resolve(process.env.ATLET_WEB_ROOT ?? "build/web");
 const email = process.env.ATLET_WEB_EMAIL;
 const password = process.env.ATLET_WEB_PASSWORD;
 const role = process.env.ATLET_WEB_ROLE ?? "customer_a";
+const mode = process.env.ATLET_WEB_MODE ?? "direct";
+const gatewayUrl = process.env.ATLET_WEB_GATEWAY_URL ?? null;
+const webPort = mode === "server" ? 8765 : 0;
+if (mode !== "direct" && mode !== "server") throw new Error("invalid Appwrite mode");
+if (mode === "server" && !gatewayUrl) throw new Error("server mode needs a gateway URL");
+const syncPattern = mode === "server"
+  ? "**/appwrite/sync/*"
+  : "**/functions/atlet_sync/executions";
 const evidencePath = process.env.ATLET_WEB_EVIDENCE;
 if (!email || !password || !evidencePath) {
   throw new Error("Rust launcher must supply browser credentials and evidence path");
@@ -56,7 +64,7 @@ function serve() {
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve(server));
+    server.listen(webPort, "127.0.0.1", () => resolve(server));
   });
 }
 
@@ -95,6 +103,19 @@ async function enterFlutterText(field, value) {
   throw new Error(`Flutter text input mismatch (expected ${value.length} chars, got ${actual.length})`);
 }
 
+function syncRequest(request) {
+  try {
+    if (mode === "server") {
+      const path = new URL(request.url()).pathname;
+      if (path !== "/appwrite/sync/pull" && path !== "/appwrite/sync/push") return null;
+      return { path: path.replace("/appwrite", ""), body: request.postDataJSON() };
+    }
+    if (!request.url().includes("/functions/atlet_sync/executions")) return null;
+    const execution = request.postDataJSON();
+    return { path: execution.path, body: JSON.parse(execution.body) };
+  } catch (_) { return null; }
+}
+
 async function main() {
   const started = Date.now();
   const server = await serve();
@@ -116,11 +137,10 @@ async function main() {
     if (message.type() === "error") browserErrors.push(message.text().slice(0, 250));
   });
   page.on("response", (response) => {
-    if (response.url().includes("/functions/atlet_sync/executions")) {
+    const sync = syncRequest(response.request());
+    if (sync) {
       appwriteCalls.push(response.status());
-      let body;
-      try { body = JSON.parse(response.request().postDataJSON()?.body ?? "null"); }
-      catch (_) { body = null; }
+      const body = sync.body;
       if (body?.table) {
         pushTrace.push({
           table: body.table,
@@ -135,7 +155,7 @@ async function main() {
       sqliteWasmLoaded = true;
     }
   });
-  const evidence = { role, provider: "appwrite", browser: "chrome", success: false };
+  const evidence = { role, provider: "appwrite", mode, browser: "chrome", success: false };
   try {
     const baseUrl = `http://127.0.0.1:${server.address().port}/`;
     await signIn(page, baseUrl, email, password);
@@ -163,11 +183,9 @@ async function main() {
           !(Number(submittedPrice) > 0)) {
         throw new Error("Flutter admin product inputs did not receive keyboard text");
       }
-      const productPush = page.waitForResponse((response) => {
-        if (!response.url().includes("/functions/atlet_sync/executions")) return false;
-        try { return response.request().postDataJSON()?.path === "/sync/push"; }
-        catch (_) { return false; }
-      }, { timeout: 45000 }).catch(() => null);
+      const productPush = page.waitForResponse((response) =>
+        syncRequest(response.request())?.path === "/sync/push",
+      { timeout: 45000 }).catch(() => null);
       await page.getByRole("button", { name: "Save" }).click();
       await page.getByText(submittedProductName).waitFor({ timeout: 15000 });
       const productResponse = await productPush;
@@ -191,17 +209,17 @@ async function main() {
       // before forwarding any cached product snapshot or connected status.
       const wrongAccountJwt = process.env.ATLET_WEB_WRONG_ACCOUNT_JWT;
       if (!wrongAccountJwt) throw new Error("Rust launcher omitted customer B JWT");
-      await page.evaluate(({ endpoint, projectId, token }) => {
+      await page.evaluate(({ endpoint, projectId, token, gatewayUrl }) => {
         const messages = [];
         const worker = new SharedWorker("/nostos/nostos_broker.js", { type: "module" }).port;
         worker.start();
         worker.onmessage = (event) => messages.push(event.data);
         window.__atletFollowerProbe = { worker, messages };
         worker.postMessage({ id: 77001, cmd: "connect", url: endpoint,
-          provider: "appwrite", projectId, functionId: "atlet_sync",
+          provider: "appwrite", projectId, functionId: "atlet_sync", gatewayUrl,
           userId: "atlet_admin_demo", token,
           tables: [{ name: "products" }] });
-      }, { endpoint: process.env.ATLET_WEB_ENDPOINT,
+      }, { endpoint: process.env.ATLET_WEB_ENDPOINT, gatewayUrl,
         projectId: process.env.ATLET_WEB_PROJECT_ID, token: wrongAccountJwt });
       await page.waitForFunction(() => window.__atletFollowerProbe?.messages
         .some((message) => message.id === 77001), undefined, { timeout: 30000 });
@@ -226,16 +244,16 @@ async function main() {
       if (!followerJwt || !rotatedJwt || followerJwt === rotatedJwt) {
         throw new Error("Rust launcher did not provide distinct same-user JWTs");
       }
-      await page.evaluate(({ endpoint, projectId, token }) => {
+      await page.evaluate(({ endpoint, projectId, token, gatewayUrl }) => {
         const messages = [];
         const worker = new SharedWorker("/nostos/nostos_broker.js", { type: "module" }).port;
         worker.start();
         worker.onmessage = (event) => messages.push(event.data);
         window.__atletSameUserTab = { worker, messages };
         worker.postMessage({ id: 77101, cmd: "connect", url: endpoint,
-          provider: "appwrite", projectId, functionId: "atlet_sync",
+          provider: "appwrite", projectId, functionId: "atlet_sync", gatewayUrl,
           userId: "atlet_admin_demo", token, tables: [{ name: "products" }] });
-      }, { endpoint: process.env.ATLET_WEB_ENDPOINT,
+      }, { endpoint: process.env.ATLET_WEB_ENDPOINT, gatewayUrl,
         projectId: process.env.ATLET_WEB_PROJECT_ID, token: followerJwt });
       await page.waitForFunction(() => window.__atletSameUserTab?.messages
         .some((message) => message.id === 77101), undefined, { timeout: 30000 });
@@ -363,13 +381,10 @@ async function main() {
               cartBox.y + cartBox.height / 2);
             await customerPage.getByRole("button", { name: "Checkout" }).click();
             const orderPush = customerPage.waitForResponse((response) => {
-              if (!response.url().includes("/functions/atlet_sync/executions")) return false;
-              try {
-                const request = response.request().postDataJSON();
-                const body = JSON.parse(request.body);
-                return request.path === "/sync/push" && body.table === "orders" &&
-                  body.op === "upsert" && body.payload?.status === "paid";
-              } catch (_) { return false; }
+              const request = syncRequest(response.request());
+              const body = request?.body;
+              return request?.path === "/sync/push" && body?.table === "orders" &&
+                body.op === "upsert" && body.payload?.status === "paid";
             }, { timeout: 60000 }).catch(() => null);
             await customerPage.getByRole("button", { name: /^Pay / }).click();
             await customerPage.getByText("Order placed").waitFor({ timeout: 20000 });
@@ -379,7 +394,7 @@ async function main() {
             if (orderExecution.responseStatusCode < 200 || orderExecution.responseStatusCode >= 300) {
               throw new Error(`Customer A order rejected: ${orderExecution.responseStatusCode}`);
             }
-            orderId = JSON.parse(orderResponse.request().postDataJSON().body).pk;
+            orderId = syncRequest(orderResponse.request()).body.pk;
             evidence.order_id = orderId;
             evidence.customer_a_order_paid = true;
             await customerPage.screenshot({
@@ -424,13 +439,10 @@ async function main() {
         .getByRole("button", { name: action });
       await orderAction("paid", "Ship").waitFor({ timeout: 45000 });
       const shipPush = page.waitForResponse((response) => {
-        if (!response.url().includes("/functions/atlet_sync/executions")) return false;
-        try {
-          const request = response.request().postDataJSON();
-          const body = JSON.parse(request.body);
-          return request.path === "/sync/push" && body.table === "orders" &&
-            body.pk === orderId && body.payload?.status === "shipped";
-        } catch (_) { return false; }
+        const request = syncRequest(response.request());
+        const body = request?.body;
+        return request?.path === "/sync/push" && body?.table === "orders" &&
+          body.pk === orderId && body.payload?.status === "shipped";
       }, { timeout: 60000 }).catch(() => null);
       await orderAction("paid", "Ship").click();
       const shipped = await shipPush;
@@ -439,13 +451,10 @@ async function main() {
       }
       evidence.admin_sees_customer_order = true;
       const deliverPush = page.waitForResponse((response) => {
-        if (!response.url().includes("/functions/atlet_sync/executions")) return false;
-        try {
-          const request = response.request().postDataJSON();
-          const body = JSON.parse(request.body);
-          return request.path === "/sync/push" && body.table === "orders" &&
-            body.pk === orderId && body.payload?.status === "delivered";
-        } catch (_) { return false; }
+        const request = syncRequest(response.request());
+        const body = request?.body;
+        return request?.path === "/sync/push" && body?.table === "orders" &&
+          body.pk === orderId && body.payload?.status === "delivered";
       }, { timeout: 60000 }).catch(() => null);
       await orderAction("shipped", "Deliver").click();
       const delivered = await deliverPush;
@@ -461,7 +470,7 @@ async function main() {
     } else {
       evidence.admin_nav_absent = await page.getByText("Admin", { exact: true }).count() === 0;
     }
-    await page.route("**/functions/atlet_sync/executions", (route) => route.abort());
+    await page.route(syncPattern, (route) => route.abort());
     await page.getByRole("button", { name: "Add session" }).focus();
     await page.keyboard.press("Enter");
     await page.waitForTimeout(1000);
@@ -488,16 +497,12 @@ async function main() {
     await page.getByText(submittedTitle).waitFor({ timeout: 30000 });
     evidence.reload_retained_offline_write = true;
     const push = page.waitForResponse((response) => {
-      if (!response.url().includes("/functions/atlet_sync/executions")) return false;
-      try {
-        const request = response.request().postDataJSON();
-        const body = JSON.parse(request.body);
-        return request.path === "/sync/push" && body.table === "sessions" &&
-          body.payload?.title === submittedTitle;
-      }
-      catch (_) { return false; }
+      const request = syncRequest(response.request());
+      const body = request?.body;
+      return request?.path === "/sync/push" && body?.table === "sessions" &&
+        body.payload?.title === submittedTitle;
     }, { timeout: 45000 });
-    await page.unroute("**/functions/atlet_sync/executions");
+    await page.unroute(syncPattern);
     const pushed = await push;
     const execution = await pushed.json();
     evidence.session_push_response_status = execution.responseStatusCode;
@@ -510,7 +515,8 @@ async function main() {
     }
     evidence.cloud_push_acknowledged = true;
     evidence.function_calls_after_resume = appwriteCalls.length;
-    evidence.appwrite_function_calls = appwriteCalls.length;
+    evidence.sync_calls = appwriteCalls.length;
+    evidence.appwrite_function_calls = mode === "direct" ? appwriteCalls.length : 0;
     evidence.browser_errors = browserErrors.slice(0, 10);
     const mutations = new Map();
     for (const write of pushTrace) {
@@ -525,7 +531,7 @@ async function main() {
     if (role === "customer_a") {
       // Sign out with a genuinely pending offline write. A later sign-in as
       // the same account must not replay this discarded outbox entry.
-      await page.route("**/functions/atlet_sync/executions", (route) => route.abort());
+      await page.route(syncPattern, (route) => route.abort());
       await page.getByRole("button", { name: "Add session" }).click();
       const discardedTitle = `Atlet web discarded ${Date.now()}`;
       await enterFlutterText(page.getByRole("textbox", { name: "Title" }), discardedTitle);
@@ -544,7 +550,7 @@ async function main() {
     await page.getByRole("button", { name: "Sign in" }).waitFor({ timeout: 30000 });
     evidence.sign_out_returned_to_login = true;
     if (role === "customer_a") {
-      await page.unroute("**/functions/atlet_sync/executions");
+      await page.unroute(syncPattern);
       await signIn(page, baseUrl, email, password);
       await page.waitForTimeout(3000);
       evidence.same_account_wipe =
@@ -567,8 +573,10 @@ async function main() {
       await page.getByRole("button", { name: "Sign out" }).click();
       await page.getByRole("button", { name: "Sign in" }).waitFor({ timeout: 30000 });
     }
-    evidence.appwrite_function_calls = appwriteCalls.length;
-    evidence.success = evidence.appwrite_function_calls > 0 &&
+    evidence.sync_calls = appwriteCalls.length;
+    evidence.appwrite_function_calls = mode === "direct" ? appwriteCalls.length : 0;
+    evidence.gateway_sync_calls = mode === "server" ? appwriteCalls.length : 0;
+    evidence.success = evidence.sync_calls > 0 &&
       evidence.home_marker !== "sign_in" &&
       evidence.offline_local_render &&
       evidence.reload_retained_offline_write &&
@@ -587,7 +595,7 @@ async function main() {
         evidence.customer_a_order_paid && evidence.customer_b_order_isolated &&
         evidence.admin_order_delivered));
     if (!evidence.success) throw new Error("Atlet browser sync acceptance incomplete");
-    console.log(`ATLET_EVIDENCE:${JSON.stringify({ home: true, appwrite_function_calls: appwriteCalls.length, storage: evidence.storage })}`);
+    console.log(`ATLET_EVIDENCE:${JSON.stringify({ home: true, sync_calls: appwriteCalls.length, mode, storage: evidence.storage })}`);
   } catch (error) {
     evidence.error = String(error.message).slice(0, 300);
     evidence.browser_errors = browserErrors.slice(0, 10);

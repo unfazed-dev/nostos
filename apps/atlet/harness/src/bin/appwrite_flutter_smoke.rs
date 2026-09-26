@@ -26,6 +26,12 @@ struct Args {
     /// `basic` tests one role; `order` runs all roles; `revoked` checks a fresh inactive account.
     #[arg(long, default_value = "basic", value_parser = ["basic", "order", "revoked"])]
     scenario: String,
+    /// Direct Function calls (default) or the hosted nostos-server gateway.
+    #[arg(long, default_value = "direct", value_parser = ["direct", "server"])]
+    mode: String,
+    /// Hosted gateway URL; required in server mode unless the credentials file has it.
+    #[arg(long)]
+    gateway_url: Option<String>,
     /// Ignored credentials file, never placed on the command line.
     #[arg(long, default_value = "apps/atlet/.env.cloud")]
     credentials: PathBuf,
@@ -44,6 +50,19 @@ async fn main() -> Result<()> {
         root.join(&args.credentials)
     };
     let secrets = Credentials::read(&credentials_path)?;
+    let gateway_url = if args.mode == "server" {
+        let url = args
+            .gateway_url
+            .as_deref()
+            .or_else(|| secrets.get("NOSTOS_APPWRITE_GATEWAY_URL").ok())
+            .context("server mode needs --gateway-url or NOSTOS_APPWRITE_GATEWAY_URL")?;
+        if !url.starts_with("https://") && !url.starts_with("http://127.0.0.1:") {
+            bail!("server mode requires an HTTPS gateway URL");
+        }
+        Some(url.to_owned())
+    } else {
+        None
+    };
     if args.scenario == "revoked" && args.role != "customer_b" {
         bail!("revoked scenario requires --role customer_b");
     }
@@ -64,7 +83,11 @@ async fn main() -> Result<()> {
         "ATLET_TEST_ROLE":args.role,
         "ATLET_TEST_MANUAL_CONNECTIVITY":"true",
         "ATLET_TEST_DB_SUFFIX":run_id,
+        "NOSTOS_MODE":args.mode,
     });
+    if let Some(url) = &gateway_url {
+        values["NOSTOS_APPWRITE_GATEWAY_URL"] = json!(url);
+    }
     if args.scenario == "order" {
         // Supabase's pilot flag must not suppress Appwrite foreground banners
         // or initialize Firebase for an Appwrite build.
@@ -234,6 +257,7 @@ async fn main() -> Result<()> {
         "flutter_version":flutter_version,
         "device":args.device,
         "scenario":args.scenario,
+        "mode":args.mode,
         "role":args.role,
         "success":output.status.success() && convergence.is_some() && visual_error_count == 0,
         "exit_code":output.status.code(),

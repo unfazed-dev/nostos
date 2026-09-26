@@ -142,6 +142,7 @@ class Nostos {
     required String functionId,
     required String userId,
     required String jwt,
+    String? gatewayUrl,
     String? sqlitePath,
   }) async => Nostos._(
     await createAppwriteNostosEngine(
@@ -150,6 +151,7 @@ class Nostos {
       functionId: functionId,
       userId: userId,
       jwt: jwt,
+      gatewayUrl: gatewayUrl,
       sqlitePath: sqlitePath,
     ),
   );

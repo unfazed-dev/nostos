@@ -99,6 +99,7 @@ abstract class RustLibApi extends BaseApi {
     required String userId,
     required String jwt,
     required String dbPath,
+    String? gatewayUrl,
   });
 
   Future<void> crateApiAppwriteNostosAppwriteHandleDisconnect({
@@ -453,6 +454,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String userId,
     required String jwt,
     required String dbPath,
+    String? gatewayUrl,
   }) {
     return handler.executeSync(
       SyncTask(
@@ -464,6 +466,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(userId, serializer);
           sse_encode_String(jwt, serializer);
           sse_encode_String(dbPath, serializer);
+          sse_encode_opt_String(gatewayUrl, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
@@ -472,7 +475,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiAppwriteNostosAppwriteHandleConnectConstMeta,
-        argValues: [endpoint, projectId, functionId, userId, jwt, dbPath],
+        argValues: [
+          endpoint,
+          projectId,
+          functionId,
+          userId,
+          jwt,
+          dbPath,
+          gatewayUrl,
+        ],
         apiImpl: this,
       ),
     );
@@ -488,6 +499,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "userId",
           "jwt",
           "dbPath",
+          "gatewayUrl",
         ],
       );
 

@@ -1,5 +1,33 @@
 # Deploying nostos
 
+## Atlet Appwrite gateway
+
+The [Atlet gateway config](atlet-appwrite.fly.toml) deploys `nostos-server`
+near the ADS project's Appwrite `fra` region. It uses the
+[gateway-only image](Dockerfile.atlet-appwrite), a fixed project and Function,
+two sync routes, and no Appwrite API key or Postgres slot. Direct and server
+mode therefore share the same TablesDB journal and Function authorization.
+This is a manual deployment; the repository's release workflow does not
+deploy on merge. Fly's [deploy documentation](https://fly.io/docs/launch/deploy/)
+describes the app creation and config behavior.
+
+From the repository root, after selecting an app name in a Fly account:
+
+```sh
+fly apps create <app-name>
+fly deploy --config deploy/atlet-appwrite.fly.toml --app <app-name>
+```
+
+Check `https://<app-name>.fly.dev/healthz`, then set
+`NOSTOS_APPWRITE_GATEWAY_URL=https://<app-name>.fly.dev` in the ignored
+`apps/atlet/.env.cloud` and run the `--mode server` Rust launchers documented
+in [Atlet](../apps/atlet/README.md). `/healthz` proves only the gateway is
+listening; an authenticated pull proves the Appwrite path. The browser test
+uses origin `http://127.0.0.1:8765`, the explicit origin in the Fly config.
+Add any deployed Atlet web origin to `NOSTOS_CORS_ORIGINS` before serving it.
+
+---
+
 Two binaries, two deploy targets:
 
 | Binary | Role | Port | Deploys as |

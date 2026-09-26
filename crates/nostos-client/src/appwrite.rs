@@ -81,6 +81,7 @@ pub struct AppwriteDirectClient {
     endpoint: String,
     project_id: String,
     function_id: String,
+    gateway_url: Option<String>,
     token: Mutex<Option<String>>,
     user_id: Mutex<Option<String>>,
     first_sync_done: std::sync::atomic::AtomicBool,
@@ -118,6 +119,7 @@ impl AppwriteDirectClient {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             engine: Arc::new(Mutex::new(ApplyEngine::new(storage))),
@@ -127,10 +129,47 @@ impl AppwriteDirectClient {
             endpoint: endpoint.trim_end_matches('/').into(),
             project_id: project_id.into(),
             function_id: function_id.into(),
+            gateway_url: None,
             token: Mutex::new(None),
             user_id: Mutex::new(None),
             first_sync_done: std::sync::atomic::AtomicBool::new(saved_horizon.is_some()),
         })
+    }
+
+    /// Use an always-on `nostos-server` Appwrite gateway with the same cloud
+    /// journal and Function authorization rules (ADR-0052).
+    ///
+    /// # Errors
+    /// Returns an invalid URL or local cursor error.
+    pub fn new_server(
+        endpoint: &str,
+        project_id: &str,
+        function_id: &str,
+        gateway_url: &str,
+        storage: SqliteStorage,
+    ) -> Result<Self, AppwriteSyncError> {
+        let url = reqwest::Url::parse(gateway_url)
+            .map_err(|error| AppwriteSyncError::Configuration(error.to_string()))?;
+        if url.scheme() != "https"
+            && !(url.scheme() == "http"
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")))
+        {
+            return Err(AppwriteSyncError::Configuration(
+                "gateway URL must use HTTPS outside loopback".into(),
+            ));
+        }
+        if url.query().is_some()
+            || url.fragment().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(AppwriteSyncError::Configuration(
+                "gateway URL must not contain credentials, query or fragment".into(),
+            ));
+        }
+        let mut client = Self::new(endpoint, project_id, function_id, storage)?;
+        client.gateway_url = Some(gateway_url.trim_end_matches('/').into());
+        Ok(client)
     }
 
     /// Local apply engine for watches, queries, and queued writes.
@@ -179,6 +218,17 @@ impl AppwriteDirectClient {
     }
 
     fn local_principal(&self, user_id: &str, role: Option<&str>) -> String {
+        if let Some(gateway_url) = &self.gateway_url {
+            return serde_json::to_string(&json!([
+                self.endpoint,
+                self.project_id,
+                self.function_id,
+                gateway_url,
+                user_id,
+                role
+            ]))
+            .expect("Appwrite server principal contains only strings");
+        }
         serde_json::to_string(&json!([
             self.endpoint,
             self.project_id,
@@ -424,17 +474,22 @@ impl AppwriteDirectClient {
     }
 
     async fn call(&self, jwt: &str, path: &str, body: &Value) -> Result<Value, AppwriteSyncError> {
-        let response = self
-            .http
-            .post(format!(
-                "{}/functions/{}/executions",
-                self.endpoint, self.function_id
-            ))
-            .header("X-Appwrite-Project", &self.project_id)
-            .header("X-Appwrite-JWT", jwt)
-            .json(&json!({"body":body.to_string(),"method":"POST","path":path}))
-            .send()
-            .await?;
+        let request = if let Some(gateway_url) = &self.gateway_url {
+            self.http
+                .post(format!("{gateway_url}/appwrite{path}"))
+                .bearer_auth(jwt)
+                .json(body)
+        } else {
+            self.http
+                .post(format!(
+                    "{}/functions/{}/executions",
+                    self.endpoint, self.function_id
+                ))
+                .header("X-Appwrite-Project", &self.project_id)
+                .header("X-Appwrite-JWT", jwt)
+                .json(&json!({"body":body.to_string(),"method":"POST","path":path}))
+        };
+        let response = request.send().await?;
         let status = response.status();
         let execution: Value = response.json().await?;
         if !status.is_success() {
@@ -497,9 +552,57 @@ fn bounded_message(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use axum::{http::HeaderMap, routing::post, Json, Router};
     use nostos_core::{Outbox, PendingWrite, Storage, WriteOp};
+    use serde_json::{json, Value};
 
     use super::{AppwriteDirectClient, AppwriteSyncError, SqliteStorage};
+
+    #[tokio::test]
+    async fn server_transport_uses_bearer_and_scopes_local_principal() {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let app = Router::new().route(
+            "/appwrite/sync/pull",
+            post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers["authorization"], "Bearer jwt-a");
+                assert_eq!(body["after"], "0");
+                Json(json!({
+                    "responseStatusCode": 200,
+                    "responseBody": "{\"head\":\"0\"}"
+                }))
+            }),
+        );
+        let task = tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+        let client = AppwriteDirectClient::new_server(
+            "https://example.invalid/v1",
+            "project",
+            "function",
+            &format!("http://{addr}"),
+            SqliteStorage::open_in_memory().unwrap(),
+        )
+        .unwrap();
+        client.set_user("alice", "jwt-a").await.unwrap();
+        assert_eq!(
+            client
+                .call("jwt-a", "/sync/pull", &json!({"after":"0"}))
+                .await
+                .unwrap()["head"],
+            "0"
+        );
+        let direct = AppwriteDirectClient::new(
+            "https://example.invalid/v1",
+            "project",
+            "function",
+            SqliteStorage::open_in_memory().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(
+            client.local_principal("alice", Some("customer")),
+            direct.local_principal("alice", Some("customer"))
+        );
+        task.abort();
+    }
 
     #[tokio::test]
     async fn switching_user_before_first_pull_discards_private_offline_writes() {

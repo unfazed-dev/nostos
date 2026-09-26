@@ -16,13 +16,27 @@ function functionError(status, body) {
 }
 
 export class AppwriteTransport {
-  constructor({ dbHandle, endpoint, projectId, functionId, userId, token, onStatus }) {
+  constructor({ dbHandle, endpoint, projectId, functionId, gatewayUrl, userId, token, onStatus }) {
     if (!token || !userId) throw new Error("Appwrite session required");
+    if (gatewayUrl) {
+      const url = new URL(gatewayUrl);
+      if (url.protocol !== "https:" &&
+          !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
+        throw new Error("Appwrite gateway URL must use HTTPS outside loopback");
+      }
+      if (url.username || url.password || url.search || url.hash) {
+        throw new Error("Appwrite gateway URL cannot contain credentials, query or fragment");
+      }
+    }
     this.engine = NostosEngine.newAppwrite(dbHandle, dbHandle?.deviceId ?? crypto.randomUUID());
-    this.engine.bindAppwritePrincipal(endpoint, projectId, functionId, userId);
+    // The WASM engine uses this Function identity only for its durable local
+    // principal. Include the gateway so a mode switch cannot reuse OPFS rows.
+    this.engine.bindAppwritePrincipal(endpoint, projectId,
+      gatewayUrl ? `${functionId}|gateway:${gatewayUrl}` : functionId, userId);
     this.endpoint = endpoint.replace(/\/$/, "");
     this.projectId = projectId;
     this.functionId = functionId;
+    this.gatewayUrl = gatewayUrl?.replace(/\/$/, "") ?? null;
     this.token = token;
     this.onStatus = onStatus;
     this.change = null;
@@ -94,15 +108,21 @@ export class AppwriteTransport {
     const controller = new AbortController();
     this.activeRequest = controller;
     try {
-      const response = await fetch(`${this.endpoint}/functions/${this.functionId}/executions`, {
+      const response = await fetch(this.gatewayUrl
+        ? `${this.gatewayUrl}/appwrite${path}`
+        : `${this.endpoint}/functions/${this.functionId}/executions`, {
         method: "POST",
         signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          "X-Appwrite-Project": this.projectId,
-          "X-Appwrite-JWT": this.token,
-        },
-        body: JSON.stringify({ method: "POST", path, body: JSON.stringify(body) }),
+        credentials: "omit",
+        cache: "no-store",
+        redirect: "error",
+        headers: this.gatewayUrl
+          ? { "Content-Type": "application/json", "Authorization": `Bearer ${this.token}` }
+          : { "Content-Type": "application/json", "X-Appwrite-Project": this.projectId,
+              "X-Appwrite-JWT": this.token },
+        body: this.gatewayUrl
+          ? JSON.stringify(body)
+          : JSON.stringify({ method: "POST", path, body: JSON.stringify(body) }),
       });
       if (this.closed || this.paused) throw new Error("Appwrite session paused");
       const envelope = await response.json();

@@ -71,9 +71,21 @@ class _FailsOnceWipeAdapter extends _RecordingAdapter {
   }
 }
 
+class _FailsInitAdapter extends _RecordingAdapter {
+  _FailsInitAdapter(super.name, super.log);
+
+  @override
+  Future<void> init({
+    required String supabaseUrl,
+    required String accessToken,
+    required String userId,
+    required String dbDir,
+  }) async => throw StateError('server unavailable');
+}
+
 void main() {
   test(
-    'provider and mode selection rejects unsupported Appwrite server mode',
+    'provider and mode selection keeps both Appwrite transports distinct',
     () {
       expect(
         selectEngine(provider: 'appwrite', mode: 'direct'),
@@ -85,8 +97,8 @@ void main() {
       );
       expect(selectEngine(provider: 'supabase', mode: 'server'), Engine.nostos);
       expect(
-        () => selectEngine(provider: 'appwrite', mode: 'server'),
-        throwsA(isA<UnsupportedError>()),
+        selectEngine(provider: 'appwrite', mode: 'server'),
+        Engine.nostosAppwriteServer,
       );
     },
   );
@@ -164,6 +176,18 @@ void main() {
       );
       await registry.stop();
       expect(registry.activeEngine, isNull);
+    });
+
+    test('failed Appwrite server init releases its adapter slot', () async {
+      final registry = EngineRegistry(
+        nostosAppwriteServerFactory: () => _FailsInitAdapter('server', []),
+      );
+      await expectLater(
+        registry.start(Engine.nostosAppwriteServer, session),
+        throwsStateError,
+      );
+      expect(registry.activeEngine, isNull);
+      expect(registry.debugLiveAdapters, isEmpty);
     });
 
     test(

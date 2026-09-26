@@ -45,6 +45,9 @@ const _nostosMode = String.fromEnvironment(
   'NOSTOS_MODE',
   defaultValue: 'direct',
 );
+const _appwriteGatewayUrl = String.fromEnvironment(
+  'NOSTOS_APPWRITE_GATEWAY_URL',
+);
 
 // ponytail: no package_info_plus dep for one hand-copied version string;
 // wire it in if the bench harness ever needs per-build accuracy.
@@ -198,6 +201,7 @@ void _wireFcmTaps() {
 /// rebuilds/route pushes without needing an InheritedWidget for this pilot.
 final EngineRegistry engineRegistry = EngineRegistry(
   supabaseAnonKey: _supabaseAnonKey,
+  appwriteGatewayUrl: _appwriteGatewayUrl,
 );
 
 class AtletApp extends StatelessWidget {
@@ -287,8 +291,8 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Direct-mode Nostos is the only engine: bring it up on entering Home so
-    // syncing is live the moment the app is. Post-frame so nothing touches
+    // Start the configured Nostos transport on entering Home so syncing is
+    // live the moment the app is. Post-frame so nothing touches
     // `Supabase.instance` during initState (widget_test.dart).
     // The connectivity guard also starts post-frame: platform channels are
     // unavailable during widget-test initState, and start() is what opens
@@ -437,10 +441,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Brings the sync engine up. There is one engine and no way to change it
-  /// (user request 2026-09-22): direct-mode Nostos, the device syncing with
-  /// Supabase itself with no `nostos-server` on the other end
-  /// (`docs/plans/direct-mode-sync-protocol.md`).
+  /// Brings up one engine per signed-in session. `NOSTOS_MODE` chooses direct
+  /// (the default) or server transport; provider and mode determine the local
+  /// store and cannot change while that engine is live.
   /// It starts on its own when Home opens, and says nothing while doing it —
   /// the connectivity LED and the write-status UI are what report a sync
   /// that isn't working.

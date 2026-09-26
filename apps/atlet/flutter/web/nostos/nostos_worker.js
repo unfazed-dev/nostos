@@ -76,6 +76,7 @@ function sameScope(request) {
   return provider !== "appwrite" ||
     (request.projectId === connParams.projectId &&
       request.functionId === connParams.functionId &&
+      (request.gatewayUrl ?? null) === (connParams.gatewayUrl ?? null) &&
       request.userId === connParams.userId);
 }
 
@@ -258,6 +259,7 @@ async function openSocket() {
       endpoint: connParams.url,
       projectId: connParams.projectId,
       functionId: connParams.functionId,
+      gatewayUrl: connParams.gatewayUrl,
       userId: connParams.userId,
       token,
       onStatus: (connected, accessRevoked = false) =>
@@ -354,6 +356,7 @@ const dispatchMessage = async (ev) => {
           provider: m.provider ?? "server",
           projectId: m.projectId,
           functionId: m.functionId,
+          gatewayUrl: m.gatewayUrl ?? null,
           userId: m.userId,
           tables: m.tables ?? [],
           orSetTables: m.orSetTables ?? [],

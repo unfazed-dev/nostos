@@ -26,6 +26,7 @@ abstract class NostosAppwriteHandle implements RustOpaqueInterface {
     required String userId,
     required String jwt,
     required String dbPath,
+    String? gatewayUrl,
   }) => RustLib.instance.api.crateApiAppwriteNostosAppwriteHandleConnect(
     endpoint: endpoint,
     projectId: projectId,
@@ -33,6 +34,7 @@ abstract class NostosAppwriteHandle implements RustOpaqueInterface {
     userId: userId,
     jwt: jwt,
     dbPath: dbPath,
+    gatewayUrl: gatewayUrl,
   );
 
   Future<void> disconnect();

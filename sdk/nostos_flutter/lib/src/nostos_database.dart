@@ -523,6 +523,7 @@ class NostosDatabase {
     String functionId = 'atlet_sync',
     required String userId,
     required String jwt,
+    String? gatewayUrl,
     required NostosSchema schema,
     required String sqlitePath,
   }) async {
@@ -539,6 +540,7 @@ class NostosDatabase {
       functionId: functionId,
       userId: userId,
       jwt: jwt,
+      gatewayUrl: gatewayUrl,
       sqlitePath: sqlitePath,
     );
     nostos.applySchema(schema.toClientTables());

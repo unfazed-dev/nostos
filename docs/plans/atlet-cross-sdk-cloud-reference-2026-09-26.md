@@ -43,10 +43,12 @@ app's behavior and acceptance scenarios are the same.
 
 Phase 1 is implemented on the `atlet-appwrite-flutter` worktree and has passed
 the real cloud native and macOS visual flows. Phase 2 is implemented on the
-`atlet-appwrite-web` worktree; its 15 Chrome broker regressions and hosted
+`atlet-appwrite-web` worktree; its 16 Chrome broker regressions and hosted
 admin/customer A/customer B cloud gate pass locally, including OPFS reload,
 checkout, fulfilment, and a same-origin account switch. Source review found
-no remaining lifecycle blocker; PR CI is pending. Phases 3–7 are open. The
+no remaining lifecycle blocker; PR #60 remains draft while cloud CI is
+verified. Phase 3 has local gateway, native, and Flutter transport code under
+test; hosted deployment and parity are still required. Phases 4–7 are open. The
 [Flutter Appwrite design](atlet-appwrite-flutter-design-2026-09-26.md) and
 [ADR-0050](../adr/0050-appwrite-direct-sync-function-and-journal.md) define
 the first provider path. The historical

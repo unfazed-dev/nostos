@@ -45,11 +45,16 @@ impl NostosAppwriteHandle {
         user_id: String,
         jwt: String,
         db_path: String,
+        gateway_url: Option<String>,
     ) -> Result<Self, String> {
         let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
         let storage = SqliteStorage::open(&db_path).map_err(|e| e.to_string())?;
-        let client = AppwriteDirectClient::new(&endpoint, &project_id, &function_id, storage)
-            .map_err(|e| e.to_string())?;
+        let client = if let Some(url) = gateway_url {
+            AppwriteDirectClient::new_server(&endpoint, &project_id, &function_id, &url, storage)
+        } else {
+            AppwriteDirectClient::new(&endpoint, &project_id, &function_id, storage)
+        }
+        .map_err(|e| e.to_string())?;
         rt.block_on(client.set_user(&user_id, &jwt))
             .map_err(|e| e.to_string())?;
         let (changes, _) = broadcast::channel(64);

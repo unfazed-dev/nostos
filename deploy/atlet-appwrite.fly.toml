@@ -1,0 +1,37 @@
+# Hosted Nostos transport for the ADS Atlet Appwrite reference.
+# Override the app name with `fly deploy --app <your-app>` if unavailable.
+app = "nostos-atlet-appwrite-gateway"
+primary_region = "fra"
+kill_signal = "SIGINT"
+kill_timeout = 30
+
+[build]
+  dockerfile = "deploy/Dockerfile.atlet-appwrite"
+
+[env]
+  NOSTOS_BACKEND = "appwrite"
+  NOSTOS_BIND = "0.0.0.0:8800"
+  NOSTOS_APPWRITE_ENDPOINT = "https://fra.cloud.appwrite.io/v1"
+  NOSTOS_APPWRITE_PROJECT_ID = "6ab741900038c74d1086"
+  NOSTOS_APPWRITE_FUNCTION_ID = "atlet_sync"
+  NOSTOS_CORS_ORIGINS = "http://127.0.0.1:8765"
+  NOSTOS_LOG = "info"
+
+[http_service]
+  internal_port = 8800
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "15s"
+  method = "GET"
+  path = "/healthz"
+  timeout = "3s"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

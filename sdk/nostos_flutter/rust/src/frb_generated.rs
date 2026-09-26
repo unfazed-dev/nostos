@@ -186,6 +186,7 @@ fn wire__crate__api__appwrite__NostosAppwriteHandle_connect_impl(
             let api_user_id = <String>::sse_decode(&mut deserializer);
             let api_jwt = <String>::sse_decode(&mut deserializer);
             let api_db_path = <String>::sse_decode(&mut deserializer);
+            let api_gateway_url = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
                 let output_ok = crate::api::appwrite::NostosAppwriteHandle::connect(
@@ -195,6 +196,7 @@ fn wire__crate__api__appwrite__NostosAppwriteHandle_connect_impl(
                     api_user_id,
                     api_jwt,
                     api_db_path,
+                    api_gateway_url,
                 )?;
                 std::result::Result::Ok(output_ok)
             })())

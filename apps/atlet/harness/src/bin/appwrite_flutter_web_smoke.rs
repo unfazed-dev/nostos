@@ -19,6 +19,10 @@ use uuid::Uuid;
 struct Args {
     #[arg(long, default_value = "customer_a", value_parser = ["admin", "customer_a", "customer_b"])]
     role: String,
+    #[arg(long, default_value = "direct", value_parser = ["direct", "server"])]
+    mode: String,
+    #[arg(long)]
+    gateway_url: Option<String>,
     #[arg(long, default_value = "apps/atlet/.env.cloud")]
     credentials: PathBuf,
     #[arg(long, default_value = "apps/atlet/.results")]
@@ -51,6 +55,30 @@ async fn main() -> Result<()> {
     }
     let credentials = absolute(&root, &args.credentials);
     let secrets = Credentials::read(&credentials)?;
+    let gateway_url = if args.mode == "server" {
+        let url = args
+            .gateway_url
+            .as_deref()
+            .or_else(|| secrets.get("NOSTOS_APPWRITE_GATEWAY_URL").ok())
+            .context("server mode needs --gateway-url or NOSTOS_APPWRITE_GATEWAY_URL")?;
+        if !url.starts_with("https://") {
+            bail!("server mode requires an HTTPS gateway URL");
+        }
+        Some(url.to_owned())
+    } else {
+        None
+    };
+    let build_marker = flutter.join("build/web/nostos_appwrite_mode.json");
+    if args.mode == "server" && args.no_build {
+        let built: Value = serde_json::from_slice(
+            &fs::read(&build_marker).context("server-mode web build marker missing")?,
+        )?;
+        if built["mode"].as_str() != Some("server")
+            || built["gateway_url"].as_str() != gateway_url.as_deref()
+        {
+            bail!("existing Flutter web build targets a different transport or gateway");
+        }
+    }
     let evidence_dir = absolute(&root, &args.evidence_dir);
     fs::create_dir_all(&evidence_dir)?;
     let run_id = Uuid::new_v4().simple().to_string();
@@ -70,9 +98,10 @@ async fn main() -> Result<()> {
         if has_fvm() {
             build.arg("flutter");
         }
-        let output = build
+        build
             .args(["build", "web", "--release"])
             .arg("--dart-define=ATLET_PROVIDER=appwrite")
+            .arg(format!("--dart-define=NOSTOS_MODE={}", args.mode))
             .arg(format!(
                 "--dart-define=APPWRITE_ENDPOINT={}",
                 secrets.get("APPWRITE_ENDPOINT")?
@@ -81,13 +110,19 @@ async fn main() -> Result<()> {
                 "--dart-define=APPWRITE_PROJECT_ID={}",
                 secrets.get("APPWRITE_PROJECT_ID")?
             ))
-            .current_dir(&flutter)
-            .output()
-            .context("build Atlet Flutter web")?;
+            .current_dir(&flutter);
+        if let Some(url) = &gateway_url {
+            build.arg(format!("--dart-define=NOSTOS_APPWRITE_GATEWAY_URL={url}"));
+        }
+        let output = build.output().context("build Atlet Flutter web")?;
         if !output.status.success() {
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
             bail!("Flutter web build failed");
         }
+        fs::write(
+            &build_marker,
+            serde_json::to_vec(&json!({"mode": &args.mode, "gateway_url": &gateway_url}))?,
+        )?;
     }
     let http = reqwest::Client::new();
     let (admin_jwt, customer_a_jwt) = if args.role == "admin" {
@@ -140,6 +175,7 @@ async fn main() -> Result<()> {
             secrets.get(&format!("{prefix}_PASSWORD"))?,
         )
         .env("ATLET_WEB_ROLE", &args.role)
+        .env("ATLET_WEB_MODE", &args.mode)
         .env(
             "ATLET_WEB_CUSTOMER_A_EMAIL",
             secrets.get("ATLET_USER_A_EMAIL")?,
@@ -158,6 +194,9 @@ async fn main() -> Result<()> {
         )
         .env("ATLET_WEB_EVIDENCE", &evidence_path)
         .current_dir(&flutter);
+    if let Some(url) = &gateway_url {
+        browser.env("ATLET_WEB_GATEWAY_URL", url);
+    }
     if args.role == "admin" {
         // Separate login sessions mint distinct valid JWTs for two same-user
         // browser tabs. They are process-only and never enter the evidence.
@@ -238,6 +277,7 @@ async fn main() -> Result<()> {
         "sdk":"nostos_flutter",
         "device":"chrome",
         "provider":"appwrite",
+        "mode":args.mode,
         "role":args.role,
         "browser":browser,
         "cloud_verified":cloud.as_ref().is_some_and(Result::is_ok),

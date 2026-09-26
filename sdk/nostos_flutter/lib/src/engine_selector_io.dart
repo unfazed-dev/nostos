@@ -80,20 +80,24 @@ Future<NostosEngine> createAppwriteNostosEngine({
   required String functionId,
   required String userId,
   required String jwt,
+  String? gatewayUrl,
   String? sqlitePath,
 }) async {
   if (!_rustInitialized) {
     await RustLib.init();
     _rustInitialized = true;
   }
-  final path =
-      sqlitePath ?? await _defaultSqlitePath('$endpoint/appwrite/$projectId');
+  final storeKey = gatewayUrl == null
+      ? '$endpoint/appwrite/$projectId'
+      : '$endpoint/appwrite/$projectId/server/$gatewayUrl';
+  final path = sqlitePath ?? await _defaultSqlitePath(storeKey);
   return AppwriteNostosEngine.connect(
     endpoint: endpoint,
     projectId: projectId,
     functionId: functionId,
     userId: userId,
     jwt: jwt,
+    gatewayUrl: gatewayUrl,
     dbPath: path,
   );
 }

@@ -1,19 +1,20 @@
 # nostos_flutter
 
-Plug-and-play local-first sync for Flutter, backed by [Nostos](https://github.com/unfazed-dev/nostos)
-(Postgres logical replication → Rust fan-out server → on-device SQLite,
-Apache-2.0 end to end). Rust owns SQLite and the sync loop
-(`nostos-client`'s `SyncClient`); this package wraps it with
-[flutter_rust_bridge](https://pub.dev/packages/flutter_rust_bridge)'s
-native-assets backend, so `flutter pub add nostos_flutter` is the only manual
-step — no codegen, no Xcode/Gradle wiring, no client-side schema artifact.
+Flutter's local-first Nostos SDK uses the Rust apply engine and durable outbox.
+Native apps store their local read model in SQLite through
+[flutter_rust_bridge](https://pub.dev/packages/flutter_rust_bridge); Flutter
+web uses the WASM bridge and SQLite-WASM/OPFS. Clients can sync through a
+Postgres-backed Nostos server, directly with Supabase, or with Appwrite Cloud
+in direct or gateway mode. This package is still consumed from this repository
+while publication is pending. Native assets build automatically; browser apps
+must package the Worker and WASM files listed below.
 
 ## Quickstart
 
 Run a server (zero setup — synthetic data, no auth, no Postgres):
 
 ```bash
-cargo run -p nostos-server   # ws://127.0.0.1:8800/sync
+NOSTOS_BIND=127.0.0.1:8800 cargo run -p nostos-server
 ```
 
 ```dart
@@ -119,19 +120,19 @@ final db = await NostosDatabase.open(
 > that, **not** a re-connect: swapping the token in place leaves your `watch`
 > streams open, whereas building a fresh handle ends every one of them.
 
-`NostosDatabase.supabase` does **not** depend on the `supabase_flutter`
-package — pass `accessToken` from whatever auth source you use. `supabaseUrl` is
-accepted for forward-compatibility (see ponytail in `lib/src/nostos.dart`) but not
-yet used to derive anything — point `nostosUrl` at wherever your `nostos-server`
-actually runs.
+`NostosDatabase.supabase` uses the signed-in `supabase_flutter` session and
+subscribes to its auth changes. For direct Supabase sync without that package's
+session handling, call `NostosDatabase.direct` with your project URL,
+publishable key, JWT, scope, and schema. `nostosUrl` in the example above is
+the Postgres-backed Nostos server URL.
 
-### Appwrite Cloud direct mode
+### Appwrite Cloud: direct and server transport
 
 The app signs in with Appwrite Auth and passes the current user ID and a
 short-lived user JWT to Nostos. Direct mode sends writes and cursor-based pulls
 through a deployed sync Function. The Function checks each user's scope and is
 the only holder of the cloud database API key. Supply the table schema because
-Appwrite does not expose the Postgres `/schema` endpoint used by server mode.
+Neither Appwrite transport exposes the Postgres Nostos `/schema` endpoint.
 
 ```dart
 final db = await NostosDatabase.appwrite(
@@ -144,6 +145,14 @@ final db = await NostosDatabase.appwrite(
   sqlitePath: '$dir/atlet.db',
 );
 ```
+
+Direct mode is the default. To route the same app through a hosted Nostos
+gateway, add `gatewayUrl: 'https://your-gateway.example'` to the factory call.
+The gateway must point to the same Appwrite project and Function. Keep a
+separate `sqlitePath` for each mode, or let the principal check clear a store
+when its mode changes. The [Atlet gateway](../../deploy/README.md#atlet-appwrite-gateway)
+is the running reference; [ADR-0052](../../docs/adr/0052-appwrite-server-transport-over-function-journal.md)
+defines its fixed routes and authorization boundary.
 
 `atletSchema` is the app's `NostosSchema`; see
 [Atlet's declaration](../../apps/atlet/flutter/lib/adapters/nostos_adapter.dart).
@@ -280,7 +289,7 @@ per-type mapping table and the `int8`-as-string rationale.
 | Windows / Linux | Fast-follow (per the launch plan) — not in `hook/build.dart`'s `_manifestKey()` yet, so both always take the cargo-build fallback. |
 | Web | Supported (ADR-0036, ADR-0051): `WebNostosEngine` uses a SharedWorker broker with a private MessagePort per tab; the authenticated host tab starts one dedicated Worker for `nostos-ffi-wasm` and OPFS SQLite and transfers an engine port to the broker. Package `nostos_broker.js`, `nostos_worker.js`, `appwrite_transport.js`, `sqlite_wasm_glue.js`, `nostos_ffi_wasm.{js,_bg.wasm}`, and `@sqlite.org/sqlite-wasm` under `web/`; build as JS (`flutter build web`, not `--wasm`). No COOP/COEP is needed. Without SharedWorker, one dedicated tab owns OPFS and another tab fails closed. `sqlitePath` is ignored; provide a web `BlobStore` for attachments. Browser round-trip is pinned by `web/e2e/flutter_web_smoke.spec.cjs`. |
 
-In Appwrite direct mode, each tab's private broker port is authorized through
+In Appwrite mode, each tab's private broker port is authorized through
 Appwrite `GET /account`. A fresh JWT for the same user is accepted; a different
 or expired account is rejected. JWT refresh revalidates independently. A tab
 opened while offline cannot join until its account can be verified. In server

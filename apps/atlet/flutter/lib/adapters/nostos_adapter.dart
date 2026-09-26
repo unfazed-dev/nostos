@@ -44,9 +44,11 @@ class NostosAdapter implements SyncAdapter {
             dbDir: dbDir,
           ));
 
-  /// Direct mode through the Appwrite Cloud sync Function (ADR-0050).
-  NostosAdapter.appwrite({required String projectId})
-    : engine = 'nostos-appwrite',
+  /// Appwrite direct mode, or server mode when [gatewayUrl] is supplied.
+  NostosAdapter.appwrite({required String projectId, String? gatewayUrl})
+    : engine = gatewayUrl == null
+          ? 'nostos-appwrite'
+          : 'nostos-appwrite-server',
       _appwrite = true,
       _open =
           (({
@@ -57,12 +59,13 @@ class NostosAdapter implements SyncAdapter {
           }) => NostosDatabase.appwrite(
             endpoint: supabaseUrl,
             projectId: projectId,
+            gatewayUrl: gatewayUrl,
             userId: userId,
             jwt: accessToken,
             schema: _schema,
-            sqlitePath: _appwriteTestDbSuffix.isEmpty
-                ? '$dbDir/nostos_appwrite.sqlite'
-                : '$dbDir/nostos_appwrite_$_appwriteTestDbSuffix.sqlite',
+            sqlitePath:
+                '$dbDir/nostos_appwrite${gatewayUrl == null ? '' : '_server'}'
+                '${_appwriteTestDbSuffix.isEmpty ? '' : '_$_appwriteTestDbSuffix'}.sqlite',
           ));
 
   @override

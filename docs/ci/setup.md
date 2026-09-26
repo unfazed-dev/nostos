@@ -15,7 +15,7 @@ waiting for GitHub capacity. Changing code never fixes that.
 
 | workflow | trigger | jobs |
 |---|---|---|
-| `ci.yml` | push to `main`, PR into `main` | `commits`, `lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck`, `appwrite-function`, `atlet-cloud`, `atlet-web-cloud` |
+| `ci.yml` | push to `main`, PR into `main` | `commits`, `lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck`, `appwrite-function`, `atlet-cloud`, `atlet-web-cloud`, `atlet-server-cloud` |
 | `pr.yml` | PR opened, edited, synchronized, reopened | `pr-title` (required, row 5) |
 | `release.yml` | `v*` tag | release builds. There is no deploy on merge (row 11) |
 
@@ -36,6 +36,13 @@ the Flutter Worker Chrome regressions, builds the Flutter web app, runs Chrome
 against Appwrite Cloud with OPFS, and verifies
 admin and both customer views. Its separate artifact contains only
 `appwrite-flutter-web-*.json`. Run `scripts/check.sh atlet-web-cloud` locally.
+The `atlet-server-cloud` job uses the same serialized account group and a
+second secret, `ATLET_APPWRITE_GATEWAY_URL`, for a hosted HTTPS gateway. It
+runs native mixed direct/server convergence, the macOS order UI, and the
+Chrome admin/customer UI against the same Appwrite project. The matching local
+area is `scripts/check.sh atlet-server-cloud`; a missing gateway or credentials
+fails the check. Add the job to required branch protection after its first
+hosted green run.
 
 ## Once per clone
 

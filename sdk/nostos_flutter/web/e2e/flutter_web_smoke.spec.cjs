@@ -61,6 +61,7 @@ const MIME = {
 function startStaticServer() {
   return new Promise((resolve, reject) => {
     const executionTokens = [];
+    const gatewayRequests = [];
     const state = { accountAvailable: true, revokedTokens: new Set(), accountDelayMs: {},
       failWasm: false, failSqlite: false };
     const server = http.createServer((req, res) => {
@@ -100,6 +101,12 @@ function startStaticServer() {
           return;
         } else if (urlPath === "/functions/test-function/executions") {
           executionTokens.push(String(req.headers["x-appwrite-jwt"] || ""));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ responseStatusCode: 500,
+            responseBody: JSON.stringify({ message: "mock transient failure" }) }));
+          return;
+        } else if (urlPath === "/appwrite/sync/pull" || urlPath === "/appwrite/sync/push") {
+          gatewayRequests.push({ path: urlPath, bearer: String(req.headers.authorization || "") });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ responseStatusCode: 500,
             responseBody: JSON.stringify({ message: "mock transient failure" }) }));
@@ -148,7 +155,7 @@ function startStaticServer() {
     });
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
-      resolve({ server, port: server.address().port, executionTokens, state });
+      resolve({ server, port: server.address().port, executionTokens, gatewayRequests, state });
     });
   });
 }
@@ -249,6 +256,28 @@ test("Flutter-web Worker: connect + write + reactive snapshot (ADR-0036)", async
   } finally {
     await staticServer.server.close();
     spine.child.kill("SIGTERM");
+  }
+});
+
+test("Flutter-web Appwrite server mode sends bearer to the gateway route", async ({ page }) => {
+  test.setTimeout(45000);
+  const staticServer = await startStaticServer();
+  try {
+    const endpoint = `http://127.0.0.1:${staticServer.port}`;
+    await page.goto(`${endpoint}/`, { waitUntil: "load" });
+    await page.waitForFunction(() => typeof window.nostosConnectAppwrite === "function");
+    const connected = await page.evaluate((url) =>
+      window.nostosConnectAppwrite(url, "token-a", "user-a", url), endpoint);
+    expect(connected.ok).toBe(true);
+    await expect.poll(() => staticServer.gatewayRequests.length, { timeout: 15000 })
+      .toBeGreaterThan(0);
+    expect(staticServer.gatewayRequests[0]).toEqual({
+      path: "/appwrite/sync/pull", bearer: "Bearer token-a",
+    });
+    expect(staticServer.executionTokens).toEqual([]);
+    await page.evaluate(() => window.nostosClose());
+  } finally {
+    await staticServer.server.close();
   }
 });
 

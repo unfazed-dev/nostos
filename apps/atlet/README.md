@@ -16,6 +16,13 @@ an already applied migration. Only the Function holds a server API key. The
 Flutter app signs in through Appwrite Auth and sends its short-lived user JWT
 to the Function.
 
+The Appwrite server transport is selected with `NOSTOS_MODE=server` and a
+gateway URL. The gateway forwards the same authenticated protocol to the same
+Function; direct mode remains the default. Neither app nor gateway holds an
+Appwrite API key. The two modes use separate local SQLite/OPFS stores, and
+changing mode needs a new build and sign-in. See
+[ADR-0052](../../docs/adr/0052-appwrite-server-transport-over-function-journal.md).
+
 Copy `appwrite/credentials.example` to the ignored `apps/atlet/.env.cloud`,
 fill in the three demo accounts, and restrict it to your user (`chmod 600`).
 The three account IDs expected by the Rust runners are `atlet_admin_demo`,
@@ -40,6 +47,22 @@ cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role admin
 cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_a --no-build
 cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_b --no-build
 ```
+
+To run the server transport against **the same hosted project**, deploy the
+gateway using [the Atlet Fly template](../../deploy/atlet-appwrite.fly.toml)
+and [deployment instructions](../../deploy/README.md#atlet-appwrite-gateway).
+Set `NOSTOS_APPWRITE_GATEWAY_URL` in the ignored `.env.cloud`, then run:
+
+```sh
+cargo run -p atlet-harness --bin appwrite_native_smoke -- --mode server
+cargo run -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role admin --mode server
+cargo run -p atlet-harness --bin appwrite_flutter_web_smoke -- --role admin --mode server
+```
+
+The native runner alternates direct and gateway clients on one journal. The
+browser runner serves the UI from `http://127.0.0.1:8765` so the hosted gateway
+can allow a fixed origin. These commands fail when the gateway URL is absent;
+the hosted server acceptance gate is pending its cloud deployment.
 
 For the Chrome commands, install the Flutter web toolchain and Google Chrome;
 install the locked browser dependencies with `npm ci --prefix sdk/nostos_web`.
