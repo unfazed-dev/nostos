@@ -34,7 +34,9 @@ npm run build
 # → invokes: wasm-pack build ../../crates/nostos-ffi-wasm --target nodejs --out-dir pkg-node
 ```
 
-The build writes to `crates/nostos-ffi-wasm/pkg-node/` (gitignored). The facade resolves that path relative to itself, so any cwd works.
+The build writes to `crates/nostos-ffi-wasm/pkg-node/` and stages a copy in
+`sdk/nostos_web/pkg-node/` (both gitignored). The facade loads the staged copy,
+which also ships in the npm tarball.
 
 ## Smoke
 
@@ -248,8 +250,8 @@ offline-capable within a session only.
   `storageMode === "memory"` — those writes die with the tab.
 - **Bundlers.** Construct the Worker so Vite/webpack can see it:
   `new Worker(new URL("@nostos-sync/web/worker/nostos.worker.js", import.meta.url), { type: "module" })`.
-  `worker/`, `sw/` and `pkg-web/` ship in the npm `files` list; run
-  `npm run build:web` before packing.
+  `worker/`, `sw/`, `pkg-node/` and `pkg-web/` ship in the npm `files` list;
+  run `npm run build:all` before packing.
 
 **A third gap is Node-only.** `NostosSocket.connect()` is wired to
 `web-sys::WebSocket` + `Window::localStorage` (default of the injectable

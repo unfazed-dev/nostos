@@ -34,20 +34,9 @@
 
 const path = require("path");
 
-// Resolve the wasm-pack output relative to this file so the package
-// works regardless of the caller's cwd.
-// ponytail: hardcoded relative path to a sibling crate's pkg-node — fine
-// inside the monorepo, breaks if this package is `npm publish`'d without
-// bundling the wasm. Upgrade: a `prepublishOnly` script that copies the
-// wasm + JS glue into `sdk/nostos_web/dist/` and rewrites this path.
-const PKG_NODE_DIR = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "crates",
-  "nostos-ffi-wasm",
-  "pkg-node"
-);
+// The build stages the generated glue beside this facade so the same path
+// works in the checkout and in the published package.
+const PKG_NODE_DIR = path.join(__dirname, "pkg-node");
 
 // We require the generated CJS glue. The glue itself reads
 // `nostos_ffi_wasm_bg.wasm` via `fs.readFileSync(__dirname + ...)`, so
@@ -62,7 +51,7 @@ function wasm() {
     if (!fs.existsSync(path.join(PKG_NODE_DIR, "nostos_ffi_wasm.js"))) {
       throw new Error(
         "@nostos-sync/web: wasm pkg not built. Run `npm run build` in sdk/nostos_web " +
-          "(invokes `wasm-pack build ../../crates/nostos-ffi-wasm --target nodejs --out-dir pkg-node`)."
+          "(builds and stages the Node wasm package)."
       );
     }
     throw err;

@@ -5,13 +5,13 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "wasm-pack build ../../crates/nostos-ffi-wasm --target nodejs --out-dir pkg-node",
-    "build:web": "wasm-pack build ../../crates/nostos-ffi-wasm --target web --out-dir pkg-web && : > pkg-web/.npmignore",
+    "build": "wasm-pack build ../../crates/nostos-ffi-wasm --target nodejs --out-dir pkg-node && node stage-wasm.cjs node",
+    "build:web": "wasm-pack build ../../crates/nostos-ffi-wasm --target web --out-dir pkg-web && node stage-wasm.cjs web",
     "build:all": "npm run build && npm run build:web",
     "smoke": "node smoke.cjs && node --test e2e/attachments.spec.cjs",
     "test:e2e": "npx playwright test --config=playwright.config.cjs",
     "test": "npm run smoke && npm run test:e2e",
-    "prepack": ": > pkg-web/.npmignore",
+    "prepack": "node stage-wasm.cjs node && node stage-wasm.cjs web",
     "check:pack": "node check-pack.cjs"
   },
   "license": "Apache-2.0",
@@ -23,6 +23,7 @@
     "worker_attachment_gateway.js",
     "worker/",
     "sw/",
+    "pkg-node/",
     "pkg-web/",
     "README.md"
   ],
