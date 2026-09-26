@@ -252,13 +252,13 @@ git-init: ## Initialize git (idempotent) + initial commit.
 # Playbook (agent-native visual-plan MDX -> standalone HTML).
 # Edit plan.mdx, then `make playbook` regenerates playbook.html and opens it.
 # Self-contained: Mermaid via CDN, real tables/callouts — no Plan UI bridge,
-# no auth, no Chrome PNA gate. Override the plan dir: PLAYBOOK_DIR=plans/<slug>.
+# no auth, no Chrome PNA gate. Override the guide dir: PLAYBOOK_DIR=docs/guides/<slug>.
 # render-playbook.py is a GENERIC agent-native plan.mdx renderer (stdlib-only;
 # kept byte-identical with applications/p2/scripts/render-playbook.py): Mermaid,
 # Code, Table, Callout, Checklist, QuestionForm, FileTree, TabsBlock,
 # AnnotatedCode, Diagram, Columns + markdown. See its header docstring for limits.
 # ----------------------------------------------------------------------------
-PLAYBOOK_DIR ?= plans/nostos-supabase-realtime
+PLAYBOOK_DIR ?= docs/guides/supabase-realtime
 
 .PHONY: playbook
 playbook: ## Render the playbook (plan.mdx -> playbook.html) and open it in the browser.
