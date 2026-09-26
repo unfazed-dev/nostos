@@ -170,4 +170,6 @@ NostosConnectionState _mapState(
   rust.NostosConnectionState.connected => NostosConnectionState.connected,
   rust.NostosConnectionState.reconnecting => NostosConnectionState.reconnecting,
   rust.NostosConnectionState.disconnected => NostosConnectionState.disconnected,
+  rust.NostosConnectionState.accessRevoked =>
+    NostosConnectionState.accessRevoked,
 };

@@ -1,4 +1,5 @@
 //! Appwrite Cloud direct transport over the shared Nostos SQLite engine.
+//! ADR-0050: a revoked account must immediately invalidate every watcher.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -119,6 +120,11 @@ impl NostosAppwriteHandle {
                         let _ = state_sink.add(NostosConnectionState::Connected);
                     }
                     Err(error) => {
+                        if error.is_account_inactive() {
+                            let _ = changes.send(());
+                            let _ = state_sink.add(NostosConnectionState::AccessRevoked);
+                            break;
+                        }
                         eprintln!("nostos appwrite: sync failed: {error}");
                         let _ = state_sink.add(NostosConnectionState::Reconnecting);
                     }
@@ -141,7 +147,15 @@ impl NostosAppwriteHandle {
 
     pub async fn sync_now(&self) -> Result<u64, String> {
         let bootstrap = self.client.needs_bootstrap();
-        let outcome = self.client.sync().await.map_err(|e| e.to_string())?;
+        let outcome = match self.client.sync().await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if error.is_account_inactive() {
+                    let _ = self.changes.send(());
+                }
+                return Err(error.to_string());
+            }
+        };
         if bootstrap || outcome.resnapshotted || outcome.rows_applied > 0 || outcome.pushed > 0 {
             let _ = self.changes.send(());
         }

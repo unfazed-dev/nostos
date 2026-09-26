@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:atlet/adapters/nostos_adapter.dart';
 import 'package:atlet/cloud_auth.dart';
 import 'package:atlet/main.dart' as app;
+import 'package:atlet/push/order_push.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -133,6 +134,7 @@ void main() {
         )
         .timeout(const Duration(seconds: 30));
     await _drain(tester, fulfiller);
+    await _expectForegroundBanner(tester, fulfiller, order.id, 'shipped');
     await _waitFor(tester, find.byKey(Key('admin-deliver-${order.id}')));
     await tester.tap(find.byKey(Key('admin-deliver-${order.id}')));
     await fulfiller
@@ -144,6 +146,7 @@ void main() {
         )
         .timeout(const Duration(seconds: 30));
     await _drain(tester, fulfiller);
+    await _expectForegroundBanner(tester, fulfiller, order.id, 'delivered');
     await fulfiller.deleteProduct(productId);
     await _drain(tester, fulfiller);
     await _signOut(tester);
@@ -184,10 +187,36 @@ void main() {
       isFalse,
     );
     debugPrint(
-      'ATLET_EVIDENCE:${jsonEncode({'order_id': order.id, 'order_events': events.where((row) => row.orderId == order.id).length, 'customer_b_isolated': true, 'pending_writes': await isolated.durablePendingWrites()})}',
+      'ATLET_EVIDENCE:${jsonEncode({'order_id': order.id, 'order_events': events.where((row) => row.orderId == order.id).length, 'foreground_banners': events.where((row) => row.orderId == order.id && attemptsFor(pushLog.value, row.id).any((attempt) => attempt.error == null)).length, 'customer_b_isolated': true, 'pending_writes': await isolated.durablePendingWrites()})}',
     );
     await _signOut(tester);
   });
+}
+
+Future<void> _expectForegroundBanner(
+  WidgetTester tester,
+  NostosAdapter adapter,
+  String orderId,
+  String status,
+) async {
+  final rows = await adapter.watchOrderEvents().firstWhere(
+    (events) => events.any(
+      (event) => event.orderId == orderId && event.status == status,
+    ),
+  );
+  final event = rows.singleWhere(
+    (row) => row.orderId == orderId && row.status == status,
+  );
+  for (var attempt = 0; attempt < 40; attempt++) {
+    final posts = attemptsFor(pushLog.value, event.id);
+    if (posts.isNotEmpty) {
+      expect(posts.first.error, isNull);
+      expect(posts.first.channel, 'snackbar');
+      return;
+    }
+    await tester.pump(const Duration(milliseconds: 250));
+  }
+  fail('No foreground banner was posted for $status');
 }
 
 Future<NostosAdapter> _login(

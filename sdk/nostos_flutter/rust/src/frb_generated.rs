@@ -3257,6 +3257,7 @@ impl SseDecode for crate::api::nostos::NostosConnectionState {
             1 => crate::api::nostos::NostosConnectionState::Connected,
             2 => crate::api::nostos::NostosConnectionState::Reconnecting,
             3 => crate::api::nostos::NostosConnectionState::Disconnected,
+            4 => crate::api::nostos::NostosConnectionState::AccessRevoked,
             _ => unreachable!("Invalid variant for NostosConnectionState: {}", inner),
         };
     }
@@ -3694,6 +3695,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::nostos::NostosConnectionState
             Self::Connected => 1.into_dart(),
             Self::Reconnecting => 2.into_dart(),
             Self::Disconnected => 3.into_dart(),
+            Self::AccessRevoked => 4.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -3986,6 +3988,7 @@ impl SseEncode for crate::api::nostos::NostosConnectionState {
                 crate::api::nostos::NostosConnectionState::Connected => 1,
                 crate::api::nostos::NostosConnectionState::Reconnecting => 2,
                 crate::api::nostos::NostosConnectionState::Disconnected => 3,
+                crate::api::nostos::NostosConnectionState::AccessRevoked => 4,
                 _ => {
                     unimplemented!("");
                 }

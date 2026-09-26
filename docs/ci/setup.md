@@ -24,7 +24,10 @@ visual flows against the ADS demo project. Its repository secret
 `ATLET_APPWRITE_CREDENTIALS` contains the mode-0600 `.env.cloud` file for the
 three dedicated demo accounts. The job fails when the secret is unavailable,
 including fork PRs; a maintainer must move reviewed fork changes to an internal
-branch before merging. The job uploads credential-free JSON results. Locally,
+branch before merging. It serializes every PR's use of the shared accounts;
+repository fixtures use random IDs, while the user-disable check necessarily
+uses a real fixed account. Do not run the local cloud check during a CI cloud
+run. The job uploads credential-free JSON results. Locally,
 run `scripts/check.sh atlet-cloud` with the ignored credentials file present.
 
 ## Once per clone
@@ -47,7 +50,8 @@ fresh clone needs this once. All worktrees of a clone share it.
 3. `scripts/check.sh <area>` for what you touched, or `make check` for
    everything. Each area runs the steps of the CI job with the same name, so
    local green = CI green. An area whose toolchain is missing is skipped green
-   with a note (row 4). CI always has the toolchains.
+   with a note (row 4), except `atlet-cloud`, which fails if its toolchains
+   or credentials are absent. CI always has the toolchains.
 4. `git push -u origin <task>`.
 5. `gh pr create`. The title is `[arxa-<skill>] <what changed>` (tag map in
    `decisions.md`). The body comes from `.github/pull_request_template.md`.

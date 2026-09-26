@@ -1,4 +1,4 @@
-//! Appwrite's commit-sequence cursor, shared by native and WASM clients.
+//! Appwrite's commit-sequence cursor, shared by native and WASM clients (ADR-0050).
 //!
 //! A private page can contain zero visible rows while its scanned sequence
 //! advances. The Supabase `PullCursor` needs a row to carry its horizon; this

@@ -44,7 +44,7 @@ class NostosAdapter implements SyncAdapter {
             dbDir: dbDir,
           ));
 
-  /// Direct mode through the Appwrite Cloud sync Function.
+  /// Direct mode through the Appwrite Cloud sync Function (ADR-0050).
   NostosAdapter.appwrite({required String projectId})
     : engine = 'nostos-appwrite',
       _appwrite = true,
@@ -120,6 +120,8 @@ class NostosAdapter implements SyncAdapter {
   StreamController<List<ProductRow>>? _productsController;
   StreamController<List<UserProfileRow>>? _userProfilesController;
   StreamController<bool>? _connectedController;
+  StreamController<bool>? _accessRevokedController;
+  bool _accessWasRevoked = false;
 
   // Latest values, replayed to late subscribers via replayLatest (see
   // sync_adapter.dart for the full failure mode: broadcast controllers do
@@ -178,6 +180,10 @@ class NostosAdapter implements SyncAdapter {
     _ordersController = StreamController<List<OrderRow>>.broadcast();
     _orderEventsController = StreamController<List<OrderEventRow>>.broadcast();
     _connectedController = StreamController<bool>.broadcast();
+    _accessWasRevoked = false;
+    if (_appwrite) {
+      _accessRevokedController = StreamController<bool>.broadcast();
+    }
 
     final db = await _open(
       supabaseUrl: supabaseUrl,
@@ -193,10 +199,17 @@ class NostosAdapter implements SyncAdapter {
     // subscribeTables() can miss the very first `connected` transition that
     // fires synchronously inside it, so `connected` would never emit true
     // until the next disconnect/resume cycle. See wireConnectionState below.
-    _connSub = wireConnectionState(db.connectionState, (isConnected) {
-      _lastConnected = isConnected;
-      _connectedController?.add(isConnected);
-    });
+    _connSub = wireConnectionState(
+      db.connectionState,
+      (isConnected) {
+        _lastConnected = isConnected;
+        _connectedController?.add(isConnected);
+      },
+      onAccessRevoked: () {
+        _accessWasRevoked = true;
+        _accessRevokedController?.add(true);
+      },
+    );
 
     await db.subscribeTables([
       const NostosTableSub(name: 'sessions'),
@@ -468,6 +481,16 @@ class NostosAdapter implements SyncAdapter {
     () => _lastConnected,
   );
 
+  /// The Appwrite Function rejected this account as inactive; native SQLite
+  /// rows and outbox have already been wiped (ADR-0050).
+  Stream<bool> get accessRevoked => replayLatest(
+    _requireController(
+      _accessRevokedController,
+      'Appwrite accessRevoked before init()',
+    ),
+    () => _accessWasRevoked,
+  );
+
   @override
   Future<void> setConnected(bool up) async {
     // Startup race guard: the connectivity guard fires its initial platform
@@ -532,6 +555,7 @@ class NostosAdapter implements SyncAdapter {
     await _ordersController?.close();
     await _orderEventsController?.close();
     await _connectedController?.close();
+    await _accessRevokedController?.close();
     _sessionsController = null;
     _productsController = null;
     _userProfilesController = null;
@@ -539,6 +563,8 @@ class NostosAdapter implements SyncAdapter {
     _ordersController = null;
     _orderEventsController = null;
     _connectedController = null;
+    _accessRevokedController = null;
+    _accessWasRevoked = false;
     _lastSessions = null;
     _lastProducts = null;
     _lastUserProfiles = null;
@@ -615,9 +641,11 @@ class NostosAdapter implements SyncAdapter {
 /// attaches afterward.
 StreamSubscription<NostosConnectionState> wireConnectionState(
   Stream<NostosConnectionState> connectionState,
-  void Function(bool isConnected) onConnected,
-) => connectionState.listen((state) {
+  void Function(bool isConnected) onConnected, {
+  void Function()? onAccessRevoked,
+}) => connectionState.listen((state) {
   onConnected(state == NostosConnectionState.connected);
+  if (state == NostosConnectionState.accessRevoked) onAccessRevoked?.call();
 });
 
 /// Opens Atlet's direct-mode database. Shared by

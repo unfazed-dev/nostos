@@ -69,7 +69,7 @@ Future<void> main() async {
   }
   // Firebase is the mobile rail only. On web the pilot uses raw Web Push
   // (push_pilot_web.dart) — no Firebase init, no web config to throw on.
-  if (_pushPilotEnabled && !kIsWeb) {
+  if (_pushPilotEnabled && !usesAppwrite && !kIsWeb) {
     // Platform config (google-services.json / GoogleService-Info.plist) —
     // throws here when absent, which is the point of the opt-in flag.
     await Firebase.initializeApp();
@@ -247,6 +247,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _tabIndex = 0;
   bool _isAdmin = false;
+  bool _accessRevoked = false;
+  String? _sessionUserId;
+  StreamSubscription<List<UserProfileRow>>? _profileRoleSub;
+  StreamSubscription<bool>? _accessRevokedSub;
   String? _engineStartError;
   Future<BenchStore>? _benchStoreFuture;
   ConnectivityGuard? _connectivityGuard;
@@ -328,6 +332,10 @@ class _HomeScreenState extends State<HomeScreen> {
     _orderBannerSub = null;
     _authSub?.cancel();
     _authSub = null;
+    _profileRoleSub?.cancel();
+    _profileRoleSub = null;
+    _accessRevokedSub?.cancel();
+    _accessRevokedSub = null;
     _jwtRefreshTimer?.cancel();
     _jwtRefreshTimer = null;
     super.dispose();
@@ -369,9 +377,13 @@ class _HomeScreenState extends State<HomeScreen> {
       'order banner: ${e.orderId.substring(0, 8)} '
       '${e.previousStatus} -> ${e.status} route=${historyRoute(e.id)}',
     );
-    if (!postsOwnBanner(pushPilot: _pushPilotEnabled, web: kIsWeb)) return;
-    // Web has no MethodChannel: the snackbar IS the foreground banner.
-    if (kIsWeb) {
+    if (!usesAppwrite &&
+        !postsOwnBanner(pushPilot: _pushPilotEnabled, web: kIsWeb)) {
+      return;
+    }
+    // Web and macOS show an in-app foreground banner. The native notification
+    // channel is implemented by iOS and Android; macOS has no channel handler.
+    if (kIsWeb || Platform.isMacOS) {
       _notify(payload['body']! as String);
       recordPushAttempt(
         PushAttempt(
@@ -425,6 +437,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (session == null) return; // signed out — sign-in re-enters Home
     _isAdmin = session.isAdmin;
+    _sessionUserId = session.userId;
     try {
       // path_provider has no web impl; the web engine's storage is
       // OPFS-backed and ignores sqlitePath (ADR-0036), so dbDir is an
@@ -442,6 +455,8 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
       final nostos = adapter as NostosAdapter;
+      _engineStartError = null;
+      if (usesAppwrite) _watchAppwriteAccess(nostos);
       // The order banner is pure sync — it reads watchOrders() and posts a
       // local notification. It was gated behind the FCM pilot, which meant a
       // default build showed the user nothing when their order shipped.
@@ -479,7 +494,6 @@ class _HomeScreenState extends State<HomeScreen> {
       if (_pushPilotEnabled && !usesAppwrite) {
         unawaited(pushPilot.attach(nostos));
       }
-      _engineStartError = null;
     } catch (e) {
       // Configuration failures need a persistent visible surface; a quiet
       // debug log leaves a signed-in user looking at empty tabs forever.
@@ -489,18 +503,70 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setState(() {}); // hand the live adapter to the tabs
   }
 
+  /// ADR-0050: the Function's current scope controls which profile rows can
+  /// reach this device. Re-read the Appwrite team after each scope-driven
+  /// profile update so the visible Admin tab follows promotion or demotion.
+  void _watchAppwriteAccess(NostosAdapter nostos) {
+    _profileRoleSub?.cancel();
+    _accessRevokedSub?.cancel();
+    _accessRevokedSub = nostos.accessRevoked.listen((revoked) {
+      if (!mounted || !revoked) return;
+      _jwtRefreshTimer?.cancel();
+      _jwtRefreshTimer = null;
+      setState(() {
+        _accessRevoked = true;
+        _isAdmin = false;
+        _tabIndex = 0;
+        _engineStartError = 'Account access revoked. Sign out to continue.';
+      });
+    });
+    _profileRoleSub = nostos.watchUserProfiles().listen((profiles) {
+      final own = profiles
+          .where((profile) => profile.id == _sessionUserId)
+          .firstOrNull;
+      if (own == null) return;
+      unawaited(_refreshAppwriteRole());
+    });
+  }
+
+  Future<void> _refreshAppwriteRole() async {
+    try {
+      final session = await AtletCloudAuth.instance.session();
+      if (!mounted ||
+          _accessRevoked ||
+          session == null ||
+          session.userId != _sessionUserId) {
+        return;
+      }
+      if (_isAdmin != session.isAdmin) {
+        setState(() {
+          _isAdmin = session.isAdmin;
+          if (!_isAdmin && _tabIndex == 3) _tabIndex = 0;
+        });
+      }
+    } catch (error) {
+      debugPrint('Appwrite role refresh failed: $error');
+    }
+  }
+
   /// Sign out: doorbell off, engine down (local DB wiped), Supabase session
   /// gone, back to the sign-in route. Order matters — the push pilot and the
   /// auth listener both hold the adapter, so they let go before it does.
   Future<void> _signOut() async {
     await _authSub?.cancel();
     _authSub = null;
+    await _profileRoleSub?.cancel();
+    _profileRoleSub = null;
+    await _accessRevokedSub?.cancel();
+    _accessRevokedSub = null;
     _jwtRefreshTimer?.cancel();
     _jwtRefreshTimer = null;
     if (_pushPilotEnabled && !usesAppwrite) await pushPilot.detach();
     await engineRegistry.stop();
     await AtletCloudAuth.instance.signOut();
     _isAdmin = false;
+    _sessionUserId = null;
+    _accessRevoked = false;
     if (mounted) Navigator.of(context).pushReplacementNamed('/signin');
   }
 
@@ -587,6 +653,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildHistoryTab(BuildContext context) {
+    if (usesAppwrite) {
+      return HistoryScreen(
+        events: engineRegistry.current?.watchOrderEvents() ?? _noOrderEvents(),
+      );
+    }
     return FutureBuilder<BenchStore>(
       future: _benchStore(),
       builder: (context, snapshot) {
@@ -629,7 +700,10 @@ class _HomeScreenState extends State<HomeScreen> {
               key: const Key('engine-start-error'),
               content: Text(_engineStartError!),
               actions: [
-                TextButton(onPressed: _startEngine, child: const Text('Retry')),
+                TextButton(
+                  onPressed: _accessRevoked ? _signOut : _startEngine,
+                  child: Text(_accessRevoked ? 'Sign out' : 'Retry'),
+                ),
               ],
             ),
           // Offline banner removed — the AppBar ConnectivityLed carries the

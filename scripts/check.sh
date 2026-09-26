@@ -54,11 +54,18 @@ area_appwrite_function() {
 }
 
 area_atlet_cloud() {
-  need atlet-cloud cargo flutter || return 0
+  local tool
+  for tool in cargo flutter; do
+    command -v "$tool" >/dev/null 2>&1 || {
+      echo "atlet-cloud: $tool is required" >&2
+      return 1
+    }
+  done
   [[ -f apps/atlet/.env.cloud ]] || {
     echo 'atlet-cloud: apps/atlet/.env.cloud is required' >&2
     return 1
   }
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role customer_b --scenario revoked
   cargo run --locked -q -p atlet-harness --bin appwrite_smoke -- --users-workflow
   cargo run --locked -q -p atlet-harness --bin appwrite_native_smoke
   cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role admin

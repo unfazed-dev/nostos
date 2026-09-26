@@ -1,4 +1,4 @@
-//! Hosted Appwrite transport for the Atlet Nostos direct mode.
+//! Hosted Appwrite transport for the Atlet Nostos direct mode (ADR-0050).
 
 mod api;
 

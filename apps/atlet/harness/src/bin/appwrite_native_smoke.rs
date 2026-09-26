@@ -136,6 +136,57 @@ async fn main() -> Result<()> {
     assert_session(&client, &session_id, false)?;
     tokio::try_join!(second_a.sync(), buyer_b.sync(), admin_client.sync())?;
     assert_session(&second_a, &session_id, false)?;
+    let revoked_id = format!("s{}", Uuid::new_v4().simple());
+    buyer_b.write_batch(&[PendingWrite {
+        table: "sessions".into(),
+        op: WriteOp::Upsert,
+        pk: revoked_id.clone(),
+        payload_json: Some(
+            json!({
+                "id":revoked_id,"title":"Revocation cache check","type":"reps",
+                "metric":1,"unit":"reps","streak":1,"occurred_on":"2026-09-26"
+            })
+            .to_string(),
+        ),
+    }])?;
+    buyer_b.sync().await.context("seed B private cache")?;
+    assert_session(&buyer_b, &revoked_id, true)?;
+    admin_client.write_batch(&[PendingWrite {
+        table: "user_profiles".into(),
+        op: WriteOp::Upsert,
+        pk: "atlet_user_b_demo".into(),
+        payload_json: Some(json!({"active":false}).to_string()),
+    }])?;
+    admin_client.sync().await.context("disable B")?;
+    let denied = buyer_b.sync().await;
+    // Restore the shared demo account even if the expected rejection fails.
+    admin_client.write_batch(&[PendingWrite {
+        table: "user_profiles".into(),
+        op: WriteOp::Upsert,
+        pk: "atlet_user_b_demo".into(),
+        payload_json: Some(json!({"active":true}).to_string()),
+    }])?;
+    admin_client.sync().await.context("reactivate B")?;
+    if !denied.is_err_and(|error| error.is_account_inactive()) {
+        bail!("disabled customer did not get the explicit inactive response");
+    }
+    assert_session(&buyer_b, &revoked_id, false)?;
+    if pending(&buyer_b)? != 0 || !buyer_b.needs_bootstrap() {
+        bail!("disabled customer's local state was not reset");
+    }
+    buyer_b.set_user("atlet_user_b_demo", &user_b).await?;
+    buyer_b.sync().await.context("reactivated B bootstrap")?;
+    assert_session(&buyer_b, &revoked_id, true)?;
+    buyer_b.write_batch(&[PendingWrite {
+        table: "sessions".into(),
+        op: WriteOp::Delete,
+        pk: revoked_id.clone(),
+        payload_json: None,
+    }])?;
+    buyer_b
+        .sync()
+        .await
+        .context("cleanup B revocation fixture")?;
     client.sign_out().await?;
     second_a.sign_out().await?;
     buyer_b.sign_out().await?;
@@ -154,7 +205,7 @@ async fn main() -> Result<()> {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
     }
-    println!("Appwrite native smoke: offline SQLite reopen, concurrent four-device convergence, private isolation, replay, cleanup passed");
+    println!("Appwrite native smoke: offline reopen, four-device convergence, private isolation, disabled-user cache wipe, cleanup passed");
     Ok(())
 }
 

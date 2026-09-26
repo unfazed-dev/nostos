@@ -42,14 +42,21 @@ are committed together when an arbitrary client writes directly.
 3. Pull responses include `head` and `scanned_through` decimal strings, plus
    the verified principal ID and current admin/customer access scope. A scope
    change clears cached rows and restarts the pull from zero. The
-   Function filters private rows; the client advances past scanned hidden
-   entries only after visible rows apply and its cursor saves. Realtime and
+   Function filters private rows; an explicit inactive-profile rejection wipes
+   the local cache and outbox before returning an error. The Flutter bridge
+   surfaces a distinct access-revoked state so even a first-sync rejection
+   presents a sign-out path. The client advances
+   past scanned hidden entries only after visible rows apply and its cursor
+   saves. Realtime and
    push may wake the client, but neither is the source of truth.
 4. Nostos's Rust apply engine and SQLite outbox remain the client data path.
    Appwrite direct has a distinct transport and cursor because Supabase's
    transaction horizon cannot represent a filtered Appwrite page with no
-   visible rows. Provider data uses separate local storage. Sign-out clears
-   the Appwrite local state.
+   visible rows. Provider data uses separate local storage. The stored
+   principal includes endpoint, project, Function, user, and role; changing
+   any cloud identity wipes old rows and outbox. Sign-out clears local state.
+   Pre-release test installs that stored the earlier user-only principal
+   reset on first open; drain their pending test writes before upgrading.
 5. Numbered, immutable JSON migrations in `apps/atlet/appwrite/migrations/`
    define the cloud schema. A Rust runner checks their hashes in
    `schema_migrations` before applying missing steps. Cloud smoke runners are

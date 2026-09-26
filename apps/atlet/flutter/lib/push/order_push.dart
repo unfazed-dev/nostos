@@ -64,8 +64,8 @@ class PushAttempt {
   final String eventId;
   final DateTime at;
 
-  /// `local-banner` (platform notification), `snackbar` (web has no
-  /// MethodChannel), or `fcm` (a real push came back through the app).
+  /// `local-banner` (iOS/Android notification), `snackbar` (web/macOS
+  /// foreground UI), or `fcm` (a real push came back through the app).
   final String channel;
   final Map<String, Object?> payload;
 

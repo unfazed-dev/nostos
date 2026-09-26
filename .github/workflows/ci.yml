@@ -77,6 +77,12 @@ jobs:
     name: Atlet Appwrite Cloud — multi-user visual sync
     runs-on: macos-latest
     timeout-minutes: 60
+    # The three real demo accounts are shared by this suite. Serialize all PR
+    # runs, including the brief disable/reactivate permission check.
+    concurrency:
+      group: atlet-appwrite-cloud-accounts
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2

@@ -54,6 +54,23 @@ void main() {
       await sub.cancel();
       await controller.close();
     });
+
+    test('inactive Appwrite account emits a distinct revoked state', () async {
+      final controller = StreamController<NostosConnectionState>.broadcast();
+      final connected = <bool>[];
+      var revoked = 0;
+      final sub = wireConnectionState(
+        controller.stream,
+        connected.add,
+        onAccessRevoked: () => revoked++,
+      );
+      controller.add(NostosConnectionState.accessRevoked);
+      await Future<void>.delayed(Duration.zero);
+      expect(connected, [false]);
+      expect(revoked, 1);
+      await sub.cancel();
+      await controller.close();
+    });
   });
 
   group('sessionFromRow', () {

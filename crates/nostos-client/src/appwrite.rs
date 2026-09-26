@@ -1,4 +1,5 @@
 //! Native Appwrite Function transport over the Nostos SQLite apply/outbox core.
+//! ADR-0050 defines this project's journal, scope, and local wipe rules.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,6 +50,12 @@ pub enum AppwriteSyncError {
 }
 
 impl AppwriteSyncError {
+    /// The Function explicitly revoked this profile. Other 403 responses can
+    /// reject one mutation without revoking the whole session.
+    #[must_use]
+    pub fn is_account_inactive(&self) -> bool {
+        matches!(self, Self::Status { status: 403, body } if body == "account inactive")
+    }
     /// Whether another attempt with the same outbox entry cannot succeed.
     #[must_use]
     pub fn is_permanent(&self) -> bool {
@@ -155,19 +162,31 @@ impl AppwriteDirectClient {
         let mut engine = self.engine.lock().expect("appwrite: engine mutex poisoned");
         let storage = engine.storage_mut();
         let stored_principal = storage.principal()?;
-        let stored_user = stored_principal
-            .as_deref()
-            .and_then(|principal| principal.split('|').next());
-        if stored_user != Some(user_id) {
+        let unscoped = self.local_principal(user_id, None);
+        let scoped_admin = self.local_principal(user_id, Some("admin"));
+        let scoped_customer = self.local_principal(user_id, Some("customer"));
+        if !matches!(stored_principal.as_deref(), Some(raw) if raw == unscoped || raw == scoped_admin || raw == scoped_customer)
+        {
             Storage::clear(storage)?;
             *self.cursor.lock().expect("appwrite: cursor mutex poisoned") = AppwriteCursor::fresh();
             self.first_sync_done
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            storage.save_principal(user_id)?;
+            storage.save_principal(&unscoped)?;
         }
         *self.user_id.lock().expect("appwrite: user mutex poisoned") = Some(user_id.into());
         *self.token.lock().expect("appwrite: token mutex poisoned") = Some(jwt.into());
         Ok(())
+    }
+
+    fn local_principal(&self, user_id: &str, role: Option<&str>) -> String {
+        serde_json::to_string(&json!([
+            self.endpoint,
+            self.project_id,
+            self.function_id,
+            user_id,
+            role
+        ]))
+        .expect("Appwrite principal contains only strings")
     }
 
     /// Compare the Function's current role with the cache scope before apply.
@@ -193,12 +212,13 @@ impl AppwriteDirectClient {
                 "JWT user differs from local user".into(),
             ));
         }
-        let scoped = format!("{server_user}|{access_scope}");
+        let scoped = self.local_principal(server_user, Some(access_scope));
+        let unscoped = self.local_principal(server_user, None);
         let stored = storage.principal()?;
         if stored.as_deref() == Some(&scoped) {
             return Ok(false);
         }
-        if stored.as_deref() == Some(server_user) && storage.horizon()?.is_none() {
+        if stored.as_deref() == Some(&unscoped) && storage.horizon()?.is_none() {
             // A new user may queue writes offline before the first cloud pull.
             // No cloud rows exist yet, so add the role without dropping them.
             storage.save_principal(&scoped)?;
@@ -229,7 +249,13 @@ impl AppwriteDirectClient {
     /// Returns a SQLite error if the wipe cannot commit.
     pub async fn sign_out(&self) -> Result<(), AppwriteSyncError> {
         let _guard = self.sync_lock.lock().await;
+        self.clear_session_locked()?;
+        Ok(())
+    }
+
+    fn clear_session_locked(&self) -> Result<(), AppwriteSyncError> {
         *self.token.lock().expect("appwrite: token mutex poisoned") = None;
+        *self.user_id.lock().expect("appwrite: user mutex poisoned") = None;
         Storage::clear(
             self.engine
                 .lock()
@@ -248,6 +274,14 @@ impl AppwriteDirectClient {
     /// Returns an outbox storage error.
     pub fn write_batch(&self, writes: &[PendingWrite]) -> Result<Vec<u64>, AppwriteSyncError> {
         let mut engine = self.engine.lock().expect("appwrite: engine mutex poisoned");
+        if self
+            .user_id
+            .lock()
+            .expect("appwrite: user mutex poisoned")
+            .is_none()
+        {
+            return Err(AppwriteSyncError::Unsigned);
+        }
         let ids = engine.storage_mut().enqueue_batch(writes.to_vec())?;
         for write in writes {
             if let Err(error) = engine.storage_mut().apply_local(write) {
@@ -270,7 +304,13 @@ impl AppwriteDirectClient {
             .expect("appwrite: token mutex poisoned")
             .clone()
             .ok_or(AppwriteSyncError::Unsigned)?;
-        let pushed = self.push_pending(&token).await?;
+        let pushed = match self.push_pending(&token).await {
+            Err(error) if error.is_account_inactive() => {
+                self.clear_session_locked()?;
+                return Err(error);
+            }
+            result => result?,
+        };
         let mut rows_applied = 0;
         let mut resnapshotted = false;
         for _ in 0..MAX_PAGES_PER_SYNC {
@@ -279,13 +319,20 @@ impl AppwriteDirectClient {
                 .lock()
                 .expect("appwrite: cursor mutex poisoned")
                 .after();
-            let body = self
+            let response = self
                 .call(
                     &token,
                     "/sync/pull",
                     &json!({"after":after.to_string(),"limit":PAGE_SIZE}),
                 )
-                .await?;
+                .await;
+            let body = match response {
+                Err(error) if error.is_account_inactive() => {
+                    self.clear_session_locked()?;
+                    return Err(error);
+                }
+                result => result?,
+            };
             let server_user = body["principal_id"]
                 .as_str()
                 .ok_or_else(|| AppwriteSyncError::Protocol("pull omitted principal".into()))?;
@@ -354,6 +401,7 @@ impl AppwriteDirectClient {
                         .mark_done(id)?;
                     pushed += 1;
                 }
+                Err(error) if error.is_account_inactive() => return Err(error),
                 Err(error) if error.is_permanent() => {
                     self.engine
                         .lock()
@@ -451,7 +499,7 @@ fn bounded_message(value: &Value) -> String {
 mod tests {
     use nostos_core::{Outbox, PendingWrite, Storage, WriteOp};
 
-    use super::{AppwriteDirectClient, SqliteStorage};
+    use super::{AppwriteDirectClient, AppwriteSyncError, SqliteStorage};
 
     #[tokio::test]
     async fn switching_user_before_first_pull_discards_private_offline_writes() {
@@ -477,7 +525,7 @@ mod tests {
         assert!(engine.storage().pending().unwrap().is_empty());
         assert_eq!(
             engine.storage().principal().unwrap().as_deref(),
-            Some("bob")
+            Some(client.local_principal("bob", None).as_str())
         );
     }
 
@@ -516,7 +564,137 @@ mod tests {
         assert!(engine.storage().pending().unwrap().is_empty());
         assert_eq!(
             engine.storage().principal().unwrap().as_deref(),
-            Some("alice|customer")
+            Some(client.local_principal("alice", Some("customer")).as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn project_or_endpoint_change_wipes_previous_projects_private_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "appwrite-principal-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let first = AppwriteDirectClient::new(
+            "https://one.invalid/v1",
+            "one",
+            "function",
+            SqliteStorage::open(path.to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        first.set_user("alice", "jwt-a").await.unwrap();
+        first
+            .write_batch(&[PendingWrite {
+                table: "sessions".into(),
+                op: WriteOp::Upsert,
+                pk: "private".into(),
+                payload_json: Some(r#"{"title":"Alice"}"#.into()),
+            }])
+            .unwrap();
+        drop(first);
+        // Reopen the same SQLite file with a different cloud identity.
+        let second = AppwriteDirectClient::new(
+            "https://one.invalid/v1",
+            "two",
+            "function",
+            SqliteStorage::open(path.to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        second.set_user("alice", "jwt-b").await.unwrap();
+        assert!(second
+            .engine
+            .lock()
+            .unwrap()
+            .storage()
+            .pending()
+            .unwrap()
+            .is_empty());
+        assert!(second
+            .engine
+            .lock()
+            .unwrap()
+            .storage()
+            .rows_for("sessions")
+            .unwrap()
+            .is_empty());
+        assert!(second.needs_bootstrap());
+        second
+            .write_batch(&[PendingWrite {
+                table: "sessions".into(),
+                op: WriteOp::Upsert,
+                pk: "new-private".into(),
+                payload_json: Some(r#"{"title":"New project"}"#.into()),
+            }])
+            .unwrap();
+        drop(second);
+        let third = AppwriteDirectClient::new(
+            "https://two.invalid/v1",
+            "two",
+            "function",
+            SqliteStorage::open(path.to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        third.set_user("alice", "jwt-c").await.unwrap();
+        assert!(third
+            .engine
+            .lock()
+            .unwrap()
+            .storage()
+            .pending()
+            .unwrap()
+            .is_empty());
+        drop(third);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_session_wipes_cache_and_rejects_stale_writes() {
+        let client = AppwriteDirectClient::new(
+            "https://example.invalid/v1",
+            "project",
+            "function",
+            SqliteStorage::open_in_memory().unwrap(),
+        )
+        .unwrap();
+        client.set_user("alice", "jwt-a").await.unwrap();
+        let write = PendingWrite {
+            table: "sessions".into(),
+            op: WriteOp::Upsert,
+            pk: "private".into(),
+            payload_json: Some(r#"{"title":"Alice"}"#.into()),
+        };
+        client.write_batch(std::slice::from_ref(&write)).unwrap();
+        let rejected = AppwriteSyncError::Status {
+            status: 403,
+            body: "account inactive".into(),
+        };
+        assert!(rejected.is_account_inactive());
+        client.clear_session_locked().unwrap();
+        assert!(client
+            .engine
+            .lock()
+            .unwrap()
+            .storage()
+            .pending()
+            .unwrap()
+            .is_empty());
+        assert!(client
+            .engine
+            .lock()
+            .unwrap()
+            .storage()
+            .principal()
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            client.write_batch(&[write]),
+            Err(AppwriteSyncError::Unsigned)
+        ));
+        assert!(!AppwriteSyncError::Status {
+            status: 403,
+            body: "forbidden".into()
+        }
+        .is_account_inactive());
     }
 }
