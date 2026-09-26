@@ -28,7 +28,11 @@ ADR, ROADMAP, RESULTS, code, CI or a script cites stay, even when DONE or SUPERS
 **Cleanup 2026-09-26:** the Supabase Realtime adopter playbook moved from the
 stray top-level `plans/` directory to `docs/guides/supabase-realtime/`, with
 the `make playbook` target updated. Cited historical plans stay until their
-references can be revised safely; broader pruning awaits an agreed keep list.
+references can be revised safely. A filename-reference scan found 42 of the
+46 preexisting plans cited elsewhere. The four uncited files cover a draft
+Atlet wave, unresolved code audit, pending field leg, and AI roadmap; none
+is a safe deletion based on citation alone. Broader pruning awaits an agreed
+keep list and reference cleanup.
 
 The **Basis** column is deliberate: `verified` means established from the repo or a run this
 session; `inferred` means read off the plan's own header or cross-referenced but not

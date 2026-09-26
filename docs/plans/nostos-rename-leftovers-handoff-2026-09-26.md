@@ -30,7 +30,10 @@ Sources read: `docs/plans/nostos-rename-research-2026-09-24.md` §8,
   prefix and is idempotent. `make ci` passed.
 - #2: the adopter playbook moved to `docs/guides/`. The qairn rename inventory
   and sync-scoping research are still cited by other plans, so they remain;
-  broader pruning awaits the keep-list decision.
+  a filename-reference scan found 42 of 46 preexisting plans cited elsewhere.
+  The four uncited plans are a draft Atlet wave, unresolved code audit,
+  pending field leg, and AI roadmap. Broader pruning awaits the keep-list
+  decision and reference cleanup.
 - #6: pub.dev has no `nostos_flutter` package yet; the `0.2.0` dry run passes
   with `--ignore-warnings`. Its three warnings cover two intentional exact FRB
   version pins and two tracked files ignored by Git.
