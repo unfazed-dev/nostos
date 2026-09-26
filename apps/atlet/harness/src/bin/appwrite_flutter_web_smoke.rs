@@ -28,6 +28,13 @@ struct Args {
     no_build: bool,
 }
 
+struct BrowserFixture<'a> {
+    session_title: Option<&'a str>,
+    discarded_title: Option<&'a str>,
+    product_name: Option<&'a str>,
+    order_id: Option<&'a str>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let started = Instant::now();
@@ -40,14 +47,6 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&evidence_dir)?;
     let run_id = Uuid::new_v4().simple().to_string();
     let evidence_path = evidence_dir.join(format!("appwrite-flutter-web-{run_id}.json"));
-    if args.role == "admin" {
-        finish_open_web_orders(&secrets)
-            .await
-            .context("finish prior incomplete browser demo orders")?;
-        cleanup_customer_a_cart(&secrets)
-            .await
-            .context("clear dedicated customer A demo cart before checkout")?;
-    }
     let prefix = match args.role.as_str() {
         "admin" => "ATLET_ADMIN",
         "customer_a" => "ATLET_USER_A",
@@ -81,6 +80,43 @@ async fn main() -> Result<()> {
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
             bail!("Flutter web build failed");
         }
+    }
+    let http = reqwest::Client::new();
+    let (admin_jwt, customer_a_jwt) = if args.role == "admin" {
+        let admin = sign_in(
+            &http,
+            secrets.get("APPWRITE_ENDPOINT")?,
+            secrets.get("APPWRITE_PROJECT_ID")?,
+            secrets.get("ATLET_ADMIN_EMAIL")?,
+            secrets.get("ATLET_ADMIN_PASSWORD")?,
+            "atlet_admin_demo",
+        )
+        .await?;
+        let customer_a = sign_in(
+            &http,
+            secrets.get("APPWRITE_ENDPOINT")?,
+            secrets.get("APPWRITE_PROJECT_ID")?,
+            secrets.get("ATLET_USER_A_EMAIL")?,
+            secrets.get("ATLET_USER_A_PASSWORD")?,
+            "atlet_user_a_demo",
+        )
+        .await?;
+        (Some(admin), Some(customer_a))
+    } else {
+        (None, None)
+    };
+    if args.role == "admin" {
+        finish_open_web_orders(&secrets, admin_jwt.as_deref().context("admin JWT missing")?)
+            .await
+            .context("finish prior incomplete browser demo orders")?;
+        cleanup_customer_a_cart(
+            &secrets,
+            customer_a_jwt
+                .as_deref()
+                .context("customer A JWT missing")?,
+        )
+        .await
+        .context("clear dedicated customer A demo cart before checkout")?;
     }
     let script = flutter.join("web/e2e/appwrite_cloud.cjs");
     let mut browser = Command::new("node");
@@ -117,9 +153,11 @@ async fn main() -> Result<()> {
     if args.role == "admin" {
         // Separate login sessions mint distinct valid JWTs for two same-user
         // browser tabs. They are process-only and never enter the evidence.
-        let http = reqwest::Client::new();
+        browser.env(
+            "ATLET_WEB_FOLLOWER_JWT",
+            admin_jwt.as_deref().context("admin JWT missing")?,
+        );
         for (key, account_prefix, user_id) in [
-            ("ATLET_WEB_FOLLOWER_JWT", "ATLET_ADMIN", "atlet_admin_demo"),
             ("ATLET_WEB_ROTATED_JWT", "ATLET_ADMIN", "atlet_admin_demo"),
             (
                 "ATLET_WEB_WRONG_ACCOUNT_JWT",
@@ -147,23 +185,24 @@ async fn main() -> Result<()> {
     )?;
     // A second, native Nostos device verifies the browser write reached the
     // shared cloud journal, then deletes the fixture before this run returns.
-    let session_title = browser["session_title"].as_str();
-    let discarded_title = browser["discarded_title"].as_str();
-    let product_name = browser["product_name"].as_str();
-    let order_id = browser["order_id"].as_str();
-    let cloud = if session_title.is_some()
-        || discarded_title.is_some()
-        || product_name.is_some()
-        || order_id.is_some()
+    let fixture = BrowserFixture {
+        session_title: browser["session_title"].as_str(),
+        discarded_title: browser["discarded_title"].as_str(),
+        product_name: browser["product_name"].as_str(),
+        order_id: browser["order_id"].as_str(),
+    };
+    let cloud = if fixture.session_title.is_some()
+        || fixture.discarded_title.is_some()
+        || fixture.product_name.is_some()
+        || fixture.order_id.is_some()
     {
         Some(
             verify_and_cleanup(
                 &secrets,
                 prefix,
-                session_title,
-                discarded_title,
-                product_name,
-                order_id,
+                admin_jwt.as_deref(),
+                customer_a_jwt.as_deref(),
+                &fixture,
             )
             .await,
         )
@@ -221,11 +260,16 @@ fn pubspec_version(path: &Path) -> Result<String> {
 async fn verify_and_cleanup(
     secrets: &Credentials,
     prefix: &str,
-    title: Option<&str>,
-    discarded_title: Option<&str>,
-    product_name: Option<&str>,
-    order_id: Option<&str>,
+    existing_jwt: Option<&str>,
+    customer_a_jwt: Option<&str>,
+    fixture: &BrowserFixture<'_>,
 ) -> Result<()> {
+    let BrowserFixture {
+        session_title: title,
+        discarded_title,
+        product_name,
+        order_id,
+    } = *fixture;
     let user = match prefix {
         "ATLET_ADMIN" => "atlet_admin_demo",
         "ATLET_USER_A" => "atlet_user_a_demo",
@@ -234,19 +278,28 @@ async fn verify_and_cleanup(
     };
     let endpoint = secrets.get("APPWRITE_ENDPOINT")?;
     let project = secrets.get("APPWRITE_PROJECT_ID")?;
-    let jwt = sign_in(
-        &reqwest::Client::new(),
-        endpoint,
-        project,
-        secrets.get(&format!("{prefix}_EMAIL"))?,
-        secrets.get(&format!("{prefix}_PASSWORD"))?,
-        user,
-    )
-    .await?;
+    let minted_jwt = if existing_jwt.is_none() {
+        Some(
+            sign_in(
+                &reqwest::Client::new(),
+                endpoint,
+                project,
+                secrets.get(&format!("{prefix}_EMAIL"))?,
+                secrets.get(&format!("{prefix}_PASSWORD"))?,
+                user,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let jwt = existing_jwt
+        .or(minted_jwt.as_deref())
+        .context("cloud verification JWT missing")?;
     let path = std::env::temp_dir().join(format!("atlet-web-verify-{}.sqlite", Uuid::new_v4()));
     let storage = SqliteStorage::open(&path.to_string_lossy())?;
     let client = AppwriteDirectClient::new(endpoint, project, "atlet_sync", storage)?;
-    client.set_user(user, &jwt).await?;
+    client.set_user(user, jwt).await?;
     client.sync().await?;
     let rows = client
         .engine()
@@ -343,8 +396,8 @@ async fn verify_and_cleanup(
         let _ = fs::remove_file(format!("{}{suffix}", path.display()));
     }
     if prefix == "ATLET_ADMIN" {
-        finish_open_web_orders(secrets).await?;
-        cleanup_customer_a_cart(secrets).await?;
+        finish_open_web_orders(secrets, jwt).await?;
+        cleanup_customer_a_cart(secrets, customer_a_jwt.context("customer A JWT missing")?).await?;
     }
     if !session_verified {
         bail!("browser session {title:?} absent from second Nostos device");
@@ -361,22 +414,13 @@ async fn verify_and_cleanup(
     Ok(())
 }
 
-async fn finish_open_web_orders(secrets: &Credentials) -> Result<()> {
+async fn finish_open_web_orders(secrets: &Credentials, jwt: &str) -> Result<()> {
     let endpoint = secrets.get("APPWRITE_ENDPOINT")?;
     let project = secrets.get("APPWRITE_PROJECT_ID")?;
-    let jwt = sign_in(
-        &reqwest::Client::new(),
-        endpoint,
-        project,
-        secrets.get("ATLET_ADMIN_EMAIL")?,
-        secrets.get("ATLET_ADMIN_PASSWORD")?,
-        "atlet_admin_demo",
-    )
-    .await?;
     let path = std::env::temp_dir().join(format!("atlet-web-orders-{}.sqlite", Uuid::new_v4()));
     let storage = SqliteStorage::open(&path.to_string_lossy())?;
     let client = AppwriteDirectClient::new(endpoint, project, "atlet_sync", storage)?;
-    client.set_user("atlet_admin_demo", &jwt).await?;
+    client.set_user("atlet_admin_demo", jwt).await?;
     client.sync().await?;
     for (from, to) in [("paid", "shipped"), ("shipped", "delivered")] {
         let writes = client
@@ -413,25 +457,16 @@ async fn finish_open_web_orders(secrets: &Credentials) -> Result<()> {
     Ok(())
 }
 
-async fn cleanup_customer_a_cart(secrets: &Credentials) -> Result<()> {
+async fn cleanup_customer_a_cart(secrets: &Credentials, jwt: &str) -> Result<()> {
     // These are dedicated cloud demo accounts. A failed visual checkout can
     // leave a cart line after its catalog fixture is removed; clear it before
     // the next run so the next order tests only its own product.
     let endpoint = secrets.get("APPWRITE_ENDPOINT")?;
     let project = secrets.get("APPWRITE_PROJECT_ID")?;
-    let jwt = sign_in(
-        &reqwest::Client::new(),
-        endpoint,
-        project,
-        secrets.get("ATLET_USER_A_EMAIL")?,
-        secrets.get("ATLET_USER_A_PASSWORD")?,
-        "atlet_user_a_demo",
-    )
-    .await?;
     let path = std::env::temp_dir().join(format!("atlet-web-cart-{}.sqlite", Uuid::new_v4()));
     let storage = SqliteStorage::open(&path.to_string_lossy())?;
     let client = AppwriteDirectClient::new(endpoint, project, "atlet_sync", storage)?;
-    client.set_user("atlet_user_a_demo", &jwt).await?;
+    client.set_user("atlet_user_a_demo", jwt).await?;
     client.sync().await?;
     let cart = client
         .engine()

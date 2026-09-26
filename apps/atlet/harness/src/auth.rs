@@ -1,9 +1,17 @@
 //! Real Appwrite email/password login for cloud acceptance runners.
 
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs,
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{bail, Context, Result};
-use reqwest::header::{COOKIE, SET_COOKIE};
+use reqwest::{
+    header::{HeaderMap, COOKIE, RETRY_AFTER, SET_COOKIE},
+    RequestBuilder, Response, StatusCode,
+};
 use serde_json::{json, Value};
 
 /// Local, ignored credential file for three explicit demo accounts.
@@ -54,12 +62,14 @@ pub async fn sign_in(
     password: &str,
     expected_id: &str,
 ) -> Result<String> {
-    let response = client
-        .post(format!("{endpoint}/account/sessions/email"))
-        .header("X-Appwrite-Project", project)
-        .json(&json!({"email":email,"password":password}))
-        .send()
-        .await?;
+    let response = send_with_rate_limit(
+        client
+            .post(format!("{endpoint}/account/sessions/email"))
+            .header("X-Appwrite-Project", project)
+            .json(&json!({"email":email,"password":password})),
+        "login",
+    )
+    .await?;
     let status = response.status();
     let cookies: Vec<String> = response
         .headers()
@@ -90,7 +100,7 @@ pub async fn sign_in(
     } else {
         bail!("Appwrite login returned neither cookie nor session secret");
     }
-    let response = request.send().await?;
+    let response = send_with_rate_limit(request, "JWT").await?;
     let status = response.status();
     let body: Value = response.json().await?;
     if !status.is_success() {
@@ -103,4 +113,73 @@ pub async fn sign_in(
         .as_str()
         .map(str::to_owned)
         .context("JWT missing")
+}
+
+async fn send_with_rate_limit(request: RequestBuilder, action: &str) -> Result<Response> {
+    for attempt in 0..3 {
+        let retry = request
+            .try_clone()
+            .context("Appwrite auth request is not repeatable")?;
+        let response = retry.send().await?;
+        if response.status() != StatusCode::TOO_MANY_REQUESTS || attempt == 2 {
+            return Ok(response);
+        }
+        let Some(delay) = rate_limit_delay(response.headers(), attempt) else {
+            return Ok(response);
+        };
+        eprintln!(
+            "Appwrite {action} rate limited; retrying in {}s",
+            delay.as_secs()
+        );
+        tokio::time::sleep(delay).await;
+    }
+    unreachable!("three attempts always return")
+}
+
+fn rate_limit_delay(headers: &HeaderMap, attempt: u32) -> Option<Duration> {
+    let retry_after = headers
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let reset_after = headers
+        .get("X-RateLimit-Reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|reset| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            reset.saturating_sub(now)
+        });
+    let seconds = retry_after
+        .or(reset_after)
+        .unwrap_or(2_u64.pow(attempt + 1));
+    (seconds <= 120).then(|| Duration::from_secs(seconds.saturating_add(1)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rate_limit_delay;
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rate_limit_headers_control_bounded_retry() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        assert_eq!(rate_limit_delay(&headers, 0).unwrap().as_secs(), 8);
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("3600"));
+        assert!(rate_limit_delay(&headers, 0).is_none());
+        headers.remove(RETRY_AFTER);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        headers.insert(
+            "X-RateLimit-Reset",
+            HeaderValue::from_str(&(now + 3).to_string()).unwrap(),
+        );
+        assert!((3..=4).contains(&rate_limit_delay(&headers, 0).unwrap().as_secs()));
+    }
 }
