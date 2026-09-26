@@ -138,8 +138,7 @@ area_commits() {
   echo "commits: every subject in $range is conventional"
 }
 
-# Warn-first (row 5): a missing or unknown [arxa-<skill>] tag is an annotation
-# and the job stays green. Flipping it to required is a recorded decision.
+# Required (row 5): a missing or unknown [arxa-<skill>] tag fails the job.
 area_pr_title() {
   local tags prefix tag re='^((\[[^]]+\])+) '
   tags=$(tag_map docs/ci/decisions.md)
