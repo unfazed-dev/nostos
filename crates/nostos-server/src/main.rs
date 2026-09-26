@@ -12,6 +12,7 @@
 
 mod admin_auth;
 mod all_mode_warning;
+mod appwrite_gateway;
 mod config;
 mod cors;
 mod endpoints;
@@ -57,6 +58,17 @@ async fn main() -> anyhow::Result<()> {
         cfg.rules_file = resolved.display().to_string();
     }
     init_tracing(&cfg.log);
+
+    // ADR-0052: Appwrite's durable journal has its own HTTP transport. Do
+    // not start a fake or Postgres replicator in gateway mode.
+    match nostos_infra::env::var("NOSTOS_BACKEND") {
+        Ok(mode) if mode == "appwrite" => {
+            return appwrite_gateway::serve(&cfg.bind, &cfg.cors_origins).await;
+        }
+        Ok(mode) => anyhow::bail!("unknown NOSTOS_BACKEND={mode}; expected appwrite"),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
 
     // ---- admin auth (Task 21, ADR-0031 addendum): NOSTOS_ADMIN_TOKEN gates
     // PUT /rules. Env-only by design (NOT a clap flag), same reasoning as

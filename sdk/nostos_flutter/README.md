@@ -1,19 +1,20 @@
 # nostos_flutter
 
-Plug-and-play local-first sync for Flutter, backed by [Nostos](https://github.com/unfazed-dev/nostos)
-(Postgres logical replication → Rust fan-out server → on-device SQLite,
-Apache-2.0 end to end). Rust owns SQLite and the sync loop
-(`nostos-client`'s `SyncClient`); this package wraps it with
-[flutter_rust_bridge](https://pub.dev/packages/flutter_rust_bridge)'s
-native-assets backend, so `flutter pub add nostos_flutter` is the only manual
-step — no codegen, no Xcode/Gradle wiring, no client-side schema artifact.
+Flutter's local-first Nostos SDK uses the Rust apply engine and durable outbox.
+Native apps store their local read model in SQLite through
+[flutter_rust_bridge](https://pub.dev/packages/flutter_rust_bridge); Flutter
+web uses the WASM bridge and SQLite-WASM/OPFS. Clients can sync through a
+Postgres-backed Nostos server, directly with Supabase, or with Appwrite Cloud
+in direct or gateway mode. This package is still consumed from this repository
+while publication is pending. Native assets build automatically; browser apps
+must package the Worker and WASM files listed below.
 
 ## Quickstart
 
 Run a server (zero setup — synthetic data, no auth, no Postgres):
 
 ```bash
-cargo run -p nostos-server   # ws://127.0.0.1:8800/sync
+NOSTOS_BIND=127.0.0.1:8800 cargo run -p nostos-server
 ```
 
 ```dart
@@ -119,11 +120,57 @@ final db = await NostosDatabase.open(
 > that, **not** a re-connect: swapping the token in place leaves your `watch`
 > streams open, whereas building a fresh handle ends every one of them.
 
-`NostosDatabase.supabase` does **not** depend on the `supabase_flutter`
-package — pass `accessToken` from whatever auth source you use. `supabaseUrl` is
-accepted for forward-compatibility (see ponytail in `lib/src/nostos.dart`) but not
-yet used to derive anything — point `nostosUrl` at wherever your `nostos-server`
-actually runs.
+`NostosDatabase.supabase` uses the signed-in `supabase_flutter` session and
+subscribes to its auth changes. For direct Supabase sync without that package's
+session handling, call `NostosDatabase.direct` with your project URL,
+publishable key, JWT, scope, and schema. `nostosUrl` in the example above is
+the Postgres-backed Nostos server URL.
+
+### Appwrite Cloud: direct and server transport
+
+The app signs in with Appwrite Auth and passes the current user ID and a
+short-lived user JWT to Nostos. Direct mode sends writes and cursor-based pulls
+through a deployed sync Function. The Function checks each user's scope and is
+the only holder of the cloud database API key. Supply the table schema because
+Neither Appwrite transport exposes the Postgres Nostos `/schema` endpoint.
+
+```dart
+final db = await NostosDatabase.appwrite(
+  endpoint: 'https://fra.cloud.appwrite.io/v1',
+  projectId: projectId,
+  functionId: 'atlet_sync',
+  userId: account.$id,
+  jwt: jwt.jwt,
+  schema: atletSchema,
+  sqlitePath: '$dir/atlet.db',
+);
+```
+
+Direct mode is the default. To route the same app through a hosted Nostos
+gateway, add `gatewayUrl: 'https://your-gateway.example'` to the factory call.
+The gateway must point to the same Appwrite project and Function. Keep a
+separate `sqlitePath` for each mode, or let the principal check clear a store
+when its mode changes. The [Atlet gateway](../../deploy/README.md#atlet-appwrite-gateway)
+is the running reference; [ADR-0052](../../docs/adr/0052-appwrite-server-transport-over-function-journal.md)
+defines its fixed routes and authorization boundary.
+
+`atletSchema` is the app's `NostosSchema`; see
+[Atlet's declaration](../../apps/atlet/flutter/lib/adapters/nostos_adapter.dart).
+Forward a refreshed JWT with `db.setToken(...)`. Keep the JWT out of build
+defines and local storage. `close()` pauses the client and retains its local
+database; `signOut()` clears rows, cursor, outbox, and principal. Browser
+storage uses SQLite-WASM in OPFS, so `sqlitePath` is ignored on web. The
+[Atlet cloud runner](../../apps/atlet/README.md) builds and drives the full
+Flutter UI in Chrome with the same hosted project and three real accounts.
+
+For Flutter web, copy `web/nostos/nostos_broker.js`, `nostos_worker.js`,
+`appwrite_transport.js`, `sqlite_wasm_glue.js`, the `nostos_ffi_wasm.js` and
+`nostos_ffi_wasm_bg.wasm` output of `wasm-pack build --target web`, and the
+pinned `@sqlite.org/sqlite-wasm` `index.mjs` and `sqlite3.wasm` into your
+app's `web/nostos/` tree. Retain the SQLite-WASM license and notice. The
+browser Worker imports these assets from the app origin. See
+[Atlet's packaged assets](../../apps/atlet/flutter/web/nostos/) for the exact
+layout. Build the Flutter JS target with `flutter build web --release`.
 
 ## Push notifications (ADR-0037)
 
@@ -240,7 +287,13 @@ per-type mapping table and the `int8`-as-string rationale.
 | macOS | Verified — `flutter test integration_test/nostos_server_test.dart -d macos` runs a real packaged `.app` against a real `cargo run -p nostos-server` (see that test's header comment) |
 | iOS / Android | Build config present (native-assets targets declared, plugin scaffold generated). The Rust glue crate is confirmed to cross-compile clean for both (`cargo ndk -t arm64-v8a build --release` and `cargo build --target aarch64-apple-ios --release`, W6). **Not yet verified**: the native-assets build hook actually firing during a real `flutter build ios`/`flutter build apk` — no device/simulator runner was exercised this pass. `.github/workflows/release.yml`'s flutter-android/flutter-ios jobs build the release artifacts; real end-to-end hook verification happens the first time that workflow runs against a real tag push. |
 | Windows / Linux | Fast-follow (per the launch plan) — not in `hook/build.dart`'s `_manifestKey()` yet, so both always take the cargo-build fallback. |
-| Web | Supported (ADR-0036): the conditional import selects `WebNostosEngine`, which drives the *shared* `nostos-ffi-wasm` Worker (`web/nostos/nostos_worker.js`) with an opfs-sahpool SQLite store — durable, no COOP/COEP, Safari ≥ 16.4. Apps drop `nostos_worker.js` + `sqlite_wasm_glue.js` + `nostos_ffi_wasm.{js,_bg.wasm}` + `@sqlite.org/sqlite-wasm` under `web/` (see ADR-0036 §4); build as JS (`flutter build web`, not `--wasm`). Multi-tab: one tab owns OPFS (Web Lock), every other tab proxies to it over a `BroadcastChannel` and reports the leader's mode (`reason:"follower"`); a follower is promoted when the leader tab closes (2026-09-21). `sqlitePath` is ignored; `LocalFileBlobStore` is `dart:io` — supply your own `BlobStore` for attachments. Browser round-trip pinned by `web/e2e/flutter_web_smoke.spec.cjs`. |
+| Web | Supported (ADR-0036, ADR-0051): `WebNostosEngine` uses a SharedWorker broker with a private MessagePort per tab; the authenticated host tab starts one dedicated Worker for `nostos-ffi-wasm` and OPFS SQLite and transfers an engine port to the broker. Package `nostos_broker.js`, `nostos_worker.js`, `appwrite_transport.js`, `sqlite_wasm_glue.js`, `nostos_ffi_wasm.{js,_bg.wasm}`, and `@sqlite.org/sqlite-wasm` under `web/`; build as JS (`flutter build web`, not `--wasm`). No COOP/COEP is needed. Without SharedWorker, one dedicated tab owns OPFS and another tab fails closed. `sqlitePath` is ignored; provide a web `BlobStore` for attachments. Browser round-trip is pinned by `web/e2e/flutter_web_smoke.spec.cjs`. |
+
+In Appwrite mode, each tab's private broker port is authorized through
+Appwrite `GET /account`. A fresh JWT for the same user is accepted; a different
+or expired account is rejected. JWT refresh revalidates independently. A tab
+opened while offline cannot join until its account can be verified. In server
+mode, additional tabs need the active bearer token.
 
 ## Packaging mechanism
 

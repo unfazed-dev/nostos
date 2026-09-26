@@ -1,5 +1,9 @@
 # Nostos Reference Demo App — Offline-First Tasks (all SDKs)
 
+> **Historical plan.** This Tasks/server-mode prototype is superseded by the
+> [visual Atlet cross-SDK cloud contract](atlet-cross-sdk-cloud-reference-2026-09-26.md).
+> Use that contract for current SDK ports and hosted Supabase/Appwrite tests.
+
 **Started:** 2026-07-13. **Owner:** Claude (tech lead). **Bar (operator-approved):**
 engineer + design ONE application that demonstrates **all** nostos features, with
 the **same** app implemented across every SDK — starting with **Flutter** (iOS +

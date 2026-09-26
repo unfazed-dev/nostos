@@ -36,6 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   supabase_flutter: ^2.9.1
+  appwrite: ^27.0.0
   connectivity_plus: ^6.1.0
   nostos_flutter:
     path: ../../../sdk/nostos_flutter

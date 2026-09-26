@@ -35,6 +35,7 @@ use std::sync::Mutex;
 use nostos_core::{Outbox, PendingWrite, Storage, StorageError, WriteOp};
 use nostos_domain::{Lsn, RowOp};
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
 /// The opaque-bytes row table + the meta table + the durable write outbox.
 /// One row per `(table, pk)` in `nostos_data`; the LSN checkpoint is the single
@@ -94,6 +95,8 @@ const RULES_CHECKSUM_KEY: &str = "rules_checksum";
 const HORIZON_KEY: &str = "horizon";
 /// ADR-0049: JWT `sub` of the principal whose rows the store holds.
 const PRINCIPAL_KEY: &str = "principal";
+/// Stable random identity for deriving server mutation IDs from outbox IDs.
+const DEVICE_ID_KEY: &str = "device_id";
 
 /// A synced table's schema as the client sees it — the minimal projection of
 /// the server's `SchemaDescriptor` (nostos-application) that the view layer
@@ -185,6 +188,11 @@ impl SqliteStorage {
     fn init(conn: Connection) -> Result<Self, StorageError> {
         Self::migrate_legacy_tables(&conn)?;
         conn.execute_batch(SCHEMA).map_err(rusqlite_err)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO nostos_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![DEVICE_ID_KEY, uuid::Uuid::new_v4().simple().to_string()],
+        )
+        .map_err(rusqlite_err)?;
         Self::migrate_outbox_dlq(&conn)?;
         Self::migrate_outbox_error_cols(&conn)?;
         Self::migrate_applied_lsn(&conn)?;
@@ -193,6 +201,33 @@ impl SqliteStorage {
             or_set_tables: std::collections::HashSet::new(),
             counter_tables: std::collections::HashSet::new(),
         })
+    }
+
+    /// Stable, opaque Appwrite mutation ID for one durable outbox entry.
+    ///
+    /// The device UUID survives sign-out and the SQLite AUTOINCREMENT counter
+    /// does not reuse IDs after a wipe, so a retry after a crash sends the same
+    /// ID while a later write gets a different one.
+    ///
+    /// # Errors
+    /// Returns a storage error if the device identity cannot be read.
+    pub fn mutation_id(&self, write_id: u64) -> Result<String, StorageError> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("mutation_id: storage mutex poisoned");
+        let device: String = conn
+            .query_row(
+                "SELECT value FROM nostos_meta WHERE key = ?1",
+                rusqlite::params![DEVICE_ID_KEY],
+                |row| row.get(0),
+            )
+            .map_err(rusqlite_err)?;
+        let mut hasher = Sha256::new();
+        hasher.update(device.as_bytes());
+        hasher.update(write_id.to_be_bytes());
+        let digest = hasher.finalize();
+        Ok(hex::encode(&digest[..16]))
     }
 
     /// ADR-0048: a store written before the rename keeps its rows, checkpoint
@@ -1835,6 +1870,21 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM nostos_data", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn mutation_id_survives_restart_and_differs_by_outbox_id() {
+        let dir = tempfile_dir();
+        let path = format!("{dir}/appwrite-idempotency.sqlite");
+        let first = {
+            let s = SqliteStorage::open(&path).unwrap();
+            s.mutation_id(7).unwrap()
+        };
+        let mut reopened = SqliteStorage::open(&path).unwrap();
+        assert_eq!(reopened.mutation_id(7).unwrap(), first);
+        assert_ne!(reopened.mutation_id(8).unwrap(), first);
+        nostos_core::Storage::clear(&mut reopened).unwrap();
+        assert_eq!(reopened.mutation_id(7).unwrap(), first);
     }
 
     /// Build a fresh temp dir for a durability test. Uses stdlib only (no

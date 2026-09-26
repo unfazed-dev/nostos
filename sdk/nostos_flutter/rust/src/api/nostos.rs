@@ -61,12 +61,16 @@ pub fn init_app() {
 /// tracing, but the enum carries no payload. Upgrade path: a
 /// `NostosConnectionState::Rejected(String)` variant or a sibling error
 /// stream; requires an FRB regen, deliberately deferred.
+/// `AccessRevoked` is narrower: the Appwrite Function's explicit inactive
+/// account rejection, after that client's local cache has been cleared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NostosConnectionState {
     Connecting,
     Connected,
     Reconnecting,
     Disconnected,
+    /// Appwrite explicitly rejected an inactive account and local state was wiped.
+    AccessRevoked,
 }
 
 /// FFI mirror of [`nostos_client::WriteQueueStatus`] — flutter_rust_bridge can

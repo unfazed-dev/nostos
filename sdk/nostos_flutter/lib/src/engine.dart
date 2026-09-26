@@ -33,7 +33,13 @@ export 'rust/api/nostos.dart' show ClientTableFfi;
 /// `rust.NostosConnectionState` so consumers never need to import generated
 /// code. See `rust/src/api/nostos.rs`'s `NostosConnectionState` doc for the
 /// precise (heuristic) semantics of `connected`.
-enum NostosConnectionState { connecting, connected, reconnecting, disconnected }
+enum NostosConnectionState {
+  connecting,
+  connected,
+  reconnecting,
+  disconnected,
+  accessRevoked,
+}
 
 /// One table in a multi-table subscription: a name + an optional safe-SQL
 /// `where_sql` (ADR-0012). A connection subscribes to a list of these over

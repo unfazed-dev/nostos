@@ -56,7 +56,52 @@ class _RecordingAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   Stream<SyncMark> get marks => const Stream.empty();
 }
 
+class _FailsOnceWipeAdapter extends _RecordingAdapter {
+  _FailsOnceWipeAdapter(super.name, super.log);
+
+  bool failNextWipe = true;
+
+  @override
+  Future<void> signOut() async {
+    if (failNextWipe) {
+      failNextWipe = false;
+      throw StateError('offline wipe failed');
+    }
+    await super.signOut();
+  }
+}
+
+class _FailsInitAdapter extends _RecordingAdapter {
+  _FailsInitAdapter(super.name, super.log);
+
+  @override
+  Future<void> init({
+    required String supabaseUrl,
+    required String accessToken,
+    required String userId,
+    required String dbDir,
+  }) async => throw StateError('server unavailable');
+}
+
 void main() {
+  test(
+    'provider and mode selection keeps both Appwrite transports distinct',
+    () {
+      expect(
+        selectEngine(provider: 'appwrite', mode: 'direct'),
+        Engine.nostosAppwrite,
+      );
+      expect(
+        selectEngine(provider: 'supabase', mode: 'direct'),
+        Engine.nostosDirect,
+      );
+      expect(selectEngine(provider: 'supabase', mode: 'server'), Engine.nostos);
+      expect(
+        selectEngine(provider: 'appwrite', mode: 'server'),
+        Engine.nostosAppwriteServer,
+      );
+    },
+  );
   const session = SyncSession(
     supabaseUrl: 'http://localhost:3000',
     accessToken: 'test-token',
@@ -132,5 +177,31 @@ void main() {
       await registry.stop();
       expect(registry.activeEngine, isNull);
     });
+
+    test('failed Appwrite server init releases its adapter slot', () async {
+      final registry = EngineRegistry(
+        nostosAppwriteServerFactory: () => _FailsInitAdapter('server', []),
+      );
+      await expectLater(
+        registry.start(Engine.nostosAppwriteServer, session),
+        throwsStateError,
+      );
+      expect(registry.activeEngine, isNull);
+      expect(registry.debugLiveAdapters, isEmpty);
+    });
+
+    test(
+      'failed wipe keeps the adapter available for sign-out retry',
+      () async {
+        final adapter = _FailsOnceWipeAdapter('direct', []);
+        final registry = EngineRegistry(nostosDirectFactory: () => adapter);
+        await registry.start(Engine.nostosDirect, session);
+
+        await expectLater(registry.stop(), throwsStateError);
+        expect(registry.current, same(adapter));
+        await registry.stop();
+        expect(registry.current, isNull);
+      },
+    );
   });
 }

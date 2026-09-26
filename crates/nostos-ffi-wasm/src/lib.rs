@@ -54,9 +54,11 @@
 )]
 
 use nostos_core::{
-    ApplyEngine, ApplyOutcome, Frame as CoreFrame, InMemoryStorage, Lsn, Operation, Outbox,
-    PendingWrite, RowOp, Storage, WriteOp,
+    ApplyEngine, ApplyOutcome, AppwriteCursor, Frame as CoreFrame, InMemoryStorage, Lsn, Operation,
+    Outbox, PendingWrite, RowOp, Storage, WriteOp,
 };
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
@@ -119,6 +121,18 @@ impl Storage for WebStorage {
         match self {
             WebStorage::Memory(s) => s.save_horizon(horizon),
             WebStorage::SqliteWasm(s) => s.save_horizon(horizon),
+        }
+    }
+    fn principal(&self) -> nostos_core::Result<Option<String>> {
+        match self {
+            WebStorage::Memory(s) => s.principal(),
+            WebStorage::SqliteWasm(s) => s.principal(),
+        }
+    }
+    fn save_principal(&mut self, principal: &str) -> nostos_core::Result<()> {
+        match self {
+            WebStorage::Memory(s) => s.save_principal(principal),
+            WebStorage::SqliteWasm(s) => s.save_principal(principal),
         }
     }
     fn apply_batch(
@@ -367,7 +381,7 @@ impl WebStorage {
     /// Dead-lettered write count.
     pub(crate) fn dead_letter_count(&self) -> u64 {
         match self {
-            WebStorage::Memory(_) => 0, // InMemoryStorage has no dead-letter column
+            WebStorage::Memory(s) => s.dead_letter_count() as u64,
             WebStorage::SqliteWasm(s) => s.dead_letter_count(),
         }
     }
@@ -375,7 +389,7 @@ impl WebStorage {
     /// The last error from the most recent dead-lettered write.
     pub(crate) fn last_dead_letter_error(&self) -> Option<String> {
         match self {
-            WebStorage::Memory(_) => None,
+            WebStorage::Memory(s) => s.last_dead_letter_error(),
             WebStorage::SqliteWasm(s) => s.last_dead_letter_error(),
         }
     }
@@ -566,6 +580,7 @@ impl RowEntry {
 #[wasm_bindgen]
 pub struct NostosEngine {
     inner: ApplyEngine<WebStorage>,
+    appwrite: Option<AppwriteWebState>,
     /// The optional safe-SQL predicate for the next subscribe. Held here so the
     /// future WASM transport (E1) can read it when sending the subscribe frame;
     /// the in-memory apply path ignores it (the server filters upstream).
@@ -581,6 +596,15 @@ pub struct NostosEngine {
     hlc_state: Cell<Option<nostos_domain::Hlc>>,
 }
 
+struct AppwriteWebState {
+    endpoint: String,
+    project: String,
+    function: String,
+    user: Option<String>,
+    device_id: String,
+    cursor: AppwriteCursor,
+}
+
 #[wasm_bindgen]
 impl NostosEngine {
     /// Create an in-memory engine. Data survives the apply loop but NOT a page
@@ -591,6 +615,7 @@ impl NostosEngine {
     pub fn new() -> Self {
         Self {
             inner: ApplyEngine::new(WebStorage::Memory(InMemoryStorage::new())),
+            appwrite: None,
             where_sql: None,
             replica_id: derive_replica_id(),
             hlc_state: Cell::new(None),
@@ -605,10 +630,95 @@ impl NostosEngine {
     pub(crate) fn with_durable(db: js_sys::Object) -> Self {
         Self {
             inner: ApplyEngine::new(WebStorage::SqliteWasm(SqliteWasmStorage::new(db))),
+            appwrite: None,
             where_sql: None,
             replica_id: derive_replica_id(),
             hlc_state: Cell::new(None),
         }
+    }
+
+    /// Browser direct-mode engine. The Worker supplies a device ID persisted in
+    /// the same OPFS database as the outbox, never a per-page-load random ID.
+    #[wasm_bindgen(js_name = newAppwrite)]
+    pub fn new_appwrite(db: Option<js_sys::Object>, device_id: String) -> Result<Self, JsValue> {
+        if device_id.is_empty() {
+            return Err(JsValue::from_str("Appwrite device ID required"));
+        }
+        let mut engine = db.map_or_else(Self::new, Self::with_durable);
+        engine.appwrite = Some(AppwriteWebState {
+            endpoint: String::new(),
+            project: String::new(),
+            function: String::new(),
+            user: None,
+            device_id,
+            cursor: AppwriteCursor::fresh(),
+        });
+        Ok(engine)
+    }
+
+    /// Bind the locally authenticated user before exposing cached rows. The
+    /// Function independently verifies the JWT on every cloud request.
+    #[wasm_bindgen(js_name = bindAppwritePrincipal)]
+    pub fn bind_appwrite_principal_js(
+        &mut self,
+        endpoint: &str,
+        project: &str,
+        function: &str,
+        user: &str,
+    ) -> Result<(), JsValue> {
+        self.bind_appwrite_principal(endpoint, project, function, user)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[wasm_bindgen(getter, js_name = appwriteAfter)]
+    pub fn appwrite_after_js(&self) -> Result<String, JsValue> {
+        self.appwrite_after()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Validate principal and role before applying a Function page. A role
+    /// change returns `resnapshot:true`; the Worker must pull again from zero.
+    #[wasm_bindgen(js_name = applyAppwritePage)]
+    pub fn apply_appwrite_page_js(&mut self, body: &str) -> Result<String, JsValue> {
+        self.apply_appwrite_page(body)
+            .map(|value| value.to_string())
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[wasm_bindgen(js_name = appwritePending)]
+    pub fn appwrite_pending_js(&mut self) -> Result<String, JsValue> {
+        self.appwrite_pending()
+            .map(|values| Value::Array(values).to_string())
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[wasm_bindgen(js_name = appwriteAck)]
+    pub fn appwrite_ack_js(&mut self, id: &str) -> Result<(), JsValue> {
+        let id = id
+            .parse::<u64>()
+            .map_err(|_| JsValue::from_str("invalid Appwrite outbox ID"))?;
+        self.appwrite_ack(id)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[wasm_bindgen(js_name = appwriteReject)]
+    pub fn appwrite_reject_js(
+        &mut self,
+        id: &str,
+        error: &str,
+        permanent: bool,
+    ) -> Result<(), JsValue> {
+        let id = id
+            .parse::<u64>()
+            .map_err(|_| JsValue::from_str("invalid Appwrite outbox ID"))?;
+        self.appwrite_reject(id, error, permanent)
+            .map_err(|message| JsValue::from_str(&message))
+    }
+
+    #[wasm_bindgen(js_name = appwriteRevoke)]
+    pub fn appwrite_revoke_js(&mut self) -> Result<(), JsValue> {
+        self.appwrite_revoke()
+            .map_err(|error| JsValue::from_str(&error))
     }
 
     /// Set the `where_sql` predicate the transport (E1) will attach to the next
@@ -805,14 +915,13 @@ impl NostosEngine {
                 payload_json,
             });
         }
-        let s = self.inner.storage_mut();
-        let ids = s
-            .enqueue_batch(writes.clone())
-            .map_err(|e| JsValue::from_str(&format!("writeBatch: enqueue: {e}")))?;
-        // apply_local each write for optimistic UI (best-effort).
-        for w in &writes {
-            let _ = s.apply_local(w);
-        }
+        let ids = if self.appwrite.is_some() {
+            self.appwrite_enqueue(&writes)
+                .map_err(|e| JsValue::from_str(&e))?
+        } else {
+            enqueue_local(self.inner.storage_mut(), &writes)
+                .map_err(|e| JsValue::from_str(&format!("writeBatch: enqueue: {e}")))?
+        };
         Ok(ids.into_iter().map(|id| id as f64).collect())
     }
 
@@ -1000,6 +1109,255 @@ impl NostosEngine {
 impl Default for NostosEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn enqueue_local(storage: &mut WebStorage, writes: &[PendingWrite]) -> Result<Vec<u64>, String> {
+    let ids = storage
+        .enqueue_batch(writes.to_vec())
+        .map_err(|error| error.to_string())?;
+    for write in writes {
+        let _ = storage.apply_local(write);
+    }
+    Ok(ids)
+}
+
+fn appwrite_principal_key(
+    endpoint: &str,
+    project: &str,
+    function: &str,
+    user: &str,
+    scope: Option<&str>,
+) -> String {
+    json!([endpoint, project, function, user, scope]).to_string()
+}
+
+impl NostosEngine {
+    #[cfg(test)]
+    fn new_appwrite_memory(device_id: String) -> Self {
+        let mut engine = Self::new();
+        engine.appwrite = Some(AppwriteWebState {
+            endpoint: String::new(),
+            project: String::new(),
+            function: String::new(),
+            user: None,
+            device_id,
+            cursor: AppwriteCursor::fresh(),
+        });
+        engine
+    }
+
+    fn bind_appwrite_principal(
+        &mut self,
+        endpoint: &str,
+        project: &str,
+        function: &str,
+        user: &str,
+    ) -> Result<(), String> {
+        if !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+            || project.is_empty()
+            || function.is_empty()
+            || user.is_empty()
+        {
+            return Err("Appwrite endpoint, project, Function and user required".into());
+        }
+        let state = self.appwrite.as_mut().ok_or("Appwrite engine required")?;
+        let endpoint = endpoint.trim_end_matches('/');
+        let unscoped = appwrite_principal_key(endpoint, project, function, user, None);
+        let admin = appwrite_principal_key(endpoint, project, function, user, Some("admin"));
+        let customer = appwrite_principal_key(endpoint, project, function, user, Some("customer"));
+        let stored = self
+            .inner
+            .storage()
+            .principal()
+            .map_err(|error| error.to_string())?;
+        if !matches!(stored.as_deref(), Some(raw) if raw == unscoped || raw == admin || raw == customer)
+        {
+            Storage::clear(self.inner.storage_mut()).map_err(|error| error.to_string())?;
+            self.inner
+                .storage_mut()
+                .save_principal(&unscoped)
+                .map_err(|error| error.to_string())?;
+        }
+        let after = self
+            .inner
+            .storage()
+            .horizon()
+            .map_err(|error| error.to_string())?
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|_| "invalid stored Appwrite cursor".to_string())?
+            .unwrap_or(0);
+        state.endpoint = endpoint.into();
+        state.project = project.into();
+        state.function = function.into();
+        state.user = Some(user.into());
+        state.cursor = AppwriteCursor::resume(after);
+        Ok(())
+    }
+
+    fn appwrite_after(&self) -> Result<String, String> {
+        let state = self.appwrite.as_ref().ok_or("Appwrite engine required")?;
+        if state.user.is_none() {
+            return Err("Appwrite session required".into());
+        }
+        Ok(state.cursor.after().to_string())
+    }
+
+    fn apply_appwrite_page(&mut self, body: &str) -> Result<Value, String> {
+        let page: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        let server_user = page["principal_id"]
+            .as_str()
+            .ok_or("pull omitted principal")?;
+        let scope = page["access_scope"]
+            .as_str()
+            .ok_or("pull omitted access scope")?;
+        if !matches!(scope, "admin" | "customer") {
+            return Err("invalid Appwrite access scope".into());
+        }
+        let state = self.appwrite.as_mut().ok_or("Appwrite engine required")?;
+        if state.user.as_deref() != Some(server_user) {
+            self.appwrite_revoke()?;
+            return Err("JWT user differs from local user".into());
+        }
+        let scoped = appwrite_principal_key(
+            &state.endpoint,
+            &state.project,
+            &state.function,
+            server_user,
+            Some(scope),
+        );
+        let unscoped = appwrite_principal_key(
+            &state.endpoint,
+            &state.project,
+            &state.function,
+            server_user,
+            None,
+        );
+        let storage = self.inner.storage_mut();
+        let stored = storage.principal().map_err(|error| error.to_string())?;
+        if stored.as_deref() != Some(&scoped) {
+            if stored.as_deref() == Some(&unscoped)
+                && storage
+                    .horizon()
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            {
+                storage
+                    .save_principal(&scoped)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                Storage::clear(storage).map_err(|error| error.to_string())?;
+                storage
+                    .save_principal(&scoped)
+                    .map_err(|error| error.to_string())?;
+                state.cursor = AppwriteCursor::fresh();
+                return Ok(json!({"resnapshot":true,"scanned_through":"0"}));
+            }
+        }
+        let outcome = state
+            .cursor
+            .apply(&mut self.inner, body)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({
+            "resnapshot":false,
+            "rows_applied":outcome.rows_applied,
+            "scanned_through":outcome.scanned_through.to_string(),
+            "head":outcome.head.to_string(),
+            "has_more":outcome.has_more,
+        }))
+    }
+
+    fn appwrite_enqueue(&mut self, writes: &[PendingWrite]) -> Result<Vec<u64>, String> {
+        if self
+            .appwrite
+            .as_ref()
+            .and_then(|state| state.user.as_ref())
+            .is_none()
+        {
+            return Err("Appwrite session required".into());
+        }
+        enqueue_local(self.inner.storage_mut(), writes)
+    }
+
+    fn appwrite_pending(&mut self) -> Result<Vec<Value>, String> {
+        let state = self.appwrite.as_ref().ok_or("Appwrite engine required")?;
+        if state.user.is_none() {
+            return Err("Appwrite session required".into());
+        }
+        let device_id = state.device_id.clone();
+        let writes = self
+            .inner
+            .storage()
+            .pending()
+            .map_err(|error| error.to_string())?;
+        let mut result = Vec::with_capacity(writes.len());
+        for (id, write) in writes {
+            let payload = write
+                .payload_json
+                .as_ref()
+                .map(|raw| serde_json::from_str::<Value>(raw))
+                .transpose();
+            let op = match write.op {
+                WriteOp::Upsert => Some("upsert"),
+                WriteOp::Delete => Some("delete"),
+                _ => None,
+            };
+            let valid = op.is_some()
+                && payload.as_ref().is_ok_and(|value| {
+                    op != Some("upsert") || value.as_ref().is_some_and(Value::is_object)
+                });
+            if !valid {
+                self.inner
+                    .storage()
+                    .mark_dead_letter_with_error(id, Some("unsupported Appwrite write"))
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+            let mut hasher = Sha256::new();
+            hasher.update(device_id.as_bytes());
+            hasher.update(id.to_be_bytes());
+            let mutation_id = hex::encode(&hasher.finalize()[..16]);
+            result.push(json!({
+                "id":id.to_string(),
+                "mutation_id":mutation_id,
+                "table":write.table,
+                "pk":write.pk,
+                "op":op,
+                "payload":payload.expect("validated payload"),
+            }));
+        }
+        Ok(result)
+    }
+
+    fn appwrite_ack(&mut self, id: u64) -> Result<(), String> {
+        self.appwrite_after()?;
+        self.inner
+            .storage_mut()
+            .mark_done(id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn appwrite_reject(&mut self, id: u64, error: &str, permanent: bool) -> Result<(), String> {
+        self.appwrite_after()?;
+        let storage = self.inner.storage();
+        if permanent {
+            storage
+                .mark_dead_letter_with_error(id, Some(error))
+                .map_err(|failure| failure.to_string())
+        } else {
+            storage
+                .bump_attempts(id)
+                .map(|_| ())
+                .map_err(|failure| failure.to_string())
+        }
+    }
+
+    fn appwrite_revoke(&mut self) -> Result<(), String> {
+        let state = self.appwrite.as_mut().ok_or("Appwrite engine required")?;
+        state.user = None;
+        state.cursor = AppwriteCursor::fresh();
+        Storage::clear(self.inner.storage_mut()).map_err(|error| error.to_string())
     }
 }
 
@@ -1585,6 +1943,160 @@ use wasm_bindgen::closure::Closure;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn appwrite_engine() -> NostosEngine {
+        NostosEngine::new_appwrite_memory("browser-device".into())
+    }
+
+    #[test]
+    fn appwrite_identity_switch_wipes_rows_and_outbox() {
+        let mut engine = appwrite_engine();
+        engine
+            .bind_appwrite_principal("https://cloud.example", "project", "sync", "alice")
+            .unwrap();
+        let write = PendingWrite {
+            table: "profiles".into(),
+            op: WriteOp::Upsert,
+            pk: "alice".into(),
+            payload_json: Some(r#"{"id":"alice"}"#.into()),
+        };
+        engine.appwrite_enqueue(&[write]).unwrap();
+        assert_eq!(engine.row_count(), 1);
+        assert_eq!(engine.pending_count(), 1);
+
+        engine
+            .bind_appwrite_principal("https://cloud.example", "project", "sync", "bob")
+            .unwrap();
+        assert_eq!(engine.row_count(), 0);
+        assert_eq!(engine.pending_count(), 0);
+        assert_eq!(engine.appwrite_after().unwrap(), "0");
+    }
+
+    #[test]
+    fn appwrite_hidden_page_advances_cursor_and_bad_page_does_not() {
+        let mut engine = appwrite_engine();
+        engine
+            .bind_appwrite_principal("https://cloud.example", "project", "sync", "alice")
+            .unwrap();
+        let page = r#"{"principal_id":"alice","access_scope":"customer","head":"5","scanned_through":"5","has_more":false,"changes":[]}"#;
+        let outcome = engine.apply_appwrite_page(page).unwrap();
+        assert_eq!(outcome["scanned_through"], "5");
+        assert_eq!(engine.appwrite_after().unwrap(), "5");
+
+        let bad = r#"{"principal_id":"alice","access_scope":"customer","head":"4","scanned_through":"4","has_more":false,"changes":[]}"#;
+        assert!(engine.apply_appwrite_page(bad).is_err());
+        assert_eq!(engine.appwrite_after().unwrap(), "5");
+    }
+
+    #[test]
+    fn appwrite_ack_and_revoke_block_stale_writes() {
+        let mut engine = appwrite_engine();
+        engine
+            .bind_appwrite_principal("https://cloud.example", "project", "sync", "alice")
+            .unwrap();
+        let write = PendingWrite {
+            table: "profiles".into(),
+            op: WriteOp::Upsert,
+            pk: "alice".into(),
+            payload_json: Some(r#"{"id":"alice"}"#.into()),
+        };
+        let id = engine
+            .appwrite_enqueue(std::slice::from_ref(&write))
+            .unwrap()[0];
+        let pending = engine.appwrite_pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["mutation_id"].as_str().unwrap().len(), 32);
+        engine.appwrite_ack(id).unwrap();
+        assert!(engine.appwrite_pending().unwrap().is_empty());
+
+        engine.appwrite_revoke().unwrap();
+        assert_eq!(engine.row_count(), 0);
+        assert!(engine.appwrite_enqueue(&[write]).is_err());
+    }
+
+    #[test]
+    fn appwrite_transient_rejection_retries_and_permanent_error_dead_letters() {
+        let mut engine = appwrite_engine();
+        engine
+            .bind_appwrite_principal("https://cloud.example", "project", "sync", "alice")
+            .unwrap();
+        let write = PendingWrite {
+            table: "profiles".into(),
+            op: WriteOp::Upsert,
+            pk: "alice".into(),
+            payload_json: Some(r#"{"id":"alice"}"#.into()),
+        };
+        let id = engine.appwrite_enqueue(&[write]).unwrap()[0];
+        let mutation = engine.appwrite_pending().unwrap()[0]["mutation_id"].clone();
+
+        engine
+            .appwrite_reject(id, "temporary outage", false)
+            .unwrap();
+        assert_eq!(engine.pending_count(), 1);
+        assert_eq!(engine.dead_lettered_count(), 0);
+        assert_eq!(
+            engine.appwrite_pending().unwrap()[0]["mutation_id"],
+            mutation
+        );
+
+        engine.appwrite_reject(id, "invalid order", true).unwrap();
+        assert!(engine.appwrite_pending().unwrap().is_empty());
+        assert_eq!(engine.dead_lettered_count(), 1);
+        assert_eq!(engine.last_error().as_deref(), Some("invalid order"));
+    }
+
+    #[test]
+    fn appwrite_role_change_wipes_admin_rows_before_customer_pull() {
+        let mut engine = appwrite_engine();
+        engine
+            .bind_appwrite_principal("https://cloud.example", "project", "sync", "alice")
+            .unwrap();
+        engine
+            .apply_appwrite_page(
+                r#"{"principal_id":"alice","access_scope":"admin","head":"1","scanned_through":"1","has_more":false,"changes":[{"seq":"1","table":"profiles","pk":"bob","op":"insert","row":{"id":"bob"}}]}"#,
+            )
+            .unwrap();
+        assert_eq!(engine.row_count(), 1);
+        let result = engine
+            .apply_appwrite_page(
+                r#"{"principal_id":"alice","access_scope":"customer","head":"1","scanned_through":"1","has_more":false,"changes":[]}"#,
+            )
+            .unwrap();
+        assert_eq!(result["resnapshot"], true);
+        assert_eq!(engine.row_count(), 0);
+        assert_eq!(engine.appwrite_after().unwrap(), "0");
+    }
+
+    #[test]
+    fn appwrite_mutation_id_is_stable_for_retry_and_unique_for_outbox_id() {
+        let mut engine = appwrite_engine();
+        engine
+            .bind_appwrite_principal("https://cloud.example", "project", "sync", "alice")
+            .unwrap();
+        let write = PendingWrite {
+            table: "profiles".into(),
+            op: WriteOp::Upsert,
+            pk: "alice".into(),
+            payload_json: Some(r#"{"id":"alice"}"#.into()),
+        };
+        engine.appwrite_enqueue(&[write.clone(), write]).unwrap();
+        let first = engine.appwrite_pending().unwrap();
+        let retry = engine.appwrite_pending().unwrap();
+        assert_eq!(first[0]["mutation_id"], retry[0]["mutation_id"]);
+        assert_ne!(first[0]["mutation_id"], first[1]["mutation_id"]);
+    }
+
+    #[test]
+    fn web_storage_keeps_principal_until_clear() {
+        let mut storage = WebStorage::Memory(InMemoryStorage::new());
+        storage.save_principal("appwrite:project:alice").unwrap();
+        assert_eq!(
+            storage.principal().unwrap().as_deref(),
+            Some("appwrite:project:alice")
+        );
+        Storage::clear(&mut storage).unwrap();
+        assert_eq!(storage.principal().unwrap(), None);
+    }
 
     /// The `where_sql` field is the storage seam for the future WASM transport
     /// (E1): the engine holds the predicate so E1 can attach it to the subscribe

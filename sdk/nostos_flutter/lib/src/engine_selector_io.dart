@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:path_provider/path_provider.dart';
 
 import 'engine.dart';
+import 'engine_appwrite.dart';
 import 'engine_direct.dart';
 import 'engine_io.dart';
 import 'rust/frb_generated.dart';
@@ -69,5 +70,34 @@ Future<NostosEngine> createDirectNostosEngine({
     dbPath: path,
     counterFields: counterFields,
     keepLocalOnSignOut: keepLocalOnSignOut,
+  );
+}
+
+/// Open the Appwrite Cloud adapter with a provider-scoped SQLite file.
+Future<NostosEngine> createAppwriteNostosEngine({
+  required String endpoint,
+  required String projectId,
+  required String functionId,
+  required String userId,
+  required String jwt,
+  String? gatewayUrl,
+  String? sqlitePath,
+}) async {
+  if (!_rustInitialized) {
+    await RustLib.init();
+    _rustInitialized = true;
+  }
+  final storeKey = gatewayUrl == null
+      ? '$endpoint/appwrite/$projectId'
+      : '$endpoint/appwrite/$projectId/server/$gatewayUrl';
+  final path = sqlitePath ?? await _defaultSqlitePath(storeKey);
+  return AppwriteNostosEngine.connect(
+    endpoint: endpoint,
+    projectId: projectId,
+    functionId: functionId,
+    userId: userId,
+    jwt: jwt,
+    gatewayUrl: gatewayUrl,
+    dbPath: path,
   );
 }

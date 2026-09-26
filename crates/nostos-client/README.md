@@ -26,6 +26,12 @@ in live-Supabase e2e (`tests/e2e_pg_sync.rs`).
 
 `SyncClientConfig` — incl. `dead_letter_max_attempts` (P2 outbox DLQ).
 
+`AppwriteDirectClient` — SQLite apply/outbox with Appwrite Auth and the Atlet
+Function journal. `new` calls Appwrite directly; `new_server` sends the same
+protocol through a hosted Nostos gateway. Both retain offline writes and clear
+another principal's cache on sign-in. The [Atlet Rust runner](../../apps/atlet/README.md)
+opens direct and server clients against one hosted journal to prove convergence.
+
 ## Run it
 
 ```sh

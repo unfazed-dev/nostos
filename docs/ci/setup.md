@@ -15,9 +15,34 @@ waiting for GitHub capacity. Changing code never fixes that.
 
 | workflow | trigger | jobs |
 |---|---|---|
-| `ci.yml` | push to `main`, PR into `main` | `commits`, `lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck` |
+| `ci.yml` | push to `main`, PR into `main` | `commits`, `lint-test`, `e2e-pg`, `deny`, `sdk-e2e`, `flutter`, `benchmark`, `sdk-typecheck`, `appwrite-function`, `atlet-cloud`, `atlet-web-cloud`, `atlet-server-cloud` |
 | `pr.yml` | PR opened, edited, synchronized, reopened | `pr-title` (required, row 5) |
 | `release.yml` | `v*` tag | release builds. There is no deploy on merge (row 11) |
+
+`atlet-cloud` runs the Rust Appwrite account, native SQLite, and macOS Flutter
+visual flows against the ADS demo project. Its repository secret
+`ATLET_APPWRITE_CREDENTIALS` contains the mode-0600 `.env.cloud` file for the
+three dedicated demo accounts. The job fails when the secret is unavailable,
+including fork PRs; a maintainer must move reviewed fork changes to an internal
+branch before merging. It serializes every PR's use of the shared accounts;
+repository fixtures use random IDs, while the user-disable check necessarily
+uses a real fixed account. Do not run the local cloud check during a CI cloud
+run. The job uploads credential-free JSON results. Locally,
+run `scripts/check.sh atlet-cloud` with the ignored credentials file present.
+The artifact upload selects only `.results/*.json`, includes that hidden
+directory explicitly, and fails the job if no evidence was produced. The
+`atlet-web-cloud` job shares the same serialized account group. It first runs
+the Flutter Worker Chrome regressions, builds the Flutter web app, runs Chrome
+against Appwrite Cloud with OPFS, and verifies
+admin and both customer views. Its separate artifact contains only
+`appwrite-flutter-web-*.json`. Run `scripts/check.sh atlet-web-cloud` locally.
+The `atlet-server-cloud` job uses the same serialized account group and a
+second secret, `ATLET_APPWRITE_GATEWAY_URL`, for a hosted HTTPS gateway. It
+runs native mixed direct/server convergence, the macOS order UI, and the
+Chrome admin/customer UI against the same Appwrite project. The matching local
+area is `scripts/check.sh atlet-server-cloud`; a missing gateway or credentials
+fails the check. Add the job to required branch protection after its first
+hosted green run.
 
 ## Once per clone
 
@@ -39,7 +64,8 @@ fresh clone needs this once. All worktrees of a clone share it.
 3. `scripts/check.sh <area>` for what you touched, or `make check` for
    everything. Each area runs the steps of the CI job with the same name, so
    local green = CI green. An area whose toolchain is missing is skipped green
-   with a note (row 4). CI always has the toolchains.
+   with a note (row 4), except both Atlet cloud areas, which fail if their toolchains
+   or credentials are absent. CI always has the toolchains.
 4. `git push -u origin <task>`.
 5. `gh pr create`. The title is `[arxa-<skill>] <what changed>` (tag map in
    `decisions.md`). The body comes from `.github/pull_request_template.md`.
@@ -54,6 +80,9 @@ fresh clone needs this once. All worktrees of a clone share it.
 
 Run it once the retro replay (rows 3 and 14) has finished. Until then,
 protection would refuse the replay's pushes to `main` (row 8).
+The Atlet contexts in the target list below should be added only after
+the workflow defining them lands on `main`. Adding them earlier would leave
+other open PRs without those checks and block their merges.
 
 ```sh
 gh api 'repos/{owner}/{repo}/branches/main/protection' --method PUT \
@@ -66,6 +95,9 @@ gh api 'repos/{owner}/{repo}/branches/main/protection' --method PUT \
       "fmt + clippy + test",
       "real-Postgres logical-replication e2e",
       "cargo-deny (licenses, advisories, bans)",
+      "Appwrite Function — fmt + clippy + test + deny",
+      "Atlet Appwrite Cloud — multi-user visual sync",
+      "Atlet Appwrite Cloud — Chrome OPFS and multi-user UI",
       "SDK live-replication e2e (host slices)",
       "nostos_flutter — analyze + test",
       "throughput benchmark (smoke)",

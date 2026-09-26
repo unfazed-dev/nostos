@@ -37,6 +37,7 @@ class NostosDatabase {
     this._seedToken,
     this._supabaseAuth, {
     this._localOnly = false,
+    this._appwriteDirect = false,
     this._anonKey,
     this.keepLocalOnSignOut = false,
   }) {
@@ -51,6 +52,10 @@ class NostosDatabase {
   /// no sync, no push rail. Gates the fail-loudly guards on [resumeSync] and
   /// the push-token REST calls, and resolves [waitForFirstSync] immediately.
   final bool _localOnly;
+
+  /// Appwrite's Function provides sync; its push-token rail is configured
+  /// separately from the Supabase RPC and nostos-server REST routes.
+  final bool _appwriteDirect;
 
   /// ADR-0049: this user's local rows survive [signOut] (direct mode only;
   /// the engine still wipes when a different `sub` signs in). Sign-out hooks
@@ -510,6 +515,45 @@ class NostosDatabase {
     );
   }
 
+  /// Open the shared Nostos database and outbox against Appwrite Cloud.
+  /// The app supplies a real Appwrite user ID and a short-lived user JWT.
+  static Future<NostosDatabase> appwrite({
+    required String endpoint,
+    required String projectId,
+    String functionId = 'atlet_sync',
+    required String userId,
+    required String jwt,
+    String? gatewayUrl,
+    required NostosSchema schema,
+    required String sqlitePath,
+  }) async {
+    if (schema.tables.isEmpty) {
+      throw ArgumentError.value(
+        schema.tables,
+        'schema.tables',
+        'A declared schema is required',
+      );
+    }
+    final nostos = await Nostos.appwrite(
+      endpoint: endpoint,
+      projectId: projectId,
+      functionId: functionId,
+      userId: userId,
+      jwt: jwt,
+      gatewayUrl: gatewayUrl,
+      sqlitePath: sqlitePath,
+    );
+    nostos.applySchema(schema.toClientTables());
+    return NostosDatabase._(
+      nostos,
+      schema,
+      endpoint,
+      jwt,
+      false,
+      appwriteDirect: true,
+    );
+  }
+
   /// Shared open path for [connect] and [supabase]: open the [Nostos]
   /// connection, resolve the schema (passed or fetched), and apply it.
   /// Both factories delegate here so the connect/apply sequence has one
@@ -825,6 +869,7 @@ class NostosDatabase {
         deadLetteredWrites: prev.deadLetteredWrites,
         lastWriteError: prev.lastWriteError,
         webStorageDegraded: prev.webStorageDegraded,
+        webStorageKnown: prev.webStorageKnown,
       );
     });
     // The other half of the later-of rule (see [_wireWriteStatus]): status
@@ -868,6 +913,7 @@ class NostosDatabase {
           deadLetteredWrites: w.deadLettered,
           lastWriteError: w.lastError,
           webStorageDegraded: prev.webStorageDegraded,
+          webStorageKnown: prev.webStorageKnown,
         );
       },
       // A dead pump must not take the app with it: the connection half of
@@ -879,7 +925,7 @@ class NostosDatabase {
     unawaited(_storageDegradedSub?.cancel());
     _storageDegradedSub = _nostos.webStorageDegraded.listen((degraded) {
       final prev = _status!.value;
-      if (prev.webStorageDegraded == degraded) return;
+      if (prev.webStorageKnown && prev.webStorageDegraded == degraded) return;
       _status!.value = SyncStatus(
         conn: prev.conn,
         lastSyncedAt: prev.lastSyncedAt,
@@ -887,6 +933,7 @@ class NostosDatabase {
         deadLetteredWrites: prev.deadLetteredWrites,
         lastWriteError: prev.lastWriteError,
         webStorageDegraded: degraded,
+        webStorageKnown: true,
       );
     }, onError: (Object _) {});
   }
@@ -914,10 +961,12 @@ class NostosDatabase {
     // across the close below would let a token refresh hit a closed engine.
     await _authSub?.cancel();
     await _statusSub?.cancel();
+    // The native write-status stream stays open until the engine drops its
+    // watch pump. Stop that pump before awaiting stream cancellation.
+    await _nostos.close();
     await _writeStatusSub?.cancel();
     await _storageDegradedSub?.cancel();
     _status?.dispose();
-    await _nostos.close();
   }
 
   /// Register a hook wiped on [signOut] (ADR-0029). The T6 attachments driver
@@ -946,10 +995,12 @@ class NostosDatabase {
     // setToken on a wiped engine.
     await _authSub?.cancel();
     await _statusSub?.cancel();
+    // Abort the native watch pumps before waiting for their Dart stream
+    // subscriptions to cancel; the reverse order can wait indefinitely.
+    await _nostos.signOut();
     await _writeStatusSub?.cancel();
     await _storageDegradedSub?.cancel();
     _status?.dispose();
-    await _nostos.signOut();
     // Wipe extra local surfaces (blobs) AFTER the engine is quiesced + wiped.
     // Best-effort: a failing hook is logged-and-swallowed so it cannot block
     // the (already-complete) core sign-out. Run a snapshot so a re-entrant
@@ -1046,6 +1097,11 @@ class NostosDatabase {
   /// `204` (any `2xx` in direct mode). Registered tokens are deregistered
   /// automatically by [signOut].
   Future<void> registerPushToken(String platform, String token) async {
+    if (_appwriteDirect) {
+      throw UnsupportedError(
+        'Appwrite push-token registration is not configured.',
+      );
+    }
     if (_localOnly) {
       throw StateError(
         'registerPushToken() on a NostosDatabase.local database: there is no '
@@ -1087,6 +1143,11 @@ class NostosDatabase {
   /// Throws [NostosPushTokenException] when the server replies anything other
   /// than `204` (any `2xx` in direct mode).
   Future<void> deregisterPushToken(String token) async {
+    if (_appwriteDirect) {
+      throw UnsupportedError(
+        'Appwrite push-token registration is not configured.',
+      );
+    }
     if (_localOnly) {
       throw StateError(
         'deregisterPushToken() on a NostosDatabase.local database: there is no '
@@ -1604,6 +1665,7 @@ class SyncStatus {
     this.deadLetteredWrites = 0,
     this.lastWriteError,
     this.webStorageDegraded = false,
+    this.webStorageKnown = false,
   });
 
   /// Writes captured locally but not yet ack'd by the server.
@@ -1634,6 +1696,10 @@ class SyncStatus {
   /// outbox do NOT survive a reload — surface a "session not persisted"
   /// banner so the user knows to use a non-private window.
   final bool webStorageDegraded;
+
+  /// True after the web Worker reports its actual storage backend. A false
+  /// [webStorageDegraded] before this point does not prove durable storage.
+  final bool webStorageKnown;
 
   /// True when at least one write is permanently lost. This is the condition
   /// Flutter's own optimistic-state guidance expects you to render (revert the
@@ -1666,7 +1732,7 @@ class SyncStatus {
   String toString() =>
       'SyncStatus(conn: $conn, connected: $connected, lastSyncedAt: $lastSyncedAt, '
       'pendingWrites: $pendingWrites, deadLetteredWrites: $deadLetteredWrites, '
-      'webStorageDegraded: $webStorageDegraded, '
+      'webStorageDegraded: $webStorageDegraded, webStorageKnown: $webStorageKnown, '
       'lastWriteError: $lastWriteError)';
 }
 

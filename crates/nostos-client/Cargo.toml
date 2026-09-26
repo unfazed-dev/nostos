@@ -31,6 +31,8 @@ nostos-domain = { workspace = true }
 # `workspace = true` so host-side tests still exercise the full server spine.
 nostos-infra = { path = "../nostos-infra", default-features = false }   # WireFrame decode (client ↔ server contract)
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 # Direct mode's one HTTPS POST (`rpc/pull`). The workspace pin is already
 # `default-features = false` + `rustls-tls`, which is the same constraint the
 # nostos-infra note above describes: openssl-sys cannot cross-compile to iOS, so

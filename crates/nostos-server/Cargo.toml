@@ -38,6 +38,7 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
 # `/ingest` payload construction (B2 mirror): RowOp payloads are bytes::Bytes.
 bytes = { workspace = true }
 # Task 21 admin-token gate: hash + constant-time compare NOSTOS_ADMIN_TOKEN.
@@ -45,7 +46,6 @@ sha2 = { workspace = true }
 subtle = { workspace = true }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 # Mint HS256 JWTs in admin_auth.rs's supabase_jwt_is_not_admin test (mirrors
 # crates/nostos-infra/tests/auth_sync.rs's hand-rolled mint_jwt).
 hmac = { workspace = true }

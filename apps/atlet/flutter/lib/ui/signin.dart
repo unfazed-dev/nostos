@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:appwrite/appwrite.dart' as appwrite;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../cloud_auth.dart';
 import '../design/tokens.dart';
 
 /// Injectable auth calls so route transitions are testable without a live
@@ -10,11 +12,8 @@ typedef PasswordSignIn = Future<void> Function(String email, String password);
 typedef SendEmailOtp = Future<void> Function(String email);
 typedef VerifyEmailOtp = Future<void> Function(String email, String token);
 
-Future<void> _defaultPasswordSignIn(String email, String password) => Supabase
-    .instance
-    .client
-    .auth
-    .signInWithPassword(email: email, password: password);
+Future<void> _defaultPasswordSignIn(String email, String password) =>
+    AtletCloudAuth.instance.signIn(email, password);
 
 Future<void> _defaultSendEmailOtp(String email) =>
     Supabase.instance.client.auth.signInWithOtp(email: email);
@@ -53,8 +52,12 @@ class _SigninScreenState extends State<SigninScreen> {
   // Prefill the seeded conformance user. NOTE: `.internal` addresses are
   // rejected by GoTrue's email validation, so the SDK users live under
   // `@atlet.dev` (see supabase/scripts/create_sdk_users.sh).
-  final _email = TextEditingController(text: 'flutter@atlet.dev');
-  final _password = TextEditingController(text: 'atlet-flutter-2026');
+  final _email = TextEditingController(
+    text: usesAppwrite ? '' : 'flutter@atlet.dev',
+  );
+  final _password = TextEditingController(
+    text: usesAppwrite ? '' : 'atlet-flutter-2026',
+  );
   final _otp = TextEditingController();
   bool _working = false;
   String? _error;
@@ -74,6 +77,17 @@ class _SigninScreenState extends State<SigninScreen> {
   /// kimitail: 2s poll ceiling — swap for an auth-state subscription if a
   /// slow restore ever strands users in practice.
   Future<void> _resumeRestoredSession() async {
+    if (usesAppwrite) {
+      try {
+        final session = await AtletCloudAuth.instance.session();
+        if (session != null && mounted) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => _finishSignIn());
+        }
+      } catch (_) {
+        // An unavailable cloud should leave the sign-in form usable.
+      }
+      return;
+    }
     Session? session;
     for (var i = 0; i < 20; i++) {
       try {
@@ -122,6 +136,8 @@ class _SigninScreenState extends State<SigninScreen> {
     } on AuthException catch (e) {
       // Surface the server's reason (e.g. "Invalid login credentials") —
       // a generic message here previously masked a wrong-email root cause.
+      if (mounted) setState(() => _error = 'Sign-in failed: ${e.message}');
+    } on appwrite.AppwriteException catch (e) {
       if (mounted) setState(() => _error = 'Sign-in failed: ${e.message}');
     } catch (e) {
       if (!mounted) return;
@@ -254,12 +270,13 @@ class _SigninScreenState extends State<SigninScreen> {
                       enabled: _emailValid && _password.text.isNotEmpty,
                       onPressed: _submitPassword,
                     ),
-                    TextButton(
-                      onPressed: _working
-                          ? null
-                          : () => setState(() => _mode = _Mode.otpRequest),
-                      child: const Text('Use a code instead'),
-                    ),
+                    if (!usesAppwrite)
+                      TextButton(
+                        onPressed: _working
+                            ? null
+                            : () => setState(() => _mode = _Mode.otpRequest),
+                        child: const Text('Use a code instead'),
+                      ),
                   ] else if (_mode == _Mode.otpRequest) ...[
                     const SizedBox(height: 20),
                     _PrimaryButton(

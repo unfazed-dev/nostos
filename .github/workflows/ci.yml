@@ -49,6 +49,177 @@ jobs:
       - name: test
         run: cargo test --workspace -- --include-ignored
 
+  appwrite-function:
+    name: Appwrite Function — fmt + clippy + test + deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup toolchain install 1.83.0 --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/atlet/appwrite/function
+      - name: fmt + clippy + test
+        run: |
+          cargo fmt --manifest-path apps/atlet/appwrite/function/Cargo.toml -- --check
+          cargo +1.83.0 clippy --manifest-path apps/atlet/appwrite/function/Cargo.toml --all-targets --locked -- -D warnings
+          cargo +1.83.0 test --manifest-path apps/atlet/appwrite/function/Cargo.toml --locked
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: apps/atlet/appwrite/function/Cargo.toml
+          command: check
+          command-arguments: licenses advisories bans
+
+  atlet-cloud:
+    name: Atlet Appwrite Cloud — multi-user visual sync
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The three real demo accounts are shared by this suite. Serialize all PR
+    # runs, including the brief disable/reactivate permission check.
+    concurrency:
+      group: atlet-appwrite-cloud-accounts
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.5"
+          channel: stable
+      - name: Enable native assets and install Rust
+        run: |
+          flutter config --enable-native-assets
+          rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Load scoped demo accounts
+        env:
+          ATLET_APPWRITE_CREDENTIALS: ${{ secrets.ATLET_APPWRITE_CREDENTIALS }}
+        run: |
+          test -n "$ATLET_APPWRITE_CREDENTIALS" || {
+            echo 'ATLET_APPWRITE_CREDENTIALS is required for the cloud merge gate' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$ATLET_APPWRITE_CREDENTIALS" > apps/atlet/.env.cloud
+      - name: Prepare Flutter app
+        working-directory: apps/atlet/flutter
+        run: |
+          mkdir -p build/ios/SourcePackages build/macos/SourcePackages
+          flutter pub get
+      - name: Real Appwrite accounts, SQLite, and visual UI
+        run: scripts/check.sh atlet-cloud
+      - name: Upload credential-free visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlet-appwrite-visual-evidence
+          path: apps/atlet/.results/*.json
+          # Only credential-free result JSONs are selected; .results is hidden.
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Remove demo credentials
+        if: always()
+        run: rm -f apps/atlet/.env.cloud
+
+  atlet-web-cloud:
+    name: Atlet Appwrite Cloud — Chrome OPFS and multi-user UI
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The browser and macOS jobs share fixed real accounts and cloud rows.
+    concurrency:
+      group: atlet-appwrite-cloud-accounts
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.5"
+          channel: stable
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Load scoped demo accounts
+        env:
+          ATLET_APPWRITE_CREDENTIALS: ${{ secrets.ATLET_APPWRITE_CREDENTIALS }}
+        run: |
+          test -n "$ATLET_APPWRITE_CREDENTIALS" || {
+            echo 'ATLET_APPWRITE_CREDENTIALS is required for the browser cloud gate' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$ATLET_APPWRITE_CREDENTIALS" > apps/atlet/.env.cloud
+      - name: Built Flutter UI in Chrome against hosted Appwrite
+        run: scripts/check.sh atlet-web-cloud
+      - name: Upload credential-free browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlet-appwrite-chrome-evidence
+          path: apps/atlet/.results/appwrite-flutter-web-*.json
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Remove demo credentials
+        if: always()
+        run: rm -f apps/atlet/.env.cloud
+
+  atlet-server-cloud:
+    name: Atlet Appwrite Cloud — gateway and cross-mode parity
+    runs-on: macos-latest
+    timeout-minutes: 75
+    concurrency:
+      group: atlet-appwrite-cloud-accounts
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.5"
+          channel: stable
+      - name: Enable native assets and install Rust
+        run: |
+          flutter config --enable-native-assets
+          rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Load scoped accounts and hosted gateway URL
+        env:
+          ATLET_APPWRITE_CREDENTIALS: ${{ secrets.ATLET_APPWRITE_CREDENTIALS }}
+          ATLET_APPWRITE_GATEWAY_URL: ${{ secrets.ATLET_APPWRITE_GATEWAY_URL }}
+        run: |
+          test -n "$ATLET_APPWRITE_CREDENTIALS" || {
+            echo 'ATLET_APPWRITE_CREDENTIALS is required for server-mode acceptance' >&2
+            exit 1
+          }
+          case "$ATLET_APPWRITE_GATEWAY_URL" in
+            https://*) ;;
+            *) echo 'ATLET_APPWRITE_GATEWAY_URL must be a hosted HTTPS endpoint' >&2; exit 1 ;;
+          esac
+          umask 077
+          printf '%s\nNOSTOS_APPWRITE_GATEWAY_URL=%s\n' \
+            "$ATLET_APPWRITE_CREDENTIALS" "$ATLET_APPWRITE_GATEWAY_URL" > apps/atlet/.env.cloud
+      - name: Prepare Flutter app
+        working-directory: apps/atlet/flutter
+        run: |
+          mkdir -p build/ios/SourcePackages build/macos/SourcePackages
+          flutter pub get
+      - name: Same Appwrite journal through gateway and direct clients
+        run: scripts/check.sh atlet-server-cloud
+      - name: Upload credential-free gateway evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlet-appwrite-server-evidence
+          path: apps/atlet/.results/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Remove demo credentials
+        if: always()
+        run: rm -f apps/atlet/.env.cloud
+
   # Conventional commit subjects, required (docs/ci/decisions.md row 6). The
   # range is origin/main..HEAD without merges: a PR's own commits (not GitHub's
   # synthetic merge commit), and nothing on a push to main. fetch-depth 0 so

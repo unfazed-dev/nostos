@@ -6,6 +6,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
+import 'package:nostos_flutter/nostos_flutter.dart' show SyncStatus;
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -15,11 +16,13 @@ import 'adapters/sync_adapter.dart';
 import 'bench/harness.dart';
 import 'bench/store.dart';
 import 'bench/upload.dart';
+import 'cloud_auth.dart';
 import 'design/tokens.dart';
 import 'engine_registry.dart';
 import 'push/order_push.dart';
 import 'push/push_pilot.dart';
 import 'ui/history.dart';
+import 'ui/admin.dart';
 import 'ui/history_detail.dart';
 import 'ui/connectivity_led.dart';
 import 'ui/home.dart';
@@ -38,6 +41,13 @@ const _supabaseAnonKey = String.fromEnvironment(
   'SUPABASE_ANON_KEY',
   defaultValue: 'PLACEHOLDER_ANON_KEY',
 );
+const _nostosMode = String.fromEnvironment(
+  'NOSTOS_MODE',
+  defaultValue: 'direct',
+);
+const _appwriteGatewayUrl = String.fromEnvironment(
+  'NOSTOS_APPWRITE_GATEWAY_URL',
+);
 
 // ponytail: no package_info_plus dep for one hand-copied version string;
 // wire it in if the bench harness ever needs per-build accuracy.
@@ -49,16 +59,21 @@ const _appVersion = '1.0.0+1'; // mirrors pubspec.yaml's `version:`
 // NOTE: bool.fromEnvironment only accepts the literal string "true" — pass
 // `--dart-define=ATLET_PUSH_PILOT=true`; `=1` silently parses as false.
 const _pushPilotEnabled = bool.fromEnvironment('ATLET_PUSH_PILOT');
+const _manualConnectivity = bool.fromEnvironment(
+  'ATLET_TEST_MANUAL_CONNECTIVITY',
+);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Supabase.initialize(
-    url: _supabaseUrl,
-    publishableKey: _supabaseAnonKey,
-  );
+  if (!usesAppwrite) {
+    await Supabase.initialize(
+      url: _supabaseUrl,
+      publishableKey: _supabaseAnonKey,
+    );
+  }
   // Firebase is the mobile rail only. On web the pilot uses raw Web Push
   // (push_pilot_web.dart) — no Firebase init, no web config to throw on.
-  if (_pushPilotEnabled && !kIsWeb) {
+  if (_pushPilotEnabled && !usesAppwrite && !kIsWeb) {
     // Platform config (google-services.json / GoogleService-Info.plist) —
     // throws here when absent, which is the point of the opt-in flag.
     await Firebase.initializeApp();
@@ -186,6 +201,7 @@ void _wireFcmTaps() {
 /// rebuilds/route pushes without needing an InheritedWidget for this pilot.
 final EngineRegistry engineRegistry = EngineRegistry(
   supabaseAnonKey: _supabaseAnonKey,
+  appwriteGatewayUrl: _appwriteGatewayUrl,
 );
 
 class AtletApp extends StatelessWidget {
@@ -235,6 +251,14 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _tabIndex = 0;
+  bool _isAdmin = false;
+  bool _accessRevoked = false;
+  String? _sessionUserId;
+  StreamSubscription<List<UserProfileRow>>? _profileRoleSub;
+  StreamSubscription<bool>? _accessRevokedSub;
+  String? _engineStartError;
+  bool _signOutWipeFailed = false;
+  bool _signingOut = false;
   Future<BenchStore>? _benchStoreFuture;
   ConnectivityGuard? _connectivityGuard;
 
@@ -243,6 +267,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // arrives over the live sync socket (a push is suppressed by the offline
   // gate by design), so the in-app banner IS the foreground notification.
   StreamSubscription<List<OrderEventRow>>? _orderBannerSub;
+  StreamSubscription<bool>? _orderBannerReadySub;
 
   /// Every event id this run has already seen. The first emission only seeds
   /// it — the history a fresh device pulls is not news.
@@ -253,6 +278,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// engine keeps the token it was opened with until it expires — see
   /// NostosAdapter.setToken for what that costs.
   StreamSubscription<AuthState>? _authSub;
+  Timer? _jwtRefreshTimer;
 
   /// Drives the offline banner. Sourced from platform connectivity (the
   /// guard), not the engine's `connected` stream: the banner must show even
@@ -265,15 +291,15 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Direct-mode Nostos is the only engine: bring it up on entering Home so
-    // syncing is live the moment the app is. Post-frame so nothing touches
+    // Start the configured Nostos transport on entering Home so syncing is
+    // live the moment the app is. Post-frame so nothing touches
     // `Supabase.instance` during initState (widget_test.dart).
     // The connectivity guard also starts post-frame: platform channels are
     // unavailable during widget-test initState, and start() is what opens
     // the connectivity_plus stream.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startEngine();
-      _startConnectivityGuard();
+      if (!_manualConnectivity) _startConnectivityGuard();
       // A notification tapped from a cold start reaches openHistoryEvent
       // before any navigator exists; this is the first frame that has one.
       final pending = _pendingEventId;
@@ -312,8 +338,16 @@ class _HomeScreenState extends State<HomeScreen> {
     _connectivityGuard = null;
     _orderBannerSub?.cancel();
     _orderBannerSub = null;
+    _orderBannerReadySub?.cancel();
+    _orderBannerReadySub = null;
     _authSub?.cancel();
     _authSub = null;
+    _profileRoleSub?.cancel();
+    _profileRoleSub = null;
+    _accessRevokedSub?.cancel();
+    _accessRevokedSub = null;
+    _jwtRefreshTimer?.cancel();
+    _jwtRefreshTimer = null;
     super.dispose();
   }
 
@@ -326,21 +360,39 @@ class _HomeScreenState extends State<HomeScreen> {
   /// device pulls on open is not news, and neither is the user's own checkout.
   void _wireOrderBanner(NostosAdapter adapter) {
     _orderBannerSub?.cancel();
+    _orderBannerSub = null;
+    _orderBannerReadySub?.cancel();
+    _orderBannerReadySub = null;
     _seenEventIds.clear();
     _eventsSeeded = false;
-    _orderBannerSub = adapter.watchOrderEvents().listen((events) {
-      final fresh = events.where((e) => !_seenEventIds.contains(e.id)).toList();
-      _seenEventIds.addAll(events.map((e) => e.id));
-      if (!_eventsSeeded) {
-        _eventsSeeded = true;
-        return;
-      }
-      // The stream is newest-first; post oldest-first so a burst reads in the
-      // order it happened.
-      for (final e in fresh.reversed) {
-        unawaited(_postOrderBanner(e));
-      }
-    });
+    void attach() {
+      _orderBannerSub ??= adapter.watchOrderEvents().listen((events) {
+        final fresh = events
+            .where((e) => !_seenEventIds.contains(e.id))
+            .toList();
+        _seenEventIds.addAll(events.map((e) => e.id));
+        if (!_eventsSeeded) {
+          _eventsSeeded = true;
+          return;
+        }
+        // The stream is newest-first; post oldest-first so a burst reads in
+        // the order it happened.
+        for (final e in fresh.reversed) {
+          unawaited(_postOrderBanner(e));
+        }
+      });
+    }
+
+    // Appwrite's first pull backfills the journal after the adapter opens.
+    // Wait until that pull finishes before seeding the banner stream; a
+    // first-time install must not toast every historical order event.
+    if (usesAppwrite) {
+      _orderBannerReadySub = adapter.connected.listen((online) {
+        if (online) attach();
+      });
+    } else {
+      attach();
+    }
   }
 
   /// Posts one order event to the user and records what the platform did with
@@ -353,9 +405,13 @@ class _HomeScreenState extends State<HomeScreen> {
       'order banner: ${e.orderId.substring(0, 8)} '
       '${e.previousStatus} -> ${e.status} route=${historyRoute(e.id)}',
     );
-    if (!postsOwnBanner(pushPilot: _pushPilotEnabled, web: kIsWeb)) return;
-    // Web has no MethodChannel: the snackbar IS the foreground banner.
-    if (kIsWeb) {
+    if (!usesAppwrite &&
+        !postsOwnBanner(pushPilot: _pushPilotEnabled, web: kIsWeb)) {
+      return;
+    }
+    // Web and macOS show an in-app foreground banner. The native notification
+    // channel is implemented by iOS and Android; macOS has no channel handler.
+    if (kIsWeb || Platform.isMacOS) {
       _notify(payload['body']! as String);
       recordPushAttempt(
         PushAttempt(
@@ -385,10 +441,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Brings the sync engine up. There is one engine and no way to change it
-  /// (user request 2026-09-22): direct-mode Nostos, the device syncing with
-  /// Supabase itself with no `nostos-server` on the other end
-  /// (`docs/plans/direct-mode-sync-protocol.md`).
+  /// Brings up one engine per signed-in session. `NOSTOS_MODE` chooses direct
+  /// (the default) or server transport; provider and mode determine the local
+  /// store and cannot change while that engine is live.
   /// It starts on its own when Home opens, and says nothing while doing it —
   /// the connectivity LED and the write-status UI are what report a sync
   /// that isn't working.
@@ -400,13 +455,16 @@ class _HomeScreenState extends State<HomeScreen> {
   /// reload, route re-push) or when there is no session.
   Future<void> _startEngine() async {
     if (engineRegistry.activeEngine != null) return;
-    Session? session;
+    CloudSession? session;
     try {
-      session = Supabase.instance.client.auth.currentSession;
-    } catch (_) {
-      return; // Supabase not initialized (widget tests) — stay engine-less.
+      session = await AtletCloudAuth.instance.session();
+    } catch (error) {
+      debugPrint('cloud session failed: $error');
+      return;
     }
     if (session == null) return; // signed out — sign-in re-enters Home
+    _isAdmin = session.isAdmin;
+    _sessionUserId = session.userId;
     try {
       // path_provider has no web impl; the web engine's storage is
       // OPFS-backed and ignores sqlitePath (ADR-0036), so dbDir is an
@@ -415,61 +473,165 @@ class _HomeScreenState extends State<HomeScreen> {
           ? ''
           : (await getApplicationDocumentsDirectory()).path;
       final adapter = await engineRegistry.start(
-        Engine.nostosDirect,
+        selectEngine(provider: atletProvider, mode: _nostosMode),
         SyncSession(
-          supabaseUrl: _supabaseUrl,
-          accessToken: session.accessToken,
-          userId: session.user.id,
+          supabaseUrl: usesAppwrite ? appwriteEndpoint : _supabaseUrl,
+          accessToken: session.jwt,
+          userId: session.userId,
           dbDir: dbDir,
         ),
       );
       final nostos = adapter as NostosAdapter;
+      _engineStartError = null;
+      if (usesAppwrite) _watchAppwriteAccess(nostos);
       // The order banner is pure sync — it reads watchOrders() and posts a
       // local notification. It was gated behind the FCM pilot, which meant a
       // default build showed the user nothing when their order shipped.
       _wireOrderBanner(nostos);
       // Supabase rotates the access token about hourly. The engine was opened
       // with one token and has no way to learn the next, so forward it.
-      await _authSub?.cancel();
-      _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((s) {
-        final token = s.session?.accessToken;
-        if (token == null) return;
-        if (s.event == AuthChangeEvent.tokenRefreshed ||
-            s.event == AuthChangeEvent.signedIn) {
-          // Best-effort: a refused swap leaves the previous token in place and
-          // the next rotation tries again.
-          unawaited(nostos.setToken(token).catchError((Object _) {}));
-        }
-      });
+      if (usesAppwrite) {
+        // Appwrite user JWTs expire after 15 minutes. Renew before expiry;
+        // the underlying persisted account session remains the authority.
+        _jwtRefreshTimer?.cancel();
+        _jwtRefreshTimer = Timer.periodic(const Duration(minutes: 10), (_) {
+          unawaited(() async {
+            try {
+              await nostos.setToken(
+                await AtletCloudAuth.instance.refreshedJwt(),
+              );
+            } catch (error) {
+              debugPrint('Appwrite JWT refresh failed: $error');
+            }
+          }());
+        });
+      } else {
+        await _authSub?.cancel();
+        _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((s) {
+          final token = s.session?.accessToken;
+          if (token == null) return;
+          if (s.event == AuthChangeEvent.tokenRefreshed ||
+              s.event == AuthChangeEvent.signedIn) {
+            unawaited(nostos.setToken(token).catchError((Object _) {}));
+          }
+        });
+      }
       // PILOT (ADR-0037): doorbell registration follows the nostos engine —
       // push is a nostos feature, and direct mode is still a NostosAdapter.
-      if (_pushPilotEnabled) {
+      if (_pushPilotEnabled && !usesAppwrite) {
         unawaited(pushPilot.attach(nostos));
       }
     } catch (e) {
-      // Deliberately not a snackbar: the engine is not a thing the user
-      // chose, so its lifecycle is not news to them.
+      // Configuration failures need a persistent visible surface; a quiet
+      // debug log leaves a signed-in user looking at empty tabs forever.
+      _engineStartError = e.toString();
       debugPrint('engine start failed: $e');
     }
     if (mounted) setState(() {}); // hand the live adapter to the tabs
+  }
+
+  /// ADR-0050: the Function's current scope controls which profile rows can
+  /// reach this device. Re-read the Appwrite team after each scope-driven
+  /// profile update so the visible Admin tab follows promotion or demotion.
+  void _watchAppwriteAccess(NostosAdapter nostos) {
+    _profileRoleSub?.cancel();
+    _accessRevokedSub?.cancel();
+    _accessRevokedSub = nostos.accessRevoked.listen((revoked) {
+      if (!mounted || !revoked) return;
+      _jwtRefreshTimer?.cancel();
+      _jwtRefreshTimer = null;
+      setState(() {
+        _accessRevoked = true;
+        _isAdmin = false;
+        _tabIndex = 0;
+        _engineStartError = 'Account access revoked. Sign out to continue.';
+      });
+    });
+    _profileRoleSub = nostos.watchUserProfiles().listen((profiles) {
+      final own = profiles
+          .where((profile) => profile.id == _sessionUserId)
+          .firstOrNull;
+      if (own == null) return;
+      unawaited(_refreshAppwriteRole());
+    });
+  }
+
+  Future<void> _refreshAppwriteRole() async {
+    try {
+      final session = await AtletCloudAuth.instance.session();
+      if (!mounted ||
+          _accessRevoked ||
+          session == null ||
+          session.userId != _sessionUserId) {
+        return;
+      }
+      if (_isAdmin != session.isAdmin) {
+        setState(() {
+          _isAdmin = session.isAdmin;
+          if (!_isAdmin && _tabIndex == 3) _tabIndex = 0;
+        });
+      }
+    } catch (error) {
+      debugPrint('Appwrite role refresh failed: $error');
+    }
   }
 
   /// Sign out: doorbell off, engine down (local DB wiped), Supabase session
   /// gone, back to the sign-in route. Order matters — the push pilot and the
   /// auth listener both hold the adapter, so they let go before it does.
   Future<void> _signOut() async {
+    _signingOut = true;
+    await _orderBannerSub?.cancel();
+    _orderBannerSub = null;
+    await _orderBannerReadySub?.cancel();
+    _orderBannerReadySub = null;
     await _authSub?.cancel();
     _authSub = null;
-    if (_pushPilotEnabled) await pushPilot.detach();
-    await engineRegistry.stop();
-    await Supabase.instance.client.auth.signOut();
-    if (mounted) Navigator.of(context).pushReplacementNamed('/signin');
+    await _profileRoleSub?.cancel();
+    _profileRoleSub = null;
+    await _accessRevokedSub?.cancel();
+    _accessRevokedSub = null;
+    _jwtRefreshTimer?.cancel();
+    _jwtRefreshTimer = null;
+    if (_pushPilotEnabled && !usesAppwrite) await pushPilot.detach();
+    try {
+      await engineRegistry.stop();
+    } catch (error) {
+      debugPrint('offline data wipe failed during sign-out: $error');
+      if (mounted) {
+        setState(() {
+          _signOutWipeFailed = true;
+          _engineStartError =
+              'Offline data could not be cleared. Retry sign out.';
+        });
+      }
+      _signingOut = false;
+      return;
+    }
+    await AtletCloudAuth.instance.signOut();
+    _isAdmin = false;
+    _sessionUserId = null;
+    _accessRevoked = false;
+    _signOutWipeFailed = false;
+    if (mounted) {
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.clearSnackBars();
+      messenger.removeCurrentSnackBar();
+      Navigator.of(context).pushReplacementNamed('/signin');
+    }
   }
 
   void _notify(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    if (!mounted || _signingOut) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+        // The shell owns this messenger while tab Scaffolds own their FABs.
+        // Reserve their button row so a notification cannot block checkout.
+        margin: const EdgeInsets.fromLTRB(16, 5, 16, 100),
+      ),
+    );
   }
 
   /// Builds the Nth synthetic bench session — mirrors test/harness_test.dart's
@@ -549,6 +711,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildHistoryTab(BuildContext context) {
+    if (usesAppwrite) {
+      return HistoryScreen(
+        events: engineRegistry.current?.watchOrderEvents() ?? _noOrderEvents(),
+      );
+    }
     return FutureBuilder<BenchStore>(
       future: _benchStore(),
       builder: (context, snapshot) {
@@ -580,19 +747,73 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildWebStorageStatus(SyncStatus status) {
+    final degraded = status.webStorageKnown && status.webStorageDegraded;
+    final label = !status.webStorageKnown
+        ? 'Checking offline storage…'
+        : degraded
+        ? 'Browser storage is temporary. Offline changes may be lost.'
+        : 'Offline storage ready · ${status.pendingWrites} pending';
+    return Container(
+      key: const Key('web-storage-status'),
+      color: degraded ? const Color(0xFFFFE4D6) : AtletTokens.bone,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Icon(
+            degraded ? Icons.warning_amber_rounded : Icons.storage_outlined,
+            size: 18,
+            color: AtletTokens.ink,
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(label)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final adapter = engineRegistry.current;
     return Scaffold(
       key: const Key('home-shell'),
       body: Column(
         children: [
+          if (_engineStartError != null)
+            MaterialBanner(
+              key: const Key('engine-start-error'),
+              content: Text(_engineStartError!),
+              actions: [
+                TextButton(
+                  onPressed: _accessRevoked || _signOutWipeFailed
+                      ? _signOut
+                      : _startEngine,
+                  child: Text(
+                    _signOutWipeFailed
+                        ? 'Retry sign out'
+                        : _accessRevoked
+                        ? 'Sign out'
+                        : 'Retry',
+                  ),
+                ),
+              ],
+            ),
+          if (kIsWeb && adapter is NostosAdapter)
+            ValueListenableBuilder<SyncStatus>(
+              valueListenable: adapter.syncStatusListenable,
+              builder: (context, status, child) =>
+                  _buildWebStorageStatus(status),
+            ),
           // Offline banner removed — the AppBar ConnectivityLed carries the
           // online/offline signal now (user request 2026-08-07).
           Expanded(
             child: switch (_tabIndex) {
               0 => _buildHomeTab(context),
               1 => ShopScreen(adapter: engineRegistry.current),
-              _ => _buildHistoryTab(context),
+              2 => _buildHistoryTab(context),
+              _ => AdminScreen(
+                adapter: engineRegistry.current as NostosAdapter?,
+              ),
             },
           ),
         ],
@@ -602,25 +823,32 @@ class _HomeScreenState extends State<HomeScreen> {
         selectedIndex: _tabIndex,
         backgroundColor: AtletTokens.bone,
         onDestinationSelected: (index) => setState(() => _tabIndex = index),
-        destinations: const [
-          NavigationDestination(
+        destinations: [
+          const NavigationDestination(
             key: Key('nav-tab-home'),
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home),
             label: 'Home',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             key: Key('nav-tab-shop'),
             icon: Icon(Icons.storefront_outlined),
             selectedIcon: Icon(Icons.storefront),
             label: 'Shop',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             key: Key('nav-tab-history'),
             icon: Icon(Icons.history_outlined),
             selectedIcon: Icon(Icons.history),
             label: 'History',
           ),
+          if (_isAdmin && usesAppwrite)
+            const NavigationDestination(
+              key: Key('nav-tab-admin'),
+              icon: Icon(Icons.admin_panel_settings_outlined),
+              selectedIcon: Icon(Icons.admin_panel_settings),
+              label: 'Admin',
+            ),
         ],
       ),
     );
