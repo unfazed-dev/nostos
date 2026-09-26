@@ -228,12 +228,20 @@ class _Orders extends StatelessWidget {
                 'paid' => TextButton(
                   key: Key('admin-ship-${order.id}'),
                   onPressed: () => _advance(context, order, 'shipped'),
-                  child: const Text('Ship'),
+                  child: Semantics(
+                    label: 'Ship order ${order.id}',
+                    excludeSemantics: true,
+                    child: const Text('Ship'),
+                  ),
                 ),
                 'shipped' => TextButton(
                   key: Key('admin-deliver-${order.id}'),
                   onPressed: () => _advance(context, order, 'delivered'),
-                  child: const Text('Deliver'),
+                  child: Semantics(
+                    label: 'Deliver order ${order.id}',
+                    excludeSemantics: true,
+                    child: const Text('Deliver'),
+                  ),
                 ),
                 _ => null,
               },

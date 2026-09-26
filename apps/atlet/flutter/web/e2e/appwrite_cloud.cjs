@@ -416,13 +416,12 @@ async function main() {
         }
       }
       await page.mouse.click(640, 115);
-      // Prior cloud runs can leave other paid orders visible. Flutter merges
-      // each order's title and status into its parent semantics node, so
-      // scope both actions to the order created by this run.
-      const orderAction = (status, action) => page
-        .getByLabel(new RegExp(`^Order ${orderId.slice(0, 8)} ${status} ·`))
-        .getByRole("button", { name: action });
-      await orderAction("paid", "Ship").waitFor({ timeout: 45000 });
+      // An action's accessible name carries the full order ID, so other
+      // demo runs cannot make the test fulfil the wrong paid order.
+      const orderAction = (action) => page.getByRole("button", {
+        name: `${action} order ${orderId}`, exact: true,
+      });
+      await orderAction("Ship").waitFor({ timeout: 45000 });
       const shipPush = page.waitForResponse((response) => {
         if (!response.url().includes("/functions/atlet_sync/executions")) return false;
         try {
@@ -432,7 +431,7 @@ async function main() {
             body.pk === orderId && body.payload?.status === "shipped";
         } catch (_) { return false; }
       }, { timeout: 60000 }).catch(() => null);
-      await orderAction("paid", "Ship").click();
+      await orderAction("Ship").click();
       const shipped = await shipPush;
       if (!shipped || (await shipped.json()).responseStatusCode !== 200) {
         throw new Error("Admin ship write was not committed");
@@ -447,12 +446,12 @@ async function main() {
             body.pk === orderId && body.payload?.status === "delivered";
         } catch (_) { return false; }
       }, { timeout: 60000 }).catch(() => null);
-      await orderAction("shipped", "Deliver").click();
+      await orderAction("Deliver").click();
       const delivered = await deliverPush;
       if (!delivered || (await delivered.json()).responseStatusCode !== 200) {
         throw new Error("Admin delivery write was not committed");
       }
-      await orderAction("shipped", "Deliver")
+      await orderAction("Deliver")
         .waitFor({ state: "hidden", timeout: 15000 });
       evidence.admin_order_delivered = true;
       await page.screenshot({ path: path.join(path.dirname(evidencePath), "appwrite-web-delivered.png") });
