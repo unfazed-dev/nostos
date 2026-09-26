@@ -36,6 +36,12 @@ question; change any of them and the generated files follow.
 | 13 | branching | worktrees (the arxa default) | skill default; the pre-push hook enforces it |
 | 14 | retro base | the retro `main` starts at an empty root commit dated just before the first real commit, so every real commit lands through a PR | otherwise the first commit would sit on `main` outside any PR |
 
+Operational spot check (2026-09-26): rows 4 and 8 were corrected to match the
+current checks and applied protection. Rows 6, 7, 10–14 are consistent with
+the scripts, workflows, and rewritten history checked this day. Row 9 still
+requires registry account access and a first-release decision. This check does
+not record owner acceptance of the defaults above.
+
 ## Tag map (SSOT)
 
 The one list of PR-title stage tags. A title starts with one or more tags,

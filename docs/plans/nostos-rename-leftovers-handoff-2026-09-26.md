@@ -28,6 +28,8 @@ Sources read: `docs/plans/nostos-rename-research-2026-09-24.md` §8,
 - #4: migration 0013 is in PR #57. The live `order_events` title already has
   the icon; a rolled-back transaction verified the migration repairs a missing
   prefix and is idempotent. `make ci` passed.
+- #5: rows 4 and 8 were corrected against active checks and protection; rows
+  6, 7, 10–14 passed an operational spot check. Owner acceptance is pending.
 - #2: the adopter playbook moved to `docs/guides/`. The qairn rename inventory
   and sync-scoping research are still cited by other plans, so they remain;
   a filename-reference scan found 42 of 46 preexisting plans cited elsewhere.
