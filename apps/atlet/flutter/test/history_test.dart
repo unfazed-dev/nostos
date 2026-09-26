@@ -67,6 +67,16 @@ void main() {
       if (await tempDir.exists()) await tempDir.delete(recursive: true);
     });
 
+    testWidgets('Appwrite history hides Supabase-only benchmark actions', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(home: HistoryScreen(events: Stream.value(const []))),
+      );
+      expect(find.byKey(const Key('open-bench-button')), findsNothing);
+      expect(find.byKey(const Key('history-screen')), findsOneWidget);
+    });
+
     testWidgets('stacks order events, and says so when there are none', (
       tester,
     ) async {

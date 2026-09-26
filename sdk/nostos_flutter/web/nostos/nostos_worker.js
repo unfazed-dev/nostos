@@ -53,7 +53,11 @@
 // (enqueue + apply_local + flush), so a write never throws when the socket is
 // closed — it is captured locally and ships on (re)connect.
 import init, { NostosSocket } from "./nostos_ffi_wasm.js";
+import { AppwriteTransport } from "./appwrite_transport.js";
 
+let send = self.postMessage.bind(self);
+let storageMessage = null;
+let attachedPort = null;
 
 let wasmReady = false;
 let sock = null;
@@ -65,6 +69,48 @@ const watchedTables = new Set();
 let connParams = null; // { url, tables:[{name, whereSql?}] }
 let token = null;
 
+function sameScope(request) {
+  if (!connParams || !sock) return false;
+  const provider = request.provider ?? "server";
+  if (provider !== connParams.provider || request.url !== connParams.url) return false;
+  return provider !== "appwrite" ||
+    (request.projectId === connParams.projectId &&
+      request.functionId === connParams.functionId &&
+      request.userId === connParams.userId);
+}
+
+function sameSession(request) {
+  return sameScope(request) && (request.token ?? null) === token;
+}
+
+async function appwriteTokenMatchesUser(candidate, params = connParams) {
+  if (!candidate || params?.provider !== "appwrite") return false;
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), 8000);
+  try {
+    // Validate the bearer with Appwrite itself. Never use ambient cookies:
+    // a claimed userId must be backed by this exact JWT before OPFS rows open.
+    const response = await fetch(`${params.url.replace(/\/$/, "")}/account`, {
+      method: "GET",
+      credentials: "omit",
+      cache: "no-store",
+      headers: {
+        "X-Appwrite-Project": params.projectId,
+        "X-Appwrite-JWT": candidate,
+        "Accept": "application/json",
+      },
+      signal: abort.signal,
+    });
+    if (!response.ok) return false;
+    const account = await response.json();
+    return account?.$id === params.userId && account?.status !== false;
+  } catch (_) {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // ADR-0033: the durable SQLite-WASM db handle (or null in memory/degrade mode).
 // Set by initStorage() on boot. Passed to NostosSocket.connect as the 5th arg.
 let dbHandle = null;
@@ -73,14 +119,9 @@ let storageMode = "memory";
 // Why storageMode is "memory": "secondary-tab" | "opfs-unavailable" | null.
 let storageReason = null;
 
-// Multi-tab leadership (sqlite.org/wasm persistence.md, "OPFS SyncAccessHandle
-// Pool VFS"): opfs-sahpool is ONE instance per origin — a second tab's
-// installOpfsSAHPoolVfs() throws, and before this guard that tab silently
-// degraded to memory with its OWN live socket: two diverging local states and
-// non-durable writes in tab 2. Web Locks decides leadership first.
-// Mirrors sdk/nostos_web/worker/nostos.worker.js — keep the two in step.
-// The loser then proxies to the leader over a BroadcastChannel (follower
-// proxy, end of file) instead of running its own memory engine.
+// OPFS SAH pool has one owner per origin. The SharedWorker broker spawns one
+// dedicated engine Worker and routes each tab over a private MessagePort.
+// A direct Worker opened while another owns OPFS fails closed at connect.
 const LEADER_LOCK = "nostos:opfs-sahpool";
 let leaderLockHeld = false; // also set by the promotion path (follower proxy)
 async function acquireLeaderLock() {
@@ -110,6 +151,7 @@ let schemaTables = null;
 // this works before applySchema runs). Each row's payload is a JSON object; we
 // parse + re-emit so Dart's Collection<T>.fromRow sees plain row objects (the
 // same shape the native view query returns).
+const payloadDecoder = new TextDecoder();
 function postSnapshot(table) {
   let json = "[]";
   if (sock) {
@@ -118,7 +160,10 @@ function postSnapshot(table) {
       json = JSON.stringify(
         rows.map((r) => {
           try {
-            return JSON.parse(r.payload);
+            const value = JSON.parse(typeof r.payload === "string"
+              ? r.payload : payloadDecoder.decode(r.payload));
+            return value && typeof value === "object" && !Array.isArray(value)
+              ? { ...value, pk: r.pk } : { pk: r.pk, value };
           } catch (_) {
             return { pk: r.pk };
           }
@@ -128,7 +173,7 @@ function postSnapshot(table) {
       /* socket torn down between tick + read — leave json "[]" */
     }
   }
-  self.postMessage({ type: "snapshot", table, json });
+  send({ type: "snapshot", table, json });
 }
 
 // Push the durable-outbox status (pending / dead-lettered / last error). Called
@@ -137,7 +182,7 @@ function postSnapshot(table) {
 function postWriteStatus() {
   if (!sock) return;
   try {
-    self.postMessage({
+    send({
       type: "writeStatus",
       pending: sock.pendingCount,
       deadLettered: sock.deadLetteredCount,
@@ -199,13 +244,30 @@ async function initStorage() {
   } catch (_) {
     /* no StorageManager → leave null */
   }
-  self.postMessage({ type: "storage", mode: storageMode, reason: storageReason, persisted });
+  storageMessage = { type: "storage", mode: storageMode, reason: storageReason, persisted };
+  send(storageMessage);
 }
 
 // Open (or reopen) the socket for connParams: connect with the first table,
 // then subscribe the rest (NostosSocket.connect is single-table; subscribe adds
 // more over the open socket — Wave 4a multi-table).
 async function openSocket() {
+  if (connParams.provider === "appwrite") {
+    sock = new AppwriteTransport({
+      dbHandle,
+      endpoint: connParams.url,
+      projectId: connParams.projectId,
+      functionId: connParams.functionId,
+      userId: connParams.userId,
+      token,
+      onStatus: (connected, accessRevoked = false) =>
+        send({ type: "status", connected, accessRevoked }),
+    });
+    sock.setCrdtTables(connParams.orSetTables ?? [], connParams.counterTables ?? []);
+    if (schemaTables !== null) sock.applySchema(schemaTables);
+    attachChangePush(sock);
+    return;
+  }
   const { url, tables } = connParams;
   const first = tables[0] ?? { name: "__placeholder__", whereSql: null };
   sock = await NostosSocket.connect(
@@ -254,15 +316,17 @@ async function openSocket() {
 // contract).
 const bootP = ensureWasm()
   .then(() => initStorage())
-  .catch((e) =>
-    self.postMessage({
+  .catch((e) => {
+    storageReason = "wasm-init";
+    storageMessage = {
       type: "storage",
       mode: "memory",
       error: "wasm-init: " + String((e && e.message) || e),
-    }),
-  );
+    };
+    send(storageMessage);
+  });
 
-self.onmessage = async (ev) => {
+const dispatchMessage = async (ev) => {
   const m = ev.data || {};
   const id = m.id;
 
@@ -270,31 +334,47 @@ self.onmessage = async (ev) => {
     switch (m.cmd) {
       case "connect": {
         await bootP;
-        // A follower tab never reaches here (its connect is proxied to the
-        // leader — see the follower proxy at the end of this file).
+        if (storageReason === "secondary-tab") {
+          throw new Error("another browser tab owns durable storage");
+        }
         if (sock) {
-          // A later tab's proxied connect JOINS the live session as-is (the
-          // first tab's url/tables/CRDT tags win) instead of opening a second
-          // socket over the same store.
-          self.postMessage({ id, ok: true, checkpoint: sock.checkpoint });
-          self.postMessage({ type: "status", connected: true });
+          // OPFS is shared by origin, not account. A follower may join only
+          // the same authenticated session; otherwise snapshots would expose
+          // the leader's private rows to a different signed-in tab.
+          if (!sameSession(m)) {
+            send({ id, error: "another signed-in session owns browser storage" });
+            break;
+          }
+          send({ id, ok: true, checkpoint: sock.checkpoint });
+          send({ type: "status", connected: true });
           break;
         }
-        token = m.token ?? null;
-        connParams = {
+        const nextParams = {
           url: m.url,
+          provider: m.provider ?? "server",
+          projectId: m.projectId,
+          functionId: m.functionId,
+          userId: m.userId,
           tables: m.tables ?? [],
           orSetTables: m.orSetTables ?? [],
           counterTables: m.counterTables ?? [],
         };
+        // Validate before binding a principal to the existing OPFS cache.
+        // A claimed userId and a JWT can otherwise belong to different users.
+        if (nextParams.provider === "appwrite" &&
+            !(await appwriteTokenMatchesUser(m.token, nextParams))) {
+          throw new Error("Appwrite token does not match the claimed account");
+        }
+        token = m.token ?? null;
+        connParams = nextParams;
         await openSocket();
-        self.postMessage({ id, ok: true, checkpoint: sock.checkpoint });
-        self.postMessage({ type: "status", connected: true });
+        send({ id, ok: true, checkpoint: sock.checkpoint });
+        send({ type: "status", connected: connParams.provider !== "appwrite" });
         break;
       }
       case "write": {
         if (!sock) {
-          self.postMessage({ id, error: "not connected" });
+          send({ id, error: "not connected" });
           break;
         }
         // client_write_id is required by the wasm boundary (a string); use the
@@ -306,7 +386,7 @@ self.onmessage = async (ev) => {
           m.payloadJson ?? null,
           String(id),
         );
-        self.postMessage({ id, ok: true, writeId });
+        send({ id, ok: true, writeId });
         break;
       }
       case "orSetAdd":
@@ -318,12 +398,12 @@ self.onmessage = async (ev) => {
         // nostos-domain), then ships if OPEN. The wasm method name matches the
         // cmd (camelCase); dispatch by the cmd string.
         if (!sock) {
-          self.postMessage({ id, error: "not connected" });
+          send({ id, error: "not connected" });
           break;
         }
         const fn = sock[m.cmd]; // orSetAdd | orSetRemove | counterIncrement | counterDecrement
         const writeId = fn.call(sock, m.table, m.pk, m.element ?? m.delta);
-        self.postMessage({ id, ok: true, writeId });
+        send({ id, ok: true, writeId });
         break;
       }
       case "writeBatch": {
@@ -334,7 +414,7 @@ self.onmessage = async (ev) => {
         // Array so the postMessage boundary carries JSON-friendly values (the
         // Dart + JS consumers both expect a regular array).
         if (!sock) {
-          self.postMessage({ id, error: "not connected" });
+          send({ id, error: "not connected" });
           break;
         }
         const ops = (m.ops ?? []).map((o) => ({
@@ -344,12 +424,12 @@ self.onmessage = async (ev) => {
           payloadJson: o.payloadJson ?? null,
         }));
         const writeIds = Array.from(sock.writeBatch(ops));
-        self.postMessage({ id, ok: true, writeIds });
+        send({ id, ok: true, writeIds });
         break;
       }
       case "query": {
         const json = sock ? sock.query(m.sql) : "[]";
-        self.postMessage({ id, ok: true, json });
+        send({ id, ok: true, json });
         break;
       }
       case "applySchema": {
@@ -366,7 +446,7 @@ self.onmessage = async (ev) => {
         if (sock) {
           sock.applySchema(schemaTables);
         }
-        self.postMessage({ id, ok: true });
+        send({ id, ok: true });
         break;
       }
       case "setCrdtTables": {
@@ -376,7 +456,7 @@ self.onmessage = async (ev) => {
         if (sock) {
           sock.setCrdtTables(m.orSet ?? [], m.counter ?? []);
         }
-        self.postMessage({ id, ok: true });
+        send({ id, ok: true });
         break;
       }
       case "watch": {
@@ -395,31 +475,52 @@ self.onmessage = async (ev) => {
         break;
       }
       case "setToken": {
-        token = m.token ?? null;
+        const nextToken = m.token ?? null;
+        if (connParams?.provider === "appwrite") {
+          if (!(await appwriteTokenMatchesUser(nextToken))) {
+            throw new Error("Appwrite token does not match the active account");
+          }
+        }
+        token = nextToken;
+        if (sock && connParams?.provider === "appwrite") {
+          sock.setToken(token);
+          send({ id, ok: true, checkpoint: sock.checkpoint });
+          break;
+        }
         if (sock && connParams) {
           try { sock.offChange(); } catch (_) {}
           try { sock.close(); } catch (_) {}
           sock = null;
           await bootP;
           await openSocket();
-          self.postMessage({ id, ok: true, checkpoint: sock.checkpoint });
-          self.postMessage({ type: "status", connected: true });
+          send({ id, ok: true, checkpoint: sock.checkpoint });
+          send({ type: "status", connected: true });
         } else {
-          self.postMessage({ id, ok: true });
+          send({ id, ok: true });
         }
         break;
       }
       case "disconnect": {
+        if (sock && connParams?.provider === "appwrite") {
+          sock.disconnect();
+          send({ id, ok: true });
+          break;
+        }
         if (sock) {
           try { sock.offChange(); } catch (_) {}
           try { sock.close(); } catch (_) {}
           sock = null;
         }
-        self.postMessage({ id, ok: true });
-        self.postMessage({ type: "status", connected: false });
+        send({ id, ok: true });
+        send({ type: "status", connected: false });
         break;
       }
       case "resume": {
+        if (sock && connParams?.provider === "appwrite") {
+          sock.resume();
+          send({ id, ok: true });
+          break;
+        }
         if (sock && connParams) {
           // Already-open sockets re-send the subscribe frame as a heartbeat;
           // a closed socket reconnects. Either way, re-attach the push.
@@ -428,8 +529,8 @@ self.onmessage = async (ev) => {
           await bootP;
           await openSocket();
         }
-        self.postMessage({ id, ok: true });
-        if (sock) self.postMessage({ type: "status", connected: true });
+        send({ id, ok: true });
+        if (sock) send({ type: "status", connected: true });
         break;
       }
       case "close": {
@@ -439,129 +540,63 @@ self.onmessage = async (ev) => {
           sock = null;
         }
         watchedTables.clear();
-        self.postMessage({ id, ok: true });
-        self.postMessage({ type: "status", connected: false });
+        send({ id, ok: true });
+        send({ type: "status", connected: false });
         break;
       }
       case "signOut": {
         // ADR-0029 D1: wipe rows + outbox, close, drop token + subscription.
+        // A replacement Worker may receive signOut before OPFS init finishes.
+        // Clearing a null handle would ACK while the old on-disk rows survive.
+        await bootP;
+        if (!dbHandle && storageReason) {
+          throw new Error("browser storage unavailable for local wipe");
+        }
+        let wipeError = null;
         if (sock) {
-          try { sock.clearLocalState(); } catch (_) {}
+          try { sock.clearLocalState(); } catch (error) { wipeError = error; }
           try { sock.offChange(); } catch (_) {}
           try { sock.close(); } catch (_) {}
           sock = null;
         }
         if (dbHandle) {
-          try { dbHandle.clearAll(); } catch (_) {}
+          try { dbHandle.clearAll(); } catch (error) { wipeError = error; }
+        }
+        for (const table of watchedTables) {
+          send({ type: "snapshot", table, json: "[]" });
         }
         watchedTables.clear();
         connParams = null;
         token = null;
-        self.postMessage({ id, ok: true });
-        self.postMessage({ type: "status", connected: false });
+        send({ type: "status", connected: false });
+        if (wipeError) throw wipeError;
+        send({ id, ok: true });
         break;
       }
       default:
         if (id !== undefined) {
-          self.postMessage({ id, error: "unknown cmd: " + String(m.cmd) });
+          send({ id, error: "unknown cmd: " + String(m.cmd) });
         }
     }
   } catch (e) {
     const msg = String((e && e.message) || e);
     if (id !== undefined) {
-      self.postMessage({ id, error: msg });
+      send({ id, error: msg });
     }
   }
 };
 
-// ---- Multi-tab follower proxy (2026-09-21) --------------------------------
-// A tab that lost the leader lock no longer runs a private memory engine with
-// its own socket: it forwards every command over a BroadcastChannel to the
-// leader tab's Worker (one OPFS handle, one socket — a single shared-engine
-// shape, without a SharedWorker: SharedWorkerGlobalScope exposes no `Worker`
-// and opfs-sahpool needs a dedicated worker's FileSystemSyncAccessHandle).
-// Responses route back by request id; pushes (snapshot / status / writeResult
-// / storage) mirror to every follower, so a follower's page sees the leader's
-// storage mode with reason "follower". When the leader tab closes, the Web
-// Lock queue promotes a follower: it opens OPFS and replays its own tab's
-// last `connect`. `allowSecondaryTab: true` on connect opts a tab OUT into
-// the old standalone memory engine.
-// ponytail: requests in flight at a leader change are lost (no retry); a
-// promoted follower whose tab never called connect waits for one to.
-const BUS = new BroadcastChannel("nostos:multitab");
-const MY_ID = Math.random().toString(36).slice(2);
-let standalone = false; // allowSecondaryTab: own memory engine, no proxying
-let lastConnect = null; // this tab's last connect request, replayed on promotion
-const busInflight = new Map(); // leader: negative gid → { from, id }
-let busNextId = -1;
-const sticky = new Map(); // leader: last storage / status push, replayed on hello
-const localHandler = self.onmessage;
-const pagePost = self.postMessage.bind(self);
-const isFollower = () => storageReason === "secondary-tab" && !standalone;
-
-self.postMessage = (msg) => {
-  if (msg.id != null && busInflight.has(msg.id)) {
-    // Leader answering a follower's request: back over the bus, original id.
-    const { from, id } = busInflight.get(msg.id);
-    busInflight.delete(msg.id);
-    BUS.postMessage({ bus: "res", to: from, msg: { ...msg, id } });
+// A SharedWorker cannot create an OPFS-capable DedicatedWorker in Chrome.
+// The owning page starts this Worker, then transfers a private MessagePort to
+// its SharedWorker broker. After attachment, direct page messages are ignored.
+self.onmessage = (ev) => {
+  if (ev.data?.cmd === "attachPort" && ev.data.port && !attachedPort) {
+    attachedPort = ev.data.port;
+    send = attachedPort.postMessage.bind(attachedPort);
+    attachedPort.onmessage = dispatchMessage;
+    attachedPort.start();
+    if (storageMessage) send(storageMessage);
     return;
   }
-  if (isFollower() && msg.type === "storage") {
-    // Our own "memory / secondary-tab" boot push: ask the leader instead.
-    BUS.postMessage({ bus: "hello", from: MY_ID });
-    return;
-  }
-  pagePost(msg);
-  if (msg.type && !isFollower() && !standalone) {
-    if (msg.type === "storage" || msg.type === "status") sticky.set(msg.type, msg);
-    BUS.postMessage({ bus: "push", msg });
-  }
+  if (!attachedPort) void dispatchMessage(ev);
 };
-
-BUS.onmessage = (ev) => {
-  const b = ev.data || {};
-  if (isFollower()) {
-    if (b.bus === "res" && b.to === MY_ID) pagePost(b.msg);
-    else if (b.bus === "push")
-      pagePost(b.msg.type === "storage" ? { ...b.msg, reason: "follower" } : b.msg);
-    return;
-  }
-  if (storageReason === "secondary-tab") return; // standalone: not on the bus
-  if (b.bus === "hello") {
-    for (const s of sticky.values()) BUS.postMessage({ bus: "push", msg: s });
-  } else if (b.bus === "req") {
-    let m = b.msg;
-    if (m.id != null) {
-      const gid = busNextId--;
-      busInflight.set(gid, { from: b.from, id: m.id });
-      m = { ...m, id: gid };
-    }
-    localHandler({ data: m });
-  }
-};
-
-self.onmessage = async (ev) => {
-  const m = ev.data || {};
-  await bootP; // leadership is known only after boot
-  if (m.cmd === "connect") {
-    lastConnect = m;
-    if (m.allowSecondaryTab) standalone = true;
-  }
-  if (!isFollower()) return localHandler(ev);
-  BUS.postMessage({ bus: "req", from: MY_ID, msg: m });
-};
-
-// Queue for promotion: granted only once the leader's Worker (and with it the
-// lock) is gone; then held for this Worker's lifetime.
-bootP.then(() => {
-  if (storageReason !== "secondary-tab" || !navigator.locks) return;
-  navigator.locks.request(LEADER_LOCK, async () => {
-    if (standalone) return; // release straight through to the next in line
-    leaderLockHeld = true;
-    storageReason = null;
-    await initStorage(); // opens OPFS now the old leader released it; pushes storage
-    if (lastConnect) localHandler({ data: { ...lastConnect, id: undefined } });
-    await new Promise(() => {});
-  });
-});

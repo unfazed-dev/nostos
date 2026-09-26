@@ -381,7 +381,17 @@ class ClientTableFfi {
 /// tracing, but the enum carries no payload. Upgrade path: a
 /// `NostosConnectionState::Rejected(String)` variant or a sibling error
 /// stream; requires an FRB regen, deliberately deferred.
-enum NostosConnectionState { connecting, connected, reconnecting, disconnected }
+/// `AccessRevoked` is narrower: the Appwrite Function's explicit inactive
+/// account rejection, after that client's local cache has been cleared.
+enum NostosConnectionState {
+  connecting,
+  connected,
+  reconnecting,
+  disconnected,
+
+  /// Appwrite explicitly rejected an inactive account and local state was wiped.
+  accessRevoked,
+}
 
 /// One write op inside a `write_batch` group (ADR-0032 T3). Same fields as
 /// [`NostosHandle::write`]'s params.

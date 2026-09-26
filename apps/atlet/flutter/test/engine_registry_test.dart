@@ -56,7 +56,40 @@ class _RecordingAdapter with FakeCartOrdersDefaults implements SyncAdapter {
   Stream<SyncMark> get marks => const Stream.empty();
 }
 
+class _FailsOnceWipeAdapter extends _RecordingAdapter {
+  _FailsOnceWipeAdapter(super.name, super.log);
+
+  bool failNextWipe = true;
+
+  @override
+  Future<void> signOut() async {
+    if (failNextWipe) {
+      failNextWipe = false;
+      throw StateError('offline wipe failed');
+    }
+    await super.signOut();
+  }
+}
+
 void main() {
+  test(
+    'provider and mode selection rejects unsupported Appwrite server mode',
+    () {
+      expect(
+        selectEngine(provider: 'appwrite', mode: 'direct'),
+        Engine.nostosAppwrite,
+      );
+      expect(
+        selectEngine(provider: 'supabase', mode: 'direct'),
+        Engine.nostosDirect,
+      );
+      expect(selectEngine(provider: 'supabase', mode: 'server'), Engine.nostos);
+      expect(
+        () => selectEngine(provider: 'appwrite', mode: 'server'),
+        throwsA(isA<UnsupportedError>()),
+      );
+    },
+  );
   const session = SyncSession(
     supabaseUrl: 'http://localhost:3000',
     accessToken: 'test-token',
@@ -132,5 +165,19 @@ void main() {
       await registry.stop();
       expect(registry.activeEngine, isNull);
     });
+
+    test(
+      'failed wipe keeps the adapter available for sign-out retry',
+      () async {
+        final adapter = _FailsOnceWipeAdapter('direct', []);
+        final registry = EngineRegistry(nostosDirectFactory: () => adapter);
+        await registry.start(Engine.nostosDirect, session);
+
+        await expectLater(registry.stop(), throwsStateError);
+        expect(registry.current, same(adapter));
+        await registry.stop();
+        expect(registry.current, isNull);
+      },
+    );
   });
 }

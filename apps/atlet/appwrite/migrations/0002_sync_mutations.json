@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "database": { "database_id": "atlet", "name": "Atlet" },
+  "team": { "team_id": "atlet_admins", "name": "Atlet admins" },
+  "tables": [
+    {
+      "table_id": "sync_mutations", "name": "Idempotent sync mutations", "row_security": false,
+      "columns": [
+        { "key": "seq", "type": "bigint", "required": true },
+        { "key": "actor_id", "type": "varchar", "size": 36, "required": true },
+        { "key": "request_hash", "type": "varchar", "size": 64, "required": true },
+        { "key": "created_at", "type": "datetime", "required": true }
+      ],
+      "indexes": [
+        { "key": "mutation_actor_seq", "type": "key", "attributes": ["actor_id", "seq"] }
+      ]
+    }
+  ],
+  "bootstrap_rows": []
+}

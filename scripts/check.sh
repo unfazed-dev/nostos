@@ -18,7 +18,7 @@ export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
 if [[ -d .fvm/flutter_sdk/bin ]]; then PATH="$PWD/.fvm/flutter_sdk/bin:$PATH"; fi
 
 # `all` runs them in this order: cheap first.
-AREAS=(commits pr-title deny lint-test sdk-typecheck benchmark e2e-pg sdk-e2e flutter)
+AREAS=(commits pr-title deny lint-test appwrite-function sdk-typecheck benchmark e2e-pg sdk-e2e flutter atlet-cloud atlet-web-cloud)
 
 # Conventional-commit types: the standard set plus `bench`, which this repo's
 # history uses for measurement commits. git's own `Revert "…"` also passes.
@@ -42,6 +42,58 @@ tag_map() { grep -oE '^\| `\[arxa-[a-z-]+\]`' "$1" | tr -d '|` '; }
 area_lint_test() { # fmt-check + clippy -D warnings + test --include-ignored
   need lint-test cargo make || return 0
   make ci
+}
+
+area_appwrite_function() {
+  need appwrite-function cargo cargo-deny || return 0
+  local manifest=apps/atlet/appwrite/function/Cargo.toml
+  cargo fmt --manifest-path "$manifest" -- --check
+  cargo +1.83.0 clippy --manifest-path "$manifest" --all-targets --locked -- -D warnings
+  cargo +1.83.0 test --manifest-path "$manifest" --locked
+  cargo deny --manifest-path "$manifest" check --config deny.toml licenses advisories bans
+}
+
+area_atlet_cloud() {
+  local tool
+  for tool in cargo flutter; do
+    command -v "$tool" >/dev/null 2>&1 || {
+      echo "atlet-cloud: $tool is required" >&2
+      return 1
+    }
+  done
+  [[ -f apps/atlet/.env.cloud ]] || {
+    echo 'atlet-cloud: apps/atlet/.env.cloud is required' >&2
+    return 1
+  }
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role customer_b --scenario revoked
+  cargo run --locked -q -p atlet-harness --bin appwrite_smoke -- --users-workflow
+  cargo run --locked -q -p atlet-harness --bin appwrite_native_smoke
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role admin
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --role customer_a
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_smoke -- --device macos --scenario order
+}
+
+area_atlet_web_cloud() {
+  local tool
+  for tool in cargo flutter node npm; do
+    command -v "$tool" >/dev/null 2>&1 || {
+      echo "atlet-web-cloud: $tool is required" >&2
+      return 1
+    }
+  done
+  [[ -f apps/atlet/.env.cloud ]] || {
+    echo 'atlet-web-cloud: apps/atlet/.env.cloud is required' >&2
+    return 1
+  }
+  npm ci --prefix sdk/nostos_web
+  sdk/nostos_web/node_modules/.bin/playwright install chromium
+  cargo build --locked -p nostos-infra --example e2e_server
+  NODE_PATH=sdk/nostos_web/node_modules \
+    sdk/nostos_web/node_modules/.bin/playwright test \
+    --config=sdk/nostos_flutter/web/e2e/playwright.config.cjs
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role admin
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_a --no-build
+  cargo run --locked -q -p atlet-harness --bin appwrite_flutter_web_smoke -- --role customer_b --no-build
 }
 
 pg_probe() {

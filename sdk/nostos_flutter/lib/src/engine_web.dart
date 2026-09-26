@@ -58,14 +58,18 @@ enum NostosWebStorageMode { durable, memory, secondaryTab, unknown }
 
 /// Flutter-web [NostosEngine] over a nostos Worker ([NostosWorkerPort]).
 class WebNostosEngine implements NostosEngine {
-  WebNostosEngine._(this._port, {required this.url, this.token})
+  WebNostosEngine._(this._port, {required this.url, this.token, this.appwrite})
     : _workerOwned = true;
 
   /// Test/advanced constructor: drive an externally-owned port (the caller
   /// manages the Worker lifecycle). Used by the VM unit test with a
   /// [FakeNostosWorkerPort].
-  WebNostosEngine.forPort(this._port, {required this.url, this.token})
-    : _workerOwned = false;
+  WebNostosEngine.forPort(
+    this._port, {
+    required this.url,
+    this.token,
+    this.appwrite,
+  }) : _workerOwned = false;
 
   /// Spawn a [WebNostosEngine] connected to [url]. The Worker is created by the
   /// web-only adapter (`web_worker_port.dart`'s `spawnNostosWorker`); this pure-
@@ -74,8 +78,14 @@ class WebNostosEngine implements NostosEngine {
     required String url,
     String? token,
     required NostosWorkerPort port,
+    ({String projectId, String functionId, String userId})? appwrite,
   }) {
-    final e = WebNostosEngine._(port, url: url, token: token);
+    final e = WebNostosEngine._(
+      port,
+      url: url,
+      token: token,
+      appwrite: appwrite,
+    );
     return e;
   }
 
@@ -85,9 +95,11 @@ class WebNostosEngine implements NostosEngine {
   /// The `/sync` URL (baked into the WS handshake; a token refresh reconnects).
   final String url;
   String? token;
+  final ({String projectId, String functionId, String userId})? appwrite;
 
   int _nextId = 1;
   bool _closed = false;
+  bool _closing = false;
   NostosWebStorageMode _storageMode = NostosWebStorageMode.unknown;
 
   /// Pending request callbacks keyed by `id`. Each completes on the matching
@@ -132,8 +144,17 @@ class WebNostosEngine implements NostosEngine {
   bool? _storagePersisted;
 
   @override
-  Stream<bool> get webStorageDegraded =>
-      storageModeStream.map((m) => m != NostosWebStorageMode.durable);
+  Stream<bool> get webStorageDegraded => Stream<bool>.multi((controller) {
+    // Subscribe before replaying the cached mode so a Worker boot push cannot
+    // disappear between the snapshot read and listener installation.
+    final sub = storageModeStream.listen((mode) {
+      controller.add(mode != NostosWebStorageMode.durable);
+    });
+    if (_storageMode != NostosWebStorageMode.unknown) {
+      controller.add(_storageMode != NostosWebStorageMode.durable);
+    }
+    controller.onCancel = sub.cancel;
+  });
 
   // --------------------------------------------------------------------------
   // NostosEngine contract
@@ -156,6 +177,12 @@ class WebNostosEngine implements NostosEngine {
         'cmd': 'connect',
         'url': url,
         'token': token,
+        if (appwrite != null) ...{
+          'provider': 'appwrite',
+          'projectId': appwrite!.projectId,
+          'functionId': appwrite!.functionId,
+          'userId': appwrite!.userId,
+        },
         'tables': tables
             .map((t) => {'name': t.name, 'whereSql': t.whereSql})
             .toList(),
@@ -374,7 +401,9 @@ class WebNostosEngine implements NostosEngine {
         case 'status':
           final connected = msg['connected'] == true;
           _stateController.add(
-            connected
+            msg['accessRevoked'] == true
+                ? NostosConnectionState.accessRevoked
+                : connected
                 ? NostosConnectionState.connected
                 : NostosConnectionState.disconnected,
           );
@@ -415,7 +444,7 @@ class WebNostosEngine implements NostosEngine {
   }
 
   Future<Map<String, Object?>> _request(Map<String, Object?> msg) {
-    if (_closed) {
+    if (_closed || _closing) {
       return Future.error(StateError('WebNostosEngine is closed'));
     }
     final id = _nextId++;
@@ -430,13 +459,29 @@ class WebNostosEngine implements NostosEngine {
 
   Future<void> _teardown({required String cmd}) async {
     if (_closed) return;
-    _closed = true;
-    try {
-      await _request({'cmd': cmd})
-          .timeout(const Duration(seconds: 2), onTimeout: () => {});
-    } catch (_) {
-      // Best-effort: the Worker may already be gone.
+    if (_closing) {
+      throw StateError('WebNostosEngine sign-out already in progress');
     }
+    // Sign-out must reach the Worker and receive its durable wipe ack before
+    // this engine is closed. Marking it closed first makes _request reject
+    // locally and leaves private OPFS rows and pending writes behind.
+    final request = _requestVoid({'cmd': cmd});
+    _closing = true;
+    try {
+      // The broker allows two 20s attempts if a dead Worker is replaced,
+      // plus time for a queued account transition. A shorter Dart timeout
+      // leaves a wiped broker session that the UI cannot retry.
+      await request.timeout(Duration(seconds: cmd == 'signOut' ? 75 : 2));
+    } catch (_) {
+      if (cmd == 'signOut') {
+        // Keep the Worker and local session available so sign-out can retry.
+        _closing = false;
+        rethrow;
+      }
+      // An already stopped Worker cannot acknowledge close.
+    }
+    _closed = true;
+    _closing = false;
     await _sub?.cancel();
     await _stateController.close();
     await _writeStatusController.close();

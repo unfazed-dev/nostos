@@ -1,0 +1,6 @@
+# GitHub added concurrency.queue in May 2026; actionlint 1.7.12 still
+# rejects that key. Ignore only this parser gap in the cloud-account job.
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

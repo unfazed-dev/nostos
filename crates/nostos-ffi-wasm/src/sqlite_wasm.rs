@@ -208,8 +208,8 @@ impl SqliteWasmStorage {
     }
 
     /// Run `selectValue(sql, bind?)` — returns the first column of the first
-    /// row as a `JsValue` (string, number, or null). The JS wrapper converts to
-    /// string; Rust parses.
+    /// row as a `JsValue` (string, number, or null). SQLite-WASM returns numeric
+    /// columns as JS numbers, so convert safe integers explicitly.
     fn select_value_str(&self, sql: &str, bind: Option<&js_sys::Array>) -> Option<String> {
         let sql_val = JsValue::from_str(sql);
         let result = match bind {
@@ -218,11 +218,20 @@ impl SqliteWasmStorage {
                 .ok()?,
             None => self.call("selectValue", &[sql_val]).ok()?,
         };
-        // The JS wrapper returns a string or null. `as_string` extracts.
         if result.is_null() || result.is_undefined() {
             return None;
         }
-        result.as_string()
+        result.as_string().or_else(|| {
+            result
+                .as_f64()
+                .filter(|value| {
+                    value.is_finite()
+                        && value.fract() == 0.0
+                        && *value >= 0.0
+                        && *value <= 9_007_199_254_740_991.0
+                })
+                .map(|value| format!("{value:.0}"))
+        })
     }
 
     /// Run `selectRows(sql, bind?)` — returns a JS array of arrays (rowMode:
@@ -473,6 +482,24 @@ impl Storage for SqliteWasmStorage {
         Ok(())
     }
 
+    fn principal(&self) -> nostos_core::Result<Option<String>> {
+        Ok(self.select_value_str(
+            "SELECT value FROM nostos_meta WHERE key = 'principal'",
+            None,
+        ))
+    }
+
+    fn save_principal(&mut self, principal: &str) -> nostos_core::Result<()> {
+        let bind = js_sys::Array::new();
+        bind.push(&JsValue::from_str(principal));
+        self.exec(
+            "INSERT INTO nostos_meta (key, value) VALUES ('principal', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            Some(&bind),
+        )?;
+        Ok(())
+    }
+
     fn save_epoch(&self, epoch: u64) -> nostos_core::Result<()> {
         // INSERT OR IGNORE ensures the key exists, then UPDATE sets the value.
         let bind = js_sys::Array::new();
@@ -568,15 +595,17 @@ impl Storage for SqliteWasmStorage {
     }
 
     fn clear(&mut self) -> nostos_core::Result<()> {
-        // ADR-0029: reset to fresh-database state. `clearAll()` runs:
-        //   DELETE FROM nostos_data; DELETE FROM nostos_outbox;
-        //   UPDATE nostos_meta SET value='0' WHERE key='checkpoint';
+        // ADR-0029 / ADR-0051: clearAll atomically wipes rows, outbox,
+        // checkpoint, horizon and principal while retaining device_id.
         // The checkpoint → 0 is load-bearing (resume-without-snapshot guard).
         self.call_void("clearAll", &[])?;
-        // ...and so is dropping the horizon: `clearAll` predates direct mode
-        // and only knows about the LSN checkpoint. A surviving horizon would
-        // make the next principal resume a log they have no rows from.
-        self.exec("DELETE FROM nostos_meta WHERE key = 'horizon'", None)?;
+        // Keep this idempotent delete for older JS hosts whose clearAll only
+        // knows about the LSN checkpoint. A surviving horizon would make the
+        // next principal resume a log they have no rows from.
+        self.exec(
+            "DELETE FROM nostos_meta WHERE key IN ('horizon', 'principal')",
+            None,
+        )?;
         Ok(())
     }
 
@@ -613,7 +642,8 @@ impl Outbox for SqliteWasmStorage {
         let id = self
             .select_value_str("SELECT last_insert_rowid()", None)
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(0);
+            .filter(|id| *id > 0)
+            .ok_or_else(|| StorageError::Backend("SQLite-WASM returned no outbox ID".into()))?;
         Ok(id)
     }
 
@@ -652,7 +682,10 @@ impl Outbox for SqliteWasmStorage {
                 let id = self
                     .select_value_str("SELECT last_insert_rowid()", None)
                     .and_then(|s| s.trim().parse::<u64>().ok())
-                    .unwrap_or(0);
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| {
+                        StorageError::Backend("SQLite-WASM returned no outbox ID".into())
+                    })?;
                 ids.push(id);
             }
             Ok(())
@@ -682,8 +715,18 @@ impl Outbox for SqliteWasmStorage {
             let id = row
                 .get(0)
                 .as_string()
+                .or_else(|| {
+                    row.get(0).as_f64().and_then(|value| {
+                        (value.is_finite()
+                            && value.fract() == 0.0
+                            && value > 0.0
+                            && value <= 9_007_199_254_740_991.0)
+                            .then(|| format!("{value:.0}"))
+                    })
+                })
                 .and_then(|s| s.trim().parse::<u64>().ok())
-                .unwrap_or(0);
+                .filter(|id| *id > 0)
+                .ok_or_else(|| StorageError::Backend("invalid SQLite-WASM outbox ID".into()))?;
             let table = row.get(1).as_string().unwrap_or_default();
             let op_wire = row.get(2).as_string().unwrap_or_default();
             let pk = row.get(3).as_string().unwrap_or_default();

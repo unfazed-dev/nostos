@@ -137,8 +137,7 @@ Future<void> main() async {
     if (!sheetClosed) {
       throw StateError('product sheet never closed after add-to-cart');
     }
-    // The "Added …" SnackBar overlaps the cart FAB and eats its taps for
-    // its ~4s display — let it dismiss first.
+    // Other transient sync messages can still overlap the cart FAB.
     await _until(
       tester,
       () => !tester.any(find.byType(SnackBar)),

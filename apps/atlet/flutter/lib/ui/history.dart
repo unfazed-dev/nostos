@@ -6,8 +6,7 @@
 // tapped notification deep-links to, which is what makes the two testable
 // against each other.
 //
-// The bench run launcher lives in ui/bench.dart now — one tap away in the app
-// bar, off the list.
+// Supabase builds also expose the bench runner through the app bar.
 import 'package:flutter/material.dart';
 
 import '../adapters/sync_adapter.dart';
@@ -18,26 +17,29 @@ import 'bench.dart';
 import 'connectivity_led.dart';
 import 'history_detail.dart';
 
-/// [events] is the one thing here that comes from the engine, and it arrives
-/// as a stream rather than a [SyncAdapter] so a test can hand it a literal
-/// list. The bench trio is passed straight through to [BenchScreen].
+/// [events] comes from the engine as a stream rather than a [SyncAdapter] so
+/// tests can hand it a literal list. Supplying all three bench dependencies
+/// enables the Supabase benchmark launcher; Appwrite history omits them.
 class HistoryScreen extends StatelessWidget {
   const HistoryScreen({
     super.key,
     required this.events,
-    required this.store,
-    required this.uploadRuns,
-    required this.runSuite,
+    this.store,
+    this.uploadRuns,
+    this.runSuite,
   });
 
   /// Newest first. Read-only: the device never writes an order event.
   final Stream<List<OrderEventRow>> events;
-  final BenchStore store;
-  final RunsUploader uploadRuns;
-  final Future<void> Function() runSuite;
+  final BenchStore? store;
+  final RunsUploader? uploadRuns;
+  final Future<void> Function()? runSuite;
 
   @override
   Widget build(BuildContext context) {
+    final store = this.store;
+    final uploadRuns = this.uploadRuns;
+    final runSuite = this.runSuite;
     return Scaffold(
       key: const Key('history-screen'),
       backgroundColor: AtletTokens.paper,
@@ -45,20 +47,21 @@ class HistoryScreen extends StatelessWidget {
         title: const Text('History'),
         backgroundColor: AtletTokens.bone,
         actions: [
-          IconButton(
-            key: const Key('open-bench-button'),
-            tooltip: 'Bench',
-            icon: const Icon(Icons.speed_outlined),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => BenchScreen(
-                  store: store,
-                  uploadRuns: uploadRuns,
-                  runSuite: runSuite,
+          if (store != null && uploadRuns != null && runSuite != null)
+            IconButton(
+              key: const Key('open-bench-button'),
+              tooltip: 'Bench',
+              icon: const Icon(Icons.speed_outlined),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => BenchScreen(
+                    store: store,
+                    uploadRuns: uploadRuns,
+                    runSuite: runSuite,
+                  ),
                 ),
               ),
             ),
-          ),
           const ConnectivityLed(),
         ],
       ),
