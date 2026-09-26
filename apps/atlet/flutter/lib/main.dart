@@ -774,8 +774,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       ? _signOut
                       : _startEngine,
                   child: Text(
-                    _accessRevoked || _signOutWipeFailed
+                    _signOutWipeFailed
                         ? 'Retry sign out'
+                        : _accessRevoked
+                        ? 'Sign out'
                         : 'Retry',
                   ),
                 ),

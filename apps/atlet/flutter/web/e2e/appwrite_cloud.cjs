@@ -79,25 +79,20 @@ async function signIn(page, baseUrl, accountEmail, accountPassword) {
 }
 
 async function enterFlutterText(field, value) {
-  await field.click();
-  await field.press("ControlOrMeta+A");
-  await field.pressSequentially(value, { delay: 20 });
-  let actual = await field.inputValue();
-  // Chrome's Flutter semantics bridge sometimes loses the first key after
-  // focus. On that exact failure, sacrifice a dummy key during a fresh entry.
-  if (actual === value.slice(1)) {
+  // Flutter owns the editing state behind its semantics input. `fill()` can
+  // change that DOM node without committing the value to Flutter; real key
+  // events are required. A slow CI bridge sometimes drops keys, so retry the
+  // whole entry only when the observed input is incomplete.
+  let actual = "";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await field.click();
     await field.press("ControlOrMeta+A");
-    await field.pressSequentially(`x${value}`, { delay: 20 });
+    await field.press("Backspace");
+    await field.pressSequentially(value, { delay: 60 });
     actual = await field.inputValue();
+    if (actual === value) return;
   }
-  if (actual === `x${value}`) {
-    await field.press("ControlOrMeta+A");
-    await field.pressSequentially(value, { delay: 20 });
-    actual = await field.inputValue();
-  }
-  if (actual !== value) {
-    throw new Error(`Flutter text input mismatch (expected ${value.length} chars, got ${actual.length})`);
-  }
+  throw new Error(`Flutter text input mismatch (expected ${value.length} chars, got ${actual.length})`);
 }
 
 async function main() {
